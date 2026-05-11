@@ -2,6 +2,9 @@ import { sql } from "drizzle-orm";
 import {
   check,
   index,
+  integer,
+  jsonb,
+  numeric,
   pgSchema,
   pgTable,
   serial,
@@ -122,3 +125,79 @@ export type NewInvite = typeof invites.$inferInsert;
 
 export type Brand = typeof brands.$inferSelect;
 export type NewBrand = typeof brands.$inferInsert;
+
+export const affiliate_networks = pgTable(
+  "affiliate_networks",
+  {
+    id: serial("id").primaryKey(),
+    network_id: text("network_id").notNull().unique(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    url: text("url"),
+    avatar_url: text("avatar_url"),
+    color: text("color"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("affiliate_networks_org_id_idx").on(table.org_id),
+    check(
+      "affiliate_networks_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type AffiliateNetwork = typeof affiliate_networks.$inferSelect;
+export type NewAffiliateNetwork = typeof affiliate_networks.$inferInsert;
+
+export const offers = pgTable(
+  "offers",
+  {
+    id: serial("id").primaryKey(),
+    offer_id: text("offer_id").notNull().unique(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    postfix: text("postfix"),
+    base_url: text("base_url"),
+    network_id: integer("network_id").references(() => affiliate_networks.id, {
+      onDelete: "set null",
+    }),
+    payout_model: text("payout_model").notNull().default("cpa"),
+    payout_cpa: numeric("payout_cpa", { precision: 12, scale: 4 }),
+    payout_revshare: numeric("payout_revshare", { precision: 5, scale: 2 }),
+    sales_pages: jsonb("sales_pages")
+      .$type<{ label: string; url: string }[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    avatar_url: text("avatar_url"),
+    color: text("color"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("offers_org_id_idx").on(table.org_id),
+    index("offers_network_id_idx").on(table.network_id),
+    check(
+      "offers_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+    check(
+      "offers_payout_model_check",
+      sql`${table.payout_model} IN ('cpa', 'revshare')`,
+    ),
+  ],
+);
+
+export type Offer = typeof offers.$inferSelect;
+export type NewOffer = typeof offers.$inferInsert;

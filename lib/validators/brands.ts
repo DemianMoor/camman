@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export { nullIfEmpty } from "./_helpers";
+
 // Brand validators.
 //
 // Optional fields accept empty strings (`""`) so they round-trip cleanly with
@@ -46,10 +48,3 @@ export const brandUpdateSchema = brandCreateSchema
 
 export type BrandCreateInput = z.infer<typeof brandCreateSchema>;
 export type BrandUpdateInput = z.infer<typeof brandUpdateSchema>;
-
-// Empty strings from form inputs should map to NULL in the DB.
-export function nullIfEmpty(value: string | null | undefined): string | null {
-  if (value == null) return null;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}

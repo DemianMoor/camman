@@ -59,7 +59,17 @@ Permission checks use a `can(permission)` helper on both server and client. UI h
 - Timestamps stored as `TIMESTAMPTZ`, never naive timestamps.
 - Money stored as `NUMERIC(12, 4)` for precision. Displayed as USD.
 
-## 7. API Conventions
+## 7. Cross-entity dependencies
+
+Entity availability is tracked in `lib/feature-flags.ts` via the `ENTITY_AVAILABILITY` const and the `isEntityAvailable()` helper. This is the single source of truth for "is this entity built yet?". The sidebar nav and any FK pickers / filters in other entities derive their disabled state from it.
+
+When building a new entity, the **last** step is flipping its flag to `true` — only after the schema, API, and UI are all working and tested. Flipping the flag simultaneously enables the nav item and activates any cross-entity references (e.g. the network picker in the Offers form starts fetching `/api/networks/list` the moment `networks: true` is set).
+
+When an entity's form or filter references another entity that may not yet be built, gate the fetch on `isEntityAvailable(...)`. Do **not** make speculative requests and silently catch 404s — that's wasteful, noisy in the console, and easy to forget to remove later. Render the disabled state directly when the dependent entity is unavailable.
+
+Before flipping a flag to `true`, sanity-check that no other entity's form or filter is making a fetch that would now succeed unexpectedly — the new entity's data should appear deliberately in dependent forms, not by accident.
+
+## 8. API Conventions
 
 All API routes live under `/app/api/`. Standard endpoints per entity:
 
@@ -75,7 +85,7 @@ List response: `{ data: T[], totalCount: number, page: number, pageSize: number 
 
 All inputs validated with Zod. All outputs are typed. Errors return `{ error: string, code?: string }` with appropriate HTTP status.
 
-## 8. UI Conventions
+## 9. UI Conventions
 
 - Pages are server components by default; client components only when needed (forms, interactivity).
 - Tailwind only. No CSS modules. No inline styles except dynamic ones.
@@ -86,7 +96,7 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 - Icons from lucide-react.
 - Filters in list views persisted to localStorage via a `usePersistedFilters` hook, keyed by route.
 
-## 9. File Organization
+## 10. File Organization
 
 - `/app/` — Next.js App Router pages and API routes
 - `/components/` — React components
@@ -97,7 +107,7 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 - `/lib/supabase/` — Supabase client helpers (browser and server)
 - `/types/` — shared TypeScript types
 
-## 10. Working Style with Claude Code
+## 11. Working Style with Claude Code
 
 - Make small, reviewable changes. Prefer many small commits over one large one.
 - When asked to build a new entity (e.g., "build Offers"), look at the existing Brands implementation and follow its patterns exactly. Do not invent new patterns without asking.
@@ -107,7 +117,7 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 - Never log secrets. Never include secrets in error messages.
 - Before any destructive operation (DROP TABLE, hard DELETE, force-push), ask for explicit confirmation.
 
-## 11. What This Project Is NOT (yet)
+## 12. What This Project Is NOT (yet)
 
 To keep scope tight, the following are explicitly OUT of scope for v1. Do not build them, do not stub them, do not "prepare for" them in ways that complicate v1 code:
 
@@ -122,7 +132,7 @@ To keep scope tight, the following are explicitly OUT of scope for v1. Do not bu
 
 When the user wants these, they will be added in a separate phase.
 
-## 12. What This Project IS (for v1)
+## 13. What This Project IS (for v1)
 
 - Multi-tenant CRM for contacts, segments, opt-outs, opt-ins, clickers
 - Registry of brands, offers, networks, providers, provider phones, creatives, routing types, traffic types, UTM tags

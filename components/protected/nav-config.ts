@@ -19,6 +19,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { isEntityAvailable } from "@/lib/feature-flags";
+
 export type NavItem = {
   label: string;
   href: string;
@@ -31,6 +33,9 @@ export type NavGroup = {
   items: NavItem[];
 };
 
+// `disabled` for entity items is derived from lib/feature-flags.ts. Flipping a
+// flag there automatically enables the nav item. User Management is not an
+// entity — it's a built-in feature, so its disabled state is hardcoded.
 export const navGroups: NavGroup[] = [
   {
     label: null,
@@ -41,37 +46,117 @@ export const navGroups: NavGroup[] = [
   {
     label: "Campaigns",
     items: [
-      { label: "Campaigns", href: "/campaigns", icon: Send, disabled: true },
-      { label: "Creatives", href: "/creatives", icon: MessageSquare, disabled: true },
+      {
+        label: "Campaigns",
+        href: "/campaigns",
+        icon: Send,
+        disabled: !isEntityAvailable("campaigns"),
+      },
+      {
+        label: "Creatives",
+        href: "/creatives",
+        icon: MessageSquare,
+        disabled: !isEntityAvailable("creatives"),
+      },
     ],
   },
   {
     label: "Audience",
     items: [
-      { label: "Contacts", href: "/contacts", icon: Users, disabled: true },
-      { label: "Segments", href: "/segments", icon: Layers, disabled: true },
-      { label: "Segment Groups", href: "/segment-groups", icon: FolderTree, disabled: true },
-      { label: "Opt-Outs", href: "/opt-outs", icon: UserMinus, disabled: true },
-      { label: "Opt-Ins", href: "/opt-ins", icon: UserCheck, disabled: true },
-      { label: "Clickers", href: "/clickers", icon: MousePointer, disabled: true },
+      {
+        label: "Contacts",
+        href: "/contacts",
+        icon: Users,
+        disabled: !isEntityAvailable("contacts"),
+      },
+      {
+        label: "Segments",
+        href: "/segments",
+        icon: Layers,
+        disabled: !isEntityAvailable("segments"),
+      },
+      {
+        label: "Segment Groups",
+        href: "/segment-groups",
+        icon: FolderTree,
+        disabled: !isEntityAvailable("segment_groups"),
+      },
+      {
+        label: "Opt-Outs",
+        href: "/opt-outs",
+        icon: UserMinus,
+        disabled: !isEntityAvailable("opt_outs"),
+      },
+      {
+        label: "Opt-Ins",
+        href: "/opt-ins",
+        icon: UserCheck,
+        disabled: !isEntityAvailable("opt_ins"),
+      },
+      {
+        label: "Clickers",
+        href: "/clickers",
+        icon: MousePointer,
+        disabled: !isEntityAvailable("clickers"),
+      },
     ],
   },
   {
     label: "Registry",
     items: [
-      { label: "Brands", href: "/brands", icon: Tag },
-      { label: "Offers", href: "/offers", icon: ShoppingBag, disabled: true },
-      { label: "Affiliate Networks", href: "/affiliate-networks", icon: Network, disabled: true },
-      { label: "SMS Providers", href: "/providers", icon: Phone, disabled: true },
-      { label: "Routing Types", href: "/routing-types", icon: Route, disabled: true },
-      { label: "Traffic Types", href: "/traffic-types", icon: Activity, disabled: true },
-      { label: "UTM Tags", href: "/utm-tags", icon: LinkIcon, disabled: true },
+      {
+        label: "Brands",
+        href: "/brands",
+        icon: Tag,
+        disabled: !isEntityAvailable("brands"),
+      },
+      {
+        label: "Offers",
+        href: "/offers",
+        icon: ShoppingBag,
+        disabled: !isEntityAvailable("offers"),
+      },
+      {
+        label: "Affiliate Networks",
+        href: "/affiliate-networks",
+        icon: Network,
+        disabled: !isEntityAvailable("networks"),
+      },
+      {
+        label: "SMS Providers",
+        href: "/providers",
+        icon: Phone,
+        disabled: !isEntityAvailable("providers"),
+      },
+      {
+        label: "Routing Types",
+        href: "/routing-types",
+        icon: Route,
+        disabled: !isEntityAvailable("routing_types"),
+      },
+      {
+        label: "Traffic Types",
+        href: "/traffic-types",
+        icon: Activity,
+        disabled: !isEntityAvailable("traffic_types"),
+      },
+      {
+        label: "UTM Tags",
+        href: "/utm-tags",
+        icon: LinkIcon,
+        disabled: !isEntityAvailable("utm_tags"),
+      },
     ],
   },
   {
     label: "Settings",
     items: [
-      { label: "User Management", href: "/settings/users", icon: UserCog, disabled: true },
+      {
+        label: "User Management",
+        href: "/settings/users",
+        icon: UserCog,
+        disabled: true,
+      },
     ],
   },
 ];

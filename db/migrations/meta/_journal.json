@@ -15,6 +15,20 @@
       "when": 1778497207620,
       "tag": "0001_security_layer",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1778523195528,
+      "tag": "0002_strange_kinsey_walden",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1778523211283,
+      "tag": "0003_offers_networks_rls",
+      "breakpoints": true
     }
   ]
 }

@@ -16,6 +16,16 @@ export type Permission =
   | "brands.update"
   | "brands.archive"
   | "brands.restore"
+  | "offers.view"
+  | "offers.create"
+  | "offers.update"
+  | "offers.archive"
+  | "offers.restore"
+  | "networks.view"
+  | "networks.create"
+  | "networks.update"
+  | "networks.archive"
+  | "networks.restore"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -37,6 +47,8 @@ export function isRole(value: string | null | undefined): value is Role {
 
 const viewerPerms: ReadonlySet<Permission> = new Set([
   "brands.view",
+  "offers.view",
+  "networks.view",
   "registry.view",
 ]);
 
@@ -48,6 +60,14 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "brands.update",
   "brands.archive",
   "brands.restore",
+  "offers.create",
+  "offers.update",
+  "offers.archive",
+  "offers.restore",
+  "networks.create",
+  "networks.update",
+  "networks.archive",
+  "networks.restore",
   "registry.create",
   "registry.update",
   "registry.archive",

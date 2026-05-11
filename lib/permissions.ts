@@ -26,6 +26,16 @@ export type Permission =
   | "networks.update"
   | "networks.archive"
   | "networks.restore"
+  | "providers.view"
+  | "providers.create"
+  | "providers.update"
+  | "providers.archive"
+  | "providers.restore"
+  | "provider_phones.view"
+  | "provider_phones.create"
+  | "provider_phones.update"
+  | "provider_phones.archive"
+  | "provider_phones.restore"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -49,6 +59,8 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "brands.view",
   "offers.view",
   "networks.view",
+  "providers.view",
+  "provider_phones.view",
   "registry.view",
 ]);
 
@@ -68,6 +80,14 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "networks.update",
   "networks.archive",
   "networks.restore",
+  "providers.create",
+  "providers.update",
+  "providers.archive",
+  "providers.restore",
+  "provider_phones.create",
+  "provider_phones.update",
+  "provider_phones.archive",
+  "provider_phones.restore",
   "registry.create",
   "registry.update",
   "registry.archive",

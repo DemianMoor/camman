@@ -29,6 +29,20 @@
       "when": 1778523211283,
       "tag": "0003_offers_networks_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1778525244181,
+      "tag": "0004_motionless_betty_brant",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1778525262214,
+      "tag": "0005_providers_phones_rls",
+      "breakpoints": true
     }
   ]
 }

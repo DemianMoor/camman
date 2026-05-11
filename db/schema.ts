@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  boolean,
   check,
   index,
   integer,
@@ -201,3 +202,80 @@ export const offers = pgTable(
 
 export type Offer = typeof offers.$inferSelect;
 export type NewOffer = typeof offers.$inferInsert;
+
+export const sms_providers = pgTable(
+  "sms_providers",
+  {
+    id: serial("id").primaryKey(),
+    sms_provider_id: text("sms_provider_id").notNull().unique(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    short_link_supported: boolean("short_link_supported")
+      .notNull()
+      .default(false),
+    short_link_example: text("short_link_example"),
+    avatar_url: text("avatar_url"),
+    color: text("color"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("sms_providers_org_id_idx").on(table.org_id),
+    check(
+      "sms_providers_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type SmsProvider = typeof sms_providers.$inferSelect;
+export type NewSmsProvider = typeof sms_providers.$inferInsert;
+
+export const provider_phones = pgTable(
+  "provider_phones",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    provider_id: integer("provider_id")
+      .notNull()
+      .references(() => sms_providers.id, { onDelete: "cascade" }),
+    brand_id: integer("brand_id").references(() => brands.id, {
+      onDelete: "set null",
+    }),
+    phone_number: text("phone_number").notNull(),
+    country_code: text("country_code"),
+    dial_code: text("dial_code"),
+    local_number: text("local_number"),
+    cost_per_sms: numeric("cost_per_sms", { precision: 12, scale: 4 })
+      .notNull()
+      .default("0"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("provider_phones_org_id_phone_number_unique").on(
+      table.org_id,
+      table.phone_number,
+    ),
+    index("provider_phones_provider_id_idx").on(table.provider_id),
+    index("provider_phones_brand_id_idx").on(table.brand_id),
+    index("provider_phones_org_id_idx").on(table.org_id),
+    check(
+      "provider_phones_status_check",
+      sql`${table.status} IN ('active', 'suspended', 'blocked', 'archived')`,
+    ),
+  ],
+);
+
+export type ProviderPhone = typeof provider_phones.$inferSelect;
+export type NewProviderPhone = typeof provider_phones.$inferInsert;

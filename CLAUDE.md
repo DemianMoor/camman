@@ -85,6 +85,8 @@ List response: `{ data: T[], totalCount: number, page: number, pageSize: number 
 
 All inputs validated with Zod. All outputs are typed. Errors return `{ error: string, code?: string }` with appropriate HTTP status.
 
+**Parent/child route naming.** API routes for entities with nested children use `[parentEntityId]` for the dynamic segment (e.g. `/api/providers/[providerId]/phones/...`). Page routes use `[id]` (e.g. `/providers/[id]`). This avoids Next.js's prohibition on sibling dynamic segments with different names when nesting children under a dynamic parent.
+
 ## 9. UI Conventions
 
 - Pages are server components by default; client components only when needed (forms, interactivity).
@@ -116,6 +118,7 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 - Never commit `.env.local` or any file containing secrets.
 - Never log secrets. Never include secrets in error messages.
 - Before any destructive operation (DROP TABLE, hard DELETE, force-push), ask for explicit confirmation.
+- If migration-related issues arise (journal/file mismatch, suspected drift, after recovering from a partial apply), run `npx tsx scripts/verify-migration-integrity.ts` to compare DB-recorded hashes against actual file content and verify the snapshot chain. Read-only diagnostic, safe to run anytime.
 
 ## 12. What This Project Is NOT (yet)
 

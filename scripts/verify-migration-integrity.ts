@@ -22,7 +22,7 @@ interface JournalFile {
   entries: JournalEntry[];
 }
 
-interface DbMigration {
+interface DbMigration extends Record<string, unknown> {
   id: number;
   hash: string;
   created_at: string;

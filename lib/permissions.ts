@@ -36,6 +36,16 @@ export type Permission =
   | "provider_phones.update"
   | "provider_phones.archive"
   | "provider_phones.restore"
+  | "routing_types.view"
+  | "routing_types.create"
+  | "routing_types.update"
+  | "routing_types.archive"
+  | "routing_types.restore"
+  | "traffic_types.view"
+  | "traffic_types.create"
+  | "traffic_types.update"
+  | "traffic_types.archive"
+  | "traffic_types.restore"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -61,6 +71,8 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "networks.view",
   "providers.view",
   "provider_phones.view",
+  "routing_types.view",
+  "traffic_types.view",
   "registry.view",
 ]);
 
@@ -88,6 +100,14 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "provider_phones.update",
   "provider_phones.archive",
   "provider_phones.restore",
+  "routing_types.create",
+  "routing_types.update",
+  "routing_types.archive",
+  "routing_types.restore",
+  "traffic_types.create",
+  "traffic_types.update",
+  "traffic_types.archive",
+  "traffic_types.restore",
   "registry.create",
   "registry.update",
   "registry.archive",

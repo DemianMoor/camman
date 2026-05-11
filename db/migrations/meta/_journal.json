@@ -43,6 +43,20 @@
       "when": 1778525262214,
       "tag": "0005_providers_phones_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1778528285976,
+      "tag": "0006_mighty_zodiak",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1778528297275,
+      "tag": "0007_rt_tt_rls",
+      "breakpoints": true
     }
   ]
 }

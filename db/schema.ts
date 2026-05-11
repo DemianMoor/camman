@@ -279,3 +279,61 @@ export const provider_phones = pgTable(
 
 export type ProviderPhone = typeof provider_phones.$inferSelect;
 export type NewProviderPhone = typeof provider_phones.$inferInsert;
+
+export const routing_types = pgTable(
+  "routing_types",
+  {
+    id: serial("id").primaryKey(),
+    routing_type_id: text("routing_type_id").notNull().unique(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    color: text("color"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("routing_types_org_id_idx").on(table.org_id),
+    check(
+      "routing_types_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type RoutingType = typeof routing_types.$inferSelect;
+export type NewRoutingType = typeof routing_types.$inferInsert;
+
+export const traffic_types = pgTable(
+  "traffic_types",
+  {
+    id: serial("id").primaryKey(),
+    traffic_type_id: text("traffic_type_id").notNull().unique(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    color: text("color"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("traffic_types_org_id_idx").on(table.org_id),
+    check(
+      "traffic_types_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type TrafficType = typeof traffic_types.$inferSelect;
+export type NewTrafficType = typeof traffic_types.$inferInsert;

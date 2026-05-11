@@ -10,7 +10,7 @@
 export const ENTITY_AVAILABILITY = {
   brands: true,
   offers: true,
-  networks: false,       // 5.2
+  networks: true,        // 5.2
   providers: false,      // 5.3
   routing_types: false,  // 5.4
   traffic_types: false,  // 5.4

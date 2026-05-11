@@ -9,6 +9,7 @@ import {
   parseListParams,
   requireApiMembership,
 } from "@/lib/api/helpers";
+import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 
 const SORT_COLUMNS = {
@@ -23,7 +24,9 @@ export async function GET(req: NextRequest) {
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "brands.view")) return apiError(403, "forbidden", "forbidden");
+  if (!can(role, "brands.view")) {
+    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
+  }
 
   const params = parseListParams(req);
 

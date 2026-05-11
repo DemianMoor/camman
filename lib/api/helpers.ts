@@ -8,6 +8,20 @@ import { db } from "@/db/client";
 import { org_members } from "@/db/schema";
 import { createClient } from "@/lib/supabase/server";
 import { isRole, type Role } from "@/lib/permissions";
+import { API_ERROR_CODES } from "./error-codes";
+
+// API error contract.
+//
+// Every non-2xx response from an API route returns JSON of the shape:
+//
+//   {
+//     error: string,         // user-safe human-readable message
+//     code?: string,         // stable machine-readable code (see API_ERROR_CODES)
+//     details?: unknown      // optional extra info (e.g. { field: 'brand_id' })
+//   }
+//
+// Clients should branch on `code` for special handling and fall back to `error`
+// for display. Prefer entity-agnostic codes with `details` carrying specifics.
 
 // Return-style auth helpers.
 //
@@ -20,8 +34,16 @@ export type ApiAuthFailure = { error: NextResponse };
 export type ApiUser = { user: User };
 export type ApiMembership = { user: User; orgId: string; role: Role };
 
-export function apiError(status: number, error: string, code?: string) {
-  return NextResponse.json(code ? { error, code } : { error }, { status });
+export function apiError(
+  status: number,
+  error: string,
+  code?: string,
+  details?: unknown,
+) {
+  const body: { error: string; code?: string; details?: unknown } = { error };
+  if (code !== undefined) body.code = code;
+  if (details !== undefined) body.details = details;
+  return NextResponse.json(body, { status });
 }
 
 export async function requireApiUser(): Promise<ApiUser | ApiAuthFailure> {
@@ -30,7 +52,9 @@ export async function requireApiUser(): Promise<ApiUser | ApiAuthFailure> {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return { error: apiError(401, "unauthorized", "unauthorized") };
+    return {
+      error: apiError(401, "Not signed in", API_ERROR_CODES.UNAUTHORIZED),
+    };
   }
   return { user };
 }
@@ -49,10 +73,24 @@ export async function requireApiMembership(): Promise<
 
   const row = rows[0];
   if (!row) {
-    return { error: apiError(403, "no_org_membership", "no_org_membership") };
+    return {
+      error: apiError(
+        403,
+        "No organization membership",
+        API_ERROR_CODES.FORBIDDEN,
+        { reason: "no_org_membership" },
+      ),
+    };
   }
   if (!isRole(row.role)) {
-    return { error: apiError(500, "invalid_role_in_db", "invalid_role") };
+    return {
+      error: apiError(
+        500,
+        "Account is in an invalid state",
+        API_ERROR_CODES.INTERNAL,
+        { reason: "invalid_role_in_db" },
+      ),
+    };
   }
   return { user: userResult.user, orgId: row.org_id, role: row.role };
 }

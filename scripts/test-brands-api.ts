@@ -149,9 +149,14 @@ async function main() {
     check("returns 409", r3.status === 409, `got ${r3.status}`);
     const body3 = await r3.json();
     check(
-      "code is duplicate_brand_id",
-      body3.code === "duplicate_brand_id",
+      "code is duplicate",
+      body3.code === "duplicate",
       `got code=${body3.code}`,
+    );
+    check(
+      "details.field is brand_id",
+      body3.details?.field === "brand_id",
+      `got details=${JSON.stringify(body3.details)}`,
     );
 
     console.log("\n[4] GET /api/brands/list (after create)");
@@ -177,7 +182,12 @@ async function main() {
     const r6 = await apiFetch("/api/brands/99999");
     check("returns 404", r6.status === 404);
     const body6 = await r6.json();
-    check("code is brand_not_found", body6.code === "brand_not_found");
+    check("code is not_found", body6.code === "not_found");
+    check(
+      "details.entity is brand",
+      body6.details?.entity === "brand",
+      `got details=${JSON.stringify(body6.details)}`,
+    );
 
     console.log(`\n[7] PATCH /api/brands/${createdId} (rename)`);
     const r7 = await apiFetch(`/api/brands/${createdId}`, {

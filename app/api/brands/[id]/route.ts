@@ -8,6 +8,7 @@ import {
   isUniqueViolation,
   requireApiMembership,
 } from "@/lib/api/helpers";
+import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { brandUpdateSchema, nullIfEmpty } from "@/lib/validators/brands";
 
@@ -25,11 +26,17 @@ export async function GET(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "brands.view")) return apiError(403, "forbidden", "forbidden");
+  if (!can(role, "brands.view")) {
+    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
+  }
 
   const { id } = await params;
   const brandId = parseId(id);
-  if (brandId === null) return apiError(400, "invalid_id", "invalid_id");
+  if (brandId === null) {
+    return apiError(400, "Invalid brand id", API_ERROR_CODES.VALIDATION, {
+      field: "id",
+    });
+  }
 
   const rows = await db
     .select()
@@ -37,7 +44,11 @@ export async function GET(
     .where(and(eq(brands.id, brandId), eq(brands.org_id, orgId)))
     .limit(1);
 
-  if (!rows[0]) return apiError(404, "brand_not_found", "brand_not_found");
+  if (!rows[0]) {
+    return apiError(404, "Brand not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "brand",
+    });
+  }
   return NextResponse.json(rows[0]);
 }
 
@@ -50,26 +61,30 @@ export async function PATCH(
   const { orgId, role } = auth;
 
   if (!can(role, "brands.update")) {
-    return apiError(403, "forbidden", "forbidden");
+    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
   const { id } = await params;
   const brandId = parseId(id);
-  if (brandId === null) return apiError(400, "invalid_id", "invalid_id");
+  if (brandId === null) {
+    return apiError(400, "Invalid brand id", API_ERROR_CODES.VALIDATION, {
+      field: "id",
+    });
+  }
 
   let json: unknown;
   try {
     json = await req.json();
   } catch {
-    return apiError(400, "invalid_json", "invalid_json");
+    return apiError(400, "Invalid JSON body", API_ERROR_CODES.VALIDATION);
   }
 
   const parsed = brandUpdateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError(
       400,
-      parsed.error.issues[0]?.message ?? "validation_failed",
-      "validation_failed",
+      parsed.error.issues[0]?.message ?? "Invalid input",
+      API_ERROR_CODES.VALIDATION,
     );
   }
 
@@ -95,7 +110,9 @@ export async function PATCH(
       .returning();
 
     if (!updated[0]) {
-      return apiError(404, "brand_not_found", "brand_not_found");
+      return apiError(404, "Brand not found", API_ERROR_CODES.NOT_FOUND, {
+        entity: "brand",
+      });
     }
     return NextResponse.json(updated[0]);
   } catch (err) {
@@ -103,7 +120,8 @@ export async function PATCH(
       return apiError(
         409,
         "A brand with this brand_id already exists",
-        "duplicate_brand_id",
+        API_ERROR_CODES.DUPLICATE,
+        { field: "brand_id" },
       );
     }
     throw err;

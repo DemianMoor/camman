@@ -44,6 +44,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { toastApiError } from "@/lib/api/toast-error";
+import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
 
@@ -146,17 +148,20 @@ export default function BrandsPage() {
     return () => clearTimeout(t);
   }, [searchInput, filters.search, updateFilters]);
 
+  const listApi = useApiCall<ListResponse>();
+  const createApi = useApiCall<Brand>();
+  const updateApi = useApiCall<Brand>();
+  const archiveApi = useApiCall<Brand>();
+  const restoreApi = useApiCall<Brand>();
+
   const [data, setData] = useState<Brand[]>([]);
   const [totalCount, setTotalCount] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
-
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
-    setIsLoading(true);
     setFetchError(null);
 
     const params = new URLSearchParams({
@@ -168,27 +173,18 @@ export default function BrandsPage() {
     if (filters.search) params.set("search", filters.search);
     if (filters.showArchived) params.set("showArchived", "true");
 
-    fetch(`/api/brands/list?${params.toString()}`)
-      .then(async (r) => {
-        if (!r.ok) {
-          const body = await r.json().catch(() => ({}));
-          throw new Error(body.error ?? `Request failed (${r.status})`);
-        }
-        return (await r.json()) as ListResponse;
-      })
-      .then((body) => {
-        if (cancelled) return;
-        setData(body.data);
-        setTotalCount(body.totalCount);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setFetchError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setIsLoading(false);
-      });
+    (async () => {
+      const result = await listApi.execute(
+        `/api/brands/list?${params.toString()}`,
+      );
+      if (cancelled) return;
+      if (result.ok) {
+        setData(result.data.data);
+        setTotalCount(result.data.totalCount);
+      } else {
+        setFetchError(result.error);
+      }
+    })();
 
     return () => {
       cancelled = true;
@@ -201,6 +197,7 @@ export default function BrandsPage() {
     filters.search,
     filters.showArchived,
     refreshTick,
+    listApi.execute,
   ]);
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -210,8 +207,6 @@ export default function BrandsPage() {
     | { kind: "restore"; brand: Brand }
     | null
   >(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const canCreate = can("brands.create");
   const canUpdate = can("brands.update");
@@ -219,72 +214,56 @@ export default function BrandsPage() {
   const canRestore = can("brands.restore");
 
   async function handleCreate(values: BrandFormValues) {
-    setIsSubmitting(true);
-    try {
-      const r = await fetch("/api/brands", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        toast.error(body.error ?? "Couldn't create brand");
-        return;
-      }
-      toast.success("Brand created");
-      setCreateOpen(false);
-      refetch();
-    } finally {
-      setIsSubmitting(false);
+    const result = await createApi.execute("/api/brands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+    if (!result.ok) {
+      toastApiError(result, "Couldn't create brand");
+      return;
     }
+    toast.success("Brand created");
+    setCreateOpen(false);
+    refetch();
   }
 
   async function handleEdit(values: BrandFormValues) {
     if (!editing) return;
-    setIsSubmitting(true);
-    try {
-      // Strip brand_id from the patch (it can't change and PATCH would re-validate it).
-      const { brand_id: _omit, ...patch } = values;
-      const r = await fetch(`/api/brands/${editing.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        toast.error(body.error ?? "Couldn't save brand");
-        return;
-      }
-      toast.success("Brand saved");
-      setEditing(null);
-      refetch();
-    } finally {
-      setIsSubmitting(false);
+    // Strip brand_id from the patch (it can't change and PATCH would re-validate it).
+    const { brand_id: _omit, ...patch } = values;
+    const result = await updateApi.execute(`/api/brands/${editing.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!result.ok) {
+      toastApiError(result, "Couldn't save brand");
+      return;
     }
+    toast.success("Brand saved");
+    setEditing(null);
+    refetch();
   }
 
   async function handleConfirm() {
     if (!confirming) return;
-    setConfirmBusy(true);
-    try {
-      const action = confirming.kind === "archive" ? "archive" : "restore";
-      const r = await fetch(
-        `/api/brands/${confirming.brand.id}/${action}`,
-        { method: "POST" },
+    const isArchive = confirming.kind === "archive";
+    const api = isArchive ? archiveApi : restoreApi;
+    const result = await api.execute(
+      `/api/brands/${confirming.brand.id}/${isArchive ? "archive" : "restore"}`,
+      { method: "POST" },
+    );
+    if (!result.ok) {
+      toastApiError(
+        result,
+        isArchive ? "Couldn't archive brand" : "Couldn't restore brand",
       );
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        toast.error(body.error ?? `Couldn't ${action} brand`);
-        return;
-      }
-      toast.success(
-        action === "archive" ? "Brand archived" : "Brand restored",
-      );
-      setConfirming(null);
-      refetch();
-    } finally {
-      setConfirmBusy(false);
+      return;
     }
+    toast.success(isArchive ? "Brand archived" : "Brand restored");
+    setConfirming(null);
+    refetch();
   }
 
   const columns = useMemo<ColumnDef<Brand>[]>(
@@ -385,6 +364,7 @@ export default function BrandsPage() {
   );
 
   const isAuthLoading = !auth;
+  const confirmBusy = archiveApi.isLoading || restoreApi.isLoading;
 
   return (
     <div className="space-y-6">
@@ -449,7 +429,7 @@ export default function BrandsPage() {
             Retry
           </Button>
         </div>
-      ) : !isLoading && data.length === 0 && filtersAreDefault ? (
+      ) : !listApi.isLoading && data.length === 0 && filtersAreDefault ? (
         <div
           className={cn(
             "flex flex-col items-center justify-center gap-4 rounded-md border border-dashed py-16 text-center",
@@ -468,7 +448,7 @@ export default function BrandsPage() {
             </Button>
           ) : null}
         </div>
-      ) : !isLoading && data.length === 0 ? (
+      ) : !listApi.isLoading && data.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-4 rounded-md border border-dashed py-16 text-center">
           <p className="text-sm text-muted-foreground">
             No brands match your filters.
@@ -488,7 +468,7 @@ export default function BrandsPage() {
         <DataTable<Brand>
           data={data}
           columns={columns}
-          isLoading={isLoading}
+          isLoading={listApi.isLoading}
           pageIndex={filters.page}
           pageSize={filters.pageSize}
           totalCount={totalCount}
@@ -527,7 +507,7 @@ export default function BrandsPage() {
             mode="create"
             onSubmit={handleCreate}
             onCancel={() => setCreateOpen(false)}
-            isSubmitting={isSubmitting}
+            isSubmitting={createApi.isLoading}
           />
         </DialogContent>
       </Dialog>
@@ -559,7 +539,7 @@ export default function BrandsPage() {
               }}
               onSubmit={handleEdit}
               onCancel={() => setEditing(null)}
-              isSubmitting={isSubmitting}
+              isSubmitting={updateApi.isLoading}
             />
           ) : null}
         </DialogContent>

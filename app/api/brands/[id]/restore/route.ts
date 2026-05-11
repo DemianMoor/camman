@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { brands } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 
 function parseId(idParam: string) {
@@ -21,12 +22,16 @@ export async function POST(
   const { orgId, role } = auth;
 
   if (!can(role, "brands.restore")) {
-    return apiError(403, "forbidden", "forbidden");
+    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
   const { id } = await params;
   const brandId = parseId(id);
-  if (brandId === null) return apiError(400, "invalid_id", "invalid_id");
+  if (brandId === null) {
+    return apiError(400, "Invalid brand id", API_ERROR_CODES.VALIDATION, {
+      field: "id",
+    });
+  }
 
   const updated = await db
     .update(brands)
@@ -48,6 +53,15 @@ export async function POST(
     .where(and(eq(brands.id, brandId), eq(brands.org_id, orgId)))
     .limit(1);
 
-  if (!existing[0]) return apiError(404, "brand_not_found", "brand_not_found");
-  return apiError(409, "brand_already_active", "brand_already_active");
+  if (!existing[0]) {
+    return apiError(404, "Brand not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "brand",
+    });
+  }
+  return apiError(
+    409,
+    "Brand is already active",
+    API_ERROR_CODES.CONFLICT,
+    { reason: "already_active" },
+  );
 }

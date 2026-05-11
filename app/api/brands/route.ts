@@ -7,6 +7,7 @@ import {
   isUniqueViolation,
   requireApiMembership,
 } from "@/lib/api/helpers";
+import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { brandCreateSchema, nullIfEmpty } from "@/lib/validators/brands";
 
@@ -16,22 +17,22 @@ export async function POST(req: NextRequest) {
   const { orgId, role } = auth;
 
   if (!can(role, "brands.create")) {
-    return apiError(403, "forbidden", "forbidden");
+    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
   let json: unknown;
   try {
     json = await req.json();
   } catch {
-    return apiError(400, "invalid_json", "invalid_json");
+    return apiError(400, "Invalid JSON body", API_ERROR_CODES.VALIDATION);
   }
 
   const parsed = brandCreateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError(
       400,
-      parsed.error.issues[0]?.message ?? "validation_failed",
-      "validation_failed",
+      parsed.error.issues[0]?.message ?? "Invalid input",
+      API_ERROR_CODES.VALIDATION,
     );
   }
 
@@ -54,7 +55,8 @@ export async function POST(req: NextRequest) {
       return apiError(
         409,
         "A brand with this brand_id already exists",
-        "duplicate_brand_id",
+        API_ERROR_CODES.DUPLICATE,
+        { field: "brand_id" },
       );
     }
     throw err;

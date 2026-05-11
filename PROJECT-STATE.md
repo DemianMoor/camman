@@ -12,7 +12,7 @@ Target scale at maturity is millions of contacts and 100+ campaigns per day. Sch
 
 ## 2. Tech Stack
 
-Next.js **16.2.6** with the App Router, on Turbopack (the default in 16). TypeScript everywhere. Tailwind v4 (CSS-first config, no `tailwind.config.ts`). UI primitives from **shadcn/ui v4.7** (the modern Radix-Nova style; `baseColor: "neutral"`). Forms use **react-hook-form ^7.75** + **@hookform/resolvers** with **Zod ^4.4** schemas. Toasts via **sonner ^2**. Icons from **lucide-react ^1.14**. Tables built on **@tanstack/react-table ^8.21** via a single `DataTable` wrapper.
+Next.js **16.2.6** with the App Router, on Turbopack (the default in 16). TypeScript everywhere. Tailwind v4 (CSS-first config, no `tailwind.config.ts`). UI primitives from **shadcn/ui v4.7** (the modern Radix-Nova style; `baseColor: "neutral"`). Forms use **react-hook-form ^7.75** + **@hookform/resolvers** with **Zod ^4.4** schemas. Toasts via **sonner ^2**. Icons from **lucide-react ^1.14**. Tables built on **@tanstack/react-table ^8.21** via a single `DataTable` wrapper. Phone parsing via **libphonenumber-js ^1.x** (single source of truth — don't write custom phone validation).
 
 Database is Supabase (Postgres + Auth) accessed two ways: **@supabase/supabase-js + @supabase/ssr ^0.10** for auth and any RLS-respecting calls, and **drizzle-orm ^0.45 + postgres ^3.4** for all server-side queries inside route handlers (which bypass RLS because the DB connection isn't user-scoped — we enforce `org_id` at the application layer).
 
@@ -22,102 +22,128 @@ Version-specific gotchas in Next.js 16: `params` in dynamic routes is async (mus
 
 ```
 app/
-  (auth)/            Login, signup, forgot-password (route group, no URL segment)
-  (protected)/       Layout + protected pages (dashboard, brands, …)
-  auth/              callback, reset-password, complete (route handlers + pages)
-  api/               JSON route handlers (brands/, me/)
+  (auth)/            Login, signup, forgot-password (route group)
+  (protected)/       Layout + protected pages (dashboard, brands, offers,
+                     affiliate-networks, providers, providers/[id], …)
+  auth/              callback, reset-password, complete
+  api/               JSON route handlers (brands/, offers/, networks/,
+                     providers/[providerId]/phones/[phoneId]/..., me/)
 components/
   ui/                shadcn primitives — don't edit unless re-adding via CLI
   protected/         Sidebar, nav, AuthContext (for protected layout)
-  brands/            BrandForm — the only entity-specific component so far
+  brands/            BrandForm
+  offers/            OfferForm (sections, useFieldArray for sales_pages,
+                     conditional payout fields)
+  networks/          NetworkForm
+  providers/         ProviderForm, PhoneForm
   data-table.tsx     Generic TanStack Table wrapper
-  color-picker.tsx   Reused by BrandForm; can be reused by future entities
+  color-picker.tsx   Reused across entity forms
+  status-dropdown.tsx  Reusable for status state machines
 db/
-  schema.ts          Drizzle schema (organizations, org_members, invites, brands)
-  client.ts          Drizzle + postgres-js client (globalThis-cached)
-  migrations/        Generated SQL + Drizzle metadata (0000 schema, 0001 security)
+  schema.ts          All 8 tables
+  client.ts          Drizzle + postgres-js (globalThis-cached pool, max: 5)
+  migrations/        Auto-generated SQL + hand-authored RLS migrations
 lib/
   api/               helpers, error-codes, toast-error
   auth/              Server-side getUser/requireUser/requireOrgMembership
   hooks/             useApiCall, usePersistedFilters
   supabase/          client/server/admin Supabase factories
-  validators/        Zod schemas (auth.ts, brands.ts)
+  validators/        Zod schemas per entity (+ shared _helpers.ts: nullIfEmpty)
   permissions.ts     Role/Permission types, can(), assertPermission()
-scripts/             Standalone tsx scripts (connection test, schema verify, signup-trigger
-                     E2E, RLS isolation E2E, brands API E2E)
-proxy.ts             Route protection + Supabase session refresh (Next.js 16 proxy)
+  phone-validation.ts  validatePhone() + formatPhoneInternational()
+  feature-flags.ts   ENTITY_AVAILABILITY + isEntityAvailable() — single source
+                     of truth for "is this entity built yet?"
+scripts/             Diagnostic + E2E test scripts (per-entity API tests,
+                     schema verifiers, RLS isolation E2E, migration integrity)
+proxy.ts             Route protection + Supabase session refresh (Next.js 16)
 drizzle.config.ts    Drizzle Kit config (schemaFilter: ["public"])
 ```
 
 ## 4. Database Schema (current state)
 
-Four tables, all in `public` schema. Every domain table carries `org_id UUID` and every query filters by it explicitly.
+Eight tables in `public`, all with `org_id UUID` and all with RLS enabled. Every query filters by `org_id` explicitly (RLS is defense in depth, not the primary defense).
 
-- **`organizations`** — One row per tenant. Holds `id` (uuid, default gen_random_uuid), `name`, `created_at`. Soft-delete not implemented; orgs aren't deleted in v1.
-- **`org_members`** — Links a Supabase `auth.users.id` to an organization with a role (`owner|admin|manager|operator|viewer`). `UNIQUE(user_id, org_id)`. Index on `org_id`. For v1, a user belongs to exactly one org.
-- **`invites`** — Pending invitations (email, role, token, expires_at, accepted_at). Role check excludes `'owner'`. Not yet wired to UI; the table exists for the future user-management feature.
-- **`brands`** — First domain entity. `serial id` PK plus a separate human-friendly `brand_id TEXT UNIQUE` external identifier. Status is `'active' | 'archived'` with `archived_at` timestamp (soft-delete).
+**Infrastructure / tenancy:**
+- **`organizations`** — One row per tenant.
+- **`org_members`** — Links `auth.users.id` → org with a role (`owner|admin|manager|operator|viewer`).
+- **`invites`** — Pending invitations (not yet wired to UI).
 
-A `current_org_id()` SQL function (SECURITY DEFINER, STABLE) returns the calling user's org via a SECURITY DEFINER lookup on `org_members`. RLS policies on all four tables use it for tenant isolation. There's also a `handle_new_user()` trigger on `auth.users INSERT` that auto-creates an organization and inserts the new user as its `owner` — so signup-via-Supabase Auth produces a usable account with no extra setup.
+**Registry entities (complete vertical slices):**
+- **`brands`** — Campaign group identifier with name, color, optional short-link base.
+- **`affiliate_networks`** — Platforms where you source offers. List view shows `offer_count` (active offers per network).
+- **`offers`** — Affiliate products. Has FK `network_id → affiliate_networks` (ON DELETE SET NULL), conditional payout fields (`payout_model: 'cpa' | 'revshare'` with one of `payout_cpa NUMERIC(12,4)` or `payout_revshare NUMERIC(5,2)`), and `sales_pages JSONB` (array of `{ label, url }`, up to 10).
+- **`sms_providers`** — SMS sending platforms. Includes `short_link_supported: boolean` and `short_link_example: text`.
+- **`provider_phones`** — Child of providers. FK `provider_id → sms_providers` (CASCADE), FK `brand_id → brands` (SET NULL). Phone columns: `phone_number` (E.164), `country_code` (ISO alpha-2), `dial_code`, `local_number`. UNIQUE(org_id, phone_number). Status state machine with **4** states: `active | suspended | blocked | archived`.
 
-RLS is **defense in depth**, not the primary defense. Application-level `org_id` filtering in every query is the primary defense. Both must be in place.
+A `current_org_id()` SECURITY DEFINER SQL function returns the calling user's org via a SECURITY DEFINER lookup on `org_members`. RLS policies on all 8 tables use it for tenant isolation. The `handle_new_user()` trigger on `auth.users INSERT` auto-creates an organization and inserts the new user as `owner`.
+
+Soft-delete on every domain table: `status` column + `archived_at TIMESTAMPTZ`. No DELETE policies in RLS — archive only. Hard-deletes are explicit and rare (mainly in test cleanup).
 
 ## 5. Authentication & Authorization
 
-Auth is Supabase Auth, **email + password only**. Email verification is required before login. Password reset via Supabase's built-in `resetPasswordForEmail` flow. No OAuth, no magic links, no social — and explicitly out of scope for v1.
+Auth is Supabase Auth, **email + password only**. Email verification required. Password reset via Supabase's built-in flow. No OAuth, no magic links — explicitly out of scope for v1.
 
-Five roles in ascending privilege: **viewer < operator < manager < admin < owner**. Permissions are defined as a string union in `lib/permissions.ts` and assigned cumulatively (manager inherits operator, etc.). Currently defined permissions: `brands.view`, `brands.create`, `brands.update`, `brands.archive`, `brands.restore`, `registry.view`, `registry.create`, `registry.update`, `registry.archive`, `users.manage`, `org.delete`. New permissions are added to the union and to the relevant role's Set; the file has a top comment with instructions.
+Five roles in ascending privilege: **viewer < operator < manager < admin < owner**. Permissions are a string union in `lib/permissions.ts`, assigned cumulatively (manager inherits operator, etc.). Currently defined: `brands.*`, `offers.*`, `networks.*`, `providers.*`, `provider_phones.*` (each with view/create/update/archive/restore), plus `registry.*`, `users.manage`, `org.delete`. New permissions go in the union and the relevant role's Set.
 
-The `can(role, permission)` helper is the single source of truth. It's called server-side in API routes (after `requireApiMembership()`) and client-side via the `useAuth()` hook (which fetches `/api/me` on mount and exposes `can()` to the protected tree). Both must pass — server-side is the authoritative check; client-side is for hiding controls.
+The `can(role, permission)` helper is the single source of truth. Called server-side after `requireApiMembership()` and client-side via `useAuth()` (which fetches `/api/me` on mount and exposes `can()` to the protected tree). Both checks must pass — server-side is authoritative; client-side just hides controls.
 
 ## 6. Established Conventions
 
-These are sticky decisions. Don't deviate without asking.
+These are sticky. Don't deviate without asking.
 
-**Multi-tenancy.** Every domain table has `org_id UUID`. Every query that reads or writes domain data MUST filter by `org_id` explicitly. RLS catches mistakes but is not the primary defense.
+**Multi-tenancy.** Every domain table has `org_id UUID`. Every query filters by it explicitly. RLS catches mistakes but isn't the primary defense.
 
-**API error shape.** Every non-2xx response returns `{ error: string, code?: string, details?: unknown }`. Codes come from `lib/api/error-codes.ts` (`UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `VALIDATION`, `DUPLICATE`, `CONFLICT`, `RATE_LIMITED`, `INTERNAL`). Prefer entity-agnostic codes with `details` carrying specifics (e.g. `duplicate` + `details: { field: 'brand_id' }`), never `duplicate_brand_id`.
+**API error contract.** Every non-2xx returns `{ error: string, code?: string, details?: unknown }`. Codes from `lib/api/error-codes.ts` (`UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `VALIDATION`, `DUPLICATE`, `CONFLICT`, `RATE_LIMITED`, `INTERNAL`). Prefer entity-agnostic codes with `details` carrying specifics (`duplicate` + `details: { field: 'brand_id' }`), never `duplicate_brand_id`.
 
-**API list shape.** `GET /api/{entity}/list` accepts `page`, `pageSize`, `search`, `showArchived`, `sortBy`, `sortDir` (parsed via `parseListParams`) and returns `{ data: T[], totalCount, page, pageSize }`.
+**API list shape.** `GET /api/{entity}/list` accepts `page`, `pageSize`, `search`, `showArchived`, `sortBy`, `sortDir` via `parseListParams` and returns `{ data: T[], totalCount, page, pageSize }`.
 
-**Auth in route handlers.** Use `requireApiMembership()` from `lib/api/helpers.ts`. It returns a discriminated union; callers do `if ('error' in auth) return auth.error;` then destructure `{ user, orgId, role }`. No try/catch wrappers.
+**Auth in route handlers.** `requireApiMembership()` returns a discriminated union. Callers do `if ('error' in auth) return auth.error;` then destructure `{ user, orgId, role }`. No try/catch wrappers.
 
-**DB access in route handlers.** Drizzle (`db` from `db/client.ts`), not the Supabase JS client. The Drizzle connection uses the privileged DB role and is not subject to RLS; that's why explicit `org_id` filtering is non-negotiable.
+**DB access in route handlers.** Drizzle (`db` from `db/client.ts`), not Supabase JS. The Drizzle connection uses the privileged DB role and bypasses RLS — explicit `org_id` filtering is therefore non-negotiable.
 
-**Client-side API calls.** Use `useApiCall<T>()` from `lib/hooks/use-api-call.ts`. It returns `{ isLoading, execute }`. **Depend on `.execute`, never the wrapping object** (see Gotchas). On failures, call `toastApiError(result)` for consistent user messaging.
+**Client-side API calls.** `useApiCall<T>()` from `lib/hooks/use-api-call.ts` returns `{ isLoading, execute }`. **Depend on `.execute` in effect deps, never the wrapping object** (see Gotchas). On failures, call `toastApiError(result, fallback?)` from `lib/api/toast-error.ts` for consistent user-facing copy mapped from the error code.
 
-**Forms.** shadcn `<Form>` + react-hook-form + `zodResolver`. Every input is wrapped in `<FormField>` / `<FormItem>` / `<FormControl>` / `<FormMessage>` so inline validation works. Entity forms are pure components — they accept `onSubmit` from the parent and don't make API calls themselves.
+**Forms.** shadcn `<Form>` + react-hook-form + `zodResolver`. Inputs wrapped in `<FormField>`/`<FormItem>`/`<FormControl>`/`<FormMessage>`. Entity forms are pure components — they accept `onSubmit` from the parent and don't make API calls themselves.
 
-**UI for CRUD.** Dialogs (shadcn `<Dialog>`) for simple create/edit. AlertDialog for archive/restore confirmations. Full pages are reserved for complex entities (Campaigns, eventually).
+**Soft-delete.** `status` column + `archived_at TIMESTAMPTZ`. Archive via dedicated endpoint, not PATCH.
 
-**Tables.** The `DataTable` wrapper in `components/data-table.tsx` is canonical. Manual pagination + manual sorting; the parent owns the state.
+**Tables.** `DataTable` in `components/data-table.tsx` is canonical. Manual pagination + manual sorting; the parent owns the state. `usePersistedFilters('{route}.filters', defaults)` for localStorage-backed filter state.
 
-**List filter state.** Use `usePersistedFilters('{route}.filters', defaults)` so filters survive navigation. The hook is SSR-safe and uses localStorage.
+**UI for CRUD — when to use a dialog vs a detail page.**
+- **Dialog**: simple flat entities (Brands, Offers, Networks). Create/edit happens in a shadcn `<Dialog>`. Archive/restore via `<AlertDialog>`. Most entities use this.
+- **Detail page**: entities that own children (Providers → Phones). The list row click navigates to `/{entity}/[id]`. The detail page shows top-level entity fields in a Card plus a nested management section for the children. Established in `/providers/[id]`. Use this pattern for any entity with a 1:N relationship to manage in-place.
 
-**Soft-delete.** Status column is `'active' | 'archived'` with `archived_at TIMESTAMPTZ`. No hard deletes via UI; rare hard-deletes are explicit.
+**StatusDropdown** (`components/status-dropdown.tsx`) — reusable component for status state machines beyond the simple active/archived binary. Used by `provider_phones` for the 4-state machine (active/suspended/blocked dropdown + separate archive action). Pass `options: { value, label, color }[]` and an `onChange` handler. Future use: Campaigns will need it.
+
+**Feature flags** (`lib/feature-flags.ts`) — `ENTITY_AVAILABILITY` const + `isEntityAvailable(key)` helper. Single source of truth for "is this entity built yet?". Drives both the sidebar nav (disabled state) and any FK pickers/filters in other entities. **When building a new entity, flipping its flag to `true` is the LAST step**, after schema + API + UI all work. When an entity's form references another entity that may not exist yet, gate the fetch on `isEntityAvailable(...)` — do not make speculative requests and silently catch 404s.
+
+**Route naming for parent/child entities.** Next.js prohibits sibling dynamic route segments with different names. For nested API trees, use `[parentEntityId]` for the parent's dynamic segment so children can nest under it: `/api/providers/[providerId]/phones/[phoneId]/...`. Page routes use `[id]` (e.g. `/providers/[id]`) — they live in a different subtree so naming doesn't conflict.
+
+**Cross-entity FK pickers.** When a form has a Select that loads options from another entity's `/api/{other}/list` endpoint, the pattern is: check `isEntityAvailable('other')` first; if false, render the Select disabled with an explanatory placeholder; if true, fetch and populate. This way flipping the flag activates the picker without any other code change.
 
 ## 7. What's Built
 
-- Email/password authentication: signup, login, password reset, email verification handler, defensive `/auth/complete` page. Middleware-equivalent route protection via `proxy.ts`.
-- Protected layout with sidebar nav (all planned entities visible; only Dashboard and Brands are enabled). Mobile drawer via shadcn Sheet. User block with avatar + email + sign-out.
-- Dashboard placeholder showing org name and role.
-- `AuthContext` (`/api/me` + `useAuth()`) exposing `auth`, `isLoading`, `error`, `refetch`, and `can(permission)` to the protected tree.
-- Database foundation: 4 tables, RLS policies, `current_org_id()` helper, new-user trigger. Two migrations tracked by Drizzle Kit (`0000_wealthy_power_pack.sql`, `0001_security_layer.sql`).
-- Brands: full vertical slice. Schema, RLS, all 5 API routes (list / create / get / update / archive / restore), client-side list page with create/edit dialogs, archive/restore AlertDialog, search with 300ms debounce, persistent filters, ColorPicker, BrandForm, status badges, action dropdown.
-- Shared API infrastructure: error contract, error codes, `useApiCall`, `toastApiError`. Used by Brands; reused by every future entity.
-- Integration test scripts in `scripts/`: connection test, schema verify, security-layer verify, signup-trigger E2E, RLS-isolation E2E, brands-API E2E.
+- **Auth flow**: signup, login, password reset, email verification handler, `/auth/complete` defensive page. `proxy.ts` for route protection.
+- **Protected layout**: sidebar with all planned entities (only the implemented ones enabled — see feature-flags), mobile drawer, user block.
+- **Dashboard placeholder** showing org name + role + a "Coming up" card.
+- **AuthContext**: `/api/me` + `useAuth()` exposing `auth`, `isLoading`, `error`, `refetch`, `can(permission)`.
+- **Database foundation**: 8 tables, all with RLS. 6 migrations: 0000 schema, 0001 security layer (functions + policies + trigger), 0002 offers/networks tables, 0003 offers/networks RLS, 0004 providers/phones tables, 0005 providers/phones RLS.
+- **Shared API/UI infrastructure**: error contract, `apiError` helper, `useApiCall`, `toastApiError`, `DataTable`, `ColorPicker`, `StatusDropdown`, `usePersistedFilters`. Reused by every entity.
+- **Entities — complete CRUD vertical slices** (schema + RLS + API + UI + tests + feature flag enabled):
+  - **Brands** — flat entity, dialog-based create/edit.
+  - **Offers** — conditional payout fields (CPA $ or RevShare %), dynamic `sales_pages` array via `useFieldArray`, FK to networks via Select.
+  - **Affiliate Networks** — flat entity. List shows `offer_count` aggregate (left-joined count of active offers).
+  - **SMS Providers + Provider Phones** — parent/child. Providers list → detail page (`/providers/[id]`). Detail page manages child phones in-place with multi-status filter, StatusDropdown per row, separate Add/Edit dialogs, Archive/Restore via AlertDialog. Server-side phone validation via libphonenumber-js (raw input → E.164 + country_code + dial_code + local_number). 4-state status machine with `/status` endpoint enforcing the no-status-change-while-archived rule.
+- **Diagnostic/test scripts** in `scripts/`: connection test, foundation schema verify, security-layer verify, offers+networks schema verify, providers+phones schema verify, **migration integrity** verify (compares DB hashes against file content + snapshot chain), signup-trigger E2E, RLS-isolation E2E, per-entity API E2E tests.
 
 ## 8. What's Next
 
 Roadmap of remaining entity builds (in order):
 
-- **5.1** Offers
-- **5.2** Affiliate Networks
-- **5.3** SMS Providers + Provider Phones
-- **5.4** Routing Types and Traffic Types
+- **5.4** Routing Types + Traffic Types (likely bundled — both are small lookup-style entities)
 - **5.5** UTM Tags
 - **5.6** Segment Groups
-- **6** Audience layer: Contacts, Segments, Opt-Outs, Opt-Ins, Clickers — with CSV upload/import
+- **6** Audience layer: Contacts, Segments, Opt-Outs, Opt-Ins, Clickers — with CSV upload/import (the first feature beyond basic CRUD)
 - **7** Creatives and Campaigns — the hardest part; CSV export of audience for sending, CSV import of results back
 
 Deferred indefinitely (explicitly out of scope for v1): real SMS sending, provider API integrations, inbound webhooks, two-way conversations, per-recipient delivery status, phone-number-to-campaign assignment, short-link generation, click tracking infrastructure, analytics integrations.
@@ -128,37 +154,44 @@ No background job system yet (will be needed if/when real sending is added). No 
 
 ## 10. Pattern for Building a New Entity
 
-This is the recipe; it's how Brands was built and how the next 6–10 entities should be built. A simple entity takes 1–3 hours of Claude Code work plus user testing.
+This recipe is now battle-tested across four entities (Brands, Offers, Networks, Providers). A simple entity takes 1–3 hours of Claude Code work plus user testing.
 
-1. Add the table to `db/schema.ts`. Follow the conventions: `id`, `org_id` UUID with FK to organizations CASCADE, `status` text default `'active'` with CHECK, `archived_at` timestamptz, `created_at` timestamptz default now(). Export `$inferSelect` / `$inferInsert` types.
+1. Add the table to `db/schema.ts`. Follow conventions: `id`, `org_id` UUID FK CASCADE, `status` text + CHECK, `archived_at` timestamptz, `created_at` timestamptz default now(). Export `$inferSelect`/`$inferInsert` types.
 2. Run `npm run db:generate` to produce a Drizzle migration. Review the SQL.
-3. Write a `0XXX_<name>_rls.sql` custom migration via `drizzle-kit generate --custom --name=<name>_rls` for `ENABLE ROW LEVEL SECURITY` plus SELECT/INSERT/UPDATE policies on the new table. Use the same patterns as `0001_security_layer.sql` (no DELETE policy; archive via status).
-4. Run `npm run db:migrate`. Verify in Supabase or via a small scripts/ verifier.
-5. Add permissions to `lib/permissions.ts` (e.g. `offers.view`, `offers.create`, etc.) and assign them to roles. Add a Zod validator file under `lib/validators/`.
-6. Build API routes under `app/api/{entity}/`. Mirror the Brands shape: `list/route.ts` (GET), `route.ts` (POST), `[id]/route.ts` (GET + PATCH), `[id]/archive/route.ts` (POST), `[id]/restore/route.ts` (POST). Each must `requireApiMembership()`, call `can()`, validate with Zod, filter by `org_id`, use Drizzle, and return the standard shapes.
-7. Write an E2E test script in `scripts/test-{entity}-api.ts` (clone the Brands one and adapt assertions). Run it against `localhost:3001` with `TEST_USER_EMAIL`/`TEST_USER_PASSWORD` in `.env.local`.
-8. Build the page under `app/(protected)/{entity}/page.tsx`. Reuse `DataTable`, `usePersistedFilters`, `useApiCall`, `toastApiError`. Create an `{Entity}Form` component as a pure component.
-9. Enable the nav entry in `components/protected/nav-config.ts` (flip `disabled` to `undefined` or remove the field).
-10. Test in the browser with DevTools open. Watch Network tab for the absence of loops.
+3. Author a separate RLS migration via `drizzle-kit generate --custom --name=<name>_rls`. Add `ENABLE ROW LEVEL SECURITY` + SELECT/INSERT/UPDATE policies. No DELETE policy — archive via status.
+4. Run `npm run db:migrate`. Verify via a small scripts/ verifier sibling to the existing ones.
+5. Add permissions to `lib/permissions.ts`. Add a Zod validator file under `lib/validators/`. Optional empty-string strings should use `z.union([z.string()..., z.literal("")]).optional()` (not `z.preprocess`) and normalize via `nullIfEmpty` in the API.
+6. Build API routes under `app/api/{entity}/`. For flat entities use `[id]`; for entities with child resources, use `[parentEntityId]` so nesting works. Mirror Brands' shape: list, create, get+patch, archive, restore. Each route uses `requireApiMembership`, `can`, Zod, Drizzle, `org_id` filter, standard codes from `lib/api/error-codes.ts`.
+7. Write an E2E test script in `scripts/test-{entity}-api.ts` (clone an existing one and adapt assertions). Run against `localhost:3001` with `TEST_USER_EMAIL`/`TEST_USER_PASSWORD` temporarily in `.env.local`.
+8. Build the page under `app/(protected)/{entity}/page.tsx`. Reuse `DataTable`, `useApiCall`, `toastApiError`, `usePersistedFilters`. Decide dialog vs detail page based on whether the entity has children. Create an `{Entity}Form` as a pure component.
+9. If other entities reference this one via FK picker, those forms should already have an `isEntityAvailable('thisEntity')` gate from the start. Sanity-check before flipping the flag that no other code is preemptively fetching this entity's endpoint.
+10. **Flip the flag** in `lib/feature-flags.ts` last. That single change activates the nav item AND any cross-entity pickers.
+11. Test in the browser with DevTools Network tab open. Watch for absence of loops.
 
 ## 11. Gotchas & Lessons Learned
 
-These are real bugs hit during Step 4. Read them.
+Real bugs hit. Read them.
 
-**Supabase direct DB connection doesn't resolve from non-IPv6 networks** on the free tier (the `db.<ref>.supabase.co` hostname is IPv6-only without the IPv4 add-on). Use the Supavisor **session pooler** (`aws-X-region.pooler.supabase.com:5432`) for connections from the app. Username must include the project ref: `postgres.<project-ref>`. `prepare: false` is required and is already set in `db/client.ts`.
+**Supabase direct DB doesn't resolve from non-IPv6 networks** on the free tier (`db.<ref>.supabase.co` is IPv6-only without the IPv4 add-on). Use the Supavisor **session pooler** (`aws-X-region.pooler.supabase.com:5432`). Username must include the project ref: `postgres.<project-ref>`. `prepare: false` is required and already set in `db/client.ts`.
 
-**`DATABASE_URL` password must be URL-safe.** A `#` in the password gets parsed as a URL fragment by `postgres-js`, truncating the connection string. Either URL-encode special chars (`#` → `%23`, `,` → `%2C`) or pick an alphanumeric password when rotating. The `@` between password and host must NOT be encoded — that's a structural delimiter.
+**`DATABASE_URL` password must be URL-safe.** A `#` in the password gets parsed as a URL fragment by `postgres-js`, truncating the connection string. URL-encode special chars (`#` → `%23`, `,` → `%2C`) or pick an alphanumeric password. The `@` between password and host must NOT be encoded — that's a structural delimiter.
 
-**`db/client.ts` uses a `globalThis`-cached pool with `max: 5`.** Next.js HMR re-evaluates this module on every code change in dev. Without the cache, each reload opens a fresh pool and the session pooler's ~15-client cap is exhausted within minutes, surfacing as `EMAXCONNSESSION`. Don't strip the caching.
+**`db/client.ts` uses a `globalThis`-cached pool with `max: 5`.** Next.js HMR re-evaluates this module on every code change in dev. Without the cache, each reload opens a fresh pool and the session pooler's ~15-client cap is exhausted, surfacing as `EMAXCONNSESSION`. Don't strip the caching.
 
-**Next.js 16 renamed `middleware.ts` to `proxy.ts`.** The exported function is now `proxy`, not `middleware`. The matcher syntax is unchanged. This is enforced (the legacy name issues a deprecation warning).
+**Next.js 16 renamed `middleware.ts` to `proxy.ts`.** Exported function is `proxy`, not `middleware`. Legacy name issues a deprecation warning.
 
-**`useApiCall` consumers must depend on `.execute`, not the wrapping object.** The hook returns `{ isLoading, execute }`; `execute` has stable identity (it's `useCallback([])`), but the wrapping object literal is fresh each render. Including the whole object in a `useEffect` dep array creates an infinite fetch loop: effect runs → `execute` flips `isLoading` → re-render → new wrapping object → deps change → effect re-runs. Discovered on the Brands page (88+ requests in 20s). The hook has a prominent doc block warning about this.
+**Next.js prohibits sibling dynamic route segments with different names.** Can't have `/api/providers/[id]` AND `/api/providers/[providerId]/...` at the same path level. Convention adopted: use `[parentEntityId]` for the entire nested API tree (`[providerId]` etc.), and `[id]` for page routes (which live in a different subtree).
 
-**Zod `z.preprocess` breaks react-hook-form type inference.** `z.preprocess(transform, schema)` widens the input type to `unknown`, which incompatibly narrows in zodResolver. For optional form fields, use `z.union([z.string()..., z.literal("")]).optional()` instead, and normalize empty strings to `null` at the API boundary via a `nullIfEmpty()` helper.
+**`useApiCall` consumers must depend on `.execute`, not the wrapping object.** The hook returns `{ isLoading, execute }`; `execute` has stable identity (it's `useCallback([])`), but the wrapping object literal is fresh each render. Including the whole object in a `useEffect` dep array creates an infinite fetch loop: effect runs → `execute` flips `isLoading` → re-render → new wrapping object → deps change → effect re-runs. Hit during Step 4.8 (88+ requests in 20s).
+
+**Zod `z.preprocess` breaks react-hook-form type inference.** `z.preprocess(transform, schema)` widens the input type to `unknown`, which incompatibly narrows in zodResolver. For optional form fields, use `z.union([z.string()..., z.literal("")]).optional()` instead, and normalize empty strings to `null` at the API boundary via `nullIfEmpty()` from `lib/validators/_helpers.ts`. For schemas with `.default([])` or `.transform()` (e.g. Offers' `sales_pages`), export both `z.infer<>` (output, used by API) and `z.input<>` (form type, used by RHF) — they differ.
+
+**libphonenumber-js is the standard for all phone parsing.** Don't write custom phone validation regex/parsing. The wrapper lives in `lib/phone-validation.ts` (`validatePhone()`, `formatPhoneInternational()`). Server-side: parse raw input on create, store E.164 + country_code + dial_code + local_number. Client-side: format E.164 → international for display. Future bulk-upload flows (contacts, opt-outs) will reuse the same module.
+
+**Drizzle migration journal can get out of sync if a Write is blocked mid-migration.** Specific scenario hit in 5.3: I scaffolded a custom RLS migration via `drizzle-kit generate --custom`, the Write tool's safety check ("Read first") blocked my SQL write, but I didn't notice before running `db:migrate` — which then dutifully applied the empty placeholder file and recorded it. Recovery: delete the bad row from `drizzle.__drizzle_migrations`, write the correct SQL into the migration file (now its hash differs from the deleted record), and re-run `db:migrate`. Use `scripts/verify-migration-integrity.ts` to diagnose — it hashes each SQL file with SHA-256 and compares against the recorded hashes, plus verifies the snapshot `prevId` chain. Safe to run anytime.
 
 **Always test in the browser with DevTools Network tab open after any UI refactor.** Infinite loops can hide behind 200 OK responses — every request succeeds, but you never see the load complete. The build won't catch this; only watching the network will.
 
-**Server actions can't bypass the redirect-throws-in-try-catch rule.** `redirect()` from `next/navigation` throws a special error that Next.js catches. Wrapping it in a try/catch silently swallows the redirect. For login/signup, the page returns `{ ok: true, redirectTo }` from the server action and the client does `router.push()`.
+**Server actions can't bypass the redirect-throws-in-try-catch rule.** `redirect()` from `next/navigation` throws a special error that Next.js catches. Wrapping in try/catch silently swallows the redirect. For login/signup the server action returns `{ ok: true, redirectTo }` and the client does `router.push()`.
 
-**Tests can't easily auth to Next.js API routes through cookies** because `@supabase/ssr` uses chunked, structured cookies. The pattern in `scripts/test-brands-api.ts` works: create a `@supabase/ssr` server client with an in-memory `Map` as the cookie jar, sign in (the cookies get written to the jar), then serialize the jar into a `Cookie:` header for `fetch` against `localhost:3001`. Reuse this pattern for every entity API test.
+**Tests can't easily auth to Next.js API routes through cookies** because `@supabase/ssr` uses chunked, structured cookies. The pattern in every `scripts/test-*-api.ts` works: create a `@supabase/ssr` server client with an in-memory `Map` as the cookie jar, sign in (cookies get written to the jar), then serialize the jar into a `Cookie:` header for `fetch` against `localhost:3001`. Clone this for every new entity test.

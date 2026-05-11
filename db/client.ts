@@ -3,5 +3,24 @@ import postgres from "postgres";
 
 const connectionString = process.env.DATABASE_URL!;
 
-export const sql = postgres(connectionString, { prepare: false });
+// In dev, Next.js HMR re-evaluates this module on every code change, which would
+// open a fresh postgres-js pool each time and quickly exhaust Supavisor's
+// session-mode client cap (~15). Cache the connection on globalThis so we reuse
+// the same pool across HMR reloads. In production this is harmless — globalThis
+// is per-instance — but it keeps `max` honest.
+const globalForDb = globalThis as unknown as {
+  __pg?: ReturnType<typeof postgres>;
+};
+
+export const sql =
+  globalForDb.__pg ??
+  postgres(connectionString, {
+    prepare: false,
+    max: 5,
+  });
+
+if (process.env.NODE_ENV !== "production") {
+  globalForDb.__pg = sql;
+}
+
 export const db = drizzle(sql);

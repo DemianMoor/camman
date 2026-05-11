@@ -8,7 +8,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { can } from "@/lib/permissions";
-import { brandCreateSchema } from "@/lib/validators/brands";
+import { brandCreateSchema, nullIfEmpty } from "@/lib/validators/brands";
 
 export async function POST(req: NextRequest) {
   const auth = await requireApiMembership();
@@ -42,9 +42,9 @@ export async function POST(req: NextRequest) {
         org_id: orgId,
         name: parsed.data.name,
         brand_id: parsed.data.brand_id,
-        short_link_base: parsed.data.short_link_base,
-        avatar_url: parsed.data.avatar_url,
-        color: parsed.data.color,
+        short_link_base: nullIfEmpty(parsed.data.short_link_base),
+        avatar_url: nullIfEmpty(parsed.data.avatar_url),
+        color: nullIfEmpty(parsed.data.color),
         status: "active",
       })
       .returning();

@@ -1,4 +1,5 @@
 import { requireOrgMembership } from "@/lib/auth/helpers";
+import { AuthProvider } from "@/components/protected/auth-context";
 import { MobileSidebar } from "@/components/protected/mobile-sidebar";
 import { Sidebar } from "@/components/protected/sidebar";
 
@@ -10,20 +11,22 @@ export default async function ProtectedLayout({
   const { user } = await requireOrgMembership();
 
   return (
-    <div className="flex min-h-screen">
-      <aside className="hidden w-[248px] shrink-0 border-r bg-muted/40 md:flex">
-        <Sidebar userEmail={user.email} />
-      </aside>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center gap-3 border-b px-4 md:px-6">
-          <MobileSidebar>
-            <Sidebar userEmail={user.email} />
-          </MobileSidebar>
-          {/* breadcrumb / page-title placeholder — wired in a later step */}
-          <div className="flex-1" />
-        </header>
-        <main className="flex-1 px-4 py-6 md:px-8 md:py-8">{children}</main>
+    <AuthProvider>
+      <div className="flex min-h-screen">
+        <aside className="hidden w-[248px] shrink-0 border-r bg-muted/40 md:flex">
+          <Sidebar userEmail={user.email} />
+        </aside>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <header className="flex h-14 items-center gap-3 border-b px-4 md:px-6">
+            <MobileSidebar>
+              <Sidebar userEmail={user.email} />
+            </MobileSidebar>
+            {/* breadcrumb / page-title placeholder — wired in a later step */}
+            <div className="flex-1" />
+          </header>
+          <main className="flex-1 px-4 py-6 md:px-8 md:py-8">{children}</main>
+        </div>
       </div>
-    </div>
+    </AuthProvider>
   );
 }

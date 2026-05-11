@@ -9,7 +9,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { can } from "@/lib/permissions";
-import { brandUpdateSchema } from "@/lib/validators/brands";
+import { brandUpdateSchema, nullIfEmpty } from "@/lib/validators/brands";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -75,9 +75,16 @@ export async function PATCH(
 
   // Drizzle's .set rejects entirely-empty objects, but the schema already
   // refuses those. Strip undefined keys so we don't overwrite with NULL.
+  // For the three optional string fields, empty string means "clear it" → NULL.
   const updates: Record<string, unknown> = {};
+  const NULLABLE_OPTIONAL = new Set([
+    "short_link_base",
+    "avatar_url",
+    "color",
+  ]);
   for (const [k, v] of Object.entries(parsed.data)) {
-    if (v !== undefined) updates[k] = v;
+    if (v === undefined) continue;
+    updates[k] = NULLABLE_OPTIONAL.has(k) ? nullIfEmpty(v as string) : v;
   }
 
   try {

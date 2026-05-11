@@ -59,7 +59,7 @@ export const navGroups: NavGroup[] = [
   {
     label: "Registry",
     items: [
-      { label: "Brands", href: "/brands", icon: Tag, disabled: true },
+      { label: "Brands", href: "/brands", icon: Tag },
       { label: "Offers", href: "/offers", icon: ShoppingBag, disabled: true },
       { label: "Affiliate Networks", href: "/affiliate-networks", icon: Network, disabled: true },
       { label: "SMS Providers", href: "/providers", icon: Phone, disabled: true },

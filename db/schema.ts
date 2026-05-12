@@ -578,3 +578,118 @@ export const clickers = pgTable(
 
 export type Clicker = typeof clickers.$inferSelect;
 export type NewClicker = typeof clickers.$inferInsert;
+
+// Segments: named lists of contacts. Membership lives in segment_contacts;
+// group membership lives in segment_segment_groups (many-to-many).
+// `original_name` preserves the import-time name if the user renames the
+// segment later (useful when reconciling external systems).
+export const segments = pgTable(
+  "segments",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    segment_id: text("segment_id").notNull().unique(),
+    name: text("name").notNull(),
+    original_name: text("original_name"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("segments_org_id_idx").on(table.org_id),
+    check(
+      "segments_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type Segment = typeof segments.$inferSelect;
+export type NewSegment = typeof segments.$inferInsert;
+
+export const segment_segment_groups = pgTable(
+  "segment_segment_groups",
+  {
+    segment_id: integer("segment_id")
+      .notNull()
+      .references(() => segments.id, { onDelete: "cascade" }),
+    segment_group_id: integer("segment_group_id")
+      .notNull()
+      .references(() => segment_groups.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("segment_segment_groups_pkey").on(
+      table.segment_id,
+      table.segment_group_id,
+    ),
+    index("segment_segment_groups_group_id_idx").on(table.segment_group_id),
+    index("segment_segment_groups_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type SegmentSegmentGroup = typeof segment_segment_groups.$inferSelect;
+export type NewSegmentSegmentGroup = typeof segment_segment_groups.$inferInsert;
+
+export const segment_contacts = pgTable(
+  "segment_contacts",
+  {
+    segment_id: integer("segment_id")
+      .notNull()
+      .references(() => segments.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("segment_contacts_pkey").on(table.segment_id, table.contact_id),
+    index("segment_contacts_contact_id_idx").on(table.contact_id),
+    index("segment_contacts_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type SegmentContact = typeof segment_contacts.$inferSelect;
+export type NewSegmentContact = typeof segment_contacts.$inferInsert;
+
+// Maintained aggregate counts per segment. total_count is kept in sync by
+// the segment_contacts AFTER INSERT/DELETE trigger. The opt_out_count /
+// opt_in_count / clicker_count fields are NOT trigger-maintained — they're
+// refreshed on demand via /api/segments/[id]/refresh-stats. See the trigger
+// migration for rationale.
+export const segment_stats = pgTable(
+  "segment_stats",
+  {
+    segment_id: integer("segment_id")
+      .primaryKey()
+      .references(() => segments.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    total_count: integer("total_count").notNull().default(0),
+    opt_out_count: integer("opt_out_count").notNull().default(0),
+    opt_in_count: integer("opt_in_count").notNull().default(0),
+    clicker_count: integer("clicker_count").notNull().default(0),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("segment_stats_org_id_idx").on(table.org_id)],
+);
+
+export type SegmentStats = typeof segment_stats.$inferSelect;
+export type NewSegmentStats = typeof segment_stats.$inferInsert;

@@ -52,7 +52,24 @@ export async function GET(req: NextRequest) {
 
   const [rows, countRows] = await Promise.all([
     db
-      .select()
+      .select({
+        id: segment_groups.id,
+        segment_group_id: segment_groups.segment_group_id,
+        org_id: segment_groups.org_id,
+        name: segment_groups.name,
+        description: segment_groups.description,
+        color: segment_groups.color,
+        status: segment_groups.status,
+        archived_at: segment_groups.archived_at,
+        created_at: segment_groups.created_at,
+        segment_count: drizzleSql<number>`(
+          select count(*)::int
+          from "segment_segment_groups" ssg
+          inner join "segments" s on s."id" = ssg."segment_id"
+          where ssg."segment_group_id" = "segment_groups"."id"
+            and s."status" <> 'archived'
+        )`,
+      })
       .from(segment_groups)
       .where(where)
       .orderBy(orderFn(sortColumn))
@@ -64,10 +81,7 @@ export async function GET(req: NextRequest) {
       .where(where),
   ]);
 
-  // TODO(step-6): wire up real count when segments table exists. For now
-  // hardcoded to 0 so the response shape is stable and the UI doesn't need
-  // to change when segments land.
-  const data = rows.map((r) => ({ ...r, segment_count: 0 }));
+  const data = rows;
 
   return NextResponse.json({
     data,

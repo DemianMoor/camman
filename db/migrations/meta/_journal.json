@@ -99,6 +99,34 @@
       "when": 1778581087846,
       "tag": "0013_audience_engagement_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1778582871865,
+      "tag": "0014_known_lester",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1778582883106,
+      "tag": "0015_segments_rls_and_triggers",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1778584043889,
+      "tag": "0016_fair_phalanx",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1778584061874,
+      "tag": "0017_segment_segment_groups_rls",
+      "breakpoints": true
     }
   ]
 }

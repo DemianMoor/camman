@@ -11,7 +11,13 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { clickers, contacts, opt_ins, opt_outs } from "@/db/schema";
+import {
+  clickers,
+  contacts,
+  opt_ins,
+  opt_outs,
+  segment_contacts,
+} from "@/db/schema";
 import {
   apiError,
   parseListParams,
@@ -46,10 +52,30 @@ export async function GET(req: NextRequest) {
   }
 
   const params = parseListParams(req);
-  const rawView = req.nextUrl.searchParams.get("view") ?? "active";
+  const sp = req.nextUrl.searchParams;
+  const rawView = sp.get("view") ?? "active";
   const view = (VALID_VIEWS as Set<string>).has(rawView) ? rawView : "active";
+  const segmentIdRaw = sp.get("segment_id");
+  const segmentId =
+    segmentIdRaw && /^\d+$/.test(segmentIdRaw) ? Number(segmentIdRaw) : null;
 
   const conditions = [eq(contacts.org_id, orgId)];
+  if (segmentId !== null) {
+    conditions.push(
+      exists(
+        db
+          .select({ x: drizzleSql`1` })
+          .from(segment_contacts)
+          .where(
+            and(
+              eq(segment_contacts.contact_id, contacts.id),
+              eq(segment_contacts.segment_id, segmentId),
+              eq(segment_contacts.org_id, orgId),
+            ),
+          ),
+      ),
+    );
+  }
   if (params.search) {
     conditions.push(ilike(contacts.phone_number, `%${params.search}%`));
   }

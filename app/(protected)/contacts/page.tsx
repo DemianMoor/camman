@@ -48,6 +48,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
@@ -292,6 +300,41 @@ export default function ContactsPage() {
   }, [refreshTick, statsApi.execute]);
 
   const [uploadOpen, setUploadOpen] = useState(false);
+  type AssignMode = "none" | "segment" | "group";
+  const [assignMode, setAssignMode] = useState<AssignMode>("none");
+  const [assignSegmentId, setAssignSegmentId] = useState<number | null>(null);
+  const [assignGroupId, setAssignGroupId] = useState<number | null>(null);
+  const [segmentsForAssign, setSegmentsForAssign] = useState<
+    { id: number; name: string }[]
+  >([]);
+  const [groupsForAssign, setGroupsForAssign] = useState<
+    { id: number; name: string; color: string | null }[]
+  >([]);
+  const segmentsAssignApi = useApiCall<{
+    data: { id: number; name: string }[];
+  }>();
+  const groupsAssignApi = useApiCall<{
+    data: { id: number; name: string; color: string | null }[];
+  }>();
+
+  // Lazy-load the pickers when the user opens the upload dialog so we don't
+  // fetch them on every contacts page render.
+  useEffect(() => {
+    if (!uploadOpen) return;
+    (async () => {
+      const r = await segmentsAssignApi.execute(
+        "/api/segments/list?pageSize=100&sortBy=name&sortDir=asc",
+      );
+      if (r.ok) setSegmentsForAssign(r.data.data);
+    })();
+    (async () => {
+      const r = await groupsAssignApi.execute(
+        "/api/segment-groups/list?pageSize=100&sortBy=name&sortDir=asc",
+      );
+      if (r.ok) setGroupsForAssign(r.data.data);
+    })();
+  }, [uploadOpen, segmentsAssignApi.execute, groupsAssignApi.execute]);
+
   const [confirming, setConfirming] = useState<
     | { kind: "archive"; contact: Contact }
     | { kind: "restore"; contact: Contact }
@@ -334,7 +377,15 @@ export default function ContactsPage() {
     refetch();
   }
 
-  function handleUploadSuccess(summary: UploadResultSummary) {
+  function handleUploadSuccess(
+    summary: UploadResultSummary & { segments_assigned?: number },
+  ) {
+    const assignedSuffix =
+      summary.segments_assigned && summary.segments_assigned > 0
+        ? ` · assigned to ${summary.segments_assigned} segment${
+            summary.segments_assigned === 1 ? "" : "s"
+          }`
+        : "";
     toast.success(
       `Uploaded ${summary.inserted.toLocaleString()} new contact${
         summary.inserted === 1 ? "" : "s"
@@ -342,11 +393,28 @@ export default function ContactsPage() {
         summary.duplicates_in_db > 0
           ? ` (${summary.duplicates_in_db.toLocaleString()} already in your list)`
           : ""
-      }`,
+      }${assignedSuffix}`,
     );
     refetch();
     // Form stays open showing the result screen; user closes it via "Done".
   }
+
+  // Snapshot the additional fields the upload form will POST. Only includes the
+  // active assignment branch (segment XOR group XOR none).
+  function buildUploadFields(): Record<string, unknown> {
+    if (assignMode === "segment" && assignSegmentId !== null) {
+      return { assign_to_segment_id: assignSegmentId };
+    }
+    if (assignMode === "group" && assignGroupId !== null) {
+      return { assign_to_segment_group_id: assignGroupId };
+    }
+    return {};
+  }
+
+  const uploadReady =
+    assignMode === "none" ||
+    (assignMode === "segment" && assignSegmentId !== null) ||
+    (assignMode === "group" && assignGroupId !== null);
 
   const columns = useMemo<ColumnDef<Contact>[]>(
     () => [
@@ -601,7 +669,17 @@ export default function ContactsPage() {
         />
       )}
 
-      <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
+      <Dialog
+        open={uploadOpen}
+        onOpenChange={(open) => {
+          setUploadOpen(open);
+          if (!open) {
+            setAssignMode("none");
+            setAssignSegmentId(null);
+            setAssignGroupId(null);
+          }
+        }}
+      >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>Upload contacts</DialogTitle>
@@ -609,12 +687,111 @@ export default function ContactsPage() {
               Paste phone numbers or upload a CSV file.
             </DialogDescription>
           </DialogHeader>
-          <PhoneUploadForm
-            endpoint="/api/contacts/upload"
-            onSuccess={handleUploadSuccess}
-            onCancel={() => setUploadOpen(false)}
-            submitLabel="Upload contacts"
-          />
+
+          <div className="grid gap-3 border-b pb-4">
+            <Label>Assign to</Label>
+            <div className="grid gap-2 text-sm">
+              <label className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="assign-mode"
+                  checked={assignMode === "none"}
+                  onChange={() => {
+                    setAssignMode("none");
+                    setAssignSegmentId(null);
+                    setAssignGroupId(null);
+                  }}
+                  className="size-4"
+                />
+                <span>Don&apos;t assign</span>
+              </label>
+              <label className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="assign-mode"
+                  checked={assignMode === "segment"}
+                  onChange={() => {
+                    setAssignMode("segment");
+                    setAssignGroupId(null);
+                  }}
+                  className="size-4"
+                />
+                <span>Assign to a segment</span>
+              </label>
+              {assignMode === "segment" ? (
+                <div className="pl-6">
+                  <Select
+                    value={
+                      assignSegmentId !== null ? String(assignSegmentId) : ""
+                    }
+                    onValueChange={(v) => setAssignSegmentId(Number(v))}
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue placeholder="Select a segment" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {segmentsForAssign.map((s) => (
+                        <SelectItem key={s.id} value={String(s.id)}>
+                          {s.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+              <label className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="assign-mode"
+                  checked={assignMode === "group"}
+                  onChange={() => {
+                    setAssignMode("group");
+                    setAssignSegmentId(null);
+                  }}
+                  className="size-4"
+                />
+                <span>Assign to a segment group</span>
+              </label>
+              {assignMode === "group" ? (
+                <div className="pl-6">
+                  <Select
+                    value={assignGroupId !== null ? String(assignGroupId) : ""}
+                    onValueChange={(v) => setAssignGroupId(Number(v))}
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue placeholder="Select a segment group" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {groupsForAssign.map((g) => (
+                        <SelectItem key={g.id} value={String(g.id)}>
+                          {g.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Contacts will be added to every active segment in this
+                    group.
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {!uploadReady ? (
+            <p className="text-sm text-amber-700 dark:text-amber-400">
+              Pick a {assignMode === "segment" ? "segment" : "group"} to enable
+              upload.
+            </p>
+          ) : (
+            <PhoneUploadForm
+              endpoint="/api/contacts/upload"
+              additionalFields={buildUploadFields()}
+              onSuccess={handleUploadSuccess}
+              onCancel={() => setUploadOpen(false)}
+              submitLabel="Upload contacts"
+            />
+          )}
         </DialogContent>
       </Dialog>
 

@@ -160,3 +160,12 @@ When the user wants these, they will be added in a separate phase.
 - Automatic propagation of imported opt-outs and clickers to suppression/engagement tables
 - Dashboard with campaign activity, spend, and engagement analytics
 - User management (invite, remove members, role assignment)
+
+## 14. Deployment
+
+- **Hosting:** production runs on Vercel, linked to the GitHub repo. Pushes to `main` auto-deploy.
+- **Env vars:** set in the Vercel dashboard (Settings → Environment Variables), NOT via the CLI and NOT committed. `.env.example` at the project root lists every variable the app reads.
+- **Database:** the deployed app talks to the SAME Supabase project as local dev. There isn't a separate prod Postgres yet — when one is added, `DATABASE_URL` is the only thing that changes per environment.
+- **Migrations are NOT auto-applied on deploy.** After merging a schema change, run `npm run db:migrate` locally against the production `DATABASE_URL` BEFORE pushing the code that depends on the new schema. (Same connection string the deployed app uses — Vercel build doesn't touch the database.) After applying, run `npx tsx scripts/verify-migration-integrity.ts` to confirm the chain is clean.
+- **Supabase Auth URLs:** Authentication → URL Configuration in the Supabase dashboard must include the production origin under both Site URL and Redirect URLs (`/auth/callback`, `/auth/complete`, `/auth/reset-password`). Keep the localhost entries for development.
+- **NEXT_PUBLIC_SITE_URL** must match the deployed origin in production so absolute auth-callback URLs point at the right host. After the first deploy, update this in Vercel and trigger a redeploy.

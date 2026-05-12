@@ -18,9 +18,9 @@ export const ENTITY_AVAILABILITY = {
   segment_groups: true,  // 5.6
   contacts: true,        // 6.1
   segments: false,       // 6
-  opt_outs: false,
-  opt_ins: false,
-  clickers: false,
+  opt_outs: true,        // 6.2
+  opt_ins: true,         // 6.2
+  clickers: true,        // 6.2
   creatives: false,      // 7
   campaigns: false,      // 7
 } as const;

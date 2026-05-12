@@ -101,12 +101,6 @@ const DEFAULT_FILTERS: Filters = {
   sortDir: "desc",
 };
 
-const PLACEHOLDER_VIEWS = new Set<ContactView>([
-  "opt_outs",
-  "opt_ins",
-  "clickers",
-]);
-
 const VIEW_LABELS: Record<ContactView, string> = {
   active: "active contacts",
   archived: "archived contacts",
@@ -220,7 +214,6 @@ export default function ContactsPage() {
   const filtersAreDefault =
     filters.search === DEFAULT_FILTERS.search &&
     filters.view === DEFAULT_FILTERS.view;
-  const isPlaceholderView = PLACEHOLDER_VIEWS.has(filters.view);
 
   const [searchInput, setSearchInput] = useState(filters.search);
   useEffect(() => {
@@ -513,7 +506,6 @@ export default function ContactsPage() {
           onChange={(e) => setSearchInput(e.target.value)}
           placeholder={`Search ${VIEW_LABELS[filters.view]} by phone…`}
           className="h-9 w-full max-w-sm"
-          disabled={isPlaceholderView}
         />
         {!filtersAreDefault ? (
           <Button
@@ -541,25 +533,6 @@ export default function ContactsPage() {
             onClick={refetch}
           >
             Retry
-          </Button>
-        </div>
-      ) : isPlaceholderView ? (
-        <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed py-16 text-center">
-          <Phone className="size-12 text-muted-foreground/40" aria-hidden />
-          <div className="space-y-1">
-            <p className="text-sm font-medium">
-              {VIEW_LABELS[filters.view]} view lands in Step 6.2
-            </p>
-            <p className="text-sm text-muted-foreground">
-              Click another tile above to switch the view.
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => updateFilters({ view: "active", page: 0 })}
-          >
-            Back to all contacts
           </Button>
         </div>
       ) : !listApi.isLoading &&

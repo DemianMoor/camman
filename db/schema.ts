@@ -437,3 +437,144 @@ export const contacts = pgTable(
 
 export type Contact = typeof contacts.$inferSelect;
 export type NewContact = typeof contacts.$inferInsert;
+
+// Opt-Outs: append-only records of suppressions. Multiple opt_out rows can
+// exist for the same contact over time (different sources, different brand
+// scopes). Junction tables link each opt_out to one or more brands/providers.
+export const opt_outs = pgTable(
+  "opt_outs",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    phone_number: text("phone_number").notNull(),
+    source: text("source"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("opt_outs_org_id_idx").on(table.org_id),
+    index("opt_outs_contact_id_idx").on(table.contact_id),
+    index("opt_outs_phone_number_idx").on(table.phone_number),
+  ],
+);
+
+export type OptOut = typeof opt_outs.$inferSelect;
+export type NewOptOut = typeof opt_outs.$inferInsert;
+
+export const opt_out_brands = pgTable(
+  "opt_out_brands",
+  {
+    opt_out_id: integer("opt_out_id")
+      .notNull()
+      .references(() => opt_outs.id, { onDelete: "cascade" }),
+    brand_id: integer("brand_id")
+      .notNull()
+      .references(() => brands.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    unique("opt_out_brands_pkey").on(table.opt_out_id, table.brand_id),
+    index("opt_out_brands_brand_id_idx").on(table.brand_id),
+  ],
+);
+
+export const opt_out_providers = pgTable(
+  "opt_out_providers",
+  {
+    opt_out_id: integer("opt_out_id")
+      .notNull()
+      .references(() => opt_outs.id, { onDelete: "cascade" }),
+    provider_id: integer("provider_id")
+      .notNull()
+      .references(() => sms_providers.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    unique("opt_out_providers_pkey").on(table.opt_out_id, table.provider_id),
+    index("opt_out_providers_provider_id_idx").on(table.provider_id),
+  ],
+);
+
+// Opt-Ins: single brand/provider per row (no junctions; simpler than opt_outs).
+export const opt_ins = pgTable(
+  "opt_ins",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    phone_number: text("phone_number").notNull(),
+    brand_id: integer("brand_id").references(() => brands.id, {
+      onDelete: "set null",
+    }),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    source: text("source"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("opt_ins_org_id_idx").on(table.org_id),
+    index("opt_ins_contact_id_idx").on(table.contact_id),
+    index("opt_ins_phone_number_idx").on(table.phone_number),
+    index("opt_ins_brand_id_idx").on(table.brand_id),
+    index("opt_ins_provider_id_idx").on(table.provider_id),
+  ],
+);
+
+export type OptIn = typeof opt_ins.$inferSelect;
+export type NewOptIn = typeof opt_ins.$inferInsert;
+
+// Clickers: engagement records. brand_id is required (we always know which
+// brand was clicked). Optional links to provider/provider_phone/offer for
+// richer context.
+export const clickers = pgTable(
+  "clickers",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    phone_number: text("phone_number").notNull(),
+    brand_id: integer("brand_id")
+      .notNull()
+      .references(() => brands.id, { onDelete: "cascade" }),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    provider_phone_id: integer("provider_phone_id").references(
+      () => provider_phones.id,
+      { onDelete: "set null" },
+    ),
+    offer_id: integer("offer_id").references(() => offers.id, {
+      onDelete: "set null",
+    }),
+    source: text("source"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("clickers_org_id_idx").on(table.org_id),
+    index("clickers_contact_id_idx").on(table.contact_id),
+    index("clickers_phone_number_idx").on(table.phone_number),
+    index("clickers_brand_id_idx").on(table.brand_id),
+    index("clickers_provider_id_idx").on(table.provider_id),
+    index("clickers_offer_id_idx").on(table.offer_id),
+  ],
+);
+
+export type Clicker = typeof clickers.$inferSelect;
+export type NewClicker = typeof clickers.$inferInsert;

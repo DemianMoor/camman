@@ -1,9 +1,17 @@
-import { and, asc, desc, eq, ilike, sql as drizzleSql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  ilike,
+  sql as drizzleSql,
+} from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { contacts } from "@/db/schema";
+import { clickers, contacts, opt_ins, opt_outs } from "@/db/schema";
 import {
   apiError,
   parseListParams,
@@ -18,8 +26,8 @@ const SORT_COLUMNS = {
 } as const;
 
 // Views are mutually exclusive filters driven by the stat tiles in the UI.
-// active / archived map to is_archived; the three placeholder views resolve
-// to empty until 6.2 wires up the join tables (opt_outs, opt_ins, clickers).
+// active / archived map to is_archived; opt_outs / opt_ins / clickers filter
+// to contacts that appear in the respective tables.
 const VALID_VIEWS = new Set([
   "active",
   "archived",
@@ -27,7 +35,6 @@ const VALID_VIEWS = new Set([
   "opt_ins",
   "clickers",
 ] as const);
-const PLACEHOLDER_VIEWS = new Set(["opt_outs", "opt_ins", "clickers"]);
 
 export async function GET(req: NextRequest) {
   const auth = await requireApiMembership();
@@ -42,19 +49,6 @@ export async function GET(req: NextRequest) {
   const rawView = req.nextUrl.searchParams.get("view") ?? "active";
   const view = (VALID_VIEWS as Set<string>).has(rawView) ? rawView : "active";
 
-  // Placeholder views have no data source yet — short-circuit with empty
-  // result rather than running a query whose result is guaranteed empty.
-  if (PLACEHOLDER_VIEWS.has(view)) {
-    return NextResponse.json({
-      data: [],
-      totalCount: 0,
-      page: params.page,
-      pageSize: params.pageSize,
-      view,
-      placeholder: true,
-    });
-  }
-
   const conditions = [eq(contacts.org_id, orgId)];
   if (params.search) {
     conditions.push(ilike(contacts.phone_number, `%${params.search}%`));
@@ -63,6 +57,52 @@ export async function GET(req: NextRequest) {
     conditions.push(eq(contacts.is_archived, false));
   } else if (view === "archived") {
     conditions.push(eq(contacts.is_archived, true));
+  } else if (view === "opt_outs") {
+    // Active contacts that have at least one opt_out record.
+    conditions.push(eq(contacts.is_archived, false));
+    conditions.push(
+      exists(
+        db
+          .select({ x: drizzleSql`1` })
+          .from(opt_outs)
+          .where(
+            and(
+              eq(opt_outs.contact_id, contacts.id),
+              eq(opt_outs.org_id, orgId),
+            ),
+          ),
+      ),
+    );
+  } else if (view === "opt_ins") {
+    conditions.push(eq(contacts.is_archived, false));
+    conditions.push(
+      exists(
+        db
+          .select({ x: drizzleSql`1` })
+          .from(opt_ins)
+          .where(
+            and(
+              eq(opt_ins.contact_id, contacts.id),
+              eq(opt_ins.org_id, orgId),
+            ),
+          ),
+      ),
+    );
+  } else if (view === "clickers") {
+    conditions.push(eq(contacts.is_archived, false));
+    conditions.push(
+      exists(
+        db
+          .select({ x: drizzleSql`1` })
+          .from(clickers)
+          .where(
+            and(
+              eq(clickers.contact_id, contacts.id),
+              eq(clickers.org_id, orgId),
+            ),
+          ),
+      ),
+    );
   }
   const where = and(...conditions);
 

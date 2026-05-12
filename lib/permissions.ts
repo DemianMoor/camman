@@ -61,6 +61,18 @@ export type Permission =
   | "contacts.update"
   | "contacts.archive"
   | "contacts.delete"
+  | "opt_outs.view"
+  | "opt_outs.upload"
+  | "opt_outs.update"
+  | "opt_outs.delete"
+  | "opt_ins.view"
+  | "opt_ins.upload"
+  | "opt_ins.update"
+  | "opt_ins.delete"
+  | "clickers.view"
+  | "clickers.upload"
+  | "clickers.update"
+  | "clickers.delete"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -91,6 +103,9 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "utm_tags.view",
   "segment_groups.view",
   "contacts.view",
+  "opt_outs.view",
+  "opt_ins.view",
+  "clickers.view",
   "registry.view",
 ]);
 
@@ -99,6 +114,12 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "contacts.upload",
   "contacts.update",
   "contacts.archive",
+  "opt_outs.upload",
+  "opt_outs.update",
+  "opt_ins.upload",
+  "opt_ins.update",
+  "clickers.upload",
+  "clickers.update",
 ]);
 
 const managerPerms: ReadonlySet<Permission> = new Set([
@@ -140,6 +161,9 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "segment_groups.archive",
   "segment_groups.restore",
   "contacts.delete",
+  "opt_outs.delete",
+  "opt_ins.delete",
+  "clickers.delete",
   "registry.create",
   "registry.update",
   "registry.archive",

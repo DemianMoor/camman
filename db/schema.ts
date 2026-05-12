@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   boolean,
   check,
+  date,
   index,
   integer,
   jsonb,
@@ -740,3 +741,203 @@ export const creatives = pgTable(
 export type Creative = typeof creatives.$inferSelect;
 export type NewCreative = typeof creatives.$inferInsert;
 
+// Campaigns: long-running containers for SMS-send sequences. The audience
+// is frozen at creation — see campaign_audience_pool below. Brand + offer
+// are required and locked for the campaign's lifetime; deleting either is
+// blocked by ON DELETE RESTRICT.
+export const campaigns = pgTable(
+  "campaigns",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    slug: text("slug").notNull(),
+    human_id: text("human_id"),
+    name: text("name").notNull(),
+    notes: text("notes"),
+    brand_id: integer("brand_id")
+      .notNull()
+      .references(() => brands.id, { onDelete: "restrict" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "restrict" }),
+    routing_type_id: integer("routing_type_id").references(
+      () => routing_types.id,
+      { onDelete: "set null" },
+    ),
+    traffic_type_id: integer("traffic_type_id").references(
+      () => traffic_types.id,
+      { onDelete: "set null" },
+    ),
+    assigned_to_user_id: uuid("assigned_to_user_id").references(
+      () => authUsers.id,
+      { onDelete: "set null" },
+    ),
+    created_by_user_id: uuid("created_by_user_id").references(
+      () => authUsers.id,
+      { onDelete: "set null" },
+    ),
+    audience_segment_ids: integer("audience_segment_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::integer[]`),
+    audience_filters: jsonb("audience_filters")
+      .$type<{
+        include_no_status?: boolean;
+        include_opt_in?: boolean;
+        include_clickers?: boolean;
+        include_not_clicked?: boolean;
+      }>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    audience_snapshot_count: integer("audience_snapshot_count")
+      .notNull()
+      .default(0),
+    start_date: date("start_date"),
+    end_date: date("end_date"),
+    status: text("status").notNull().default("draft"),
+    previous_status: text("previous_status"),
+    status_changed_at: timestamp("status_changed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("campaigns_org_id_slug_unique").on(table.org_id, table.slug),
+    index("campaigns_org_id_idx").on(table.org_id),
+    index("campaigns_brand_id_idx").on(table.brand_id),
+    index("campaigns_offer_id_idx").on(table.offer_id),
+    index("campaigns_assigned_to_user_id_idx").on(table.assigned_to_user_id),
+    index("campaigns_status_idx").on(table.status),
+    check(
+      "campaigns_status_check",
+      sql`${table.status} IN ('draft', 'active', 'paused', 'completed', 'archived')`,
+    ),
+  ],
+);
+
+export type Campaign = typeof campaigns.$inferSelect;
+export type NewCampaign = typeof campaigns.$inferInsert;
+
+// Campaign stages: actual SMS-send events under a campaign. stage_number is
+// auto-assigned by a BEFORE INSERT trigger (see migration) — clients can
+// omit it. The UNIQUE constraint on (campaign_id, stage_number) is a
+// backstop against the rare concurrent-insert race; one of the racers will
+// fail and the client should retry.
+export const campaign_stages = pgTable(
+  "campaign_stages",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_number: integer("stage_number").notNull(),
+    label: text("label"),
+    creative_id: integer("creative_id").references(() => creatives.id, {
+      onDelete: "set null",
+    }),
+    sms_provider_id: integer("sms_provider_id").references(
+      () => sms_providers.id,
+      { onDelete: "set null" },
+    ),
+    provider_phone_id: integer("provider_phone_id").references(
+      () => provider_phones.id,
+      { onDelete: "set null" },
+    ),
+    sales_page_label: text("sales_page_label"),
+    stop_text: text("stop_text").notNull().default("Stop to END"),
+    include_clickers: boolean("include_clickers").notNull().default(false),
+    exclude_clickers: boolean("exclude_clickers").notNull().default(false),
+    include_no_status: boolean("include_no_status").notNull().default(true),
+    scheduled_date: date("scheduled_date"),
+    sent_at: timestamp("sent_at", { withTimezone: true }),
+    status_changed_at: timestamp("status_changed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    previous_status: text("previous_status"),
+    status: text("status").notNull().default("draft"),
+    sms_count: integer("sms_count").notNull().default(0),
+    total_cost: numeric("total_cost", { precision: 12, scale: 4 })
+      .notNull()
+      .default("0"),
+    delivered_count: integer("delivered_count").notNull().default(0),
+    opt_out_count: integer("opt_out_count").notNull().default(0),
+    click_count: integer("click_count").notNull().default(0),
+    notes: text("notes"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("campaign_stages_campaign_id_stage_number_unique").on(
+      table.campaign_id,
+      table.stage_number,
+    ),
+    index("campaign_stages_org_id_idx").on(table.org_id),
+    index("campaign_stages_campaign_id_idx").on(table.campaign_id),
+    index("campaign_stages_creative_id_idx").on(table.creative_id),
+    index("campaign_stages_sms_provider_id_idx").on(table.sms_provider_id),
+    index("campaign_stages_status_idx").on(table.status),
+    check(
+      "campaign_stages_status_check",
+      sql`${table.status} IN ('draft', 'pending', 'sent', 'success', 'cancelled', 'failed', 'archived')`,
+    ),
+    check(
+      "campaign_stages_clickers_mutex",
+      sql`NOT (${table.include_clickers} AND ${table.exclude_clickers})`,
+    ),
+  ],
+);
+
+export type CampaignStage = typeof campaign_stages.$inferSelect;
+export type NewCampaignStage = typeof campaign_stages.$inferInsert;
+
+// Frozen audience pool. Populated at campaign creation by snapshotAudience()
+// and never mutated thereafter — the entire point is that adding a contact
+// to a referenced segment later doesn't retroactively expand the campaign's
+// reach. Stage exports query this pool, then apply stage-level filters
+// against the per-row snapshot booleans plus a live opt_outs exclusion.
+export const campaign_audience_pool = pgTable(
+  "campaign_audience_pool",
+  {
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    was_clicker_at_snapshot: boolean("was_clicker_at_snapshot")
+      .notNull()
+      .default(false),
+    was_opt_in_at_snapshot: boolean("was_opt_in_at_snapshot")
+      .notNull()
+      .default(false),
+    was_no_status_at_snapshot: boolean("was_no_status_at_snapshot")
+      .notNull()
+      .default(false),
+  },
+  (table) => [
+    unique("campaign_audience_pool_pkey").on(
+      table.campaign_id,
+      table.contact_id,
+    ),
+    index("campaign_audience_pool_contact_id_idx").on(table.contact_id),
+    index("campaign_audience_pool_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type CampaignAudiencePool =
+  typeof campaign_audience_pool.$inferSelect;
+export type NewCampaignAudiencePool =
+  typeof campaign_audience_pool.$inferInsert;

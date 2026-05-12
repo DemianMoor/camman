@@ -190,6 +190,7 @@ async function main() {
         segment_group_id: `TGRP2-${unique}`,
       }),
     });
+    check("group 2 creation returns 201", group2R.status === 201);
     const group2 = (await group2R.json()) as { id: number };
     createdGroupIds.push(group2.id);
 

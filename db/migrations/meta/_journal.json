@@ -141,6 +141,20 @@
       "when": 1778591228038,
       "tag": "0019_creatives_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1778594389531,
+      "tag": "0020_confused_puppet_master",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1778594399062,
+      "tag": "0021_campaigns_rls_and_trigger",
+      "breakpoints": true
     }
   ]
 }

@@ -313,6 +313,7 @@ async function main() {
         segment_group_ids: [grp.id],
       }),
     });
+    check("segment A creation returns 201", segAR.status === 201);
     const segA = (await segAR.json()) as { id: number };
     createdSegmentIds.push(segA.id);
 
@@ -324,6 +325,7 @@ async function main() {
         segment_group_ids: [grp.id],
       }),
     });
+    check("segment B creation returns 201", segBR.status === 201);
     const segB = (await segBR.json()) as { id: number };
     createdSegmentIds.push(segB.id);
 
@@ -335,6 +337,7 @@ async function main() {
         segment_id: `ASSIGN-O-${unique}`,
       }),
     });
+    check("segment Outer creation returns 201", segOuterR.status === 201);
     const segOuter = (await segOuterR.json()) as { id: number };
     createdSegmentIds.push(segOuter.id);
 

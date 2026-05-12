@@ -88,6 +88,21 @@ export type Permission =
   | "creatives.approve"
   | "creatives.archive"
   | "creatives.restore"
+  | "campaigns.view"
+  | "campaigns.create"
+  | "campaigns.update"
+  | "campaigns.activate"
+  | "campaigns.pause"
+  | "campaigns.complete"
+  | "campaigns.archive"
+  | "campaigns.restore"
+  | "campaigns.reassign"
+  | "stages.view"
+  | "stages.create"
+  | "stages.update"
+  | "stages.send"
+  | "stages.archive"
+  | "stages.restore"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -124,6 +139,8 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "segments.view",
   "segment_contacts.view",
   "creatives.view",
+  "campaigns.view",
+  "stages.view",
   "registry.view",
 ]);
 
@@ -143,6 +160,16 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "creatives.create",
   "creatives.update",
   "creatives.archive",
+  "campaigns.create",
+  "campaigns.update",
+  "campaigns.activate",
+  "campaigns.pause",
+  "campaigns.complete",
+  "campaigns.archive",
+  "stages.create",
+  "stages.update",
+  "stages.send",
+  "stages.archive",
 ]);
 
 const managerPerms: ReadonlySet<Permission> = new Set([
@@ -194,6 +221,9 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "segments.delete",
   "creatives.approve",
   "creatives.restore",
+  "campaigns.restore",
+  "campaigns.reassign",
+  "stages.restore",
   "registry.create",
   "registry.update",
   "registry.archive",

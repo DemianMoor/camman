@@ -56,6 +56,11 @@ export type Permission =
   | "segment_groups.update"
   | "segment_groups.archive"
   | "segment_groups.restore"
+  | "contacts.view"
+  | "contacts.upload"
+  | "contacts.update"
+  | "contacts.archive"
+  | "contacts.delete"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -85,10 +90,16 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "traffic_types.view",
   "utm_tags.view",
   "segment_groups.view",
+  "contacts.view",
   "registry.view",
 ]);
 
-const operatorPerms: ReadonlySet<Permission> = new Set([...viewerPerms]);
+const operatorPerms: ReadonlySet<Permission> = new Set([
+  ...viewerPerms,
+  "contacts.upload",
+  "contacts.update",
+  "contacts.archive",
+]);
 
 const managerPerms: ReadonlySet<Permission> = new Set([
   ...operatorPerms,
@@ -128,6 +139,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "segment_groups.update",
   "segment_groups.archive",
   "segment_groups.restore",
+  "contacts.delete",
   "registry.create",
   "registry.update",
   "registry.archive",

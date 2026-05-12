@@ -400,3 +400,40 @@ export const segment_groups = pgTable(
 
 export type SegmentGroup = typeof segment_groups.$inferSelect;
 export type NewSegmentGroup = typeof segment_groups.$inferInsert;
+
+// Contacts: central phone registry. UUID PK (not serial) because this table
+// will grow to millions of rows; UUIDs distribute better across shards/replicas
+// if that ever becomes relevant. Do not mirror this choice for small lookup
+// entities — those use serial.
+export const contacts = pgTable(
+  "contacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    phone_number: text("phone_number").notNull(),
+    is_archived: boolean("is_archived").notNull().default(false),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("contacts_org_id_phone_number_unique").on(
+      table.org_id,
+      table.phone_number,
+    ),
+    index("contacts_org_id_idx").on(table.org_id),
+    index("contacts_org_id_is_archived_idx").on(
+      table.org_id,
+      table.is_archived,
+    ),
+  ],
+);
+
+export type Contact = typeof contacts.$inferSelect;
+export type NewContact = typeof contacts.$inferInsert;

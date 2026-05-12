@@ -16,7 +16,7 @@ export const ENTITY_AVAILABILITY = {
   traffic_types: true,   // 5.4
   utm_tags: true,        // 5.5
   segment_groups: true,  // 5.6
-  contacts: false,       // 6
+  contacts: true,        // 6.1
   segments: false,       // 6
   opt_outs: false,
   opt_ins: false,

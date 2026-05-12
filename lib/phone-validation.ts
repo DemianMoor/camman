@@ -48,3 +48,40 @@ export function formatPhoneInternational(e164: string): string {
   const parsed = parsePhoneNumberFromString(e164);
   return parsed ? parsed.formatInternational() : e164;
 }
+
+// Parsed-phone shape (just the success branch of PhoneValidationResult).
+export type ParsedPhone = {
+  normalized: string;
+  country_code: string | null;
+  dial_code: string | null;
+  local_number: string | null;
+};
+
+export type BatchValidationResult = {
+  valid: ParsedPhone[];
+  invalid: { input: string; error: string }[];
+};
+
+// Validate a list of raw phone strings in one pass. Caller is responsible for
+// pre-cleaning (trimming/splitting) — empty strings are reported as invalid.
+export function validatePhonesBatch(
+  rawList: string[],
+  defaultCountry: CountryCode = "US",
+): BatchValidationResult {
+  const valid: ParsedPhone[] = [];
+  const invalid: { input: string; error: string }[] = [];
+  for (const raw of rawList) {
+    const r = validatePhone(raw, defaultCountry);
+    if (r.valid && r.normalized) {
+      valid.push({
+        normalized: r.normalized,
+        country_code: r.country_code,
+        dial_code: r.dial_code,
+        local_number: r.local_number,
+      });
+    } else {
+      invalid.push({ input: raw, error: r.error ?? "Invalid phone number" });
+    }
+  }
+  return { valid, invalid };
+}

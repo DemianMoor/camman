@@ -49,6 +49,20 @@ export function formatPhoneInternational(e164: string): string {
   return parsed ? parsed.formatInternational() : e164;
 }
 
+// National digits only — e.g. "+12025550199" → "2025550199". Used in CSV
+// exports because most SMS providers accept only the 10-digit US format for
+// bulk-upload lists. For non-US numbers we still return the national number
+// (no country code, no spaces); the Country column on Contacts/per-segment
+// exports preserves that info if users need to disambiguate. Null/empty
+// input returns "" so empty cells stay empty in the CSV; un-parseable input
+// falls back to stripping the leading "+".
+export function formatPhoneForExport(e164: string | null | undefined): string {
+  if (!e164) return "";
+  const parsed = parsePhoneNumberFromString(e164);
+  if (parsed) return parsed.nationalNumber;
+  return e164.startsWith("+") ? e164.slice(1) : e164;
+}
+
 // Parsed-phone shape (just the success branch of PhoneValidationResult).
 export type ParsedPhone = {
   normalized: string;

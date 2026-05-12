@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
+import { ExportButton } from "@/components/export-button";
 import {
   PhoneUploadForm,
   type UploadResultSummary,
@@ -587,6 +588,20 @@ export default function ContactsPage() {
             Reset filters
           </Button>
         ) : null}
+        <div className="ml-auto">
+          <ExportButton
+            endpoint="/api/contacts/export"
+            permission="contacts.view"
+            filenamePrefix="contacts"
+            queryParams={{
+              view: filters.view,
+              search: filters.search || undefined,
+              sortBy: filters.sortBy,
+              sortDir: filters.sortDir,
+            }}
+            disabledIfEmpty={totalCount}
+          />
+        </div>
       </div>
 
       {fetchError ? (

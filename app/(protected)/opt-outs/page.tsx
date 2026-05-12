@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
+import { ExportButton } from "@/components/export-button";
 import {
   PhoneUploadForm,
   type UploadResultSummary,
@@ -490,6 +491,20 @@ export default function OptOutsPage() {
             Reset filters
           </Button>
         ) : null}
+        <div className="ml-auto">
+          <ExportButton
+            endpoint="/api/opt-outs/export"
+            permission="opt_outs.view"
+            filenamePrefix="opt-outs"
+            queryParams={{
+              search: filters.search || undefined,
+              brand_id: filters.brand_id,
+              sortBy: filters.sortBy,
+              sortDir: filters.sortDir,
+            }}
+            disabledIfEmpty={totalCount}
+          />
+        </div>
       </div>
 
       {selectedRows.size > 0 ? (

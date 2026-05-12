@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
+import { ExportButton } from "@/components/export-button";
 import {
   PhoneUploadForm,
   type UploadResultSummary,
@@ -692,6 +693,19 @@ export default function SegmentDetailPage() {
                 Reset filters
               </Button>
             ) : null}
+            <div className="ml-auto">
+              <ExportButton
+                endpoint={`/api/segments/${segment.id}/contacts/export`}
+                permission="segments.view"
+                filenamePrefix={`segment-${segment.segment_id}-contacts`}
+                queryParams={{
+                  search: filters.search || undefined,
+                  sortBy: filters.sortBy,
+                  sortDir: filters.sortDir,
+                }}
+                disabledIfEmpty={contactsTotal}
+              />
+            </div>
           </div>
 
           {selectedRows.size > 0 ? (

@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
+import { ExportButton } from "@/components/export-button";
 import { useAuth } from "@/components/protected/auth-context";
 import {
   SegmentForm,
@@ -621,6 +622,21 @@ export default function SegmentsPage() {
             Reset filters
           </Button>
         ) : null}
+        <div className="ml-auto">
+          <ExportButton
+            endpoint="/api/segments/export"
+            permission="segments.view"
+            filenamePrefix="segments"
+            queryParams={{
+              search: filters.search || undefined,
+              segment_group_id: filters.segment_group_id,
+              showArchived: filters.showArchived ? "true" : undefined,
+              sortBy: filters.sortBy,
+              sortDir: filters.sortDir,
+            }}
+            disabledIfEmpty={totalCount}
+          />
+        </div>
       </div>
 
       {fetchError ? (

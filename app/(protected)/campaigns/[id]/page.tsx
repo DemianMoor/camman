@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
+  Download,
   MoreHorizontal,
   Pause,
   Pencil,
@@ -145,6 +146,7 @@ type Stage = {
   notes: string | null;
   archived_at: string | null;
   created_at: string;
+  audience_count: number;
   creative: { id: number; slug: string; text: string } | null;
   provider: Info | null;
   provider_phone: { id: number; phone_number: string } | null;
@@ -252,11 +254,13 @@ const STAGE_TRANSITION_MAP: Record<
 type StagesFilters = {
   statuses: StageStatus[];
   showArchived: boolean;
+  pageSize: number;
 };
 
 const DEFAULT_STAGE_FILTERS: StagesFilters = {
   statuses: [],
   showArchived: false,
+  pageSize: 20,
 };
 
 function buildCampaignPatchBody(values: CampaignFormValues): Record<string, unknown> {
@@ -644,6 +648,21 @@ export default function CampaignDetailPage() {
         ),
       },
       {
+        id: "audience_count",
+        header: "Audience",
+        accessorKey: "audience_count",
+        enableSorting: true,
+        cell: ({ row }) => {
+          const n = row.original.audience_count;
+          if (n === 0) return <span className="text-muted-foreground">—</span>;
+          return (
+            <span className="font-mono text-sm tabular-nums">
+              {n.toLocaleString()}
+            </span>
+          );
+        },
+      },
+      {
         id: "scheduled",
         header: "Scheduled",
         enableSorting: false,
@@ -742,6 +761,10 @@ export default function CampaignDetailPage() {
               ? []
               : STAGE_TRANSITION_MAP[s.status as ActiveStageStatus] ?? [];
           const canTransition = canSendStage && transitions.length > 0;
+          const audienceEmpty = s.audience_count === 0;
+          const exportTitle = audienceEmpty
+            ? "Stage has no audience — adjust filters to enable export."
+            : undefined;
           if (!showEdit && !showArchive && !showRestore && !canTransition)
             return null;
           return (
@@ -784,6 +807,17 @@ export default function CampaignDetailPage() {
                       ))}
                     </>
                   ) : null}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={audienceEmpty}
+                    title={exportTitle}
+                    onSelect={() => {
+                      if (audienceEmpty) return;
+                      window.location.href = `/api/campaigns/${campaignId}/stages/${s.id}/export-phones`;
+                    }}
+                  >
+                    <Download className="size-4" aria-hidden /> Export phones (CSV)
+                  </DropdownMenuItem>
                   {(showArchive || showRestore) ? (
                     <DropdownMenuSeparator />
                   ) : null}
@@ -812,7 +846,7 @@ export default function CampaignDetailPage() {
         },
       },
     ],
-    [canUpdateStage, canArchiveStage, canRestoreStage, canSendStage],
+    [campaignId, canUpdateStage, canArchiveStage, canRestoreStage, canSendStage],
   );
 
   if (!auth) return null;
@@ -1190,10 +1224,10 @@ export default function CampaignDetailPage() {
                 columns={stageColumns}
                 isLoading={stagesApi.isLoading}
                 pageIndex={0}
-                pageSize={stages.length || 20}
+                pageSize={stageFilters.pageSize}
                 totalCount={stages.length}
                 onPageChange={() => {}}
-                onPageSizeChange={() => {}}
+                onPageSizeChange={(s) => updateStageFilters({ pageSize: s })}
                 sortBy="stage_number"
                 sortDir="asc"
                 onSortChange={() => {}}
@@ -1320,6 +1354,7 @@ export default function CampaignDetailPage() {
             key={`edit-stage-${editingStage.id}`}
             mode="edit"
             campaignId={campaign.id}
+            stageId={editingStage.id}
             campaign={campaign}
             initialValues={editStageValues}
             onSubmit={handleStageEdit}

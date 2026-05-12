@@ -85,6 +85,91 @@ function buildQualifyingContactsSql(input: AudiencePreviewInput) {
   `;
 }
 
+// Stage-level filter toggles. Mutex on include_clickers / exclude_clickers
+// is enforced upstream (validator + DB check constraint).
+export interface StageAudienceFilters {
+  include_no_status: boolean;
+  include_clickers: boolean;
+  exclude_clickers: boolean;
+}
+
+export interface StageAudienceCountResult {
+  count: number;
+  breakdown: {
+    no_status: number;
+    clickers: number;
+    excluded_for_optout: number;
+  };
+}
+
+// Compute the resolved audience count + breakdown for a stage's filters on
+// top of a campaign's frozen pool, with live opt-outs excluded. Shared by
+// the audience-preview endpoint (hypothetical filters posted in the body),
+// the audience-count endpoint (filters read from the saved stage row), and
+// the stages list endpoint (per-row audience_count column).
+//
+// One round-trip per call. The caller is responsible for verifying the
+// campaign belongs to the org BEFORE calling — this function trusts that
+// (campaignId, orgId) was already authorized.
+export async function computeStageAudienceCount(
+  campaignId: number,
+  orgId: string,
+  filters: StageAudienceFilters,
+): Promise<StageAudienceCountResult> {
+  const { include_no_status, include_clickers, exclude_clickers } = filters;
+  const rows = (await db.execute(drizzleSql`
+    with joined as (
+      select
+        p.contact_id,
+        p.was_clicker_at_snapshot,
+        p.was_no_status_at_snapshot,
+        exists (
+          select 1 from opt_outs oo
+          where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
+        ) as is_opt_out_now
+      from campaign_audience_pool p
+      where p.campaign_id = ${campaignId}::int and p.org_id = ${orgId}::uuid
+    )
+    select
+      count(*) filter (
+        where not is_opt_out_now
+          and (
+            (${include_no_status}::boolean and was_no_status_at_snapshot)
+            or (${include_clickers}::boolean and was_clicker_at_snapshot)
+          )
+          and not (${exclude_clickers}::boolean and was_clicker_at_snapshot)
+      )::int as count,
+      count(*) filter (
+        where not is_opt_out_now and was_no_status_at_snapshot
+      )::int as no_status,
+      count(*) filter (
+        where not is_opt_out_now and was_clicker_at_snapshot
+      )::int as clickers,
+      count(*) filter (where is_opt_out_now)::int as excluded_for_optout
+    from joined
+  `)) as unknown as {
+    count: number;
+    no_status: number;
+    clickers: number;
+    excluded_for_optout: number;
+  }[];
+
+  const row = rows[0] ?? {
+    count: 0,
+    no_status: 0,
+    clickers: 0,
+    excluded_for_optout: 0,
+  };
+  return {
+    count: row.count,
+    breakdown: {
+      no_status: row.no_status,
+      clickers: row.clickers,
+      excluded_for_optout: row.excluded_for_optout,
+    },
+  };
+}
+
 // Compute the count for the UI's audience preview. No DB write.
 export async function previewAudience(
   input: AudiencePreviewInput,

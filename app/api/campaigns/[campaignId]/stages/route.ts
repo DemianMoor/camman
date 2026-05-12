@@ -17,6 +17,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { computeStageAudienceCount } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 import {
   nullIfEmpty,
@@ -162,14 +163,39 @@ export async function GET(
     .where(where)
     .orderBy(orderFn(sortColumn));
 
-  const data = rows.map((r) => ({
+  // TODO: audience_count is computed per-stage via one query each. Fine for
+  // typical campaigns (≤12 stages); may need optimization for campaigns
+  // with many stages — consider materializing on stage-status-change in a
+  // later step, or batching all stages into a single query with FILTERs.
+  const audienceCounts = await Promise.all(
+    rows.map((r) =>
+      computeStageAudienceCount(cid, orgId, {
+        include_no_status: r.include_no_status,
+        include_clickers: r.include_clickers,
+        exclude_clickers: r.exclude_clickers,
+      }).then((res) => res.count),
+    ),
+  );
+
+  let data = rows.map((r, i) => ({
     ...r,
     creative: r.creative?.id ? r.creative : null,
     provider: r.provider?.id ? r.provider : null,
     provider_phone: r.provider_phone?.id ? r.provider_phone : null,
     brand: r.brand?.id ? r.brand : null,
     offer: r.offer?.id ? r.offer : null,
+    audience_count: audienceCounts[i],
   }));
+
+  // audience_count is derived in JS post-query; sort it here when the
+  // client asks for it. SQL-side ordering is handled above for the
+  // built-in columns.
+  if (listParams.sortBy === "audience_count") {
+    const dir = sortDirRaw === "desc" ? -1 : 1;
+    data = [...data].sort(
+      (a, b) => dir * (a.audience_count - b.audience_count),
+    );
+  }
 
   return NextResponse.json({ data, totalCount: data.length });
 }

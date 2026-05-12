@@ -578,6 +578,180 @@ async function main() {
       },
     );
     check("cancelled → sent: 409 (terminal)", ss5R.status === 409);
+
+    console.log("\n[9] Stage phone export — against the [7b] preview campaign");
+    // Reuse the previewCamp built in [7b]: 30 pool members (20 no-status +
+    // 10 clickers), 3 post-snapshot opt-outs (2 no-status, 1 clicker).
+
+    // Stage A: include_no_status=true, exclude_clickers=false, include_clickers=false
+    //   eligible = 20 no-status - 2 opted-out = 18
+    const stageAR = await apiFetch(
+      `/api/campaigns/${previewCamp.id}/stages`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          include_no_status: true,
+          include_clickers: false,
+          exclude_clickers: false,
+        }),
+      },
+    );
+    check(
+      "preview stage A (no-status only) creates: 201",
+      stageAR.status === 201,
+    );
+    const stageA = (await stageAR.json()) as {
+      id: number;
+      stage_number: number;
+    };
+
+    // [9.1] audience-count endpoint matches expectation + breakdown shape
+    const acR = await apiFetch(
+      `/api/campaigns/${previewCamp.id}/stages/${stageA.id}/audience-count`,
+    );
+    check("audience-count: 200", acR.status === 200);
+    const ac = (await acR.json()) as {
+      count: number;
+      breakdown: {
+        no_status: number;
+        clickers: number;
+        excluded_for_optout: number;
+      };
+      pool_size: number;
+    };
+    check("audience-count.count = 18 (20 - 2 opt-out)", ac.count === 18, `got ${ac.count}`);
+    check(
+      "audience-count breakdown.no_status = 18",
+      ac.breakdown.no_status === 18,
+    );
+    check(
+      "audience-count breakdown.clickers = 9",
+      ac.breakdown.clickers === 9,
+    );
+    check(
+      "audience-count breakdown.excluded_for_optout = 3",
+      ac.breakdown.excluded_for_optout === 3,
+    );
+
+    // [9.2] CSV export — headers
+    const exportAR = await apiFetch(
+      `/api/campaigns/${previewCamp.id}/stages/${stageA.id}/export-phones`,
+    );
+    check("export-phones: 200", exportAR.status === 200);
+    check(
+      "Content-Type starts with text/csv",
+      (exportAR.headers.get("content-type") ?? "").startsWith("text/csv"),
+      `got ${exportAR.headers.get("content-type")}`,
+    );
+    const cd = exportAR.headers.get("content-disposition") ?? "";
+    check(
+      "Content-Disposition contains attachment",
+      cd.toLowerCase().includes("attachment"),
+      `got ${cd}`,
+    );
+    check(
+      "Filename matches campaign-<slug>-stage-N-phones-YYYY-MM-DD-HHmmss.csv",
+      /filename="campaign-.+-stage-\d+-phones-\d{4}-\d{2}-\d{2}-\d{6}\.csv"/.test(
+        cd,
+      ),
+      `got ${cd}`,
+    );
+
+    // [9.3] CSV body: row count + 10-digit format
+    const exportABody = await exportAR.text();
+    const exportALines = exportABody.split("\n").filter((l) => l.length > 0);
+    // Header is line 0; the rest are data rows.
+    check(
+      "data row count matches audience-count",
+      exportALines.length - 1 === ac.count,
+      `expected ${ac.count} data rows, got ${exportALines.length - 1}`,
+    );
+    check(
+      "all phone numbers are 10 digits",
+      exportALines
+        .slice(1)
+        .every((line) => /^\d{10}$/.test(line.trim())),
+    );
+
+    // [9.4] limit param
+    const exportLimitR = await apiFetch(
+      `/api/campaigns/${previewCamp.id}/stages/${stageA.id}/export-phones?limit=5`,
+    );
+    check("export with limit=5: 200", exportLimitR.status === 200);
+    const limitedLines = (await exportLimitR.text())
+      .split("\n")
+      .filter((l) => l.length > 0);
+    check(
+      "limit=5 returns exactly 5 data rows",
+      limitedLines.length - 1 === 5,
+      `got ${limitedLines.length - 1} data rows`,
+    );
+
+    // [9.5] empty-audience stage still returns a valid CSV with just the header.
+    const emptyStageR = await apiFetch(
+      `/api/campaigns/${previewCamp.id}/stages`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          include_no_status: false,
+          include_clickers: false,
+          exclude_clickers: false,
+        }),
+      },
+    );
+    check("empty-audience stage creates: 201", emptyStageR.status === 201);
+    const emptyStage = (await emptyStageR.json()) as { id: number };
+    const emptyExportR = await apiFetch(
+      `/api/campaigns/${previewCamp.id}/stages/${emptyStage.id}/export-phones`,
+    );
+    check("empty-audience export: 200", emptyExportR.status === 200);
+    const emptyExportBody = await emptyExportR.text();
+    const emptyExportLines = emptyExportBody
+      .split("\n")
+      .filter((l) => l.length > 0);
+    check(
+      "empty-audience CSV has only the header line",
+      emptyExportLines.length === 1,
+      `got ${emptyExportLines.length} non-empty lines`,
+    );
+    check(
+      "empty-audience filename still well-formed",
+      /filename="campaign-.+-stage-\d+-phones-\d{4}-\d{2}-\d{2}-\d{6}\.csv"/.test(
+        emptyExportR.headers.get("content-disposition") ?? "",
+      ),
+    );
+
+    // [9.6] deterministic ordering on re-export
+    const exportA2R = await apiFetch(
+      `/api/campaigns/${previewCamp.id}/stages/${stageA.id}/export-phones`,
+    );
+    const exportA2Body = await exportA2R.text();
+    check("re-export: 200", exportA2R.status === 200);
+    check(
+      "re-export rows are identical to first export",
+      exportABody === exportA2Body,
+    );
+
+    // [9.7] stages list now includes audience_count per row
+    const stagesListR = await apiFetch(
+      `/api/campaigns/${previewCamp.id}/stages?pageSize=50`,
+    );
+    const stagesList = (await stagesListR.json()) as {
+      data: { id: number; audience_count: number }[];
+    };
+    const stageAInList = stagesList.data.find((s) => s.id === stageA.id);
+    const emptyInList = stagesList.data.find((s) => s.id === emptyStage.id);
+    check(
+      "stages list includes audience_count = 18 for stage A",
+      stageAInList?.audience_count === 18,
+      `got ${stageAInList?.audience_count}`,
+    );
+    check(
+      "stages list includes audience_count = 0 for empty stage",
+      emptyInList?.audience_count === 0,
+      `got ${emptyInList?.audience_count}`,
+    );
+
   } finally {
     console.log("\nCleanup");
     try {

@@ -172,7 +172,11 @@ export function DataTable<T>({
       <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
         <div className="flex items-center gap-3">
           <Select
-            value={String(pageSize)}
+            value={
+              pageSizeOptions.includes(pageSize)
+                ? String(pageSize)
+                : String(pageSizeOptions[0])
+            }
             onValueChange={(v) => onPageSizeChange(Number(v))}
           >
             <SelectTrigger className="h-8 w-[110px]">

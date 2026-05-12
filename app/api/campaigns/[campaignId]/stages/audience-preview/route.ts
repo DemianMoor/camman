@@ -1,11 +1,12 @@
-import { and, eq, sql as drizzleSql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 
 import { db } from "@/db/client";
-import { campaign_audience_pool, campaigns } from "@/db/schema";
+import { campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { computeStageAudienceCount } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 
 function parseId(idParam: string) {
@@ -83,69 +84,11 @@ export async function POST(
       API_ERROR_CODES.VALIDATION,
     );
   }
-  const { include_no_status, include_clickers, exclude_clickers } =
-    parsed.data;
-
-  // Single CTE-driven aggregate: join pool to a live opt-outs presence
-  // flag, then count with FILTERs for each breakdown slice.
-  //
-  //   match  = NOT opt_out_now
-  //            AND ((no_status AND inc_ns) OR (clicker AND inc_cl))
-  //            AND NOT (clicker AND excl_cl)
-  //
-  // The breakdown counts use the same opt-out exclusion but ignore the
-  // include/exclude toggles so the UI can show "what if I changed this."
-  const rows = (await db.execute(drizzleSql`
-    with joined as (
-      select
-        p.contact_id,
-        p.was_clicker_at_snapshot,
-        p.was_no_status_at_snapshot,
-        exists (
-          select 1 from opt_outs oo
-          where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
-        ) as is_opt_out_now
-      from campaign_audience_pool p
-      where p.campaign_id = ${cid}::int
-    )
-    select
-      count(*) filter (
-        where not is_opt_out_now
-          and (
-            (${include_no_status}::boolean and was_no_status_at_snapshot)
-            or (${include_clickers}::boolean and was_clicker_at_snapshot)
-          )
-          and not (${exclude_clickers}::boolean and was_clicker_at_snapshot)
-      )::int as count,
-      count(*) filter (
-        where not is_opt_out_now and was_no_status_at_snapshot
-      )::int as no_status,
-      count(*) filter (
-        where not is_opt_out_now and was_clicker_at_snapshot
-      )::int as clickers,
-      count(*) filter (where is_opt_out_now)::int as excluded_for_optout
-    from joined
-  `)) as unknown as {
-    count: number;
-    no_status: number;
-    clickers: number;
-    excluded_for_optout: number;
-  }[];
-
-  const row = rows[0] ?? {
-    count: 0,
-    no_status: 0,
-    clickers: 0,
-    excluded_for_optout: 0,
-  };
+  const result = await computeStageAudienceCount(cid, orgId, parsed.data);
 
   return NextResponse.json({
-    count: row.count,
-    breakdown: {
-      no_status: row.no_status,
-      clickers: row.clickers,
-      excluded_for_optout: row.excluded_for_optout,
-    },
+    count: result.count,
+    breakdown: result.breakdown,
     pool_size: campaignRow[0].audience_snapshot_count,
   });
 }

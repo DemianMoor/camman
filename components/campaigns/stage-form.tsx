@@ -89,6 +89,8 @@ type AudiencePreview = {
 export interface StageFormProps {
   mode: "create" | "edit";
   campaignId: number;
+  // Only set in edit mode; needed for the per-stage export URL.
+  stageId?: number;
   campaign: {
     id: number;
     name: string;
@@ -123,6 +125,7 @@ const DEFAULT_VALUES: StageFormValues = {
 export function StageForm({
   mode,
   campaignId,
+  stageId,
   campaign,
   initialValues,
   onSubmit,
@@ -553,7 +556,32 @@ export function StageForm({
 
         {/* ============ Audience filters ============ */}
         <section className="grid gap-4">
-          <SectionHeader title="Audience" />
+          <div className="flex items-center justify-between gap-3">
+            <SectionHeader title="Audience" />
+            {isEdit && stageId !== undefined ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={audienceEmpty}
+                title={
+                  audienceEmpty
+                    ? "Stage has no audience — adjust filters to enable export."
+                    : undefined
+                }
+                onClick={() => {
+                  if (audienceEmpty) return;
+                  window.open(
+                    `/api/campaigns/${campaignId}/stages/${stageId}/export-phones`,
+                    "_blank",
+                    "noopener",
+                  );
+                }}
+              >
+                Export phones (CSV) →
+              </Button>
+            ) : null}
+          </div>
           <p className="text-sm text-muted-foreground">
             These filters select a subset of the campaign&apos;s frozen
             audience for this stage. Opt-outs accumulated since campaign

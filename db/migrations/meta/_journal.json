@@ -127,6 +127,20 @@
       "when": 1778584061874,
       "tag": "0017_segment_segment_groups_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1778591221306,
+      "tag": "0018_round_devos",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1778591228038,
+      "tag": "0019_creatives_rls",
+      "breakpoints": true
     }
   ]
 }

@@ -21,7 +21,7 @@ export const ENTITY_AVAILABILITY = {
   opt_outs: true,        // 6.2
   opt_ins: true,         // 6.2
   clickers: true,        // 6.2
-  creatives: false,      // 7
+  creatives: true,       // 7.1
   campaigns: false,      // 7
 } as const;
 

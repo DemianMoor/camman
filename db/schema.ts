@@ -693,3 +693,50 @@ export const segment_stats = pgTable(
 
 export type SegmentStats = typeof segment_stats.$inferSelect;
 export type NewSegmentStats = typeof segment_stats.$inferInsert;
+
+// Creatives: SMS copy linked to an Offer, optionally scoped to a Provider
+// + Brand. `slug` is auto-generated and used in short-link construction.
+// `creative_id` is an optional human-friendly identifier for external
+// tracking systems.
+export const creatives = pgTable(
+  "creatives",
+  {
+    id: serial("id").primaryKey(),
+    creative_id: text("creative_id").unique(),
+    slug: text("slug").notNull().unique(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    sms_provider_id: integer("sms_provider_id").references(
+      () => sms_providers.id,
+      { onDelete: "set null" },
+    ),
+    brand_id: integer("brand_id").references(() => brands.id, {
+      onDelete: "set null",
+    }),
+    text: text("text").notNull(),
+    status: text("status").notNull().default("draft"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("creatives_org_id_idx").on(table.org_id),
+    index("creatives_offer_id_idx").on(table.offer_id),
+    index("creatives_sms_provider_id_idx").on(table.sms_provider_id),
+    index("creatives_brand_id_idx").on(table.brand_id),
+    index("creatives_status_idx").on(table.status),
+    check(
+      "creatives_status_check",
+      sql`${table.status} IN ('draft', 'pending', 'ready', 'paused', 'archived')`,
+    ),
+  ],
+);
+
+export type Creative = typeof creatives.$inferSelect;
+export type NewCreative = typeof creatives.$inferInsert;
+

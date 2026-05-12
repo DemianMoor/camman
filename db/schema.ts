@@ -857,7 +857,7 @@ export const campaign_stages = pgTable(
     include_clickers: boolean("include_clickers").notNull().default(false),
     exclude_clickers: boolean("exclude_clickers").notNull().default(false),
     include_no_status: boolean("include_no_status").notNull().default(true),
-    scheduled_date: date("scheduled_date"),
+    scheduled_at: timestamp("scheduled_at", { withTimezone: true }),
     sent_at: timestamp("sent_at", { withTimezone: true }),
     status_changed_at: timestamp("status_changed_at", { withTimezone: true })
       .notNull()

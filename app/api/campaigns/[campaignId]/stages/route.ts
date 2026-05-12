@@ -116,7 +116,7 @@ export async function GET(
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,
       include_no_status: campaign_stages.include_no_status,
-      scheduled_date: campaign_stages.scheduled_date,
+      scheduled_at: campaign_stages.scheduled_at,
       sent_at: campaign_stages.sent_at,
       status_changed_at: campaign_stages.status_changed_at,
       previous_status: campaign_stages.previous_status,
@@ -298,7 +298,7 @@ export async function POST(
     include_clickers: input.include_clickers,
     exclude_clickers: input.exclude_clickers,
     include_no_status: input.include_no_status,
-    scheduled_date: input.scheduled_date ?? null,
+    scheduled_at: input.scheduled_at ? new Date(input.scheduled_at) : null,
     notes: nullIfEmpty(input.notes),
     status: "draft",
   };

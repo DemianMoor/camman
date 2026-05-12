@@ -10,9 +10,11 @@ import postgres from "postgres";
 import {
   brands,
   campaigns,
+  clickers,
   contacts,
   creatives,
   offers,
+  opt_outs,
   segment_contacts,
   segment_groups,
   segments,
@@ -285,6 +287,279 @@ async function main() {
       },
     );
     check("success: 200", ss3R.status === 200);
+
+    console.log(
+      "\n[7b] Stage audience preview — filter combinations on a separate campaign",
+    );
+    // Build a fresh campaign with a controllable mix: 20 no-status + 10
+    // clickers in its frozen pool, then opt out 3 (2 no-status + 1 clicker).
+    // This lets us verify the include/exclude combinations precisely.
+    const previewUnique = String(Date.now()).slice(-6).padStart(6, "0");
+    // 30 phones, valid US E.164 (10 digits after +1). Format:
+    // +1 510 7 {4 digits from run} {2 digits from i} → unique per run + i.
+    // The first 10 will become clickers (before campaign creation).
+    const previewPhones: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      previewPhones.push(
+        `+15107${previewUnique.slice(0, 4)}${String(i).padStart(2, "0")}`,
+      );
+    }
+    // Sanity-check uniqueness — previewUnique gives us 30 distinct phones
+    // only if i never collides with another test's phones.
+    insertedPhones.push(...previewPhones);
+
+    const previewSegR = await apiFetch("/api/segments", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Preview Test Segment ${previewUnique}`,
+        segment_id: `PREV-SEG-${previewUnique}`,
+      }),
+    });
+    check(
+      "seed: preview segment creation returns 201",
+      previewSegR.status === 201,
+    );
+    const previewSeg = (await previewSegR.json()) as { id: number };
+    createdSegmentIds.push(previewSeg.id);
+
+    const previewUploadR = await apiFetch(
+      `/api/segments/${previewSeg.id}/contacts/upload`,
+      {
+        method: "POST",
+        body: JSON.stringify({ phones: previewPhones.join("\n") }),
+      },
+    );
+    const previewUploadBody = (await previewUploadR.json()) as {
+      inserted: number;
+    };
+    check(
+      "seed: 30 preview contacts uploaded",
+      previewUploadBody.inserted === 30,
+      `inserted=${previewUploadBody.inserted}`,
+    );
+
+    // Resolve contact_ids in upload order so we know which 10 to make clickers.
+    const previewContactRows = await db
+      .select({ id: contacts.id, phone_number: contacts.phone_number })
+      .from(contacts)
+      .where(inArray(contacts.phone_number, previewPhones));
+    // Build an index keyed by phone_number for deterministic ordering.
+    const byPhone = new Map(
+      previewContactRows.map((r) => [r.phone_number, r.id]),
+    );
+    const clickerContactIds = previewPhones
+      .slice(0, 10)
+      .map((p) => byPhone.get(p)!);
+    const noStatusContactIds = previewPhones
+      .slice(10)
+      .map((p) => byPhone.get(p)!);
+
+    // Org id for direct Drizzle inserts comes from the seed brand.
+    const probeOrgRow = await db
+      .select({ org_id: brands.org_id })
+      .from(brands)
+      .where(eq(brands.id, brand.id))
+      .limit(1);
+    const orgId = probeOrgRow[0]!.org_id;
+
+    // Mark 10 contacts as clickers (BEFORE creating the campaign so the
+    // snapshot captures was_clicker_at_snapshot=true for them).
+    await db.insert(clickers).values(
+      clickerContactIds.map((cid) => ({
+        org_id: orgId,
+        contact_id: cid,
+        phone_number: previewContactRows.find((r) => r.id === cid)!
+          .phone_number,
+        brand_id: brand.id,
+        source: "test",
+      })),
+    );
+
+    // Now create the campaign — its pool will have 10 was_clicker + 20
+    // was_no_status. Filters must include BOTH categories so the snapshot
+    // pulls everyone in.
+    const previewCampR = await apiFetch("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Preview Test Campaign ${previewUnique}`,
+        brand_id: brand.id,
+        offer_id: offer.id,
+        audience_segment_ids: [previewSeg.id],
+        audience_filters: {
+          include_no_status: true,
+          include_clickers: true,
+          include_not_clicked: false,
+        },
+        save_as_draft: false,
+      }),
+    });
+    check(
+      "seed: preview campaign launches",
+      previewCampR.status === 201,
+      `got ${previewCampR.status}`,
+    );
+    const previewCamp = (await previewCampR.json()) as {
+      id: number;
+      audience_snapshot_count: number;
+    };
+    createdCampaignIds.push(previewCamp.id);
+    check(
+      "preview campaign pool = 30",
+      previewCamp.audience_snapshot_count === 30,
+      `got ${previewCamp.audience_snapshot_count}`,
+    );
+
+    // Add 3 opt-outs AFTER snapshot: 2 no-status + 1 clicker.
+    const optOutIds = [
+      ...noStatusContactIds.slice(0, 2),
+      clickerContactIds[0],
+    ];
+    await db.insert(opt_outs).values(
+      optOutIds.map((cid) => ({
+        org_id: orgId,
+        contact_id: cid,
+        phone_number: previewContactRows.find((r) => r.id === cid)!
+          .phone_number,
+        source: "test",
+      })),
+    );
+
+    type PreviewResp = {
+      count: number;
+      breakdown: {
+        no_status: number;
+        clickers: number;
+        excluded_for_optout: number;
+      };
+      pool_size: number;
+    };
+    async function preview(filters: {
+      include_no_status: boolean;
+      include_clickers: boolean;
+      exclude_clickers: boolean;
+    }) {
+      const r = await apiFetch(
+        `/api/campaigns/${previewCamp.id}/stages/audience-preview`,
+        { method: "POST", body: JSON.stringify(filters) },
+      );
+      return { status: r.status, body: (await r.json()) as PreviewResp };
+    }
+
+    // 20 no-status total, 2 of them opted out → 18 eligible.
+    const p1 = await preview({
+      include_no_status: true,
+      include_clickers: false,
+      exclude_clickers: false,
+    });
+    check("no-status-only count = 18", p1.body.count === 18, `got ${p1.body.count}`);
+    check(
+      "no-status-only breakdown.no_status = 18",
+      p1.body.breakdown.no_status === 18,
+    );
+    check(
+      "breakdown.excluded_for_optout = 3 (regardless of filter)",
+      p1.body.breakdown.excluded_for_optout === 3,
+    );
+
+    // 10 clickers total, 1 opted out → 9 eligible.
+    const p2 = await preview({
+      include_no_status: false,
+      include_clickers: true,
+      exclude_clickers: false,
+    });
+    check("clickers-only count = 9", p2.body.count === 9, `got ${p2.body.count}`);
+    check(
+      "clickers-only breakdown.clickers = 9",
+      p2.body.breakdown.clickers === 9,
+    );
+
+    // Both included → 18 + 9 = 27.
+    const p3 = await preview({
+      include_no_status: true,
+      include_clickers: true,
+      exclude_clickers: false,
+    });
+    check("both-included count = 27", p3.body.count === 27, `got ${p3.body.count}`);
+
+    // include_no_status=true + exclude_clickers=true: no-status only,
+    // clickers explicitly excluded → 18.
+    const p4 = await preview({
+      include_no_status: true,
+      include_clickers: false,
+      exclude_clickers: true,
+    });
+    check(
+      "no-status + exclude_clickers count = 18",
+      p4.body.count === 18,
+      `got ${p4.body.count}`,
+    );
+
+    console.log(
+      "\n[7c] scheduled_at: ISO datetime persists, PATCH-null clears, garbage rejected",
+    );
+    // POST a stage with an explicit ISO datetime (with offset). The server
+    // stores it as TIMESTAMPTZ; the GET should round-trip the same instant.
+    const scheduledIso = "2026-06-15T18:30:00.000Z";
+    const stgSchedR = await apiFetch(`/api/campaigns/${campaign.id}/stages`, {
+      method: "POST",
+      body: JSON.stringify({ scheduled_at: scheduledIso }),
+    });
+    check("scheduled_at create: 201", stgSchedR.status === 201);
+    const stgSched = (await stgSchedR.json()) as {
+      id: number;
+      scheduled_at: string | null;
+    };
+    check(
+      "scheduled_at persists as same instant",
+      stgSched.scheduled_at !== null &&
+        new Date(stgSched.scheduled_at).getTime() ===
+          new Date(scheduledIso).getTime(),
+      `got ${stgSched.scheduled_at}`,
+    );
+
+    // Round-trip via GET to make sure it survives select.
+    const stgSchedGetR = await apiFetch(
+      `/api/campaigns/${campaign.id}/stages/${stgSched.id}`,
+    );
+    const stgSchedGet = (await stgSchedGetR.json()) as {
+      scheduled_at: string | null;
+    };
+    check(
+      "GET round-trip preserves scheduled_at",
+      stgSchedGet.scheduled_at !== null &&
+        new Date(stgSchedGet.scheduled_at).getTime() ===
+          new Date(scheduledIso).getTime(),
+    );
+
+    // PATCH to null clears the value.
+    const stgSchedNullR = await apiFetch(
+      `/api/campaigns/${campaign.id}/stages/${stgSched.id}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ scheduled_at: null }),
+      },
+    );
+    check("PATCH scheduled_at=null: 200", stgSchedNullR.status === 200);
+    const stgSchedNullBody = (await stgSchedNullR.json()) as {
+      scheduled_at: string | null;
+    };
+    check(
+      "scheduled_at cleared to null",
+      stgSchedNullBody.scheduled_at === null,
+      `got ${stgSchedNullBody.scheduled_at}`,
+    );
+
+    // Validator must reject non-ISO strings (the old YYYY-MM-DD format
+    // is no longer accepted).
+    const stgSchedBadR = await apiFetch(`/api/campaigns/${campaign.id}/stages`, {
+      method: "POST",
+      body: JSON.stringify({ scheduled_at: "2026-06-15" }),
+    });
+    check(
+      "non-ISO scheduled_at rejected with 400",
+      stgSchedBadR.status === 400,
+      `got ${stgSchedBadR.status}`,
+    );
 
     console.log("\n[8] Stage 2: draft → cancelled → 200; cancelled → sent → 409");
     const ss4R = await apiFetch(

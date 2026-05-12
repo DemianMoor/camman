@@ -82,7 +82,7 @@ export async function GET(
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,
       include_no_status: campaign_stages.include_no_status,
-      scheduled_date: campaign_stages.scheduled_date,
+      scheduled_at: campaign_stages.scheduled_at,
       sent_at: campaign_stages.sent_at,
       status_changed_at: campaign_stages.status_changed_at,
       previous_status: campaign_stages.previous_status,
@@ -241,6 +241,10 @@ export async function PATCH(
   for (const [k, v] of Object.entries(input)) {
     if (v === undefined) continue;
     if (NON_UPDATABLE.has(k)) continue;
+    if (k === "scheduled_at") {
+      updates[k] = typeof v === "string" ? new Date(v) : null;
+      continue;
+    }
     updates[k] = NULLABLE_OPTIONAL_STRING.has(k) ? nullIfEmpty(v as string) : v;
   }
   if (Object.keys(updates).length === 0) {

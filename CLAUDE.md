@@ -59,6 +59,15 @@ Permission checks use a `can(permission)` helper on both server and client. UI h
 - Timestamps stored as `TIMESTAMPTZ`, never naive timestamps.
 - Money stored as `NUMERIC(12, 4)` for precision. Displayed as USD.
 
+### Timezone
+
+Campaign-related times are anchored to a single project-wide timezone: **America/New_York (ET)**. The constant lives in `lib/campaign-timezone.ts` as `CAMPAIGN_TIMEZONE`, with label `CAMPAIGN_TIMEZONE_LABEL = "ET"`. We do not (yet) support per-user or per-org timezones — adding that later would mean editing one file.
+
+- Storage: all timestamps remain `TIMESTAMPTZ` in UTC. No naive timestamps.
+- API: datetime fields cross the wire as ISO 8601 strings with offset (validators use `z.string().datetime({ offset: true })`).
+- Display: always go through `formatCampaignDateTime(utc)`, which renders in ET and suffixes the label. Never use bare `date-fns` `format()` on a campaign timestamp — it'll render in the browser's local zone.
+- Forms: `<input type="datetime-local">` exposes the value as an ET wall-clock string. Convert on submit with `campaignLocalInputToUtcIso(value)`, and on load with `utcToCampaignLocalInput(utc)`.
+
 ## 7. Cross-entity dependencies
 
 Entity availability is tracked in `lib/feature-flags.ts` via the `ENTITY_AVAILABILITY` const and the `isEntityAvailable()` helper. This is the single source of truth for "is this entity built yet?". The sidebar nav and any FK pickers / filters in other entities derive their disabled state from it.

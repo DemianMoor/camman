@@ -162,6 +162,13 @@
       "when": 1778606152634,
       "tag": "0022_campaigns_draft_relaxation",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1778609176587,
+      "tag": "0023_stages_scheduled_at",
+      "breakpoints": true
     }
   ]
 }

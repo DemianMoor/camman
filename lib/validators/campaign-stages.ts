@@ -12,10 +12,6 @@ export const STAGE_STATUSES = [
   "archived",
 ] as const;
 
-const dateStringSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, {
-  message: "Date must be YYYY-MM-DD",
-});
-
 // Every optional field accepts both undefined (key omitted) and null
 // (key sent with explicit null), matching campaigns.ts. Forms typically
 // JSON.stringify null fields rather than omitting them.
@@ -35,7 +31,11 @@ const stageBaseSchema = z.object({
   include_clickers: z.boolean().default(false),
   exclude_clickers: z.boolean().default(false),
   include_no_status: z.boolean().default(true),
-  scheduled_date: dateStringSchema.nullable().optional(),
+  scheduled_at: z
+    .string()
+    .datetime({ offset: true, message: "scheduled_at must be an ISO 8601 datetime with timezone offset" })
+    .nullable()
+    .optional(),
   notes: z
     .union([z.string().trim().max(2000), z.literal("")])
     .nullable()

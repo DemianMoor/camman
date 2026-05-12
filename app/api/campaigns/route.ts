@@ -1,3 +1,4 @@
+import { format } from "date-fns";
 import { and, eq, inArray, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
@@ -145,8 +146,21 @@ export async function POST(req: NextRequest) {
 
   const filters = input.audience_filters ?? {};
 
-  // Transaction: insert campaign, snapshot audience (if launching), update
-  // count. If the audience comes out empty for a launch, roll back.
+  // Auto-generate a name for empty drafts so the list page has something
+  // to render. The pattern is intentionally readable so an operator can
+  // identify their own drafts at a glance.
+  const trimmedName = input.name?.trim() ?? "";
+  const resolvedName =
+    trimmedName.length > 0
+      ? trimmedName
+      : saveAsDraft
+        ? format(new Date(), "'Draft - 'yyyy-MM-dd HH:mm")
+        : null; // shouldn't happen — validator rejects empty name on launch
+
+  // Transaction: insert campaign, snapshot audience (launch path only),
+  // update count. Drafts skip the snapshot entirely — it'll be computed
+  // at activation time. If the audience is empty for a launch, roll back
+  // the whole transaction.
   for (let attempt = 0; attempt < SLUG_RETRY_LIMIT; attempt++) {
     try {
       const result = await db.transaction(async (tx) => {
@@ -157,10 +171,10 @@ export async function POST(req: NextRequest) {
             org_id: orgId,
             slug,
             human_id: nullIfEmpty(input.human_id),
-            name: input.name,
+            name: resolvedName,
             notes: nullIfEmpty(input.notes),
-            brand_id: input.brand_id!,
-            offer_id: input.offer_id!,
+            brand_id: input.brand_id ?? null,
+            offer_id: input.offer_id ?? null,
             routing_type_id: input.routing_type_id ?? null,
             traffic_type_id: input.traffic_type_id ?? null,
             assigned_to_user_id: input.assigned_to_user_id ?? user.id,
@@ -174,7 +188,8 @@ export async function POST(req: NextRequest) {
           })
           .returning();
 
-        if (!saveAsDraft && segmentIds.length > 0) {
+        if (!saveAsDraft) {
+          // Launch path: the validator guarantees segments.length >= 1.
           const snap = await snapshotAudience(
             {
               campaignId: inserted.id,
@@ -185,7 +200,7 @@ export async function POST(req: NextRequest) {
             tx,
           );
           if (snap.count === 0) {
-            // Trigger rollback by throwing — caller maps to a 400.
+            // Trigger rollback — caller maps to a 400.
             throw new EmptyAudienceError();
           }
           const [updated] = await tx

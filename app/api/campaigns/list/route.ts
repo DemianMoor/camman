@@ -12,7 +12,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { brands, campaigns, offers } from "@/db/schema";
+import { brands, campaign_stages, campaigns, offers } from "@/db/schema";
 import {
   apiError,
   parseListParams,
@@ -121,6 +121,11 @@ export async function GET(req: NextRequest) {
         created_at: campaigns.created_at,
         brand: { id: brands.id, name: brands.name, color: brands.color },
         offer: { id: offers.id, name: offers.name, color: offers.color },
+        stage_count_total: drizzleSql<number>`(
+          select count(*)::int from ${campaign_stages}
+          where ${campaign_stages.campaign_id} = ${campaigns.id}
+            and ${campaign_stages.status} <> 'archived'
+        )`,
       })
       .from(campaigns)
       .leftJoin(brands, eq(brands.id, campaigns.brand_id))

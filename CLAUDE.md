@@ -109,6 +109,10 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 - `/lib/supabase/` — Supabase client helpers (browser and server)
 - `/types/` — shared TypeScript types
 
+## 10b. Campaign audience snapshots
+
+Drafts can be saved with zero required fields and no segments. The audience snapshot (rows in `campaign_audience_pool`) is computed **at activation time**, not at draft save. The `draft → active` status transition gates on name + brand + offer + ≥1 segment and runs the snapshot in the same transaction as the status update — so a stale draft can't slip through, and a snapshot that comes out empty rolls the whole thing back. Once a campaign reaches `active`, the audience is frozen: the `PATCH` endpoint rejects changes to `audience_segment_ids` and `audience_filters` with `details.reason = 'audience_locked_after_draft'`.
+
 ## 11. Working Style with Claude Code
 
 - Make small, reviewable changes. Prefer many small commits over one large one.

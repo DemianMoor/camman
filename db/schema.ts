@@ -742,9 +742,10 @@ export type Creative = typeof creatives.$inferSelect;
 export type NewCreative = typeof creatives.$inferInsert;
 
 // Campaigns: long-running containers for SMS-send sequences. The audience
-// is frozen at creation — see campaign_audience_pool below. Brand + offer
-// are required and locked for the campaign's lifetime; deleting either is
-// blocked by ON DELETE RESTRICT.
+// is frozen at activation — see campaign_audience_pool below. Drafts can
+// be saved empty; name + brand + offer are enforced at the API layer when
+// transitioning out of draft. FK constraints still apply when non-null;
+// deleting a referenced brand/offer is blocked by ON DELETE RESTRICT.
 export const campaigns = pgTable(
   "campaigns",
   {
@@ -754,14 +755,14 @@ export const campaigns = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     human_id: text("human_id"),
-    name: text("name").notNull(),
+    name: text("name"),
     notes: text("notes"),
-    brand_id: integer("brand_id")
-      .notNull()
-      .references(() => brands.id, { onDelete: "restrict" }),
-    offer_id: integer("offer_id")
-      .notNull()
-      .references(() => offers.id, { onDelete: "restrict" }),
+    brand_id: integer("brand_id").references(() => brands.id, {
+      onDelete: "restrict",
+    }),
+    offer_id: integer("offer_id").references(() => offers.id, {
+      onDelete: "restrict",
+    }),
     routing_type_id: integer("routing_type_id").references(
       () => routing_types.id,
       { onDelete: "set null" },

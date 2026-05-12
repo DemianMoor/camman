@@ -221,51 +221,280 @@ async function main() {
     );
 
     console.log(
-      "\n[2] POST create with save_as_draft=true (minimal draft — no segments)",
+      "\n[2] POST create with save_as_draft=true and ZERO other fields",
     );
-    // save_as_draft relaxes audience_segment_ids (and other secondary
-    // fields). brand_id + offer_id remain required because the audience
-    // snapshot is brand-scoped and an offer is needed to compose short
-    // links. This test verifies the relaxation: name + brand + offer only.
+    // Drafts are scratchpads: no required fields. The API auto-generates
+    // a name from the current time and skips the audience snapshot.
     const c2R = await apiFetch("/api/campaigns", {
       method: "POST",
-      body: JSON.stringify({
-        name: `Draft Campaign ${unique}`,
-        brand_id: brand.id,
-        offer_id: offer.id,
-        save_as_draft: true,
-      }),
+      body: JSON.stringify({ save_as_draft: true }),
     });
     check("returns 201", c2R.status === 201);
     const c2 = (await c2R.json()) as {
       id: number;
       status: string;
+      name: string | null;
+      brand_id: number | null;
+      offer_id: number | null;
       audience_snapshot_count: number;
     };
     createdCampaignIds.push(c2.id);
     check("status = 'draft'", c2.status === "draft");
     check(
+      "name matches auto-generated pattern",
+      c2.name !== null &&
+        /^Draft - \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(c2.name),
+      `got ${JSON.stringify(c2.name)}`,
+    );
+    check("brand_id is null", c2.brand_id === null);
+    check("offer_id is null", c2.offer_id === null);
+    check(
       "audience_snapshot_count = 0",
       c2.audience_snapshot_count === 0,
     );
+    const c2Pool = await db
+      .select({ contact_id: campaign_audience_pool.contact_id })
+      .from(campaign_audience_pool)
+      .where(eq(campaign_audience_pool.campaign_id, c2.id));
+    check(
+      "campaign_audience_pool has 0 rows for the empty draft",
+      c2Pool.length === 0,
+    );
 
     console.log(
-      "\n[2b] POST create without brand_id (save_as_draft=true) → 400",
+      "\n[2b] POST create with save_as_draft=false and no brand_id → 400",
     );
-    // Drafts still require brand_id and offer_id — that's not part of the
-    // relaxation. Verify the validator surfaces the right error.
+    // The launch path still enforces brand + offer + name + ≥1 segment.
     const c2bR = await apiFetch("/api/campaigns", {
       method: "POST",
       body: JSON.stringify({
-        name: `Bad Draft ${unique}`,
+        name: `Bad Launch ${unique}`,
+        save_as_draft: false,
+      }),
+    });
+    check(
+      "launch without brand_id returns 400",
+      c2bR.status === 400,
+      `got ${c2bR.status}`,
+    );
+
+    console.log(
+      "\n[2c] Create empty draft → PATCH fields → activate (snapshot at activation)",
+    );
+    const c2cR = await apiFetch("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify({ save_as_draft: true }),
+    });
+    const c2c = (await c2cR.json()) as { id: number };
+    createdCampaignIds.push(c2c.id);
+    // Fill in launch-required fields via PATCH (draft path allows audience
+    // changes).
+    const c2cPatchR = await apiFetch(`/api/campaigns/${c2c.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        name: `Filled Draft ${unique}`,
+        brand_id: brand.id,
+        offer_id: offer.id,
+        audience_segment_ids: [seg.id],
+        audience_filters: {
+          include_no_status: true,
+          include_not_clicked: true,
+        },
+      }),
+    });
+    check("PATCH on draft returns 200", c2cPatchR.status === 200);
+    // Activate.
+    const c2cActR = await apiFetch(`/api/campaigns/${c2c.id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status: "active" }),
+    });
+    check("draft → active returns 200", c2cActR.status === 200);
+    const c2cActivated = (await c2cActR.json()) as {
+      status: string;
+      audience_snapshot_count: number;
+    };
+    check("status flipped to 'active'", c2cActivated.status === "active");
+    check(
+      "audience_snapshot_count populated at activation (= 95)",
+      c2cActivated.audience_snapshot_count === 95,
+      `got ${c2cActivated.audience_snapshot_count}`,
+    );
+    const c2cPool = await db
+      .select({ contact_id: campaign_audience_pool.contact_id })
+      .from(campaign_audience_pool)
+      .where(eq(campaign_audience_pool.campaign_id, c2c.id));
+    check(
+      "campaign_audience_pool now has 95 rows for the activated campaign",
+      c2cPool.length === 95,
+      `got ${c2cPool.length}`,
+    );
+
+    console.log(
+      "\n[2d] Activate an empty draft without filling fields → 400 incomplete_draft",
+    );
+    const c2dR = await apiFetch("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify({ save_as_draft: true }),
+    });
+    const c2d = (await c2dR.json()) as { id: number };
+    createdCampaignIds.push(c2d.id);
+    const c2dActR = await apiFetch(`/api/campaigns/${c2d.id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status: "active" }),
+    });
+    check(
+      "empty draft → active returns 400",
+      c2dActR.status === 400,
+      `got ${c2dActR.status}`,
+    );
+    const c2dBody = await c2dActR.json();
+    check(
+      "details.reason = 'incomplete_draft'",
+      c2dBody.details?.reason === "incomplete_draft",
+    );
+    const missing = c2dBody.details?.missing ?? [];
+    check(
+      "details.missing includes name, brand_id, offer_id, audience_segment_ids",
+      Array.isArray(missing) &&
+        missing.includes("brand_id") &&
+        missing.includes("offer_id") &&
+        missing.includes("audience_segment_ids"),
+      `got ${JSON.stringify(missing)}`,
+    );
+
+    console.log(
+      "\n[2e] Activate a draft whose audience is all opt-outs → 400 empty_audience",
+    );
+    // Seed: a fresh segment with only opt-out contacts.
+    const optOutSegR = await apiFetch("/api/segments", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `OptOut-Only Segment ${unique}`,
+        segment_id: `OO-ONLY-${unique}`,
+      }),
+    });
+    check(
+      "seed: opt-out-only segment creation returns 201",
+      optOutSegR.status === 201,
+    );
+    const optOutSeg = (await optOutSegR.json()) as { id: number };
+    createdSegmentIds.push(optOutSeg.id);
+    // 10-digit US format: +1 + area + 7 digits. The seed timestamp gives
+    // us enough variation per run.
+    const ooBase = String(unique).slice(-6).padStart(6, "0");
+    const ooOnlyPhones = [
+      `+1415${ooBase}0`,
+      `+1415${ooBase}1`,
+      `+1415${ooBase}2`,
+    ];
+    insertedPhones.push(...ooOnlyPhones);
+    const ooUploadR = await apiFetch(
+      `/api/segments/${optOutSeg.id}/contacts/upload`,
+      {
+        method: "POST",
+        body: JSON.stringify({ phones: ooOnlyPhones.join("\n") }),
+      },
+    );
+    const ooUploadBody = (await ooUploadR.json()) as { inserted: number };
+    check(
+      "seed: opt-out-only contacts uploaded (3)",
+      ooUploadBody.inserted === 3,
+      `inserted=${ooUploadBody.inserted}`,
+    );
+    // Mark all three phones as opt-outs at the org level so the snapshot
+    // qualifier filters them out.
+    const ooContactRows = await db
+      .select({ id: contacts.id, phone_number: contacts.phone_number })
+      .from(contacts)
+      .where(inArray(contacts.phone_number, ooOnlyPhones));
+    await db.insert(opt_outs).values(
+      ooContactRows.map((c) => ({
+        org_id: orgId!,
+        contact_id: c.id,
+        phone_number: c.phone_number,
+        source: "test",
+      })),
+    );
+    // Now build the draft pointed at that opt-out-only segment and try to
+    // activate.
+    const c2eR = await apiFetch("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify({ save_as_draft: true }),
+    });
+    const c2e = (await c2eR.json()) as { id: number };
+    createdCampaignIds.push(c2e.id);
+    await apiFetch(`/api/campaigns/${c2e.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        name: `Empty Audience Draft ${unique}`,
+        brand_id: brand.id,
+        offer_id: offer.id,
+        audience_segment_ids: [optOutSeg.id],
+        audience_filters: {
+          include_no_status: true,
+          include_not_clicked: true,
+        },
+      }),
+    });
+    const c2eActR = await apiFetch(`/api/campaigns/${c2e.id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status: "active" }),
+    });
+    check(
+      "opt-outs-only segment → active returns 400",
+      c2eActR.status === 400,
+      `got ${c2eActR.status}`,
+    );
+    const c2eBody = await c2eActR.json();
+    check(
+      "details.reason = 'empty_audience'",
+      c2eBody.details?.reason === "empty_audience",
+      `got ${JSON.stringify(c2eBody.details)}`,
+    );
+
+    console.log(
+      "\n[2f] Draft create with EXPLICIT null for name/brand_id/offer_id → 201",
+    );
+    // Browsers JSON.stringify a `null` field as `"field": null` (not
+    // omitted). Validators must accept null on optional fields or the form
+    // path breaks even though the API-test path (which omits keys) works.
+    // This regression-tests that distinction.
+    const c2fR = await apiFetch("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify({
+        name: null,
+        human_id: null,
+        notes: null,
+        brand_id: null,
+        offer_id: null,
+        routing_type_id: null,
+        traffic_type_id: null,
+        assigned_to_user_id: null,
+        start_date: null,
+        end_date: null,
         save_as_draft: true,
       }),
     });
     check(
-      "draft without brand_id returns 400",
-      c2bR.status === 400,
-      `got ${c2bR.status}`,
+      "draft with explicit nulls returns 201",
+      c2fR.status === 201,
+      `got ${c2fR.status}`,
     );
+    const c2f = (await c2fR.json()) as {
+      id: number;
+      status: string;
+      name: string | null;
+      brand_id: number | null;
+    };
+    createdCampaignIds.push(c2f.id);
+    check("status = 'draft'", c2f.status === "draft");
+    check(
+      "auto-generated name applied despite explicit null",
+      c2f.name !== null &&
+        /^Draft - \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(c2f.name),
+      `got ${JSON.stringify(c2f.name)}`,
+    );
+    check("brand_id is null", c2f.brand_id === null);
 
     console.log("\n[3] POST create with cross-org segment → 400");
     const c3R = await apiFetch("/api/campaigns", {

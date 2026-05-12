@@ -45,12 +45,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -773,80 +772,83 @@ export default function ProviderDetailPage() {
       </section>
 
       {/* Edit Provider dialog */}
-      <Dialog open={editProviderOpen} onOpenChange={setEditProviderOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit provider</DialogTitle>
-            <DialogDescription>{provider.name}</DialogDescription>
-          </DialogHeader>
-          <ProviderForm
-            key={`edit-${provider.id}`}
-            mode="edit"
-            initialValues={{
-              name: provider.name,
-              sms_provider_id: provider.sms_provider_id,
-              short_link_supported: provider.short_link_supported,
-              short_link_example: provider.short_link_example ?? "",
-              avatar_url: provider.avatar_url ?? "",
-              color: provider.color ?? "",
-            }}
-            onSubmit={handleProviderEdit}
-            onCancel={() => setEditProviderOpen(false)}
-            isSubmitting={updateProviderApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={editProviderOpen}
+        onOpenChange={setEditProviderOpen}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>Edit provider</DialogTitle>
+          <DialogDescription>{provider.name}</DialogDescription>
+        </DialogHeader>
+        <ProviderForm
+          key={`edit-${provider.id}`}
+          mode="edit"
+          initialValues={{
+            name: provider.name,
+            sms_provider_id: provider.sms_provider_id,
+            short_link_supported: provider.short_link_supported,
+            short_link_example: provider.short_link_example ?? "",
+            avatar_url: provider.avatar_url ?? "",
+            color: provider.color ?? "",
+          }}
+          onSubmit={handleProviderEdit}
+          onCancel={() => setEditProviderOpen(false)}
+          isSubmitting={updateProviderApi.isLoading}
+        />
+      </FormDialog>
 
       {/* Add phone dialog */}
-      <Dialog open={addPhoneOpen} onOpenChange={setAddPhoneOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Add phone</DialogTitle>
-            <DialogDescription>For {provider.name}</DialogDescription>
-          </DialogHeader>
-          <PhoneForm
-            key="add"
-            mode="create"
-            onSubmit={handleAddPhone}
-            onCancel={() => setAddPhoneOpen(false)}
-            isSubmitting={createPhoneApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={addPhoneOpen}
+        onOpenChange={setAddPhoneOpen}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>Add phone</DialogTitle>
+          <DialogDescription>For {provider.name}</DialogDescription>
+        </DialogHeader>
+        <PhoneForm
+          key="add"
+          mode="create"
+          onSubmit={handleAddPhone}
+          onCancel={() => setAddPhoneOpen(false)}
+          isSubmitting={createPhoneApi.isLoading}
+        />
+      </FormDialog>
 
       {/* Edit phone dialog */}
-      <Dialog
+      <FormDialog
         open={editingPhone !== null}
         onOpenChange={(open) => {
           if (!open) setEditingPhone(null);
         }}
+        className="sm:max-w-lg"
       >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit phone</DialogTitle>
-            <DialogDescription>
-              {editingPhone
-                ? formatPhoneInternational(editingPhone.phone_number)
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          {editingPhone ? (
-            <PhoneForm
-              key={`edit-phone-${editingPhone.id}`}
-              mode="edit"
-              existingPhoneNumber={editingPhone.phone_number}
-              initialValues={{
-                phone_number: editingPhone.phone_number,
-                cost_per_sms: Number(editingPhone.cost_per_sms),
-                brand_id: editingPhone.brand_id,
-              }}
-              onSubmit={handleEditPhone}
-              onCancel={() => setEditingPhone(null)}
-              isSubmitting={updatePhoneApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit phone</DialogTitle>
+          <DialogDescription>
+            {editingPhone
+              ? formatPhoneInternational(editingPhone.phone_number)
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {editingPhone ? (
+          <PhoneForm
+            key={`edit-phone-${editingPhone.id}`}
+            mode="edit"
+            existingPhoneNumber={editingPhone.phone_number}
+            initialValues={{
+              phone_number: editingPhone.phone_number,
+              cost_per_sms: Number(editingPhone.cost_per_sms),
+              brand_id: editingPhone.brand_id,
+            }}
+            onSubmit={handleEditPhone}
+            onCancel={() => setEditingPhone(null)}
+            isSubmitting={updatePhoneApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       {/* Provider archive/restore confirm */}
       <AlertDialog

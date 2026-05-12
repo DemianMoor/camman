@@ -32,12 +32,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -507,54 +506,55 @@ export default function SegmentGroupsPage() {
         />
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>New segment group</DialogTitle>
-            <DialogDescription>
-              Group segments by theme or use case.
-            </DialogDescription>
-          </DialogHeader>
-          <SegmentGroupForm
-            key="create"
-            mode="create"
-            onSubmit={handleCreate}
-            onCancel={() => setCreateOpen(false)}
-            isSubmitting={createApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>New segment group</DialogTitle>
+          <DialogDescription>
+            Group segments by theme or use case.
+          </DialogDescription>
+        </DialogHeader>
+        <SegmentGroupForm
+          key="create"
+          mode="create"
+          onSubmit={handleCreate}
+          onCancel={() => setCreateOpen(false)}
+          isSubmitting={createApi.isLoading}
+        />
+      </FormDialog>
 
-      <Dialog
+      <FormDialog
         open={editing !== null}
         onOpenChange={(open) => {
           if (!open) setEditing(null);
         }}
+        className="sm:max-w-lg"
       >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit segment group</DialogTitle>
-            <DialogDescription>
-              {editing ? editing.name : ""}
-            </DialogDescription>
-          </DialogHeader>
-          {editing ? (
-            <SegmentGroupForm
-              key={`edit-${editing.id}`}
-              mode="edit"
-              initialValues={{
-                name: editing.name,
-                segment_group_id: editing.segment_group_id,
-                description: editing.description ?? "",
-                color: editing.color ?? "",
-              }}
-              onSubmit={handleEdit}
-              onCancel={() => setEditing(null)}
-              isSubmitting={updateApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit segment group</DialogTitle>
+          <DialogDescription>
+            {editing ? editing.name : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {editing ? (
+          <SegmentGroupForm
+            key={`edit-${editing.id}`}
+            mode="edit"
+            initialValues={{
+              name: editing.name,
+              segment_group_id: editing.segment_group_id,
+              description: editing.description ?? "",
+              color: editing.color ?? "",
+            }}
+            onSubmit={handleEdit}
+            onCancel={() => setEditing(null)}
+            isSubmitting={updateApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       <AlertDialog
         open={confirming !== null}

@@ -32,12 +32,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -577,55 +576,56 @@ export default function UtmTagsPage() {
         />
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>New UTM tag</DialogTitle>
-            <DialogDescription>
-              Reusable tracking parameters.
-            </DialogDescription>
-          </DialogHeader>
-          <UtmTagForm
-            key="create"
-            mode="create"
-            onSubmit={handleCreate}
-            onCancel={() => setCreateOpen(false)}
-            isSubmitting={createApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>New UTM tag</DialogTitle>
+          <DialogDescription>
+            Reusable tracking parameters.
+          </DialogDescription>
+        </DialogHeader>
+        <UtmTagForm
+          key="create"
+          mode="create"
+          onSubmit={handleCreate}
+          onCancel={() => setCreateOpen(false)}
+          isSubmitting={createApi.isLoading}
+        />
+      </FormDialog>
 
-      <Dialog
+      <FormDialog
         open={editing !== null}
         onOpenChange={(open) => {
           if (!open) setEditing(null);
         }}
+        className="sm:max-w-lg"
       >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit UTM tag</DialogTitle>
-            <DialogDescription>
-              {editing ? editing.label : ""}
-            </DialogDescription>
-          </DialogHeader>
-          {editing ? (
-            <UtmTagForm
-              key={`edit-${editing.id}`}
-              mode="edit"
-              initialValues={{
-                label: editing.label,
-                tag_id: editing.tag_id,
-                value_source: editing.value_source,
-                affiliate_network_id: editing.affiliate_network_id,
-                color: editing.color ?? "",
-              }}
-              onSubmit={handleEdit}
-              onCancel={() => setEditing(null)}
-              isSubmitting={updateApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit UTM tag</DialogTitle>
+          <DialogDescription>
+            {editing ? editing.label : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {editing ? (
+          <UtmTagForm
+            key={`edit-${editing.id}`}
+            mode="edit"
+            initialValues={{
+              label: editing.label,
+              tag_id: editing.tag_id,
+              value_source: editing.value_source,
+              affiliate_network_id: editing.affiliate_network_id,
+              color: editing.color ?? "",
+            }}
+            onSubmit={handleEdit}
+            onCancel={() => setEditing(null)}
+            isSubmitting={updateApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       <AlertDialog
         open={confirming !== null}

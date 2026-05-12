@@ -33,12 +33,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -608,8 +607,11 @@ export default function OptOutsPage() {
         />
       )}
 
-      <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
+      <FormDialog
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-xl"
+      >
           <DialogHeader>
             <DialogTitle>Add opt-outs</DialogTitle>
             <DialogDescription>
@@ -715,8 +717,7 @@ export default function OptOutsPage() {
               />
             )}
           </div>
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
 
       <AlertDialog open={bulkDeleteConfirm} onOpenChange={setBulkDeleteConfirm}>
         <AlertDialogContent>
@@ -748,8 +749,11 @@ export default function OptOutsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Dialog open={deleteByBrandOpen} onOpenChange={setDeleteByBrandOpen}>
-        <DialogContent className="sm:max-w-md">
+      <FormDialog
+        open={deleteByBrandOpen}
+        onOpenChange={setDeleteByBrandOpen}
+        className="sm:max-w-md"
+      >
           <DialogHeader>
             <DialogTitle>Bulk delete by brand</DialogTitle>
             <DialogDescription>
@@ -796,8 +800,7 @@ export default function OptOutsPage() {
               </Button>
             </div>
           </div>
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
 
       {isAuthLoading ? (
         <p className="sr-only" aria-live="polite">

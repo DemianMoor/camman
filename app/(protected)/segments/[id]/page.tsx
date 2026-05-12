@@ -43,12 +43,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -844,27 +843,29 @@ export default function SegmentDetailPage() {
       </Tabs>
 
       {/* Edit segment dialog */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit segment</DialogTitle>
-            <DialogDescription>{segment.name}</DialogDescription>
-          </DialogHeader>
-          <SegmentForm
-            key={`edit-${segment.id}`}
-            mode="edit"
-            initialValues={{
-              name: segment.name,
-              segment_id: segment.segment_id,
-              original_name: segment.original_name ?? "",
-              segment_group_ids: segment.segment_groups.map((g) => g.id),
-            }}
-            onSubmit={handleEdit}
-            onCancel={() => setEditOpen(false)}
-            isSubmitting={updateApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>Edit segment</DialogTitle>
+          <DialogDescription>{segment.name}</DialogDescription>
+        </DialogHeader>
+        <SegmentForm
+          key={`edit-${segment.id}`}
+          mode="edit"
+          initialValues={{
+            name: segment.name,
+            segment_id: segment.segment_id,
+            original_name: segment.original_name ?? "",
+            segment_group_ids: segment.segment_groups.map((g) => g.id),
+          }}
+          onSubmit={handleEdit}
+          onCancel={() => setEditOpen(false)}
+          isSubmitting={updateApi.isLoading}
+        />
+      </FormDialog>
 
       {/* Archive / Restore / Delete confirm */}
       <AlertDialog

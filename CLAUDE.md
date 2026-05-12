@@ -106,6 +106,7 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 - Toasts via sonner.
 - Icons from lucide-react.
 - Filters in list views persisted to localStorage via a `usePersistedFilters` hook, keyed by route.
+- Form-containing dialogs prevent accidental dismissal via backdrop click or Escape. Use the shared `<FormDialog>` wrapper (`components/ui/form-dialog.tsx`) for any create/edit dialog, upload dialog, or any other dialog that takes user input beyond a single button press. Confirmation/`<AlertDialog>` dialogs retain default behavior. Read-only modals use the bare `<Dialog>` + `<DialogContent>` primitives.
 
 ## 10. File Organization
 

@@ -52,12 +52,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -1208,25 +1207,27 @@ export default function CampaignDetailPage() {
       </section>
 
       {/* ============ Dialogs ============ */}
-      <Dialog open={editCampaignOpen} onOpenChange={setEditCampaignOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Edit campaign</DialogTitle>
-            <DialogDescription>{campaign.name}</DialogDescription>
-          </DialogHeader>
-          <CampaignForm
-            key={`edit-${campaign.id}`}
-            mode="edit"
-            initialValues={editValues}
-            currentStatus={campaign.status}
-            onSubmitDraft={handleCampaignEdit}
-            onSubmitActivate={handleCampaignEdit}
-            onCancel={() => setEditCampaignOpen(false)}
-            isSubmittingDraft={false}
-            isSubmittingActivate={campaignUpdateApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={editCampaignOpen}
+        onOpenChange={setEditCampaignOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
+      >
+        <DialogHeader>
+          <DialogTitle>Edit campaign</DialogTitle>
+          <DialogDescription>{campaign.name}</DialogDescription>
+        </DialogHeader>
+        <CampaignForm
+          key={`edit-${campaign.id}`}
+          mode="edit"
+          initialValues={editValues}
+          currentStatus={campaign.status}
+          onSubmitDraft={handleCampaignEdit}
+          onSubmitActivate={handleCampaignEdit}
+          onCancel={() => setEditCampaignOpen(false)}
+          isSubmittingDraft={false}
+          isSubmittingActivate={campaignUpdateApi.isLoading}
+        />
+      </FormDialog>
 
       <StatusChangeDialog
         transition={campaignTransition}
@@ -1278,54 +1279,55 @@ export default function CampaignDetailPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Dialog open={addStageOpen} onOpenChange={setAddStageOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Add stage</DialogTitle>
-            <DialogDescription>
-              A new SMS send under {campaign.name}.
-            </DialogDescription>
-          </DialogHeader>
-          <StageForm
-            mode="create"
-            campaignId={campaign.id}
-            campaign={campaign}
-            onSubmit={handleStageCreate}
-            onCancel={() => setAddStageOpen(false)}
-            isSubmitting={stageCreateApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={addStageOpen}
+        onOpenChange={setAddStageOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
+      >
+        <DialogHeader>
+          <DialogTitle>Add stage</DialogTitle>
+          <DialogDescription>
+            A new SMS send under {campaign.name}.
+          </DialogDescription>
+        </DialogHeader>
+        <StageForm
+          mode="create"
+          campaignId={campaign.id}
+          campaign={campaign}
+          onSubmit={handleStageCreate}
+          onCancel={() => setAddStageOpen(false)}
+          isSubmitting={stageCreateApi.isLoading}
+        />
+      </FormDialog>
 
-      <Dialog
+      <FormDialog
         open={editingStage !== null}
         onOpenChange={(open) => {
           if (!open) setEditingStage(null);
         }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Edit stage</DialogTitle>
-            <DialogDescription>
-              {editingStage
-                ? `Stage ${editingStage.stage_number}${editingStage.label ? ` · ${editingStage.label}` : ""}`
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          {editingStage && editStageValues ? (
-            <StageForm
-              key={`edit-stage-${editingStage.id}`}
-              mode="edit"
-              campaignId={campaign.id}
-              campaign={campaign}
-              initialValues={editStageValues}
-              onSubmit={handleStageEdit}
-              onCancel={() => setEditingStage(null)}
-              isSubmitting={stageUpdateApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit stage</DialogTitle>
+          <DialogDescription>
+            {editingStage
+              ? `Stage ${editingStage.stage_number}${editingStage.label ? ` · ${editingStage.label}` : ""}`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {editingStage && editStageValues ? (
+          <StageForm
+            key={`edit-stage-${editingStage.id}`}
+            mode="edit"
+            campaignId={campaign.id}
+            campaign={campaign}
+            initialValues={editStageValues}
+            onSubmit={handleStageEdit}
+            onCancel={() => setEditingStage(null)}
+            isSubmitting={stageUpdateApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       <StageStatusChangeDialog
         transition={stageTransitionTarget?.transition ?? null}

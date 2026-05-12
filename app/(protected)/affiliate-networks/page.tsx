@@ -33,12 +33,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -520,54 +519,55 @@ export default function AffiliateNetworksPage() {
       )}
 
       {/* Create dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>New network</DialogTitle>
-            <DialogDescription>
-              Platforms where you source affiliate offers.
-            </DialogDescription>
-          </DialogHeader>
-          <NetworkForm
-            key="create"
-            mode="create"
-            onSubmit={handleCreate}
-            onCancel={() => setCreateOpen(false)}
-            isSubmitting={createApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>New network</DialogTitle>
+          <DialogDescription>
+            Platforms where you source affiliate offers.
+          </DialogDescription>
+        </DialogHeader>
+        <NetworkForm
+          key="create"
+          mode="create"
+          onSubmit={handleCreate}
+          onCancel={() => setCreateOpen(false)}
+          isSubmitting={createApi.isLoading}
+        />
+      </FormDialog>
 
       {/* Edit dialog */}
-      <Dialog
+      <FormDialog
         open={editing !== null}
         onOpenChange={(open) => {
           if (!open) setEditing(null);
         }}
+        className="sm:max-w-lg"
       >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit network</DialogTitle>
-            <DialogDescription>{editing ? editing.name : ""}</DialogDescription>
-          </DialogHeader>
-          {editing ? (
-            <NetworkForm
-              key={`edit-${editing.id}`}
-              mode="edit"
-              initialValues={{
-                name: editing.name,
-                network_id: editing.network_id,
-                url: editing.url ?? "",
-                avatar_url: editing.avatar_url ?? "",
-                color: editing.color ?? "",
-              }}
-              onSubmit={handleEdit}
-              onCancel={() => setEditing(null)}
-              isSubmitting={updateApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit network</DialogTitle>
+          <DialogDescription>{editing ? editing.name : ""}</DialogDescription>
+        </DialogHeader>
+        {editing ? (
+          <NetworkForm
+            key={`edit-${editing.id}`}
+            mode="edit"
+            initialValues={{
+              name: editing.name,
+              network_id: editing.network_id,
+              url: editing.url ?? "",
+              avatar_url: editing.avatar_url ?? "",
+              color: editing.color ?? "",
+            }}
+            onSubmit={handleEdit}
+            onCancel={() => setEditing(null)}
+            isSubmitting={updateApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       {/* Archive / Restore confirm */}
       <AlertDialog

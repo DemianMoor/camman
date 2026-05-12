@@ -33,12 +33,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -514,55 +513,56 @@ export default function ProvidersPage() {
       )}
 
       {/* Create dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>New provider</DialogTitle>
-            <DialogDescription>
-              Platforms you use to send SMS campaigns.
-            </DialogDescription>
-          </DialogHeader>
-          <ProviderForm
-            key="create"
-            mode="create"
-            onSubmit={handleCreate}
-            onCancel={() => setCreateOpen(false)}
-            isSubmitting={createApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>New provider</DialogTitle>
+          <DialogDescription>
+            Platforms you use to send SMS campaigns.
+          </DialogDescription>
+        </DialogHeader>
+        <ProviderForm
+          key="create"
+          mode="create"
+          onSubmit={handleCreate}
+          onCancel={() => setCreateOpen(false)}
+          isSubmitting={createApi.isLoading}
+        />
+      </FormDialog>
 
       {/* Edit dialog */}
-      <Dialog
+      <FormDialog
         open={editing !== null}
         onOpenChange={(open) => {
           if (!open) setEditing(null);
         }}
+        className="sm:max-w-lg"
       >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit provider</DialogTitle>
-            <DialogDescription>{editing ? editing.name : ""}</DialogDescription>
-          </DialogHeader>
-          {editing ? (
-            <ProviderForm
-              key={`edit-${editing.id}`}
-              mode="edit"
-              initialValues={{
-                name: editing.name,
-                sms_provider_id: editing.sms_provider_id,
-                short_link_supported: editing.short_link_supported,
-                short_link_example: editing.short_link_example ?? "",
-                avatar_url: editing.avatar_url ?? "",
-                color: editing.color ?? "",
-              }}
-              onSubmit={handleEdit}
-              onCancel={() => setEditing(null)}
-              isSubmitting={updateApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit provider</DialogTitle>
+          <DialogDescription>{editing ? editing.name : ""}</DialogDescription>
+        </DialogHeader>
+        {editing ? (
+          <ProviderForm
+            key={`edit-${editing.id}`}
+            mode="edit"
+            initialValues={{
+              name: editing.name,
+              sms_provider_id: editing.sms_provider_id,
+              short_link_supported: editing.short_link_supported,
+              short_link_example: editing.short_link_example ?? "",
+              avatar_url: editing.avatar_url ?? "",
+              color: editing.color ?? "",
+            }}
+            onSubmit={handleEdit}
+            onCancel={() => setEditing(null)}
+            isSubmitting={updateApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       <AlertDialog
         open={confirming !== null}

@@ -36,12 +36,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -684,7 +683,7 @@ export default function ContactsPage() {
         />
       )}
 
-      <Dialog
+      <FormDialog
         open={uploadOpen}
         onOpenChange={(open) => {
           setUploadOpen(open);
@@ -694,8 +693,8 @@ export default function ContactsPage() {
             setAssignGroupId(null);
           }
         }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-xl"
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>Upload contacts</DialogTitle>
             <DialogDescription>
@@ -807,8 +806,7 @@ export default function ContactsPage() {
               submitLabel="Upload contacts"
             />
           )}
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
 
       <AlertDialog
         open={confirming !== null}

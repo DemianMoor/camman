@@ -29,12 +29,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -631,66 +630,67 @@ export default function OffersPage() {
       )}
 
       {/* Create dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>New offer</DialogTitle>
-            <DialogDescription>
-              Affiliate products you promote through campaigns.
-            </DialogDescription>
-          </DialogHeader>
-          <OfferForm
-            key="create"
-            mode="create"
-            onSubmit={handleCreate}
-            onCancel={() => setCreateOpen(false)}
-            isSubmitting={createApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-xl"
+      >
+        <DialogHeader>
+          <DialogTitle>New offer</DialogTitle>
+          <DialogDescription>
+            Affiliate products you promote through campaigns.
+          </DialogDescription>
+        </DialogHeader>
+        <OfferForm
+          key="create"
+          mode="create"
+          onSubmit={handleCreate}
+          onCancel={() => setCreateOpen(false)}
+          isSubmitting={createApi.isLoading}
+        />
+      </FormDialog>
 
       {/* Edit dialog */}
-      <Dialog
+      <FormDialog
         open={editing !== null}
         onOpenChange={(open) => {
           if (!open) setEditing(null);
         }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-xl"
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Edit offer</DialogTitle>
-            <DialogDescription>{editing ? editing.name : ""}</DialogDescription>
-          </DialogHeader>
-          {editing ? (
-            <OfferForm
-              key={`edit-${editing.id}`}
-              mode="edit"
-              initialValues={{
-                name: editing.name,
-                offer_id: editing.offer_id,
-                postfix: editing.postfix ?? "",
-                base_url: editing.base_url ?? "",
-                network_id: editing.network_id,
-                payout_model: editing.payout_model,
-                payout_cpa:
-                  editing.payout_cpa != null
-                    ? Number(editing.payout_cpa)
-                    : undefined,
-                payout_revshare:
-                  editing.payout_revshare != null
-                    ? Number(editing.payout_revshare)
-                    : undefined,
-                sales_pages: editing.sales_pages ?? [],
-                avatar_url: editing.avatar_url ?? "",
-                color: editing.color ?? "",
-              }}
-              onSubmit={handleEdit}
-              onCancel={() => setEditing(null)}
-              isSubmitting={updateApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit offer</DialogTitle>
+          <DialogDescription>{editing ? editing.name : ""}</DialogDescription>
+        </DialogHeader>
+        {editing ? (
+          <OfferForm
+            key={`edit-${editing.id}`}
+            mode="edit"
+            initialValues={{
+              name: editing.name,
+              offer_id: editing.offer_id,
+              postfix: editing.postfix ?? "",
+              base_url: editing.base_url ?? "",
+              network_id: editing.network_id,
+              payout_model: editing.payout_model,
+              payout_cpa:
+                editing.payout_cpa != null
+                  ? Number(editing.payout_cpa)
+                  : undefined,
+              payout_revshare:
+                editing.payout_revshare != null
+                  ? Number(editing.payout_revshare)
+                  : undefined,
+              sales_pages: editing.sales_pages ?? [],
+              avatar_url: editing.avatar_url ?? "",
+              color: editing.color ?? "",
+            }}
+            onSubmit={handleEdit}
+            onCancel={() => setEditing(null)}
+            isSubmitting={updateApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       {/* Archive / Restore confirm */}
       <AlertDialog

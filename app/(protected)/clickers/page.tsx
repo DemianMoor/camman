@@ -32,12 +32,11 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -608,8 +607,11 @@ export default function ClickersPage() {
         />
       )}
 
-      <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
+      <FormDialog
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-xl"
+      >
           <DialogHeader>
             <DialogTitle>Add clickers</DialogTitle>
             <DialogDescription>
@@ -738,8 +740,7 @@ export default function ClickersPage() {
               />
             )}
           </div>
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
 
       <AlertDialog open={bulkDeleteConfirm} onOpenChange={setBulkDeleteConfirm}>
         <AlertDialogContent>

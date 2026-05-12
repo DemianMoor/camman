@@ -42,12 +42,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -969,28 +968,30 @@ export default function CampaignsPage() {
       )}
 
       {/* Create dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>New campaign</DialogTitle>
-            <DialogDescription>
-              Set the brand and offer, pick an audience, and launch — or save
-              as a draft to fill in details later.
-            </DialogDescription>
-          </DialogHeader>
-          <CampaignForm
-            mode="create"
-            onSubmitDraft={handleCreateDraft}
-            onSubmitActivate={handleCreateActivate}
-            onCancel={() => setCreateOpen(false)}
-            isSubmittingDraft={createApi.isLoading}
-            isSubmittingActivate={activateApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
+      >
+        <DialogHeader>
+          <DialogTitle>New campaign</DialogTitle>
+          <DialogDescription>
+            Set the brand and offer, pick an audience, and launch — or save
+            as a draft to fill in details later.
+          </DialogDescription>
+        </DialogHeader>
+        <CampaignForm
+          mode="create"
+          onSubmitDraft={handleCreateDraft}
+          onSubmitActivate={handleCreateActivate}
+          onCancel={() => setCreateOpen(false)}
+          isSubmittingDraft={createApi.isLoading}
+          isSubmittingActivate={activateApi.isLoading}
+        />
+      </FormDialog>
 
       {/* Edit dialog */}
-      <Dialog
+      <FormDialog
         open={editing !== null}
         onOpenChange={(open) => {
           if (!open) {
@@ -998,32 +999,31 @@ export default function CampaignsPage() {
             setEditingValues(null);
           }
         }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Edit campaign</DialogTitle>
-            <DialogDescription>
-              {editing ? editing.name : ""}
-            </DialogDescription>
-          </DialogHeader>
-          {editing && editingValues ? (
-            <CampaignForm
-              key={`edit-${editing.id}`}
-              mode="edit"
-              initialValues={editingValues}
-              currentStatus={editing.status}
-              onSubmitDraft={handleEditSubmit}
-              onSubmitActivate={handleEditSubmit}
-              onCancel={() => {
-                setEditing(null);
-                setEditingValues(null);
-              }}
-              isSubmittingDraft={false}
-              isSubmittingActivate={updateApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit campaign</DialogTitle>
+          <DialogDescription>
+            {editing ? editing.name : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {editing && editingValues ? (
+          <CampaignForm
+            key={`edit-${editing.id}`}
+            mode="edit"
+            initialValues={editingValues}
+            currentStatus={editing.status}
+            onSubmitDraft={handleEditSubmit}
+            onSubmitActivate={handleEditSubmit}
+            onCancel={() => {
+              setEditing(null);
+              setEditingValues(null);
+            }}
+            isSubmittingDraft={false}
+            isSubmittingActivate={updateApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       {/* Status transition dialog */}
       <StatusChangeDialog

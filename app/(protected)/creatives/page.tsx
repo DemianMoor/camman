@@ -39,12 +39,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -801,58 +800,59 @@ export default function CreativesPage() {
         />
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>New creative</DialogTitle>
-            <DialogDescription>
-              SMS copy linked to an offer, optionally scoped to a provider and
-              brand.
-            </DialogDescription>
-          </DialogHeader>
-          <CreativeForm
-            key="create"
-            mode="create"
-            onSubmit={handleCreate}
-            onCancel={() => setCreateOpen(false)}
-            isSubmitting={createApi.isLoading}
-          />
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
+      >
+        <DialogHeader>
+          <DialogTitle>New creative</DialogTitle>
+          <DialogDescription>
+            SMS copy linked to an offer, optionally scoped to a provider and
+            brand.
+          </DialogDescription>
+        </DialogHeader>
+        <CreativeForm
+          key="create"
+          mode="create"
+          onSubmit={handleCreate}
+          onCancel={() => setCreateOpen(false)}
+          isSubmitting={createApi.isLoading}
+        />
+      </FormDialog>
 
-      <Dialog
+      <FormDialog
         open={editing !== null}
         onOpenChange={(open) => {
           if (!open) setEditing(null);
         }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Edit creative</DialogTitle>
-            <DialogDescription>
-              {editing ? `Slug: ${editing.slug}` : ""}
-            </DialogDescription>
-          </DialogHeader>
-          {editing ? (
-            <CreativeForm
-              key={`edit-${editing.id}`}
-              mode="edit"
-              slug={editing.slug}
-              currentStatus={editing.status}
-              initialValues={{
-                offer_id: editing.offer_id,
-                sms_provider_id: editing.sms_provider_id,
-                brand_id: editing.brand_id,
-                text: editing.text,
-                creative_id: editing.creative_id ?? "",
-              }}
-              onSubmit={handleEdit}
-              onCancel={() => setEditing(null)}
-              isSubmitting={updateApi.isLoading}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        <DialogHeader>
+          <DialogTitle>Edit creative</DialogTitle>
+          <DialogDescription>
+            {editing ? `Slug: ${editing.slug}` : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {editing ? (
+          <CreativeForm
+            key={`edit-${editing.id}`}
+            mode="edit"
+            slug={editing.slug}
+            currentStatus={editing.status}
+            initialValues={{
+              offer_id: editing.offer_id,
+              sms_provider_id: editing.sms_provider_id,
+              brand_id: editing.brand_id,
+              text: editing.text,
+              creative_id: editing.creative_id ?? "",
+            }}
+            onSubmit={handleEdit}
+            onCancel={() => setEditing(null)}
+            isSubmitting={updateApi.isLoading}
+          />
+        ) : null}
+      </FormDialog>
 
       <AlertDialog
         open={confirming !== null}

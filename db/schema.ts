@@ -337,3 +337,66 @@ export const traffic_types = pgTable(
 
 export type TrafficType = typeof traffic_types.$inferSelect;
 export type NewTrafficType = typeof traffic_types.$inferInsert;
+
+export const utm_tags = pgTable(
+  "utm_tags",
+  {
+    id: serial("id").primaryKey(),
+    tag_id: text("tag_id").notNull().unique(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    value_source: text("value_source").notNull(),
+    affiliate_network_id: integer("affiliate_network_id").references(
+      () => affiliate_networks.id,
+      { onDelete: "set null" },
+    ),
+    color: text("color"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("utm_tags_org_id_idx").on(table.org_id),
+    index("utm_tags_affiliate_network_id_idx").on(table.affiliate_network_id),
+    check(
+      "utm_tags_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type UtmTag = typeof utm_tags.$inferSelect;
+export type NewUtmTag = typeof utm_tags.$inferInsert;
+
+export const segment_groups = pgTable(
+  "segment_groups",
+  {
+    id: serial("id").primaryKey(),
+    segment_group_id: text("segment_group_id").notNull().unique(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    color: text("color"),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("segment_groups_org_id_idx").on(table.org_id),
+    check(
+      "segment_groups_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type SegmentGroup = typeof segment_groups.$inferSelect;
+export type NewSegmentGroup = typeof segment_groups.$inferInsert;

@@ -46,6 +46,16 @@ export type Permission =
   | "traffic_types.update"
   | "traffic_types.archive"
   | "traffic_types.restore"
+  | "utm_tags.view"
+  | "utm_tags.create"
+  | "utm_tags.update"
+  | "utm_tags.archive"
+  | "utm_tags.restore"
+  | "segment_groups.view"
+  | "segment_groups.create"
+  | "segment_groups.update"
+  | "segment_groups.archive"
+  | "segment_groups.restore"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -73,6 +83,8 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "provider_phones.view",
   "routing_types.view",
   "traffic_types.view",
+  "utm_tags.view",
+  "segment_groups.view",
   "registry.view",
 ]);
 
@@ -108,6 +120,14 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "traffic_types.update",
   "traffic_types.archive",
   "traffic_types.restore",
+  "utm_tags.create",
+  "utm_tags.update",
+  "utm_tags.archive",
+  "utm_tags.restore",
+  "segment_groups.create",
+  "segment_groups.update",
+  "segment_groups.archive",
+  "segment_groups.restore",
   "registry.create",
   "registry.update",
   "registry.archive",

@@ -9,12 +9,14 @@ import {
   CheckCircle2,
   ChevronDown,
   Download,
+  History,
   MoreHorizontal,
   Pause,
   Pencil,
   Play,
   Plus,
   Send,
+  Upload,
 } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -26,6 +28,8 @@ import {
   type AudienceFilters,
   type CampaignFormValues,
 } from "@/components/campaigns/campaign-form";
+import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
+import { ResultsImportForm } from "@/components/campaigns/results-import-form";
 import { StageForm, type StageFormValues } from "@/components/campaigns/stage-form";
 import {
   StageStatusChangeDialog,
@@ -404,6 +408,8 @@ export default function CampaignDetailPage() {
     kind: "archive" | "restore";
     stage: Stage;
   } | null>(null);
+  const [importStage, setImportStage] = useState<Stage | null>(null);
+  const [historyStage, setHistoryStage] = useState<Stage | null>(null);
 
   const canUpdateCampaign = can("campaigns.update");
   const canActivate = can("campaigns.activate");
@@ -416,6 +422,8 @@ export default function CampaignDetailPage() {
   const canSendStage = can("stages.send");
   const canArchiveStage = can("stages.archive");
   const canRestoreStage = can("stages.restore");
+  const canImportResults = can("result_imports.create");
+  const canViewImports = can("result_imports.view");
 
   // ============ Handlers ============
 
@@ -818,6 +826,18 @@ export default function CampaignDetailPage() {
                   >
                     <Download className="size-4" aria-hidden /> Export phones (CSV)
                   </DropdownMenuItem>
+                  {canImportResults ? (
+                    <DropdownMenuItem onSelect={() => setImportStage(s)}>
+                      <Upload className="size-4" aria-hidden /> Import results
+                      (CSV)
+                    </DropdownMenuItem>
+                  ) : null}
+                  {canViewImports ? (
+                    <DropdownMenuItem onSelect={() => setHistoryStage(s)}>
+                      <History className="size-4" aria-hidden /> View import
+                      history
+                    </DropdownMenuItem>
+                  ) : null}
                   {(showArchive || showRestore) ? (
                     <DropdownMenuSeparator />
                   ) : null}
@@ -846,7 +866,15 @@ export default function CampaignDetailPage() {
         },
       },
     ],
-    [campaignId, canUpdateStage, canArchiveStage, canRestoreStage, canSendStage],
+    [
+      campaignId,
+      canUpdateStage,
+      canArchiveStage,
+      canRestoreStage,
+      canSendStage,
+      canImportResults,
+      canViewImports,
+    ],
   );
 
   if (!auth) return null;
@@ -1356,6 +1384,29 @@ export default function CampaignDetailPage() {
             campaignId={campaign.id}
             stageId={editingStage.id}
             campaign={campaign}
+            resultsCounters={{
+              sms_count: editingStage.sms_count,
+              delivered_count: editingStage.delivered_count,
+              opt_out_count: editingStage.opt_out_count,
+              click_count: editingStage.click_count,
+              total_cost: editingStage.total_cost,
+            }}
+            onImportResults={
+              canImportResults
+                ? () => {
+                    setImportStage(editingStage);
+                    setEditingStage(null);
+                  }
+                : undefined
+            }
+            onViewImportHistory={
+              canViewImports
+                ? () => {
+                    setHistoryStage(editingStage);
+                    setEditingStage(null);
+                  }
+                : undefined
+            }
             initialValues={editStageValues}
             onSubmit={handleStageEdit}
             onCancel={() => setEditingStage(null)}
@@ -1417,6 +1468,76 @@ export default function CampaignDetailPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Import results — multi-step long-flow form, FormDialog gates dismissal */}
+      <FormDialog
+        open={importStage !== null}
+        onOpenChange={(open) => {
+          if (!open) setImportStage(null);
+        }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-4xl"
+      >
+        <DialogHeader>
+          <DialogTitle>Import results (CSV)</DialogTitle>
+          <DialogDescription>
+            {importStage
+              ? `Stage ${importStage.stage_number}${importStage.label ? ` · ${importStage.label}` : ""}`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {importStage ? (
+          <ResultsImportForm
+            key={`import-${importStage.id}`}
+            campaignId={campaignId}
+            stageId={importStage.id}
+            stage={{
+              stage_number: importStage.stage_number,
+              sms_provider_id: importStage.sms_provider_id,
+              provider: importStage.provider,
+            }}
+            onClose={() => setImportStage(null)}
+            onComplete={() => {
+              refetchCampaign();
+              refetchStages();
+            }}
+          />
+        ) : null}
+      </FormDialog>
+
+      {/* Import history */}
+      <FormDialog
+        open={historyStage !== null}
+        onOpenChange={(open) => {
+          if (!open) setHistoryStage(null);
+        }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
+      >
+        <DialogHeader>
+          <DialogTitle>Import history</DialogTitle>
+          <DialogDescription>
+            {historyStage
+              ? `Stage ${historyStage.stage_number}${historyStage.label ? ` · ${historyStage.label}` : ""}`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {historyStage ? (
+          <ImportHistoryDialog
+            key={`history-${historyStage.id}`}
+            campaignId={campaignId}
+            stageId={historyStage.id}
+            stageNumber={historyStage.stage_number}
+            members={members.map((m) => ({
+              user_id: m.id,
+              display_name: m.display_name,
+            }))}
+            onClose={() => setHistoryStage(null)}
+            onReverted={() => {
+              refetchCampaign();
+              refetchStages();
+            }}
+          />
+        ) : null}
+      </FormDialog>
     </div>
   );
 }

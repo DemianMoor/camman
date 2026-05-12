@@ -107,6 +107,13 @@ export type Permission =
   | "registry.create"
   | "registry.update"
   | "registry.archive"
+  | "result_imports.view"
+  | "result_imports.create"
+  | "result_imports.revert"
+  | "import_mappings.view"
+  | "import_mappings.create"
+  | "import_mappings.update"
+  | "import_mappings.delete"
   | "users.manage"
   | "org.delete";
 
@@ -142,6 +149,8 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "campaigns.view",
   "stages.view",
   "registry.view",
+  "result_imports.view",
+  "import_mappings.view",
 ]);
 
 const operatorPerms: ReadonlySet<Permission> = new Set([
@@ -170,6 +179,9 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "stages.update",
   "stages.send",
   "stages.archive",
+  "result_imports.create",
+  "import_mappings.create",
+  "import_mappings.update",
 ]);
 
 const managerPerms: ReadonlySet<Permission> = new Set([
@@ -227,6 +239,8 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "registry.create",
   "registry.update",
   "registry.archive",
+  "result_imports.revert",
+  "import_mappings.delete",
 ]);
 
 const adminPerms: ReadonlySet<Permission> = new Set([

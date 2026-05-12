@@ -98,6 +98,17 @@ export interface StageFormProps {
     offer: OfferInfo | null;
     audience_snapshot_count: number;
   };
+  // Edit-mode-only: current results counters + handlers for the inline
+  // Results section. Omit for create mode.
+  resultsCounters?: {
+    sms_count: number;
+    delivered_count: number;
+    opt_out_count: number;
+    click_count: number;
+    total_cost: string;
+  };
+  onImportResults?: () => void;
+  onViewImportHistory?: () => void;
   initialValues?: Partial<StageFormValues>;
   onSubmit: (values: StageFormValues) => Promise<void>;
   onCancel: () => void;
@@ -127,6 +138,9 @@ export function StageForm({
   campaignId,
   stageId,
   campaign,
+  resultsCounters,
+  onImportResults,
+  onViewImportHistory,
   initialValues,
   onSubmit,
   onCancel,
@@ -685,6 +699,65 @@ export function StageForm({
           </Card>
         </section>
 
+        {isEdit && resultsCounters ? (
+          <>
+            <Separator />
+            {/* ============ Results ============ */}
+            <section className="grid gap-3">
+              <div className="flex items-center justify-between gap-3">
+                <SectionHeader title="Results" />
+                <div className="flex items-center gap-2">
+                  {onViewImportHistory ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={onViewImportHistory}
+                    >
+                      View import history →
+                    </Button>
+                  ) : null}
+                  {onImportResults ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={onImportResults}
+                    >
+                      Import results (CSV) →
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+              <Card>
+                <CardContent className="grid grid-cols-2 gap-3 pt-6 text-sm sm:grid-cols-5">
+                  <ResultMetric
+                    label="SMS sent"
+                    value={resultsCounters.sms_count}
+                  />
+                  <ResultMetric
+                    label="Delivered"
+                    value={resultsCounters.delivered_count}
+                  />
+                  <ResultMetric
+                    label="Opt-outs"
+                    value={resultsCounters.opt_out_count}
+                  />
+                  <ResultMetric
+                    label="Clickers"
+                    value={resultsCounters.click_count}
+                  />
+                  <ResultMetric
+                    label="Total cost"
+                    value={`$${Number(resultsCounters.total_cost).toFixed(2)}`}
+                    raw
+                  />
+                </CardContent>
+              </Card>
+            </section>
+          </>
+        ) : null}
+
         <Separator />
 
         {/* ============ Scheduling ============ */}
@@ -756,6 +829,29 @@ export function StageForm({
 
 function SectionHeader({ title }: { title: string }) {
   return <h3 className="text-sm font-semibold text-foreground">{title}</h3>;
+}
+
+function ResultMetric({
+  label,
+  value,
+  raw = false,
+}: {
+  label: string;
+  value: number | string;
+  raw?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-xs uppercase text-muted-foreground">{label}</div>
+      <div className="font-mono text-lg tabular-nums">
+        {raw
+          ? String(value)
+          : typeof value === "number"
+            ? value.toLocaleString()
+            : value}
+      </div>
+    </div>
+  );
 }
 
 function FilterToggle({

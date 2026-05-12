@@ -942,3 +942,156 @@ export type CampaignAudiencePool =
   typeof campaign_audience_pool.$inferSelect;
 export type NewCampaignAudiencePool =
   typeof campaign_audience_pool.$inferInsert;
+
+// ============ Stage results imports ============
+// Per-provider column-mapping templates. Each provider ships a different
+// CSV; users configure the mapping once and reuse it. is_default is enforced
+// to be unique per (org, provider) via a partial unique index.
+export const result_import_mappings = pgTable(
+  "result_import_mappings",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    sms_provider_id: integer("sms_provider_id")
+      .notNull()
+      .references(() => sms_providers.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    is_default: boolean("is_default").notNull().default(false),
+    mapping: jsonb("mapping").notNull(),
+    status_value_map: jsonb("status_value_map"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("result_import_mappings_org_provider_idx").on(
+      table.org_id,
+      table.sms_provider_id,
+    ),
+  ],
+);
+
+export type ResultImportMapping = typeof result_import_mappings.$inferSelect;
+export type NewResultImportMapping =
+  typeof result_import_mappings.$inferInsert;
+
+// One row per import event. Permanent (no hard delete) so the audit trail
+// survives even after revert. reverted_at + reverted_by_user_id are set on
+// revert; the related stage_result_rows are deleted (via CASCADE on the
+// revert path's delete from stage_result_rows).
+export const stage_results_imports = pgTable(
+  "stage_results_imports",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    imported_by_user_id: uuid("imported_by_user_id").references(
+      () => authUsers.id,
+      { onDelete: "set null" },
+    ),
+    mapping_id: integer("mapping_id").references(
+      () => result_import_mappings.id,
+      { onDelete: "set null" },
+    ),
+    filename: text("filename"),
+    submitted_rows: integer("submitted_rows").notNull(),
+    processed_rows: integer("processed_rows").notNull(),
+    delivered_added: integer("delivered_added").notNull().default(0),
+    failed_added: integer("failed_added").notNull().default(0),
+    optouts_added: integer("optouts_added").notNull().default(0),
+    clickers_added: integer("clickers_added").notNull().default(0),
+    total_cost_added: numeric("total_cost_added", { precision: 12, scale: 4 })
+      .notNull()
+      .default("0"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    reverted_at: timestamp("reverted_at", { withTimezone: true }),
+    reverted_by_user_id: uuid("reverted_by_user_id").references(
+      () => authUsers.id,
+      { onDelete: "set null" },
+    ),
+  },
+  (table) => [
+    index("stage_results_imports_org_stage_created_idx").on(
+      table.org_id,
+      table.stage_id,
+      table.created_at,
+    ),
+  ],
+);
+
+export type StageResultsImport = typeof stage_results_imports.$inferSelect;
+export type NewStageResultsImport =
+  typeof stage_results_imports.$inferInsert;
+
+// Per-row record of what an import wrote. UNIQUE(stage_id, phone_number)
+// is the dedup key: re-importing the same CSV will hit conflicts and skip.
+// created_opt_out_id / created_clicker_id reference the resulting opt_out
+// or clicker — either newly inserted by this import OR pre-existing (e.g.
+// a prior import already created it). On revert, the opt_out/clicker is
+// kept if any other non-reverted row still references it; otherwise it's
+// deleted alongside this row. This is the cross-import preservation rule.
+export const stage_result_rows = pgTable(
+  "stage_result_rows",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    import_id: integer("import_id")
+      .notNull()
+      .references(() => stage_results_imports.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    phone_number: text("phone_number").notNull(),
+    contact_id: uuid("contact_id").references(() => contacts.id, {
+      onDelete: "set null",
+    }),
+    outcome: text("outcome").notNull(),
+    cost: numeric("cost", { precision: 12, scale: 4 }),
+    raw_row: jsonb("raw_row"),
+    created_opt_out_id: integer("created_opt_out_id").references(
+      () => opt_outs.id,
+      { onDelete: "set null" },
+    ),
+    created_clicker_id: integer("created_clicker_id").references(
+      () => clickers.id,
+      { onDelete: "set null" },
+    ),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("stage_result_rows_stage_phone_unique").on(
+      table.stage_id,
+      table.phone_number,
+    ),
+    index("stage_result_rows_import_id_idx").on(table.import_id),
+    index("stage_result_rows_stage_outcome_idx").on(
+      table.stage_id,
+      table.outcome,
+    ),
+    check(
+      "stage_result_rows_outcome_check",
+      sql`${table.outcome} IN ('delivered', 'failed', 'optout', 'clicker', 'noop')`,
+    ),
+  ],
+);
+
+export type StageResultRow = typeof stage_result_rows.$inferSelect;
+export type NewStageResultRow = typeof stage_result_rows.$inferInsert;

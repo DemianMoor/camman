@@ -135,6 +135,7 @@ These are sticky. Don't deviate without asking.
   - **Affiliate Networks** — flat entity. List shows `offer_count` aggregate (left-joined count of active offers).
   - **SMS Providers + Provider Phones** — parent/child. Providers list → detail page (`/providers/[id]`). Detail page manages child phones in-place with multi-status filter, StatusDropdown per row, separate Add/Edit dialogs, Archive/Restore via AlertDialog. Server-side phone validation via libphonenumber-js (raw input → E.164 + country_code + dial_code + local_number). 4-state status machine with `/status` endpoint enforcing the no-status-change-while-archived rule.
 - **Diagnostic/test scripts** in `scripts/`: connection test, foundation schema verify, security-layer verify, offers+networks schema verify, providers+phones schema verify, **migration integrity** verify (compares DB hashes against file content + snapshot chain), signup-trigger E2E, RLS-isolation E2E, per-entity API E2E tests.
+- **Step 8a — Spam scoring foundation** (this step): append-only `spam_scores` cache table, pluggable provider abstraction (`lib/spam/`), `SelfHostedClassifierProvider` calling Cloud Run, `POST /api/spam/score` + `GET /api/spam/health`, `/spam-debug` page. No Creatives/Campaigns wiring yet (8b/8c). Normalization in `lib/spam/normalize.ts` must stay in sync with the classifier's Python `src/data/normalize.py`.
 
 ## 8. What's Next
 

@@ -10,6 +10,7 @@ import {
   pgSchema,
   pgTable,
   primaryKey,
+  real,
   serial,
   text,
   timestamp,
@@ -1126,3 +1127,50 @@ export const stage_result_rows = pgTable(
 
 export type StageResultRow = typeof stage_result_rows.$inferSelect;
 export type NewStageResultRow = typeof stage_result_rows.$inferInsert;
+
+// ============ Spam scoring cache ============
+// Append-only cache keyed by (org_id, text_hash, provider). Re-scoring the
+// same text is a cache hit unless force=true. Different providers can
+// score the same text independently. See lib/spam/.
+export const spam_scores = pgTable(
+  "spam_scores",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    text_hash: text("text_hash").notNull(),
+    text_length: integer("text_length").notNull(),
+    score: integer("score").notNull(),
+    label: text("label").notNull(),
+    confidence: real("confidence"),
+    provider: text("provider").notNull(),
+    model_version: text("model_version"),
+    raw_response: jsonb("raw_response"),
+    latency_ms: integer("latency_ms"),
+    error: text("error"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("spam_scores_org_hash_provider_unique").on(
+      table.org_id,
+      table.text_hash,
+      table.provider,
+    ),
+    index("spam_scores_org_created_idx").on(table.org_id, table.created_at),
+    index("spam_scores_score_idx").on(table.score),
+    check(
+      "spam_scores_score_check",
+      sql`${table.score} >= 0 AND ${table.score} <= 100`,
+    ),
+    check(
+      "spam_scores_label_check",
+      sql`${table.label} IN ('ham', 'suspicious', 'spam')`,
+    ),
+  ],
+);
+
+export type SpamScore = typeof spam_scores.$inferSelect;
+export type NewSpamScore = typeof spam_scores.$inferInsert;

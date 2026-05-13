@@ -190,6 +190,20 @@
       "when": 1778686537130,
       "tag": "0026_creatives_redesign",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1778705883837,
+      "tag": "0027_spam_scores",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1778705913526,
+      "tag": "0028_spam_scores_rls",
+      "breakpoints": true
     }
   ]
 }

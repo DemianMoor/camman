@@ -6,6 +6,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 
+import { SpamCheckStrip } from "@/components/spam/spam-check-strip";
 import { Button } from "@/components/ui/button";
 import {
   Form,
@@ -92,6 +93,14 @@ export interface CreativeFormProps {
   initialValues?: Partial<CreativeFormValues>;
   // Edit-mode extras displayed read-only
   slug?: string;
+  // If the creative was scored previously (e.g. surfaced by the list endpoint's
+  // cache join), pass it here so the strip prefills with the known score.
+  initialSpamResult?: {
+    score: number;
+    label: "ham" | "suspicious" | "spam";
+    verdict: "spam" | "not_spam";
+    textHash: string;
+  } | null;
   onSubmit: (values: CreativeFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
@@ -101,6 +110,7 @@ export function CreativeForm({
   mode,
   initialValues,
   slug,
+  initialSpamResult,
   onSubmit,
   onCancel,
   isSubmitting,
@@ -237,6 +247,16 @@ export function CreativeForm({
                   stop text.
                 </FormDescription>
               ) : null}
+              <SpamCheckStrip
+                text={text ?? ""}
+                initialResult={
+                  initialSpamResult
+                    ? { ...initialSpamResult, cached: true, latencyMs: 0, error: null }
+                    : null
+                }
+                disabled={isSubmitting}
+                className="pt-1"
+              />
               <FormMessage />
             </FormItem>
           )}

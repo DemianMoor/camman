@@ -94,6 +94,11 @@ type Creative = {
   created_at: string;
   offers: Info[];
   campaign_count: number;
+  // Cached spam score from the list endpoint. Null when unscored.
+  spam_score: number | null;
+  spam_label: "ham" | "suspicious" | "spam" | null;
+  spam_verdict: "spam" | "not_spam" | null;
+  spam_text_hash: string | null;
 };
 
 type ListResponse = { data: Creative[]; totalCount: number };
@@ -818,6 +823,19 @@ export default function CreativesPage() {
               applies_to_all_offers: editing.applies_to_all_offers,
               offer_ids: editing.offers.map((o) => o.id),
             }}
+            initialSpamResult={
+              editing.spam_score !== null &&
+              editing.spam_label !== null &&
+              editing.spam_verdict !== null &&
+              editing.spam_text_hash !== null
+                ? {
+                    score: editing.spam_score,
+                    label: editing.spam_label,
+                    verdict: editing.spam_verdict,
+                    textHash: editing.spam_text_hash,
+                  }
+                : null
+            }
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}
             isSubmitting={updateApi.isLoading}

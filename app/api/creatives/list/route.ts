@@ -13,7 +13,9 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { creative_offers, creatives, offers } from "@/db/schema";
+import { creative_offers, creatives, offers, spam_scores } from "@/db/schema";
+import { hashText } from "@/lib/spam/normalize";
+import { deriveVerdict } from "@/lib/spam/types";
 import {
   apiError,
   parseListParams,
@@ -189,11 +191,62 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const data = rows.map((r) => ({
-    ...r,
-    offers: offersByCreative.get(r.id) ?? [],
-    campaign_count: 0, // TODO: wire to real campaign references once those exist
-  }));
+  // Look up cached spam scores by text hash. We only surface scores that
+  // already exist — listing does NOT trigger scoring (which costs money).
+  // The provider name is kept in sync with SelfHostedClassifierProvider.name;
+  // when we add more providers this'll need to read from the registry.
+  const CURRENT_PROVIDER =
+    (process.env.SPAM_PROVIDER ?? "classifier") === "classifier"
+      ? "classifier-v1"
+      : (process.env.SPAM_PROVIDER ?? "classifier");
+
+  const hashByRowId = new Map<number, string>();
+  for (const r of rows) hashByRowId.set(r.id, hashText(r.text));
+  const uniqueHashes = Array.from(new Set(hashByRowId.values()));
+
+  type SpamCache = {
+    text_hash: string;
+    score: number;
+    label: "ham" | "suspicious" | "spam";
+  };
+  const spamByHash = new Map<string, SpamCache>();
+  if (uniqueHashes.length > 0) {
+    const found = await db
+      .select({
+        text_hash: spam_scores.text_hash,
+        score: spam_scores.score,
+        label: spam_scores.label,
+      })
+      .from(spam_scores)
+      .where(
+        and(
+          eq(spam_scores.org_id, orgId),
+          eq(spam_scores.provider, CURRENT_PROVIDER),
+          inArray(spam_scores.text_hash, uniqueHashes),
+        ),
+      );
+    for (const f of found) {
+      spamByHash.set(f.text_hash, {
+        text_hash: f.text_hash,
+        score: f.score,
+        label: f.label as "ham" | "suspicious" | "spam",
+      });
+    }
+  }
+
+  const data = rows.map((r) => {
+    const hash = hashByRowId.get(r.id);
+    const spam = hash ? spamByHash.get(hash) ?? null : null;
+    return {
+      ...r,
+      offers: offersByCreative.get(r.id) ?? [],
+      campaign_count: 0, // TODO: wire to real campaign references once those exist
+      spam_score: spam ? spam.score : null,
+      spam_label: spam ? spam.label : null,
+      spam_verdict: spam ? deriveVerdict(spam.score) : null,
+      spam_text_hash: spam ? spam.text_hash : null,
+    };
+  });
 
   return NextResponse.json({
     data,

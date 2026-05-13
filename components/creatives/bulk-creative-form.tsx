@@ -16,6 +16,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
+import { SpamCheckStrip } from "@/components/spam/spam-check-strip";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
@@ -322,6 +323,11 @@ export function BulkCreativeForm({
                   </span>
                 ) : null}
               </div>
+              <SpamCheckStrip
+                text={row.text}
+                disabled={isSubmitting}
+                className="pt-2"
+              />
               {err ? (
                 <p className="pt-1 text-xs text-destructive">{err}</p>
               ) : null}

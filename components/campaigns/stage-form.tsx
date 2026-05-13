@@ -53,6 +53,10 @@ type Creative = {
   slug: string;
   text: string;
   status: string;
+  // Cached spam score, surfaced by the list endpoint. Null when the
+  // creative hasn't been scored yet.
+  spam_score: number | null;
+  spam_verdict: "spam" | "not_spam" | null;
 };
 type Provider = {
   id: number;
@@ -372,6 +376,10 @@ export function StageForm({
                     {creatives.map((c) => (
                       <SelectItem key={c.id} value={String(c.id)}>
                         <span className="inline-flex items-center gap-2">
+                          <SpamScoreDot
+                            score={c.spam_score}
+                            verdict={c.spam_verdict}
+                          />
                           <span className="font-mono text-xs">{c.slug}</span>
                           <span className="truncate text-xs text-muted-foreground">
                             {c.text.slice(0, 50)}
@@ -383,8 +391,10 @@ export function StageForm({
                   </SelectContent>
                 </Select>
                 <FormDescription>
-                  Only creatives in the &quot;ready&quot; state and tied to
-                  this campaign&apos;s offer are shown.
+                  Active creatives tied to this campaign&apos;s offer (or
+                  marked &quot;applies to all offers&quot;) are shown. Spam
+                  score dot · number = cached score; missing means
+                  unscored.
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -831,6 +841,51 @@ export function StageForm({
 
 function SectionHeader({ title }: { title: string }) {
   return <h3 className="text-sm font-semibold text-foreground">{title}</h3>;
+}
+
+// Renders a small color dot + score number for the creative picker.
+// Green = not_spam, red = spam, gray = no cached score yet.
+function SpamScoreDot({
+  score,
+  verdict,
+}: {
+  score: number | null;
+  verdict: "spam" | "not_spam" | null;
+}) {
+  if (score === null) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+        title="Not scored yet"
+      >
+        <span className="size-2 rounded-full bg-muted-foreground/30" aria-hidden />
+        <span className="font-mono">—</span>
+      </span>
+    );
+  }
+  const isSpam = verdict === "spam";
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-xs"
+      title={`Spam score: ${score}/100 (${isSpam ? "SPAM" : "NOT SPAM"})`}
+    >
+      <span
+        className={cn(
+          "size-2 rounded-full",
+          isSpam ? "bg-red-500" : "bg-green-500",
+        )}
+        aria-hidden
+      />
+      <span
+        className={cn(
+          "font-mono tabular-nums",
+          isSpam ? "text-red-700 dark:text-red-300" : "text-green-700 dark:text-green-300",
+        )}
+      >
+        {score}
+      </span>
+    </span>
+  );
 }
 
 function ResultMetric({

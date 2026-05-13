@@ -109,6 +109,8 @@ export type Permission =
   | "result_imports.view"
   | "result_imports.create"
   | "result_imports.revert"
+  | "spam.view"
+  | "spam.score"
   | "import_mappings.view"
   | "import_mappings.create"
   | "import_mappings.update"
@@ -150,6 +152,7 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "registry.view",
   "result_imports.view",
   "import_mappings.view",
+  "spam.view",
 ]);
 
 const operatorPerms: ReadonlySet<Permission> = new Set([
@@ -181,6 +184,7 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "result_imports.create",
   "import_mappings.create",
   "import_mappings.update",
+  "spam.score",
 ]);
 
 const managerPerms: ReadonlySet<Permission> = new Set([

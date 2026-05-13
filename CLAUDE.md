@@ -128,6 +128,18 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 
 Drafts can be saved with zero required fields and no segments. The audience snapshot (rows in `campaign_audience_pool`) is computed **at activation time**, not at draft save. The `draft → active` status transition gates on name + brand + offer + ≥1 segment and runs the snapshot in the same transaction as the status update — so a stale draft can't slip through, and a snapshot that comes out empty rolls the whole thing back. Once a campaign reaches `active`, the audience is frozen: the `PATCH` endpoint rejects changes to `audience_segment_ids` and `audience_filters` with `details.reason = 'audience_locked_after_draft'`.
 
+## 10d. Spam scoring
+
+- Scoring lives behind a pluggable provider abstraction in [lib/spam/](lib/spam/). Currently only `classifier` (a self-hosted SMS-classifier service running on Cloud Run, accessed over HTTP with an API key). Future providers (OpenAI, on-device, etc.) implement the same `SpamProvider` interface and register in the factory map.
+- Append-only cache table `spam_scores` keyed on `(org_id, text_hash, provider)`. Re-scoring the same text against the same provider is a cache hit; `force=true` re-runs the provider and overwrites… well, doesn't actually overwrite (the cache is append-only — the unique constraint blocks duplicates and `force=true` is currently a no-op against an existing row; this gets revisited if we add scheduled re-scoring).
+- Permission model: `spam.view` for any org member (cache reads), `spam.score` for operator+ (the action that potentially costs money). Matches the RLS policy.
+- Two derived classifications from the single 0–100 score:
+  - **Internal label** (`ham` / `suspicious` / `spam`) — thresholds 0–30 / 31–70 / 71–100. Used for analytics and the future "warn before activate" gating UX.
+  - **Binary verdict** (`spam` / `not_spam`) — `score > 50` ⇒ spam. The user-facing yes/no.
+- Both fields are returned in every API response. Verdict is derived at the service-layer level, not stored as a column.
+- Normalization in `lib/spam/normalize.ts` (NFKC → lowercase → trim → collapse whitespace → SHA-256) MUST stay byte-for-byte identical to the Python classifier's `src/data/normalize.py`. Divergence silently doubles cost by making the cache miss across the boundary.
+- **UI integration:** scoring is button-triggered inline via the shared `<SpamCheckStrip>` (`components/spam/spam-check-strip.tsx`). It sits below the textarea in `CreativeForm` and on every row of `BulkCreativeForm`. The stage form's creative picker shows a small color-dot + score number next to each option, populated from the list endpoint's cache join (read-only — listing does NOT trigger scoring). There is no standalone debug page; the inline strip + the `/api/spam/score` endpoint are the only entry points.
+
 ## 10c. Creatives
 
 - Many-to-many with offers via the `creative_offers` junction table. A creative can be tied to zero, one, or many offers.

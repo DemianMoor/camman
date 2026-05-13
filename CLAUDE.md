@@ -59,6 +59,10 @@ Permission checks use a `can(permission)` helper on both server and client. UI h
 - Timestamps stored as `TIMESTAMPTZ`, never naive timestamps.
 - Money stored as `NUMERIC(12, 4)` for precision. Displayed as USD.
 
+### Database connection mode
+
+`DATABASE_URL` uses Supabase's **Transaction pooler** (port `6543`) with `?prepare=false`. This is required for serverless deployment (Vercel) — Session pooler (port `5432`) holds connections per-client and saturates the 15-connection limit under any concurrent serverless load. Transaction pooler releases connections per-transaction and scales to thousands of brief queries. Long-running transactions (e.g., CSV imports of 50K+ rows) still hold one connection for their duration.
+
 ### Timezone
 
 Campaign-related times are anchored to a single project-wide timezone: **America/New_York (ET)**. The constant lives in `lib/campaign-timezone.ts` as `CAMPAIGN_TIMEZONE`, with label `CAMPAIGN_TIMEZONE_LABEL = "ET"`. We do not (yet) support per-user or per-org timezones — adding that later would mean editing one file.

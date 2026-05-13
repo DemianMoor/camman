@@ -9,6 +9,7 @@ import {
   numeric,
   pgSchema,
   pgTable,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -699,6 +700,10 @@ export type NewSegmentStats = typeof segment_stats.$inferInsert;
 // + Brand. `slug` is auto-generated and used in short-link construction.
 // `creative_id` is an optional human-friendly identifier for external
 // tracking systems.
+// Creatives: SMS copy templates. Many-to-many with offers via the
+// creative_offers junction (or applies_to_all_offers=true for an
+// org-wide creative). No direct provider/brand association — those live
+// at the stage level. Status is just active|archived; no state machine.
 export const creatives = pgTable(
   "creatives",
   {
@@ -708,18 +713,13 @@ export const creatives = pgTable(
     org_id: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    offer_id: integer("offer_id")
-      .notNull()
-      .references(() => offers.id, { onDelete: "cascade" }),
-    sms_provider_id: integer("sms_provider_id").references(
-      () => sms_providers.id,
-      { onDelete: "set null" },
-    ),
-    brand_id: integer("brand_id").references(() => brands.id, {
-      onDelete: "set null",
-    }),
     text: text("text").notNull(),
-    status: text("status").notNull().default("draft"),
+    quality: text("quality").notNull().default("unknown"),
+    sequence_placement: text("sequence_placement").notNull().default("unknown"),
+    applies_to_all_offers: boolean("applies_to_all_offers")
+      .notNull()
+      .default(false),
+    status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -727,19 +727,50 @@ export const creatives = pgTable(
   },
   (table) => [
     index("creatives_org_id_idx").on(table.org_id),
-    index("creatives_offer_id_idx").on(table.offer_id),
-    index("creatives_sms_provider_id_idx").on(table.sms_provider_id),
-    index("creatives_brand_id_idx").on(table.brand_id),
     index("creatives_status_idx").on(table.status),
     check(
       "creatives_status_check",
-      sql`${table.status} IN ('draft', 'pending', 'ready', 'paused', 'archived')`,
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+    check(
+      "creatives_quality_check",
+      sql`${table.quality} IN ('high', 'average', 'poor', 'unknown')`,
+    ),
+    check(
+      "creatives_sequence_placement_check",
+      sql`${table.sequence_placement} IN ('1st', '2nd', '3rd', 'any', 'unknown')`,
     ),
   ],
 );
 
 export type Creative = typeof creatives.$inferSelect;
 export type NewCreative = typeof creatives.$inferInsert;
+
+// Junction: creatives ↔ offers. A creative with applies_to_all_offers=true
+// is org-wide and doesn't need junction rows (though existing rows are
+// preserved on toggle — see PATCH semantics).
+export const creative_offers = pgTable(
+  "creative_offers",
+  {
+    creative_id: integer("creative_id")
+      .notNull()
+      .references(() => creatives.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.creative_id, table.offer_id] }),
+    index("creative_offers_offer_id_idx").on(table.offer_id),
+    index("creative_offers_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type CreativeOffer = typeof creative_offers.$inferSelect;
+export type NewCreativeOffer = typeof creative_offers.$inferInsert;
 
 // Campaigns: long-running containers for SMS-send sequences. The audience
 // is frozen at activation — see campaign_audience_pool below. Drafts can

@@ -1,8 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { brands, creatives, offers, sms_providers } from "@/db/schema";
+import { creative_offers, creatives, offers } from "@/db/schema";
 import {
   apiError,
   isUniqueViolation,
@@ -22,9 +22,19 @@ function parseId(idParam: string) {
 }
 
 const NULLABLE_OPTIONAL_STRING = new Set(["creative_id"]);
-// Statuses where editing the SMS text is allowed. Once approved, the text
-// is locked — operators must duplicate to iterate on copy.
-const TEXT_EDITABLE_STATUSES = new Set(["draft", "pending"]);
+
+async function loadOffersFor(creativeId: number) {
+  return db
+    .select({
+      id: offers.id,
+      name: offers.name,
+      color: offers.color,
+      avatar_url: offers.avatar_url,
+    })
+    .from(creative_offers)
+    .innerJoin(offers, eq(offers.id, creative_offers.offer_id))
+    .where(eq(creative_offers.creative_id, creativeId));
+}
 
 export async function GET(
   _req: NextRequest,
@@ -52,25 +62,15 @@ export async function GET(
       creative_id: creatives.creative_id,
       slug: creatives.slug,
       org_id: creatives.org_id,
-      offer_id: creatives.offer_id,
-      sms_provider_id: creatives.sms_provider_id,
-      brand_id: creatives.brand_id,
       text: creatives.text,
+      quality: creatives.quality,
+      sequence_placement: creatives.sequence_placement,
+      applies_to_all_offers: creatives.applies_to_all_offers,
       status: creatives.status,
       archived_at: creatives.archived_at,
       created_at: creatives.created_at,
-      offer: { id: offers.id, name: offers.name, color: offers.color },
-      provider: {
-        id: sms_providers.id,
-        name: sms_providers.name,
-        color: sms_providers.color,
-      },
-      brand: { id: brands.id, name: brands.name, color: brands.color },
     })
     .from(creatives)
-    .leftJoin(offers, eq(offers.id, creatives.offer_id))
-    .leftJoin(sms_providers, eq(sms_providers.id, creatives.sms_provider_id))
-    .leftJoin(brands, eq(brands.id, creatives.brand_id))
     .where(and(eq(creatives.id, creativeId), eq(creatives.org_id, orgId)))
     .limit(1);
 
@@ -79,12 +79,10 @@ export async function GET(
       entity: "creative",
     });
   }
-  const r = rows[0];
+  const offersArr = await loadOffersFor(creativeId);
   return NextResponse.json({
-    ...r,
-    offer: r.offer && r.offer.id !== null ? r.offer : null,
-    provider: r.provider && r.provider.id !== null ? r.provider : null,
-    brand: r.brand && r.brand.id !== null ? r.brand : null,
+    ...rows[0],
+    offers: offersArr,
     campaign_count: 0,
   });
 }
@@ -124,11 +122,14 @@ export async function PATCH(
       API_ERROR_CODES.VALIDATION,
     );
   }
+  const input = parsed.data;
 
-  // Pull the current row so we can enforce text-editability against the
-  // current status and verify the FK changes still belong to this org.
   const current = await db
-    .select({ id: creatives.id, status: creatives.status })
+    .select({
+      id: creatives.id,
+      status: creatives.status,
+      applies_to_all_offers: creatives.applies_to_all_offers,
+    })
     .from(creatives)
     .where(and(eq(creatives.id, creativeId), eq(creatives.org_id, orgId)))
     .limit(1);
@@ -145,91 +146,99 @@ export async function PATCH(
       { reason: "archived" },
     );
   }
-  if (
-    parsed.data.text !== undefined &&
-    !TEXT_EDITABLE_STATUSES.has(current[0].status)
-  ) {
-    return apiError(
-      400,
-      "SMS text can only be edited while the creative is in draft or pending status",
-      API_ERROR_CODES.VALIDATION,
-      { field: "text", reason: "text_locked" },
-    );
-  }
 
-  if (parsed.data.offer_id !== undefined) {
-    const r = await db
+  // Verify any new offer_ids belong to the org.
+  if (input.offer_ids !== undefined && input.offer_ids.length > 0) {
+    const found = await db
       .select({ id: offers.id })
       .from(offers)
       .where(
-        and(eq(offers.id, parsed.data.offer_id), eq(offers.org_id, orgId)),
-      )
-      .limit(1);
-    if (!r[0]) {
-      return apiError(
-        400,
-        "offer_id doesn't belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "offer_id" },
+        and(eq(offers.org_id, orgId), inArray(offers.id, input.offer_ids)),
       );
-    }
-  }
-  if (parsed.data.sms_provider_id != null) {
-    const r = await db
-      .select({ id: sms_providers.id })
-      .from(sms_providers)
-      .where(
-        and(
-          eq(sms_providers.id, parsed.data.sms_provider_id),
-          eq(sms_providers.org_id, orgId),
-        ),
-      )
-      .limit(1);
-    if (!r[0]) {
+    if (found.length !== new Set(input.offer_ids).size) {
       return apiError(
         400,
-        "sms_provider_id doesn't belong to your organization",
+        "One or more offer_ids don't belong to your organization",
         API_ERROR_CODES.VALIDATION,
-        { field: "sms_provider_id" },
-      );
-    }
-  }
-  if (parsed.data.brand_id != null) {
-    const r = await db
-      .select({ id: brands.id })
-      .from(brands)
-      .where(
-        and(eq(brands.id, parsed.data.brand_id), eq(brands.org_id, orgId)),
-      )
-      .limit(1);
-    if (!r[0]) {
-      return apiError(
-        400,
-        "brand_id doesn't belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "brand_id" },
+        { field: "offer_ids" },
       );
     }
   }
 
+  // Compute the resulting state for the at-least-one-association rule.
+  // The rule applies only when offer_ids OR applies_to_all_offers is in the
+  // patch. We need to fetch current offer associations only when that's
+  // relevant and offer_ids is NOT being updated (it'd be replaced anyway).
+  const resultingAppliesToAll =
+    input.applies_to_all_offers !== undefined
+      ? input.applies_to_all_offers
+      : current[0].applies_to_all_offers;
+
+  let resultingOfferCount: number;
+  if (input.offer_ids !== undefined) {
+    resultingOfferCount = input.offer_ids.length;
+  } else if (input.applies_to_all_offers !== undefined) {
+    // applies_to_all is being toggled; fetch current junction count.
+    const rows = await db
+      .select({ x: creative_offers.creative_id })
+      .from(creative_offers)
+      .where(eq(creative_offers.creative_id, creativeId));
+    resultingOfferCount = rows.length;
+  } else {
+    // Neither field is in the patch — no need to recheck.
+    resultingOfferCount = -1;
+  }
+  if (
+    (input.offer_ids !== undefined ||
+      input.applies_to_all_offers !== undefined) &&
+    !resultingAppliesToAll &&
+    resultingOfferCount === 0
+  ) {
+    return apiError(
+      400,
+      "Must apply to at least one offer (or select 'All offers').",
+      API_ERROR_CODES.VALIDATION,
+      { field: "offer_ids" },
+    );
+  }
+
+  // Build scalar field updates.
   const updates: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(parsed.data)) {
+  for (const [k, v] of Object.entries(input)) {
     if (v === undefined) continue;
+    if (k === "offer_ids") continue; // handled in transaction below
     updates[k] = NULLABLE_OPTIONAL_STRING.has(k) ? nullIfEmpty(v as string) : v;
   }
 
   try {
-    const updated = await db
-      .update(creatives)
-      .set(updates)
-      .where(and(eq(creatives.id, creativeId), eq(creatives.org_id, orgId)))
-      .returning();
-    if (!updated[0]) {
-      return apiError(404, "Creative not found", API_ERROR_CODES.NOT_FOUND, {
-        entity: "creative",
-      });
-    }
-    return NextResponse.json(updated[0]);
+    await db.transaction(async (tx) => {
+      if (Object.keys(updates).length > 0) {
+        await tx
+          .update(creatives)
+          .set(updates)
+          .where(
+            and(eq(creatives.id, creativeId), eq(creatives.org_id, orgId)),
+          );
+      }
+      if (input.offer_ids !== undefined) {
+        // Replace semantics: drop all existing junction rows then insert
+        // the new set. Even with applies_to_all_offers=true the user may
+        // want a fallback junction list (junction rows aren't auto-cleared
+        // when applies_to_all_offers toggles on — see the spec note).
+        await tx
+          .delete(creative_offers)
+          .where(eq(creative_offers.creative_id, creativeId));
+        if (input.offer_ids.length > 0) {
+          await tx.insert(creative_offers).values(
+            input.offer_ids.map((offer_id) => ({
+              creative_id: creativeId,
+              offer_id,
+              org_id: orgId,
+            })),
+          );
+        }
+      }
+    });
   } catch (err) {
     if (isUniqueViolation(err)) {
       return apiError(
@@ -241,4 +250,12 @@ export async function PATCH(
     }
     throw err;
   }
+
+  const [updated] = await db
+    .select()
+    .from(creatives)
+    .where(eq(creatives.id, creativeId))
+    .limit(1);
+  const offersArr = await loadOffersFor(creativeId);
+  return NextResponse.json({ ...updated, offers: offersArr });
 }

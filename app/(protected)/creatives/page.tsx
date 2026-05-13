@@ -17,15 +17,15 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import {
+  BulkCreativeForm,
+  type BulkCreativeFormSubmit,
+} from "@/components/creatives/bulk-creative-form";
+import {
   CreativeForm,
-  type CreativeFormSubmit,
+  type CreativeFormValues,
 } from "@/components/creatives/creative-form";
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
-import {
-  StatusDropdown,
-  type StatusOption,
-} from "@/components/status-dropdown";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -65,38 +65,51 @@ import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
+import {
+  QUALITY_VALUES,
+  SEQUENCE_PLACEMENT_VALUES,
+  type CreativeQuality,
+  type CreativeSequencePlacement,
+} from "@/lib/validators/creatives";
 
-type Info = { id: number; name: string; color: string | null };
-type Status = "draft" | "pending" | "ready" | "paused" | "archived";
-type ActiveStatus = Exclude<Status, "archived">;
+type Info = {
+  id: number;
+  name: string;
+  color: string | null;
+  avatar_url: string | null;
+};
+type Status = "active" | "archived";
 
 type Creative = {
   id: number;
   creative_id: string | null;
   slug: string;
   org_id: string;
-  offer_id: number;
-  sms_provider_id: number | null;
-  brand_id: number | null;
   text: string;
+  quality: CreativeQuality;
+  sequence_placement: CreativeSequencePlacement;
+  applies_to_all_offers: boolean;
   status: Status;
   archived_at: string | null;
   created_at: string;
-  offer: Info | null;
-  provider: Info | null;
-  brand: Info | null;
+  offers: Info[];
   campaign_count: number;
 };
 
 type ListResponse = { data: Creative[]; totalCount: number };
-type InfoListResponse = { data: Info[] };
+type OfferInfo = {
+  id: number;
+  name: string;
+  color: string | null;
+  status: string;
+};
+type OfferListResponse = { data: OfferInfo[] };
 
 type Filters = {
   search: string;
   offer_id: number | null;
-  sms_provider_id: number | null;
-  brand_id: number | null;
-  statuses: Status[];
+  qualities: CreativeQuality[];
+  sequences: CreativeSequencePlacement[];
   showArchived: boolean;
   page: number;
   pageSize: number;
@@ -104,19 +117,11 @@ type Filters = {
   sortDir: "asc" | "desc";
 };
 
-const ALL_ACTIVE_STATUSES: ActiveStatus[] = [
-  "draft",
-  "pending",
-  "ready",
-  "paused",
-];
-
 const DEFAULT_FILTERS: Filters = {
   search: "",
   offer_id: null,
-  sms_provider_id: null,
-  brand_id: null,
-  statuses: [],
+  qualities: [],
+  sequences: [],
   showArchived: false,
   page: 0,
   pageSize: 20,
@@ -124,25 +129,32 @@ const DEFAULT_FILTERS: Filters = {
   sortDir: "desc",
 };
 
-const STATUS_OPTIONS: StatusOption<ActiveStatus>[] = [
-  { value: "draft", label: "Draft", color: "gray" },
-  { value: "pending", label: "Pending", color: "amber" },
-  { value: "ready", label: "Ready", color: "green" },
-  { value: "paused", label: "Paused", color: "orange" },
-];
-
-// Legal next-states per current state. Mirrors server-side state machine in
-// /api/creatives/[id]/status/route.ts. The dropdown disables disallowed
-// options so the UX surfaces the invariant without round-tripping a 409.
-const TRANSITIONS: Record<ActiveStatus, ReadonlySet<ActiveStatus>> = {
-  draft: new Set(["pending"]),
-  pending: new Set(["draft", "ready"]),
-  ready: new Set(["paused"]),
-  paused: new Set(["ready"]),
-};
-
 const SEARCH_DEBOUNCE_MS = 300;
 const FILTER_ALL = "__all__";
+
+const QUALITY_LABEL: Record<CreativeQuality, string> = {
+  high: "High",
+  average: "Average",
+  poor: "Poor",
+  unknown: "Unknown",
+};
+
+const QUALITY_BADGE: Record<CreativeQuality, string> = {
+  high: "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
+  average:
+    "border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200",
+  poor: "border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
+  unknown:
+    "border-zinc-200 bg-zinc-100 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300",
+};
+
+const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
+  "1st": "1st",
+  "2nd": "2nd",
+  "3rd": "3rd",
+  any: "Any",
+  unknown: "Unknown",
+};
 
 function SlugChip({ slug }: { slug: string }) {
   const [copied, setCopied] = useState(false);
@@ -169,16 +181,42 @@ function SlugChip({ slug }: { slug: string }) {
   );
 }
 
-function Chip({ item }: { item: Info | null }) {
-  if (!item) return <span className="text-muted-foreground">—</span>;
+function OffersCell({ creative }: { creative: Creative }) {
+  if (creative.applies_to_all_offers) {
+    return (
+      <Badge className="border-indigo-200 bg-indigo-100 text-indigo-800 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-200">
+        All offers
+      </Badge>
+    );
+  }
+  if (creative.offers.length === 0) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+  const visible = creative.offers.slice(0, 3);
+  const extra = creative.offers.length - visible.length;
   return (
-    <span className="inline-flex items-center gap-1.5">
-      <span
-        className="size-2 rounded-full"
-        style={{ backgroundColor: item.color ?? "#64748B" }}
-      />
-      <span className="text-sm">{item.name}</span>
-    </span>
+    <div className="flex flex-wrap items-center gap-1">
+      {visible.map((o) => (
+        <span
+          key={o.id}
+          className="inline-flex items-center gap-1 rounded-full border bg-background px-1.5 py-0.5 text-xs"
+        >
+          <span
+            className="size-2 rounded-full"
+            style={{ backgroundColor: o.color ?? "#64748B" }}
+          />
+          {o.name}
+        </span>
+      ))}
+      {extra > 0 ? (
+        <span
+          className="text-xs text-muted-foreground"
+          title={creative.offers.map((o) => o.name).join(", ")}
+        >
+          +{extra} more
+        </span>
+      ) : null}
+    </div>
   );
 }
 
@@ -205,9 +243,8 @@ export default function CreativesPage() {
   const filtersAreDefault =
     filters.search === DEFAULT_FILTERS.search &&
     filters.offer_id === DEFAULT_FILTERS.offer_id &&
-    filters.sms_provider_id === DEFAULT_FILTERS.sms_provider_id &&
-    filters.brand_id === DEFAULT_FILTERS.brand_id &&
-    filters.statuses.length === 0 &&
+    filters.qualities.length === 0 &&
+    filters.sequences.length === 0 &&
     filters.showArchived === DEFAULT_FILTERS.showArchived;
 
   const [searchInput, setSearchInput] = useState(filters.search);
@@ -223,15 +260,12 @@ export default function CreativesPage() {
   }, [searchInput, filters.search, updateFilters]);
 
   const listApi = useApiCall<ListResponse>();
-  const createApi = useApiCall<Creative>();
+  const bulkCreateApi = useApiCall<{ created: Creative[] }>();
   const updateApi = useApiCall<Creative>();
-  const statusApi = useApiCall<Creative>();
   const archiveApi = useApiCall<Creative>();
   const restoreApi = useApiCall<Creative>();
   const duplicateApi = useApiCall<Creative>();
-  const offersApi = useApiCall<InfoListResponse>();
-  const providersApi = useApiCall<InfoListResponse>();
-  const brandsApi = useApiCall<InfoListResponse>();
+  const offersApi = useApiCall<OfferListResponse>();
 
   const [data, setData] = useState<Creative[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -239,27 +273,13 @@ export default function CreativesPage() {
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
 
-  const [offers, setOffers] = useState<Info[]>([]);
-  const [providers, setProviders] = useState<Info[]>([]);
-  const [brands, setBrands] = useState<Info[]>([]);
+  const [offers, setOffers] = useState<OfferInfo[]>([]);
   useEffect(() => {
     (async () => {
       const r = await offersApi.execute("/api/offers/list?pageSize=200");
       if (r.ok) setOffers(r.data.data);
     })();
   }, [offersApi.execute]);
-  useEffect(() => {
-    (async () => {
-      const r = await providersApi.execute("/api/providers/list?pageSize=200");
-      if (r.ok) setProviders(r.data.data);
-    })();
-  }, [providersApi.execute]);
-  useEffect(() => {
-    (async () => {
-      const r = await brandsApi.execute("/api/brands/list?pageSize=200");
-      if (r.ok) setBrands(r.data.data);
-    })();
-  }, [brandsApi.execute]);
 
   useEffect(() => {
     let cancelled = false;
@@ -272,11 +292,10 @@ export default function CreativesPage() {
     });
     if (filters.search) sp.set("search", filters.search);
     if (filters.offer_id !== null) sp.set("offer_id", String(filters.offer_id));
-    if (filters.sms_provider_id !== null)
-      sp.set("sms_provider_id", String(filters.sms_provider_id));
-    if (filters.brand_id !== null) sp.set("brand_id", String(filters.brand_id));
-    if (filters.statuses.length > 0)
-      sp.set("status", filters.statuses.join(","));
+    if (filters.qualities.length > 0)
+      sp.set("quality", filters.qualities.join(","));
+    if (filters.sequences.length > 0)
+      sp.set("sequence_placement", filters.sequences.join(","));
     if (filters.showArchived) sp.set("showArchived", "true");
 
     (async () => {
@@ -301,9 +320,8 @@ export default function CreativesPage() {
     filters.sortDir,
     filters.search,
     filters.offer_id,
-    filters.sms_provider_id,
-    filters.brand_id,
-    filters.statuses,
+    filters.qualities,
+    filters.sequences,
     filters.showArchived,
     refreshTick,
     listApi.execute,
@@ -321,29 +339,37 @@ export default function CreativesPage() {
   const canUpdate = can("creatives.update");
   const canArchive = can("creatives.archive");
   const canRestore = can("creatives.restore");
-  const canApprove = can("creatives.approve");
 
-  async function handleCreate(values: CreativeFormSubmit) {
-    const result = await createApi.execute("/api/creatives", {
+  async function handleBulkCreate(values: BulkCreativeFormSubmit) {
+    const result = await bulkCreateApi.execute("/api/creatives", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(values),
     });
     if (!result.ok) {
-      toastApiError(result, "Couldn't create creative");
+      toastApiError(result, "Couldn't create creatives");
       return;
     }
-    toast.success("Creative draft created");
+    const n = result.data.created.length;
+    toast.success(`${n} creative${n === 1 ? "" : "s"} saved`);
     setCreateOpen(false);
     refetch();
   }
 
-  async function handleEdit(values: CreativeFormSubmit) {
+  async function handleEdit(values: CreativeFormValues) {
     if (!editing) return;
+    const body = {
+      text: values.text,
+      creative_id: values.creative_id || undefined,
+      quality: values.quality,
+      sequence_placement: values.sequence_placement,
+      applies_to_all_offers: values.applies_to_all_offers,
+      offer_ids: values.offer_ids,
+    };
     const result = await updateApi.execute(`/api/creatives/${editing.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(values),
+      body: JSON.stringify(body),
     });
     if (!result.ok) {
       toastApiError(result, "Couldn't save creative");
@@ -351,23 +377,6 @@ export default function CreativesPage() {
     }
     toast.success("Creative saved");
     setEditing(null);
-    refetch();
-  }
-
-  async function handleStatusChange(creative: Creative, next: ActiveStatus) {
-    const result = await statusApi.execute(
-      `/api/creatives/${creative.id}/status`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: next }),
-      },
-    );
-    if (!result.ok) {
-      toastApiError(result, "Couldn't change status");
-      return;
-    }
-    toast.success(`Status updated to ${next}`);
     refetch();
   }
 
@@ -399,7 +408,6 @@ export default function CreativesPage() {
     }
     toast.success("Creative duplicated");
     refetch();
-    // Open the new draft in the edit dialog so the user can iterate.
     setEditing(result.data);
   }
 
@@ -412,24 +420,6 @@ export default function CreativesPage() {
         cell: ({ row }) => <SlugChip slug={row.original.slug} />,
       },
       {
-        id: "offer",
-        header: "Offer",
-        enableSorting: false,
-        cell: ({ row }) => <Chip item={row.original.offer} />,
-      },
-      {
-        id: "provider",
-        header: "Provider",
-        enableSorting: false,
-        cell: ({ row }) => <Chip item={row.original.provider} />,
-      },
-      {
-        id: "brand",
-        header: "Brand",
-        enableSorting: false,
-        cell: ({ row }) => <Chip item={row.original.brand} />,
-      },
-      {
         id: "text",
         header: "Text",
         enableSorting: false,
@@ -437,45 +427,55 @@ export default function CreativesPage() {
           const segs = calculateSmsSegments(row.original.text);
           return (
             <div className="min-w-0">
-              <div className="truncate text-sm">
+              <div
+                className="truncate text-sm"
+                title={row.original.text}
+              >
                 {truncate(row.original.text, 60)}
               </div>
               <div className="text-xs text-muted-foreground">
-                {segs.segments} seg · {segs.charset}
+                {row.original.text.length}ch / {segs.segments} seg
               </div>
             </div>
           );
         },
       },
       {
+        id: "offers",
+        header: "Offers",
+        enableSorting: false,
+        cell: ({ row }) => <OffersCell creative={row.original} />,
+      },
+      {
+        id: "quality",
+        header: "Quality",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <Badge className={cn("capitalize", QUALITY_BADGE[row.original.quality])}>
+            {QUALITY_LABEL[row.original.quality]}
+          </Badge>
+        ),
+      },
+      {
+        id: "sequence",
+        header: "Sequence",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <Badge variant="outline" className="font-mono text-xs">
+            {SEQUENCE_LABEL[row.original.sequence_placement]}
+          </Badge>
+        ),
+      },
+      {
         id: "status",
         header: "Status",
         enableSorting: true,
         cell: ({ row }) => {
-          const c = row.original;
-          if (c.status === "archived") return <ArchivedBadge />;
-          // Build options where transitions disallowed from the current state
-          // are disabled. The pending→ready option also disables if the user
-          // lacks the approve permission.
-          const allowed = TRANSITIONS[c.status as ActiveStatus];
-          const opts: StatusOption<ActiveStatus>[] = STATUS_OPTIONS.map((o) => {
-            const isCurrent = o.value === c.status;
-            const isAllowed = isCurrent || allowed.has(o.value);
-            const needsApprove =
-              c.status === "pending" && o.value === "ready";
-            return {
-              ...o,
-              disabled: !isAllowed || (needsApprove && !canApprove),
-            };
-          });
+          if (row.original.status === "archived") return <ArchivedBadge />;
           return (
-            <StatusDropdown<ActiveStatus>
-              current={c.status as ActiveStatus}
-              options={opts}
-              onChange={(next) => handleStatusChange(c, next)}
-              isUpdating={statusApi.isLoading}
-              isTerminal={!canUpdate}
-            />
+            <Badge className="border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
+              Active
+            </Badge>
           );
         },
       },
@@ -563,35 +563,30 @@ export default function CreativesPage() {
         },
       },
     ],
-    [
-      canUpdate,
-      canArchive,
-      canRestore,
-      canCreate,
-      canApprove,
-      statusApi.isLoading,
-      handleStatusChange,
-      handleDuplicate,
-    ],
+    [canUpdate, canArchive, canRestore, canCreate],
   );
 
   const isAuthLoading = !auth;
   const confirmBusy = archiveApi.isLoading || restoreApi.isLoading;
   const offerFilterValue =
     filters.offer_id === null ? FILTER_ALL : String(filters.offer_id);
-  const providerFilterValue =
-    filters.sms_provider_id === null
-      ? FILTER_ALL
-      : String(filters.sms_provider_id);
-  const brandFilterValue =
-    filters.brand_id === null ? FILTER_ALL : String(filters.brand_id);
 
-  function toggleStatusFilter(s: Status) {
-    const set = new Set(filters.statuses);
+  function toggleQuality(q: CreativeQuality) {
+    const set = new Set(filters.qualities);
+    if (set.has(q)) set.delete(q);
+    else set.add(q);
+    updateFilters({
+      qualities: Array.from(set) as CreativeQuality[],
+      page: 0,
+    });
+  }
+
+  function toggleSequence(s: CreativeSequencePlacement) {
+    const set = new Set(filters.sequences);
     if (set.has(s)) set.delete(s);
     else set.add(s);
     updateFilters({
-      statuses: Array.from(set) as Status[],
+      sequences: Array.from(set) as CreativeSequencePlacement[],
       page: 0,
     });
   }
@@ -602,13 +597,13 @@ export default function CreativesPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Creatives</h1>
           <p className="text-sm text-muted-foreground">
-            SMS copy linked to offers. Drafts walk through approval before
-            campaigns can use them.
+            SMS copy linked to offers. Active creatives can be picked when
+            building a campaign stage.
           </p>
         </div>
         {canCreate ? (
           <Button onClick={() => setCreateOpen(true)}>
-            <Plus className="size-4" aria-hidden /> New Creative
+            <Plus className="size-4" aria-hidden /> New Creatives
           </Button>
         ) : null}
       </header>
@@ -629,11 +624,11 @@ export default function CreativesPage() {
             })
           }
         >
-          <SelectTrigger className="h-9 w-[180px]">
-            <SelectValue placeholder="All offers" />
+          <SelectTrigger className="h-9 w-[200px]">
+            <SelectValue placeholder="Any offer" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={FILTER_ALL}>All offers</SelectItem>
+            <SelectItem value={FILTER_ALL}>Any offer</SelectItem>
             {offers.map((o) => (
               <SelectItem key={o.id} value={String(o.id)}>
                 {o.name}
@@ -641,56 +636,14 @@ export default function CreativesPage() {
             ))}
           </SelectContent>
         </Select>
-        <Select
-          value={providerFilterValue}
-          onValueChange={(v) =>
-            updateFilters({
-              sms_provider_id: v === FILTER_ALL ? null : Number(v),
-              page: 0,
-            })
-          }
-        >
-          <SelectTrigger className="h-9 w-[160px]">
-            <SelectValue placeholder="All providers" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={FILTER_ALL}>All providers</SelectItem>
-            {providers.map((p) => (
-              <SelectItem key={p.id} value={String(p.id)}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select
-          value={brandFilterValue}
-          onValueChange={(v) =>
-            updateFilters({
-              brand_id: v === FILTER_ALL ? null : Number(v),
-              page: 0,
-            })
-          }
-        >
-          <SelectTrigger className="h-9 w-[160px]">
-            <SelectValue placeholder="All brands" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={FILTER_ALL}>All brands</SelectItem>
-            {brands.map((b) => (
-              <SelectItem key={b.id} value={String(b.id)}>
-                {b.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         <div className="flex flex-wrap items-center gap-1.5">
-          {ALL_ACTIVE_STATUSES.map((s) => {
-            const active = filters.statuses.includes(s);
+          {QUALITY_VALUES.map((q) => {
+            const active = filters.qualities.includes(q);
             return (
               <button
-                key={s}
+                key={q}
                 type="button"
-                onClick={() => toggleStatusFilter(s)}
+                onClick={() => toggleQuality(q)}
                 className={cn(
                   "rounded-full border px-2.5 py-0.5 text-xs capitalize transition-colors",
                   active
@@ -698,7 +651,27 @@ export default function CreativesPage() {
                     : "border-border bg-background text-muted-foreground hover:bg-muted",
                 )}
               >
-                {s}
+                {QUALITY_LABEL[q]}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {SEQUENCE_PLACEMENT_VALUES.map((s) => {
+            const active = filters.sequences.includes(s);
+            return (
+              <button
+                key={s}
+                type="button"
+                onClick={() => toggleSequence(s)}
+                className={cn(
+                  "rounded-full border px-2 py-0.5 text-xs transition-colors",
+                  active
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-border bg-background text-muted-foreground hover:bg-muted",
+                )}
+              >
+                {SEQUENCE_LABEL[s]}
               </button>
             );
           })}
@@ -752,12 +725,12 @@ export default function CreativesPage() {
           <div className="space-y-1">
             <p className="text-sm font-medium">No creatives yet</p>
             <p className="text-sm text-muted-foreground">
-              Draft your first SMS message tied to an offer.
+              Draft your first SMS messages tied to one or more offers.
             </p>
           </div>
           {canCreate ? (
             <Button onClick={() => setCreateOpen(true)}>
-              <Plus className="size-4" aria-hidden /> New Creative
+              <Plus className="size-4" aria-hidden /> New Creatives
             </Button>
           ) : null}
         </div>
@@ -803,21 +776,19 @@ export default function CreativesPage() {
       <FormDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
-        className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
+        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
       >
         <DialogHeader>
-          <DialogTitle>New creative</DialogTitle>
+          <DialogTitle>New creatives</DialogTitle>
           <DialogDescription>
-            SMS copy linked to an offer, optionally scoped to a provider and
-            brand.
+            Add one or more SMS messages with shared offer + quality + sequence
+            settings.
           </DialogDescription>
         </DialogHeader>
-        <CreativeForm
-          key="create"
-          mode="create"
-          onSubmit={handleCreate}
+        <BulkCreativeForm
+          onSubmit={handleBulkCreate}
           onCancel={() => setCreateOpen(false)}
-          isSubmitting={createApi.isLoading}
+          isSubmitting={bulkCreateApi.isLoading}
         />
       </FormDialog>
 
@@ -839,13 +810,13 @@ export default function CreativesPage() {
             key={`edit-${editing.id}`}
             mode="edit"
             slug={editing.slug}
-            currentStatus={editing.status}
             initialValues={{
-              offer_id: editing.offer_id,
-              sms_provider_id: editing.sms_provider_id,
-              brand_id: editing.brand_id,
               text: editing.text,
               creative_id: editing.creative_id ?? "",
+              quality: editing.quality,
+              sequence_placement: editing.sequence_placement,
+              applies_to_all_offers: editing.applies_to_all_offers,
+              offer_ids: editing.offers.map((o) => o.id),
             }}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}
@@ -869,8 +840,8 @@ export default function CreativesPage() {
             </AlertDialogTitle>
             <AlertDialogDescription>
               {confirming?.kind === "archive"
-                ? "Archived creatives are hidden from the active list and can't be used in new campaigns."
-                : "Restoring brings the creative back as a draft so it goes through approval again."}
+                ? "Archived creatives are hidden from the active list and can't be picked for new stages."
+                : "Restoring brings the creative back as active."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -53,7 +53,6 @@ type Creative = {
   slug: string;
   text: string;
   status: string;
-  offer_id: number;
 };
 type Provider = {
   id: number;
@@ -160,11 +159,14 @@ export function StageForm({
   // Creatives are filtered by the campaign's offer + status=ready so we
   // don't accidentally send unfinished copy. If the campaign has no offer
   // yet (rare — drafts), skip the fetch.
+  // Picker eligibility: active creatives that either apply to all offers
+  // OR are linked to this campaign's offer via the creative_offers junction.
+  // The list endpoint's offer_id filter handles the OR-with-all logic.
   useEffect(() => {
     if (!campaign.offer?.id) return;
     (async () => {
       const r = await creativesApi.execute(
-        `/api/creatives/list?pageSize=200&offer_id=${campaign.offer!.id}&status=ready`,
+        `/api/creatives/list?pageSize=200&offer_id=${campaign.offer!.id}&status=active`,
       );
       if (r.ok) setCreatives(r.data.data);
     })();

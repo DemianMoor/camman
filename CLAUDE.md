@@ -111,6 +111,7 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 - Icons from lucide-react.
 - Filters in list views persisted to localStorage via a `usePersistedFilters` hook, keyed by route.
 - Form-containing dialogs prevent accidental dismissal via backdrop click or Escape. Use the shared `<FormDialog>` wrapper (`components/ui/form-dialog.tsx`) for any create/edit dialog, upload dialog, or any other dialog that takes user input beyond a single button press. Confirmation/`<AlertDialog>` dialogs retain default behavior. Read-only modals use the bare `<Dialog>` + `<DialogContent>` primitives.
+- For multi-entity selection with potentially many options (>10), use `<MultiSelectPicker>` from `components/multi-select-picker.tsx`. It's a popover-based searchable checkbox list that scales to hundreds of items. Pill-toggle patterns are reserved for small fixed enums (≤5 options) like status filters.
 
 ## 10. File Organization
 
@@ -126,6 +127,16 @@ All inputs validated with Zod. All outputs are typed. Errors return `{ error: st
 ## 10b. Campaign audience snapshots
 
 Drafts can be saved with zero required fields and no segments. The audience snapshot (rows in `campaign_audience_pool`) is computed **at activation time**, not at draft save. The `draft → active` status transition gates on name + brand + offer + ≥1 segment and runs the snapshot in the same transaction as the status update — so a stale draft can't slip through, and a snapshot that comes out empty rolls the whole thing back. Once a campaign reaches `active`, the audience is frozen: the `PATCH` endpoint rejects changes to `audience_segment_ids` and `audience_filters` with `details.reason = 'audience_locked_after_draft'`.
+
+## 10c. Creatives
+
+- Many-to-many with offers via the `creative_offers` junction table. A creative can be tied to zero, one, or many offers.
+- `applies_to_all_offers=true` makes a creative valid for any offer in the org. Junction rows are still allowed when this flag is on (used as a fallback list); toggling the flag does NOT auto-clear junction rows.
+- No provider or brand association on the creative itself — those concepts live at the stage level (provider on the stage, brand on the parent campaign).
+- No status state machine. Creatives are `active` or `archived` only.
+- `quality` (`high | average | poor | unknown`) and `sequence_placement` (`1st | 2nd | 3rd | any | unknown`) are user-managed metadata used for filtering/organizing. Defaults are `unknown`. Not enforced anywhere else in the system.
+- The stage form's creative picker queries `/api/creatives/list?offer_id=<X>&status=active` — the list endpoint's `offer_id` filter returns creatives that either have a junction row to X OR have `applies_to_all_offers=true`.
+- Bulk-create accepts up to 50 rows per request; shared offer/quality/sequence apply to every row in the batch. The whole batch runs in one transaction.
 
 ## 11. Working Style with Claude Code
 

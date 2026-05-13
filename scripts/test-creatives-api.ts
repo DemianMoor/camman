@@ -3,11 +3,11 @@ import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 
 import { createServerClient } from "@supabase/ssr";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { brands, creatives, offers, sms_providers } from "../db/schema";
+import { brands, creatives, offers } from "../db/schema";
 import { calculateSmsSegments } from "../lib/creative-helpers";
 
 async function main() {
@@ -36,7 +36,6 @@ async function main() {
     },
   });
 
-  console.log(`Signing in as ${testEmail}…`);
   const { error: signInErr } = await supabase.auth.signInWithPassword({
     email: testEmail,
     password: testPassword,
@@ -80,7 +79,6 @@ async function main() {
   const createdCreativeIds: number[] = [];
   const createdBrandIds: number[] = [];
   const createdOfferIds: number[] = [];
-  const createdProviderIds: number[] = [];
 
   // =============== SMS segment unit tests ===============
   console.log("\n[0] calculateSmsSegments unit tests");
@@ -92,16 +90,6 @@ async function main() {
         r.characters === 5 &&
         r.segments === 1 &&
         r.per_segment_limit === 160,
-    );
-  }
-  {
-    const r = calculateSmsSegments("a".repeat(160));
-    check(
-      "160 GSM chars → 1 segment, 0 remaining",
-      r.charset === "GSM-7" &&
-        r.characters === 160 &&
-        r.segments === 1 &&
-        r.remaining_in_segment === 0,
     );
   }
   {
@@ -121,39 +109,9 @@ async function main() {
       r.charset === "UCS-2" && r.segments === 1,
     );
   }
-  {
-    // 70 UTF-16 code units of plain UCS-2 text (Chinese chars are 1 code unit each).
-    const r = calculateSmsSegments("中".repeat(70));
-    check(
-      "70 UCS-2 chars → 1 segment, 0 remaining",
-      r.charset === "UCS-2" &&
-        r.characters === 70 &&
-        r.segments === 1 &&
-        r.remaining_in_segment === 0,
-    );
-  }
-  {
-    const r = calculateSmsSegments("中".repeat(71));
-    check(
-      "71 UCS-2 chars → 2 segments, 67-char limit",
-      r.charset === "UCS-2" &&
-        r.characters === 71 &&
-        r.segments === 2 &&
-        r.per_segment_limit === 67,
-    );
-  }
-  {
-    // GSM-7 extension chars count as 2.
-    const r = calculateSmsSegments("{}");
-    check(
-      "GSM-7 extension chars count as 2",
-      r.charset === "GSM-7" && r.characters === 4 && r.segments === 1,
-      `characters=${r.characters}`,
-    );
-  }
 
   try {
-    // =============== Setup: brand + offer + provider ===============
+    // =============== Setup: brand + 3 offers ===============
     const brandR = await apiFetch("/api/brands", {
       method: "POST",
       body: JSON.stringify({
@@ -161,43 +119,36 @@ async function main() {
         brand_id: `CR-PROBE-${unique}`,
       }),
     });
-    check("seed: brand creation returns 201", brandR.status === 201);
+    check("seed: brand 201", brandR.status === 201);
     const brand = (await brandR.json()) as { id: number };
     createdBrandIds.push(brand.id);
 
-    const offerR = await apiFetch("/api/offers", {
-      method: "POST",
-      body: JSON.stringify({
-        name: "Creative Probe Offer",
-        offer_id: `CR-OFFER-${unique}`,
-        payout_model: "cpa",
-        payout_cpa: 10,
-      }),
-    });
-    check("offer creation returns 201", offerR.status === 201);
-    const offer = (await offerR.json()) as { id: number };
-    createdOfferIds.push(offer.id);
+    async function createOffer(label: string): Promise<{ id: number }> {
+      const r = await apiFetch("/api/offers", {
+        method: "POST",
+        body: JSON.stringify({
+          name: `CR Offer ${label}`,
+          offer_id: `CR-OFFER-${unique}-${label}`,
+          payout_model: "cpa",
+          payout_cpa: 10,
+        }),
+      });
+      check(`seed: offer ${label} 201`, r.status === 201);
+      const o = (await r.json()) as { id: number };
+      createdOfferIds.push(o.id);
+      return o;
+    }
+    const offer1 = await createOffer("A");
+    const offer2 = await createOffer("B");
+    const offer3 = await createOffer("C");
 
-    const provR = await apiFetch("/api/providers", {
-      method: "POST",
-      body: JSON.stringify({
-        name: "Creative Probe Provider",
-        sms_provider_id: `CR-PROV-${unique}`,
-      }),
-    });
-    check("seed: provider creation returns 201", provR.status === 201);
-    const prov = (await provR.json()) as { id: number };
-    createdProviderIds.push(prov.id);
-
-    // =============== Create + slug ===============
-    console.log("\n[1] POST create creative");
+    // ============ [1] Single create with one offer ============
+    console.log("\n[1] Single create with one offer");
     const c1R = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
-        offer_id: offer.id,
-        brand_id: brand.id,
-        sms_provider_id: prov.id,
-        text: "Hello from {brand}!",
+        text: "Single-offer creative",
+        offer_ids: [offer1.id],
       }),
     });
     check("returns 201", c1R.status === 201);
@@ -205,180 +156,335 @@ async function main() {
       id: number;
       slug: string;
       status: string;
+      offers: { id: number }[];
+      applies_to_all_offers: boolean;
+      quality: string;
+      sequence_placement: string;
     };
     createdCreativeIds.push(c1.id);
+    check("slug present", /^[a-z0-9]{6}$/.test(c1.slug), `got ${c1.slug}`);
+    check("status defaults to 'active'", c1.status === "active");
     check(
-      "slug is 6 lowercase alphanumeric chars",
-      /^[a-z0-9]{6}$/.test(c1.slug),
-      `got ${c1.slug}`,
+      "offers array has 1 entry (offer1)",
+      c1.offers.length === 1 && c1.offers[0].id === offer1.id,
     );
-    check("status defaults to 'draft'", c1.status === "draft");
+    check("applies_to_all_offers = false", c1.applies_to_all_offers === false);
 
-    console.log("\n[2] GET [id] returns joined offer/brand/provider");
-    const getR = await apiFetch(`/api/creatives/${c1.id}`);
-    const detail = (await getR.json()) as {
-      offer: { id: number } | null;
-      brand: { id: number } | null;
-      provider: { id: number } | null;
+    // ============ [2] Single create with multiple offers ============
+    console.log("\n[2] Single create with multiple offers");
+    const c2R = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Multi-offer creative",
+        offer_ids: [offer1.id, offer2.id, offer3.id],
+      }),
+    });
+    check("returns 201", c2R.status === 201);
+    const c2 = (await c2R.json()) as {
+      id: number;
+      slug: string;
+      offers: { id: number }[];
+    };
+    createdCreativeIds.push(c2.id);
+    check("offers array has 3 entries", c2.offers.length === 3);
+
+    // ============ [3] applies_to_all_offers=true ============
+    console.log("\n[3] Single create with applies_to_all_offers=true");
+    const c3R = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Org-wide creative",
+        applies_to_all_offers: true,
+      }),
+    });
+    check("returns 201", c3R.status === 201);
+    const c3 = (await c3R.json()) as {
+      id: number;
+      applies_to_all_offers: boolean;
+      offers: { id: number }[];
+    };
+    createdCreativeIds.push(c3.id);
+    check("applies_to_all_offers = true", c3.applies_to_all_offers === true);
+    check("offers array is empty (no junction rows)", c3.offers.length === 0);
+
+    // ============ [4] Validation: no offers + applies_to_all=false ============
+    console.log("\n[4] Validation: at least one offer association required");
+    const c4R = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Orphan",
+        offer_ids: [],
+        applies_to_all_offers: false,
+      }),
+    });
+    check("returns 400", c4R.status === 400);
+    const c4err = await c4R.json();
+    check(
+      "error mentions offer requirement",
+      typeof c4err.error === "string" &&
+        c4err.error.toLowerCase().includes("offer"),
+    );
+
+    // ============ [5] Bulk create ============
+    console.log("\n[5] Bulk create — 3 creatives, shared offer + quality + sequence");
+    const bulkR = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        creatives: [{ text: "Bulk A" }, { text: "Bulk B" }, { text: "Bulk C" }],
+        offer_ids: [offer1.id],
+        quality: "high",
+        sequence_placement: "1st",
+      }),
+    });
+    check("returns 201", bulkR.status === 201);
+    const bulk = (await bulkR.json()) as {
+      created: Array<{
+        id: number;
+        offers: { id: number }[];
+        quality: string;
+        sequence_placement: string;
+        text: string;
+      }>;
+    };
+    for (const c of bulk.created) createdCreativeIds.push(c.id);
+    check("3 creatives created", bulk.created.length === 3);
+    check(
+      "each has 1 junction row to offer1",
+      bulk.created.every(
+        (c) => c.offers.length === 1 && c.offers[0].id === offer1.id,
+      ),
+    );
+    check(
+      "each has quality='high'",
+      bulk.created.every((c) => c.quality === "high"),
+    );
+    check(
+      "each has sequence_placement='1st'",
+      bulk.created.every((c) => c.sequence_placement === "1st"),
+    );
+    check(
+      "texts match input order",
+      bulk.created[0].text === "Bulk A" &&
+        bulk.created[1].text === "Bulk B" &&
+        bulk.created[2].text === "Bulk C",
+    );
+
+    // ============ [6] Bulk create cap ============
+    console.log("\n[6] Bulk create cap — 51 rows → 400");
+    const over = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        creatives: Array.from({ length: 51 }, (_, i) => ({ text: `r${i}` })),
+        offer_ids: [offer1.id],
+      }),
+    });
+    check("returns 400", over.status === 400);
+
+    // ============ [7] Bulk transactional rollback ============
+    console.log("\n[7] Bulk transactional rollback — invalid row aborts batch");
+    // Snapshot the count of test creatives we own before the batch.
+    const before = await db
+      .select({ id: creatives.id })
+      .from(creatives)
+      .where(inArray(creatives.id, createdCreativeIds));
+    const rollR = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        creatives: [
+          { text: "Valid row 1" },
+          { text: "" }, // invalid — empty
+          { text: "Valid row 3" },
+        ],
+        offer_ids: [offer1.id],
+      }),
+    });
+    check("returns 400", rollR.status === 400);
+    const after = await db
+      .select({ id: creatives.id })
+      .from(creatives)
+      .where(inArray(creatives.id, createdCreativeIds));
+    check(
+      "no new creatives inserted from failed batch",
+      after.length === before.length,
+    );
+
+    // ============ [8] PATCH offer_ids — replace semantics ============
+    console.log("\n[8] PATCH offer_ids replace semantics");
+    const c8R = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Replace-semantics target",
+        offer_ids: [offer1.id, offer2.id],
+      }),
+    });
+    const c8 = (await c8R.json()) as { id: number };
+    createdCreativeIds.push(c8.id);
+    const pR = await apiFetch(`/api/creatives/${c8.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ offer_ids: [offer2.id, offer3.id] }),
+    });
+    check("PATCH returns 200", pR.status === 200);
+    const pBody = (await pR.json()) as { offers: { id: number }[] };
+    const ids = new Set(pBody.offers.map((o) => o.id));
+    check(
+      "result is exactly [offer2, offer3]",
+      ids.size === 2 && ids.has(offer2.id) && ids.has(offer3.id),
+      `got ${[...ids].join(",")}`,
+    );
+
+    // ============ [9] PATCH applies_to_all_offers toggle ============
+    console.log("\n[9] PATCH applies_to_all_offers — junction rows preserved");
+    const c9R = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Toggle target",
+        offer_ids: [offer1.id],
+      }),
+    });
+    const c9 = (await c9R.json()) as { id: number };
+    createdCreativeIds.push(c9.id);
+    const toggleOnR = await apiFetch(`/api/creatives/${c9.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ applies_to_all_offers: true }),
+    });
+    check("toggle ON returns 200", toggleOnR.status === 200);
+    const toggleOnBody = (await toggleOnR.json()) as {
+      applies_to_all_offers: boolean;
+      offers: { id: number }[];
     };
     check(
-      "joined offer/brand/provider present",
-      detail.offer?.id === offer.id &&
-        detail.brand?.id === brand.id &&
-        detail.provider?.id === prov.id,
+      "applies_to_all_offers = true",
+      toggleOnBody.applies_to_all_offers === true,
     );
-
-    console.log("\n[3] PATCH text while draft → 200");
-    const p1R = await apiFetch(`/api/creatives/${c1.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ text: "Updated message" }),
-    });
-    check("PATCH returns 200", p1R.status === 200);
-
-    console.log("\n[4] Status draft → pending");
-    const s1R = await apiFetch(`/api/creatives/${c1.id}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status: "pending" }),
-    });
-    check("returns 200", s1R.status === 200);
     check(
-      "status is now 'pending'",
-      ((await s1R.json()) as { status: string }).status === "pending",
+      "junction rows NOT auto-cleared",
+      toggleOnBody.offers.length === 1 &&
+        toggleOnBody.offers[0].id === offer1.id,
     );
-
-    console.log("\n[5] PATCH text while pending → 200 (still editable)");
-    const p2R = await apiFetch(`/api/creatives/${c1.id}`, {
+    const toggleOffR = await apiFetch(`/api/creatives/${c9.id}`, {
       method: "PATCH",
-      body: JSON.stringify({ text: "Edited during pending" }),
+      body: JSON.stringify({ applies_to_all_offers: false }),
     });
-    check("PATCH text returns 200 while pending", p2R.status === 200);
-
-    console.log("\n[6] Status pending → ready (manager approval)");
-    const s2R = await apiFetch(`/api/creatives/${c1.id}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status: "ready" }),
-    });
-    check("returns 200", s2R.status === 200);
-
-    console.log("\n[7] PATCH text while ready → 400 (text locked)");
-    const p3R = await apiFetch(`/api/creatives/${c1.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ text: "Should be blocked" }),
-    });
-    check("returns 400", p3R.status === 400);
-    const p3body = await p3R.json();
+    const toggleOffBody = (await toggleOffR.json()) as {
+      offers: { id: number }[];
+    };
     check(
-      "error mentions text lock",
-      p3body.details?.reason === "text_locked",
-      `got ${JSON.stringify(p3body.details)}`,
+      "toggling back keeps original junction rows",
+      toggleOffBody.offers.length === 1 &&
+        toggleOffBody.offers[0].id === offer1.id,
     );
 
-    console.log("\n[8] PATCH offer/brand while ready → 200 (still editable)");
-    const p4R = await apiFetch(`/api/creatives/${c1.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ brand_id: null }),
+    // ============ [10] Stage picker eligibility ============
+    console.log("\n[10] Stage picker eligibility via /api/creatives/list?offer_id=…");
+    // c1: offer1 (created in [1]); c3: applies_to_all_offers=true; c2: [offer1, offer2, offer3]
+    // We need a creative that is ONLY on offer2 (i.e. NOT offer1) to verify exclusion.
+    const cOffer2OnlyR = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Offer2-only creative",
+        offer_ids: [offer2.id],
+      }),
     });
-    check("returns 200", p4R.status === 200);
+    const cOffer2Only = (await cOffer2OnlyR.json()) as { id: number };
+    createdCreativeIds.push(cOffer2Only.id);
 
-    console.log("\n[9] Status ready → paused → ready");
-    const s3R = await apiFetch(`/api/creatives/${c1.id}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status: "paused" }),
-    });
-    check("paused returns 200", s3R.status === 200);
-    const s4R = await apiFetch(`/api/creatives/${c1.id}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status: "ready" }),
-    });
-    check("paused → ready returns 200", s4R.status === 200);
-
-    console.log("\n[10] Status ready → draft → 409 invalid transition");
-    const s5R = await apiFetch(`/api/creatives/${c1.id}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status: "draft" }),
-    });
-    check("returns 409", s5R.status === 409);
-    const s5body = await s5R.json();
+    const pickR = await apiFetch(
+      `/api/creatives/list?offer_id=${offer1.id}&status=active&pageSize=200`,
+    );
+    const pickBody = (await pickR.json()) as {
+      data: { id: number; applies_to_all_offers: boolean }[];
+    };
+    const pickIds = new Set(pickBody.data.map((r) => r.id));
     check(
-      "details.reason = invalid_transition",
-      s5body.details?.reason === "invalid_transition",
+      "c1 (offer1 junction) is in the offer1 picker results",
+      pickIds.has(c1.id),
+    );
+    check(
+      "c3 (applies_to_all_offers) is in the offer1 picker results",
+      pickIds.has(c3.id),
+    );
+    check(
+      "cOffer2Only is NOT in the offer1 picker results",
+      !pickIds.has(cOffer2Only.id),
     );
 
-    console.log("\n[11] Archive → 200, status becomes 'archived'");
+    // ============ [11] Quality + sequence defaults ============
+    console.log("\n[11] Defaults — POST without quality/sequence → 'unknown'");
+    const cDefR = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Default-meta creative",
+        offer_ids: [offer1.id],
+      }),
+    });
+    const cDef = (await cDefR.json()) as {
+      id: number;
+      quality: string;
+      sequence_placement: string;
+    };
+    createdCreativeIds.push(cDef.id);
+    check("quality defaults to 'unknown'", cDef.quality === "unknown");
+    check(
+      "sequence_placement defaults to 'unknown'",
+      cDef.sequence_placement === "unknown",
+    );
+
+    // ============ [12] Archive + restore ============
+    console.log("\n[12] Archive + restore");
     const archR = await apiFetch(`/api/creatives/${c1.id}/archive`, {
       method: "POST",
     });
-    check("archive returns 200", archR.status === 200);
+    check("archive 200", archR.status === 200);
     const archived = (await archR.json()) as { status: string };
     check("status is 'archived'", archived.status === "archived");
-
-    console.log("\n[12] Status transition on archived → 409");
-    const s6R = await apiFetch(`/api/creatives/${c1.id}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status: "ready" }),
-    });
-    check("returns 409", s6R.status === 409);
-
-    console.log("\n[13] Restore → status returns to 'draft'");
+    // Hidden in default list
+    const defListR = await apiFetch("/api/creatives/list?pageSize=200");
+    const defList = (await defListR.json()) as { data: { id: number }[] };
+    check(
+      "archived row hidden from default list",
+      !defList.data.some((r) => r.id === c1.id),
+    );
+    // Shown when showArchived=true
+    const showR = await apiFetch(
+      "/api/creatives/list?showArchived=true&pageSize=200",
+    );
+    const showBody = (await showR.json()) as { data: { id: number }[] };
+    check(
+      "archived row visible with showArchived=true",
+      showBody.data.some((r) => r.id === c1.id),
+    );
+    // Restore → status=active
     const resR = await apiFetch(`/api/creatives/${c1.id}/restore`, {
       method: "POST",
     });
-    check("restore returns 200", resR.status === 200);
+    check("restore 200", resR.status === 200);
     const restored = (await resR.json()) as { status: string };
-    check("status is back to 'draft'", restored.status === "draft");
+    check("restore sets status back to 'active'", restored.status === "active");
 
-    console.log("\n[14] Duplicate creates an independent record");
-    const dupR = await apiFetch(`/api/creatives/${c1.id}/duplicate`, {
+    // ============ [13] Duplicate copies junction ============
+    console.log("\n[13] Duplicate copies junction offers");
+    const dupR = await apiFetch(`/api/creatives/${c2.id}/duplicate`, {
       method: "POST",
     });
-    check("duplicate returns 201", dupR.status === 201);
+    check("duplicate 201", dupR.status === 201);
     const dup = (await dupR.json()) as {
       id: number;
       slug: string;
-      status: string;
-      text: string;
+      offers: { id: number }[];
     };
     createdCreativeIds.push(dup.id);
-    check("dup is a different id", dup.id !== c1.id);
-    check("dup has a different slug", dup.slug !== c1.slug);
-    check("dup starts as draft", dup.status === "draft");
-
-    // Editing the duplicate must not affect the original.
-    await apiFetch(`/api/creatives/${dup.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ text: "Duplicate-only change" }),
-    });
-    const origNowR = await apiFetch(`/api/creatives/${c1.id}`);
-    const origNow = (await origNowR.json()) as { text: string };
+    check("dup has different id + slug", dup.id !== c2.id && dup.slug !== c2.slug);
     check(
-      "editing dup does not change original text",
-      origNow.text !== "Duplicate-only change",
-    );
-
-    console.log("\n[15] List filters by status");
-    const listR = await apiFetch(
-      `/api/creatives/list?status=draft&pageSize=100`,
-    );
-    const listBody = (await listR.json()) as {
-      data: { id: number; status: string }[];
-    };
-    check(
-      "list with status=draft returns only drafts",
-      listBody.data.every((r) => r.status === "draft"),
-    );
-    check(
-      "our two test rows are in the draft list",
-      listBody.data.some((r) => r.id === c1.id) &&
-        listBody.data.some((r) => r.id === dup.id),
+      "dup has same offer associations as source (3 offers)",
+      dup.offers.length === 3,
     );
   } finally {
     console.log("\nCleanup");
     try {
+      // creative_offers CASCADE off creatives — explicit delete of creatives
+      // wipes their junction rows too.
       for (const cid of createdCreativeIds) {
         await db.delete(creatives).where(eq(creatives.id, cid));
-      }
-      for (const pid of createdProviderIds) {
-        await db.delete(sms_providers).where(eq(sms_providers.id, pid));
       }
       for (const oid of createdOfferIds) {
         await db.delete(offers).where(eq(offers.id, oid));

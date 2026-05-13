@@ -85,7 +85,6 @@ export type Permission =
   | "creatives.view"
   | "creatives.create"
   | "creatives.update"
-  | "creatives.approve"
   | "creatives.archive"
   | "creatives.restore"
   | "campaigns.view"
@@ -231,7 +230,6 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "segments.archive",
   "segments.restore",
   "segments.delete",
-  "creatives.approve",
   "creatives.restore",
   "campaigns.restore",
   "campaigns.reassign",

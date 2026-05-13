@@ -16,8 +16,8 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { useApiCall } from "@/lib/hooks/use-api-call";
-import { cn } from "@/lib/utils";
 import {
   segmentCreateSchema,
   type SegmentFormValues,
@@ -116,58 +116,34 @@ export function SegmentForm({
         <FormField
           control={form.control}
           name="segment_group_ids"
-          render={({ field }) => {
-            const selected = field.value ?? [];
-            return (
-              <FormItem>
-                <FormLabel>Groups (optional)</FormLabel>
-                <FormControl>
-                  <div className="flex flex-wrap gap-1.5">
-                    {groups.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">
-                        No groups available yet. Create one from Segment Groups.
-                      </p>
-                    ) : (
-                      groups.map((g) => {
-                        const active = selected.includes(g.id);
-                        return (
-                          <button
-                            key={g.id}
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={() =>
-                              field.onChange(
-                                active
-                                  ? selected.filter((id) => id !== g.id)
-                                  : [...selected, g.id],
-                              )
-                            }
-                            className={cn(
-                              "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs",
-                              active
-                                ? "border-foreground bg-foreground text-background"
-                                : "bg-background hover:bg-muted",
-                              isSubmitting && "cursor-not-allowed opacity-50",
-                            )}
-                          >
-                            <span
-                              className="size-2 rounded-full"
-                              style={{ backgroundColor: g.color ?? "#64748B" }}
-                            />
-                            {g.name}
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                </FormControl>
-                <FormDescription>
-                  A segment can belong to multiple groups. Click to toggle.
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            );
-          }}
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Groups (optional)</FormLabel>
+              <FormControl>
+                <MultiSelectPicker
+                  options={groups.map((g) => ({
+                    id: g.id,
+                    label: g.name,
+                    color: g.color,
+                  }))}
+                  value={field.value ?? []}
+                  onChange={(next) => field.onChange(next as number[])}
+                  placeholder="Select groups…"
+                  selectedLabel={(n) =>
+                    `${n} group${n === 1 ? "" : "s"} selected`
+                  }
+                  isLoading={groupsApi.isLoading && groups.length === 0}
+                  disabled={isSubmitting}
+                  emptyMessage="No groups available yet. Create one from Segment Groups."
+                  searchPlaceholder="Search groups…"
+                />
+              </FormControl>
+              <FormDescription>
+                A segment can belong to multiple groups.
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
         />
 
         <div className="flex items-center justify-end gap-2 pt-2">

@@ -585,7 +585,13 @@ export function CampaignForm({
             </div>
           ) : null}
 
-          {/* Segments */}
+          {/* Segments
+              TODO: this inline scrollable list with search predates
+              <MultiSelectPicker>. It scales fine (already has search +
+              scroll), but a future cleanup could migrate to the shared
+              picker for UI consistency. The current pattern is
+              "visible-by-default" rather than popover-collapsed, which
+              suits the campaign builder's main step better. */}
           <div className="grid gap-2">
             <Label>Segments (1+ required for activation)</Label>
             <div className="relative">

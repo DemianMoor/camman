@@ -21,8 +21,6 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  // Restore is manager+ — restoring approved copy back into the active
-  // pool needs the same level of authority as approval.
   if (!can(role, "creatives.restore")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
@@ -35,11 +33,10 @@ export async function POST(
     });
   }
 
-  // Policy: restore always returns the creative to draft so it must walk
-  // through the approval flow again before it can be used in a campaign.
+  // Restore returns the creative to active. No state machine anymore.
   const updated = await db
     .update(creatives)
-    .set({ status: "draft", archived_at: null })
+    .set({ status: "active", archived_at: null })
     .where(
       and(
         eq(creatives.id, creativeId),

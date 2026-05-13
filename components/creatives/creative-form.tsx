@@ -17,6 +17,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -24,19 +25,25 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
-import { creativeCreateSchema } from "@/lib/validators/creatives";
+import {
+  QUALITY_VALUES,
+  SEQUENCE_PLACEMENT_VALUES,
+  type CreativeQuality,
+  type CreativeSequencePlacement,
+} from "@/lib/validators/creatives";
 
-// Form values are the input shape — same fields as creativeCreateSchema but
-// we want segment/brand/provider to use sentinel string values in the Select
-// component for "none". We re-map before submitting.
+// Soft warning threshold. Long text doesn't block save — it just flags
+// that the user may be pushing past one SMS segment once the brand prefix
+// and stop text are prepended at stage send time.
+const TEXT_WARN_THRESHOLD = 110;
+
 const formSchema = z.object({
-  offer_id: z.number().int().positive(),
-  sms_provider_id: z.number().int().positive().nullable(),
-  brand_id: z.number().int().positive().nullable(),
   text: z.string().min(1, "Message text is required").max(1600),
   creative_id: z
     .union([
@@ -44,42 +51,48 @@ const formSchema = z.object({
         .string()
         .trim()
         .max(80)
-        .regex(/^[A-Za-z0-9_-]+$/, "Letters, digits, hyphens, underscores only"),
+        .regex(
+          /^[A-Za-z0-9_-]+$/,
+          "Letters, digits, hyphens, underscores only",
+        ),
       z.literal(""),
     ])
     .optional(),
+  quality: z.enum(QUALITY_VALUES),
+  sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES),
+  applies_to_all_offers: z.boolean(),
+  offer_ids: z.array(z.number().int().positive()),
 });
 export type CreativeFormValues = z.input<typeof formSchema>;
-export type CreativeFormSubmit = z.infer<typeof creativeCreateSchema>;
 
-type OfferInfo = {
-  id: number;
-  name: string;
-  color: string | null;
-  status: string;
-};
-type ProviderInfo = {
-  id: number;
-  name: string;
-  color: string | null;
-  status: string;
-};
-type BrandInfo = {
+export type OfferInfo = {
   id: number;
   name: string;
   color: string | null;
   status: string;
 };
 
-const NONE = "__none__";
+const QUALITY_LABEL: Record<CreativeQuality, string> = {
+  high: "High",
+  average: "Average",
+  poor: "Poor",
+  unknown: "Unknown",
+};
+
+const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
+  "1st": "1st",
+  "2nd": "2nd",
+  "3rd": "3rd",
+  any: "Any",
+  unknown: "Unknown",
+};
 
 export interface CreativeFormProps {
   mode: "create" | "edit";
   initialValues?: Partial<CreativeFormValues>;
   // Edit-mode extras displayed read-only
   slug?: string;
-  currentStatus?: string;
-  onSubmit: (values: CreativeFormSubmit) => Promise<void>;
+  onSubmit: (values: CreativeFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
 }
@@ -88,18 +101,13 @@ export function CreativeForm({
   mode,
   initialValues,
   slug,
-  currentStatus,
   onSubmit,
   onCancel,
   isSubmitting,
 }: CreativeFormProps) {
   const isEdit = mode === "edit";
   const offersApi = useApiCall<{ data: OfferInfo[] }>();
-  const providersApi = useApiCall<{ data: ProviderInfo[] }>();
-  const brandsApi = useApiCall<{ data: BrandInfo[] }>();
   const [offers, setOffers] = useState<OfferInfo[]>([]);
-  const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [brands, setBrands] = useState<BrandInfo[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(
     Boolean(initialValues?.creative_id),
   );
@@ -111,40 +119,23 @@ export function CreativeForm({
       if (r.ok) setOffers(r.data.data.filter((o) => o.status === "active"));
     })();
   }, [offersApi.execute]);
-  useEffect(() => {
-    (async () => {
-      const r = await providersApi.execute(
-        "/api/providers/list?pageSize=200",
-      );
-      if (r.ok)
-        setProviders(r.data.data.filter((p) => p.status === "active"));
-    })();
-  }, [providersApi.execute]);
-  useEffect(() => {
-    (async () => {
-      const r = await brandsApi.execute("/api/brands/list?pageSize=200");
-      if (r.ok) setBrands(r.data.data.filter((b) => b.status === "active"));
-    })();
-  }, [brandsApi.execute]);
 
   const form = useForm<CreativeFormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
-      offer_id: initialValues?.offer_id ?? (undefined as unknown as number),
-      sms_provider_id: initialValues?.sms_provider_id ?? null,
-      brand_id: initialValues?.brand_id ?? null,
       text: initialValues?.text ?? "",
       creative_id: initialValues?.creative_id ?? "",
+      quality: initialValues?.quality ?? "unknown",
+      sequence_placement: initialValues?.sequence_placement ?? "unknown",
+      applies_to_all_offers: initialValues?.applies_to_all_offers ?? false,
+      offer_ids: initialValues?.offer_ids ?? [],
     },
   });
 
   const text = form.watch("text");
+  const appliesToAll = form.watch("applies_to_all_offers");
   const segments = useMemo(() => calculateSmsSegments(text ?? ""), [text]);
-
-  // Text is locked once the creative is approved (ready/paused). The list
-  // page passes currentStatus so we can disable the textarea inline.
-  const textLocked =
-    isEdit && currentStatus !== undefined && currentStatus !== "draft" && currentStatus !== "pending";
+  const isLongText = (text?.length ?? 0) > TEXT_WARN_THRESHOLD;
 
   async function copySlug() {
     if (!slug) return;
@@ -156,11 +147,17 @@ export function CreativeForm({
   }
 
   async function handleFormSubmit(values: CreativeFormValues) {
+    // Surface the "must have at least one association" rule before the API
+    // would (the validator enforces it server-side too). When applies_to_all
+    // is on the offer list is allowed to be empty.
+    if (!values.applies_to_all_offers && values.offer_ids.length === 0) {
+      form.setError("offer_ids", {
+        message: "Must apply to at least one offer (or select 'All offers').",
+      });
+      return;
+    }
     await onSubmit({
-      offer_id: values.offer_id,
-      sms_provider_id: values.sms_provider_id ?? undefined,
-      brand_id: values.brand_id ?? undefined,
-      text: values.text,
+      ...values,
       creative_id:
         values.creative_id && values.creative_id !== ""
           ? values.creative_id
@@ -168,12 +165,11 @@ export function CreativeForm({
     });
   }
 
-  const counterTone =
-    segments.segments > 8
-      ? "text-red-700 dark:text-red-400"
-      : segments.segments > 4
-        ? "text-amber-700 dark:text-amber-400"
-        : "text-muted-foreground";
+  const counterTone = isLongText
+    ? "text-red-700 dark:text-red-400"
+    : segments.segments > 4
+      ? "text-amber-700 dark:text-amber-400"
+      : "text-muted-foreground";
 
   return (
     <Form {...form}>
@@ -202,117 +198,6 @@ export function CreativeForm({
 
         <FormField
           control={form.control}
-          name="offer_id"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Offer</FormLabel>
-              <Select
-                value={field.value ? String(field.value) : ""}
-                onValueChange={(v) => field.onChange(Number(v))}
-                disabled={isSubmitting}
-              >
-                <FormControl>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select an offer" />
-                  </SelectTrigger>
-                </FormControl>
-                <SelectContent>
-                  {offers.map((o) => (
-                    <SelectItem key={o.id} value={String(o.id)}>
-                      <span className="inline-flex items-center gap-2">
-                        <span
-                          className="size-2 rounded-full"
-                          style={{ backgroundColor: o.color ?? "#64748B" }}
-                        />
-                        {o.name}
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-
-        <FormField
-          control={form.control}
-          name="sms_provider_id"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Provider (optional)</FormLabel>
-              <Select
-                value={field.value === null ? NONE : String(field.value)}
-                onValueChange={(v) =>
-                  field.onChange(v === NONE ? null : Number(v))
-                }
-                disabled={isSubmitting}
-              >
-                <FormControl>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Unassigned" />
-                  </SelectTrigger>
-                </FormControl>
-                <SelectContent>
-                  <SelectItem value={NONE}>Unassigned</SelectItem>
-                  {providers.map((p) => (
-                    <SelectItem key={p.id} value={String(p.id)}>
-                      <span className="inline-flex items-center gap-2">
-                        <span
-                          className="size-2 rounded-full"
-                          style={{ backgroundColor: p.color ?? "#64748B" }}
-                        />
-                        {p.name}
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-
-        <FormField
-          control={form.control}
-          name="brand_id"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Brand (optional)</FormLabel>
-              <Select
-                value={field.value === null ? NONE : String(field.value)}
-                onValueChange={(v) =>
-                  field.onChange(v === NONE ? null : Number(v))
-                }
-                disabled={isSubmitting}
-              >
-                <FormControl>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Unassigned" />
-                  </SelectTrigger>
-                </FormControl>
-                <SelectContent>
-                  <SelectItem value={NONE}>Unassigned</SelectItem>
-                  {brands.map((b) => (
-                    <SelectItem key={b.id} value={String(b.id)}>
-                      <span className="inline-flex items-center gap-2">
-                        <span
-                          className="size-2 rounded-full"
-                          style={{ backgroundColor: b.color ?? "#64748B" }}
-                        />
-                        {b.name}
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-
-        <FormField
-          control={form.control}
           name="text"
           render={({ field }) => (
             <FormItem>
@@ -321,17 +206,14 @@ export function CreativeForm({
                 <Textarea
                   rows={5}
                   placeholder="Your message…"
-                  disabled={isSubmitting || textLocked}
-                  className="font-mono text-sm"
+                  disabled={isSubmitting}
+                  className={cn(
+                    "font-mono text-sm",
+                    isLongText && "border-red-400 focus-visible:ring-red-400",
+                  )}
                   {...field}
                 />
               </FormControl>
-              {textLocked ? (
-                <FormDescription className="text-amber-700 dark:text-amber-400">
-                  Text is locked once approved. Duplicate this creative to
-                  iterate on copy.
-                </FormDescription>
-              ) : null}
               <div className={cn("text-xs tabular-nums", counterTone)}>
                 {text ? (
                   <>
@@ -348,10 +230,140 @@ export function CreativeForm({
                   </span>
                 )}
               </div>
+              {isLongText ? (
+                <FormDescription className="text-red-700 dark:text-red-400">
+                  Long creative — over {TEXT_WARN_THRESHOLD} characters may
+                  push past 1 SMS segment when assembled with brand prefix and
+                  stop text.
+                </FormDescription>
+              ) : null}
               <FormMessage />
             </FormItem>
           )}
         />
+
+        <div className="grid gap-3 rounded-md border p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <Label className="cursor-pointer" htmlFor="applies-to-all">
+                Apply to all offers
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                When on, this creative is eligible for every offer in your
+                organization. The offer list below becomes a fallback list,
+                not a restriction.
+              </p>
+            </div>
+            <FormField
+              control={form.control}
+              name="applies_to_all_offers"
+              render={({ field }) => (
+                <Switch
+                  id="applies-to-all"
+                  checked={field.value}
+                  onCheckedChange={field.onChange}
+                  disabled={isSubmitting}
+                />
+              )}
+            />
+          </div>
+
+          <FormField
+            control={form.control}
+            name="offer_ids"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel className={appliesToAll ? "opacity-60" : ""}>
+                  Offers
+                </FormLabel>
+                <FormControl>
+                  <MultiSelectPicker
+                    options={offers.map((o) => ({
+                      id: o.id,
+                      label: o.name,
+                      color: o.color,
+                    }))}
+                    value={field.value ?? []}
+                    onChange={(next) => field.onChange(next as number[])}
+                    placeholder="Select offers…"
+                    selectedLabel={(n) =>
+                      `${n} offer${n === 1 ? "" : "s"} selected`
+                    }
+                    isLoading={offersApi.isLoading && offers.length === 0}
+                    disabled={isSubmitting || appliesToAll}
+                    emptyMessage="No active offers available."
+                    searchPlaceholder="Search offers…"
+                  />
+                </FormControl>
+                <FormDescription>
+                  {appliesToAll
+                    ? "Disabled — this creative is org-wide."
+                    : null}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <FormField
+            control={form.control}
+            name="quality"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Quality</FormLabel>
+                <Select
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  disabled={isSubmitting}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    {QUALITY_VALUES.map((q) => (
+                      <SelectItem key={q} value={q}>
+                        {QUALITY_LABEL[q]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="sequence_placement"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Sequence placement</FormLabel>
+                <Select
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  disabled={isSubmitting}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    {SEQUENCE_PLACEMENT_VALUES.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {SEQUENCE_LABEL[s]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
 
         <button
           type="button"
@@ -404,7 +416,7 @@ export function CreativeForm({
             {isSubmitting ? (
               <Loader2 className="size-4 animate-spin" aria-hidden />
             ) : null}
-            {isEdit ? "Save changes" : "Create draft"}
+            {isEdit ? "Save changes" : "Create"}
           </Button>
         </div>
       </form>

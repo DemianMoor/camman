@@ -178,8 +178,7 @@ async function main() {
     const creR = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
-        offer_id: offer.id,
-        brand_id: brand.id,
+        offer_ids: [offer.id],
         text: "Stage test SMS body",
       }),
     });

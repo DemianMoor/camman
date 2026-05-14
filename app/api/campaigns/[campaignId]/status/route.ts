@@ -79,7 +79,9 @@ export async function POST(
       brand_id: campaigns.brand_id,
       offer_id: campaigns.offer_id,
       audience_segment_ids: campaigns.audience_segment_ids,
+      audience_contact_group_ids: campaigns.audience_contact_group_ids,
       audience_filters: campaigns.audience_filters,
+      audience_cap: campaigns.audience_cap,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
@@ -117,7 +119,10 @@ export async function POST(
     if (c.brand_id == null) missing.push("brand_id");
     if (c.offer_id == null) missing.push("offer_id");
     const segmentIds = c.audience_segment_ids ?? [];
-    if (segmentIds.length === 0) missing.push("audience_segment_ids");
+    const contactGroupIds = c.audience_contact_group_ids ?? [];
+    if (segmentIds.length === 0 && contactGroupIds.length === 0) {
+      missing.push("audience_segment_ids");
+    }
     if (missing.length > 0) {
       return apiError(
         400,
@@ -145,7 +150,9 @@ export async function POST(
               campaignId,
               orgId,
               segmentIds,
+              contactGroupIds,
               filters: c.audience_filters ?? {},
+              cap: c.audience_cap ?? null,
             },
             tx,
           );

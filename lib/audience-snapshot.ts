@@ -17,15 +17,35 @@ export interface AudienceFilters {
 export interface AudiencePreviewInput {
   orgId: string;
   segmentIds: number[];
+  contactGroupIds?: number[];
   filters: AudienceFilters;
+  // Optional cap. When set, the preview returns BOTH the total matching
+  // count and the effective count (= min(total, cap)). The snapshot path
+  // takes a random sample of `cap` contacts at activation time.
+  cap?: number | null;
 }
 
 export interface AudienceSnapshotInput extends AudiencePreviewInput {
   campaignId: number;
 }
 
-export interface AudienceSnapshotResult {
+export interface AudiencePreviewResult {
+  // Effective count after cap is applied (= total_matching if no cap or
+  // if cap >= total_matching). This is the number the campaign will
+  // actually send to.
   count: number;
+  // Full matching pool size, ignoring any cap. Equal to count when no
+  // cap is in effect.
+  total_matching: number;
+  applied_cap: number | null;
+}
+
+export interface AudienceSnapshotResult {
+  // Number of rows actually inserted into campaign_audience_pool.
+  count: number;
+  // Full matching pool size before the cap was applied. Equal to count
+  // when no cap was in effect.
+  total_matching: number;
 }
 
 // Build the SQL that yields one row per qualifying contact_id, with the
@@ -34,23 +54,44 @@ export interface AudienceSnapshotResult {
 // pool. The qualifier WHERE clause OR-combines the filter toggles: a
 // contact is in if ANY enabled category includes them, and they're never
 // in if they have any opt-out record for this org.
+//
+// Audience source is the UNION of:
+//   * per-segment rule-filtered membership (via buildSegmentAudienceClause)
+//   * contacts directly tagged in any of the selected contact_groups
+// Either source can be empty; the function returns the empty set if both
+// are empty (caller short-circuits before invoking).
 async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
-  const { orgId, segmentIds, filters } = input;
+  const { orgId, segmentIds, contactGroupIds = [], filters } = input;
   const includeNoStatus = filters.include_no_status === true;
   const includeOptIn = filters.include_opt_in === true;
   const includeClickers = filters.include_clickers === true;
   const includeNotClicked = filters.include_not_clicked === true;
 
-  // Per-segment rule-filtered clauses, UNION'd into segment_members. Each
-  // segment's clause respects its own rules; a segment with zero active
-  // rules contributes its full manual membership (the buildSegmentAudienceClause
-  // helper handles the empty-rules short-circuit). The end result is the
-  // distinct set of contacts who belong to at least one of the listed
-  // segments AFTER each segment's rules are applied.
+  // Per-segment rule-filtered clauses. Each yields a set of contact_ids
+  // honoring that segment's rules + manual membership UNION.
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
   );
-  const unioned = perSegmentClauses.reduce(
+
+  // Contact-group clause: every contact tagged with any of the selected
+  // groups. Built inline because the rules engine doesn't model groups
+  // (groups are tags directly on contacts, not gated by segment rules).
+  const groupClauses =
+    contactGroupIds.length > 0
+      ? [
+          drizzleSql`
+            SELECT contact_id
+            FROM contact_contact_groups
+            WHERE org_id = ${orgId}::uuid
+              AND contact_group_id = ANY(${drizzleSql.raw(
+                "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+              )})
+          `,
+        ]
+      : [];
+
+  const allClauses = [...perSegmentClauses, ...groupClauses];
+  const unioned = allClauses.reduce(
     (acc, clause, i) =>
       i === 0 ? clause : drizzleSql`${acc} UNION ${clause}`,
   );
@@ -90,6 +131,12 @@ async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
         or (${includeNotClicked}::boolean and not has_clicker)
       )
   `;
+}
+
+function hasAnySource(input: AudiencePreviewInput): boolean {
+  return (
+    input.segmentIds.length > 0 || (input.contactGroupIds?.length ?? 0) > 0
+  );
 }
 
 // Stage-level filter toggles. Mutex on include_clickers / exclude_clickers
@@ -178,32 +225,62 @@ export async function computeStageAudienceCount(
 }
 
 // Compute the count for the UI's audience preview. No DB write.
+//
+// Returns total_matching (pre-cap) and count (post-cap, what actually
+// gets sent to). When no cap is set or the cap is >= total, the two are
+// equal. The preview never executes the random sample — that would be
+// wasted work since the snapshot does its own.
 export async function previewAudience(
   input: AudiencePreviewInput,
-): Promise<AudienceSnapshotResult> {
-  if (input.segmentIds.length === 0) return { count: 0 };
+): Promise<AudiencePreviewResult> {
+  if (!hasAnySource(input)) {
+    return { count: 0, total_matching: 0, applied_cap: input.cap ?? null };
+  }
   const qualifying = await buildQualifyingContactsSql(input);
   const result = (await db.execute(drizzleSql`
     select count(*)::int as count from (${qualifying}) q
   `)) as unknown as { count: number }[];
   const row = Array.isArray(result) ? result[0] : null;
-  return { count: row?.count ?? 0 };
+  const total = row?.count ?? 0;
+  const cap = input.cap ?? null;
+  const effective = cap !== null && cap < total ? cap : total;
+  return { count: effective, total_matching: total, applied_cap: cap };
 }
 
 // Snapshot the audience for a campaign: inserts one row into
 // campaign_audience_pool for each qualifying contact with its per-row
-// snapshot booleans. Returns the count of inserted rows. Caller is
-// responsible for running this inside a transaction with the campaign
-// row itself, so a failure rolls back the whole campaign.
+// snapshot booleans. Returns the count of inserted rows + the full
+// matching pool size. Caller is responsible for running this inside a
+// transaction with the campaign row itself, so a failure rolls back the
+// whole campaign.
+//
+// When `cap` is set and less than the resolved pool, applies
+// ORDER BY RANDOM() LIMIT cap to take a random sample. The sample is
+// frozen in the pool — there's no reseeding.
 export async function snapshotAudience(
   input: AudienceSnapshotInput,
   // Allow passing a transaction handle so this call participates in the
   // caller's transaction. Falls back to the top-level db.
   tx?: Pick<typeof db, "execute">,
 ): Promise<AudienceSnapshotResult> {
-  if (input.segmentIds.length === 0) return { count: 0 };
+  if (!hasAnySource(input)) return { count: 0, total_matching: 0 };
   const runner = tx ?? db;
   const qualifying = await buildQualifyingContactsSql(input);
+  const cap = input.cap ?? null;
+
+  // We count first so the caller knows total_matching even when capped.
+  // One extra query, runs inside the same transaction so the pool sees
+  // a consistent snapshot.
+  const totalRows = (await runner.execute(drizzleSql`
+    select count(*)::int as count from (${qualifying}) q
+  `)) as unknown as { count: number }[];
+  const total = Array.isArray(totalRows) ? totalRows[0]?.count ?? 0 : 0;
+
+  const limitClause =
+    cap !== null && cap < total
+      ? drizzleSql`order by random() limit ${cap}`
+      : drizzleSql``;
+
   const result = (await runner.execute(drizzleSql`
     insert into campaign_audience_pool
       (campaign_id, contact_id, org_id, was_clicker_at_snapshot, was_opt_in_at_snapshot, was_no_status_at_snapshot)
@@ -215,9 +292,10 @@ export async function snapshotAudience(
       was_opt_in,
       was_no_status
     from (${qualifying}) q
+    ${limitClause}
     on conflict (campaign_id, contact_id) do nothing
     returning contact_id
   `)) as unknown as { contact_id: string }[];
   const count = Array.isArray(result) ? result.length : 0;
-  return { count };
+  return { count, total_matching: total };
 }

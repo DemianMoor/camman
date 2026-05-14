@@ -1,4 +1,4 @@
-import { and, eq, sql as drizzleSql } from "drizzle-orm";
+import { and, eq, inArray, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -6,6 +6,7 @@ import {
   brands,
   campaign_stages,
   campaigns,
+  contact_groups,
   offers,
   routing_types,
   traffic_types,
@@ -77,8 +78,10 @@ export async function GET(
       assigned_to_user_id: campaigns.assigned_to_user_id,
       created_by_user_id: campaigns.created_by_user_id,
       audience_segment_ids: campaigns.audience_segment_ids,
+      audience_contact_group_ids: campaigns.audience_contact_group_ids,
       audience_filters: campaigns.audience_filters,
       audience_snapshot_count: campaigns.audience_snapshot_count,
+      audience_cap: campaigns.audience_cap,
       start_date: campaigns.start_date,
       end_date: campaigns.end_date,
       status: campaigns.status,
@@ -202,11 +205,14 @@ export async function PATCH(
   }
 
   // Audience fields lock once the campaign leaves draft. The frozen pool
-  // can't change after a campaign has been activated even once.
+  // can't change after a campaign has been activated even once. Covers
+  // segments, contact groups, filters, and the random-sample cap.
   if (
     current[0].status !== "draft" &&
     (input.audience_segment_ids !== undefined ||
-      input.audience_filters !== undefined)
+      input.audience_contact_group_ids !== undefined ||
+      input.audience_filters !== undefined ||
+      input.audience_cap !== undefined)
   ) {
     return apiError(
       400,
@@ -214,6 +220,31 @@ export async function PATCH(
       API_ERROR_CODES.VALIDATION,
       { reason: "audience_locked_after_draft" },
     );
+  }
+
+  // Verify org ownership of contact_group_ids when present. Same pattern
+  // as the create route — RLS isn't enough since Drizzle bypasses it.
+  if (
+    input.audience_contact_group_ids !== undefined &&
+    input.audience_contact_group_ids.length > 0
+  ) {
+    const found = await db
+      .select({ id: contact_groups.id })
+      .from(contact_groups)
+      .where(
+        and(
+          eq(contact_groups.org_id, orgId),
+          inArray(contact_groups.id, input.audience_contact_group_ids),
+        ),
+      );
+    if (found.length !== input.audience_contact_group_ids.length) {
+      return apiError(
+        400,
+        "One or more audience_contact_group_ids don't belong to your organization",
+        API_ERROR_CODES.VALIDATION,
+        { field: "audience_contact_group_ids" },
+      );
+    }
   }
 
   // Reassignment gate: changing assigned_to_user_id requires the

@@ -57,9 +57,16 @@ const campaignCreateBaseSchema = z.object({
   assigned_to_user_id: z.string().uuid().nullable().optional(),
   // audience_segment_ids stays .optional() (NOT nullable) because its DB
   // column is NOT NULL with default '{}'. The form always ships an array;
-  // a missing field means "no change" not "set to null". Same for filters.
+  // a missing field means "no change" not "set to null". Same for filters
+  // and contact_group_ids.
   audience_segment_ids: z.array(z.number().int().positive()).optional(),
+  audience_contact_group_ids: z
+    .array(z.number().int().positive())
+    .optional(),
   audience_filters: audienceFiltersSchema.optional(),
+  // Optional cap on the random-sampled audience. Null clears the cap.
+  // Validated as positive; the DB has a matching CHECK.
+  audience_cap: z.number().int().positive().nullable().optional(),
   start_date: dateStringSchema.nullable().optional(),
   end_date: dateStringSchema.nullable().optional(),
   notes: z
@@ -97,14 +104,18 @@ export const campaignCreateSchema = campaignCreateBaseSchema.superRefine(
         message: "offer_id is required when launching",
       });
     }
-    if (
-      !data.audience_segment_ids ||
-      data.audience_segment_ids.length === 0
-    ) {
+    const hasSegments =
+      data.audience_segment_ids != null &&
+      data.audience_segment_ids.length > 0;
+    const hasGroups =
+      data.audience_contact_group_ids != null &&
+      data.audience_contact_group_ids.length > 0;
+    if (!hasSegments && !hasGroups) {
       ctx.addIssue({
         path: ["audience_segment_ids"],
         code: z.ZodIssueCode.custom,
-        message: "At least one segment is required when launching",
+        message:
+          "At least one segment or contact group is required when launching",
       });
     }
   },
@@ -121,11 +132,27 @@ export const campaignStatusChangeSchema = z.object({
 });
 
 // Audience preview takes the same shape as the audience portion of create —
-// segment_ids + filters — without the rest of the campaign metadata.
-export const audiencePreviewSchema = z.object({
-  audience_segment_ids: z.array(z.number().int().positive()).min(1),
-  audience_filters: audienceFiltersSchema.optional(),
-});
+// segment_ids + contact_group_ids + filters — without the rest of the
+// campaign metadata. At least one of segments / groups must be non-empty;
+// caller short-circuits the empty case so we don't even hit the network.
+export const audiencePreviewSchema = z
+  .object({
+    audience_segment_ids: z.array(z.number().int().positive()).default([]),
+    audience_contact_group_ids: z
+      .array(z.number().int().positive())
+      .default([]),
+    audience_filters: audienceFiltersSchema.optional(),
+    audience_cap: z.number().int().positive().nullable().optional(),
+  })
+  .refine(
+    (d) =>
+      d.audience_segment_ids.length > 0 ||
+      d.audience_contact_group_ids.length > 0,
+    {
+      path: ["audience_segment_ids"],
+      message: "Provide at least one segment or contact group",
+    },
+  );
 
 export type CampaignCreateInput = z.infer<typeof campaignCreateSchema>;
 export type CampaignUpdateInput = z.infer<typeof campaignUpdateSchema>;

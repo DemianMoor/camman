@@ -5,6 +5,7 @@ import { Loader2, Lock, Search } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 import { useAuth } from "@/components/protected/auth-context";
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -66,7 +67,10 @@ export interface CampaignFormValues {
   traffic_type_id: number | null;
   assigned_to_user_id: string | null;
   audience_segment_ids: number[];
+  audience_contact_group_ids: number[];
   audience_filters: AudienceFilters;
+  // Null = no cap. The form represents an empty input as null.
+  audience_cap: number | null;
   start_date: string;
   end_date: string;
 }
@@ -114,12 +118,14 @@ export function CampaignForm({
   const routingApi = useApiCall<{ data: Info[] }>();
   const trafficApi = useApiCall<{ data: Info[] }>();
   const segmentsApi = useApiCall<{ data: SegmentInfo[] }>();
+  const contactGroupsApi = useApiCall<{ data: Info[] }>();
   const membersApi = useApiCall<{ data: Member[] }>();
   const [brands, setBrands] = useState<Info[]>([]);
   const [offers, setOffers] = useState<Offer[]>([]);
   const [routingTypes, setRoutingTypes] = useState<Info[]>([]);
   const [trafficTypes, setTrafficTypes] = useState<Info[]>([]);
   const [segments, setSegments] = useState<SegmentInfo[]>([]);
+  const [contactGroups, setContactGroups] = useState<Info[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
 
   useEffect(() => {
@@ -162,6 +168,14 @@ export function CampaignForm({
   }, [segmentsApi.execute]);
   useEffect(() => {
     (async () => {
+      const r = await contactGroupsApi.execute(
+        "/api/contact-groups/list?pageSize=500&sortBy=name&sortDir=asc",
+      );
+      if (r.ok) setContactGroups(r.data.data);
+    })();
+  }, [contactGroupsApi.execute]);
+  useEffect(() => {
+    (async () => {
       const r = await membersApi.execute("/api/members");
       if (r.ok) setMembers(r.data.data);
     })();
@@ -180,7 +194,10 @@ export function CampaignForm({
       assigned_to_user_id:
         initialValues?.assigned_to_user_id ?? auth?.user.id ?? null,
       audience_segment_ids: initialValues?.audience_segment_ids ?? [],
+      audience_contact_group_ids:
+        initialValues?.audience_contact_group_ids ?? [],
       audience_filters: initialValues?.audience_filters ?? DEFAULT_FILTERS,
+      audience_cap: initialValues?.audience_cap ?? null,
       start_date: initialValues?.start_date ?? "",
       end_date: initialValues?.end_date ?? "",
     },
@@ -191,23 +208,39 @@ export function CampaignForm({
   const watchedBrandId = form.watch("brand_id");
   const watchedOfferId = form.watch("offer_id");
   const watchedSegments = form.watch("audience_segment_ids");
+  const watchedContactGroups = form.watch("audience_contact_group_ids");
   const watchedFilters = form.watch("audience_filters");
+  const watchedCap = form.watch("audience_cap");
   const watchedStart = form.watch("start_date");
   const watchedEnd = form.watch("end_date");
 
   // Audience preview, debounced. Tracks its own cancel signal so a fast
-  // toggle doesn't apply a stale count.
-  const previewApi = useApiCall<{ count: number }>();
+  // toggle doesn't apply a stale count. Returns both the post-cap count
+  // and the full matching pool so the UI can show "5,000 of 12,547".
+  const previewApi = useApiCall<{
+    count: number;
+    total_matching: number;
+    applied_cap: number | null;
+  }>();
   const [previewCount, setPreviewCount] = useState<number | null>(null);
+  const [previewTotalMatching, setPreviewTotalMatching] = useState<
+    number | null
+  >(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
   const segmentsKey = watchedSegments.join(",");
+  const groupsKey = watchedContactGroups.join(",");
   const filtersKey = JSON.stringify(watchedFilters);
+  const capKey = watchedCap ?? "";
 
   useEffect(() => {
-    if (watchedSegments.length === 0) {
+    if (
+      watchedSegments.length === 0 &&
+      watchedContactGroups.length === 0
+    ) {
       setPreviewCount(null);
+      setPreviewTotalMatching(null);
       setPreviewError(null);
       return;
     }
@@ -221,7 +254,9 @@ export function CampaignForm({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             audience_segment_ids: watchedSegments,
+            audience_contact_group_ids: watchedContactGroups,
             audience_filters: watchedFilters,
+            audience_cap: watchedCap,
           }),
         },
       );
@@ -229,20 +264,22 @@ export function CampaignForm({
       setPreviewLoading(false);
       if (result.ok) {
         setPreviewCount(result.data.count);
+        setPreviewTotalMatching(result.data.total_matching);
         setPreviewError(null);
       } else {
         setPreviewError(result.error);
         setPreviewCount(null);
+        setPreviewTotalMatching(null);
       }
     }, 400);
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
-    // segmentsKey / filtersKey collapse the array+object identity to stable
-    // primitives so this effect only re-runs on actual change.
+    // segmentsKey / groupsKey / filtersKey / capKey collapse identity to
+    // stable primitives so this only re-runs on real change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segmentsKey, filtersKey, previewApi.execute]);
+  }, [segmentsKey, groupsKey, filtersKey, capKey, previewApi.execute]);
 
   // Date sanity (purely client-side hint; the server doesn't refuse
   // end<start because either field can be null).
@@ -252,18 +289,21 @@ export function CampaignForm({
       : null;
 
   // Drafts are a scratchpad — always saveable. Activation requires the
-  // launch invariants (name + brand + offer + ≥1 segment).
+  // launch invariants (name + brand + offer + at least one segment OR
+  // contact group as audience source).
   const draftReady = !dateError;
+  const hasAudienceSource =
+    watchedSegments.length > 0 || watchedContactGroups.length > 0;
   const activateReady =
     !!watchedName.trim() &&
     watchedBrandId !== null &&
     watchedOfferId !== null &&
-    watchedSegments.length > 0 &&
+    hasAudienceSource &&
     !dateError;
   const activateBlockedReason = dateError
     ? dateError
     : !activateReady
-      ? "Fill in name, brand, offer, and at least one segment to activate."
+      ? "Fill in name, brand, offer, and at least one segment or contact group to activate."
       : null;
   const anySubmitting = isSubmittingDraft || isSubmittingActivate;
 
@@ -598,7 +638,7 @@ export function CampaignForm({
               Segments
               <span aria-hidden className="text-destructive ml-0.5">*</span>
               <span className="ml-2 text-xs font-normal text-muted-foreground">
-                (1+ required to activate)
+                (segment or contact group required to activate)
               </span>
             </Label>
             <div className="relative">
@@ -677,6 +717,40 @@ export function CampaignForm({
             ) : null}
           </div>
 
+          {/* Contact groups — UNION'd into the audience alongside segments. */}
+          <div className="grid gap-2">
+            <Label>Contact groups</Label>
+            <MultiSelectPicker
+              options={contactGroups.map((g) => ({
+                id: g.id,
+                label: g.name,
+                color: g.color,
+              }))}
+              value={watchedContactGroups}
+              onChange={(next) =>
+                form.setValue(
+                  "audience_contact_group_ids",
+                  next as number[],
+                  { shouldDirty: true },
+                )
+              }
+              placeholder="Add contact groups…"
+              selectedLabel={(n) =>
+                `${n} contact group${n === 1 ? "" : "s"} selected`
+              }
+              isLoading={
+                contactGroupsApi.isLoading && contactGroups.length === 0
+              }
+              disabled={audienceLocked || anySubmitting}
+              emptyMessage="No contact groups exist yet."
+              searchPlaceholder="Search groups…"
+            />
+            <p className="text-xs text-muted-foreground">
+              Contacts in any selected group are included in the audience
+              alongside contacts from the selected segments (UNION).
+            </p>
+          </div>
+
           {/* Filter toggles */}
           <div className="grid gap-3">
             <FilterToggle
@@ -712,6 +786,45 @@ export function CampaignForm({
             </p>
           </div>
 
+          {/* Audience cap */}
+          <FormField
+            control={form.control}
+            name="audience_cap"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Audience cap</FormLabel>
+                <FormControl>
+                  <Input
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="No cap"
+                    disabled={audienceLocked || anySubmitting}
+                    value={field.value ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value.trim();
+                      if (v === "") {
+                        field.onChange(null);
+                        return;
+                      }
+                      const n = Number(v);
+                      field.onChange(
+                        Number.isFinite(n) && n > 0 ? Math.floor(n) : null,
+                      );
+                    }}
+                  />
+                </FormControl>
+                <FormDescription>
+                  Leave blank to use the full matching audience. When set, a
+                  random sample of N contacts is selected at activation. The
+                  sample is frozen — re-activating won&apos;t pick different
+                  contacts.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
           {/* Audience preview */}
           <Card>
             <CardContent className="flex items-center justify-between gap-3 pt-6 text-sm">
@@ -719,19 +832,37 @@ export function CampaignForm({
                 <div className="text-xs uppercase text-muted-foreground">
                   Estimated audience
                 </div>
-                {watchedSegments.length === 0 ? (
+                {!hasAudienceSource ? (
                   <div className="text-muted-foreground">
-                    0 contacts (select segments to see your reach)
+                    0 contacts (pick segments or contact groups to see your
+                    reach)
                   </div>
                 ) : previewError ? (
                   <div className="text-sm text-muted-foreground">
                     Could not preview audience — fix any issues above
                   </div>
+                ) : previewCount === null ||
+                  previewTotalMatching === null ? (
+                  <div className="text-2xl font-semibold tabular-nums">—</div>
+                ) : previewCount < previewTotalMatching ? (
+                  <>
+                    <div className="text-sm text-muted-foreground">
+                      Total matching:{" "}
+                      <span className="font-mono tabular-nums text-foreground">
+                        {previewTotalMatching.toLocaleString()}
+                      </span>{" "}
+                      contacts
+                    </div>
+                    <div className="text-2xl font-semibold tabular-nums">
+                      Will send to: {previewCount.toLocaleString()}{" "}
+                      <span className="text-sm font-normal text-muted-foreground">
+                        (random sample, applied at activation)
+                      </span>
+                    </div>
+                  </>
                 ) : (
                   <div className="text-2xl font-semibold tabular-nums">
-                    {previewCount !== null
-                      ? `${previewCount.toLocaleString()} contacts`
-                      : "—"}
+                    {previewCount.toLocaleString()} contacts
                   </div>
                 )}
               </div>

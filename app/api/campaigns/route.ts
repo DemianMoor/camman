@@ -6,6 +6,7 @@ import { db } from "@/db/client";
 import {
   brands,
   campaigns,
+  contact_groups,
   offers,
   routing_types,
   segments,
@@ -129,6 +130,7 @@ export async function POST(req: NextRequest) {
     }
   }
   const segmentIds = input.audience_segment_ids ?? [];
+  const contactGroupIds = input.audience_contact_group_ids ?? [];
   if (segmentIds.length > 0) {
     const found = await db
       .select({ id: segments.id })
@@ -143,8 +145,28 @@ export async function POST(req: NextRequest) {
       );
     }
   }
+  if (contactGroupIds.length > 0) {
+    const found = await db
+      .select({ id: contact_groups.id })
+      .from(contact_groups)
+      .where(
+        and(
+          eq(contact_groups.org_id, orgId),
+          inArray(contact_groups.id, contactGroupIds),
+        ),
+      );
+    if (found.length !== contactGroupIds.length) {
+      return apiError(
+        400,
+        "One or more audience_contact_group_ids don't belong to your organization",
+        API_ERROR_CODES.VALIDATION,
+        { field: "audience_contact_group_ids" },
+      );
+    }
+  }
 
   const filters = input.audience_filters ?? {};
+  const audienceCap = input.audience_cap ?? null;
 
   // Auto-generate a name for empty drafts so the list page has something
   // to render. The pattern is intentionally readable so an operator can
@@ -180,8 +202,10 @@ export async function POST(req: NextRequest) {
             assigned_to_user_id: input.assigned_to_user_id ?? user.id,
             created_by_user_id: user.id,
             audience_segment_ids: segmentIds,
+            audience_contact_group_ids: contactGroupIds,
             audience_filters: filters,
             audience_snapshot_count: 0,
+            audience_cap: audienceCap,
             start_date: input.start_date ?? null,
             end_date: input.end_date ?? null,
             status: "draft",
@@ -189,13 +213,16 @@ export async function POST(req: NextRequest) {
           .returning();
 
         if (!saveAsDraft) {
-          // Launch path: the validator guarantees segments.length >= 1.
+          // Launch path: the validator guarantees segments.length >= 1
+          // OR contact_group_ids.length >= 1.
           const snap = await snapshotAudience(
             {
               campaignId: inserted.id,
               orgId,
               segmentIds,
+              contactGroupIds,
               filters,
+              cap: audienceCap,
             },
             tx,
           );

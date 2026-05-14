@@ -85,8 +85,10 @@ type Campaign = {
   assigned_to_user_id: string | null;
   created_by_user_id: string | null;
   audience_segment_ids: number[];
+  audience_contact_group_ids: number[];
   audience_filters: AudienceFilters;
   audience_snapshot_count: number;
+  audience_cap: number | null;
   start_date: string | null;
   end_date: string | null;
   status: Status;
@@ -176,7 +178,9 @@ function buildCreateBody(
     traffic_type_id: values.traffic_type_id,
     assigned_to_user_id: values.assigned_to_user_id,
     audience_segment_ids: values.audience_segment_ids,
+    audience_contact_group_ids: values.audience_contact_group_ids,
     audience_filters: values.audience_filters,
+    audience_cap: values.audience_cap,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
     save_as_draft: saveAsDraft,
@@ -194,7 +198,9 @@ function buildPatchBody(values: CampaignFormValues): Record<string, unknown> {
     traffic_type_id: values.traffic_type_id,
     assigned_to_user_id: values.assigned_to_user_id,
     audience_segment_ids: values.audience_segment_ids,
+    audience_contact_group_ids: values.audience_contact_group_ids,
     audience_filters: values.audience_filters,
+    audience_cap: values.audience_cap,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
   };
@@ -341,6 +347,51 @@ export default function CampaignsPage() {
     campaign: Campaign;
   } | null>(null);
 
+  // Bulk-selection state. Set of campaign IDs currently checked.
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  // Drop selection whenever the underlying data changes (filters,
+  // refetch, page change) so stale ids don't carry over.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [data]);
+  const bulkApi = useApiCall<{
+    succeeded: number[];
+    failed: { id: number; reason: string }[];
+  }>();
+  async function runBulk(target: "paused" | "active" | "completed" | "archived" | "draft") {
+    if (selectedIds.size === 0) return;
+    setBulkBusy(true);
+    const result = await bulkApi.execute("/api/campaigns/bulk-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        campaign_ids: Array.from(selectedIds),
+        target_status: target,
+        confirm: true,
+      }),
+    });
+    setBulkBusy(false);
+    if (!result.ok) {
+      toastApiError(result, "Couldn't apply bulk action");
+      return;
+    }
+    const { succeeded, failed } = result.data;
+    if (succeeded.length > 0 && failed.length === 0) {
+      toast.success(`${succeeded.length} campaigns updated`);
+    } else if (succeeded.length > 0) {
+      toast.warning(
+        `${succeeded.length} updated, ${failed.length} skipped: ${failed.map((f) => f.reason).slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}`,
+      );
+    } else {
+      toast.error(
+        `0 updated, ${failed.length} skipped: ${failed.map((f) => f.reason).slice(0, 3).join(", ")}`,
+      );
+    }
+    setSelectedIds(new Set());
+    refetch();
+  }
+
   const canCreate = can("campaigns.create");
   const canUpdate = can("campaigns.update");
   const canActivate = can("campaigns.activate");
@@ -403,12 +454,14 @@ export default function CampaignsPage() {
       traffic_type_id: d.traffic_type_id,
       assigned_to_user_id: d.assigned_to_user_id,
       audience_segment_ids: d.audience_segment_ids ?? [],
+      audience_contact_group_ids: d.audience_contact_group_ids ?? [],
       audience_filters: {
         include_no_status: d.audience_filters?.include_no_status ?? true,
         include_opt_in: d.audience_filters?.include_opt_in ?? false,
         include_clickers: d.audience_filters?.include_clickers ?? false,
         include_not_clicked: d.audience_filters?.include_not_clicked ?? true,
       },
+      audience_cap: d.audience_cap ?? null,
       start_date: d.start_date ?? "",
       end_date: d.end_date ?? "",
     });
@@ -421,7 +474,9 @@ export default function CampaignsPage() {
     const body = buildPatchBody(values);
     if (editing.status !== "draft") {
       delete body.audience_segment_ids;
+      delete body.audience_contact_group_ids;
       delete body.audience_filters;
+      delete body.audience_cap;
     }
     const result = await updateApi.execute(`/api/campaigns/${editing.id}`, {
       method: "PATCH",
@@ -487,6 +542,28 @@ export default function CampaignsPage() {
 
   const columns = useMemo<ColumnDef<Campaign>[]>(
     () => [
+      {
+        id: "select",
+        header: () => null,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <input
+            type="checkbox"
+            checked={selectedIds.has(row.original.id)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() =>
+              setSelectedIds((prev) => {
+                const next = new Set(prev);
+                if (next.has(row.original.id)) next.delete(row.original.id);
+                else next.add(row.original.id);
+                return next;
+              })
+            }
+            aria-label="Select campaign"
+            className="size-4 cursor-pointer"
+          />
+        ),
+      },
       {
         id: "name",
         header: "Name",
@@ -742,6 +819,7 @@ export default function CampaignsPage() {
       canArchive,
       canRestore,
       members,
+      selectedIds,
     ],
   );
 
@@ -945,26 +1023,96 @@ export default function CampaignsPage() {
           </Button>
         </div>
       ) : (
-        <DataTable<Campaign>
-          data={data}
-          columns={columns}
-          isLoading={listApi.isLoading}
-          pageIndex={filters.page}
-          pageSize={filters.pageSize}
-          totalCount={totalCount}
-          onPageChange={(p) => updateFilters({ page: p })}
-          onPageSizeChange={(s) => updateFilters({ pageSize: s, page: 0 })}
-          sortBy={filters.sortBy || null}
-          sortDir={filters.sortDir}
-          onSortChange={(by, dir) =>
-            updateFilters({
-              sortBy: by ?? "created_at",
-              sortDir: dir,
-              page: 0,
-            })
-          }
-          onRowClick={(c) => router.push(`/campaigns/${c.id}`)}
-        />
+        <>
+          {selectedIds.size > 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+              <div>
+                <span className="font-medium">{selectedIds.size}</span>{" "}
+                campaign{selectedIds.size === 1 ? "" : "s"} selected
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedIds(new Set())}
+                  disabled={bulkBusy}
+                >
+                  Clear
+                </Button>
+                {canPause ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runBulk("paused")}
+                    disabled={bulkBusy}
+                  >
+                    Pause
+                  </Button>
+                ) : null}
+                {canPause ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runBulk("active")}
+                    disabled={bulkBusy}
+                  >
+                    Resume
+                  </Button>
+                ) : null}
+                {canComplete ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runBulk("completed")}
+                    disabled={bulkBusy}
+                  >
+                    Mark complete
+                  </Button>
+                ) : null}
+                {canArchive ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runBulk("archived")}
+                    disabled={bulkBusy}
+                  >
+                    Archive
+                  </Button>
+                ) : null}
+                {canRestore ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runBulk("draft")}
+                    disabled={bulkBusy}
+                  >
+                    Restore
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          <DataTable<Campaign>
+            data={data}
+            columns={columns}
+            isLoading={listApi.isLoading}
+            pageIndex={filters.page}
+            pageSize={filters.pageSize}
+            totalCount={totalCount}
+            onPageChange={(p) => updateFilters({ page: p })}
+            onPageSizeChange={(s) => updateFilters({ pageSize: s, page: 0 })}
+            sortBy={filters.sortBy || null}
+            sortDir={filters.sortDir}
+            onSortChange={(by, dir) =>
+              updateFilters({
+                sortBy: by ?? "created_at",
+                sortDir: dir,
+                page: 0,
+              })
+            }
+            onRowClick={(c) => router.push(`/campaigns/${c.id}`)}
+          />
+        </>
       )}
 
       {/* Create dialog */}

@@ -110,8 +110,10 @@ type CampaignDetail = {
   assigned_to_user_id: string | null;
   created_by_user_id: string | null;
   audience_segment_ids: number[];
+  audience_contact_group_ids: number[];
   audience_filters: AudienceFilters;
   audience_snapshot_count: number;
+  audience_cap: number | null;
   start_date: string | null;
   end_date: string | null;
   status: CampaignStatus;
@@ -278,7 +280,9 @@ function buildCampaignPatchBody(values: CampaignFormValues): Record<string, unkn
     traffic_type_id: values.traffic_type_id,
     assigned_to_user_id: values.assigned_to_user_id,
     audience_segment_ids: values.audience_segment_ids,
+    audience_contact_group_ids: values.audience_contact_group_ids,
     audience_filters: values.audience_filters,
+    audience_cap: values.audience_cap,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
   };
@@ -332,6 +336,58 @@ export default function CampaignDetailPage() {
   const [stagesError, setStagesError] = useState<string | null>(null);
   const [stagesTick, setStagesTick] = useState(0);
   const refetchStages = useCallback(() => setStagesTick((n) => n + 1), []);
+
+  // Bulk-selection state for stages. Set of stage IDs currently checked.
+  // Cleared on every fresh stages fetch so stale ids don't survive a
+  // filter change.
+  const [selectedStageIds, setSelectedStageIds] = useState<Set<number>>(
+    new Set(),
+  );
+  const [stageBulkBusy, setStageBulkBusy] = useState(false);
+  useEffect(() => {
+    setSelectedStageIds(new Set());
+  }, [stages]);
+  const stageBulkApi = useApiCall<{
+    succeeded: number[];
+    failed: { id: number; reason: string }[];
+  }>();
+  async function runStageBulk(
+    target: "success" | "failed" | "cancelled" | "archived",
+  ) {
+    if (selectedStageIds.size === 0) return;
+    setStageBulkBusy(true);
+    const result = await stageBulkApi.execute(
+      `/api/campaigns/${campaignId}/stages/bulk-status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stage_ids: Array.from(selectedStageIds),
+          target_status: target,
+          confirm: true,
+        }),
+      },
+    );
+    setStageBulkBusy(false);
+    if (!result.ok) {
+      toastApiError(result, "Couldn't apply bulk action");
+      return;
+    }
+    const { succeeded, failed } = result.data;
+    if (succeeded.length > 0 && failed.length === 0) {
+      toast.success(`${succeeded.length} stages updated`);
+    } else if (succeeded.length > 0) {
+      toast.warning(
+        `${succeeded.length} updated, ${failed.length} skipped: ${failed.map((f) => f.reason).slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}`,
+      );
+    } else {
+      toast.error(
+        `0 updated, ${failed.length} skipped: ${failed.map((f) => f.reason).slice(0, 3).join(", ")}`,
+      );
+    }
+    setSelectedStageIds(new Set());
+    refetchStages();
+  }
 
   const [members, setMembers] = useState<Member[]>([]);
 
@@ -432,7 +488,9 @@ export default function CampaignDetailPage() {
     const body = buildCampaignPatchBody(values);
     if (campaign.status !== "draft") {
       delete body.audience_segment_ids;
+      delete body.audience_contact_group_ids;
       delete body.audience_filters;
+      delete body.audience_cap;
     }
     const result = await campaignUpdateApi.execute(
       `/api/campaigns/${campaign.id}`,
@@ -575,6 +633,28 @@ export default function CampaignDetailPage() {
 
   const stageColumns = useMemo<ColumnDef<Stage>[]>(
     () => [
+      {
+        id: "select",
+        header: () => null,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <input
+            type="checkbox"
+            checked={selectedStageIds.has(row.original.id)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() =>
+              setSelectedStageIds((prev) => {
+                const next = new Set(prev);
+                if (next.has(row.original.id)) next.delete(row.original.id);
+                else next.add(row.original.id);
+                return next;
+              })
+            }
+            aria-label="Select stage"
+            className="size-4 cursor-pointer"
+          />
+        ),
+      },
       {
         id: "stage_number",
         header: "#",
@@ -884,6 +964,7 @@ export default function CampaignDetailPage() {
       canSendStage,
       canImportResults,
       canViewImports,
+      selectedStageIds,
     ],
   );
 
@@ -974,6 +1055,7 @@ export default function CampaignDetailPage() {
     traffic_type_id: campaign.traffic_type_id,
     assigned_to_user_id: campaign.assigned_to_user_id,
     audience_segment_ids: campaign.audience_segment_ids ?? [],
+    audience_contact_group_ids: campaign.audience_contact_group_ids ?? [],
     audience_filters: {
       include_no_status: campaign.audience_filters?.include_no_status ?? true,
       include_opt_in: campaign.audience_filters?.include_opt_in ?? false,
@@ -981,6 +1063,7 @@ export default function CampaignDetailPage() {
       include_not_clicked:
         campaign.audience_filters?.include_not_clicked ?? true,
     },
+    audience_cap: campaign.audience_cap ?? null,
     start_date: campaign.start_date ?? "",
     end_date: campaign.end_date ?? "",
   };
@@ -1164,9 +1247,18 @@ export default function CampaignDetailPage() {
             label="Audience"
             value={
               <span
-                title={`Segments: ${campaign.audience_segment_ids.join(", ") || "—"}\nFilters: ${JSON.stringify(campaign.audience_filters)}`}
+                title={
+                  `Segments: ${campaign.audience_segment_ids.join(", ") || "—"}\n` +
+                  `Contact groups: ${campaign.audience_contact_group_ids.join(", ") || "—"}\n` +
+                  `Cap: ${campaign.audience_cap ?? "none"}\n` +
+                  `Filters: ${JSON.stringify(campaign.audience_filters)}`
+                }
               >
-                {campaign.audience_snapshot_count.toLocaleString()} contacts frozen
+                {campaign.audience_snapshot_count.toLocaleString()} contacts
+                frozen
+                {campaign.audience_cap !== null
+                  ? ` (capped at ${campaign.audience_cap.toLocaleString()})`
+                  : ""}
               </span>
             }
           />
@@ -1278,22 +1370,84 @@ export default function CampaignDetailPage() {
                 </Button>
               </div>
             ) : (
-              <DataTable<Stage>
-                data={stages}
-                columns={stageColumns}
-                isLoading={stagesApi.isLoading}
-                pageIndex={0}
-                pageSize={stageFilters.pageSize}
-                totalCount={stages.length}
-                onPageChange={() => {}}
-                onPageSizeChange={(s) => updateStageFilters({ pageSize: s })}
-                sortBy="stage_number"
-                sortDir="asc"
-                onSortChange={() => {}}
-                onRowClick={
-                  canUpdateStage ? (s) => setEditingStage(s) : undefined
-                }
-              />
+              <>
+                {selectedStageIds.size > 0 ? (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                    <div>
+                      <span className="font-medium">
+                        {selectedStageIds.size}
+                      </span>{" "}
+                      stage{selectedStageIds.size === 1 ? "" : "s"} selected
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectedStageIds(new Set())}
+                        disabled={stageBulkBusy}
+                      >
+                        Clear
+                      </Button>
+                      {canSendStage ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => runStageBulk("success")}
+                          disabled={stageBulkBusy}
+                        >
+                          Mark success
+                        </Button>
+                      ) : null}
+                      {canSendStage ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => runStageBulk("failed")}
+                          disabled={stageBulkBusy}
+                        >
+                          Mark failed
+                        </Button>
+                      ) : null}
+                      {canSendStage ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => runStageBulk("cancelled")}
+                          disabled={stageBulkBusy}
+                        >
+                          Mark cancelled
+                        </Button>
+                      ) : null}
+                      {canArchiveStage ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => runStageBulk("archived")}
+                          disabled={stageBulkBusy}
+                        >
+                          Archive
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+                <DataTable<Stage>
+                  data={stages}
+                  columns={stageColumns}
+                  isLoading={stagesApi.isLoading}
+                  pageIndex={0}
+                  pageSize={stageFilters.pageSize}
+                  totalCount={stages.length}
+                  onPageChange={() => {}}
+                  onPageSizeChange={(s) => updateStageFilters({ pageSize: s })}
+                  sortBy="stage_number"
+                  sortDir="asc"
+                  onSortChange={() => {}}
+                  onRowClick={
+                    canUpdateStage ? (s) => setEditingStage(s) : undefined
+                  }
+                />
+              </>
             )}
           </>
         )}

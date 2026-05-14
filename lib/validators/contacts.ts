@@ -20,31 +20,21 @@ export const contactUpdateSchema = z
 // Server-side defense; client-side enforces the same limit.
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
 
-export const contactBulkUploadSchema = z
-  .object({
-    phones: z
-      .string()
-      .min(1, "Phones field is required")
-      .max(MAX_PAYLOAD_BYTES, "Payload too large (max ~5MB)"),
-    // Optional: assign uploaded contacts directly to a single segment.
-    assign_to_segment_id: z.number().int().positive().nullable().optional(),
-    // Optional: assign uploaded contacts to every active segment in this group.
-    assign_to_segment_group_id: z
-      .number()
-      .int()
-      .positive()
-      .nullable()
-      .optional(),
-  })
-  .refine(
-    (d) =>
-      !(d.assign_to_segment_id != null && d.assign_to_segment_group_id != null),
-    {
-      message:
-        "Pass either assign_to_segment_id or assign_to_segment_group_id, not both",
-      path: ["assign_to_segment_id"],
-    },
-  );
+export const contactBulkUploadSchema = z.object({
+  phones: z
+    .string()
+    .min(1, "Phones field is required")
+    .max(MAX_PAYLOAD_BYTES, "Payload too large (max ~5MB)"),
+  // Optional: assign uploaded contacts directly to a single segment.
+  assign_to_segment_id: z.number().int().positive().nullable().optional(),
+  // Optional: tag every uploaded contact with these contact groups.
+  // Replaces the old assign_to_segment_group_id (removed in 0031 — groups
+  // are now applied to contacts directly, not through segment membership).
+  assign_to_group_ids: z
+    .array(z.number().int().positive())
+    .max(50, "At most 50 groups per upload")
+    .optional(),
+});
 
 // List-query schema is just a shape marker for the parseListParams output plus
 // the future segment_id filter (accepted-and-ignored in 6.1).

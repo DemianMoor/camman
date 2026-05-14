@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 
 import { createServerClient } from "@supabase/ssr";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql as drizzleSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
@@ -12,7 +12,7 @@ import {
   contacts,
   opt_ins,
   opt_outs,
-  segment_groups,
+  contact_groups,
   segments,
 } from "../db/schema";
 
@@ -109,38 +109,25 @@ async function main() {
     probeBrandId = probe.id;
     createdBrandIds.push(probe.id);
 
-    // Build a few test phones we'll reuse across segments.
-    const u4 = String(unique).slice(-4);
-    const seg1Phones = [
-      `+1213700${u4}1`,
-      `+1213700${u4}2`,
-      `+1213700${u4}3`,
-      `+1213700${u4}4`,
-      `+1213700${u4}5`,
-    ];
-    const seg2Phones = [
-      `+1213700${u4}3`,
-      `+1213700${u4}4`,
-      `+1213700${u4}5`,
-      `+1213700${u4}6`,
-      `+1213700${u4}7`,
-    ];
-    const seg3Phones = [
-      `+1213700${u4}4`,
-      `+1213700${u4}5`,
-      `+1213700${u4}6`,
-      `+1213700${u4}8`,
-    ];
+    // Build a few test phones we'll reuse across segments. Pattern
+    // `+1213XXXXXXX` yields 10 digits national → valid US per libphonenumber.
+    // Base index is derived from `unique` so reruns don't collide.
+    const base = (Number(String(unique).slice(-7)) % 9_000_000) + 1_000_000;
+    const phoneAt = (i: number) =>
+      `+1213${String(base + i).padStart(7, "0")}`;
+    const seg1Phones = [0, 1, 2, 3, 4].map(phoneAt);
+    const seg2Phones = [2, 3, 4, 5, 6].map(phoneAt);
+    const seg3Phones = [3, 4, 5, 7].map(phoneAt);
     insertedPhones.push(
       ...Array.from(new Set([...seg1Phones, ...seg2Phones, ...seg3Phones])),
     );
 
     console.log("\n[1] POST create segment group + 3 segments");
-    const groupR = await apiFetch("/api/segment-groups", {
+    const groupR = await apiFetch("/api/contact-groups", {
       method: "POST",
       body: JSON.stringify({
         name: `Test Group ${unique}`,
-        segment_group_id: `TGRP-${unique}`,
+        contact_group_id: `TGRP-${unique}`,
       }),
     });
     check("group creation returns 201", groupR.status === 201);
@@ -152,7 +139,6 @@ async function main() {
       body: JSON.stringify({
         name: `Seg A ${unique}`,
         segment_id: `SEGA-${unique}`,
-        segment_group_ids: [group.id],
       }),
     });
     check("segment A creation returns 201", seg1R.status === 201);
@@ -181,75 +167,9 @@ async function main() {
     const seg3 = (await seg3R.json()) as { id: number };
     createdSegmentIds.push(seg3.id);
 
-    console.log("\n[1b] Multi-group membership via PATCH");
-    // Create a second group and assign seg2 to BOTH groups via PATCH.
-    const group2R = await apiFetch("/api/segment-groups", {
-      method: "POST",
-      body: JSON.stringify({
-        name: `Test Group 2 ${unique}`,
-        segment_group_id: `TGRP2-${unique}`,
-      }),
-    });
-    check("group 2 creation returns 201", group2R.status === 201);
-    const group2 = (await group2R.json()) as { id: number };
-    createdGroupIds.push(group2.id);
-
-    const patchR = await apiFetch(`/api/segments/${seg2.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        segment_group_ids: [group.id, group2.id],
-      }),
-    });
-    check("PATCH multi-group returns 200", patchR.status === 200);
-
-    const detailMultiR = await apiFetch(`/api/segments/${seg2.id}`);
-    const detailMulti = (await detailMultiR.json()) as {
-      segment_groups: { id: number; name: string }[];
-    };
-    check(
-      "GET returns 2 groups joined",
-      detailMulti.segment_groups.length === 2,
-      `got ${detailMulti.segment_groups.length}`,
-    );
-    check(
-      "groups include both ids",
-      detailMulti.segment_groups.some((g) => g.id === group.id) &&
-        detailMulti.segment_groups.some((g) => g.id === group2.id),
-    );
-
-    // Replace memberships with just the second group (empty + non-empty path).
-    const patchReplaceR = await apiFetch(`/api/segments/${seg2.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ segment_group_ids: [group2.id] }),
-    });
-    check(
-      "PATCH replace memberships returns 200",
-      patchReplaceR.status === 200,
-    );
-    const detailAfterReplaceR = await apiFetch(`/api/segments/${seg2.id}`);
-    const detailAfterReplace = (await detailAfterReplaceR.json()) as {
-      segment_groups: { id: number }[];
-    };
-    check(
-      "memberships replaced (now 1 group)",
-      detailAfterReplace.segment_groups.length === 1 &&
-        detailAfterReplace.segment_groups[0].id === group2.id,
-    );
-
-    // Empty array clears all memberships.
-    const patchClearR = await apiFetch(`/api/segments/${seg2.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ segment_group_ids: [] }),
-    });
-    check("PATCH clear memberships returns 200", patchClearR.status === 200);
-    const detailClearedR = await apiFetch(`/api/segments/${seg2.id}`);
-    const detailCleared = (await detailClearedR.json()) as {
-      segment_groups: { id: number }[];
-    };
-    check(
-      "memberships cleared",
-      detailCleared.segment_groups.length === 0,
-    );
+    // Note: segment ↔ group membership was removed in 0031 — groups now
+    // live on contacts directly. The "Multi-group membership via PATCH"
+    // section that used to live here is deleted.
 
     console.log("\n[2] GET segment detail — segment_stats row exists (zeros)");
     const detailR = await apiFetch(`/api/segments/${seg1.id}`);
@@ -454,16 +374,16 @@ async function main() {
       `got ${abc?.count}`,
     );
 
-    console.log("\n[9] Cross-page wiring — segment-groups segment_count");
-    const groupListR = await apiFetch("/api/segment-groups/list?pageSize=100");
+    console.log("\n[9] Cross-page wiring — contact-groups list shape");
+    const groupListR = await apiFetch("/api/contact-groups/list?pageSize=100");
     const groupList = (await groupListR.json()) as {
-      data: Array<{ id: number; segment_count: number }>;
+      data: Array<{ id: number; contact_count: number }>;
     };
     const ourGroup = groupList.data.find((g) => g.id === group.id);
     check(
-      "group has segment_count = 1 (seg A is in this group)",
-      ourGroup !== undefined && ourGroup.segment_count === 1,
-      `got ${ourGroup?.segment_count}`,
+      "list endpoint surfaces contact_count for our group",
+      ourGroup !== undefined && typeof ourGroup.contact_count === "number",
+      `got contact_count=${ourGroup?.contact_count}`,
     );
 
     console.log("\n[10] Cross-page wiring — contacts list segment_id filter");
@@ -564,7 +484,7 @@ async function main() {
         await db.delete(segments).where(eq(segments.id, sid));
       }
       for (const gid of createdGroupIds) {
-        await db.delete(segment_groups).where(eq(segment_groups.id, gid));
+        await db.delete(contact_groups).where(eq(contact_groups.id, gid));
       }
       if (insertedPhones.length > 0) {
         await db

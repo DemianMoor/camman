@@ -25,6 +25,7 @@ import {
   type UploadResultSummary,
 } from "@/components/phone-upload-form";
 import { useAuth } from "@/components/protected/auth-context";
+import { RulesPanel } from "@/components/segments/rules-panel";
 import {
   SegmentForm,
   type SegmentFormValues,
@@ -58,13 +59,12 @@ import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import { cn } from "@/lib/utils";
 
-type GroupInfo = { id: number; name: string; color: string | null };
-
 type SegmentStats = {
   total_count: number;
   opt_out_count: number;
   opt_in_count: number;
   clicker_count: number;
+  rule_filtered_count: number | null;
   updated_at: string | null;
 };
 
@@ -77,8 +77,8 @@ type Segment = {
   status: "active" | "archived";
   archived_at: string | null;
   created_at: string;
-  segment_groups: GroupInfo[];
   stats: SegmentStats;
+  active_rules_count: number;
 };
 
 type ContactRow = {
@@ -290,9 +290,9 @@ export default function SegmentDetailPage() {
     removed: number;
     not_found: number;
   } | null>(null);
-  const [activeTab, setActiveTab] = useState<"contacts" | "upload" | "remove">(
-    "contacts",
-  );
+  const [activeTab, setActiveTab] = useState<
+    "contacts" | "rules" | "upload" | "remove"
+  >("contacts");
 
   const canUpdate = can("segments.update");
   const canArchive = can("segments.archive");
@@ -300,6 +300,8 @@ export default function SegmentDetailPage() {
   const canDelete = can("segments.delete");
   const canUpload = can("segment_contacts.upload");
   const canRemove = can("segment_contacts.remove");
+  const canViewRules = can("segment_rules.view");
+  const canEditRules = can("segment_rules.update");
 
   function toggleRow(id: string) {
     setSelectedRows((prev) => {
@@ -555,22 +557,6 @@ export default function SegmentDetailPage() {
             <span className="font-mono text-xs text-muted-foreground">
               {segment.segment_id}
             </span>
-            {segment.segment_groups.length > 0 ? (
-              <div className="flex flex-wrap items-center gap-1">
-                {segment.segment_groups.map((g) => (
-                  <span
-                    key={g.id}
-                    className="inline-flex items-center gap-1 rounded-md border bg-background px-1.5 py-0.5 text-xs"
-                  >
-                    <span
-                      className="size-2 rounded-full"
-                      style={{ backgroundColor: g.color ?? "#64748B" }}
-                    />
-                    {g.name}
-                  </span>
-                ))}
-              </div>
-            ) : null}
             <StatusPill status={segment.status} />
             {segment.original_name && segment.original_name !== segment.name ? (
               <span className="text-xs text-muted-foreground">
@@ -631,8 +617,25 @@ export default function SegmentDetailPage() {
       </header>
 
       <Card>
-        <CardContent className="grid grid-cols-2 gap-3 pt-6 sm:grid-cols-5">
+        <CardContent
+          className={cn(
+            "grid grid-cols-2 gap-3 pt-6",
+            segment.active_rules_count > 0
+              ? "sm:grid-cols-6"
+              : "sm:grid-cols-5",
+          )}
+        >
           <StatCard label="Total contacts" value={segment.stats.total_count} />
+          {segment.active_rules_count > 0 ? (
+            <StatCard
+              label="Rule-filtered"
+              value={
+                segment.stats.rule_filtered_count !== null
+                  ? segment.stats.rule_filtered_count
+                  : "—"
+              }
+            />
+          ) : null}
           <StatCard
             label="Opt-Outs"
             value={segment.stats.opt_out_count}
@@ -658,12 +661,22 @@ export default function SegmentDetailPage() {
       <Tabs
         value={activeTab}
         onValueChange={(v) =>
-          setActiveTab(v as "contacts" | "upload" | "remove")
+          setActiveTab(v as "contacts" | "rules" | "upload" | "remove")
         }
         className="space-y-4"
       >
         <TabsList>
           <TabsTrigger value="contacts">Contacts</TabsTrigger>
+          {canViewRules ? (
+            <TabsTrigger value="rules">
+              Rules
+              {segment.active_rules_count > 0 ? (
+                <Badge variant="secondary" className="ml-1.5 h-4 px-1 text-xs">
+                  {segment.active_rules_count}
+                </Badge>
+              ) : null}
+            </TabsTrigger>
+          ) : null}
           {canUpload ? (
             <TabsTrigger value="upload">Upload Phones</TabsTrigger>
           ) : null}
@@ -776,6 +789,17 @@ export default function SegmentDetailPage() {
           )}
         </TabsContent>
 
+        {canViewRules ? (
+          <TabsContent value="rules" className="space-y-3">
+            <RulesPanel
+              segmentId={segment.id}
+              currentSegmentDbId={segment.id}
+              canEdit={canEditRules}
+              manualCount={segment.stats.total_count}
+            />
+          </TabsContent>
+        ) : null}
+
         {canUpload ? (
           <TabsContent value="upload" className="space-y-3">
             <p className="text-sm text-muted-foreground">
@@ -859,7 +883,6 @@ export default function SegmentDetailPage() {
             name: segment.name,
             segment_id: segment.segment_id,
             original_name: segment.original_name ?? "",
-            segment_group_ids: segment.segment_groups.map((g) => g.id),
           }}
           onSubmit={handleEdit}
           onCancel={() => setEditOpen(false)}

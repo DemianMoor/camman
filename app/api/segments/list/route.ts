@@ -3,7 +3,6 @@ import {
   asc,
   desc,
   eq,
-  exists,
   ilike,
   or,
   sql as drizzleSql,
@@ -12,11 +11,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import {
-  segment_segment_groups,
-  segment_stats,
-  segments,
-} from "@/db/schema";
+import { segment_stats, segments } from "@/db/schema";
 import {
   apiError,
   parseListParams,
@@ -32,26 +27,9 @@ const SORT_COLUMNS = {
   status: segments.status,
 } as const;
 
-// Correlated subquery returning the joined groups for each segment row.
-// Uses literal SQL aliases because Drizzle's ${column} interpolation inside
-// raw template strings emits the column name without a table prefix —
-// which causes column-reference ambiguity when two tables in scope share
-// column names (segments.segment_id text slug vs the junction's segment_id
-// integer FK, etc).
-const groupsAggSql = drizzleSql<
-  { id: number; name: string; color: string | null }[]
->`(
-  select coalesce(json_agg(json_build_object(
-    'id', sg."id",
-    'name', sg."name",
-    'color', sg."color"
-  ) order by sg."name"), '[]'::json)
-  from "segment_segment_groups" ssg
-  inner join "segment_groups" sg
-    on sg."id" = ssg."segment_group_id"
-  where ssg."segment_id" = "segments"."id"
-)`;
-
+// Segments no longer carry group membership (groups are on contacts now,
+// not on segments). The list payload omits the previous `segment_groups`
+// aggregation; the `?segment_group_id=` query param is also gone.
 export async function GET(req: NextRequest) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -63,11 +41,15 @@ export async function GET(req: NextRequest) {
 
   const params = parseListParams(req);
   const sp = req.nextUrl.searchParams;
-  const segmentGroupIdRaw = sp.get("segment_group_id");
-  const segmentGroupId =
-    segmentGroupIdRaw && /^\d+$/.test(segmentGroupIdRaw)
-      ? Number(segmentGroupIdRaw)
-      : null;
+  // "Has rules" filter: "with" / "without" / null (all). Replaces the
+  // segment_group_id filter that's gone after 0031.
+  const hasRulesParam = sp.get("has_rules");
+  const hasRulesFilter =
+    hasRulesParam === "with"
+      ? "with"
+      : hasRulesParam === "without"
+        ? "without"
+        : null;
 
   const conditions = [eq(segments.org_id, orgId)];
   if (params.search) {
@@ -83,19 +65,13 @@ export async function GET(req: NextRequest) {
   if (!params.showArchived) {
     conditions.push(eq(segments.status, "active"));
   }
-  if (segmentGroupId !== null) {
+  if (hasRulesFilter === "with") {
     conditions.push(
-      exists(
-        db
-          .select({ x: drizzleSql`1` })
-          .from(segment_segment_groups)
-          .where(
-            and(
-              eq(segment_segment_groups.segment_id, segments.id),
-              eq(segment_segment_groups.segment_group_id, segmentGroupId),
-            ),
-          ),
-      ),
+      drizzleSql`exists (select 1 from segment_rules sr where sr.segment_id = ${segments.id} and sr.is_active = true)`,
+    );
+  } else if (hasRulesFilter === "without") {
+    conditions.push(
+      drizzleSql`not exists (select 1 from segment_rules sr where sr.segment_id = ${segments.id} and sr.is_active = true)`,
     );
   }
   const where = and(...conditions);
@@ -115,14 +91,19 @@ export async function GET(req: NextRequest) {
         status: segments.status,
         archived_at: segments.archived_at,
         created_at: segments.created_at,
-        segment_groups: groupsAggSql,
         stats: {
           total_count: segment_stats.total_count,
           opt_out_count: segment_stats.opt_out_count,
           opt_in_count: segment_stats.opt_in_count,
           clicker_count: segment_stats.clicker_count,
+          rule_filtered_count: segment_stats.rule_filtered_count,
           updated_at: segment_stats.updated_at,
         },
+        active_rules_count: drizzleSql<number>`(
+          select count(*)::int from segment_rules
+          where segment_rules.segment_id = ${segments.id}
+            and segment_rules.is_active = true
+        )`,
       })
       .from(segments)
       .leftJoin(segment_stats, eq(segments.id, segment_stats.segment_id))
@@ -143,6 +124,7 @@ export async function GET(req: NextRequest) {
       opt_out_count: 0,
       opt_in_count: 0,
       clicker_count: 0,
+      rule_filtered_count: null,
       updated_at: null,
     },
   }));

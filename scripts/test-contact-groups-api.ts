@@ -7,11 +7,11 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { segment_groups } from "../db/schema";
+import { contact_groups } from "../db/schema";
 
 type SegmentGroup = {
   id: number;
-  segment_group_id: string;
+  contact_group_id: string;
   name: string;
   description: string | null;
   color: string | null;
@@ -20,7 +20,7 @@ type SegmentGroup = {
   created_at: string;
   org_id: string;
 };
-type SegmentGroupListRow = SegmentGroup & { segment_count: number };
+type SegmentGroupListRow = SegmentGroup & { contact_count: number };
 type ListResponse = { data: SegmentGroupListRow[]; totalCount: number };
 
 async function main() {
@@ -97,18 +97,18 @@ async function main() {
   const db = drizzle(pg);
 
   try {
-    console.log("\n[1] GET /api/segment-groups/list (initial)");
-    const r1 = await apiFetch("/api/segment-groups/list");
+    console.log("\n[1] GET /api/contact-groups/list (initial)");
+    const r1 = await apiFetch("/api/contact-groups/list");
     check("returns 200", r1.status === 200);
     const body1 = (await r1.json()) as ListResponse;
     const initialCount = body1.totalCount;
 
-    console.log("\n[2] POST /api/segment-groups (create)");
-    const r2 = await apiFetch("/api/segment-groups", {
+    console.log("\n[2] POST /api/contact-groups (create)");
+    const r2 = await apiFetch("/api/contact-groups", {
       method: "POST",
       body: JSON.stringify({
         name: "High-value customers",
-        segment_group_id: slug,
+        contact_group_id: slug,
         description: "Customers with LTV above $500",
         color: "#A855F7",
       }),
@@ -117,67 +117,67 @@ async function main() {
     const sg = (await r2.json()) as SegmentGroup;
     createdIds.push(sg.id);
 
-    console.log("\n[3] POST /api/segment-groups (duplicate)");
-    const r3 = await apiFetch("/api/segment-groups", {
+    console.log("\n[3] POST /api/contact-groups (duplicate)");
+    const r3 = await apiFetch("/api/contact-groups", {
       method: "POST",
-      body: JSON.stringify({ name: "Dup", segment_group_id: slug }),
+      body: JSON.stringify({ name: "Dup", contact_group_id: slug }),
     });
     check("returns 409", r3.status === 409);
     const body3 = await r3.json();
     check("code is duplicate", body3.code === "duplicate");
     check(
-      "details.field is segment_group_id",
-      body3.details?.field === "segment_group_id",
+      "details.field is contact_group_id",
+      body3.details?.field === "contact_group_id",
     );
 
-    console.log(`\n[4] GET /api/segment-groups/${sg.id}`);
-    const r4 = await apiFetch(`/api/segment-groups/${sg.id}`);
+    console.log(`\n[4] GET /api/contact-groups/${sg.id}`);
+    const r4 = await apiFetch(`/api/contact-groups/${sg.id}`);
     check("returns 200", r4.status === 200);
 
-    console.log("\n[5] GET /api/segment-groups/99999");
-    const r5 = await apiFetch("/api/segment-groups/99999");
+    console.log("\n[5] GET /api/contact-groups/99999");
+    const r5 = await apiFetch("/api/contact-groups/99999");
     check("returns 404", r5.status === 404);
     const body5 = await r5.json();
     check("code is not_found", body5.code === "not_found");
     check(
-      "details.entity is segment_group",
-      body5.details?.entity === "segment_group",
+      "details.entity is contact_group",
+      body5.details?.entity === "contact_group",
     );
 
-    console.log(`\n[6] PATCH /api/segment-groups/${sg.id}`);
-    const r6 = await apiFetch(`/api/segment-groups/${sg.id}`, {
+    console.log(`\n[6] PATCH /api/contact-groups/${sg.id}`);
+    const r6 = await apiFetch(`/api/contact-groups/${sg.id}`, {
       method: "PATCH",
       body: JSON.stringify({ name: "High-value (renamed)" }),
     });
     check("returns 200", r6.status === 200);
 
-    console.log("\n[7] GET /api/segment-groups/list (segment_count placeholder)");
-    const r7 = await apiFetch("/api/segment-groups/list?pageSize=100");
+    console.log("\n[7] GET /api/contact-groups/list (contact_count placeholder)");
+    const r7 = await apiFetch("/api/contact-groups/list?pageSize=100");
     const body7 = (await r7.json()) as ListResponse;
     const found = body7.data.find((g) => g.id === sg.id);
     // Step-6 TODO: real count once segments table exists.
     check(
-      "segment_count is 0 (placeholder until step 6)",
-      found?.segment_count === 0,
-      `got ${found?.segment_count}`,
+      "contact_count is 0 (placeholder until step 6)",
+      found?.contact_count === 0,
+      `got ${found?.contact_count}`,
     );
 
-    console.log(`\n[8] POST /api/segment-groups/${sg.id}/archive`);
-    const r8 = await apiFetch(`/api/segment-groups/${sg.id}/archive`, {
+    console.log(`\n[8] POST /api/contact-groups/${sg.id}/archive`);
+    const r8 = await apiFetch(`/api/contact-groups/${sg.id}/archive`, {
       method: "POST",
     });
     check("returns 200", r8.status === 200);
 
-    console.log("\n[9] GET /api/segment-groups/list (archived hidden)");
-    const r9 = await apiFetch("/api/segment-groups/list");
+    console.log("\n[9] GET /api/contact-groups/list (archived hidden)");
+    const r9 = await apiFetch("/api/contact-groups/list");
     const body9 = (await r9.json()) as ListResponse;
     check(
       "archived not in default list",
       !body9.data.some((g) => g.id === sg.id),
     );
 
-    console.log(`\n[10] POST /api/segment-groups/${sg.id}/restore`);
-    const r10 = await apiFetch(`/api/segment-groups/${sg.id}/restore`, {
+    console.log(`\n[10] POST /api/contact-groups/${sg.id}/restore`);
+    const r10 = await apiFetch(`/api/contact-groups/${sg.id}/restore`, {
       method: "POST",
     });
     check("returns 200", r10.status === 200);
@@ -188,9 +188,9 @@ async function main() {
     try {
       for (const id of createdIds) {
         const d = await db
-          .delete(segment_groups)
-          .where(eq(segment_groups.id, id))
-          .returning({ id: segment_groups.id });
+          .delete(contact_groups)
+          .where(eq(contact_groups.id, id))
+          .returning({ id: contact_groups.id });
         console.log(`  deleted id=${id} (${d.length} row)`);
       }
     } finally {

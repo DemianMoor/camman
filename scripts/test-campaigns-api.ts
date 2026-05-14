@@ -15,7 +15,7 @@ import {
   offers,
   opt_outs,
   segment_contacts,
-  segment_groups,
+  contact_groups,
   segments,
 } from "../db/schema";
 
@@ -120,15 +120,15 @@ async function main() {
     const offer = (await offerR.json()) as { id: number };
     createdOfferIds.push(offer.id);
 
-    // Group + segment so the segment_count audit shows a real value if checked.
-    const grpR = await apiFetch("/api/segment-groups", {
+    // Contact group used as a smoke check that the renamed API works.
+    const grpR = await apiFetch("/api/contact-groups", {
       method: "POST",
       body: JSON.stringify({
         name: "Campaign Probe Group",
-        segment_group_id: `CMP-GRP-${unique}`,
+        contact_group_id: `CMP-GRP-${unique}`,
       }),
     });
-    check("seed: segment-group creation returns 201", grpR.status === 201);
+    check("seed: contact-group creation returns 201", grpR.status === 201);
     const grp = (await grpR.json()) as { id: number };
     createdGroupIds.push(grp.id);
 
@@ -137,7 +137,6 @@ async function main() {
       body: JSON.stringify({
         name: "Campaign Probe Segment",
         segment_id: `CMP-SEG-${unique}`,
-        segment_group_ids: [grp.id],
       }),
     });
     check("seed: segment creation returns 201", segR.status === 201);
@@ -618,7 +617,7 @@ async function main() {
         await db.delete(segments).where(eq(segments.id, sid));
       }
       for (const gid of createdGroupIds) {
-        await db.delete(segment_groups).where(eq(segment_groups.id, gid));
+        await db.delete(contact_groups).where(eq(contact_groups.id, gid));
       }
       for (const oid of createdOfferIds) {
         await db.delete(offers).where(eq(offers.id, oid));

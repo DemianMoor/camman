@@ -41,6 +41,7 @@ type SegmentInfo = {
   name: string;
   segment_id: string;
   stats: { total_count: number };
+  active_rules_count?: number;
 };
 type Member = {
   id: string;
@@ -643,6 +644,14 @@ export function CampaignForm({
                             <span className="font-mono text-xs text-muted-foreground">
                               {s.segment_id}
                             </span>
+                            {(s.active_rules_count ?? 0) > 0 ? (
+                              <span
+                                className="rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-violet-700 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200"
+                                title="Audience is narrowed by segment rules"
+                              >
+                                Filtered
+                              </span>
+                            ) : null}
                           </span>
                           <Badge variant="secondary">
                             {s.stats.total_count.toLocaleString()}

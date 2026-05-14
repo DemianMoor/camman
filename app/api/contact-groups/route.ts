@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { segment_groups } from "@/db/schema";
+import { contact_groups } from "@/db/schema";
 import {
   apiError,
   isUniqueViolation,
@@ -10,16 +10,16 @@ import {
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import {
+  contactGroupCreateSchema,
   nullIfEmpty,
-  segmentGroupCreateSchema,
-} from "@/lib/validators/segment-groups";
+} from "@/lib/validators/contact-groups";
 
 export async function POST(req: NextRequest) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "segment_groups.create")) {
+  if (!can(role, "contact_groups.create")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
     return apiError(400, "Invalid JSON body", API_ERROR_CODES.VALIDATION);
   }
 
-  const parsed = segmentGroupCreateSchema.safeParse(json);
+  const parsed = contactGroupCreateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError(
       400,
@@ -41,11 +41,11 @@ export async function POST(req: NextRequest) {
 
   try {
     const [created] = await db
-      .insert(segment_groups)
+      .insert(contact_groups)
       .values({
         org_id: orgId,
         name: parsed.data.name,
-        segment_group_id: parsed.data.segment_group_id,
+        contact_group_id: parsed.data.contact_group_id,
         description: nullIfEmpty(parsed.data.description),
         color: nullIfEmpty(parsed.data.color),
         status: "active",
@@ -56,9 +56,9 @@ export async function POST(req: NextRequest) {
     if (isUniqueViolation(err)) {
       return apiError(
         409,
-        "A segment group with this segment_group_id already exists",
+        "A contact group with this contact_group_id already exists",
         API_ERROR_CODES.DUPLICATE,
-        { field: "segment_group_id" },
+        { field: "contact_group_id" },
       );
     }
     throw err;

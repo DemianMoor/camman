@@ -4,6 +4,8 @@ export { nullIfEmpty } from "./_helpers";
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
 
+// Segments no longer carry group membership (groups are on contacts now,
+// not on segments). The `segment_group_ids` field was removed in 0031.
 export const segmentCreateSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(120),
   segment_id: z
@@ -16,10 +18,6 @@ export const segmentCreateSchema = z.object({
       "segment_id may only contain letters, digits, hyphens, and underscores",
     ),
   original_name: z.string().trim().max(120).optional(),
-  segment_group_ids: z
-    .array(z.number().int().positive())
-    .max(50, "At most 50 groups per segment")
-    .optional(),
 });
 
 export const segmentUpdateSchema = segmentCreateSchema

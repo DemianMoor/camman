@@ -1,8 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { segment_groups } from "@/db/schema";
+import { contact_groups } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
@@ -21,7 +21,7 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "segment_groups.restore")) {
+  if (!can(role, "contact_groups.archive")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -34,13 +34,13 @@ export async function POST(
   }
 
   const updated = await db
-    .update(segment_groups)
-    .set({ status: "active", archived_at: null })
+    .update(contact_groups)
+    .set({ status: "archived", archived_at: drizzleSql`now()` })
     .where(
       and(
-        eq(segment_groups.id, sid),
-        eq(segment_groups.org_id, orgId),
-        eq(segment_groups.status, "archived"),
+        eq(contact_groups.id, sid),
+        eq(contact_groups.org_id, orgId),
+        eq(contact_groups.status, "active"),
       ),
     )
     .returning();
@@ -48,20 +48,20 @@ export async function POST(
   if (updated[0]) return NextResponse.json(updated[0]);
 
   const existing = await db
-    .select({ status: segment_groups.status })
-    .from(segment_groups)
-    .where(and(eq(segment_groups.id, sid), eq(segment_groups.org_id, orgId)))
+    .select({ status: contact_groups.status })
+    .from(contact_groups)
+    .where(and(eq(contact_groups.id, sid), eq(contact_groups.org_id, orgId)))
     .limit(1);
 
   if (!existing[0]) {
-    return apiError(404, "Segment group not found", API_ERROR_CODES.NOT_FOUND, {
-      entity: "segment_group",
+    return apiError(404, "Contact group not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "contact_group",
     });
   }
   return apiError(
     409,
-    "Segment group is already active",
+    "Contact group is already archived",
     API_ERROR_CODES.CONFLICT,
-    { reason: "already_active" },
+    { reason: "already_archived" },
   );
 }

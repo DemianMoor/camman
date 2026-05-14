@@ -65,16 +65,18 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
 
-type GroupInfo = { id: number; name: string; color: string | null };
-
 type SegmentStats = {
   total_count: number;
   opt_out_count: number;
   opt_in_count: number;
   clicker_count: number;
+  rule_filtered_count: number | null;
   updated_at: string | null;
 };
 
+// Groups no longer appear on segments (groups are on contacts now). The
+// list row exposes `active_rules_count` so we can render a "Rules" badge
+// and offer a has-rules filter in place of the old group filter.
 type Segment = {
   id: number;
   segment_id: string;
@@ -84,7 +86,7 @@ type Segment = {
   status: "active" | "archived";
   archived_at: string | null;
   created_at: string;
-  segment_groups: GroupInfo[];
+  active_rules_count: number;
   stats: SegmentStats;
 };
 
@@ -97,7 +99,7 @@ type ListResponse = {
 
 type Filters = {
   search: string;
-  segment_group_id: number | null;
+  has_rules: "all" | "with" | "without";
   showArchived: boolean;
   page: number;
   pageSize: number;
@@ -107,7 +109,7 @@ type Filters = {
 
 const DEFAULT_FILTERS: Filters = {
   search: "",
-  segment_group_id: null,
+  has_rules: "all",
   showArchived: false,
   page: 0,
   pageSize: 20,
@@ -116,7 +118,6 @@ const DEFAULT_FILTERS: Filters = {
 };
 
 const SEARCH_DEBOUNCE_MS = 300;
-const GROUP_FILTER_ALL = "__all__";
 
 function StatusBadge({ status }: { status: Segment["status"] }) {
   if (status === "active") {
@@ -164,7 +165,7 @@ export default function SegmentsPage() {
   );
   const filtersAreDefault =
     filters.search === DEFAULT_FILTERS.search &&
-    filters.segment_group_id === DEFAULT_FILTERS.segment_group_id &&
+    filters.has_rules === DEFAULT_FILTERS.has_rules &&
     filters.showArchived === DEFAULT_FILTERS.showArchived;
 
   const [searchInput, setSearchInput] = useState(filters.search);
@@ -180,7 +181,6 @@ export default function SegmentsPage() {
   }, [searchInput, filters.search, updateFilters]);
 
   const listApi = useApiCall<ListResponse>();
-  const groupsApi = useApiCall<{ data: GroupInfo[] }>();
   const createApi = useApiCall<Segment>();
   const updateApi = useApiCall<Segment>();
   const archiveApi = useApiCall<Segment>();
@@ -190,19 +190,9 @@ export default function SegmentsPage() {
 
   const [data, setData] = useState<Segment[]>([]);
   const [totalCount, setTotalCount] = useState(0);
-  const [groups, setGroups] = useState<GroupInfo[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
-
-  useEffect(() => {
-    (async () => {
-      const r = await groupsApi.execute(
-        "/api/segment-groups/list?pageSize=100",
-      );
-      if (r.ok) setGroups(r.data.data);
-    })();
-  }, [groupsApi.execute]);
 
   useEffect(() => {
     let cancelled = false;
@@ -215,8 +205,7 @@ export default function SegmentsPage() {
     });
     if (filters.search) params.set("search", filters.search);
     if (filters.showArchived) params.set("showArchived", "true");
-    if (filters.segment_group_id !== null)
-      params.set("segment_group_id", String(filters.segment_group_id));
+    if (filters.has_rules !== "all") params.set("has_rules", filters.has_rules);
     (async () => {
       const result = await listApi.execute(
         `/api/segments/list?${params.toString()}`,
@@ -238,7 +227,7 @@ export default function SegmentsPage() {
     filters.sortBy,
     filters.sortDir,
     filters.search,
-    filters.segment_group_id,
+    filters.has_rules,
     filters.showArchived,
     refreshTick,
     listApi.execute,
@@ -360,38 +349,19 @@ export default function SegmentsPage() {
         },
       },
       {
-        id: "groups",
-        header: "Groups",
+        id: "rules",
+        header: "Rules",
         enableSorting: false,
         cell: ({ row }) => {
-          const gs = row.original.segment_groups;
-          if (!gs || gs.length === 0)
-            return <span className="text-muted-foreground">—</span>;
-          const visible = gs.slice(0, 2);
-          const overflow = gs.slice(2);
+          const n = row.original.active_rules_count;
+          if (n === 0) return <span className="text-muted-foreground">—</span>;
           return (
-            <div className="flex flex-wrap gap-1">
-              {visible.map((g) => (
-                <span
-                  key={g.id}
-                  className="inline-flex items-center gap-1 rounded-md border bg-background px-1.5 py-0.5 text-xs"
-                >
-                  <span
-                    className="size-2 rounded-full"
-                    style={{ backgroundColor: g.color ?? "#64748B" }}
-                  />
-                  {g.name}
-                </span>
-              ))}
-              {overflow.length > 0 ? (
-                <span
-                  className="inline-flex items-center rounded-md border bg-muted/50 px-1.5 py-0.5 text-xs text-muted-foreground"
-                  title={overflow.map((g) => g.name).join(", ")}
-                >
-                  +{overflow.length} more
-                </span>
-              ) : null}
-            </div>
+            <Badge
+              className="border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200"
+              title={`${n} active rule${n === 1 ? "" : "s"}`}
+            >
+              {n}
+            </Badge>
           );
         },
       },
@@ -541,10 +511,6 @@ export default function SegmentsPage() {
   const isAuthLoading = !auth;
   const confirmBusy =
     archiveApi.isLoading || restoreApi.isLoading || deleteApi.isLoading;
-  const groupFilterValue =
-    filters.segment_group_id === null
-      ? GROUP_FILTER_ALL
-      : String(filters.segment_group_id);
 
   return (
     <div className="space-y-6">
@@ -577,24 +543,21 @@ export default function SegmentsPage() {
           className="h-9 w-full max-w-sm"
         />
         <Select
-          value={groupFilterValue}
+          value={filters.has_rules}
           onValueChange={(v) =>
             updateFilters({
-              segment_group_id: v === GROUP_FILTER_ALL ? null : Number(v),
+              has_rules: v as Filters["has_rules"],
               page: 0,
             })
           }
         >
-          <SelectTrigger className="h-9 w-[200px]">
-            <SelectValue placeholder="All groups" />
+          <SelectTrigger className="h-9 w-[180px]">
+            <SelectValue placeholder="All segments" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={GROUP_FILTER_ALL}>All groups</SelectItem>
-            {groups.map((g) => (
-              <SelectItem key={g.id} value={String(g.id)}>
-                {g.name}
-              </SelectItem>
-            ))}
+            <SelectItem value="all">All segments</SelectItem>
+            <SelectItem value="with">With rules</SelectItem>
+            <SelectItem value="without">Without rules</SelectItem>
           </SelectContent>
         </Select>
         <div className="flex items-center gap-2">
@@ -628,7 +591,7 @@ export default function SegmentsPage() {
             filenamePrefix="segments"
             queryParams={{
               search: filters.search || undefined,
-              segment_group_id: filters.segment_group_id,
+              has_rules: filters.has_rules !== "all" ? filters.has_rules : undefined,
               showArchived: filters.showArchived ? "true" : undefined,
               sortBy: filters.sortBy,
               sortDir: filters.sortDir,
@@ -751,7 +714,6 @@ export default function SegmentsPage() {
               name: editing.name,
               segment_id: editing.segment_id,
               original_name: editing.original_name ?? "",
-              segment_group_ids: editing.segment_groups.map((g) => g.id),
             }}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}

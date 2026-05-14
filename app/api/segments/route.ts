@@ -1,12 +1,7 @@
-import { and, eq, inArray } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import {
-  segment_groups,
-  segment_segment_groups,
-  segments,
-} from "@/db/schema";
+import { segments } from "@/db/schema";
 import {
   apiError,
   isUniqueViolation,
@@ -19,6 +14,10 @@ import {
   segmentCreateSchema,
 } from "@/lib/validators/segments";
 
+// Segments no longer carry group membership (groups live on contacts now,
+// applied via /api/contact-groups/* and the upload pipeline). This endpoint
+// is a thin create-only route since the rules-based audience model arrived
+// in 0029.
 export async function POST(req: NextRequest) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -44,50 +43,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const groupIds = Array.from(new Set(parsed.data.segment_group_ids ?? []));
-  if (groupIds.length > 0) {
-    const rows = await db
-      .select({ id: segment_groups.id })
-      .from(segment_groups)
-      .where(
-        and(
-          eq(segment_groups.org_id, orgId),
-          inArray(segment_groups.id, groupIds),
-        ),
-      );
-    if (rows.length !== groupIds.length) {
-      return apiError(
-        400,
-        "One or more segment_group_ids do not belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "segment_group_ids" },
-      );
-    }
-  }
-
   try {
-    const created = await db.transaction(async (tx) => {
-      const [seg] = await tx
-        .insert(segments)
-        .values({
-          org_id: orgId,
-          name: parsed.data.name,
-          segment_id: parsed.data.segment_id,
-          original_name: nullIfEmpty(parsed.data.original_name),
-          status: "active",
-        })
-        .returning();
-      if (groupIds.length > 0) {
-        await tx.insert(segment_segment_groups).values(
-          groupIds.map((gid) => ({
-            segment_id: seg.id,
-            segment_group_id: gid,
-            org_id: orgId,
-          })),
-        );
-      }
-      return seg;
-    });
+    const [created] = await db
+      .insert(segments)
+      .values({
+        org_id: orgId,
+        name: parsed.data.name,
+        segment_id: parsed.data.segment_id,
+        original_name: nullIfEmpty(parsed.data.original_name),
+        status: "active",
+      })
+      .returning();
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
     if (isUniqueViolation(err)) {

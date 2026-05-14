@@ -15,7 +15,7 @@ export const ENTITY_AVAILABILITY = {
   routing_types: true,   // 5.4
   traffic_types: true,   // 5.4
   utm_tags: true,        // 5.5
-  segment_groups: true,  // 5.6
+  contact_groups: true,  // 5.6 (was segment_groups; flipped to contact-direct model in 0031)
   contacts: true,        // 6.1
   segments: true,        // 6.3
   opt_outs: true,        // 6.2

@@ -14,9 +14,9 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import {
-  SegmentGroupForm,
-  type SegmentGroupFormValues,
-} from "@/components/segment-groups/segment-group-form";
+  ContactGroupForm,
+  type ContactGroupFormValues,
+} from "@/components/contact-groups/contact-group-form";
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
 import {
@@ -51,9 +51,9 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
 
-type SegmentGroup = {
+type ContactGroup = {
   id: number;
-  segment_group_id: string;
+  contact_group_id: string;
   name: string;
   description: string | null;
   color: string | null;
@@ -61,11 +61,11 @@ type SegmentGroup = {
   archived_at: string | null;
   created_at: string;
   org_id: string;
-  segment_count: number;
+  contact_count: number;
 };
 
 type ListResponse = {
-  data: SegmentGroup[];
+  data: ContactGroup[];
   totalCount: number;
   page: number;
   pageSize: number;
@@ -91,7 +91,7 @@ const DEFAULT_FILTERS: Filters = {
 
 const SEARCH_DEBOUNCE_MS = 300;
 
-function GroupCell({ row }: { row: SegmentGroup }) {
+function GroupCell({ row }: { row: ContactGroup }) {
   return (
     <div className="flex items-center gap-2">
       <span
@@ -101,14 +101,14 @@ function GroupCell({ row }: { row: SegmentGroup }) {
       <div className="min-w-0">
         <div className="truncate font-medium">{row.name}</div>
         <div className="truncate font-mono text-xs text-muted-foreground">
-          {row.segment_group_id}
+          {row.contact_group_id}
         </div>
       </div>
     </div>
   );
 }
 
-function StatusBadge({ status }: { status: SegmentGroup["status"] }) {
+function StatusBadge({ status }: { status: ContactGroup["status"] }) {
   if (status === "active") {
     return (
       <Badge className="border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
@@ -123,11 +123,11 @@ function StatusBadge({ status }: { status: SegmentGroup["status"] }) {
   );
 }
 
-export default function SegmentGroupsPage() {
+export default function ContactGroupsPage() {
   const { auth, can } = useAuth();
 
   const [filters, updateFilters, resetFilters] = usePersistedFilters<Filters>(
-    "segment-groups.filters",
+    "contact-groups.filters",
     DEFAULT_FILTERS,
   );
   const filtersAreDefault =
@@ -147,12 +147,12 @@ export default function SegmentGroupsPage() {
   }, [searchInput, filters.search, updateFilters]);
 
   const listApi = useApiCall<ListResponse>();
-  const createApi = useApiCall<SegmentGroup>();
-  const updateApi = useApiCall<SegmentGroup>();
-  const archiveApi = useApiCall<SegmentGroup>();
-  const restoreApi = useApiCall<SegmentGroup>();
+  const createApi = useApiCall<ContactGroup>();
+  const updateApi = useApiCall<ContactGroup>();
+  const archiveApi = useApiCall<ContactGroup>();
+  const restoreApi = useApiCall<ContactGroup>();
 
-  const [data, setData] = useState<SegmentGroup[]>([]);
+  const [data, setData] = useState<ContactGroup[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -172,7 +172,7 @@ export default function SegmentGroupsPage() {
 
     (async () => {
       const result = await listApi.execute(
-        `/api/segment-groups/list?${params.toString()}`,
+        `/api/contact-groups/list?${params.toString()}`,
       );
       if (cancelled) return;
       if (result.ok) {
@@ -197,26 +197,26 @@ export default function SegmentGroupsPage() {
   ]);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [editing, setEditing] = useState<SegmentGroup | null>(null);
+  const [editing, setEditing] = useState<ContactGroup | null>(null);
   const [confirming, setConfirming] = useState<
-    | { kind: "archive"; row: SegmentGroup }
-    | { kind: "restore"; row: SegmentGroup }
+    | { kind: "archive"; row: ContactGroup }
+    | { kind: "restore"; row: ContactGroup }
     | null
   >(null);
 
-  const canCreate = can("segment_groups.create");
-  const canUpdate = can("segment_groups.update");
-  const canArchive = can("segment_groups.archive");
-  const canRestore = can("segment_groups.restore");
+  const canCreate = can("contact_groups.create");
+  const canUpdate = can("contact_groups.update");
+  const canArchive = can("contact_groups.archive");
+  const canRestore = can("contact_groups.restore");
 
-  async function handleCreate(values: SegmentGroupFormValues) {
-    const result = await createApi.execute("/api/segment-groups", {
+  async function handleCreate(values: ContactGroupFormValues) {
+    const result = await createApi.execute("/api/contact-groups", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(values),
     });
     if (!result.ok) {
-      toastApiError(result, "Couldn't create segment group");
+      toastApiError(result, "Couldn't create contact group");
       return;
     }
     toast.success("Segment group created");
@@ -224,11 +224,11 @@ export default function SegmentGroupsPage() {
     refetch();
   }
 
-  async function handleEdit(values: SegmentGroupFormValues) {
+  async function handleEdit(values: ContactGroupFormValues) {
     if (!editing) return;
-    const { segment_group_id: _omit, ...patch } = values;
+    const { contact_group_id: _omit, ...patch } = values;
     const result = await updateApi.execute(
-      `/api/segment-groups/${editing.id}`,
+      `/api/contact-groups/${editing.id}`,
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -236,7 +236,7 @@ export default function SegmentGroupsPage() {
       },
     );
     if (!result.ok) {
-      toastApiError(result, "Couldn't save segment group");
+      toastApiError(result, "Couldn't save contact group");
       return;
     }
     toast.success("Segment group saved");
@@ -249,7 +249,7 @@ export default function SegmentGroupsPage() {
     const isArchive = confirming.kind === "archive";
     const api = isArchive ? archiveApi : restoreApi;
     const result = await api.execute(
-      `/api/segment-groups/${confirming.row.id}/${isArchive ? "archive" : "restore"}`,
+      `/api/contact-groups/${confirming.row.id}/${isArchive ? "archive" : "restore"}`,
       { method: "POST" },
     );
     if (!result.ok) {
@@ -263,7 +263,7 @@ export default function SegmentGroupsPage() {
     refetch();
   }
 
-  const columns = useMemo<ColumnDef<SegmentGroup>[]>(
+  const columns = useMemo<ColumnDef<ContactGroup>[]>(
     () => [
       {
         id: "name",
@@ -285,11 +285,11 @@ export default function SegmentGroupsPage() {
           ),
       },
       {
-        id: "segment_count",
+        id: "contact_count",
         header: "Segments",
         enableSorting: false,
         cell: ({ row }) => {
-          const n = row.original.segment_count ?? 0;
+          const n = row.original.contact_count ?? 0;
           if (n === 0) return <span className="text-muted-foreground">—</span>;
           return (
             <Badge variant="secondary">
@@ -382,7 +382,7 @@ export default function SegmentGroupsPage() {
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">
-            Segment Groups
+            Contact Groups
           </h1>
           <p className="text-sm text-muted-foreground">
             Organize segments into themed groups. Segments themselves arrive in
@@ -391,7 +391,7 @@ export default function SegmentGroupsPage() {
         </div>
         {canCreate ? (
           <Button onClick={() => setCreateOpen(true)}>
-            <Plus className="size-4" aria-hidden /> New Segment Group
+            <Plus className="size-4" aria-hidden /> New Contact Group
           </Button>
         ) : null}
       </header>
@@ -432,7 +432,7 @@ export default function SegmentGroupsPage() {
       {fetchError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">
           <p className="text-destructive">
-            Couldn&apos;t load segment groups: {fetchError}
+            Couldn&apos;t load contact groups: {fetchError}
           </p>
           <Button
             variant="outline"
@@ -454,21 +454,21 @@ export default function SegmentGroupsPage() {
             aria-hidden
           />
           <div className="space-y-1">
-            <p className="text-sm font-medium">No segment groups yet</p>
+            <p className="text-sm font-medium">No contact groups yet</p>
             <p className="text-sm text-muted-foreground">
               Add a group to organize your segments.
             </p>
           </div>
           {canCreate ? (
             <Button onClick={() => setCreateOpen(true)}>
-              <Plus className="size-4" aria-hidden /> New Segment Group
+              <Plus className="size-4" aria-hidden /> New Contact Group
             </Button>
           ) : null}
         </div>
       ) : !listApi.isLoading && data.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-4 rounded-md border border-dashed py-16 text-center">
           <p className="text-sm text-muted-foreground">
-            No segment groups match your filters.
+            No contact groups match your filters.
           </p>
           <Button
             variant="outline"
@@ -482,7 +482,7 @@ export default function SegmentGroupsPage() {
           </Button>
         </div>
       ) : (
-        <DataTable<SegmentGroup>
+        <DataTable<ContactGroup>
           data={data}
           columns={columns}
           isLoading={listApi.isLoading}
@@ -512,12 +512,12 @@ export default function SegmentGroupsPage() {
         className="sm:max-w-lg"
       >
         <DialogHeader>
-          <DialogTitle>New segment group</DialogTitle>
+          <DialogTitle>New contact group</DialogTitle>
           <DialogDescription>
             Group segments by theme or use case.
           </DialogDescription>
         </DialogHeader>
-        <SegmentGroupForm
+        <ContactGroupForm
           key="create"
           mode="create"
           onSubmit={handleCreate}
@@ -534,18 +534,18 @@ export default function SegmentGroupsPage() {
         className="sm:max-w-lg"
       >
         <DialogHeader>
-          <DialogTitle>Edit segment group</DialogTitle>
+          <DialogTitle>Edit contact group</DialogTitle>
           <DialogDescription>
             {editing ? editing.name : ""}
           </DialogDescription>
         </DialogHeader>
         {editing ? (
-          <SegmentGroupForm
+          <ContactGroupForm
             key={`edit-${editing.id}`}
             mode="edit"
             initialValues={{
               name: editing.name,
-              segment_group_id: editing.segment_group_id,
+              contact_group_id: editing.contact_group_id,
               description: editing.description ?? "",
               color: editing.color ?? "",
             }}
@@ -566,8 +566,8 @@ export default function SegmentGroupsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>
               {confirming?.kind === "archive"
-                ? "Archive this segment group?"
-                : "Restore this segment group?"}
+                ? "Archive this contact group?"
+                : "Restore this contact group?"}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {confirming?.kind === "archive"

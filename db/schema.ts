@@ -375,11 +375,15 @@ export const utm_tags = pgTable(
 export type UtmTag = typeof utm_tags.$inferSelect;
 export type NewUtmTag = typeof utm_tags.$inferInsert;
 
-export const segment_groups = pgTable(
-  "segment_groups",
+// Contact groups: categorical tags applied directly to contacts. A contact
+// may have multiple groups. Renamed from `segment_groups` in 0031; rows are
+// preserved (existing IDs unchanged). The associated junction was also
+// flipped from segment↔group to contact↔group — see contact_contact_groups.
+export const contact_groups = pgTable(
+  "contact_groups",
   {
     id: serial("id").primaryKey(),
-    segment_group_id: text("segment_group_id").notNull().unique(),
+    contact_group_id: text("contact_group_id").notNull().unique(),
     org_id: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -395,14 +399,14 @@ export const segment_groups = pgTable(
   (table) => [
     index("segment_groups_org_id_idx").on(table.org_id),
     check(
-      "segment_groups_status_check",
+      "contact_groups_status_check",
       sql`${table.status} IN ('active', 'archived')`,
     ),
   ],
 );
 
-export type SegmentGroup = typeof segment_groups.$inferSelect;
-export type NewSegmentGroup = typeof segment_groups.$inferInsert;
+export type ContactGroup = typeof contact_groups.$inferSelect;
+export type NewContactGroup = typeof contact_groups.$inferInsert;
 
 // Contacts: central phone registry. UUID PK (not serial) because this table
 // will grow to millions of rows; UUIDs distribute better across shards/replicas
@@ -614,15 +618,17 @@ export const segments = pgTable(
 export type Segment = typeof segments.$inferSelect;
 export type NewSegment = typeof segments.$inferInsert;
 
-export const segment_segment_groups = pgTable(
-  "segment_segment_groups",
+// Junction: contacts ↔ contact_groups. Many-to-many tags applied directly
+// to contacts (replaces the old segment_segment_groups junction).
+export const contact_contact_groups = pgTable(
+  "contact_contact_groups",
   {
-    segment_id: integer("segment_id")
+    contact_id: uuid("contact_id")
       .notNull()
-      .references(() => segments.id, { onDelete: "cascade" }),
-    segment_group_id: integer("segment_group_id")
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    contact_group_id: integer("contact_group_id")
       .notNull()
-      .references(() => segment_groups.id, { onDelete: "cascade" }),
+      .references(() => contact_groups.id, { onDelete: "cascade" }),
     org_id: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -631,17 +637,14 @@ export const segment_segment_groups = pgTable(
       .defaultNow(),
   },
   (table) => [
-    unique("segment_segment_groups_pkey").on(
-      table.segment_id,
-      table.segment_group_id,
-    ),
-    index("segment_segment_groups_group_id_idx").on(table.segment_group_id),
-    index("segment_segment_groups_org_id_idx").on(table.org_id),
+    primaryKey({ columns: [table.contact_id, table.contact_group_id] }),
+    index("contact_contact_groups_group_id_idx").on(table.contact_group_id),
+    index("contact_contact_groups_org_id_idx").on(table.org_id),
   ],
 );
 
-export type SegmentSegmentGroup = typeof segment_segment_groups.$inferSelect;
-export type NewSegmentSegmentGroup = typeof segment_segment_groups.$inferInsert;
+export type ContactContactGroup = typeof contact_contact_groups.$inferSelect;
+export type NewContactContactGroup = typeof contact_contact_groups.$inferInsert;
 
 export const segment_contacts = pgTable(
   "segment_contacts",
@@ -687,6 +690,11 @@ export const segment_stats = pgTable(
     opt_out_count: integer("opt_out_count").notNull().default(0),
     opt_in_count: integer("opt_in_count").notNull().default(0),
     clicker_count: integer("clicker_count").notNull().default(0),
+    // Nullable: only populated by /refresh-stats when segment rules exist.
+    // UI renders "—" if null. Separate from total_count because total_count
+    // is maintained by a cheap per-row trigger; the rule-filtered count
+    // requires running the full rules evaluation query.
+    rule_filtered_count: integer("rule_filtered_count"),
     updated_at: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -696,6 +704,62 @@ export const segment_stats = pgTable(
 
 export type SegmentStats = typeof segment_stats.$inferSelect;
 export type NewSegmentStats = typeof segment_stats.$inferInsert;
+
+// Segment rules: declarative filters on segment audiences. Zero rules =
+// no filtering. Rules combine with AND. See lib/segment-rules-eval.ts.
+export const segment_rules = pgTable(
+  "segment_rules",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    segment_id: integer("segment_id")
+      .notNull()
+      .references(() => segments.id, { onDelete: "cascade" }),
+    rule_type: text("rule_type").notNull(),
+    operator: text("operator").notNull(),
+    value: jsonb("value"),
+    position: integer("position").notNull(),
+    is_active: boolean("is_active").notNull().default(true),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("segment_rules_segment_position_idx").on(
+      table.segment_id,
+      table.position,
+    ),
+    index("segment_rules_org_id_idx").on(table.org_id),
+    check(
+      "segment_rules_rule_type_check",
+      sql`${table.rule_type} IN (
+        'is_clicker_any_brand',
+        'is_clicker_for_brand',
+        'is_clicker_for_offer',
+        'is_optin_any_brand',
+        'is_optin_for_brand',
+        'is_optout_for_brand',
+        'contact_added_in_last_n_days',
+        'contact_added_more_than_n_days_ago',
+        'joined_segment_in_last_n_days',
+        'joined_segment_more_than_n_days_ago',
+        'member_of_segment'
+      )`,
+    ),
+    check(
+      "segment_rules_operator_check",
+      sql`${table.operator} IN ('is', 'is_not')`,
+    ),
+  ],
+);
+
+export type SegmentRule = typeof segment_rules.$inferSelect;
+export type NewSegmentRule = typeof segment_rules.$inferInsert;
 
 // Creatives: SMS copy linked to an Offer, optionally scoped to a Provider
 // + Brand. `slug` is auto-generated and used in short-link construction.

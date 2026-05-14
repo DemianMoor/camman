@@ -140,6 +140,26 @@ Drafts can be saved with zero required fields and no segments. The audience snap
 - Normalization in `lib/spam/normalize.ts` (NFKC → lowercase → trim → collapse whitespace → SHA-256) MUST stay byte-for-byte identical to the Python classifier's `src/data/normalize.py`. Divergence silently doubles cost by making the cache miss across the boundary.
 - **UI integration:** scoring is button-triggered inline via the shared `<SpamCheckStrip>` (`components/spam/spam-check-strip.tsx`). It sits below the textarea in `CreativeForm` and on every row of `BulkCreativeForm`. The stage form's creative picker shows a small color-dot + score number next to each option, populated from the list endpoint's cache join (read-only — listing does NOT trigger scoring). There is no standalone debug page; the inline strip + the `/api/spam/score` endpoint are the only entry points.
 
+## 10e. Segment rules
+
+Rules are a compound filter layered on top of a segment's manual membership (rows in `segment_contacts`). Manual membership is the universe; rules narrow it. A segment with **zero active rules** behaves identically to pre-rules: the audience is exactly the manual membership. The SQL builder (`lib/segment-rules-eval.ts`) short-circuits to the bare `SELECT contact_id FROM segment_contacts …` clause when there are no active rules — preserve this property in any future refactor.
+
+- **Schema:** [db/schema.ts](db/schema.ts) `segment_rules` table. Rules carry `rule_type`, `operator` (`is` / `is_not`), `value` (JSONB; shape per rule_type), `position` (display order; no UNIQUE constraint — reorder briefly produces duplicates and renumbers in a two-phase update), `is_active` boolean. CHECK constraints enforce valid types and operators at the DB level.
+- **Validation source of truth:** [lib/validators/segment-rule-types.ts](lib/validators/segment-rule-types.ts) maps each `rule_type` → allowed operators + value shape. Both server (Zod schemas in [lib/validators/segment-rules.ts](lib/validators/segment-rules.ts)) and client (`RulesPanel`) read from this map — don't fork.
+- **Operators are constrained per rule type.** Time-based rule types (`*_in_last_n_days`, `*_more_than_n_days_ago`) accept `is` only — the direction is encoded in the type name. The form hides the operator select for these.
+- **FK ownership.** Brand/offer/segment IDs in rule values are re-verified against the user's org before insert/update (`verifyValueOwnership` in [app/api/segments/[id]/rules/route.ts](app/api/segments/[id]/rules/route.ts)). RLS is defense-in-depth.
+- **Counts:**
+  - `segment_stats.total_count` (per-row trigger) is the manual-membership count — unaffected by rules.
+  - `segment_stats.rule_filtered_count` (computed on demand by `/api/segments/[id]/refresh-stats`) is the rule-narrowed count. Null when no active rules exist or when the eval timed out.
+- **Preview endpoint:** `POST /api/segments/[id]/rules/preview` returns `{ count, manual_count, rule_filtered_count, duration_ms, truncated }`. Hard 10s `SET LOCAL statement_timeout` inside a transaction; on timeout (Postgres error code 57014) returns `truncated: true, count: null` rather than 500.
+- **Campaign audience snapshots respect rules.** The audience-snapshot builder in [lib/audience-snapshot.ts](lib/audience-snapshot.ts) UNIONs per-segment rule-filtered clauses — `buildSegmentAudienceClause(segmentId, orgId)` is the single entry point. Existing frozen pools (`campaign_audience_pool` rows) are NOT recomputed when rules change after a campaign moves past draft; this is by design.
+- **UI conventions:**
+  - The Rules tab lives on `/segments/[id]` next to Contacts/Upload/Remove.
+  - Auto-save per-rule: rule_type and operator changes commit immediately; numeric/FK values commit on blur. No save button per row.
+  - Reorder via up/down arrow buttons (no drag-and-drop dep). If we add `@dnd-kit` later, the up/down arrows can stay as a fallback for keyboard.
+  - The 600ms debounced preview fires whenever the in-memory rule list changes. Network-tab discipline: do not re-fire the preview on every keystroke; the rules list only updates after PATCH returns.
+  - Segments with `active_rules_count > 0` show a small `Filtered` badge in the campaign-form audience picker so it's obvious the audience won't equal `total_count`.
+
 ## 10c. Creatives
 
 - Many-to-many with offers via the `creative_offers` junction table. A creative can be tied to zero, one, or many offers.
@@ -173,6 +193,7 @@ To keep scope tight, the following are explicitly OUT of scope for v1. Do not bu
 - Per-recipient delivery status tracking from a provider
 - Phone-number-to-campaign assignment ("Load Phones" workflow from the original spec)
 - Short link generation and click tracking infrastructure (we record clicker data via CSV import only)
+- Per-contact send history (`send_history` / `has_been_sent_*` rule types). Deferred until campaign-pool snapshotting captures per-recipient deltas. The segment-rules system is structured to absorb a future `has_been_sent_to_by_campaign` rule type without schema churn — add the type to `RULE_TYPES` and emit the corresponding sub-SELECT in [lib/segment-rules-eval.ts](lib/segment-rules-eval.ts).
 
 When the user wants these, they will be added in a separate phase.
 

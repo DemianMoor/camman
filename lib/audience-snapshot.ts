@@ -4,6 +4,8 @@ import { sql as drizzleSql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 
+import { buildSegmentAudienceClause } from "./segment-rules-eval";
+
 export interface AudienceFilters {
   include_no_status?: boolean;
   include_opt_in?: boolean;
@@ -32,25 +34,30 @@ export interface AudienceSnapshotResult {
 // pool. The qualifier WHERE clause OR-combines the filter toggles: a
 // contact is in if ANY enabled category includes them, and they're never
 // in if they have any opt-out record for this org.
-function buildQualifyingContactsSql(input: AudiencePreviewInput) {
+async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
   const { orgId, segmentIds, filters } = input;
   const includeNoStatus = filters.include_no_status === true;
   const includeOptIn = filters.include_opt_in === true;
   const includeClickers = filters.include_clickers === true;
   const includeNotClicked = filters.include_not_clicked === true;
 
-  // segment_ids must be a non-empty integer[]; caller validates at the
-  // schema level. Convert to a literal SQL array fragment via sql.placeholder
-  // would require parameter binding; using sql.raw on validated numeric ids
-  // is safe here because the schema accepts only z.number().int().positive().
-  const idsLiteral = segmentIds.length === 0 ? "0" : segmentIds.join(",");
+  // Per-segment rule-filtered clauses, UNION'd into segment_members. Each
+  // segment's clause respects its own rules; a segment with zero active
+  // rules contributes its full manual membership (the buildSegmentAudienceClause
+  // helper handles the empty-rules short-circuit). The end result is the
+  // distinct set of contacts who belong to at least one of the listed
+  // segments AFTER each segment's rules are applied.
+  const perSegmentClauses = await Promise.all(
+    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
+  );
+  const unioned = perSegmentClauses.reduce(
+    (acc, clause, i) =>
+      i === 0 ? clause : drizzleSql`${acc} UNION ${clause}`,
+  );
 
   return drizzleSql`
     with segment_members as (
-      select distinct contact_id
-      from segment_contacts
-      where org_id = ${orgId}::uuid
-        and segment_id in (${drizzleSql.raw(idsLiteral)})
+      select distinct contact_id from (${unioned}) sm_union
     ),
     flagged as (
       select
@@ -175,7 +182,7 @@ export async function previewAudience(
   input: AudiencePreviewInput,
 ): Promise<AudienceSnapshotResult> {
   if (input.segmentIds.length === 0) return { count: 0 };
-  const qualifying = buildQualifyingContactsSql(input);
+  const qualifying = await buildQualifyingContactsSql(input);
   const result = (await db.execute(drizzleSql`
     select count(*)::int as count from (${qualifying}) q
   `)) as unknown as { count: number }[];
@@ -196,7 +203,7 @@ export async function snapshotAudience(
 ): Promise<AudienceSnapshotResult> {
   if (input.segmentIds.length === 0) return { count: 0 };
   const runner = tx ?? db;
-  const qualifying = buildQualifyingContactsSql(input);
+  const qualifying = await buildQualifyingContactsSql(input);
   const result = (await runner.execute(drizzleSql`
     insert into campaign_audience_pool
       (campaign_id, contact_id, org_id, was_clicker_at_snapshot, was_opt_in_at_snapshot, was_no_status_at_snapshot)

@@ -76,10 +76,10 @@ export const navGroups: NavGroup[] = [
         disabled: !isEntityAvailable("segments"),
       },
       {
-        label: "Segment Groups",
-        href: "/segment-groups",
+        label: "Contact Groups",
+        href: "/contact-groups",
         icon: FolderTree,
-        disabled: !isEntityAvailable("segment_groups"),
+        disabled: !isEntityAvailable("contact_groups"),
       },
       {
         label: "Opt-Outs",

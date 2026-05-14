@@ -3,11 +3,16 @@ import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 
 import { createServerClient } from "@supabase/ssr";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { contacts, segment_groups, segments } from "../db/schema";
+import {
+  contact_contact_groups,
+  contact_groups,
+  contacts,
+  segments,
+} from "../db/schema";
 
 type Contact = {
   id: string;
@@ -28,6 +33,7 @@ type UploadSummary = {
   inserted: number;
   invalid_samples: { input: string; error: string }[];
   segments_assigned: number;
+  groups_applied: number;
 };
 
 type ListResponse = { data: Contact[]; totalCount: number };
@@ -294,11 +300,11 @@ async function main() {
 
     // ============ Amendment 2 — upload-with-assignment ============
     console.log("\n[12] Set up a group with 2 segments for assignment tests");
-    const grpR = await apiFetch("/api/segment-groups", {
+    const grpR = await apiFetch("/api/contact-groups", {
       method: "POST",
       body: JSON.stringify({
         name: `Assign Group ${unique}`,
-        segment_group_id: `ASSIGN-G-${unique}`,
+        contact_group_id: `ASSIGN-G-${unique}`,
       }),
     });
     check("group creation returns 201", grpR.status === 201);
@@ -310,36 +316,11 @@ async function main() {
       body: JSON.stringify({
         name: `Assign Seg A ${unique}`,
         segment_id: `ASSIGN-A-${unique}`,
-        segment_group_ids: [grp.id],
       }),
     });
     check("segment A creation returns 201", segAR.status === 201);
     const segA = (await segAR.json()) as { id: number };
     createdSegmentIds.push(segA.id);
-
-    const segBR = await apiFetch("/api/segments", {
-      method: "POST",
-      body: JSON.stringify({
-        name: `Assign Seg B ${unique}`,
-        segment_id: `ASSIGN-B-${unique}`,
-        segment_group_ids: [grp.id],
-      }),
-    });
-    check("segment B creation returns 201", segBR.status === 201);
-    const segB = (await segBR.json()) as { id: number };
-    createdSegmentIds.push(segB.id);
-
-    // A third segment NOT in the group — proves group-scope is respected.
-    const segOuterR = await apiFetch("/api/segments", {
-      method: "POST",
-      body: JSON.stringify({
-        name: `Assign Seg Outer ${unique}`,
-        segment_id: `ASSIGN-O-${unique}`,
-      }),
-    });
-    check("segment Outer creation returns 201", segOuterR.status === 201);
-    const segOuter = (await segOuterR.json()) as { id: number };
-    createdSegmentIds.push(segOuter.id);
 
     console.log("\n[13] Upload with single-segment assignment");
     const assignPhones1: string[] = [];
@@ -357,7 +338,7 @@ async function main() {
     check("returns 201", r13.status === 201);
     const s13 = (await r13.json()) as UploadSummary;
     check("segments_assigned = 1", s13.segments_assigned === 1);
-    // Verify membership landed.
+    check("groups_applied = 0", s13.groups_applied === 0);
     const segADetailR = await apiFetch(`/api/segments/${segA.id}`);
     const segADetail = (await segADetailR.json()) as {
       stats: { total_count: number };
@@ -368,7 +349,7 @@ async function main() {
       `got ${segADetail.stats.total_count}`,
     );
 
-    console.log("\n[14] Upload with group assignment (lands in both segments)");
+    console.log("\n[14] Upload with assign_to_group_ids (tags contacts)");
     const assignPhones2: string[] = [];
     for (let i = 0; i < 4; i++) {
       assignPhones2.push(`+1213800${String(i).padStart(4, "0")}`);
@@ -378,55 +359,55 @@ async function main() {
       method: "POST",
       body: JSON.stringify({
         phones: assignPhones2.join("\n"),
-        assign_to_segment_group_id: grp.id,
+        assign_to_group_ids: [grp.id],
       }),
     });
     check("returns 201", r14.status === 201);
     const s14 = (await r14.json()) as UploadSummary;
+    check("groups_applied = 1", s14.groups_applied === 1);
+    check("segments_assigned = 0", s14.segments_assigned === 0);
+    // Each uploaded contact should now appear in contact_contact_groups.
+    const phonesNorm = assignPhones2;
+    const cRows = await db
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(inArray(contacts.phone_number, phonesNorm));
+    const cIds = cRows.map((c) => c.id);
+    const tagged = await db
+      .select({ contact_id: contact_contact_groups.contact_id })
+      .from(contact_contact_groups)
+      .where(
+        and(
+          eq(contact_contact_groups.contact_group_id, grp.id),
+          inArray(contact_contact_groups.contact_id, cIds),
+        ),
+      );
     check(
-      "segments_assigned = 2 (both group members)",
-      s14.segments_assigned === 2,
-      `got ${s14.segments_assigned}`,
-    );
-    const segADetail2R = await apiFetch(`/api/segments/${segA.id}`);
-    const segADetail2 = (await segADetail2R.json()) as {
-      stats: { total_count: number };
-    };
-    check(
-      "segA gained 4 more (5 + 4 = 9)",
-      segADetail2.stats.total_count === 9,
-      `got ${segADetail2.stats.total_count}`,
-    );
-    const segBDetailR = await apiFetch(`/api/segments/${segB.id}`);
-    const segBDetail = (await segBDetailR.json()) as {
-      stats: { total_count: number };
-    };
-    check(
-      "segB has 4",
-      segBDetail.stats.total_count === 4,
-      `got ${segBDetail.stats.total_count}`,
-    );
-    const segOuterDetailR = await apiFetch(`/api/segments/${segOuter.id}`);
-    const segOuterDetail = (await segOuterDetailR.json()) as {
-      stats: { total_count: number };
-    };
-    check(
-      "outer segment unaffected (0)",
-      segOuterDetail.stats.total_count === 0,
+      "all 4 uploaded contacts tagged with the group",
+      tagged.length === 4,
+      `got ${tagged.length}`,
     );
 
-    console.log("\n[15] Upload with BOTH segment + group → 400");
+    console.log("\n[15] Upload with BOTH segment + groups (both apply)");
+    const bothPhones: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      bothPhones.push(`+1213900${String(i).padStart(4, "0")}`);
+    }
+    insertedNormalizedPhones.push(...bothPhones);
     const r15 = await apiFetch("/api/contacts/upload", {
       method: "POST",
       body: JSON.stringify({
-        phones: `+1213900${u4.padStart(4, "0")}`,
+        phones: bothPhones.join("\n"),
         assign_to_segment_id: segA.id,
-        assign_to_segment_group_id: grp.id,
+        assign_to_group_ids: [grp.id],
       }),
     });
-    check("returns 400", r15.status === 400, `got ${r15.status}`);
+    check("returns 201", r15.status === 201, `got ${r15.status}`);
+    const s15 = (await r15.json()) as UploadSummary;
+    check("segments_assigned = 1", s15.segments_assigned === 1);
+    check("groups_applied = 1", s15.groups_applied === 1);
 
-    console.log("\n[16] Upload with NO assignment → segments_assigned = 0");
+    console.log("\n[16] Upload with NO assignment → segments_assigned/groups_applied = 0");
     const noAssignPhone = `+1214000${u4.padStart(4, "0")}`;
     insertedNormalizedPhones.push(noAssignPhone);
     const r16 = await apiFetch("/api/contacts/upload", {
@@ -436,6 +417,7 @@ async function main() {
     check("returns 201", r16.status === 201);
     const s16 = (await r16.json()) as UploadSummary;
     check("segments_assigned = 0", s16.segments_assigned === 0);
+    check("groups_applied = 0", s16.groups_applied === 0);
   } finally {
     console.log("\nCleanup");
     try {
@@ -443,7 +425,7 @@ async function main() {
         await db.delete(segments).where(eq(segments.id, sid));
       }
       for (const gid of createdGroupIds) {
-        await db.delete(segment_groups).where(eq(segment_groups.id, gid));
+        await db.delete(contact_groups).where(eq(contact_groups.id, gid));
       }
       if (insertedNormalizedPhones.length > 0) {
         const deleted = await db

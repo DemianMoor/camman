@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { segment_groups } from "@/db/schema";
+import { contact_groups } from "@/db/schema";
 import {
   apiError,
   isUniqueViolation,
@@ -11,9 +11,9 @@ import {
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import {
+  contactGroupUpdateSchema,
   nullIfEmpty,
-  segmentGroupUpdateSchema,
-} from "@/lib/validators/segment-groups";
+} from "@/lib/validators/contact-groups";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -31,7 +31,7 @@ export async function GET(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "segment_groups.view")) {
+  if (!can(role, "contact_groups.view")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -45,13 +45,13 @@ export async function GET(
 
   const rows = await db
     .select()
-    .from(segment_groups)
-    .where(and(eq(segment_groups.id, sid), eq(segment_groups.org_id, orgId)))
+    .from(contact_groups)
+    .where(and(eq(contact_groups.id, sid), eq(contact_groups.org_id, orgId)))
     .limit(1);
 
   if (!rows[0]) {
-    return apiError(404, "Segment group not found", API_ERROR_CODES.NOT_FOUND, {
-      entity: "segment_group",
+    return apiError(404, "Contact group not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "contact_group",
     });
   }
   return NextResponse.json(rows[0]);
@@ -65,7 +65,7 @@ export async function PATCH(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "segment_groups.update")) {
+  if (!can(role, "contact_groups.update")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -84,7 +84,7 @@ export async function PATCH(
     return apiError(400, "Invalid JSON body", API_ERROR_CODES.VALIDATION);
   }
 
-  const parsed = segmentGroupUpdateSchema.safeParse(json);
+  const parsed = contactGroupUpdateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError(
       400,
@@ -101,14 +101,14 @@ export async function PATCH(
 
   try {
     const updated = await db
-      .update(segment_groups)
+      .update(contact_groups)
       .set(updates)
-      .where(and(eq(segment_groups.id, sid), eq(segment_groups.org_id, orgId)))
+      .where(and(eq(contact_groups.id, sid), eq(contact_groups.org_id, orgId)))
       .returning();
 
     if (!updated[0]) {
-      return apiError(404, "Segment group not found", API_ERROR_CODES.NOT_FOUND, {
-        entity: "segment_group",
+      return apiError(404, "Contact group not found", API_ERROR_CODES.NOT_FOUND, {
+        entity: "contact_group",
       });
     }
     return NextResponse.json(updated[0]);
@@ -116,9 +116,9 @@ export async function PATCH(
     if (isUniqueViolation(err)) {
       return apiError(
         409,
-        "A segment group with this segment_group_id already exists",
+        "A contact group with this contact_group_id already exists",
         API_ERROR_CODES.DUPLICATE,
-        { field: "segment_group_id" },
+        { field: "contact_group_id" },
       );
     }
     throw err;

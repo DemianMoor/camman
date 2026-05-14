@@ -51,11 +51,11 @@ export type Permission =
   | "utm_tags.update"
   | "utm_tags.archive"
   | "utm_tags.restore"
-  | "segment_groups.view"
-  | "segment_groups.create"
-  | "segment_groups.update"
-  | "segment_groups.archive"
-  | "segment_groups.restore"
+  | "contact_groups.view"
+  | "contact_groups.create"
+  | "contact_groups.update"
+  | "contact_groups.archive"
+  | "contact_groups.restore"
   | "contacts.view"
   | "contacts.upload"
   | "contacts.update"
@@ -111,6 +111,12 @@ export type Permission =
   | "result_imports.revert"
   | "spam.view"
   | "spam.score"
+  | "segment_rules.view"
+  | "segment_rules.create"
+  | "segment_rules.update"
+  | "segment_rules.delete"
+  | "contact_contact_groups.view"
+  | "contact_contact_groups.manage"
   | "import_mappings.view"
   | "import_mappings.create"
   | "import_mappings.update"
@@ -139,7 +145,7 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "routing_types.view",
   "traffic_types.view",
   "utm_tags.view",
-  "segment_groups.view",
+  "contact_groups.view",
   "contacts.view",
   "opt_outs.view",
   "opt_ins.view",
@@ -153,6 +159,8 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "result_imports.view",
   "import_mappings.view",
   "spam.view",
+  "segment_rules.view",
+  "contact_contact_groups.view",
 ]);
 
 const operatorPerms: ReadonlySet<Permission> = new Set([
@@ -185,6 +193,7 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "import_mappings.create",
   "import_mappings.update",
   "spam.score",
+  "contact_contact_groups.manage",
 ]);
 
 const managerPerms: ReadonlySet<Permission> = new Set([
@@ -221,10 +230,10 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "utm_tags.update",
   "utm_tags.archive",
   "utm_tags.restore",
-  "segment_groups.create",
-  "segment_groups.update",
-  "segment_groups.archive",
-  "segment_groups.restore",
+  "contact_groups.create",
+  "contact_groups.update",
+  "contact_groups.archive",
+  "contact_groups.restore",
   "contacts.delete",
   "opt_outs.delete",
   "opt_ins.delete",
@@ -234,6 +243,9 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "segments.archive",
   "segments.restore",
   "segments.delete",
+  "segment_rules.create",
+  "segment_rules.update",
+  "segment_rules.delete",
   "creatives.restore",
   "campaigns.restore",
   "campaigns.reassign",

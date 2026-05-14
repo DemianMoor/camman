@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -16,17 +15,12 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { MultiSelectPicker } from "@/components/multi-select-picker";
-import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
   segmentCreateSchema,
   type SegmentFormValues,
 } from "@/lib/validators/segments";
 
 export type { SegmentFormValues };
-
-type GroupInfo = { id: number; name: string; color: string | null };
-type GroupListResponse = { data: GroupInfo[] };
 
 export interface SegmentFormProps {
   mode: "create" | "edit";
@@ -36,6 +30,8 @@ export interface SegmentFormProps {
   isSubmitting?: boolean;
 }
 
+// Segments no longer have group membership — groups live on contacts now
+// (see contact_contact_groups). The old multi-group selector is gone.
 export function SegmentForm({
   mode,
   initialValues,
@@ -44,15 +40,6 @@ export function SegmentForm({
   isSubmitting,
 }: SegmentFormProps) {
   const isEdit = mode === "edit";
-  const groupsApi = useApiCall<GroupListResponse>();
-  const [groups, setGroups] = useState<GroupInfo[]>([]);
-
-  useEffect(() => {
-    (async () => {
-      const r = await groupsApi.execute("/api/segment-groups/list?pageSize=100");
-      if (r.ok) setGroups(r.data.data);
-    })();
-  }, [groupsApi.execute]);
 
   const form = useForm<SegmentFormValues>({
     resolver: zodResolver(segmentCreateSchema),
@@ -60,7 +47,6 @@ export function SegmentForm({
       name: initialValues?.name ?? "",
       segment_id: initialValues?.segment_id ?? "",
       original_name: initialValues?.original_name ?? "",
-      segment_group_ids: initialValues?.segment_group_ids ?? [],
     },
   });
 
@@ -107,39 +93,6 @@ export function SegmentForm({
                 {isEdit
                   ? "Segment ID can't be changed after creation."
                   : "Letters, digits, hyphens, and underscores only."}
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-
-        <FormField
-          control={form.control}
-          name="segment_group_ids"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Groups (optional)</FormLabel>
-              <FormControl>
-                <MultiSelectPicker
-                  options={groups.map((g) => ({
-                    id: g.id,
-                    label: g.name,
-                    color: g.color,
-                  }))}
-                  value={field.value ?? []}
-                  onChange={(next) => field.onChange(next as number[])}
-                  placeholder="Select groups…"
-                  selectedLabel={(n) =>
-                    `${n} group${n === 1 ? "" : "s"} selected`
-                  }
-                  isLoading={groupsApi.isLoading && groups.length === 0}
-                  disabled={isSubmitting}
-                  emptyMessage="No groups available yet. Create one from Segment Groups."
-                  searchPlaceholder="Search groups…"
-                />
-              </FormControl>
-              <FormDescription>
-                A segment can belong to multiple groups.
               </FormDescription>
               <FormMessage />
             </FormItem>

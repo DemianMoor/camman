@@ -18,34 +18,34 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ColorPicker } from "@/components/color-picker";
 import {
-  segmentGroupCreateSchema,
-  type SegmentGroupFormValues,
-} from "@/lib/validators/segment-groups";
+  contactGroupCreateSchema,
+  type ContactGroupFormValues,
+} from "@/lib/validators/contact-groups";
 
-export type { SegmentGroupFormValues };
+export type { ContactGroupFormValues };
 
-export interface SegmentGroupFormProps {
+export interface ContactGroupFormProps {
   mode: "create" | "edit";
-  initialValues?: Partial<SegmentGroupFormValues>;
-  onSubmit: (values: SegmentGroupFormValues) => Promise<void>;
+  initialValues?: Partial<ContactGroupFormValues>;
+  onSubmit: (values: ContactGroupFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
 }
 
-export function SegmentGroupForm({
+export function ContactGroupForm({
   mode,
   initialValues,
   onSubmit,
   onCancel,
   isSubmitting,
-}: SegmentGroupFormProps) {
+}: ContactGroupFormProps) {
   const isEdit = mode === "edit";
 
-  const form = useForm<SegmentGroupFormValues>({
-    resolver: zodResolver(segmentGroupCreateSchema),
+  const form = useForm<ContactGroupFormValues>({
+    resolver: zodResolver(contactGroupCreateSchema),
     defaultValues: {
       name: initialValues?.name ?? "",
-      segment_group_id: initialValues?.segment_group_id ?? "",
+      contact_group_id: initialValues?.contact_group_id ?? "",
       description: initialValues?.description ?? "",
       color: initialValues?.color ?? "",
     },
@@ -78,7 +78,7 @@ export function SegmentGroupForm({
 
         <FormField
           control={form.control}
-          name="segment_group_id"
+          name="contact_group_id"
           render={({ field }) => (
             <FormItem>
               <FormLabel>Segment Group ID</FormLabel>

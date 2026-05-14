@@ -1,21 +1,8 @@
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  exists,
-  ilike,
-  or,
-  sql as drizzleSql,
-} from "drizzle-orm";
+import { and, asc, desc, eq, ilike, or } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import {
-  segment_segment_groups,
-  segment_stats,
-  segments,
-} from "@/db/schema";
+import { segment_stats, segments } from "@/db/schema";
 import {
   apiError,
   parseListParams,
@@ -29,18 +16,9 @@ import {
 } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 
-// Aggregate joined groups for each segment. Literal SQL aliases (not Drizzle
-// ${column} interpolation) — same rationale as the list endpoint: the raw
-// template tag doesn't qualify columns and ambiguity can arise.
-const groupsAggSql = drizzleSql<
-  string
->`(
-  select coalesce(string_agg(sg."name", ', ' order by sg."name"), '')
-  from "segment_segment_groups" ssg
-  inner join "segment_groups" sg
-    on sg."id" = ssg."segment_group_id"
-  where ssg."segment_id" = "segments"."id"
-)`;
+// Group membership is now on contacts, not segments — the Groups column
+// is gone from the segments export. Per-contact export still surfaces
+// groups via the contacts export endpoint.
 
 const SORT_COLUMNS = {
   name: segments.name,
@@ -59,12 +37,6 @@ export async function GET(req: NextRequest) {
   }
 
   const params = parseListParams(req);
-  const sp = req.nextUrl.searchParams;
-  const segmentGroupIdRaw = sp.get("segment_group_id");
-  const segmentGroupId =
-    segmentGroupIdRaw && /^\d+$/.test(segmentGroupIdRaw)
-      ? Number(segmentGroupIdRaw)
-      : null;
 
   const conditions = [eq(segments.org_id, orgId)];
   if (params.search) {
@@ -80,21 +52,6 @@ export async function GET(req: NextRequest) {
   if (!params.showArchived) {
     conditions.push(eq(segments.status, "active"));
   }
-  if (segmentGroupId !== null) {
-    conditions.push(
-      exists(
-        db
-          .select({ x: drizzleSql`1` })
-          .from(segment_segment_groups)
-          .where(
-            and(
-              eq(segment_segment_groups.segment_id, segments.id),
-              eq(segment_segment_groups.segment_group_id, segmentGroupId),
-            ),
-          ),
-      ),
-    );
-  }
   const where = and(...conditions);
 
   const sortKey = (params.sortBy ?? "created_at") as keyof typeof SORT_COLUMNS;
@@ -109,7 +66,6 @@ export async function GET(req: NextRequest) {
           segment_id: segments.segment_id,
           status: segments.status,
           created_at: segments.created_at,
-          groups: groupsAggSql,
           total_count: segment_stats.total_count,
           opt_out_count: segment_stats.opt_out_count,
           opt_in_count: segment_stats.opt_in_count,
@@ -128,7 +84,6 @@ export async function GET(req: NextRequest) {
     columns: [
       { key: "name", label: "Segment Name" },
       { key: "segment_id", label: "Segment ID" },
-      { key: "groups", label: "Groups" },
       { key: "total_count", label: "Total Contacts" },
       { key: "opt_out_count", label: "Opt-Out Count" },
       { key: "opt_in_count", label: "Opt-In Count" },
@@ -140,7 +95,6 @@ export async function GET(req: NextRequest) {
     rowMapper: (row) => ({
       name: row.name,
       segment_id: row.segment_id,
-      groups: row.groups ?? "",
       total_count: row.total_count ?? 0,
       opt_out_count: row.opt_out_count ?? 0,
       opt_in_count: row.opt_in_count ?? 0,

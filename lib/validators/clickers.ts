@@ -15,6 +15,10 @@ export const clickerUploadSchema = z.object({
   provider_phone_id: z.number().int().positive().nullable().optional(),
   offer_id: z.number().int().positive().nullable().optional(),
   source: z.string().trim().max(100).optional(),
+  assign_to_group_ids: z
+    .array(z.number().int().positive())
+    .max(50, "At most 50 groups per upload")
+    .optional(),
 });
 
 export const clickerBulkDeleteSchema = z.object({

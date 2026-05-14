@@ -2,16 +2,11 @@ import { and, eq, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import {
-  brands,
-  offers,
-  segment_rules,
-  segments,
-} from "@/db/schema";
+import { segment_rules, segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
-import { getValueShapeForRuleType } from "@/lib/validators/segment-rule-types";
+import { verifyValueOwnership } from "@/lib/api/segment-rule-value-ownership";
 import {
   segmentRuleUpdateSchema,
   validateMergedRuleShape,
@@ -49,60 +44,6 @@ async function assertSegment(segmentId: number, orgId: string) {
     .where(and(eq(segments.id, segmentId), eq(segments.org_id, orgId)))
     .limit(1);
   return r.length > 0;
-}
-
-async function verifyValueOwnership(
-  ruleType: string,
-  value: unknown,
-  orgId: string,
-): Promise<Response | null> {
-  const shape = getValueShapeForRuleType(ruleType);
-  if (!shape || shape === "none" || shape === "positive_integer") return null;
-  if (typeof value !== "number") return null;
-  if (shape === "brand_id") {
-    const r = await db
-      .select({ id: brands.id })
-      .from(brands)
-      .where(and(eq(brands.id, value), eq(brands.org_id, orgId)))
-      .limit(1);
-    if (!r[0]) {
-      return apiError(
-        400,
-        "Referenced brand doesn't belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "value" },
-      );
-    }
-  } else if (shape === "offer_id") {
-    const r = await db
-      .select({ id: offers.id })
-      .from(offers)
-      .where(and(eq(offers.id, value), eq(offers.org_id, orgId)))
-      .limit(1);
-    if (!r[0]) {
-      return apiError(
-        400,
-        "Referenced offer doesn't belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "value" },
-      );
-    }
-  } else if (shape === "segment_id") {
-    const r = await db
-      .select({ id: segments.id })
-      .from(segments)
-      .where(and(eq(segments.id, value), eq(segments.org_id, orgId)))
-      .limit(1);
-    if (!r[0]) {
-      return apiError(
-        400,
-        "Referenced segment doesn't belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "value" },
-      );
-    }
-  }
-  return null;
 }
 
 export async function PATCH(
@@ -176,11 +117,16 @@ export async function PATCH(
       return apiError(400, err, API_ERROR_CODES.VALIDATION);
     }
     const ownership = await verifyValueOwnership(
+      orgId,
       mergedRuleType,
       mergedValue,
-      orgId,
+      segmentId,
     );
-    if (ownership) return ownership;
+    if (!ownership.ok) {
+      return apiError(400, ownership.reason, API_ERROR_CODES.VALIDATION, {
+        field: "value",
+      });
+    }
   }
 
   const updates: Record<string, unknown> = {

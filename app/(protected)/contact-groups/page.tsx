@@ -10,6 +10,7 @@ import {
   Pencil,
   Plus,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
@@ -124,6 +125,7 @@ function StatusBadge({ status }: { status: ContactGroup["status"] }) {
 }
 
 export default function ContactGroupsPage() {
+  const router = useRouter();
   const { auth, can } = useAuth();
 
   const [filters, updateFilters, resetFilters] = usePersistedFilters<Filters>(
@@ -502,7 +504,7 @@ export default function ContactGroupsPage() {
               page: 0,
             })
           }
-          onRowClick={canUpdate ? (r) => setEditing(r) : undefined}
+          onRowClick={(r) => router.push(`/contact-groups/${r.id}`)}
         />
       )}
 

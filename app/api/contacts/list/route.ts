@@ -58,8 +58,30 @@ export async function GET(req: NextRequest) {
   const segmentIdRaw = sp.get("segment_id");
   const segmentId =
     segmentIdRaw && /^\d+$/.test(segmentIdRaw) ? Number(segmentIdRaw) : null;
+  // group_ids=12,34 — comma-separated. OR semantics across groups (any-of).
+  const groupIdsRaw = sp.get("group_ids");
+  const groupIds = groupIdsRaw
+    ? groupIdsRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => /^\d+$/.test(s))
+        .map((s) => Number(s))
+    : [];
 
   const conditions = [eq(contacts.org_id, orgId)];
+  if (groupIds.length > 0) {
+    // Inline the IDs as a literal int[] — group_ids has already been
+    // sanitized to integers above, so this is safe against injection.
+    const idsLiteral = groupIds.join(",");
+    conditions.push(
+      drizzleSql`exists (
+        select 1 from contact_contact_groups ccg
+        where ccg.contact_id = ${contacts.id}
+          and ccg.org_id = ${orgId}
+          and ccg.contact_group_id = ANY(ARRAY[${drizzleSql.raw(idsLiteral)}]::int[])
+      )`,
+    );
+  }
   if (segmentId !== null) {
     conditions.push(
       exists(
@@ -136,9 +158,34 @@ export async function GET(req: NextRequest) {
   const sortColumn = SORT_COLUMNS[sortKey] ?? contacts.created_at;
   const orderFn = params.sortDir === "asc" ? asc : desc;
 
+  // JSON aggregate of contact_groups joined to each contact. Returns `[]`
+  // when the contact has no groups. Same shape as the segment_groups agg
+  // used elsewhere — literal SQL aliases avoid column-name ambiguity.
+  const groupsAggSql = drizzleSql<
+    { id: number; name: string; color: string | null }[]
+  >`(
+    select coalesce(json_agg(json_build_object(
+      'id', cg."id",
+      'name', cg."name",
+      'color', cg."color"
+    ) order by cg."name"), '[]'::json)
+    from "contact_contact_groups" ccg
+    inner join "contact_groups" cg on cg."id" = ccg."contact_group_id"
+    where ccg."contact_id" = "contacts"."id"
+  )`;
+
   const [data, countRows] = await Promise.all([
     db
-      .select()
+      .select({
+        id: contacts.id,
+        org_id: contacts.org_id,
+        phone_number: contacts.phone_number,
+        is_archived: contacts.is_archived,
+        archived_at: contacts.archived_at,
+        created_at: contacts.created_at,
+        updated_at: contacts.updated_at,
+        groups: groupsAggSql,
+      })
       .from(contacts)
       .where(where)
       .orderBy(orderFn(sortColumn))

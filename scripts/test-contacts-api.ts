@@ -418,6 +418,110 @@ async function main() {
     const s16 = (await r16.json()) as UploadSummary;
     check("segments_assigned = 0", s16.segments_assigned === 0);
     check("groups_applied = 0", s16.groups_applied === 0);
+
+    // ====================================================================
+    // 6.5p2: contacts list `groups` column + `group_ids` filter +
+    // /api/contacts/bulk-apply-groups
+    // ====================================================================
+
+    console.log("\n[17] contacts/list response carries `groups` array");
+    // Reuse the existing assignment fixture: assignPhones2 were tagged with grp.
+    const listGroupsR = await apiFetch(
+      `/api/contacts/list?search=${encodeURIComponent(assignPhones2[0])}&pageSize=5`,
+    );
+    check("list returns 200", listGroupsR.status === 200);
+    const listGroups = (await listGroupsR.json()) as {
+      data: { id: string; phone_number: string; groups: { id: number }[] }[];
+    };
+    const row17 = listGroups.data.find(
+      (c) => c.phone_number === assignPhones2[0],
+    );
+    check(
+      "tagged contact surfaces grp.id in `groups`",
+      !!row17 && row17.groups.some((g) => g.id === grp.id),
+      `groups=${JSON.stringify(row17?.groups)}`,
+    );
+
+    console.log("\n[18] contacts/list `group_ids` filter narrows to tagged contacts");
+    const filterR = await apiFetch(
+      `/api/contacts/list?group_ids=${grp.id}&pageSize=100`,
+    );
+    const filterBody = (await filterR.json()) as {
+      data: { phone_number: string }[];
+      totalCount: number;
+    };
+    const filterPhones = new Set(filterBody.data.map((c) => c.phone_number));
+    check(
+      "all 4 tagged phones present in group_ids filtered list",
+      assignPhones2.every((p) => filterPhones.has(p)),
+      `matched=${assignPhones2.filter((p) => filterPhones.has(p)).length}/4`,
+    );
+    check(
+      "untagged perf contact NOT in filtered list",
+      filterPhones.has(big[0]) === false,
+    );
+
+    console.log("\n[19] bulk-apply-groups tags new memberships idempotently");
+    // Take 3 contacts that are NOT currently in grp and apply it.
+    const targetPhones = big.slice(0, 3);
+    const targetRows = await db
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(inArray(contacts.phone_number, targetPhones));
+    const targetIds = targetRows.map((r) => r.id);
+    check("found 3 target contacts to tag", targetIds.length === 3);
+
+    const bulk1R = await apiFetch("/api/contacts/bulk-apply-groups", {
+      method: "POST",
+      body: JSON.stringify({ contact_ids: targetIds, group_ids: [grp.id] }),
+    });
+    check("bulk apply returns 200", bulk1R.status === 200);
+    const bulk1 = (await bulk1R.json()) as { applied: number };
+    check(
+      "applied = 3 (new memberships)",
+      bulk1.applied === 3,
+      `got ${bulk1.applied}`,
+    );
+
+    // Re-apply — all rows already exist, so applied = 0 (ON CONFLICT skips).
+    const bulk2R = await apiFetch("/api/contacts/bulk-apply-groups", {
+      method: "POST",
+      body: JSON.stringify({ contact_ids: targetIds, group_ids: [grp.id] }),
+    });
+    const bulk2 = (await bulk2R.json()) as { applied: number };
+    check(
+      "re-apply idempotent — applied = 0",
+      bulk2.applied === 0,
+      `got ${bulk2.applied}`,
+    );
+
+    console.log("\n[20] bulk-apply-groups rejects ghost contact_id (400)");
+    const ghostBulkR = await apiFetch("/api/contacts/bulk-apply-groups", {
+      method: "POST",
+      body: JSON.stringify({
+        contact_ids: ["00000000-0000-0000-0000-000000000000"],
+        group_ids: [grp.id],
+      }),
+    });
+    check(
+      "ghost contact_id → 400",
+      ghostBulkR.status === 400,
+      `got ${ghostBulkR.status}`,
+    );
+
+    console.log("\n[21] bulk-apply-groups rejects ghost group_id (400)");
+    const ghostGroupR = await apiFetch("/api/contacts/bulk-apply-groups", {
+      method: "POST",
+      body: JSON.stringify({
+        contact_ids: targetIds,
+        group_ids: [999_999_999],
+      }),
+    });
+    check(
+      "ghost group_id → 400",
+      ghostGroupR.status === 400,
+      `got ${ghostGroupR.status}`,
+    );
   } finally {
     console.log("\nCleanup");
     try {

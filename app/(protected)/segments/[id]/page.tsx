@@ -686,6 +686,24 @@ export default function SegmentDetailPage() {
         </TabsList>
 
         <TabsContent value="contacts" className="space-y-3">
+          {segment.active_rules_count > 0 ? (
+            <div className="rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-900 dark:border-violet-900 dark:bg-violet-950/40 dark:text-violet-100">
+              <span className="font-medium">Manual members only.</span> This
+              segment has{" "}
+              <span className="font-medium">
+                {segment.active_rules_count} active rule
+                {segment.active_rules_count === 1 ? "" : "s"}
+              </span>{" "}
+              that add{segment.active_rules_count === 1 ? "s" : ""}{" "}
+              {segment.stats.rule_filtered_count !== null &&
+              segment.stats.rule_filtered_count > segment.stats.total_count
+                ? `${(segment.stats.rule_filtered_count - segment.stats.total_count).toLocaleString()} more contact${segment.stats.rule_filtered_count - segment.stats.total_count === 1 ? "" : "s"} to the audience`
+                : "more contacts to the audience"}
+              . Open the <span className="font-medium">Rules</span> tab to view
+              or change them. Rule-matched contacts can't be removed
+              individually here — change the rule instead.
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center gap-3">
             <Input
               value={searchInput}

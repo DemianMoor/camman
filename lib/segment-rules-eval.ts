@@ -6,7 +6,35 @@ import type { SQL } from "drizzle-orm";
 import { db } from "@/db/client";
 import { segment_rules } from "@/db/schema";
 
+import { getValueShapeForRuleType } from "./validators/segment-rule-types";
 import type { RuleType } from "./validators/segment-rule-types";
+
+// A rule is "complete" — has all the inputs the eval needs — when its
+// value matches the shape required by its rule_type. Incomplete FK rules
+// (e.g. user changed rule_type to is_in_contact_group but hasn't picked
+// a group yet) are persisted with value=null so the rule_type change
+// survives tab switches; this filter excludes them from evaluation so
+// they don't accidentally match-everything via NOT IN (empty set).
+function isRuleComplete(rule: {
+  rule_type: string;
+  value: unknown;
+}): boolean {
+  const shape = getValueShapeForRuleType(rule.rule_type);
+  if (!shape) return false;
+  if (shape === "none") return rule.value == null;
+  if (shape === "positive_integer") {
+    return (
+      typeof rule.value === "number" &&
+      Number.isInteger(rule.value) &&
+      rule.value >= 1
+    );
+  }
+  return (
+    typeof rule.value === "number" &&
+    Number.isInteger(rule.value) &&
+    rule.value >= 1
+  );
+}
 
 // Build the contact_id subquery for one rule. The returned fragment is a
 // parameterized "(SELECT contact_id FROM ...)" — the caller wraps it in
@@ -93,22 +121,29 @@ function ruleInnerQuery(
   }
 }
 
-// Build the SQL fragment that represents this segment's rule-filtered
-// audience as a `SELECT contact_id FROM ...` subquery suitable for
-// embedding in `(SELECT ... FROM (<frag>) sub)`.
+// Build the SQL fragment that represents this segment's effective audience
+// as a `SELECT contact_id FROM ...` subquery suitable for embedding in
+// `(SELECT ... FROM (<frag>) sub)`.
 //
-// Semantics:
-//   - Zero ACTIVE rules → identical to today's behavior: full manual
-//     membership from segment_contacts. CRITICAL — see step 6.5 spec.
-//   - 1+ active rules → manual membership AND every rule condition
-//     (combined with AND). `is_not` operator negates per-rule.
+// Semantics (Model C — UNION):
+//
+//   final audience =  (manual segment_contacts membership)
+//                  ∪  (org contacts matching ALL active rules)
+//
+//   - Zero ACTIVE rules → short-circuits to manual membership only.
+//     CRITICAL: any rewrite must preserve this property.
+//   - 1+ active rules → UNION of manual + rule-matched contacts.
+//     Rules within the segment combine via AND. `is_not` negates per-rule.
+//
+// Manual members are always included regardless of whether they match the
+// rules — that's the difference from the prior intersection behaviour.
 //
 // Caller wraps this in a CTE or subquery as needed.
 export async function buildSegmentAudienceClause(
   segmentId: number,
   orgId: string,
 ): Promise<SQL> {
-  const rules = await db
+  const allRules = await db
     .select({
       rule_type: segment_rules.rule_type,
       operator: segment_rules.operator,
@@ -124,7 +159,13 @@ export async function buildSegmentAudienceClause(
     )
     .orderBy(asc(segment_rules.position));
 
-  // Zero-rule short-circuit: identical to pre-rules behavior.
+  // Skip incomplete rules — see isRuleComplete above. The same short-circuit
+  // applies whether the segment has no rules OR only incomplete rules:
+  // audience = manual.
+  const rules = allRules.filter(isRuleComplete);
+
+  // Zero-rule short-circuit: identical to pre-rules behavior — manual only.
+  // Tested explicitly in scripts/test-segment-rules-api.ts.
   if (rules.length === 0) {
     return drizzleSql`
       SELECT sc.contact_id
@@ -134,25 +175,36 @@ export async function buildSegmentAudienceClause(
     `;
   }
 
-  // Build per-rule AND clauses. Each becomes `sc.contact_id IN (...)` or
-  // `sc.contact_id NOT IN (...)` depending on the operator.
+  // Build per-rule predicates that reference `c.id` (the outer contacts
+  // alias of the rule_matches scan). Each rule becomes a `c.id IN (...)`
+  // or `c.id NOT IN (...)` test. Rules combine via AND.
   const conditions = rules.map((r) => {
     const inner = ruleInnerQuery(r, segmentId, orgId);
     return r.operator === "is_not"
-      ? drizzleSql`sc.contact_id NOT IN (${inner})`
-      : drizzleSql`sc.contact_id IN (${inner})`;
+      ? drizzleSql`c.id NOT IN (${inner})`
+      : drizzleSql`c.id IN (${inner})`;
   });
-  // Join conditions with AND.
   const joined = conditions.reduce(
-    (acc, c, i) => (i === 0 ? c : drizzleSql`${acc} AND ${c}`),
+    (acc, cnd, i) => (i === 0 ? cnd : drizzleSql`${acc} AND ${cnd}`),
   );
 
+  // UNION ALL + DISTINCT is cheaper than UNION when overlaps are few, but
+  // UNION suffices here (Postgres collapses duplicates implicitly). We
+  // could switch to UNION ALL + an outer SELECT DISTINCT if profiling shows
+  // overlap-heavy workloads dominating, but the planner currently chooses
+  // sensibly for both shapes.
   return drizzleSql`
-    SELECT sc.contact_id
-    FROM segment_contacts sc
-    WHERE sc.segment_id = ${segmentId}::int
-      AND sc.org_id = ${orgId}::uuid
-      AND (${joined})
+    SELECT contact_id FROM (
+      SELECT sc.contact_id AS contact_id
+      FROM segment_contacts sc
+      WHERE sc.segment_id = ${segmentId}::int
+        AND sc.org_id = ${orgId}::uuid
+      UNION
+      SELECT c.id AS contact_id
+      FROM contacts c
+      WHERE c.org_id = ${orgId}::uuid
+        AND (${joined})
+    ) AS combined
   `;
 }
 

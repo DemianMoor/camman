@@ -714,6 +714,7 @@ export default function OptOutsPage() {
                 onCancel={() => setUploadOpen(false)}
                 submitLabel="Add opt-outs"
                 successLabel="Opt-outs added"
+                enableContactGroups
               />
             )}
           </div>

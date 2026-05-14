@@ -15,6 +15,12 @@ export const optOutUploadSchema = z.object({
     .min(1, "Select at least one brand"),
   provider_ids: z.array(z.number().int().positive()).default([]),
   source: z.string().trim().max(100).optional(),
+  // Optional: tag every uploaded contact with these contact groups too.
+  // The upload pipeline applies them after contacts are upserted.
+  assign_to_group_ids: z
+    .array(z.number().int().positive())
+    .max(50, "At most 50 groups per upload")
+    .optional(),
 });
 
 export const optOutBulkDeleteSchema = z.object({

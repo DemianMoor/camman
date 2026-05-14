@@ -76,6 +76,7 @@ export async function POST(req: NextRequest) {
   const summary = await processAudienceUpload({
     orgId,
     rawPhones: parsed.data.phones,
+    assignToGroupIds: parsed.data.assign_to_group_ids,
     insertEntities: async (rows: ResolvedContact[]) => {
       if (rows.length === 0) return 0;
       return await db.transaction(async (tx) => {

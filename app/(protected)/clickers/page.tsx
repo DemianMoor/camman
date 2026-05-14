@@ -737,6 +737,7 @@ export default function ClickersPage() {
                 onCancel={() => setUploadOpen(false)}
                 submitLabel="Add clickers"
                 successLabel="Clickers added"
+                enableContactGroups
               />
             )}
           </div>

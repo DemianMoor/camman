@@ -3,11 +3,11 @@ import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 
 import { createServerClient } from "@supabase/ssr";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { contact_groups } from "../db/schema";
+import { contact_groups, contacts } from "../db/schema";
 
 type SegmentGroup = {
   id: number;
@@ -183,6 +183,140 @@ async function main() {
     check("returns 200", r10.status === 200);
 
     console.log(`\n    final delta = ${body9.totalCount - initialCount}`);
+
+    // ====================================================================
+    // 6.5p2: contact-group child endpoints (list / add / remove)
+    // ====================================================================
+
+    // 10-digit national format (`+1 213 XXXXXXX`) — valid US per libphonenumber.
+    const base = (Number(String(unique).slice(-6)) % 9_000) + 1_000;
+    const childPhones = [0, 1, 2, 3].map(
+      (i) => `+1213700${String(base + i).padStart(4, "0")}`,
+    );
+
+    console.log(`\n[11] POST /api/contact-groups/${sg.id}/contacts/add — adds 4 contacts`);
+    const r11 = await apiFetch(
+      `/api/contact-groups/${sg.id}/contacts/add`,
+      {
+        method: "POST",
+        body: JSON.stringify({ phones: childPhones.join("\n") }),
+      },
+    );
+    check("add returns 201", r11.status === 201);
+    const s11 = (await r11.json()) as {
+      submitted: number;
+      valid: number;
+      contacts_created: number;
+      groups_applied: number;
+    };
+    check(
+      "add response: 4 valid",
+      s11.valid === 4,
+      `got valid=${s11.valid}`,
+    );
+    check(
+      "add response: 4 groups_applied",
+      s11.groups_applied === 4,
+      `got groups_applied=${s11.groups_applied}`,
+    );
+
+    console.log(`\n[12] GET /api/contact-groups/${sg.id}/contacts — lists 4`);
+    const r12 = await apiFetch(
+      `/api/contact-groups/${sg.id}/contacts?pageSize=20`,
+    );
+    check("contacts list returns 200", r12.status === 200);
+    const body12 = (await r12.json()) as {
+      data: { id: string; phone_number: string; other_groups: { id: number }[] }[];
+      totalCount: number;
+    };
+    check(
+      "totalCount = 4",
+      body12.totalCount === 4,
+      `got ${body12.totalCount}`,
+    );
+    check(
+      "every row carries other_groups array (current group excluded)",
+      body12.data.every(
+        (r) =>
+          Array.isArray(r.other_groups) &&
+          !r.other_groups.some((g) => g.id === sg.id),
+      ),
+    );
+
+    console.log("\n[13] Re-add the same phones — idempotent, groups_applied = 0");
+    const r13 = await apiFetch(
+      `/api/contact-groups/${sg.id}/contacts/add`,
+      {
+        method: "POST",
+        body: JSON.stringify({ phones: childPhones.join("\n") }),
+      },
+    );
+    const s13 = (await r13.json()) as {
+      contacts_created: number;
+      groups_applied: number;
+    };
+    check(
+      "re-add: contacts_created = 0 (already exist)",
+      s13.contacts_created === 0,
+      `got ${s13.contacts_created}`,
+    );
+    check(
+      "re-add: groups_applied = 0 (idempotent)",
+      s13.groups_applied === 0,
+      `got ${s13.groups_applied}`,
+    );
+
+    console.log(`\n[14] POST /api/contact-groups/${sg.id}/contacts/remove — removes 2`);
+    const r14 = await apiFetch(
+      `/api/contact-groups/${sg.id}/contacts/remove`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          phones: childPhones.slice(0, 2).join("\n"),
+        }),
+      },
+    );
+    check("remove returns 200", r14.status === 200);
+    const s14 = (await r14.json()) as { removed: number; not_in_group: number };
+    check("removed = 2", s14.removed === 2, `got ${s14.removed}`);
+
+    console.log("\n[15] Remove same phones again — not_in_group = 2, removed = 0");
+    const r15 = await apiFetch(
+      `/api/contact-groups/${sg.id}/contacts/remove`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          phones: childPhones.slice(0, 2).join("\n"),
+        }),
+      },
+    );
+    const s15 = (await r15.json()) as { removed: number; not_in_group: number };
+    check("removed = 0 (already gone)", s15.removed === 0);
+    check(
+      "not_in_group = 2",
+      s15.not_in_group === 2,
+      `got ${s15.not_in_group}`,
+    );
+
+    console.log("\n[16] Remove a phone that's not in the contacts table — not_found counted");
+    // A valid US phone we have NOT inserted in this run — should count as not_found.
+    const ghostPhone = `+1213999${String(base).padStart(4, "0")}`;
+    const r16 = await apiFetch(
+      `/api/contact-groups/${sg.id}/contacts/remove`,
+      {
+        method: "POST",
+        body: JSON.stringify({ phones: ghostPhone }),
+      },
+    );
+    const s16 = (await r16.json()) as { not_found: number };
+    check("not_found >= 1", s16.not_found >= 1, `got ${s16.not_found}`);
+
+    console.log("\n[17] 404 on /contacts for non-existent group");
+    const r17 = await apiFetch("/api/contact-groups/999999999/contacts");
+    check("ghost group → 404", r17.status === 404, `got ${r17.status}`);
+
+    // Clean up the contacts we created via the add endpoint.
+    await db.delete(contacts).where(inArray(contacts.phone_number, childPhones));
   } finally {
     console.log("\nCleanup");
     try {

@@ -12,6 +12,10 @@ export const optInUploadSchema = z.object({
   brand_id: z.number().int().positive(),
   provider_id: z.number().int().positive().nullable().optional(),
   source: z.string().trim().max(100).optional(),
+  assign_to_group_ids: z
+    .array(z.number().int().positive())
+    .max(50, "At most 50 groups per upload")
+    .optional(),
 });
 
 export const optInBulkDeleteSchema = z.object({

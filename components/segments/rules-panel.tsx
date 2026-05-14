@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -91,7 +91,12 @@ function coerceValueForShape(
     }
     return 1;
   }
-  if (shape === "brand_id" || shape === "offer_id" || shape === "segment_id") {
+  if (
+    shape === "brand_id" ||
+    shape === "offer_id" ||
+    shape === "segment_id" ||
+    shape === "contact_group_id"
+  ) {
     return typeof prior === "number" ? prior : null;
   }
   return null;
@@ -99,6 +104,11 @@ function coerceValueForShape(
 
 // Whether the rule is fully specified enough to PATCH to the server. The
 // server re-validates, but we don't hit it with obvious nonsense.
+//
+// FK shapes accept null — that's an "incomplete" rule (the rule_type has
+// changed but the user hasn't picked a value yet). The eval skips
+// incomplete rules so the audience is unaffected; persisting the
+// rule_type change is what lets it survive tab switches.
 function isRuleReadyToSave(
   ruleType: string,
   operator: string,
@@ -116,7 +126,21 @@ function isRuleReadyToSave(
       value <= 36500
     );
   }
+  if (value === null || value === undefined) return true;
   return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+// True when a rule's value isn't yet a valid pick for its rule_type's
+// FK shape. We persist such rules but flag them in the UI so the user
+// knows they need to finish picking before the rule affects audience.
+function isRuleIncomplete(
+  ruleType: string,
+  value: unknown,
+): boolean {
+  const shape = valueShapeFor(ruleType);
+  if (!shape) return false;
+  if (shape === "none" || shape === "positive_integer") return false;
+  return value === null || value === undefined;
 }
 
 export function RulesPanel({
@@ -130,13 +154,28 @@ export function RulesPanel({
   const createApi = useApiCall<SegmentRule>();
   const previewApi = useApiCall<PreviewResponse>();
 
-  // FK picker option fetches, gated on feature flags.
+  // FK picker option fetches. Eager (on mount) — lazy gating used to live
+  // here, but it deadlocked: the "do we need this picker?" condition was
+  // derived from the parent's `rules` array, which only updates after a
+  // successful PATCH, which can't happen until the picker has options to
+  // pick from. Eager is cheap (each list is ≤500 rows) and removes the
+  // class of timing bugs.
   const brandsApi = useApiCall<{ data: PickerOption[] }>();
   const offersApi = useApiCall<{ data: PickerOption[] }>();
   const segmentsApi = useApiCall<{ data: PickerOption[] }>();
+  const contactGroupsApi = useApiCall<{ data: PickerOption[] }>();
   const [brands, setBrands] = useState<PickerOption[]>([]);
   const [offers, setOffers] = useState<PickerOption[]>([]);
   const [segmentsList, setSegmentsList] = useState<PickerOption[]>([]);
+  const [contactGroupOptions, setContactGroupOptions] = useState<
+    PickerOption[]
+  >([]);
+  // Per-picker loaded flags. `true` after fetch resolves (regardless of
+  // result count) OR when the entity isn't enabled by feature flag.
+  const [brandsLoaded, setBrandsLoaded] = useState(false);
+  const [offersLoaded, setOffersLoaded] = useState(false);
+  const [segmentsLoaded, setSegmentsLoaded] = useState(false);
+  const [contactGroupsLoaded, setContactGroupsLoaded] = useState(false);
 
   const [rules, setRules] = useState<SegmentRule[]>([]);
   const [rulesError, setRulesError] = useState<string | null>(null);
@@ -163,65 +202,81 @@ export function RulesPanel({
     };
   }, [segmentId, rulesTick, listApi.execute]);
 
-  // Lazy-load FK pickers. Only fetch when a rule of that shape exists or is
-  // being added — otherwise this is wasted bandwidth on segments with rules
-  // that don't reference these entities.
-  const needBrands = useMemo(
-    () => rules.some((r) => valueShapeFor(r.rule_type) === "brand_id"),
-    [rules],
-  );
-  const needOffers = useMemo(
-    () => rules.some((r) => valueShapeFor(r.rule_type) === "offer_id"),
-    [rules],
-  );
-  const needSegments = useMemo(
-    () => rules.some((r) => valueShapeFor(r.rule_type) === "segment_id"),
-    [rules],
-  );
-
+  // Eager FK option fetches, fire-once on mount. Each marks its `loaded`
+  // flag in a finally-like step so the UI can distinguish "still loading"
+  // from "loaded with zero options" (which deserves a different message).
   useEffect(() => {
-    if (!needBrands || !isEntityAvailable("brands")) return;
     let cancelled = false;
+    if (!isEntityAvailable("brands")) {
+      setBrandsLoaded(true);
+      return;
+    }
     (async () => {
       const r = await brandsApi.execute("/api/brands/list?pageSize=500");
       if (cancelled) return;
       if (r.ok) setBrands(r.data.data);
+      setBrandsLoaded(true);
     })();
     return () => {
       cancelled = true;
     };
-  }, [needBrands, brandsApi.execute]);
+  }, [brandsApi.execute]);
 
   useEffect(() => {
-    if (!needOffers || !isEntityAvailable("offers")) return;
     let cancelled = false;
+    if (!isEntityAvailable("offers")) {
+      setOffersLoaded(true);
+      return;
+    }
     (async () => {
       const r = await offersApi.execute("/api/offers/list?pageSize=500");
       if (cancelled) return;
       if (r.ok) setOffers(r.data.data);
+      setOffersLoaded(true);
     })();
     return () => {
       cancelled = true;
     };
-  }, [needOffers, offersApi.execute]);
+  }, [offersApi.execute]);
 
   useEffect(() => {
-    if (!needSegments) return;
     let cancelled = false;
     (async () => {
       const r = await segmentsApi.execute("/api/segments/list?pageSize=500");
       if (cancelled) return;
       // Exclude the current segment to prevent obvious self-reference loops.
+      // Server-side also rejects self-reference (see
+      // lib/api/segment-rule-value-ownership.ts) — this is just UI polish.
       if (r.ok) {
         setSegmentsList(
           r.data.data.filter((s) => s.id !== currentSegmentDbId),
         );
       }
+      setSegmentsLoaded(true);
     })();
     return () => {
       cancelled = true;
     };
-  }, [needSegments, currentSegmentDbId, segmentsApi.execute]);
+  }, [currentSegmentDbId, segmentsApi.execute]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isEntityAvailable("contact_groups")) {
+      setContactGroupsLoaded(true);
+      return;
+    }
+    (async () => {
+      const r = await contactGroupsApi.execute(
+        "/api/contact-groups/list?pageSize=500",
+      );
+      if (cancelled) return;
+      if (r.ok) setContactGroupOptions(r.data.data);
+      setContactGroupsLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [contactGroupsApi.execute]);
 
   // Debounced preview. Triggers on rules changing — when the user mutates,
   // the in-memory rule list updates and that re-fires this effect after the
@@ -389,6 +444,11 @@ export function RulesPanel({
               brands={brands}
               offers={offers}
               segments={segmentsList}
+              contactGroups={contactGroupOptions}
+              brandsLoaded={brandsLoaded}
+              offersLoaded={offersLoaded}
+              segmentsLoaded={segmentsLoaded}
+              contactGroupsLoaded={contactGroupsLoaded}
               onSaved={handleRuleSaved}
               onDelete={() => handleDelete(rule.id)}
               onMoveUp={
@@ -422,6 +482,11 @@ interface RuleRowProps {
   brands: PickerOption[];
   offers: PickerOption[];
   segments: PickerOption[];
+  contactGroups: PickerOption[];
+  brandsLoaded: boolean;
+  offersLoaded: boolean;
+  segmentsLoaded: boolean;
+  contactGroupsLoaded: boolean;
   onSaved: (rule: SegmentRule) => void;
   onDelete: () => void;
   onMoveUp?: () => void;
@@ -435,6 +500,11 @@ function RuleRow({
   brands,
   offers,
   segments,
+  contactGroups,
+  brandsLoaded,
+  offersLoaded,
+  segmentsLoaded,
+  contactGroupsLoaded,
   onSaved,
   onDelete,
   onMoveUp,
@@ -541,12 +611,23 @@ function RuleRow({
     void savePatch({ value });
   }
 
+  // Rule is "incomplete" (persisted but doesn't yet have a valid FK value).
+  // The eval skips incomplete rules; mark the row so the user sees they
+  // need to pick a value before it affects audience.
+  const incomplete = isRuleIncomplete(ruleType, value);
+
   return (
     <div
       className={cn(
         "flex flex-wrap items-center gap-2 rounded-md border bg-background p-3",
         !isActive && "opacity-60",
+        incomplete && "border-amber-300 dark:border-amber-700",
       )}
+      title={
+        incomplete
+          ? "Pick a value to activate this rule. Incomplete rules don't affect the audience."
+          : undefined
+      }
     >
       {/* Reorder controls */}
       <div className="flex flex-col">
@@ -616,10 +697,20 @@ function RuleRow({
         value={value}
         onChange={setValue}
         onBlur={handleValueBlur}
+        onValueCommit={(next) => void savePatch({ value: next })}
         disabled={!canEdit || saving}
         brands={brands}
         offers={offers}
         segments={segments}
+        contactGroups={contactGroups}
+        brandsLoaded={brandsLoaded}
+        offersLoaded={offersLoaded}
+        segmentsLoaded={segmentsLoaded}
+        contactGroupsLoaded={contactGroupsLoaded}
+        // For the fallback display when options haven't loaded yet (or the
+        // referenced entity is no longer in the active list): use the
+        // hydrated metadata from the rules list endpoint.
+        currentRef={rule.ref}
       />
 
       <div className="ml-auto flex items-center gap-3">
@@ -655,11 +746,21 @@ interface ValueControlProps {
   shape: ValueShape | null;
   value: unknown;
   onChange: (next: unknown) => void;
+  // Fired after the user commits a value via blur (number input) or
+  // selection (FK select). The handler receives the explicit new value
+  // so callers don't read stale state from a closure.
   onBlur: () => void;
+  onValueCommit: (next: number) => void;
   disabled: boolean;
   brands: PickerOption[];
   offers: PickerOption[];
   segments: PickerOption[];
+  contactGroups: PickerOption[];
+  brandsLoaded: boolean;
+  offersLoaded: boolean;
+  segmentsLoaded: boolean;
+  contactGroupsLoaded: boolean;
+  currentRef: RefInfo;
 }
 
 function ValueControl({
@@ -667,10 +768,17 @@ function ValueControl({
   value,
   onChange,
   onBlur,
+  onValueCommit,
   disabled,
   brands,
   offers,
   segments,
+  contactGroups,
+  brandsLoaded,
+  offersLoaded,
+  segmentsLoaded,
+  contactGroupsLoaded,
+  currentRef,
 }: ValueControlProps) {
   if (shape === "none") return null;
   if (shape === "positive_integer") {
@@ -709,39 +817,108 @@ function ValueControl({
         ? offers
         : shape === "segment_id"
           ? segments
-          : [];
-  const placeholder =
+          : shape === "contact_group_id"
+            ? contactGroups
+            : [];
+  const loaded =
     shape === "brand_id"
-      ? "Select brand"
+      ? brandsLoaded
       : shape === "offer_id"
-        ? "Select offer"
-        : "Select segment";
+        ? offersLoaded
+        : shape === "segment_id"
+          ? segmentsLoaded
+          : shape === "contact_group_id"
+            ? contactGroupsLoaded
+            : true;
   const featureMissing =
     (shape === "brand_id" && !isEntityAvailable("brands")) ||
-    (shape === "offer_id" && !isEntityAvailable("offers"));
+    (shape === "offer_id" && !isEntityAvailable("offers")) ||
+    (shape === "contact_group_id" && !isEntityAvailable("contact_groups"));
   if (featureMissing) {
     return (
       <span className="text-xs text-muted-foreground">
-        {shape === "brand_id" ? "Brands" : "Offers"} not yet enabled
+        {shape === "brand_id"
+          ? "Brands"
+          : shape === "offer_id"
+            ? "Offers"
+            : "Contact groups"}{" "}
+        not yet enabled
       </span>
     );
   }
+
+  // Placeholder shown when the user has no current selection. Three cases:
+  // (1) fetch still pending → "Loading…"; (2) loaded with zero options →
+  // a helpful message pointing at the registry page; (3) loaded with
+  // options → the normal "Select X" placeholder.
+  const placeholder = !loaded
+    ? "Loading…"
+    : options.length === 0
+      ? shape === "brand_id"
+        ? "No brands available — create one in /brands first"
+        : shape === "offer_id"
+          ? "No offers available — create one in /offers first"
+          : shape === "segment_id"
+            ? "No other segments available"
+            : "No contact groups — create one in /contact-groups first"
+      : shape === "brand_id"
+        ? "Select a brand"
+        : shape === "offer_id"
+          ? "Select an offer"
+          : shape === "segment_id"
+            ? "Select a segment"
+            : "Select a contact group";
+
+  // Fallback display: when the rule has a persisted value but the picker
+  // hasn't loaded its options yet (or the referenced entity is no longer
+  // in the active list), show the hydrated `ref.name` so the user can see
+  // what's currently selected. Opening the dropdown still works once
+  // options arrive.
+  const hasValue = typeof value === "number";
+  const matchedInOptions =
+    hasValue && options.some((o) => o.id === (value as number));
+  const showFallback = hasValue && !matchedInOptions && currentRef !== null;
+
   return (
     <Select
-      value={typeof value === "number" ? String(value) : ""}
+      value={hasValue ? String(value) : ""}
       onValueChange={(v) => {
         const parsed = Number.parseInt(v, 10);
+        if (!Number.isFinite(parsed)) return;
         onChange(parsed);
-        // FK selects don't blur; commit immediately via onBlur callback so
-        // the parent saves the patch.
-        queueMicrotask(onBlur);
+        // Save explicitly with the new value — previously we relied on a
+        // queueMicrotask(onBlur) dance that read `value` from the render's
+        // closure, which is the PRE-pick value because setValue is async.
+        // That caused the saved value to lag one selection behind the user's
+        // actual pick. Pass the new value to onValueCommit so the save uses
+        // the user's actual choice.
+        onValueCommit(parsed);
       }}
-      disabled={disabled || options.length === 0}
+      disabled={disabled}
     >
       <SelectTrigger className="h-9 w-[200px]">
-        <SelectValue
-          placeholder={options.length === 0 ? "Loading…" : placeholder}
-        />
+        {/*
+          Children must be conditionally omitted (not passed as `null`) —
+          Radix Select.Value renders whatever you pass as children, so
+          `children={null}` produces a blank trigger. Falling through to
+          the unguarded SelectValue lets Radix render the selected
+          option's content via its internal ItemText mirroring.
+        */}
+        {showFallback ? (
+          <SelectValue placeholder={placeholder}>
+            <span className="inline-flex items-center gap-2">
+              {currentRef!.color ? (
+                <span
+                  className="size-2 rounded-full"
+                  style={{ backgroundColor: currentRef!.color }}
+                />
+              ) : null}
+              <span className="truncate">{currentRef!.name}</span>
+            </span>
+          </SelectValue>
+        ) : (
+          <SelectValue placeholder={placeholder} />
+        )}
       </SelectTrigger>
       <SelectContent>
         {options.map((o) => (
@@ -809,13 +986,18 @@ function PreviewPanel({
           header to compute in the background.
         </p>
       ) : preview ? (
+        // Under UNION semantics the count is the FULL audience (manual ∪
+        // rule_matches), which can be larger than manual. We surface both
+        // numbers separately so the user sees how much the rules expanded
+        // (or didn't expand) the manual set.
         <p className="mt-1 tabular-nums">
           <span className="text-base font-semibold">
             {(preview.count ?? 0).toLocaleString()}
           </span>{" "}
           <span className="text-muted-foreground">
-            of {preview.manual_count.toLocaleString()} manual members match (
-            {preview.duration_ms} ms)
+            contact{preview.count === 1 ? "" : "s"} in audience ·{" "}
+            {preview.manual_count.toLocaleString()} manual member
+            {preview.manual_count === 1 ? "" : "s"} ({preview.duration_ms} ms)
           </span>
         </p>
       ) : (

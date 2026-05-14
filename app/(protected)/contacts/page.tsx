@@ -18,6 +18,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
 import { ExportButton } from "@/components/export-button";
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import {
   PhoneUploadForm,
   type UploadResultSummary,
@@ -62,6 +63,12 @@ import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import { cn } from "@/lib/utils";
 
+type ContactGroupBadge = {
+  id: number;
+  name: string;
+  color: string | null;
+};
+
 type Contact = {
   id: string;
   org_id: string;
@@ -70,6 +77,7 @@ type Contact = {
   archived_at: string | null;
   created_at: string;
   updated_at: string;
+  groups: ContactGroupBadge[];
 };
 
 type ContactView = "active" | "archived" | "opt_outs" | "opt_ins" | "clickers";
@@ -98,6 +106,7 @@ type Filters = {
   pageSize: number;
   sortBy: string;
   sortDir: "asc" | "desc";
+  group_ids: number[];
 };
 
 const DEFAULT_FILTERS: Filters = {
@@ -107,6 +116,7 @@ const DEFAULT_FILTERS: Filters = {
   pageSize: 20,
   sortBy: "created_at",
   sortDir: "desc",
+  group_ids: [],
 };
 
 const VIEW_LABELS: Record<ContactView, string> = {
@@ -221,7 +231,8 @@ export default function ContactsPage() {
   );
   const filtersAreDefault =
     filters.search === DEFAULT_FILTERS.search &&
-    filters.view === DEFAULT_FILTERS.view;
+    filters.view === DEFAULT_FILTERS.view &&
+    filters.group_ids.length === 0;
 
   const [searchInput, setSearchInput] = useState(filters.search);
   useEffect(() => {
@@ -240,6 +251,8 @@ export default function ContactsPage() {
   const archiveApi = useApiCall<Contact>();
   const restoreApi = useApiCall<Contact>();
   const deleteApi = useApiCall<{ ok: true; id: string }>();
+  const groupsApi = useApiCall<{ data: ContactGroupBadge[] }>();
+  const bulkApplyApi = useApiCall<{ applied: number }>();
 
   const [data, setData] = useState<Contact[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -247,6 +260,63 @@ export default function ContactsPage() {
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
+
+  // Contact groups for the filter + bulk-apply dialog. Loaded once on mount.
+  const [contactGroups, setContactGroups] = useState<ContactGroupBadge[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const r = await groupsApi.execute(
+        "/api/contact-groups/list?pageSize=200",
+      );
+      if (cancelled) return;
+      if (r.ok) setContactGroups(r.data.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [groupsApi.execute]);
+
+  // Bulk selection of contact rows.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  // Clear selection when the page or view changes — different rows now.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [filters.page, filters.view, filters.search, filters.group_ids.join(",")]);
+
+  // Bulk-apply-groups dialog.
+  const [applyOpen, setApplyOpen] = useState(false);
+  const [applyGroupIds, setApplyGroupIds] = useState<number[]>([]);
+  async function handleApplyGroups() {
+    if (selectedIds.size === 0 || applyGroupIds.length === 0) return;
+    const r = await bulkApplyApi.execute("/api/contacts/bulk-apply-groups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contact_ids: Array.from(selectedIds),
+        group_ids: applyGroupIds,
+      }),
+    });
+    if (!r.ok) {
+      toastApiError(r, "Couldn't apply groups");
+      return;
+    }
+    toast.success(
+      `Applied ${r.data.applied.toLocaleString()} new group membership${r.data.applied === 1 ? "" : "s"}`,
+    );
+    setApplyOpen(false);
+    setApplyGroupIds([]);
+    setSelectedIds(new Set());
+    refetch();
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -260,6 +330,8 @@ export default function ContactsPage() {
       view: filters.view,
     });
     if (filters.search) params.set("search", filters.search);
+    if (filters.group_ids.length > 0)
+      params.set("group_ids", filters.group_ids.join(","));
 
     (async () => {
       const result = await listApi.execute(
@@ -276,6 +348,9 @@ export default function ContactsPage() {
     return () => {
       cancelled = true;
     };
+    // group_ids array identity changes per render; collapse to a stable
+    // string key in the dep array so the effect only refires on actual change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     filters.page,
     filters.pageSize,
@@ -283,6 +358,7 @@ export default function ContactsPage() {
     filters.sortDir,
     filters.search,
     filters.view,
+    filters.group_ids.join(","),
     refreshTick,
     listApi.execute,
   ]);
@@ -419,6 +495,21 @@ export default function ContactsPage() {
   const columns = useMemo<ColumnDef<Contact>[]>(
     () => [
       {
+        id: "select",
+        header: () => null,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <input
+            type="checkbox"
+            checked={selectedIds.has(row.original.id)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() => toggleSelected(row.original.id)}
+            aria-label="Select row"
+            className="size-4 cursor-pointer"
+          />
+        ),
+      },
+      {
         id: "phone_number",
         header: "Phone Number",
         cell: ({ row }) => <PhoneCell contact={row.original} />,
@@ -429,6 +520,42 @@ export default function ContactsPage() {
         header: "Status indicators",
         enableSorting: false,
         cell: () => <span className="text-muted-foreground">—</span>,
+      },
+      {
+        id: "groups",
+        header: "Groups",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const gs = row.original.groups;
+          if (!gs || gs.length === 0)
+            return <span className="text-muted-foreground">—</span>;
+          const visible = gs.slice(0, 3);
+          const overflow = gs.slice(3);
+          return (
+            <div className="flex flex-wrap gap-1">
+              {visible.map((g) => (
+                <span
+                  key={g.id}
+                  className="inline-flex items-center gap-1 rounded-md border bg-background px-1.5 py-0.5 text-xs"
+                >
+                  <span
+                    className="size-2 rounded-full"
+                    style={{ backgroundColor: g.color ?? "#64748B" }}
+                  />
+                  {g.name}
+                </span>
+              ))}
+              {overflow.length > 0 ? (
+                <span
+                  className="inline-flex items-center rounded-md border bg-muted/50 px-1.5 py-0.5 text-xs text-muted-foreground"
+                  title={overflow.map((g) => g.name).join(", ")}
+                >
+                  +{overflow.length} more
+                </span>
+              ) : null}
+            </div>
+          );
+        },
       },
       {
         id: "is_archived",
@@ -507,7 +634,7 @@ export default function ContactsPage() {
         },
       },
     ],
-    [canArchive, canDelete],
+    [canArchive, canDelete, selectedIds],
   );
 
   const isAuthLoading = !auth;
@@ -575,6 +702,26 @@ export default function ContactsPage() {
           placeholder={`Search ${VIEW_LABELS[filters.view]} by phone…`}
           className="h-9 w-full max-w-sm"
         />
+        <div className="w-[260px]">
+          <MultiSelectPicker
+            options={contactGroups.map((g) => ({
+              id: g.id,
+              label: g.name,
+              color: g.color,
+            }))}
+            value={filters.group_ids}
+            onChange={(next) =>
+              updateFilters({ group_ids: next as number[], page: 0 })
+            }
+            placeholder="Filter by groups"
+            selectedLabel={(n) =>
+              `${n} group${n === 1 ? "" : "s"} filtered`
+            }
+            isLoading={groupsApi.isLoading && contactGroups.length === 0}
+            emptyMessage="No contact groups available."
+            searchPlaceholder="Search groups…"
+          />
+        </div>
         {!filtersAreDefault ? (
           <Button
             variant="ghost"
@@ -602,6 +749,34 @@ export default function ContactsPage() {
           />
         </div>
       </div>
+
+      {selectedIds.size > 0 ? (
+        <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+          <div>
+            <span className="font-medium">{selectedIds.size}</span> selected
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSelectedIds(new Set())}
+            >
+              Clear
+            </Button>
+            {can("contact_contact_groups.manage") ? (
+              <Button
+                size="sm"
+                onClick={() => {
+                  setApplyGroupIds([]);
+                  setApplyOpen(true);
+                }}
+              >
+                Apply to groups
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {fetchError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">
@@ -804,8 +979,64 @@ export default function ContactsPage() {
               onSuccess={handleUploadSuccess}
               onCancel={() => setUploadOpen(false)}
               submitLabel="Upload contacts"
+              enableContactGroups
             />
           )}
+      </FormDialog>
+
+      {/* Bulk apply-groups dialog */}
+      <FormDialog
+        open={applyOpen}
+        onOpenChange={(o) => {
+          if (!o) setApplyOpen(false);
+        }}
+        className="sm:max-w-md"
+      >
+        <DialogHeader>
+          <DialogTitle>
+            Apply contact groups to {selectedIds.size} contact
+            {selectedIds.size === 1 ? "" : "s"}
+          </DialogTitle>
+          <DialogDescription>
+            Existing memberships are kept. Each contact will be tagged with
+            every selected group.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-3">
+          <MultiSelectPicker
+            options={contactGroups.map((g) => ({
+              id: g.id,
+              label: g.name,
+              color: g.color,
+            }))}
+            value={applyGroupIds}
+            onChange={(next) => setApplyGroupIds(next as number[])}
+            placeholder="Select groups to apply"
+            selectedLabel={(n) =>
+              `${n} group${n === 1 ? "" : "s"} selected`
+            }
+            isLoading={groupsApi.isLoading && contactGroups.length === 0}
+            emptyMessage="No contact groups available. Create one first."
+            searchPlaceholder="Search groups…"
+          />
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              onClick={() => setApplyOpen(false)}
+              disabled={bulkApplyApi.isLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleApplyGroups()}
+              disabled={
+                bulkApplyApi.isLoading || applyGroupIds.length === 0
+              }
+            >
+              Apply
+            </Button>
+          </div>
+        </div>
       </FormDialog>
 
       <AlertDialog

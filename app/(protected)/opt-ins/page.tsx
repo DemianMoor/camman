@@ -659,6 +659,7 @@ export default function OptInsPage() {
                 onCancel={() => setUploadOpen(false)}
                 submitLabel="Add opt-ins"
                 successLabel="Opt-ins added"
+                enableContactGroups
               />
             )}
           </div>

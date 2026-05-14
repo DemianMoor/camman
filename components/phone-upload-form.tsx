@@ -1,9 +1,10 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, FileUp, Loader2, Upload } from "lucide-react";
 import Papa from "papaparse";
 
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,6 +22,16 @@ export type UploadResultSummary = {
   duplicates_in_db: number;
   inserted: number;
   invalid_samples: { input: string; error: string }[];
+  // Optional: present on endpoints that participate in the group-tagging
+  // pipeline (contacts/upload, opt-outs/upload, etc.) when the user
+  // selected groups in the form below.
+  groups_applied?: number;
+};
+
+type ContactGroupOption = {
+  id: number;
+  name: string;
+  color: string | null;
 };
 
 export interface PhoneUploadFormProps {
@@ -33,6 +44,10 @@ export interface PhoneUploadFormProps {
   submitLabel?: string;
   successLabel?: string;
   acceptCsv?: boolean;
+  // When true, render a contact-groups multi-select above the phones
+  // input. Selected group IDs are sent as `assign_to_group_ids` on submit.
+  // Caller is responsible for ensuring the endpoint supports the field.
+  enableContactGroups?: boolean;
 }
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
@@ -58,8 +73,10 @@ export function PhoneUploadForm({
   submitLabel = "Upload contacts",
   successLabel = "Uploaded successfully",
   acceptCsv = true,
+  enableContactGroups = false,
 }: PhoneUploadFormProps) {
   const uploadApi = useApiCall<UploadResultSummary>();
+  const contactGroupsApi = useApiCall<{ data: ContactGroupOption[] }>();
   const [pasteValue, setPasteValue] = useState("");
   const [csvLines, setCsvLines] = useState<string[]>([]);
   const [csvSourceName, setCsvSourceName] = useState<string | null>(null);
@@ -68,7 +85,25 @@ export function PhoneUploadForm({
   const [activeTab, setActiveTab] = useState<"paste" | "csv">("paste");
   const [result, setResult] = useState<UploadResultSummary | null>(null);
   const [showInvalid, setShowInvalid] = useState(false);
+  const [contactGroups, setContactGroups] = useState<ContactGroupOption[]>([]);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<number[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Lazy-load contact groups only when the multi-select is rendered.
+  useEffect(() => {
+    if (!enableContactGroups) return;
+    let cancelled = false;
+    (async () => {
+      const r = await contactGroupsApi.execute(
+        "/api/contact-groups/list?pageSize=200",
+      );
+      if (cancelled) return;
+      if (r.ok) setContactGroups(r.data.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [enableContactGroups, contactGroupsApi.execute]);
 
   function reset() {
     setPasteValue("");
@@ -78,6 +113,7 @@ export function PhoneUploadForm({
     setCsvError(null);
     setResult(null);
     setShowInvalid(false);
+    setSelectedGroupIds([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -135,10 +171,21 @@ export function PhoneUploadForm({
       return;
     }
 
+    // Include assign_to_group_ids when the user selected at least one
+    // group. Omit the field entirely when empty so the endpoint can keep
+    // its no-group fast path.
+    const body: Record<string, unknown> = {
+      phones,
+      ...(additionalFields ?? {}),
+    };
+    if (enableContactGroups && selectedGroupIds.length > 0) {
+      body.assign_to_group_ids = selectedGroupIds;
+    }
+
     const result = await uploadApi.execute(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phones, ...(additionalFields ?? {}) }),
+      body: JSON.stringify(body),
     });
 
     if (!result.ok) {
@@ -181,6 +228,14 @@ export function PhoneUploadForm({
             value={result.duplicates_in_input}
             tone="muted"
           />
+          {typeof result.groups_applied === "number" &&
+          result.groups_applied > 0 ? (
+            <Stat
+              label="Group tags applied"
+              value={result.groups_applied}
+              tone="success"
+            />
+          ) : null}
         </div>
 
         {result.invalid_samples.length > 0 ? (
@@ -227,6 +282,32 @@ export function PhoneUploadForm({
   // === Input screen ===
   return (
     <div className="grid gap-4">
+      {enableContactGroups ? (
+        <div className="grid gap-2">
+          <Label>Apply contact groups (optional)</Label>
+          <MultiSelectPicker
+            options={contactGroups.map((g) => ({
+              id: g.id,
+              label: g.name,
+              color: g.color,
+            }))}
+            value={selectedGroupIds}
+            onChange={(next) => setSelectedGroupIds(next as number[])}
+            placeholder="Select contact groups…"
+            selectedLabel={(n) =>
+              `${n.toLocaleString()} group${n === 1 ? "" : "s"} selected`
+            }
+            isLoading={contactGroupsApi.isLoading && contactGroups.length === 0}
+            disabled={uploadApi.isLoading}
+            emptyMessage="No contact groups exist yet."
+            searchPlaceholder="Search groups…"
+          />
+          <p className="text-xs text-muted-foreground">
+            Every uploaded contact will be tagged with the selected groups.
+          </p>
+        </div>
+      ) : null}
+
       <Tabs
         value={activeTab}
         onValueChange={(v) => setActiveTab(v as "paste" | "csv")}

@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import {
   brands,
+  contact_groups,
   offers,
   segment_rules,
   segments,
@@ -11,6 +12,7 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { verifyValueOwnership } from "@/lib/api/segment-rule-value-ownership";
 import { getValueShapeForRuleType } from "@/lib/validators/segment-rule-types";
 import { segmentRuleCreateSchema } from "@/lib/validators/segment-rules";
 
@@ -34,63 +36,6 @@ async function assertSegmentOwnership(
   return r.length > 0;
 }
 
-// Verify any FK-referenced entity belongs to the org. Returns an error
-// response on failure or null on success.
-async function verifyValueOwnership(
-  ruleType: string,
-  value: unknown,
-  orgId: string,
-): Promise<Response | null> {
-  const shape = getValueShapeForRuleType(ruleType);
-  if (!shape) return null;
-  if (shape === "none" || shape === "positive_integer") return null;
-  if (typeof value !== "number") return null;
-  if (shape === "brand_id") {
-    const r = await db
-      .select({ id: brands.id })
-      .from(brands)
-      .where(and(eq(brands.id, value), eq(brands.org_id, orgId)))
-      .limit(1);
-    if (!r[0]) {
-      return apiError(
-        400,
-        "Referenced brand doesn't belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "value" },
-      );
-    }
-  } else if (shape === "offer_id") {
-    const r = await db
-      .select({ id: offers.id })
-      .from(offers)
-      .where(and(eq(offers.id, value), eq(offers.org_id, orgId)))
-      .limit(1);
-    if (!r[0]) {
-      return apiError(
-        400,
-        "Referenced offer doesn't belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "value" },
-      );
-    }
-  } else if (shape === "segment_id") {
-    const r = await db
-      .select({ id: segments.id })
-      .from(segments)
-      .where(and(eq(segments.id, value), eq(segments.org_id, orgId)))
-      .limit(1);
-    if (!r[0]) {
-      return apiError(
-        400,
-        "Referenced segment doesn't belong to your organization",
-        API_ERROR_CODES.VALIDATION,
-        { field: "value" },
-      );
-    }
-  }
-  return null;
-}
-
 // Hydrate a rule with the referenced entity's basic info for UI display.
 // Returns `{ ...rule, ref: { id, name, color } | null }` per row.
 type RuleRow = {
@@ -109,17 +54,20 @@ async function hydrateRefs(rows: RuleRow[], orgId: string) {
   const brandIds = new Set<number>();
   const offerIds = new Set<number>();
   const segmentIds = new Set<number>();
+  const contactGroupIds = new Set<number>();
   for (const r of rows) {
     const shape = getValueShapeForRuleType(r.rule_type);
     if (typeof r.value !== "number") continue;
     if (shape === "brand_id") brandIds.add(r.value);
     else if (shape === "offer_id") offerIds.add(r.value);
     else if (shape === "segment_id") segmentIds.add(r.value);
+    else if (shape === "contact_group_id") contactGroupIds.add(r.value);
   }
   type Info = { id: number; name: string; color: string | null };
   const brandMap = new Map<number, Info>();
   const offerMap = new Map<number, Info>();
   const segmentMap = new Map<number, Info>();
+  const contactGroupMap = new Map<number, Info>();
   if (brandIds.size > 0) {
     const b = await db
       .select({ id: brands.id, name: brands.name, color: brands.color })
@@ -157,6 +105,22 @@ async function hydrateRefs(rows: RuleRow[], orgId: string) {
     // Segments don't have a color column; pad to the shared Info shape.
     for (const row of s) segmentMap.set(row.id, { ...row, color: null });
   }
+  if (contactGroupIds.size > 0) {
+    const g = await db
+      .select({
+        id: contact_groups.id,
+        name: contact_groups.name,
+        color: contact_groups.color,
+      })
+      .from(contact_groups)
+      .where(
+        and(
+          eq(contact_groups.org_id, orgId),
+          drizzleSql`${contact_groups.id} = ANY (ARRAY[${drizzleSql.raw(Array.from(contactGroupIds).join(","))}]::int[])`,
+        ),
+      );
+    for (const row of g) contactGroupMap.set(row.id, row);
+  }
   return rows.map((r) => {
     const shape = getValueShapeForRuleType(r.rule_type);
     let ref: Info | null = null;
@@ -164,6 +128,8 @@ async function hydrateRefs(rows: RuleRow[], orgId: string) {
       if (shape === "brand_id") ref = brandMap.get(r.value) ?? null;
       else if (shape === "offer_id") ref = offerMap.get(r.value) ?? null;
       else if (shape === "segment_id") ref = segmentMap.get(r.value) ?? null;
+      else if (shape === "contact_group_id")
+        ref = contactGroupMap.get(r.value) ?? null;
     }
     return { ...r, ref };
   });
@@ -251,11 +217,16 @@ export async function POST(
   const input = parsed.data;
 
   const ownership = await verifyValueOwnership(
+    orgId,
     input.rule_type,
     input.value,
-    orgId,
+    segmentId,
   );
-  if (ownership) return ownership;
+  if (!ownership.ok) {
+    return apiError(400, ownership.reason, API_ERROR_CODES.VALIDATION, {
+      field: "value",
+    });
+  }
 
   // Position auto-assigned as MAX(position) + 1 inside a transaction so
   // concurrent creates don't collide. (No UNIQUE constraint, so worst case

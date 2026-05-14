@@ -140,25 +140,40 @@ Drafts can be saved with zero required fields and no segments. The audience snap
 - Normalization in `lib/spam/normalize.ts` (NFKC → lowercase → trim → collapse whitespace → SHA-256) MUST stay byte-for-byte identical to the Python classifier's `src/data/normalize.py`. Divergence silently doubles cost by making the cache miss across the boundary.
 - **UI integration:** scoring is button-triggered inline via the shared `<SpamCheckStrip>` (`components/spam/spam-check-strip.tsx`). It sits below the textarea in `CreativeForm` and on every row of `BulkCreativeForm`. The stage form's creative picker shows a small color-dot + score number next to each option, populated from the list endpoint's cache join (read-only — listing does NOT trigger scoring). There is no standalone debug page; the inline strip + the `/api/spam/score` endpoint are the only entry points.
 
-## 10e. Segment rules
+## 10e. Segment rules — UNION with manual membership (Model C)
 
-Rules are a compound filter layered on top of a segment's manual membership (rows in `segment_contacts`). Manual membership is the universe; rules narrow it. A segment with **zero active rules** behaves identically to pre-rules: the audience is exactly the manual membership. The SQL builder (`lib/segment-rules-eval.ts`) short-circuits to the bare `SELECT contact_id FROM segment_contacts …` clause when there are no active rules — preserve this property in any future refactor.
+A segment's effective audience is the **UNION** of its manual `segment_contacts` membership and the contacts matching ALL active rules:
+
+```
+final audience = (manual membership) ∪ (contacts matching every active rule)
+```
+
+A segment with **zero active rules** short-circuits to manual membership only. The SQL builder (`lib/segment-rules-eval.ts`) checks for active rules first and emits the bare `SELECT contact_id FROM segment_contacts …` clause when there are none — **preserve this property in any future refactor**. With rules active, the builder emits a `SELECT … FROM (manual UNION rule_matches) AS combined` shape. Manual members are always included regardless of whether they match the rules; rules only ever ADD contacts to the audience.
 
 - **Schema:** [db/schema.ts](db/schema.ts) `segment_rules` table. Rules carry `rule_type`, `operator` (`is` / `is_not`), `value` (JSONB; shape per rule_type), `position` (display order; no UNIQUE constraint — reorder briefly produces duplicates and renumbers in a two-phase update), `is_active` boolean. CHECK constraints enforce valid types and operators at the DB level.
 - **Validation source of truth:** [lib/validators/segment-rule-types.ts](lib/validators/segment-rule-types.ts) maps each `rule_type` → allowed operators + value shape. Both server (Zod schemas in [lib/validators/segment-rules.ts](lib/validators/segment-rules.ts)) and client (`RulesPanel`) read from this map — don't fork.
 - **Operators are constrained per rule type.** Time-based rule types (`*_in_last_n_days`, `*_more_than_n_days_ago`) accept `is` only — the direction is encoded in the type name. The form hides the operator select for these.
-- **FK ownership.** Brand/offer/segment IDs in rule values are re-verified against the user's org before insert/update (`verifyValueOwnership` in [app/api/segments/[id]/rules/route.ts](app/api/segments/[id]/rules/route.ts)). RLS is defense-in-depth.
+- **FK ownership.** Brand/offer/segment/contact_group IDs in rule values are re-verified against the user's org before insert/update (`verifyValueOwnership` in [app/api/segments/[id]/rules/route.ts](app/api/segments/[id]/rules/route.ts)). RLS is defense-in-depth.
 - **Counts:**
   - `segment_stats.total_count` (per-row trigger) is the manual-membership count — unaffected by rules.
-  - `segment_stats.rule_filtered_count` (computed on demand by `/api/segments/[id]/refresh-stats`) is the rule-narrowed count. Null when no active rules exist or when the eval timed out.
+  - `segment_stats.rule_filtered_count` (computed on demand by `/api/segments/[id]/refresh-stats`) is the FULL UNION'd audience count (manual ∪ rule_matches). Null when no active rules exist or when the eval timed out. The column name is historical — under UNION semantics it represents `audience_count`, not a narrowed subset.
 - **Preview endpoint:** `POST /api/segments/[id]/rules/preview` returns `{ count, manual_count, rule_filtered_count, duration_ms, truncated }`. Hard 10s `SET LOCAL statement_timeout` inside a transaction; on timeout (Postgres error code 57014) returns `truncated: true, count: null` rather than 500.
-- **Campaign audience snapshots respect rules.** The audience-snapshot builder in [lib/audience-snapshot.ts](lib/audience-snapshot.ts) UNIONs per-segment rule-filtered clauses — `buildSegmentAudienceClause(segmentId, orgId)` is the single entry point. Existing frozen pools (`campaign_audience_pool` rows) are NOT recomputed when rules change after a campaign moves past draft; this is by design.
+- **Campaign audience snapshots respect UNION.** [lib/audience-snapshot.ts](lib/audience-snapshot.ts) calls `buildSegmentAudienceClause(segmentId, orgId)` per segment and UNIONs across segments. Existing frozen pools (`campaign_audience_pool` rows) are NOT recomputed when rules change after a campaign moves past draft; this is by design.
 - **UI conventions:**
   - The Rules tab lives on `/segments/[id]` next to Contacts/Upload/Remove.
   - Auto-save per-rule: rule_type and operator changes commit immediately; numeric/FK values commit on blur. No save button per row.
   - Reorder via up/down arrow buttons (no drag-and-drop dep). If we add `@dnd-kit` later, the up/down arrows can stay as a fallback for keyboard.
   - The 600ms debounced preview fires whenever the in-memory rule list changes. Network-tab discipline: do not re-fire the preview on every keystroke; the rules list only updates after PATCH returns.
-  - Segments with `active_rules_count > 0` show a small `Filtered` badge in the campaign-form audience picker so it's obvious the audience won't equal `total_count`.
+  - Segments with `active_rules_count > 0` show a small `Has rules` badge in the campaign-form audience picker. Tooltip explains the audience is the rule-filtered + manual UNION.
+
+## 10f. Contact groups (formerly Segment Groups)
+
+Categorical tags applied directly to contacts via the `contact_contact_groups` junction. A contact may have multiple groups. Used as a filter dimension in segment rules (`is_in_contact_group`) and on the `/contacts` page (groups column + multi-select group filter + bulk "Apply to groups" action).
+
+- Renamed from `segment_groups` in migration 0031. The old "folder for segments" concept is gone — segments don't carry group membership anymore.
+- Detail page at `/contact-groups/[id]` with three tabs: Contacts (list/search/sort/bulk-remove), Add contacts (via `PhoneUploadForm`), Remove contacts (via `PhoneUploadForm`).
+- All four phone-upload entry points (contacts, opt-outs, opt-ins, clickers) expose a `MultiSelectPicker` for contact groups; selected IDs travel as `assign_to_group_ids` on the POST. The shared [lib/upload/audience-upload.ts](lib/upload/audience-upload.ts) helper applies them after contacts are upserted.
+- Bulk-apply endpoint: `POST /api/contacts/bulk-apply-groups` with `{ contact_ids[], group_ids[] }`, idempotent via `ON CONFLICT DO NOTHING`. Returns `{ applied: number }`.
 
 ## 10c. Creatives
 

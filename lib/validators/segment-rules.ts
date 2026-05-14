@@ -9,6 +9,13 @@ import {
 
 // Per-value-shape validation. Used by the refinement to cross-check
 // `value` against the resolved value_shape for the chosen rule_type.
+//
+// FK shapes (brand_id / offer_id / segment_id / contact_group_id) accept
+// `null` as well as a positive integer: a null value persists the rule
+// in an "incomplete" state. The eval skips incomplete rules so the
+// audience is unaffected until the user picks a value. This is what
+// lets the user change rule_type in the UI and persist the change
+// before they've selected a target entity.
 function validateValueByShape(shape: ValueShape, value: unknown): boolean {
   switch (shape) {
     case "none":
@@ -24,6 +31,7 @@ function validateValueByShape(shape: ValueShape, value: unknown): boolean {
     case "offer_id":
     case "segment_id":
     case "contact_group_id":
+      if (value == null) return true;
       return (
         typeof value === "number" &&
         Number.isInteger(value) &&

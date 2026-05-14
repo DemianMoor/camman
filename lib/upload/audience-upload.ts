@@ -1,9 +1,9 @@
 import "server-only";
 
-import { sql as drizzleSql } from "drizzle-orm";
+import { and, eq, inArray, sql as drizzleSql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { contacts } from "@/db/schema";
+import { contact_contact_groups, contact_groups, contacts } from "@/db/schema";
 import { validatePhonesBatch } from "@/lib/phone-validation";
 
 export type AudienceUploadSummary = {
@@ -14,6 +14,7 @@ export type AudienceUploadSummary = {
   duplicates_in_db: number;
   inserted: number;
   invalid_samples: { input: string; error: string }[];
+  groups_applied: number;
 };
 
 export type ResolvedContact = {
@@ -28,6 +29,9 @@ export interface AudienceUploadConfig {
   // upserted. Should perform the entity-specific insert(s) and return the
   // count of entity rows it actually inserted.
   insertEntities: (rows: ResolvedContact[]) => Promise<number>;
+  // Optional: tag every resolved contact with these contact groups.
+  // Caller is responsible for verifying these IDs are owned by orgId.
+  assignToGroupIds?: number[];
 }
 
 const CONTACT_UPSERT_CHUNK = 1000;
@@ -42,7 +46,27 @@ const INVALID_SAMPLE_LIMIT = 20;
 export async function processAudienceUpload(
   config: AudienceUploadConfig,
 ): Promise<AudienceUploadSummary> {
-  const { orgId, rawPhones, insertEntities } = config;
+  const { orgId, rawPhones, insertEntities, assignToGroupIds } = config;
+
+  // Resolve & verify groups up front so a bad group ID rejects the upload
+  // before we do any contact work.
+  const requestedGroupIds = Array.from(new Set(assignToGroupIds ?? []));
+  if (requestedGroupIds.length > 0) {
+    const ownedGroups = await db
+      .select({ id: contact_groups.id })
+      .from(contact_groups)
+      .where(
+        and(
+          eq(contact_groups.org_id, orgId),
+          inArray(contact_groups.id, requestedGroupIds),
+        ),
+      );
+    if (ownedGroups.length !== requestedGroupIds.length) {
+      throw new Error(
+        "One or more assign_to_group_ids do not belong to your organization",
+      );
+    }
+  }
 
   // Parse — split by newline / comma / semicolon; trim; drop empties.
   const rawLines = rawPhones
@@ -92,6 +116,28 @@ export async function processAudienceUpload(
 
   const inserted = await insertEntities(resolved);
 
+  // Tag resolved contacts with the requested groups (idempotent).
+  let groups_applied = 0;
+  if (requestedGroupIds.length > 0 && resolved.length > 0) {
+    for (let i = 0; i < resolved.length; i += CONTACT_UPSERT_CHUNK) {
+      const chunk = resolved.slice(i, i + CONTACT_UPSERT_CHUNK);
+      for (const groupId of requestedGroupIds) {
+        const tagged = await db
+          .insert(contact_contact_groups)
+          .values(
+            chunk.map((c) => ({
+              contact_id: c.contact_id,
+              contact_group_id: groupId,
+              org_id: orgId,
+            })),
+          )
+          .onConflictDoNothing()
+          .returning({ contact_id: contact_contact_groups.contact_id });
+        groups_applied += tagged.length;
+      }
+    }
+  }
+
   return {
     submitted,
     valid: valid.length,
@@ -100,5 +146,6 @@ export async function processAudienceUpload(
     duplicates_in_db: 0,
     inserted,
     invalid_samples: invalid.slice(0, INVALID_SAMPLE_LIMIT),
+    groups_applied,
   };
 }

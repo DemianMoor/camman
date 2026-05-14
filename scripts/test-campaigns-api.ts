@@ -380,11 +380,12 @@ async function main() {
     createdSegmentIds.push(optOutSeg.id);
     // 10-digit US format: +1 + area + 7 digits. The seed timestamp gives
     // us enough variation per run.
-    const ooBase = String(unique).slice(-6).padStart(6, "0");
+    // 10-digit national format; pick a base disjoint from the main fixture range.
+    const ooBaseN = (Number(String(unique).slice(-6)) % 9_000) + 1_000;
     const ooOnlyPhones = [
-      `+1415${ooBase}0`,
-      `+1415${ooBase}1`,
-      `+1415${ooBase}2`,
+      `+1415555${String(ooBaseN).padStart(4, "0")}`,
+      `+1415555${String(ooBaseN + 1).padStart(4, "0")}`,
+      `+1415555${String(ooBaseN + 2).padStart(4, "0")}`,
     ];
     insertedPhones.push(...ooOnlyPhones);
     const ooUploadR = await apiFetch(

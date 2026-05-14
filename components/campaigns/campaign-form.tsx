@@ -647,9 +647,9 @@ export function CampaignForm({
                             {(s.active_rules_count ?? 0) > 0 ? (
                               <span
                                 className="rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-violet-700 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200"
-                                title="Audience is narrowed by segment rules"
+                                title={`This segment uses ${s.active_rules_count} audience rule${s.active_rules_count === 1 ? "" : "s"} combined with its manual membership. The audience count reflects the rule-filtered+manual UNION.`}
                               >
-                                Filtered
+                                Has rules
                               </span>
                             ) : null}
                           </span>

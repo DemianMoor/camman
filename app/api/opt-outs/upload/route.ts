@@ -89,6 +89,7 @@ export async function POST(req: NextRequest) {
   const summary = await processAudienceUpload({
     orgId,
     rawPhones: parsed.data.phones,
+    assignToGroupIds: parsed.data.assign_to_group_ids,
     insertEntities: async (rows: ResolvedContact[]) => {
       if (rows.length === 0) return 0;
       // Wrap entity inserts in a transaction so opt_out + junction rows commit

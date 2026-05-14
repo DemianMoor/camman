@@ -8,6 +8,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import {
+  affiliate_networks,
   brands,
   campaign_audience_pool,
   campaigns,
@@ -88,6 +89,7 @@ async function main() {
   const insertedPhones: string[] = [];
   const createdBrandIds: number[] = [];
   const createdOfferIds: number[] = [];
+  const createdNetworkIds: number[] = [];
   const createdSegmentIds: number[] = [];
   const createdGroupIds: number[] = [];
   const createdCampaignIds: number[] = [];
@@ -107,11 +109,24 @@ async function main() {
     orgId = brand.org_id;
     createdBrandIds.push(brand.id);
 
+    // Network is now required on offers.
+    const networkR = await apiFetch("/api/networks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Campaign Probe Network ${unique}`,
+        network_id: `CMP-NET-${unique}`,
+      }),
+    });
+    check("seed: network creation returns 201", networkR.status === 201);
+    const network = (await networkR.json()) as { id: number };
+    createdNetworkIds.push(network.id);
+
     const offerR = await apiFetch("/api/offers", {
       method: "POST",
       body: JSON.stringify({
         name: "Campaign Probe Offer",
         offer_id: `CMP-OFFER-${unique}`,
+        network_id: network.id,
         payout_model: "cpa",
         payout_cpa: 10,
       }),
@@ -622,6 +637,9 @@ async function main() {
       }
       for (const oid of createdOfferIds) {
         await db.delete(offers).where(eq(offers.id, oid));
+      }
+      for (const nid of createdNetworkIds) {
+        await db.delete(affiliate_networks).where(eq(affiliate_networks.id, nid));
       }
       for (const bid of createdBrandIds) {
         await db.delete(brands).where(eq(brands.id, bid));

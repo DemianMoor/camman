@@ -34,7 +34,7 @@ const baseOfferShape = {
     ),
   postfix: z.string().trim().max(80).optional(),
   base_url: z.string().trim().max(500).optional(),
-  network_id: z.number().int().positive().nullable().optional(),
+  network_id: z.number({ message: "Network is required" }).int().positive(),
   payout_model: payoutModelEnum,
   payout_cpa: z.number().nonnegative().optional(),
   payout_revshare: z.number().min(0).max(100).optional(),

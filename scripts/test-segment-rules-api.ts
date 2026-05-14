@@ -106,11 +106,14 @@ async function main() {
   const createdSegmentIds: number[] = [];
   const createdBrandIds: number[] = [];
   const createdGroupIds: number[] = [];
+  const createdOfferIds: number[] = [];
+  const createdNetworkIds: number[] = [];
   const insertedPhones: string[] = [...manualPhones, ...externalPhones];
   let orgId = "";
   let probeBrandId = 0;
   let otherBrandId = 0;
   let contactGroupId = 0;
+  let testNetworkId = 0;
 
   try {
     const probeR = await apiFetch("/api/brands", {
@@ -128,6 +131,22 @@ async function main() {
     orgId = probe.org_id;
     probeBrandId = probe.id;
     createdBrandIds.push(probe.id);
+
+    // Networks are now required on offers, so set one up for the offer
+    // fixture that the R2 rule uses below.
+    const netR = await apiFetch("/api/networks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Rules Network ${unique}`,
+        network_id: `RULES-N-${unique}`,
+      }),
+    });
+    if (netR.status !== 201) {
+      console.error("Couldn't create network", await netR.text());
+      process.exit(1);
+    }
+    testNetworkId = ((await netR.json()) as { id: number }).id;
+    createdNetworkIds.push(testNetworkId);
 
     const otherR = await apiFetch("/api/brands", {
       method: "POST",
@@ -754,6 +773,7 @@ async function main() {
         name: `Rules Offer ${unique}`,
         offer_id: `RULES-OF-${unique}`,
         brand_id: probeBrandId,
+        network_id: testNetworkId,
         payout_model: "cpa",
         payout_cpa: 1,
       }),
@@ -763,6 +783,7 @@ async function main() {
       throw new Error("offer create failed");
     }
     const offerA = (await offerAR.json()) as { id: number };
+    createdOfferIds.push(offerA.id);
     // Insert 3 offer-A clickers: external[5], external[6], manual[2].
     const offerAClickerPhones = [
       externalPhones[5],
@@ -1071,6 +1092,18 @@ async function main() {
       }
       for (const gid of createdGroupIds) {
         await db.delete(contact_groups).where(eq(contact_groups.id, gid));
+      }
+      // Offers must be deleted before networks (FK ON DELETE SET NULL is
+      // safe in either order, but explicit ordering keeps intent obvious).
+      // Offers must also be deleted before their brand (ON DELETE CASCADE
+      // would otherwise blow them away when the brand is removed).
+      for (const oid of createdOfferIds) {
+        await db.execute(drizzleSql`DELETE FROM offers WHERE id = ${oid}`);
+      }
+      for (const nid of createdNetworkIds) {
+        await db.execute(
+          drizzleSql`DELETE FROM affiliate_networks WHERE id = ${nid}`,
+        );
       }
       for (const bid of createdBrandIds) {
         await db.execute(drizzleSql`DELETE FROM brands WHERE id = ${bid}`);

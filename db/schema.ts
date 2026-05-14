@@ -171,9 +171,14 @@ export const offers = pgTable(
     name: text("name").notNull(),
     postfix: text("postfix"),
     base_url: text("base_url"),
-    network_id: integer("network_id").references(() => affiliate_networks.id, {
-      onDelete: "set null",
-    }),
+    network_id: integer("network_id")
+      .notNull()
+      .references(() => affiliate_networks.id, {
+        // restrict: a network with offers under it can't be deleted out from
+        // under them. Archive the offers first, then the network. We can't
+        // SET NULL anymore because the column is NOT NULL.
+        onDelete: "restrict",
+      }),
     payout_model: text("payout_model").notNull().default("cpa"),
     payout_cpa: numeric("payout_cpa", { precision: 12, scale: 4 }),
     payout_revshare: numeric("payout_revshare", { precision: 5, scale: 2 }),

@@ -54,8 +54,6 @@ type NetworksListResponse = {
   totalCount: number;
 };
 
-const UNASSIGNED = "__unassigned__";
-
 export function OfferForm({
   mode,
   initialValues,
@@ -72,7 +70,10 @@ export function OfferForm({
       offer_id: initialValues?.offer_id ?? "",
       postfix: initialValues?.postfix ?? "",
       base_url: initialValues?.base_url ?? "",
-      network_id: initialValues?.network_id ?? null,
+      // RHF treats undefined as "untouched" — the Select renders its
+      // placeholder until the user picks a network. zodResolver will then
+      // produce the "Network is required" error on submit.
+      network_id: initialValues?.network_id ?? undefined,
       payout_model: initialValues?.payout_model ?? "cpa",
       payout_cpa: initialValues?.payout_cpa,
       payout_revshare: initialValues?.payout_revshare,
@@ -135,7 +136,7 @@ export function OfferForm({
             name="name"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Name</FormLabel>
+                <FormLabel required>Name</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="e.g. Acme Loan Application"
@@ -153,7 +154,7 @@ export function OfferForm({
             name="offer_id"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Offer ID</FormLabel>
+                <FormLabel required>Offer ID</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="acme-loan"
@@ -187,7 +188,7 @@ export function OfferForm({
                   />
                 </FormControl>
                 <FormDescription>
-                  URL parameter name for tracking. Optional.
+                  URL parameter name for tracking.
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -208,7 +209,7 @@ export function OfferForm({
                     value={field.value ?? ""}
                   />
                 </FormControl>
-                <FormDescription>Destination URL stem. Optional.</FormDescription>
+                <FormDescription>Destination URL stem.</FormDescription>
                 <FormMessage />
               </FormItem>
             )}
@@ -268,7 +269,7 @@ export function OfferForm({
             name="payout_model"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Payout model</FormLabel>
+                <FormLabel required>Payout model</FormLabel>
                 <Select
                   value={field.value}
                   onValueChange={field.onChange}
@@ -297,7 +298,7 @@ export function OfferForm({
               name="payout_cpa"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>CPA payout (USD)</FormLabel>
+                  <FormLabel required>CPA payout (USD)</FormLabel>
                   <FormControl>
                     <div className="relative">
                       <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
@@ -328,7 +329,7 @@ export function OfferForm({
               name="payout_revshare"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Revshare percentage</FormLabel>
+                  <FormLabel required>Revshare percentage</FormLabel>
                   <FormControl>
                     <div className="relative">
                       <Input
@@ -453,15 +454,14 @@ export function OfferForm({
             control={form.control}
             name="network_id"
             render={({ field }) => {
-              const value =
-                field.value == null ? UNASSIGNED : String(field.value);
+              const value = field.value == null ? "" : String(field.value);
               return (
                 <FormItem>
-                  <FormLabel>Network</FormLabel>
+                  <FormLabel required>Network</FormLabel>
                   <Select
                     value={value}
                     onValueChange={(v) =>
-                      field.onChange(v === UNASSIGNED ? null : Number(v))
+                      field.onChange(v === "" ? null : Number(v))
                     }
                     disabled={isSubmitting || !networksAvailable}
                   >
@@ -471,13 +471,12 @@ export function OfferForm({
                           placeholder={
                             !networksAvailable
                               ? "Networks not yet available — see Step 5.2"
-                              : "Unassigned"
+                              : "Select a network"
                           }
                         />
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <SelectItem value={UNASSIGNED}>Unassigned</SelectItem>
                       {networks.map((n) => (
                         <SelectItem key={n.id} value={String(n.id)}>
                           <span className="inline-flex items-center gap-2">

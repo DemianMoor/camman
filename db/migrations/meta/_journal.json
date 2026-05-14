@@ -225,6 +225,13 @@
       "when": 1778836000000,
       "tag": "0031_contact_groups_and_rules",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1779062400000,
+      "tag": "0032_offers_network_id_required",
+      "breakpoints": true
     }
   ]
 }

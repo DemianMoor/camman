@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { offers } from "../db/schema";
+import { affiliate_networks, offers } from "../db/schema";
 
 type SalesPage = { label: string; url: string };
 
@@ -115,11 +115,28 @@ async function main() {
   }
 
   const createdIds: number[] = [];
+  const createdNetworkIds: number[] = [];
   const unique = Date.now();
   const cpaOfferId = `OFF-CPA-${unique}`;
   const rsOfferId = `OFF-RS-${unique}`;
+  let testNetworkId = 0;
 
   try {
+    console.log("\n[0] POST /api/networks (network required on offers now)");
+    const nR = await apiFetch("/api/networks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Test Network ${unique}`,
+        network_id: `OFF-NET-${unique}`,
+      }),
+    });
+    if (nR.status !== 201) {
+      console.error("network create failed:", await nR.text());
+      process.exit(1);
+    }
+    testNetworkId = ((await nR.json()) as { id: number }).id;
+    createdNetworkIds.push(testNetworkId);
+
     console.log("\n[1] GET /api/offers/list (initial)");
     const r1 = await apiFetch("/api/offers/list");
     check("returns 200", r1.status === 200);
@@ -133,6 +150,7 @@ async function main() {
       body: JSON.stringify({
         name: "Test Offer CPA",
         offer_id: cpaOfferId,
+        network_id: testNetworkId,
         payout_model: "cpa",
         payout_cpa: 25.5,
       }),
@@ -154,6 +172,7 @@ async function main() {
       body: JSON.stringify({
         name: "Dup",
         offer_id: cpaOfferId,
+        network_id: testNetworkId,
         payout_model: "cpa",
         payout_cpa: 10,
       }),
@@ -169,6 +188,7 @@ async function main() {
       body: JSON.stringify({
         name: "Test Offer RevShare",
         offer_id: rsOfferId,
+        network_id: testNetworkId,
         payout_model: "revshare",
         payout_revshare: 30,
         sales_pages: [
@@ -198,12 +218,48 @@ async function main() {
       body: JSON.stringify({
         name: "Missing CPA",
         offer_id: `OFF-BAD-${unique}`,
+        network_id: testNetworkId,
         payout_model: "cpa",
       }),
     });
     check("returns 400", r5.status === 400, `got ${r5.status}`);
     const body5 = await r5.json();
     check("code is validation", body5.code === "validation");
+
+    console.log("\n[5b] POST /api/offers (missing network_id rejected)");
+    const r5b = await apiFetch("/api/offers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Missing Network",
+        offer_id: `OFF-NONET-${unique}`,
+        payout_model: "cpa",
+        payout_cpa: 5,
+      }),
+    });
+    check("returns 400", r5b.status === 400, `got ${r5b.status}`);
+    const body5b = await r5b.json();
+    check("code is validation", body5b.code === "validation");
+
+    console.log("\n[5c] POST /api/offers (cross-org network rejected)");
+    const r5c = await apiFetch("/api/offers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Bogus Network",
+        offer_id: `OFF-BOGUSNET-${unique}`,
+        // 2^31 - 1: well outside any real serial id range, so the FK lookup
+        // will miss whether or not such an id exists in another org.
+        network_id: 2147483647,
+        payout_model: "cpa",
+        payout_cpa: 5,
+      }),
+    });
+    check("returns 400", r5c.status === 400, `got ${r5c.status}`);
+    const body5c = await r5c.json();
+    check(
+      "details.field is network_id",
+      body5c.details?.field === "network_id",
+      `got ${JSON.stringify(body5c.details)}`,
+    );
 
     console.log("\n[6] GET /api/offers/list (after creates)");
     const r6 = await apiFetch("/api/offers/list");
@@ -216,8 +272,8 @@ async function main() {
     const cpaRow = body6.data.find((o) => o.id === cpaCreated.id);
     check("CPA offer present in list", cpaRow !== undefined);
     check(
-      "joined network is null (no networks yet)",
-      cpaRow?.network === null,
+      "joined network matches the one we created",
+      cpaRow?.network?.id === testNetworkId,
       `got ${JSON.stringify(cpaRow?.network)}`,
     );
 
@@ -289,19 +345,31 @@ async function main() {
     const restored = (await r13.json()) as Offer;
     check("status is active", restored.status === "active");
   } finally {
-    if (createdIds.length > 0) {
+    if (createdIds.length > 0 || createdNetworkIds.length > 0) {
       console.log(
-        `\nCleanup: hard-deleting test offer ids=${createdIds.join(",")}`,
+        `\nCleanup: hard-deleting test offer ids=${createdIds.join(",")}` +
+          (createdNetworkIds.length > 0
+            ? ` and network ids=${createdNetworkIds.join(",")}`
+            : ""),
       );
       const pg = postgres(dbUrl, { prepare: false, max: 1 });
       const db = drizzle(pg);
       try {
+        // Offers first — the network ON DELETE RESTRICT FK would otherwise
+        // block the network delete.
         for (const id of createdIds) {
           const deleted = await db
             .delete(offers)
             .where(eq(offers.id, id))
             .returning({ id: offers.id });
-          console.log(`  deleted ${deleted.length} row(s) for id=${id}`);
+          console.log(`  deleted offer ${deleted.length} row(s) for id=${id}`);
+        }
+        for (const id of createdNetworkIds) {
+          const deleted = await db
+            .delete(affiliate_networks)
+            .where(eq(affiliate_networks.id, id))
+            .returning({ id: affiliate_networks.id });
+          console.log(`  deleted network ${deleted.length} row(s) for id=${id}`);
         }
       } finally {
         await pg.end({ timeout: 5 });

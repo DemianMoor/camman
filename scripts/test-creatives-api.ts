@@ -7,7 +7,12 @@ import { eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { brands, creatives, offers } from "../db/schema";
+import {
+  affiliate_networks,
+  brands,
+  creatives,
+  offers,
+} from "../db/schema";
 import { calculateSmsSegments } from "../lib/creative-helpers";
 
 async function main() {
@@ -79,6 +84,7 @@ async function main() {
   const createdCreativeIds: number[] = [];
   const createdBrandIds: number[] = [];
   const createdOfferIds: number[] = [];
+  const createdNetworkIds: number[] = [];
 
   // =============== SMS segment unit tests ===============
   console.log("\n[0] calculateSmsSegments unit tests");
@@ -123,12 +129,25 @@ async function main() {
     const brand = (await brandR.json()) as { id: number };
     createdBrandIds.push(brand.id);
 
+    // Networks are now required on offers.
+    const netR = await apiFetch("/api/networks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Creative Probe Network ${unique}`,
+        network_id: `CR-NET-${unique}`,
+      }),
+    });
+    check("seed: network 201", netR.status === 201);
+    const network = (await netR.json()) as { id: number };
+    createdNetworkIds.push(network.id);
+
     async function createOffer(label: string): Promise<{ id: number }> {
       const r = await apiFetch("/api/offers", {
         method: "POST",
         body: JSON.stringify({
           name: `CR Offer ${label}`,
           offer_id: `CR-OFFER-${unique}-${label}`,
+          network_id: network.id,
           payout_model: "cpa",
           payout_cpa: 10,
         }),
@@ -488,6 +507,9 @@ async function main() {
       }
       for (const oid of createdOfferIds) {
         await db.delete(offers).where(eq(offers.id, oid));
+      }
+      for (const nid of createdNetworkIds) {
+        await db.delete(affiliate_networks).where(eq(affiliate_networks.id, nid));
       }
       for (const bid of createdBrandIds) {
         await db.delete(brands).where(eq(brands.id, bid));

@@ -8,6 +8,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import {
+  affiliate_networks,
   brands,
   campaigns,
   contacts,
@@ -83,6 +84,7 @@ async function main() {
   const unique = Date.now();
   const createdBrandIds: number[] = [];
   const createdOfferIds: number[] = [];
+  const createdNetworkIds: number[] = [];
   const createdSegmentIds: number[] = [];
   const createdCampaignIds: number[] = [];
   const insertedPhones: string[] = [];
@@ -100,11 +102,24 @@ async function main() {
     const brand = (await brandR.json()) as { id: number };
     createdBrandIds.push(brand.id);
 
+    // Networks are now required on offers.
+    const netR = await apiFetch("/api/networks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Dash Test Network ${unique}`,
+        network_id: `DSH-N-${unique}`,
+      }),
+    });
+    check("seed: network 201", netR.status === 201);
+    const network = (await netR.json()) as { id: number };
+    createdNetworkIds.push(network.id);
+
     const offerR = await apiFetch("/api/offers", {
       method: "POST",
       body: JSON.stringify({
         name: "Dash Test Offer",
         offer_id: `DSH-O-${unique}`,
+        network_id: network.id,
         payout_model: "cpa",
         payout_cpa: 10,
       }),
@@ -416,6 +431,9 @@ async function main() {
       }
       for (const oid of createdOfferIds) {
         await db.delete(offers).where(eq(offers.id, oid));
+      }
+      for (const nid of createdNetworkIds) {
+        await db.delete(affiliate_networks).where(eq(affiliate_networks.id, nid));
       }
       for (const bid of createdBrandIds) {
         await db.delete(brands).where(eq(brands.id, bid));

@@ -7,7 +7,13 @@ import { eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { brands, clickers, contacts, offers } from "../db/schema";
+import {
+  affiliate_networks,
+  brands,
+  clickers,
+  contacts,
+  offers,
+} from "../db/schema";
 
 async function main() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -78,6 +84,7 @@ async function main() {
   const unique = Date.now();
   const createdBrandIds: number[] = [];
   const createdOfferIds: number[] = [];
+  const createdNetworkIds: number[] = [];
   const insertedPhones: string[] = [];
   let orgId: string | null = null;
 
@@ -97,12 +104,25 @@ async function main() {
     orgId = probe.org_id;
     createdBrandIds.push(probe.id);
 
+    // Networks are now required on offers.
+    const network = await db
+      .insert(affiliate_networks)
+      .values({
+        org_id: orgId,
+        name: `CL Test Network ${unique}`,
+        network_id: `CL-NET-${unique}`,
+        status: "active",
+      })
+      .returning({ id: affiliate_networks.id });
+    createdNetworkIds.push(network[0].id);
+
     const offer = await db
       .insert(offers)
       .values({
         org_id: orgId,
         name: "CL Test Offer",
         offer_id: `CL-OFFER-${unique}`,
+        network_id: network[0].id,
         payout_model: "cpa",
         payout_cpa: "1.00",
         sales_pages: [],
@@ -174,6 +194,9 @@ async function main() {
       }
       for (const oid of createdOfferIds) {
         await db.delete(offers).where(eq(offers.id, oid));
+      }
+      for (const nid of createdNetworkIds) {
+        await db.delete(affiliate_networks).where(eq(affiliate_networks.id, nid));
       }
       for (const bid of createdBrandIds) {
         await db.delete(brands).where(eq(brands.id, bid));

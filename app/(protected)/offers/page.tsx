@@ -671,7 +671,10 @@ export default function OffersPage() {
               offer_id: editing.offer_id,
               postfix: editing.postfix ?? "",
               base_url: editing.base_url ?? "",
-              network_id: editing.network_id,
+              // Pre-migration rows may have null network_id; the form
+              // treats undefined as "untouched" so the user is forced to
+              // pick before save.
+              network_id: editing.network_id ?? undefined,
               payout_model: editing.payout_model,
               payout_cpa:
                 editing.payout_cpa != null

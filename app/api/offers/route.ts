@@ -1,7 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { and, eq } from "drizzle-orm";
+
 import { db } from "@/db/client";
-import { offers } from "@/db/schema";
+import { affiliate_networks, offers } from "@/db/schema";
 import {
   apiError,
   isUniqueViolation,
@@ -38,6 +40,25 @@ export async function POST(req: NextRequest) {
 
   const data = parsed.data;
 
+  // Cross-org verification: the network must belong to the caller's org.
+  // The DB has a FK + RLS but Drizzle's connection bypasses RLS, so we
+  // enforce ownership at the application layer here.
+  const networkRows = await db
+    .select({ id: affiliate_networks.id })
+    .from(affiliate_networks)
+    .where(
+      and(
+        eq(affiliate_networks.id, data.network_id),
+        eq(affiliate_networks.org_id, orgId),
+      ),
+    )
+    .limit(1);
+  if (networkRows.length === 0) {
+    return apiError(400, "Network not found", API_ERROR_CODES.VALIDATION, {
+      field: "network_id",
+    });
+  }
+
   try {
     const [created] = await db
       .insert(offers)
@@ -47,7 +68,7 @@ export async function POST(req: NextRequest) {
         name: data.name,
         postfix: nullIfEmpty(data.postfix),
         base_url: nullIfEmpty(data.base_url),
-        network_id: data.network_id ?? null,
+        network_id: data.network_id,
         payout_model: data.payout_model,
         payout_cpa:
           data.payout_model === "cpa" && data.payout_cpa != null

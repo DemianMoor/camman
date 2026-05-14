@@ -129,13 +129,32 @@ export async function PATCH(
     if (v === undefined) continue;
     if (NULLABLE_OPTIONAL_STRING.has(k)) {
       updates[k] = nullIfEmpty(v as string);
-    } else if (k === "network_id") {
-      updates[k] = v ?? null;
     } else if (k === "payout_cpa" || k === "payout_revshare") {
       // Drizzle accepts string for numeric columns; preserve precision.
       updates[k] = v == null ? null : String(v);
     } else {
       updates[k] = v;
+    }
+  }
+
+  // If network_id is being changed, verify the new network belongs to the
+  // caller's org. DB-level FK + RLS aren't enough — the Drizzle connection
+  // uses the privileged role.
+  if (typeof updates.network_id === "number") {
+    const networkRows = await db
+      .select({ id: affiliate_networks.id })
+      .from(affiliate_networks)
+      .where(
+        and(
+          eq(affiliate_networks.id, updates.network_id),
+          eq(affiliate_networks.org_id, orgId),
+        ),
+      )
+      .limit(1);
+    if (networkRows.length === 0) {
+      return apiError(400, "Network not found", API_ERROR_CODES.VALIDATION, {
+        field: "network_id",
+      });
     }
   }
 

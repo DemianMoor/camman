@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   Check,
   Copy,
+  Download,
   Pencil,
   RefreshCw,
   Trash2,
@@ -585,6 +586,20 @@ export default function SegmentDetailPage() {
               <RefreshCw className="size-4" aria-hidden /> Refresh stats
             </Button>
           ) : null}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              window.open(
+                `/api/segments/${segment.id}/export-contacts`,
+                "_blank",
+                "noopener",
+              )
+            }
+            title="Export the segment's full audience (manual + rule-matched) as CSV"
+          >
+            <Download className="size-4" aria-hidden /> Export contacts
+          </Button>
           {segment.status === "active" && canArchive ? (
             <Button
               variant="outline"

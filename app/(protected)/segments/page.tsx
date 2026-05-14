@@ -5,6 +5,7 @@ import { format } from "date-fns";
 import {
   ArchiveRestore,
   Archive as ArchiveIcon,
+  Download,
   GitMerge,
   Layers,
   MoreHorizontal,
@@ -431,7 +432,23 @@ export default function SegmentsPage() {
           )
             return null;
           return (
-            <div className="flex justify-end">
+            <div className="flex items-center justify-end gap-1">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Export contacts"
+                title="Export the segment's full audience (manual + rule-matched) as CSV"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(
+                    `/api/segments/${seg.id}/export-contacts`,
+                    "_blank",
+                    "noopener",
+                  );
+                }}
+              >
+                <Download className="size-4" />
+              </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button

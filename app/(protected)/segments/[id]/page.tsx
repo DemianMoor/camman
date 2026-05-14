@@ -52,6 +52,13 @@ import {
 import { FormDialog } from "@/components/ui/form-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
@@ -181,6 +188,224 @@ function StatCard({
   );
 }
 
+// Read-only paginated view of the segment's full UNION audience. Mounts
+// when the user opens the Audience tab. Search + membership filter are
+// stored in component state (not localStorage) since this tab is
+// typically a one-off audit, not a recurring view.
+function AudiencePanel({
+  segmentId,
+  segmentSlug,
+}: {
+  segmentId: number;
+  segmentSlug: string;
+}) {
+  type AudienceRow = {
+    contact_id: string;
+    phone: string;
+    joined_at: string | null;
+    membership_type: "manual" | "rule-matched";
+    other_groups: { id: number; name: string; color: string | null }[];
+  };
+  type AudienceResponse = {
+    data: AudienceRow[];
+    totalCount: number;
+    page: number;
+    pageSize: number;
+    counts: { manual: number; rule_matched: number; total: number };
+  };
+
+  const audienceApi = useApiCall<AudienceResponse>();
+  const [data, setData] = useState<AudienceRow[]>([]);
+  const [counts, setCounts] = useState<AudienceResponse["counts"]>({
+    manual: 0,
+    rule_matched: 0,
+    total: 0,
+  });
+  const [totalCount, setTotalCount] = useState(0);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [membership, setMembership] = useState<
+    "all" | "manual" | "rule-matched"
+  >("all");
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const fetchAudience = useCallback(async () => {
+    const qs = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+    });
+    if (debouncedSearch) qs.set("search", debouncedSearch);
+    if (membership !== "all") qs.set("membership_type", membership);
+    const r = await audienceApi.execute(
+      `/api/segments/${segmentId}/audience?${qs.toString()}`,
+    );
+    if (r.ok) {
+      setData(r.data.data);
+      setTotalCount(r.data.totalCount);
+      setCounts(r.data.counts);
+    }
+  }, [audienceApi.execute, segmentId, page, pageSize, debouncedSearch, membership]);
+
+  useEffect(() => {
+    fetchAudience();
+  }, [fetchAudience]);
+
+  const audienceColumns = useMemo<ColumnDef<AudienceRow>[]>(
+    () => [
+      {
+        id: "phone",
+        header: "Phone",
+        enableSorting: false,
+        cell: ({ row }) => <PhoneCell phone={row.original.phone} />,
+      },
+      {
+        id: "membership",
+        header: "Membership",
+        enableSorting: false,
+        cell: ({ row }) =>
+          row.original.membership_type === "manual" ? (
+            <Badge variant="secondary">Manual</Badge>
+          ) : (
+            <Badge
+              className="border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200"
+              title="Pulled in by an active rule"
+            >
+              Rule-matched
+            </Badge>
+          ),
+      },
+      {
+        id: "joined_at",
+        header: "Joined",
+        enableSorting: false,
+        cell: ({ row }) =>
+          row.original.joined_at ? (
+            <span className="text-muted-foreground">
+              {format(new Date(row.original.joined_at), "MMM d, yyyy")}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+      },
+      {
+        id: "other_groups",
+        header: "Other groups",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const groups = row.original.other_groups;
+          if (groups.length === 0)
+            return <span className="text-muted-foreground">—</span>;
+          return (
+            <div className="flex flex-wrap gap-1">
+              {groups.map((g) => (
+                <span
+                  key={g.id}
+                  className="inline-flex items-center gap-1 rounded-full border border-muted bg-muted/40 px-1.5 py-0.5 text-xs"
+                >
+                  <span
+                    className="size-2 rounded-full"
+                    style={{ backgroundColor: g.color ?? "#64748B" }}
+                  />
+                  {g.name}
+                </span>
+              ))}
+            </div>
+          );
+        },
+      },
+    ],
+    [],
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-md border bg-background p-3 text-sm">
+        <span className="text-muted-foreground">Manual:</span>{" "}
+        <span className="font-mono tabular-nums">
+          {counts.manual.toLocaleString()}
+        </span>
+        <span className="mx-2 text-muted-foreground">·</span>
+        <span className="text-muted-foreground">Rule-matched:</span>{" "}
+        <span className="font-mono tabular-nums">
+          {counts.rule_matched.toLocaleString()}
+        </span>
+        <span className="mx-2 text-muted-foreground">·</span>
+        <span className="font-medium">Total audience:</span>{" "}
+        <span className="font-mono tabular-nums font-semibold">
+          {counts.total.toLocaleString()}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Input
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(0);
+          }}
+          placeholder="Search by phone…"
+          className="h-9 w-full max-w-sm"
+        />
+        <Select
+          value={membership}
+          onValueChange={(v) => {
+            setMembership(v as "all" | "manual" | "rule-matched");
+            setPage(0);
+          }}
+        >
+          <SelectTrigger className="h-9 w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All members</SelectItem>
+            <SelectItem value="manual">Manual only</SelectItem>
+            <SelectItem value="rule-matched">Rule-matched only</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="ml-auto">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              window.open(
+                `/api/segments/${segmentId}/export-contacts`,
+                "_blank",
+                "noopener",
+              )
+            }
+            title={`Export segment ${segmentSlug} audience CSV`}
+          >
+            <Download className="size-4" aria-hidden /> Export CSV
+          </Button>
+        </div>
+      </div>
+
+      <DataTable<AudienceRow>
+        data={data}
+        columns={audienceColumns}
+        isLoading={audienceApi.isLoading}
+        pageIndex={page}
+        pageSize={pageSize}
+        totalCount={totalCount}
+        onPageChange={setPage}
+        onPageSizeChange={(s) => {
+          setPageSize(s);
+          setPage(0);
+        }}
+        sortBy={null}
+        sortDir="asc"
+        onSortChange={() => undefined}
+      />
+    </div>
+  );
+}
+
 export default function SegmentDetailPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -292,7 +517,7 @@ export default function SegmentDetailPage() {
     not_found: number;
   } | null>(null);
   const [activeTab, setActiveTab] = useState<
-    "contacts" | "rules" | "upload" | "remove"
+    "contacts" | "audience" | "rules" | "upload" | "remove"
   >("contacts");
 
   const canUpdate = can("segments.update");
@@ -676,12 +901,25 @@ export default function SegmentDetailPage() {
       <Tabs
         value={activeTab}
         onValueChange={(v) =>
-          setActiveTab(v as "contacts" | "rules" | "upload" | "remove")
+          setActiveTab(
+            v as "contacts" | "audience" | "rules" | "upload" | "remove",
+          )
         }
         className="space-y-4"
       >
         <TabsList>
           <TabsTrigger value="contacts">Contacts</TabsTrigger>
+          <TabsTrigger value="audience">
+            Audience
+            {segment.active_rules_count > 0 ? (
+              <Badge
+                className="ml-1.5 h-4 border-violet-200 bg-violet-50 px-1 text-[10px] uppercase tracking-wide text-violet-700 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200"
+                title="UNION of manual members + contacts matching active rules"
+              >
+                union
+              </Badge>
+            ) : null}
+          </TabsTrigger>
           {canViewRules ? (
             <TabsTrigger value="rules">
               Rules
@@ -820,6 +1058,10 @@ export default function SegmentDetailPage() {
               }
             />
           )}
+        </TabsContent>
+
+        <TabsContent value="audience" className="space-y-3">
+          <AudiencePanel segmentId={segment.id} segmentSlug={segment.segment_id} />
         </TabsContent>
 
         {canViewRules ? (

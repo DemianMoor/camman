@@ -134,7 +134,7 @@ export function PhoneForm({
             name="phone_number"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Phone number</FormLabel>
+                <FormLabel required>Phone number</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="+1 202 555 0199 or 2025550199"
@@ -157,7 +157,7 @@ export function PhoneForm({
           name="cost_per_sms"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Cost per SMS (USD)</FormLabel>
+              <FormLabel required>Cost per SMS (USD)</FormLabel>
               <FormControl>
                 <div className="relative">
                   <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
@@ -191,7 +191,7 @@ export function PhoneForm({
               field.value == null ? UNASSIGNED : String(field.value);
             return (
               <FormItem>
-                <FormLabel>Brand (optional)</FormLabel>
+                <FormLabel>Brand</FormLabel>
                 <Select
                   value={value}
                   onValueChange={(v) =>

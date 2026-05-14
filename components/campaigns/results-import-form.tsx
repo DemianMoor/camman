@@ -5,6 +5,7 @@ import Papa from "papaparse";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { FileDropZone } from "@/components/file-drop-zone";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -82,12 +83,17 @@ export interface ResultsImportFormProps {
 const NONE = "__none__";
 
 const CANONICAL_LABELS: Record<CanonicalFieldKey, string> = {
-  phone_number: "Phone Number (required)",
+  phone_number: "Phone Number",
   status: "Status",
   is_optout: "Is Opt-Out",
   is_clicker: "Is Clicker",
   cost: "Cost",
 };
+
+// CanonicalFieldKey values that are required in the mapping step.
+const REQUIRED_CANONICAL: ReadonlySet<CanonicalFieldKey> = new Set([
+  "phone_number",
+]);
 
 const CANONICAL_ORDER: CanonicalFieldKey[] = [
   "phone_number",
@@ -320,20 +326,22 @@ export function ResultsImportForm({
 
       {step === 1 ? (
         <section className="grid gap-3">
-          <Label htmlFor="results-csv">Results CSV file</Label>
-          <Input
-            id="results-csv"
-            type="file"
+          <Label>
+            Results CSV file
+            <span aria-hidden className="text-destructive ml-0.5">*</span>
+          </Label>
+          <FileDropZone
             accept=".csv,text/csv,text/plain"
-            onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+            hint="Click to select or drag a CSV file here"
+            onFile={(f) => handleFile(f)}
+            selectedSummary={
+              file
+                ? { name: file.name, meta: `${(file.size / 1024).toFixed(1)} KB` }
+                : null
+            }
           />
           {fileError ? (
             <p className="text-sm text-destructive">{fileError}</p>
-          ) : null}
-          {file ? (
-            <div className="text-sm text-muted-foreground">
-              {file.name} · {(file.size / 1024).toFixed(1)} KB
-            </div>
           ) : null}
           {previewRows.length > 0 ? (
             <Card>
@@ -412,7 +420,14 @@ export function ResultsImportForm({
           <div className="grid gap-3 rounded-md border p-4">
             {CANONICAL_ORDER.map((key) => (
               <div key={key} className="grid gap-1.5">
-                <Label className="text-xs">{CANONICAL_LABELS[key]}</Label>
+                <Label className="text-xs">
+                  {CANONICAL_LABELS[key]}
+                  {REQUIRED_CANONICAL.has(key) ? (
+                    <span aria-hidden className="text-destructive ml-0.5">
+                      *
+                    </span>
+                  ) : null}
+                </Label>
                 <Select
                   value={mappingColumns[key] ?? NONE}
                   onValueChange={(v) => setColumn(key, v)}

@@ -568,13 +568,16 @@ export default function OptInsPage() {
           <DialogHeader>
             <DialogTitle>Add opt-ins</DialogTitle>
             <DialogDescription>
-              Required: a brand. Optional: provider, source.
+              Pick a brand. You can also link to a provider or source.
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-4">
             <div className="grid gap-2">
-              <Label>Brand (required)</Label>
+              <Label>
+                Brand
+                <span aria-hidden className="text-destructive ml-0.5">*</span>
+              </Label>
               <div className="flex flex-wrap gap-1.5">
                 {brands.map((b) => {
                   const active = uploadBrandId === b.id;
@@ -604,7 +607,7 @@ export default function OptInsPage() {
             </div>
 
             <div className="grid gap-2">
-              <Label>Provider (optional)</Label>
+              <Label>Provider</Label>
               <div className="flex flex-wrap gap-1.5">
                 {providers.map((p) => {
                   const active = uploadProviderId === p.id;
@@ -634,7 +637,7 @@ export default function OptInsPage() {
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="source">Source (optional)</Label>
+              <Label htmlFor="source">Source</Label>
               <Input
                 id="source"
                 placeholder="e.g. form submission, double opt-in"

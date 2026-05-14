@@ -335,7 +335,7 @@ export function CampaignForm({
             name="name"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Name</FormLabel>
+                <FormLabel required>Name</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="e.g. Q1 New Customer Push"
@@ -352,7 +352,7 @@ export function CampaignForm({
             name="human_id"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Human ID (optional)</FormLabel>
+                <FormLabel>Human ID</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="Q1-PROMO-2026"
@@ -373,7 +373,7 @@ export function CampaignForm({
             name="notes"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Notes (optional)</FormLabel>
+                <FormLabel>Notes</FormLabel>
                 <FormControl>
                   <Textarea
                     rows={3}
@@ -398,7 +398,7 @@ export function CampaignForm({
             name="brand_id"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Brand</FormLabel>
+                <FormLabel required>Brand</FormLabel>
                 <Select
                   value={field.value === null ? "" : String(field.value)}
                   onValueChange={(v) => field.onChange(Number(v))}
@@ -432,7 +432,7 @@ export function CampaignForm({
             name="offer_id"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Offer</FormLabel>
+                <FormLabel required>Offer</FormLabel>
                 <Select
                   value={field.value === null ? "" : String(field.value)}
                   onValueChange={(v) => field.onChange(Number(v))}
@@ -473,7 +473,7 @@ export function CampaignForm({
               name="routing_type_id"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Routing type (optional)</FormLabel>
+                  <FormLabel>Routing type</FormLabel>
                   <Select
                     value={field.value === null ? NONE : String(field.value)}
                     onValueChange={(v) =>
@@ -504,7 +504,7 @@ export function CampaignForm({
               name="traffic_type_id"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Traffic type (optional)</FormLabel>
+                  <FormLabel>Traffic type</FormLabel>
                   <Select
                     value={field.value === null ? NONE : String(field.value)}
                     onValueChange={(v) =>
@@ -594,7 +594,13 @@ export function CampaignForm({
               "visible-by-default" rather than popover-collapsed, which
               suits the campaign builder's main step better. */}
           <div className="grid gap-2">
-            <Label>Segments (1+ required for activation)</Label>
+            <Label>
+              Segments
+              <span aria-hidden className="text-destructive ml-0.5">*</span>
+              <span className="ml-2 text-xs font-normal text-muted-foreground">
+                (1+ required to activate)
+              </span>
+            </Label>
             <div className="relative">
               <Search
                 className="absolute left-3 top-2.5 size-4 text-muted-foreground"
@@ -743,7 +749,7 @@ export function CampaignForm({
 
         {/* ============ Schedule ============ */}
         <section className="grid gap-4">
-          <SectionHeader title="Schedule (optional)" />
+          <SectionHeader title="Schedule" />
           <div className="grid gap-4 sm:grid-cols-2">
             <FormField
               control={form.control}

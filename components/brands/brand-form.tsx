@@ -65,7 +65,7 @@ export function BrandForm({
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Name</FormLabel>
+              <FormLabel required>Name</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. Acme Mobile"
@@ -83,7 +83,7 @@ export function BrandForm({
           name="brand_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Brand ID</FormLabel>
+              <FormLabel required>Brand ID</FormLabel>
               <FormControl>
                 <Input
                   placeholder="acme-mobile"
@@ -115,7 +115,6 @@ export function BrandForm({
                   {...field}
                 />
               </FormControl>
-              <FormDescription>Optional.</FormDescription>
               <FormMessage />
             </FormItem>
           )}
@@ -134,7 +133,6 @@ export function BrandForm({
                   {...field}
                 />
               </FormControl>
-              <FormDescription>Optional.</FormDescription>
               <FormMessage />
             </FormItem>
           )}

@@ -615,13 +615,16 @@ export default function ClickersPage() {
           <DialogHeader>
             <DialogTitle>Add clickers</DialogTitle>
             <DialogDescription>
-              Required: a brand. Optional: offer, provider, source.
+              Pick a brand. You can also link to an offer, provider, or source.
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-4">
             <div className="grid gap-2">
-              <Label>Brand (required)</Label>
+              <Label>
+                Brand
+                <span aria-hidden className="text-destructive ml-0.5">*</span>
+              </Label>
               <div className="flex flex-wrap gap-1.5">
                 {brands.map((b) => {
                   const active = uploadBrandId === b.id;
@@ -651,7 +654,7 @@ export default function ClickersPage() {
             </div>
 
             <div className="grid gap-2">
-              <Label>Offer (optional)</Label>
+              <Label>Offer</Label>
               <div className="flex flex-wrap gap-1.5">
                 {offers.map((o) => {
                   const active = uploadOfferId === o.id;
@@ -681,7 +684,7 @@ export default function ClickersPage() {
             </div>
 
             <div className="grid gap-2">
-              <Label>Provider (optional)</Label>
+              <Label>Provider</Label>
               <div className="flex flex-wrap gap-1.5">
                 {providers.map((p) => {
                   const active = uploadProviderId === p.id;
@@ -711,7 +714,7 @@ export default function ClickersPage() {
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="source">Source (optional)</Label>
+              <Label htmlFor="source">Source</Label>
               <Input
                 id="source"
                 placeholder="e.g. provider report import"

@@ -68,7 +68,7 @@ export default function ResetPasswordPage() {
                 name="newPassword"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>New password</FormLabel>
+                    <FormLabel required>New password</FormLabel>
                     <FormControl>
                       <Input
                         type="password"
@@ -86,7 +86,7 @@ export default function ResetPasswordPage() {
                 name="confirmNewPassword"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Confirm new password</FormLabel>
+                    <FormLabel required>Confirm new password</FormLabel>
                     <FormControl>
                       <Input
                         type="password"

@@ -621,7 +621,10 @@ export default function OptOutsPage() {
 
           <div className="grid gap-4">
             <div className="grid gap-2">
-              <Label>Brands (required)</Label>
+              <Label>
+                Brands
+                <span aria-hidden className="text-destructive ml-0.5">*</span>
+              </Label>
               <div className="flex flex-wrap gap-1.5">
                 {brands.map((b) => {
                   const active = selectedBrandIds.includes(b.id);
@@ -655,7 +658,7 @@ export default function OptOutsPage() {
             </div>
 
             <div className="grid gap-2">
-              <Label>Providers (optional)</Label>
+              <Label>Providers</Label>
               <div className="flex flex-wrap gap-1.5">
                 {providers.map((p) => {
                   const active = selectedProviderIds.includes(p.id);
@@ -689,7 +692,7 @@ export default function OptOutsPage() {
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="source">Source (optional)</Label>
+              <Label htmlFor="source">Source</Label>
               <Input
                 id="source"
                 placeholder="e.g. STOP reply, manual, API"

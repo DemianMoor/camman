@@ -333,7 +333,7 @@ export function StageForm({
             name="label"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Label (optional)</FormLabel>
+                <FormLabel>Label</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="e.g. Day 1 Initial Push"
@@ -444,7 +444,7 @@ export function StageForm({
             name="stop_text"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Stop text</FormLabel>
+                <FormLabel required>Stop text</FormLabel>
                 <FormControl>
                   <Input disabled={isSubmitting} {...field} />
                 </FormControl>
@@ -780,7 +780,7 @@ export function StageForm({
             name="scheduled_at"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Scheduled send time (optional)</FormLabel>
+                <FormLabel>Scheduled send time</FormLabel>
                 <FormControl>
                   <Input
                     type="datetime-local"
@@ -801,7 +801,7 @@ export function StageForm({
             name="notes"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Notes (optional)</FormLabel>
+                <FormLabel>Notes</FormLabel>
                 <FormControl>
                   <Textarea
                     rows={3}

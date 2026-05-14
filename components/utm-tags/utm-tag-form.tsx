@@ -101,7 +101,7 @@ export function UtmTagForm({
           name="label"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Label</FormLabel>
+              <FormLabel required>Label</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. Sub ID or Campaign Slug"
@@ -119,7 +119,7 @@ export function UtmTagForm({
           name="tag_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Tag ID</FormLabel>
+              <FormLabel required>Tag ID</FormLabel>
               <FormControl>
                 <Input
                   placeholder="sub1"
@@ -143,7 +143,7 @@ export function UtmTagForm({
           name="value_source"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Value source</FormLabel>
+              <FormLabel required>Value source</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. campaign_slug, brand_name, or a literal value"
@@ -204,7 +204,7 @@ export function UtmTagForm({
                   </SelectContent>
                 </Select>
                 <FormDescription>
-                  Optional. Limits the tag to one network.
+                  Limits the tag to one network.
                 </FormDescription>
                 <FormMessage />
               </FormItem>

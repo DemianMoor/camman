@@ -62,7 +62,7 @@ export function NetworkForm({
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Name</FormLabel>
+              <FormLabel required>Name</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. MaxBounty"
@@ -80,7 +80,7 @@ export function NetworkForm({
           name="network_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Network ID</FormLabel>
+              <FormLabel required>Network ID</FormLabel>
               <FormControl>
                 <Input
                   placeholder="maxbounty"
@@ -113,7 +113,6 @@ export function NetworkForm({
                   value={field.value ?? ""}
                 />
               </FormControl>
-              <FormDescription>Optional.</FormDescription>
               <FormMessage />
             </FormItem>
           )}

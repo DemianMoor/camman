@@ -191,7 +191,12 @@ export function BulkCreativeForm({
           </div>
 
           <div className="grid gap-1.5">
-            <Label className={appliesToAll ? "opacity-60" : ""}>Offers</Label>
+            <Label className={appliesToAll ? "opacity-60" : ""}>
+              Offers
+              {!appliesToAll ? (
+                <span aria-hidden className="text-destructive ml-0.5">*</span>
+              ) : null}
+            </Label>
             <MultiSelectPicker
               options={offers.map((o) => ({
                 id: o.id,

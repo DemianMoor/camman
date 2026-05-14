@@ -211,7 +211,7 @@ export function CreativeForm({
           name="text"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>SMS body</FormLabel>
+              <FormLabel required>SMS body</FormLabel>
               <FormControl>
                 <Textarea
                   rows={5}
@@ -293,7 +293,10 @@ export function CreativeForm({
             name="offer_ids"
             render={({ field }) => (
               <FormItem>
-                <FormLabel className={appliesToAll ? "opacity-60" : ""}>
+                <FormLabel
+                  className={appliesToAll ? "opacity-60" : ""}
+                  required={!appliesToAll}
+                >
                   Offers
                 </FormLabel>
                 <FormControl>
@@ -332,7 +335,7 @@ export function CreativeForm({
             name="quality"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Quality</FormLabel>
+                <FormLabel required>Quality</FormLabel>
                 <Select
                   value={field.value}
                   onValueChange={field.onChange}
@@ -360,7 +363,7 @@ export function CreativeForm({
             name="sequence_placement"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Sequence placement</FormLabel>
+                <FormLabel required>Sequence placement</FormLabel>
                 <Select
                   value={field.value}
                   onValueChange={field.onChange}
@@ -404,7 +407,7 @@ export function CreativeForm({
             name="creative_id"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>External creative ID (optional)</FormLabel>
+                <FormLabel>External creative ID</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="e.g. CR-2026-Q1-002"

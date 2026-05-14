@@ -67,7 +67,7 @@ export function ProviderForm({
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Name</FormLabel>
+              <FormLabel required>Name</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. SendNexus"
@@ -85,7 +85,7 @@ export function ProviderForm({
           name="sms_provider_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Provider ID</FormLabel>
+              <FormLabel required>Provider ID</FormLabel>
               <FormControl>
                 <Input
                   placeholder="sendnexus"

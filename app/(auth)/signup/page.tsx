@@ -93,7 +93,7 @@ export default function SignupPage() {
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Email</FormLabel>
+                    <FormLabel required>Email</FormLabel>
                     <FormControl>
                       <Input
                         type="email"
@@ -111,7 +111,7 @@ export default function SignupPage() {
                 name="password"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Password</FormLabel>
+                    <FormLabel required>Password</FormLabel>
                     <FormControl>
                       <Input
                         type="password"
@@ -129,7 +129,7 @@ export default function SignupPage() {
                 name="displayName"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Display name (optional)</FormLabel>
+                    <FormLabel>Display name</FormLabel>
                     <FormControl>
                       <Input
                         autoComplete="name"

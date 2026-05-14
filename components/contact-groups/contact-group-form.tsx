@@ -63,7 +63,7 @@ export function ContactGroupForm({
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Name</FormLabel>
+              <FormLabel required>Name</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. High-value customers"
@@ -81,7 +81,7 @@ export function ContactGroupForm({
           name="contact_group_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Segment Group ID</FormLabel>
+              <FormLabel required>Contact Group ID</FormLabel>
               <FormControl>
                 <Input
                   placeholder="high-value"
@@ -92,7 +92,7 @@ export function ContactGroupForm({
               </FormControl>
               <FormDescription>
                 {isEdit
-                  ? "Segment Group ID can't be changed after creation."
+                  ? "Contact Group ID can't be changed after creation."
                   : "Letters, digits, hyphens, and underscores only."}
               </FormDescription>
               <FormMessage />
@@ -115,7 +115,7 @@ export function ContactGroupForm({
                   value={field.value ?? ""}
                 />
               </FormControl>
-              <FormDescription>Optional. Max 500 characters.</FormDescription>
+              <FormDescription>Max 500 characters.</FormDescription>
               <FormMessage />
             </FormItem>
           )}

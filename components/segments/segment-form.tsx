@@ -62,7 +62,7 @@ export function SegmentForm({
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Name</FormLabel>
+              <FormLabel required>Name</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. Q1 prospect list"
@@ -80,7 +80,7 @@ export function SegmentForm({
           name="segment_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Segment ID</FormLabel>
+              <FormLabel required>Segment ID</FormLabel>
               <FormControl>
                 <Input
                   placeholder="q1-prospects"

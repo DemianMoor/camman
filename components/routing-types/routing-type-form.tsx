@@ -63,7 +63,7 @@ export function RoutingTypeForm({
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Name</FormLabel>
+              <FormLabel required>Name</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. Direct"
@@ -81,7 +81,7 @@ export function RoutingTypeForm({
           name="routing_type_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Routing Type ID</FormLabel>
+              <FormLabel required>Routing Type ID</FormLabel>
               <FormControl>
                 <Input
                   placeholder="direct"
@@ -115,7 +115,7 @@ export function RoutingTypeForm({
                   value={field.value ?? ""}
                 />
               </FormControl>
-              <FormDescription>Optional. Max 500 characters.</FormDescription>
+              <FormDescription>Max 500 characters.</FormDescription>
               <FormMessage />
             </FormItem>
           )}

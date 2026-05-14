@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, FileUp, Loader2, Upload } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CheckCircle2, Loader2, Upload } from "lucide-react";
 import Papa from "papaparse";
 
+import { FileDropZone } from "@/components/file-drop-zone";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -87,7 +87,6 @@ export function PhoneUploadForm({
   const [showInvalid, setShowInvalid] = useState(false);
   const [contactGroups, setContactGroups] = useState<ContactGroupOption[]>([]);
   const [selectedGroupIds, setSelectedGroupIds] = useState<number[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Lazy-load contact groups only when the multi-select is rendered.
   useEffect(() => {
@@ -114,7 +113,6 @@ export function PhoneUploadForm({
     setResult(null);
     setShowInvalid(false);
     setSelectedGroupIds([]);
-    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   function handleFileSelect(file: File) {
@@ -284,7 +282,7 @@ export function PhoneUploadForm({
     <div className="grid gap-4">
       {enableContactGroups ? (
         <div className="grid gap-2">
-          <Label>Apply contact groups (optional)</Label>
+          <Label>Apply contact groups</Label>
           <MultiSelectPicker
             options={contactGroups.map((g) => ({
               id: g.id,
@@ -320,7 +318,10 @@ export function PhoneUploadForm({
         </TabsList>
 
         <TabsContent value="paste" className="grid gap-2 pt-3">
-          <Label htmlFor="phones-paste">Phone numbers</Label>
+          <Label htmlFor="phones-paste">
+            Phone numbers
+            <span aria-hidden className="text-destructive ml-0.5">*</span>
+          </Label>
           <Textarea
             id="phones-paste"
             placeholder="+1 202 555 0199&#10;+1 202 555 0200&#10;..."
@@ -338,39 +339,36 @@ export function PhoneUploadForm({
 
         {acceptCsv ? (
           <TabsContent value="csv" className="grid gap-2 pt-3">
-            <Label htmlFor="phones-csv">CSV / TXT file</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="phones-csv"
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,.txt"
-                disabled={uploadApi.isLoading}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) handleFileSelect(file);
-                }}
-                className="cursor-pointer file:cursor-pointer"
-              />
-            </div>
+            <Label>
+              CSV / TXT file
+              <span aria-hidden className="text-destructive ml-0.5">*</span>
+            </Label>
+            <FileDropZone
+              accept=".csv,.txt"
+              disabled={uploadApi.isLoading}
+              hint="Click to select or drag a CSV/TXT file here"
+              onFile={handleFileSelect}
+              selectedSummary={
+                csvSourceName && !csvError && csvLines.length > 0
+                  ? {
+                      name: csvSourceName,
+                      meta: `${csvLines.length} ${csvLines.length === 1 ? "row" : "rows"}`,
+                    }
+                  : null
+              }
+            />
             {csvError ? (
               <p className="text-sm text-destructive">{csvError}</p>
             ) : null}
-            {csvSourceName && !csvError && csvLines.length > 0 ? (
-              <div className="rounded-md border bg-muted/40 p-3 text-sm">
-                <div className="flex items-center gap-2">
-                  <FileUp className="size-4" aria-hidden />
-                  <span className="font-medium">{csvSourceName}</span>
-                  <span className="text-muted-foreground">
-                    — {csvLines.length} {csvLines.length === 1 ? "row" : "rows"}
-                  </span>
-                </div>
-                <div className="mt-2 grid gap-0.5 font-mono text-xs text-muted-foreground">
+            {csvPreview.length > 0 && !csvError ? (
+              <div className="rounded-md border bg-muted/40 p-3 text-xs">
+                <div className="text-muted-foreground">Preview</div>
+                <div className="mt-1 grid gap-0.5 font-mono">
                   {csvPreview.map((p, i) => (
                     <div key={i}>{p}</div>
                   ))}
                   {csvLines.length > PREVIEW_COUNT ? (
-                    <div className="italic">
+                    <div className="italic text-muted-foreground">
                       …and {csvLines.length - PREVIEW_COUNT} more
                     </div>
                   ) : null}

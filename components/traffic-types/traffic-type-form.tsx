@@ -63,7 +63,7 @@ export function TrafficTypeForm({
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Name</FormLabel>
+              <FormLabel required>Name</FormLabel>
               <FormControl>
                 <Input
                   placeholder="e.g. Display Ads"
@@ -81,7 +81,7 @@ export function TrafficTypeForm({
           name="traffic_type_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Traffic Type ID</FormLabel>
+              <FormLabel required>Traffic Type ID</FormLabel>
               <FormControl>
                 <Input
                   placeholder="display"
@@ -115,7 +115,7 @@ export function TrafficTypeForm({
                   value={field.value ?? ""}
                 />
               </FormControl>
-              <FormDescription>Optional. Max 500 characters.</FormDescription>
+              <FormDescription>Max 500 characters.</FormDescription>
               <FormMessage />
             </FormItem>
           )}

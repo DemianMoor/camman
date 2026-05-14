@@ -776,7 +776,27 @@ export default function CampaignDetailPage() {
           if (!showEdit && !showArchive && !showRestore && !canTransition)
             return null;
           return (
-            <div className="flex justify-end">
+            <div className="flex items-center justify-end gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={audienceEmpty}
+                title={
+                  exportTitle ?? "Export this stage's phones as a CSV"
+                }
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (audienceEmpty) return;
+                  window.open(
+                    `/api/campaigns/${campaignId}/stages/${s.id}/export-phones`,
+                    "_blank",
+                    "noopener",
+                  );
+                }}
+              >
+                <Download className="size-4" aria-hidden />
+                <span className="sr-only sm:not-sr-only">Export phones</span>
+              </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
@@ -816,16 +836,6 @@ export default function CampaignDetailPage() {
                     </>
                   ) : null}
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    disabled={audienceEmpty}
-                    title={exportTitle}
-                    onSelect={() => {
-                      if (audienceEmpty) return;
-                      window.location.href = `/api/campaigns/${campaignId}/stages/${s.id}/export-phones`;
-                    }}
-                  >
-                    <Download className="size-4" aria-hidden /> Export phones (CSV)
-                  </DropdownMenuItem>
                   {canImportResults ? (
                     <DropdownMenuItem onSelect={() => setImportStage(s)}>
                       <Upload className="size-4" aria-hidden /> Import results
@@ -1029,6 +1039,27 @@ export default function CampaignDetailPage() {
               onClick={() => setEditCampaignOpen(true)}
             >
               <Pencil className="size-4" aria-hidden /> Edit
+            </Button>
+          ) : null}
+          {/* Union-of-all-stages export. Disabled for drafts because the
+              audience snapshot is computed at activation time — no stage
+              rows yet. Also hidden when every stage is archived, since
+              the endpoint excludes archived stages anyway. */}
+          {campaign.status !== "draft" &&
+          stages.some((s) => s.status !== "archived") ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                window.open(
+                  `/api/campaigns/${campaignId}/export-all-phones`,
+                  "_blank",
+                  "noopener",
+                )
+              }
+              title="Export the union of all non-archived stages' phones as one CSV"
+            >
+              <Download className="size-4" aria-hidden /> Export all phones
             </Button>
           ) : null}
           {possibleCampaignTransitions.length > 0 ? (

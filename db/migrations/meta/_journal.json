@@ -232,6 +232,20 @@
       "when": 1779062400000,
       "tag": "0032_offers_network_id_required",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1779148800000,
+      "tag": "0033_audience_contact_groups_and_cap",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1779235200000,
+      "tag": "0034_creatives_spam_columns",
+      "breakpoints": true
     }
   ]
 }

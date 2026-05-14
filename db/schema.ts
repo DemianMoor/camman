@@ -789,6 +789,19 @@ export const creatives = pgTable(
     applies_to_all_offers: boolean("applies_to_all_offers")
       .notNull()
       .default(false),
+    // Mirrored from spam_scores on save. spam_score is 0-100 from the
+    // provider; spam_label is the binary verdict (score > 50 ⇒ 'spam').
+    // spam_score_error is set when scoring failed; in that case score /
+    // label / model_id stay NULL. Re-scoring via PATCH or the dedicated
+    // /rescore endpoint overwrites both. The shared spam_scores cache is
+    // still the source of truth for cross-creative deduping; these
+    // columns exist for fast list rendering and per-row UI without a
+    // join.
+    spam_score: integer("spam_score"),
+    spam_label: text("spam_label"),
+    spam_scored_at: timestamp("spam_scored_at", { withTimezone: true }),
+    spam_model_id: text("spam_model_id"),
+    spam_score_error: text("spam_score_error"),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
@@ -809,6 +822,14 @@ export const creatives = pgTable(
     check(
       "creatives_sequence_placement_check",
       sql`${table.sequence_placement} IN ('1st', '2nd', '3rd', 'any', 'unknown')`,
+    ),
+    check(
+      "creatives_spam_score_check",
+      sql`${table.spam_score} IS NULL OR (${table.spam_score} >= 0 AND ${table.spam_score} <= 100)`,
+    ),
+    check(
+      "creatives_spam_label_check",
+      sql`${table.spam_label} IS NULL OR ${table.spam_label} IN ('ham', 'spam')`,
     ),
   ],
 );
@@ -884,6 +905,10 @@ export const campaigns = pgTable(
       .array()
       .notNull()
       .default(sql`'{}'::integer[]`),
+    audience_contact_group_ids: integer("audience_contact_group_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::integer[]`),
     audience_filters: jsonb("audience_filters")
       .$type<{
         include_no_status?: boolean;
@@ -896,6 +921,11 @@ export const campaigns = pgTable(
     audience_snapshot_count: integer("audience_snapshot_count")
       .notNull()
       .default(0),
+    // Cap is applied at activation time via ORDER BY RANDOM() LIMIT.
+    // NULL = no cap (use the full matching audience). A cap larger than
+    // the matching pool is a no-op. Frozen with the rest of the audience
+    // after the draft → active transition.
+    audience_cap: integer("audience_cap"),
     start_date: date("start_date"),
     end_date: date("end_date"),
     status: text("status").notNull().default("draft"),

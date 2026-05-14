@@ -143,6 +143,15 @@ export async function GET(req: NextRequest) {
         quality: creatives.quality,
         sequence_placement: creatives.sequence_placement,
         applies_to_all_offers: creatives.applies_to_all_offers,
+        // Direct columns: filled in by the scoring step on save. The
+        // cache lookup below is the legacy path; we still consult it so
+        // pre-migration creatives (which have NULLs in the columns)
+        // still surface their cached score.
+        row_spam_score: creatives.spam_score,
+        row_spam_label: creatives.spam_label,
+        row_spam_scored_at: creatives.spam_scored_at,
+        row_spam_model_id: creatives.spam_model_id,
+        row_spam_score_error: creatives.spam_score_error,
         status: creatives.status,
         archived_at: creatives.archived_at,
         created_at: creatives.created_at,
@@ -237,14 +246,38 @@ export async function GET(req: NextRequest) {
   const data = rows.map((r) => {
     const hash = hashByRowId.get(r.id);
     const spam = hash ? spamByHash.get(hash) ?? null : null;
+    // Prefer the per-row columns (always up-to-date for new creatives);
+    // fall back to the cache for pre-migration rows. Score takes
+    // precedence; spam_label on the row is binary, on the cache it's
+    // 3-bucket — we expose the cache label when only the cache has a
+    // hit, otherwise the binary one from the row.
+    const rowHasScore = r.row_spam_score !== null;
+    const score = rowHasScore ? r.row_spam_score : spam?.score ?? null;
+    const label = rowHasScore
+      ? r.row_spam_label
+      : spam?.label ?? null;
     return {
-      ...r,
+      id: r.id,
+      creative_id: r.creative_id,
+      slug: r.slug,
+      org_id: r.org_id,
+      text: r.text,
+      quality: r.quality,
+      sequence_placement: r.sequence_placement,
+      applies_to_all_offers: r.applies_to_all_offers,
+      status: r.status,
+      archived_at: r.archived_at,
+      created_at: r.created_at,
       offers: offersByCreative.get(r.id) ?? [],
       campaign_count: 0, // TODO: wire to real campaign references once those exist
-      spam_score: spam ? spam.score : null,
-      spam_label: spam ? spam.label : null,
-      spam_verdict: spam ? deriveVerdict(spam.score) : null,
+      spam_score: score,
+      spam_label: label,
+      spam_verdict:
+        score !== null ? deriveVerdict(score) : null,
       spam_text_hash: spam ? spam.text_hash : null,
+      spam_scored_at: r.row_spam_scored_at,
+      spam_model_id: r.row_spam_model_id,
+      spam_score_error: r.row_spam_score_error,
     };
   });
 

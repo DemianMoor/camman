@@ -10,10 +10,17 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { scoreAndPersistCreative } from "@/lib/spam/score-creative";
 import {
   creativeUpdateSchema,
   nullIfEmpty,
 } from "@/lib/validators/creatives";
+
+function spamScoringEnabled(): boolean {
+  const v = process.env.SPAM_PROVIDER;
+  if (v === undefined) return true;
+  return v.toLowerCase() !== "off" && v.trim().length > 0;
+}
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -66,6 +73,11 @@ export async function GET(
       quality: creatives.quality,
       sequence_placement: creatives.sequence_placement,
       applies_to_all_offers: creatives.applies_to_all_offers,
+      spam_score: creatives.spam_score,
+      spam_label: creatives.spam_label,
+      spam_scored_at: creatives.spam_scored_at,
+      spam_model_id: creatives.spam_model_id,
+      spam_score_error: creatives.spam_score_error,
       status: creatives.status,
       archived_at: creatives.archived_at,
       created_at: creatives.created_at,
@@ -127,6 +139,7 @@ export async function PATCH(
   const current = await db
     .select({
       id: creatives.id,
+      text: creatives.text,
       status: creatives.status,
       applies_to_all_offers: creatives.applies_to_all_offers,
     })
@@ -249,6 +262,19 @@ export async function PATCH(
       );
     }
     throw err;
+  }
+
+  // Re-score whenever text actually changed. Same-text PATCHes are
+  // common (quality/sequence updates) — skip the score call for those
+  // since the cached score is still accurate.
+  const textChanged =
+    typeof input.text === "string" && input.text !== current[0].text;
+  if (textChanged && spamScoringEnabled()) {
+    await scoreAndPersistCreative({
+      creativeId,
+      orgId,
+      text: input.text as string,
+    });
   }
 
   const [updated] = await db

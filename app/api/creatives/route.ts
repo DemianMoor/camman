@@ -11,12 +11,24 @@ import {
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { generateCreativeSlug } from "@/lib/creative-helpers";
 import { can } from "@/lib/permissions";
+import { scoreAndPersistCreative } from "@/lib/spam/score-creative";
 import {
   BULK_CREATE_MAX,
   creativeBulkCreateSchema,
   creativeCreateSchema,
   nullIfEmpty,
 } from "@/lib/validators/creatives";
+
+// Scoring is gated by SPAM_PROVIDER. When the env var is unset the
+// existing scoreMessage() still works (defaults to the classifier
+// provider), but we want a single explicit kill switch the operator can
+// flip without redeploying. Setting SPAM_PROVIDER=off skips scoring on
+// save entirely; existing scores on rows are preserved.
+function spamScoringEnabled(): boolean {
+  const v = process.env.SPAM_PROVIDER;
+  if (v === undefined) return true;
+  return v.toLowerCase() !== "off" && v.trim().length > 0;
+}
 
 const SLUG_RETRY_LIMIT = 5;
 
@@ -111,6 +123,19 @@ async function handleSingle(json: unknown, orgId: string) {
         return created;
       });
 
+      // Auto-score on save. Awaited so the response carries the score —
+      // the call is fast (~100-500ms typical) and the inline strip in
+      // the UI no longer needs a follow-up click. Errors are non-fatal:
+      // a failed score is persisted as spam_score_error on the row and
+      // the creative is still returned 201.
+      if (spamScoringEnabled()) {
+        await scoreAndPersistCreative({
+          creativeId: result.id,
+          orgId,
+          text: input.text,
+        });
+      }
+
       const populated = await loadCreativeWithOffers(result.id);
       return NextResponse.json(populated, { status: 201 });
     } catch (err) {
@@ -202,6 +227,21 @@ async function handleBulk(json: unknown, orgId: string) {
       return ids;
     });
 
+    // Score each created creative in parallel. allSettled so one failure
+    // doesn't block the others — failed scores land on the row as
+    // spam_score_error and the batch still returns 201.
+    if (spamScoringEnabled()) {
+      await Promise.allSettled(
+        createdIds.map((id, i) =>
+          scoreAndPersistCreative({
+            creativeId: id,
+            orgId,
+            text: input.creatives[i].text,
+          }),
+        ),
+      );
+    }
+
     const populated = await Promise.all(
       createdIds.map((id) => loadCreativeWithOffers(id)),
     );
@@ -235,6 +275,11 @@ async function loadCreativeWithOffers(id: number) {
       quality: creatives.quality,
       sequence_placement: creatives.sequence_placement,
       applies_to_all_offers: creatives.applies_to_all_offers,
+      spam_score: creatives.spam_score,
+      spam_label: creatives.spam_label,
+      spam_scored_at: creatives.spam_scored_at,
+      spam_model_id: creatives.spam_model_id,
+      spam_score_error: creatives.spam_score_error,
       status: creatives.status,
       archived_at: creatives.archived_at,
       created_at: creatives.created_at,

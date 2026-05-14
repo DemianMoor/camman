@@ -94,11 +94,17 @@ type Creative = {
   created_at: string;
   offers: Info[];
   campaign_count: number;
-  // Cached spam score from the list endpoint. Null when unscored.
+  // Spam scoring fields. spam_score is 0-100 (or null when unscored).
+  // spam_label is the binary verdict mirrored from the cache; the list
+  // endpoint also returns the 3-bucket cache label here for older rows.
+  // spam_verdict is derived from score (> 50 ⇒ spam).
   spam_score: number | null;
   spam_label: "ham" | "suspicious" | "spam" | null;
   spam_verdict: "spam" | "not_spam" | null;
   spam_text_hash: string | null;
+  spam_scored_at: string | null;
+  spam_model_id: string | null;
+  spam_score_error: string | null;
 };
 
 type ListResponse = { data: Creative[]; totalCount: number };
@@ -230,6 +236,76 @@ function ArchivedBadge() {
     <Badge className="border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
       Archived
     </Badge>
+  );
+}
+
+// Compact dot + score for the list view. Green = not_spam, red = spam,
+// grey = no score (either never scored or scoring failed). The error
+// tooltip surfaces the classifier error when present so the user can
+// decide whether to retry.
+function SpamScoreCell({ creative }: { creative: Creative }) {
+  if (creative.spam_score_error) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400"
+        title={`Scoring failed: ${creative.spam_score_error}`}
+      >
+        <span
+          className="size-2 rounded-full bg-amber-500"
+          aria-hidden
+        />
+        <span className="font-mono">err</span>
+      </span>
+    );
+  }
+  if (creative.spam_score === null) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+        title="Not scored yet"
+      >
+        <span
+          className="size-2 rounded-full bg-muted-foreground/30"
+          aria-hidden
+        />
+        <span className="font-mono">—</span>
+      </span>
+    );
+  }
+  const isSpam = creative.spam_verdict === "spam";
+  const tooltip = [
+    `Score: ${creative.spam_score}/100`,
+    isSpam ? "SPAM" : "NOT SPAM",
+    creative.spam_model_id ? `Model: ${creative.spam_model_id}` : null,
+    creative.spam_scored_at
+      ? `Scored: ${format(new Date(creative.spam_scored_at), "MMM d, yyyy HH:mm")}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-xs"
+      title={tooltip}
+    >
+      <span
+        className={cn(
+          "size-2 rounded-full",
+          isSpam ? "bg-red-500" : "bg-green-500",
+        )}
+        aria-hidden
+      />
+      <span
+        className={cn(
+          "font-mono tabular-nums",
+          isSpam
+            ? "text-red-700 dark:text-red-300"
+            : "text-green-700 dark:text-green-300",
+        )}
+      >
+        {creative.spam_score}
+      </span>
+    </span>
   );
 }
 
@@ -444,6 +520,12 @@ export default function CreativesPage() {
             </div>
           );
         },
+      },
+      {
+        id: "spam",
+        header: "Spam Score",
+        enableSorting: false,
+        cell: ({ row }) => <SpamScoreCell creative={row.original} />,
       },
       {
         id: "offers",

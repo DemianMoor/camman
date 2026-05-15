@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, Loader2, Lock, Users } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { MultiSelectPicker } from "@/components/multi-select-picker";
+import { SegmentPicker } from "@/components/segments/segment-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -414,6 +415,7 @@ function Inner({
           </div>
           <aside className="grid gap-3">
             <AudienceCompositionPanel state={state} />
+            <NotesCard state={state} />
             {!isEdit && activateBlockedReason ? (
               <p className="text-xs text-muted-foreground">
                 {activateBlockedReason}
@@ -648,63 +650,36 @@ function SetupCard({ state }: { state: CampaignFormState }) {
               </FormItem>
             )}
           />
-          {/* Start/End packed into one column slot */}
-          <FormItem className="md:col-span-2">
-            <FormLabel>Start / End</FormLabel>
-            <div className="flex items-center gap-2">
-              <FormField
-                control={form.control}
-                name="start_date"
-                render={({ field }) => (
-                  <FormControl>
-                    <Input
-                      type="date"
-                      disabled={anySubmitting}
-                      className="flex-1"
-                      {...field}
-                    />
-                  </FormControl>
-                )}
-              />
-              <span className="text-sm text-muted-foreground">→</span>
-              <FormField
-                control={form.control}
-                name="end_date"
-                render={({ field }) => (
-                  <FormControl>
-                    <Input
-                      type="date"
-                      disabled={anySubmitting}
-                      className="flex-1"
-                      {...field}
-                    />
-                  </FormControl>
-                )}
-              />
-            </div>
-            {dateError ? (
-              <p className="text-xs text-destructive">{dateError}</p>
-            ) : null}
-          </FormItem>
+          <FormField
+            control={form.control}
+            name="start_date"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Start date</FormLabel>
+                <FormControl>
+                  <Input type="date" disabled={anySubmitting} {...field} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="end_date"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>End date</FormLabel>
+                <FormControl>
+                  <Input type="date" disabled={anySubmitting} {...field} />
+                </FormControl>
+                {dateError ? (
+                  <p className="text-xs text-destructive">{dateError}</p>
+                ) : null}
+                <FormMessage />
+              </FormItem>
+            )}
+          />
         </div>
-        <FormField
-          control={form.control}
-          name="notes"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Notes</FormLabel>
-              <FormControl>
-                <Textarea
-                  rows={2}
-                  placeholder="Context, links, anything worth remembering…"
-                  disabled={anySubmitting}
-                  {...field}
-                />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
       </CardContent>
     </Card>
   );
@@ -725,18 +700,6 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
     watchedFilters,
     setFilter,
   } = state;
-
-  const segmentOptions = useMemo(
-    () =>
-      segments.map((s) => ({
-        id: s.id,
-        label: s.name,
-        meta: `${s.stats.total_count.toLocaleString()}${
-          (s.active_rules_count ?? 0) > 0 ? " · rules" : ""
-        }`,
-      })),
-    [segments],
-  );
 
   return (
     <Card>
@@ -759,7 +722,7 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
           </div>
         ) : null}
 
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-3">
           <div className="grid gap-1.5">
             <Label>
               Segments
@@ -767,21 +730,15 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
                 *
               </span>
             </Label>
-            <MultiSelectPicker
-              options={segmentOptions}
+            <SegmentPicker
+              segments={segments}
               value={watchedSegments}
               onChange={(next) =>
-                form.setValue("audience_segment_ids", next as number[], {
+                form.setValue("audience_segment_ids", next, {
                   shouldDirty: true,
                 })
               }
-              placeholder="Select segments"
-              selectedLabel={(n) =>
-                `${n} segment${n === 1 ? "" : "s"} selected`
-              }
               disabled={audienceLocked || anySubmitting}
-              emptyMessage="No segments available."
-              searchPlaceholder="Search segments…"
             />
           </div>
           <div className="grid gap-1.5">
@@ -810,6 +767,40 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
               searchPlaceholder="Search groups…"
             />
           </div>
+          <FormField
+            control={form.control}
+            name="audience_cap"
+            render={({ field }) => (
+              <FormItem className="grid gap-1.5">
+                <FormLabel>Audience cap</FormLabel>
+                <FormControl>
+                  <Input
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="No cap"
+                    disabled={audienceLocked || anySubmitting}
+                    value={field.value ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value.trim();
+                      if (v === "") {
+                        field.onChange(null);
+                        return;
+                      }
+                      const n = Number(v);
+                      field.onChange(
+                        Number.isFinite(n) && n > 0 ? Math.floor(n) : null,
+                      );
+                    }}
+                  />
+                </FormControl>
+                <FormDescription className="text-xs">
+                  Blank = full audience. Random sample frozen at activation.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
         </div>
 
         {/* Filter chips */}
@@ -841,39 +832,36 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
             · Opt-outs always excluded
           </span>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
 
-        {/* Cap */}
+// =============== Notes card (right rail) ===============
+
+function NotesCard({ state }: { state: CampaignFormState }) {
+  const { form, anySubmitting } = state;
+  return (
+    <Card>
+      <CardHeader className="border-b py-2">
+        <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Notes
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-3">
         <FormField
           control={form.control}
-          name="audience_cap"
+          name="notes"
           render={({ field }) => (
-            <FormItem className="grid max-w-[180px] gap-1.5">
-              <FormLabel>Audience cap</FormLabel>
+            <FormItem>
               <FormControl>
-                <Input
-                  type="number"
-                  min={1}
-                  step={1}
-                  placeholder="No cap"
-                  disabled={audienceLocked || anySubmitting}
-                  value={field.value ?? ""}
-                  onChange={(e) => {
-                    const v = e.target.value.trim();
-                    if (v === "") {
-                      field.onChange(null);
-                      return;
-                    }
-                    const n = Number(v);
-                    field.onChange(
-                      Number.isFinite(n) && n > 0 ? Math.floor(n) : null,
-                    );
-                  }}
+                <Textarea
+                  rows={4}
+                  placeholder="Context, links, anything worth remembering…"
+                  disabled={anySubmitting}
+                  {...field}
                 />
               </FormControl>
-              <FormDescription className="text-xs">
-                Leave blank for full audience. Random sample frozen at
-                activation.
-              </FormDescription>
               <FormMessage />
             </FormItem>
           )}

@@ -25,6 +25,8 @@ function parseId(idParam: string) {
 const NULLABLE_OPTIONAL_STRING = new Set([
   "label",
   "sales_page_label",
+  "short_url",
+  "full_url",
   "notes",
 ]);
 
@@ -78,6 +80,8 @@ export async function GET(
       sms_provider_id: campaign_stages.sms_provider_id,
       provider_phone_id: campaign_stages.provider_phone_id,
       sales_page_label: campaign_stages.sales_page_label,
+      short_url: campaign_stages.short_url,
+      full_url: campaign_stages.full_url,
       stop_text: campaign_stages.stop_text,
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,

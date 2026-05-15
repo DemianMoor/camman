@@ -27,6 +27,17 @@ const stageBaseSchema = z.object({
     .union([z.string().trim().max(80), z.literal("")])
     .nullable()
     .optional(),
+  // Optional URLs. short_url is rendered into the SMS preview; full_url
+  // is tracking metadata only. Length caps are loose because providers
+  // vary on what they'll shorten — we don't second-guess them here.
+  short_url: z
+    .union([z.string().trim().max(500), z.literal("")])
+    .nullable()
+    .optional(),
+  full_url: z
+    .union([z.string().trim().max(2000), z.literal("")])
+    .nullable()
+    .optional(),
   stop_text: z.string().trim().min(1).max(80).default("Stop to END"),
   include_clickers: z.boolean().default(false),
   exclude_clickers: z.boolean().default(false),

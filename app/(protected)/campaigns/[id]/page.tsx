@@ -137,6 +137,8 @@ type Stage = {
   sms_provider_id: number | null;
   provider_phone_id: number | null;
   sales_page_label: string | null;
+  short_url: string | null;
+  full_url: string | null;
   stop_text: string;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -295,6 +297,8 @@ function buildStageCreateBody(values: StageFormValues): Record<string, unknown> 
     sms_provider_id: values.sms_provider_id,
     provider_phone_id: values.provider_phone_id,
     sales_page_label: values.sales_page_label || undefined,
+    short_url: values.short_url.trim() || undefined,
+    full_url: values.full_url.trim() || undefined,
     stop_text: values.stop_text,
     include_no_status: values.include_no_status,
     include_clickers: values.include_clickers,
@@ -1076,6 +1080,8 @@ export default function CampaignDetailPage() {
         sms_provider_id: editingStage.sms_provider_id,
         provider_phone_id: editingStage.provider_phone_id,
         sales_page_label: editingStage.sales_page_label ?? "",
+        short_url: editingStage.short_url ?? "",
+        full_url: editingStage.full_url ?? "",
         stop_text: editingStage.stop_text,
         include_no_status: editingStage.include_no_status,
         include_clickers: editingStage.include_clickers,

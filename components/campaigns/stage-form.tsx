@@ -40,6 +40,11 @@ export interface StageFormValues {
   sms_provider_id: number | null;
   provider_phone_id: number | null;
   sales_page_label: string;
+  // Optional URLs. short_url is rendered into the SMS preview on its
+  // own line between creative text and stop text; full_url is tracking
+  // metadata only (not sent).
+  short_url: string;
+  full_url: string;
   stop_text: string;
   include_no_status: boolean;
   include_clickers: boolean;
@@ -126,6 +131,8 @@ const DEFAULT_VALUES: StageFormValues = {
   sms_provider_id: null,
   provider_phone_id: null,
   sales_page_label: "",
+  short_url: "",
+  full_url: "",
   stop_text: "Stop to END",
   include_no_status: true,
   include_clickers: false,
@@ -194,6 +201,7 @@ export function StageForm({
   const watchedProviderId = form.watch("sms_provider_id");
   const watchedPhoneId = form.watch("provider_phone_id");
   const watchedStopText = form.watch("stop_text");
+  const watchedShortUrl = form.watch("short_url");
   const watchedIncludeNoStatus = form.watch("include_no_status");
   const watchedIncludeClickers = form.watch("include_clickers");
   const watchedExcludeClickers = form.watch("exclude_clickers");
@@ -238,8 +246,14 @@ export function StageForm({
     [creatives, watchedCreativeId],
   );
   const brandName = campaign.brand?.name ?? "";
+  // When short_url is present it lands on its own line between the
+  // creative text and the stop text. full_url is tracking metadata and
+  // never enters the SMS.
+  const trimmedShortUrl = (watchedShortUrl ?? "").trim();
   const assembledSms = selectedCreative
-    ? `${brandName}: ${selectedCreative.text}\n${watchedStopText}`
+    ? trimmedShortUrl.length > 0
+      ? `${brandName}: ${selectedCreative.text}\n${trimmedShortUrl}\n${watchedStopText}`
+      : `${brandName}: ${selectedCreative.text}\n${watchedStopText}`
     : "";
   const segments = useMemo(
     () => calculateSmsSegments(assembledSms),
@@ -434,6 +448,51 @@ export function StageForm({
                     ))}
                   </SelectContent>
                 </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="short_url"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Short URL</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder="e.g. lnk.example.com/abc123"
+                    disabled={isSubmitting}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  When set, inserted into the SMS preview on its own line
+                  between the creative text and the stop text.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="full_url"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Full URL</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder="e.g. https://example.com/lp?sub1={campaign}"
+                    disabled={isSubmitting}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  Tracking metadata only. Stored alongside the stage for
+                  reference and external link-building — never rendered
+                  into the SMS itself.
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}

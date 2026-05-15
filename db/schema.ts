@@ -984,6 +984,12 @@ export const campaign_stages = pgTable(
       { onDelete: "set null" },
     ),
     sales_page_label: text("sales_page_label"),
+    // Optional tracking + send URLs. full_url is metadata only (used for
+    // tracking the link with campaign IDs externally); short_url, when
+    // present, is rendered into the SMS preview on its own line between
+    // the creative text and the stop text.
+    short_url: text("short_url"),
+    full_url: text("full_url"),
     stop_text: text("stop_text").notNull().default("Stop to END"),
     include_clickers: boolean("include_clickers").notNull().default(false),
     exclude_clickers: boolean("exclude_clickers").notNull().default(false),

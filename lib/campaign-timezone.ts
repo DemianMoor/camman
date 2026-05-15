@@ -18,6 +18,22 @@ export function formatCampaignDateTime(
   return `${formatInTimeZone(date, CAMPAIGN_TIMEZONE, "MMM d, yyyy h:mm a")} ${CAMPAIGN_TIMEZONE_LABEL}`;
 }
 
+// Format an instant in the campaign timezone using an arbitrary date-fns
+// format string. Used by lib/tracking-id.ts to build the MMDDYY date
+// segment and the YYYY-MM-DD counter-table key. Throws if `utc` is not a
+// valid date — callers always have one (e.g. campaigns.created_at), and
+// failing loud beats silently producing a malformed tracking_id.
+export function formatInCampaignTimezone(
+  utc: Date | string,
+  pattern: string,
+): string {
+  const date = typeof utc === "string" ? new Date(utc) : utc;
+  if (Number.isNaN(date.getTime())) {
+    throw new Error("formatInCampaignTimezone: invalid date");
+  }
+  return formatInTimeZone(date, CAMPAIGN_TIMEZONE, pattern);
+}
+
 // Convert a value from <input type="datetime-local"> (interpreted as ET
 // wall-clock time, no tz suffix) to a UTC ISO string suitable for the API.
 export function campaignLocalInputToUtcIso(localInput: string): string {

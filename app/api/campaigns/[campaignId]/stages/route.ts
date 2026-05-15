@@ -20,6 +20,10 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { computeStageAudienceCount } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 import {
+  generateCampaignTrackingId,
+  generateStageTrackingId,
+} from "@/lib/tracking-id";
+import {
   nullIfEmpty,
   stageCreateSchema,
   STAGE_STATUSES,
@@ -130,6 +134,7 @@ export async function GET(
       opt_out_count: campaign_stages.opt_out_count,
       click_count: campaign_stages.click_count,
       notes: campaign_stages.notes,
+      tracking_id: campaign_stages.tracking_id,
       archived_at: campaign_stages.archived_at,
       created_at: campaign_stages.created_at,
       creative: {
@@ -223,7 +228,14 @@ export async function POST(
   }
 
   const campaignRow = await db
-    .select({ id: campaigns.id, status: campaigns.status })
+    .select({
+      id: campaigns.id,
+      status: campaigns.status,
+      brand_id: campaigns.brand_id,
+      offer_id: campaigns.offer_id,
+      tracking_id: campaigns.tracking_id,
+      created_at: campaigns.created_at,
+    })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
     .limit(1);
@@ -333,9 +345,55 @@ export async function POST(
     status: "draft",
   };
 
-  const [created] = await db
-    .insert(campaign_stages)
-    .values(values as typeof campaign_stages.$inferInsert)
-    .returning();
+  // Stage insert + (conditional) campaign-tracking-id backfill + stage
+  // tracking_id generation all run in one transaction so a failure at any
+  // point leaves no partial state. The stage's tracking_id requires the
+  // parent campaign to have a tracking_id AND the stage to have a
+  // creative_id; both NULLs are tolerated for drafts.
+  const created = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(campaign_stages)
+      .values(values as typeof campaign_stages.$inferInsert)
+      .returning();
+
+    let parentTrackingId = campaignRow[0].tracking_id;
+    if (
+      parentTrackingId == null &&
+      campaignRow[0].brand_id != null &&
+      campaignRow[0].offer_id != null
+    ) {
+      // Pre-Phase-9 campaigns (created before tracking_id existed) and
+      // drafts that were upgraded out-of-band may lack a tracking_id even
+      // though brand+offer are set. Generate it now so the stage can
+      // reference it.
+      parentTrackingId = await generateCampaignTrackingId(tx, {
+        orgId,
+        brandId: campaignRow[0].brand_id,
+        offerId: campaignRow[0].offer_id,
+        createdAt: campaignRow[0].created_at,
+      });
+      await tx
+        .update(campaigns)
+        .set({ tracking_id: parentTrackingId })
+        .where(eq(campaigns.id, cid));
+    }
+
+    if (parentTrackingId != null && row.creative_id != null) {
+      const stageTrackingId = generateStageTrackingId({
+        campaignTrackingId: parentTrackingId,
+        stageNumber: row.stage_number,
+        creativeId: row.creative_id,
+      });
+      const [withTracking] = await tx
+        .update(campaign_stages)
+        .set({ tracking_id: stageTrackingId })
+        .where(eq(campaign_stages.id, row.id))
+        .returning();
+      return withTracking;
+    }
+
+    return row;
+  });
+
   return NextResponse.json(created, { status: 201 });
 }

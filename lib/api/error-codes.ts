@@ -16,6 +16,7 @@ export const API_ERROR_CODES = {
   CONFLICT: "conflict",
   RATE_LIMITED: "rate_limited",
   INTERNAL: "internal",
+  TRACKING_ID_IMMUTABLE: "tracking_id_immutable",
 } as const;
 
 export type ApiErrorCode =

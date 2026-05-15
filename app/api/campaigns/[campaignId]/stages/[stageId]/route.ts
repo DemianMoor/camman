@@ -46,6 +46,11 @@ const NON_UPDATABLE = new Set([
   "click_count",
   "archived_at",
   "created_at",
+  // tracking_id is system-generated and immutable; rejected upstream by
+  // the validator with a TRACKING_ID_IMMUTABLE code, but listed here as
+  // a backstop in case the validator changes. Mutating creative_id does
+  // NOT regenerate tracking_id — the historical reference stays.
+  "tracking_id",
 ]);
 
 export async function GET(
@@ -97,6 +102,7 @@ export async function GET(
       opt_out_count: campaign_stages.opt_out_count,
       click_count: campaign_stages.click_count,
       notes: campaign_stages.notes,
+      tracking_id: campaign_stages.tracking_id,
       archived_at: campaign_stages.archived_at,
       created_at: campaign_stages.created_at,
       creative: {
@@ -176,10 +182,19 @@ export async function PATCH(
   }
   const parsed = stageUpdateSchema.safeParse(json);
   if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    // params lives on custom-code issues only; the validator tags
+    // tracking_id rejections with params.code = TRACKING_ID_IMMUTABLE.
+    const isTrackingId =
+      first?.code === "custom" &&
+      (first.params as { code?: string } | undefined)?.code ===
+        "TRACKING_ID_IMMUTABLE";
     return apiError(
       400,
-      parsed.error.issues[0]?.message ?? "Invalid input",
-      API_ERROR_CODES.VALIDATION,
+      first?.message ?? "Invalid input",
+      isTrackingId
+        ? API_ERROR_CODES.TRACKING_ID_IMMUTABLE
+        : API_ERROR_CODES.VALIDATION,
     );
   }
   const input = parsed.data;

@@ -117,6 +117,7 @@ export async function GET(req: NextRequest) {
         status: campaigns.status,
         previous_status: campaigns.previous_status,
         status_changed_at: campaigns.status_changed_at,
+        tracking_id: campaigns.tracking_id,
         archived_at: campaigns.archived_at,
         created_at: campaigns.created_at,
         brand: { id: brands.id, name: brands.name, color: brands.color },

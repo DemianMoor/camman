@@ -50,6 +50,7 @@ export interface EditableStage {
   opt_out_count: number;
   click_count: number;
   total_cost: string;
+  tracking_id: string | null;
 }
 
 export interface StageInlineEditorProps {
@@ -169,6 +170,7 @@ export function StageInlineEditor({
           mode={isEdit ? "edit" : "create"}
           campaignId={campaignId}
           stageId={isEdit ? stage!.id : undefined}
+          trackingId={isEdit ? stage!.tracking_id : null}
           campaign={campaign}
           resultsCounters={
             isEdit

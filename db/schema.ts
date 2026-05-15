@@ -948,6 +948,11 @@ export const campaigns = pgTable(
     status_changed_at: timestamp("status_changed_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // Auto-generated, immutable, structured ID for external analytics
+    // (e.g. `5_14296_051526_1` = brand_5, offer_14296, May 15 2026 ET,
+    // first of the day). NULL until both brand_id and offer_id are set.
+    // Once non-NULL it never changes — see lib/tracking-id.ts.
+    tracking_id: text("tracking_id"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -1024,6 +1029,12 @@ export const campaign_stages = pgTable(
     opt_out_count: integer("opt_out_count").notNull().default(0),
     click_count: integer("click_count").notNull().default(0),
     notes: text("notes"),
+    // Auto-generated, immutable tracking ID. Format:
+    // `<campaign_tracking_id>_s<stage_number>_c<creative_id>`. NULL until
+    // the parent campaign has a tracking_id AND the stage has a
+    // creative_id. Generated on insert; never regenerated when creative_id
+    // is changed later. See lib/tracking-id.ts.
+    tracking_id: text("tracking_id"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -1052,6 +1063,43 @@ export const campaign_stages = pgTable(
 
 export type CampaignStage = typeof campaign_stages.$inferSelect;
 export type NewCampaignStage = typeof campaign_stages.$inferInsert;
+
+// Per-(org, brand, offer, date) counter table backing the campaign
+// tracking_id sequence. Rows are inserted on demand via an atomic
+// INSERT ... ON CONFLICT DO UPDATE ... RETURNING next_seq - 1, which
+// reserves the next sequence number in a single statement (no race
+// between SELECT and INSERT). See lib/tracking-id.ts.
+//
+// date_et is the campaign's created_at date in America/New_York (the
+// project-wide CAMPAIGN_TIMEZONE). Stored as DATE so daily partitioning
+// of the key space is unambiguous regardless of how the timestamp was
+// originally captured.
+export const campaign_tracking_counters = pgTable(
+  "campaign_tracking_counters",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    brand_id: integer("brand_id")
+      .notNull()
+      .references(() => brands.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    date_et: date("date_et").notNull(),
+    next_seq: integer("next_seq").notNull().default(1),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.org_id, table.brand_id, table.offer_id, table.date_et],
+    }),
+  ],
+);
+
+export type CampaignTrackingCounter =
+  typeof campaign_tracking_counters.$inferSelect;
+export type NewCampaignTrackingCounter =
+  typeof campaign_tracking_counters.$inferInsert;
 
 // Frozen audience pool. Populated at campaign creation by snapshotAudience()
 // and never mutated thereafter — the entire point is that adding a contact

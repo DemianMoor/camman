@@ -111,6 +111,7 @@ type CampaignDetail = {
   end_date: string | null;
   status: CampaignStatus;
   status_changed_at: string;
+  tracking_id: string | null;
   archived_at: string | null;
   created_at: string;
   brand: Info | null;
@@ -145,6 +146,7 @@ type Stage = {
   opt_out_count: number;
   click_count: number;
   notes: string | null;
+  tracking_id: string | null;
   archived_at: string | null;
   created_at: string;
   audience_count: number;
@@ -574,12 +576,31 @@ export default function CampaignDetailPage() {
         id: "label",
         header: "Label",
         enableSorting: false,
-        cell: ({ row }) =>
-          row.original.label ? (
-            <span className="text-sm">{row.original.label}</span>
-          ) : (
-            <span className="text-sm text-muted-foreground">(no label)</span>
-          ),
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            {row.original.label ? (
+              <div className="text-sm">{row.original.label}</div>
+            ) : (
+              <div className="text-sm text-muted-foreground">(no label)</div>
+            )}
+            {row.original.tracking_id ? (
+              <button
+                type="button"
+                className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+                title="Click to copy"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigator.clipboard
+                    .writeText(row.original.tracking_id as string)
+                    .then(() => toast.success("Tracking ID copied"))
+                    .catch(() => toast.error("Couldn't copy"));
+                }}
+              >
+                {row.original.tracking_id}
+              </button>
+            ) : null}
+          </div>
+        ),
       },
       {
         id: "creative",
@@ -1539,7 +1560,7 @@ function CampaignMetaCompact({
           ) : null}
         </div>
 
-        {/* Line 2: Traffic · Assigned · Created · Audience [Details ▾] */}
+        {/* Line 2: Traffic · Assigned · Created · Audience · Tracking ID [Details ▾] */}
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           <span>
             Traffic:{" "}
@@ -1564,6 +1585,27 @@ function CampaignMetaCompact({
             frozen
             {capSuffix}
           </span>
+          {campaign.tracking_id ? (
+            <>
+              <span>·</span>
+              <span>
+                Tracking:{" "}
+                <button
+                  type="button"
+                  className="font-mono text-foreground hover:underline"
+                  title="Click to copy"
+                  onClick={() => {
+                    navigator.clipboard
+                      .writeText(campaign.tracking_id as string)
+                      .then(() => toast.success("Tracking ID copied"))
+                      .catch(() => toast.error("Couldn't copy"));
+                  }}
+                >
+                  {campaign.tracking_id}
+                </button>
+              </span>
+            </>
+          ) : null}
           <button
             type="button"
             onClick={() => setShowDetails((s) => !s)}

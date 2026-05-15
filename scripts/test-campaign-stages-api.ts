@@ -207,8 +207,21 @@ async function main() {
       body: JSON.stringify({ creative_id: cre.id }),
     });
     check("returns 201", s1R.status === 201, `got ${s1R.status}`);
-    const s1 = (await s1R.json()) as { id: number; stage_number: number };
+    const s1 = (await s1R.json()) as {
+      id: number;
+      stage_number: number;
+      tracking_id: string | null;
+    };
     check("stage_number = 1 (trigger assigned)", s1.stage_number === 1);
+    // Stage tracking_id format: `<campaign_tracking_id>_s<stage_number>_c<creative_id>`
+    check(
+      "stage tracking_id matches expected format with stage_number and creative_id",
+      typeof s1.tracking_id === "string" &&
+        new RegExp(`_s${s1.stage_number}_c${cre.id}$`).test(
+          s1.tracking_id ?? "",
+        ),
+      `got ${JSON.stringify(s1.tracking_id)}`,
+    );
 
     console.log("\n[2] POST stage 2");
     const s2R = await apiFetch(`/api/campaigns/${campaign.id}/stages`, {
@@ -216,8 +229,58 @@ async function main() {
       body: JSON.stringify({}),
     });
     check("returns 201", s2R.status === 201);
-    const s2 = (await s2R.json()) as { id: number; stage_number: number };
+    const s2 = (await s2R.json()) as {
+      id: number;
+      stage_number: number;
+      tracking_id: string | null;
+    };
     check("stage_number = 2", s2.stage_number === 2);
+    check(
+      "stage 2 tracking_id is null (no creative_id)",
+      s2.tracking_id === null,
+      `got ${JSON.stringify(s2.tracking_id)}`,
+    );
+
+    console.log("\n[1b] PATCH tracking_id on stage → 400 TRACKING_ID_IMMUTABLE");
+    const immStageR = await apiFetch(
+      `/api/campaigns/${campaign.id}/stages/${s1.id}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ tracking_id: "hacked" }),
+      },
+    );
+    check("returns 400", immStageR.status === 400);
+    const immStageBody = (await immStageR.json()) as { code?: string };
+    check(
+      "error code = TRACKING_ID_IMMUTABLE",
+      immStageBody.code === "tracking_id_immutable",
+      `got code=${immStageBody.code}`,
+    );
+
+    console.log("\n[1c] PATCH creative_id does NOT regenerate tracking_id");
+    // Create a second creative on the same offer and switch the stage to it.
+    const cre2R = await apiFetch("/api/creatives", {
+      method: "POST",
+      body: JSON.stringify({
+        offer_ids: [offer.id],
+        text: "Stage test SMS body — alt",
+      }),
+    });
+    const cre2 = (await cre2R.json()) as { id: number };
+    createdCreativeIds.push(cre2.id);
+    const switchR = await apiFetch(
+      `/api/campaigns/${campaign.id}/stages/${s1.id}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ creative_id: cre2.id }),
+      },
+    );
+    const switched = (await switchR.json()) as { tracking_id: string | null };
+    check(
+      "tracking_id preserved (still references original creative_id)",
+      switched.tracking_id === s1.tracking_id,
+      `was ${s1.tracking_id}, now ${switched.tracking_id}`,
+    );
 
     console.log("\n[3] POST stage with conflicting clicker flags → 400");
     const s3R = await apiFetch(`/api/campaigns/${campaign.id}/stages`, {

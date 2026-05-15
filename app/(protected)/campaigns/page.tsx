@@ -85,6 +85,7 @@ type Campaign = {
   end_date: string | null;
   status: Status;
   status_changed_at: string;
+  tracking_id: string | null;
   archived_at: string | null;
   created_at: string;
   brand: Info | null;
@@ -130,6 +131,9 @@ type Filters = {
   // "__me__" | "__unassigned__" | <uuid> | null
   assigned_to_user_id: string | null;
   showArchived: boolean;
+  // Toggle for the Tracking ID column — hidden by default to keep the
+  // table narrow; persisted per-browser like every other list filter.
+  showTrackingId: boolean;
   page: number;
   pageSize: number;
   sortBy: string;
@@ -143,6 +147,7 @@ const DEFAULT_FILTERS: Filters = {
   offer_id: null,
   assigned_to_user_id: null,
   showArchived: false,
+  showTrackingId: false,
   page: 0,
   pageSize: 20,
   sortBy: "created_at",
@@ -556,6 +561,34 @@ export default function CampaignsPage() {
           </span>
         ),
       },
+      // Hidden by default; surfaced when `filters.showTrackingId` is on.
+      // The base column array always includes it; we conditionally filter
+      // it out below so column order stays stable when toggled.
+      {
+        id: "tracking_id",
+        header: "Tracking ID",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const t = row.original.tracking_id;
+          if (!t) return <span className="text-muted-foreground">—</span>;
+          return (
+            <button
+              type="button"
+              className="font-mono text-xs hover:underline"
+              title="Click to copy"
+              onClick={(e) => {
+                e.stopPropagation();
+                navigator.clipboard
+                  .writeText(t)
+                  .then(() => toast.success("Tracking ID copied"))
+                  .catch(() => toast.error("Couldn't copy"));
+              }}
+            >
+              {t}
+            </button>
+          );
+        },
+      },
       {
         id: "actions",
         header: () => <span className="sr-only">Actions</span>,
@@ -696,6 +729,17 @@ export default function CampaignsPage() {
       members,
       selectedIds,
     ],
+  );
+
+  // Strip out the tracking_id column when the toggle is off. Done here
+  // rather than gating the column-definition itself so re-renders don't
+  // rebuild the columns array (the memo is keyed on the toggle below).
+  const visibleColumns = useMemo(
+    () =>
+      filters.showTrackingId
+        ? columns
+        : columns.filter((c) => c.id !== "tracking_id"),
+    [columns, filters.showTrackingId],
   );
 
   // ============ Filter helpers ============
@@ -840,6 +884,18 @@ export default function CampaignsPage() {
             Show archived
           </Label>
         </div>
+        <div className="flex items-center gap-2">
+          <Switch
+            id="show-tracking-id"
+            checked={filters.showTrackingId}
+            onCheckedChange={(checked) =>
+              updateFilters({ showTrackingId: checked })
+            }
+          />
+          <Label htmlFor="show-tracking-id" className="text-sm">
+            Show tracking ID
+          </Label>
+        </div>
         {!filtersAreDefault ? (
           <Button
             variant="ghost"
@@ -973,7 +1029,7 @@ export default function CampaignsPage() {
           ) : null}
           <DataTable<Campaign>
             data={data}
-            columns={columns}
+            columns={visibleColumns}
             isLoading={listApi.isLoading}
             pageIndex={filters.page}
             pageSize={filters.pageSize}

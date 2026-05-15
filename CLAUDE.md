@@ -184,6 +184,22 @@ Categorical tags applied directly to contacts via the `contact_contact_groups` j
 - All four phone-upload entry points (contacts, opt-outs, opt-ins, clickers) expose a `MultiSelectPicker` for contact groups; selected IDs travel as `assign_to_group_ids` on the POST. The shared [lib/upload/audience-upload.ts](lib/upload/audience-upload.ts) helper applies them after contacts are upserted.
 - Bulk-apply endpoint: `POST /api/contacts/bulk-apply-groups` with `{ contact_ids[], group_ids[] }`, idempotent via `ON CONFLICT DO NOTHING`. Returns `{ applied: number }`.
 
+## 10g. Tracking IDs (campaigns + stages)
+
+Auto-generated, **immutable**, structured identifiers separate from the internal `id` (UUID-like primary key) and the user-editable `human_id`. Used as URL parameters in external analytics tracking links.
+
+- **Campaign format:** `<brand_id>_<offer_id>_<MMDDYY>_<seq>` (e.g. `5_14296_051526_1`). Date is the campaign's `created_at` rendered in ET (`CAMPAIGN_TIMEZONE`).
+- **Stage format:** `<campaign_tracking_id>_s<stage_number>_c<creative_id>` (e.g. `5_14296_051526_1_s2_c42`).
+- **Counter table:** `campaign_tracking_counters (org_id, brand_id, offer_id, date_et)` PK. Allocation is a single atomic `INSERT ... ON CONFLICT DO UPDATE ... RETURNING (next_seq - 1)` (see [lib/tracking-id.ts](lib/tracking-id.ts)) — no SELECT-then-INSERT races.
+- **When generated:**
+  - **Campaign:** in the POST transaction if `brand_id` and `offer_id` are both set. In PATCH if the prior value was NULL and the patch results in both being set. Uses the campaign's ORIGINAL `created_at` for the date segment — drafts that get brand+offer added later still date back to when they were first saved.
+  - **Stage:** in the POST (and duplicate) transaction if the parent campaign has a `tracking_id` AND the stage has a `creative_id`. If the parent is NULL but brand+offer exist (e.g. pre-Phase-9 backfill case), the stage POST generates the campaign's `tracking_id` first in the same transaction.
+- **Immutability:** PATCH endpoints reject `tracking_id` in the payload with `code: "tracking_id_immutable"` (mapped from a Zod issue with `params.code = "TRACKING_ID_IMMUTABLE"` in the validators). Mutating `brand_id` / `offer_id` / `creative_id` / `stage_number` on an entity with a non-NULL `tracking_id` does NOT regenerate it — historical references are preserved by design.
+- **Uniqueness:** partial unique indexes `campaigns_tracking_id_org_uniq` and `campaign_stages_tracking_id_org_uniq` (both `WHERE tracking_id IS NOT NULL`) so multiple NULLs coexist while generated IDs are globally-unique per org.
+- **Sortability gotcha:** the MMDDYY date segment is not string-sortable across year boundaries — `010127` < `120126` lexicographically. Always `ORDER BY created_at` for chronology, never by `tracking_id`.
+- **UI:** the `<CopyableId>` component ([components/ui/copyable-id.tsx](components/ui/copyable-id.tsx)) is the canonical surface — read-only input + copy button + sonner toast. Reuse it for any system-generated identifier surfaced to the user. The campaigns list table shows the column behind a per-browser `Show tracking ID` toggle to keep the default view narrow.
+- **Backfill:** [scripts/backfill-tracking-ids.ts](scripts/backfill-tracking-ids.ts) is idempotent (`tracking_id IS NULL` gate). Processes campaigns first ordered by `(org_id, created_at, id)`, then stages ordered by `(campaign_id, stage_number)`. Run once after migration 0038 applies in any environment with existing data.
+
 ## 10c. Creatives
 
 - Many-to-many with offers via the `creative_offers` junction table. A creative can be tied to zero, one, or many offers.

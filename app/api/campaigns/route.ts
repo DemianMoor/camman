@@ -21,6 +21,7 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { snapshotAudience } from "@/lib/audience-snapshot";
 import { generateCampaignSlug } from "@/lib/campaign-helpers";
 import { can } from "@/lib/permissions";
+import { generateCampaignTrackingId } from "@/lib/tracking-id";
 import {
   campaignCreateSchema,
   nullIfEmpty,
@@ -212,6 +213,24 @@ export async function POST(req: NextRequest) {
           })
           .returning();
 
+        // Generate the tracking_id in the same transaction so a rolled-back
+        // campaign creation doesn't burn a sequence number. Skipped when
+        // brand or offer aren't set yet (typical for drafts) — backfilled
+        // by PATCH once both are filled in.
+        let trackingId: string | null = null;
+        if (inserted.brand_id != null && inserted.offer_id != null) {
+          trackingId = await generateCampaignTrackingId(tx, {
+            orgId,
+            brandId: inserted.brand_id,
+            offerId: inserted.offer_id,
+            createdAt: inserted.created_at,
+          });
+          await tx
+            .update(campaigns)
+            .set({ tracking_id: trackingId })
+            .where(eq(campaigns.id, inserted.id));
+        }
+
         if (!saveAsDraft) {
           // Launch path: the validator guarantees segments.length >= 1
           // OR contact_group_ids.length >= 1.
@@ -243,7 +262,7 @@ export async function POST(req: NextRequest) {
           return updated;
         }
 
-        return inserted;
+        return { ...inserted, tracking_id: trackingId };
       });
       return NextResponse.json(result, { status: 201 });
     } catch (err) {

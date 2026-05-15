@@ -6,6 +6,10 @@ import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import {
+  generateCampaignTrackingId,
+  generateStageTrackingId,
+} from "@/lib/tracking-id";
 
 function parseId(idParam: string): number | null {
   const n = Number(idParam);
@@ -39,9 +43,17 @@ export async function POST(
   }
 
   // Verify campaign belongs to org (cheap pre-check that surfaces the
-  // right error before the stage lookup).
+  // right error before the stage lookup). Also pull brand/offer/tracking
+  // so we can mirror the same on-the-fly tracking-id generation as the
+  // POST handler.
   const campaignRow = await db
-    .select({ id: campaigns.id })
+    .select({
+      id: campaigns.id,
+      brand_id: campaigns.brand_id,
+      offer_id: campaigns.offer_id,
+      tracking_id: campaigns.tracking_id,
+      created_at: campaigns.created_at,
+    })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
     .limit(1);
@@ -99,9 +111,51 @@ export async function POST(
     click_count: 0,
   };
 
-  const [created] = await db
-    .insert(campaign_stages)
-    .values(values as typeof campaign_stages.$inferInsert)
-    .returning();
+  const created = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(campaign_stages)
+      .values(values as typeof campaign_stages.$inferInsert)
+      .returning();
+
+    // Mirror the POST handler: backfill the parent tracking_id if it's
+    // missing but brand+offer exist, then generate this stage's
+    // tracking_id from the parent + (auto-assigned) stage_number +
+    // creative_id. Duplicating a stage with no creative_id produces a
+    // stage row with NULL tracking_id, same as the create path.
+    let parentTrackingId = campaignRow[0].tracking_id;
+    if (
+      parentTrackingId == null &&
+      campaignRow[0].brand_id != null &&
+      campaignRow[0].offer_id != null
+    ) {
+      parentTrackingId = await generateCampaignTrackingId(tx, {
+        orgId,
+        brandId: campaignRow[0].brand_id,
+        offerId: campaignRow[0].offer_id,
+        createdAt: campaignRow[0].created_at,
+      });
+      await tx
+        .update(campaigns)
+        .set({ tracking_id: parentTrackingId })
+        .where(eq(campaigns.id, cid));
+    }
+
+    if (parentTrackingId != null && row.creative_id != null) {
+      const stageTrackingId = generateStageTrackingId({
+        campaignTrackingId: parentTrackingId,
+        stageNumber: row.stage_number,
+        creativeId: row.creative_id,
+      });
+      const [withTracking] = await tx
+        .update(campaign_stages)
+        .set({ tracking_id: stageTrackingId })
+        .where(eq(campaign_stages.id, row.id))
+        .returning();
+      return withTracking;
+    }
+
+    return row;
+  });
+
   return NextResponse.json(created, { status: 201 });
 }

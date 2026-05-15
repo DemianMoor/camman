@@ -18,6 +18,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { generateCampaignTrackingId } from "@/lib/tracking-id";
 import {
   campaignUpdateSchema,
   nullIfEmpty,
@@ -41,6 +42,10 @@ const NON_UPDATABLE = new Set([
   "created_at",
   "archived_at",
   "save_as_draft",
+  // tracking_id is system-generated and immutable; rejected upstream by
+  // the validator with a TRACKING_ID_IMMUTABLE code, but listed here as
+  // a backstop in case the validator changes.
+  "tracking_id",
 ]);
 
 export async function GET(
@@ -87,6 +92,7 @@ export async function GET(
       status: campaigns.status,
       previous_status: campaigns.previous_status,
       status_changed_at: campaigns.status_changed_at,
+      tracking_id: campaigns.tracking_id,
       archived_at: campaigns.archived_at,
       created_at: campaigns.created_at,
       brand: { id: brands.id, name: brands.name, color: brands.color },
@@ -173,10 +179,19 @@ export async function PATCH(
 
   const parsed = campaignUpdateSchema.safeParse(json);
   if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    // params lives on custom-code issues only; the validator tags
+    // tracking_id rejections with params.code = TRACKING_ID_IMMUTABLE.
+    const isTrackingId =
+      first?.code === "custom" &&
+      (first.params as { code?: string } | undefined)?.code ===
+        "TRACKING_ID_IMMUTABLE";
     return apiError(
       400,
-      parsed.error.issues[0]?.message ?? "Invalid input",
-      API_ERROR_CODES.VALIDATION,
+      first?.message ?? "Invalid input",
+      isTrackingId
+        ? API_ERROR_CODES.TRACKING_ID_IMMUTABLE
+        : API_ERROR_CODES.VALIDATION,
     );
   }
   const input = parsed.data;
@@ -186,6 +201,10 @@ export async function PATCH(
       id: campaigns.id,
       status: campaigns.status,
       assigned_to_user_id: campaigns.assigned_to_user_id,
+      brand_id: campaigns.brand_id,
+      offer_id: campaigns.offer_id,
+      tracking_id: campaigns.tracking_id,
+      created_at: campaigns.created_at,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
@@ -281,11 +300,50 @@ export async function PATCH(
   }
 
   try {
-    const [updated] = await db
-      .update(campaigns)
-      .set(updates)
-      .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
-      .returning();
+    // Compute whether this PATCH should also generate a tracking_id:
+    // only when the campaign currently has none AND brand_id + offer_id
+    // are both set after the update applies. We compare against the
+    // existing values for any field not in the patch. The tracking_id
+    // uses the campaign's ORIGINAL created_at (not "now") so the ID
+    // reflects creation, not finalization.
+    const resolvedBrandId =
+      input.brand_id !== undefined ? input.brand_id ?? null : current[0].brand_id;
+    const resolvedOfferId =
+      input.offer_id !== undefined ? input.offer_id ?? null : current[0].offer_id;
+    const needsTrackingId =
+      current[0].tracking_id == null &&
+      resolvedBrandId != null &&
+      resolvedOfferId != null;
+
+    const updated = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(campaigns)
+        .set(updates)
+        .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
+        .returning();
+      if (!row) return null;
+
+      if (needsTrackingId) {
+        const trackingId = await generateCampaignTrackingId(tx, {
+          orgId,
+          brandId: resolvedBrandId as number,
+          offerId: resolvedOfferId as number,
+          createdAt: current[0].created_at,
+        });
+        const [withTracking] = await tx
+          .update(campaigns)
+          .set({ tracking_id: trackingId })
+          .where(eq(campaigns.id, campaignId))
+          .returning();
+        return withTracking;
+      }
+      return row;
+    });
+    if (!updated) {
+      return apiError(404, "Campaign not found", API_ERROR_CODES.NOT_FOUND, {
+        entity: "campaign",
+      });
+    }
     return NextResponse.json(updated);
   } catch (err) {
     if (isUniqueViolation(err)) {

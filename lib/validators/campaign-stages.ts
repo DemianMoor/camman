@@ -63,16 +63,34 @@ export const stageCreateSchema = stageBaseSchema.refine(
 
 export const stageUpdateSchema = stageBaseSchema
   .partial()
-  .refine((d) => Object.values(d).some((v) => v !== undefined), {
-    message: "At least one field must be provided",
-  })
-  .refine(
-    (d) => !(d.include_clickers === true && d.exclude_clickers === true),
-    {
-      path: ["include_clickers"],
-      message: "include_clickers and exclude_clickers can't both be true",
-    },
-  );
+  // Same pattern as campaignUpdateSchema: accept tracking_id only to
+  // explicitly reject it with a TRACKING_ID_IMMUTABLE code instead of
+  // silently stripping. The route inspects issue.params.code.
+  .extend({ tracking_id: z.unknown().optional() })
+  .superRefine((d, ctx) => {
+    if (d.tracking_id !== undefined) {
+      ctx.addIssue({
+        path: ["tracking_id"],
+        code: z.ZodIssueCode.custom,
+        message: "tracking_id is read-only",
+        params: { code: "TRACKING_ID_IMMUTABLE" },
+      });
+    }
+    if (!Object.entries(d).some(([k, v]) => k !== "tracking_id" && v !== undefined)) {
+      ctx.addIssue({
+        path: [],
+        code: z.ZodIssueCode.custom,
+        message: "At least one field must be provided",
+      });
+    }
+    if (d.include_clickers === true && d.exclude_clickers === true) {
+      ctx.addIssue({
+        path: ["include_clickers"],
+        code: z.ZodIssueCode.custom,
+        message: "include_clickers and exclude_clickers can't both be true",
+      });
+    }
+  });
 
 // Note: `archived` transitions go through the dedicated archive endpoint,
 // not this one — same pattern as creatives.

@@ -7,6 +7,7 @@ import { useForm } from "react-hook-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { CopyableId } from "@/components/ui/copyable-id";
 import { formatInTimeZone } from "date-fns-tz";
 
 import {
@@ -110,6 +111,11 @@ export interface StageFormProps {
   campaignId: number;
   // Only set in edit mode; needed for the per-stage export URL.
   stageId?: number;
+  // Edit-mode only: the existing stage's tracking_id (null when the
+  // parent campaign or this stage's creative haven't reached the state
+  // where one can be generated). Always null in create mode — the ID is
+  // generated on save and surfaced only after the next fetch.
+  trackingId?: string | null;
   campaign: {
     id: number;
     name: string;
@@ -187,6 +193,7 @@ export function StageForm({
   mode,
   campaignId,
   stageId,
+  trackingId,
   campaign,
   resultsCounters,
   onImportResults,
@@ -455,6 +462,24 @@ export function StageForm({
               />
             </div>
 
+            {isEdit ? (
+              <CopyableId
+                label="Tracking ID"
+                value={trackingId ?? null}
+                placeholder="ID pending — pick a creative and save to generate"
+                helperText={
+                  trackingId
+                    ? "Auto-generated. Used in analytics URLs."
+                    : "Auto-generated when the campaign and creative are set."
+                }
+                copiedMessage="Tracking ID copied"
+              />
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Tracking ID is auto-generated on save.
+              </p>
+            )}
+
         {/* ============ Sales page & URLs ============ */}
         <div className="grid gap-3 border-t pt-3">
           <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -586,11 +611,23 @@ export function StageForm({
                   <FormLabel>Full URL</FormLabel>
                   <FormControl>
                     <Input
-                      placeholder="e.g. https://example.com/lp?sub1={campaign}"
+                      placeholder="e.g. https://example.com/lp?sub1={campaign_tracking_id}&sub2={stage_tracking_id}"
                       disabled={isSubmitting}
                       {...field}
                     />
                   </FormControl>
+                  <FormDescription className="text-xs">
+                    Tracking metadata only. Reference tokens:{" "}
+                    <code className="font-mono">{`{campaign_tracking_id}`}</code>
+                    ,{" "}
+                    <code className="font-mono">{`{stage_tracking_id}`}</code>
+                    ,{" "}
+                    <code className="font-mono">{`{brand_id}`}</code>,{" "}
+                    <code className="font-mono">{`{offer_id}`}</code>,{" "}
+                    <code className="font-mono">{`{creative_id}`}</code>,{" "}
+                    <code className="font-mono">{`{stage_number}`}</code>. Tokens are NOT auto-substituted in the SMS or
+                    on export — this field is for your records.
+                  </FormDescription>
                   <FormMessage />
                 </FormItem>
               )}

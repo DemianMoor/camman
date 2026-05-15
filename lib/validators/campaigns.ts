@@ -123,8 +123,27 @@ export const campaignCreateSchema = campaignCreateBaseSchema.superRefine(
 
 export const campaignUpdateSchema = campaignCreateBaseSchema
   .partial()
-  .refine((d) => Object.values(d).some((v) => v !== undefined), {
-    message: "At least one field must be provided",
+  // Use a passthrough-then-explicit-check pattern so we can reject the
+  // immutable tracking_id with a stable code rather than silently
+  // stripping it. Other unknown keys still pass through (campaign create
+  // schema is not strict), preserving existing PATCH behavior.
+  .extend({ tracking_id: z.unknown().optional() })
+  .superRefine((d, ctx) => {
+    if (d.tracking_id !== undefined) {
+      ctx.addIssue({
+        path: ["tracking_id"],
+        code: z.ZodIssueCode.custom,
+        message: "tracking_id is read-only",
+        params: { code: "TRACKING_ID_IMMUTABLE" },
+      });
+    }
+    if (!Object.entries(d).some(([k, v]) => k !== "tracking_id" && v !== undefined)) {
+      ctx.addIssue({
+        path: [],
+        code: z.ZodIssueCode.custom,
+        message: "At least one field must be provided",
+      });
+    }
   });
 
 export const campaignStatusChangeSchema = z.object({

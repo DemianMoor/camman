@@ -11,6 +11,10 @@ import {
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { generateCampaignSlug } from "@/lib/campaign-helpers";
 import { can } from "@/lib/permissions";
+import {
+  generateCampaignTrackingId,
+  generateStageTrackingId,
+} from "@/lib/tracking-id";
 
 const SLUG_RETRY_LIMIT = 5;
 
@@ -119,6 +123,23 @@ export async function POST(
           })
           .returning();
 
+        // Generate the cloned campaign's own tracking_id (separate
+        // sequence number from the source — its tracking_id stays put).
+        // Skipped when brand or offer aren't set on the source.
+        let parentTrackingId: string | null = null;
+        if (inserted.brand_id != null && inserted.offer_id != null) {
+          parentTrackingId = await generateCampaignTrackingId(tx, {
+            orgId,
+            brandId: inserted.brand_id,
+            offerId: inserted.offer_id,
+            createdAt: inserted.created_at,
+          });
+          await tx
+            .update(campaigns)
+            .set({ tracking_id: parentTrackingId })
+            .where(eq(campaigns.id, inserted.id));
+        }
+
         if (sourceStages.length > 0) {
           // Reset send-state on every cloned stage. stage_number is
           // auto-assigned by the BEFORE INSERT trigger; the Drizzle type
@@ -150,12 +171,35 @@ export async function POST(
             opt_out_count: 0,
             click_count: 0,
           }));
-          await tx
+          const insertedStages = await tx
             .insert(campaign_stages)
-            .values(rowsToInsert as typeof campaign_stages.$inferInsert[]);
+            .values(rowsToInsert as typeof campaign_stages.$inferInsert[])
+            .returning({
+              id: campaign_stages.id,
+              stage_number: campaign_stages.stage_number,
+              creative_id: campaign_stages.creative_id,
+            });
+
+          // Generate per-stage tracking_ids using the freshly-allocated
+          // parent tracking_id + each row's auto-assigned stage_number.
+          // Skip stages without a creative_id (per the stage POST route).
+          if (parentTrackingId != null) {
+            for (const s of insertedStages) {
+              if (s.creative_id == null) continue;
+              const stageTrackingId = generateStageTrackingId({
+                campaignTrackingId: parentTrackingId,
+                stageNumber: s.stage_number,
+                creativeId: s.creative_id,
+              });
+              await tx
+                .update(campaign_stages)
+                .set({ tracking_id: stageTrackingId })
+                .where(eq(campaign_stages.id, s.id));
+            }
+          }
         }
 
-        return inserted;
+        return { ...inserted, tracking_id: parentTrackingId };
       });
       return NextResponse.json(result, { status: 201 });
     } catch (err) {

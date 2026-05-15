@@ -11,6 +11,7 @@ import { SegmentPicker } from "@/components/segments/segment-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CopyableId } from "@/components/ui/copyable-id";
 import {
   Form,
   FormControl,
@@ -64,6 +65,7 @@ type CampaignDetail = {
   start_date: string | null;
   end_date: string | null;
   status: Status;
+  tracking_id: string | null;
 };
 
 interface CreateModeProps {
@@ -198,6 +200,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
       campaignSlug={data.slug}
       campaignName={data.name}
       currentStatus={data.status}
+      trackingId={data.tracking_id}
       initialValues={initialValues}
     />
   );
@@ -211,6 +214,7 @@ interface InnerProps {
   campaignSlug?: string;
   campaignName?: string;
   currentStatus?: Status;
+  trackingId?: string | null;
   initialValues?: CampaignFormValues;
 }
 
@@ -220,6 +224,7 @@ function Inner({
   campaignSlug,
   campaignName,
   currentStatus,
+  trackingId,
   initialValues,
 }: InnerProps) {
   const router = useRouter();
@@ -437,7 +442,7 @@ function Inner({
         {/* Body */}
         <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
           <div className="grid min-w-0 gap-4">
-            <SetupCard state={state} />
+            <SetupCard state={state} trackingId={trackingId ?? null} />
             <AudienceCard state={state} />
           </div>
           <aside className="grid gap-3">
@@ -457,7 +462,13 @@ function Inner({
 
 // =============== Setup card ===============
 
-function SetupCard({ state }: { state: CampaignFormState }) {
+function SetupCard({
+  state,
+  trackingId,
+}: {
+  state: CampaignFormState;
+  trackingId: string | null;
+}) {
   const {
     form,
     brands,
@@ -494,6 +505,18 @@ function SetupCard({ state }: { state: CampaignFormState }) {
                 <FormMessage />
               </FormItem>
             )}
+          />
+          <CopyableId
+            label="Tracking ID"
+            value={trackingId}
+            placeholder="ID pending — set brand and offer to generate"
+            helperText={
+              trackingId
+                ? "Auto-generated. Used in analytics URLs."
+                : "Auto-generated once brand and offer are saved."
+            }
+            copiedMessage="Tracking ID copied"
+            className="md:col-span-2"
           />
           <FormField
             control={form.control}

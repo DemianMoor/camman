@@ -23,11 +23,7 @@ import { useParams } from "next/navigation";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
-import {
-  CampaignForm,
-  type AudienceFilters,
-  type CampaignFormValues,
-} from "@/components/campaigns/campaign-form";
+import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ResultsImportForm } from "@/components/campaigns/results-import-form";
 import { StageForm, type StageFormValues } from "@/components/campaigns/stage-form";
@@ -271,25 +267,6 @@ const DEFAULT_STAGE_FILTERS: StagesFilters = {
   pageSize: 20,
 };
 
-function buildCampaignPatchBody(values: CampaignFormValues): Record<string, unknown> {
-  return {
-    name: values.name.trim(),
-    human_id: values.human_id.trim() ? values.human_id.trim() : "",
-    notes: values.notes.trim() ? values.notes.trim() : "",
-    brand_id: values.brand_id,
-    offer_id: values.offer_id,
-    routing_type_id: values.routing_type_id,
-    traffic_type_id: values.traffic_type_id,
-    assigned_to_user_id: values.assigned_to_user_id,
-    audience_segment_ids: values.audience_segment_ids,
-    audience_contact_group_ids: values.audience_contact_group_ids,
-    audience_filters: values.audience_filters,
-    audience_cap: values.audience_cap,
-    start_date: values.start_date || undefined,
-    end_date: values.end_date || undefined,
-  };
-}
-
 function buildStageCreateBody(values: StageFormValues): Record<string, unknown> {
   return {
     label: values.label.trim() ? values.label.trim() : undefined,
@@ -318,7 +295,6 @@ export default function CampaignDetailPage() {
   const campaignApi = useApiCall<CampaignDetail>();
   const stagesApi = useApiCall<StagesListResponse>();
   const membersApi = useApiCall<{ data: Member[] }>();
-  const campaignUpdateApi = useApiCall<CampaignDetail>();
   const campaignStatusApi = useApiCall<CampaignDetail>();
   const campaignArchiveApi = useApiCall<CampaignDetail>();
   const campaignRestoreApi = useApiCall<CampaignDetail>();
@@ -451,7 +427,6 @@ export default function CampaignDetailPage() {
   }, [membersApi.execute]);
 
   // ============ Dialog state ============
-  const [editCampaignOpen, setEditCampaignOpen] = useState(false);
   const [campaignTransition, setCampaignTransition] =
     useState<CampaignTransition | null>(null);
   const [campaignArchiveConfirm, setCampaignArchiveConfirm] = useState<
@@ -486,32 +461,6 @@ export default function CampaignDetailPage() {
   const canViewImports = can("result_imports.view");
 
   // ============ Handlers ============
-
-  async function handleCampaignEdit(values: CampaignFormValues) {
-    if (!campaign) return;
-    const body = buildCampaignPatchBody(values);
-    if (campaign.status !== "draft") {
-      delete body.audience_segment_ids;
-      delete body.audience_contact_group_ids;
-      delete body.audience_filters;
-      delete body.audience_cap;
-    }
-    const result = await campaignUpdateApi.execute(
-      `/api/campaigns/${campaign.id}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
-    if (!result.ok) {
-      toastApiError(result, "Couldn't save campaign");
-      return;
-    }
-    toast.success("Campaign saved");
-    setEditCampaignOpen(false);
-    refetchCampaign();
-  }
 
   async function handleCampaignTransition() {
     if (!campaign || !campaignTransition) return;
@@ -1048,30 +997,6 @@ export default function CampaignDetailPage() {
       ? "No stages yet"
       : `${campaign.stage_count_total} stage${campaign.stage_count_total === 1 ? "" : "s"} — ${roleUpParts.join(", ")}`;
 
-  // Edit-dialog initial values
-  const editValues: CampaignFormValues = {
-    name: campaign.name,
-    human_id: campaign.human_id ?? "",
-    notes: campaign.notes ?? "",
-    brand_id: campaign.brand_id,
-    offer_id: campaign.offer_id,
-    routing_type_id: campaign.routing_type_id,
-    traffic_type_id: campaign.traffic_type_id,
-    assigned_to_user_id: campaign.assigned_to_user_id,
-    audience_segment_ids: campaign.audience_segment_ids ?? [],
-    audience_contact_group_ids: campaign.audience_contact_group_ids ?? [],
-    audience_filters: {
-      include_no_status: campaign.audience_filters?.include_no_status ?? true,
-      include_opt_in: campaign.audience_filters?.include_opt_in ?? false,
-      include_clickers: campaign.audience_filters?.include_clickers ?? false,
-      include_not_clicked:
-        campaign.audience_filters?.include_not_clicked ?? true,
-    },
-    audience_cap: campaign.audience_cap ?? null,
-    start_date: campaign.start_date ?? "",
-    end_date: campaign.end_date ?? "",
-  };
-
   // Edit-stage initial values
   const editStageValues: StageFormValues | null = editingStage
     ? {
@@ -1122,12 +1047,10 @@ export default function CampaignDetailPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {canUpdateCampaign && campaign.status !== "archived" ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setEditCampaignOpen(true)}
-            >
-              <Pencil className="size-4" aria-hidden /> Edit
+            <Button asChild variant="outline" size="sm">
+              <Link href={`/campaigns/${campaign.id}/edit`}>
+                <Pencil className="size-4" aria-hidden /> Edit
+              </Link>
             </Button>
           ) : null}
           {/* Union-of-all-stages export. Disabled for drafts because the
@@ -1460,28 +1383,6 @@ export default function CampaignDetailPage() {
       </section>
 
       {/* ============ Dialogs ============ */}
-      <FormDialog
-        open={editCampaignOpen}
-        onOpenChange={setEditCampaignOpen}
-        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
-      >
-        <DialogHeader>
-          <DialogTitle>Edit campaign</DialogTitle>
-          <DialogDescription>{campaign.name}</DialogDescription>
-        </DialogHeader>
-        <CampaignForm
-          key={`edit-${campaign.id}`}
-          mode="edit"
-          initialValues={editValues}
-          currentStatus={campaign.status}
-          onSubmitDraft={handleCampaignEdit}
-          onSubmitActivate={handleCampaignEdit}
-          onCancel={() => setEditCampaignOpen(false)}
-          isSubmittingDraft={false}
-          isSubmittingActivate={campaignUpdateApi.isLoading}
-        />
-      </FormDialog>
-
       <StatusChangeDialog
         transition={campaignTransition}
         campaignName={campaign.name}

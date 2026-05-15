@@ -13,15 +13,12 @@ import {
   Plus,
   Send,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
-import {
-  CampaignForm,
-  type AudienceFilters,
-  type CampaignFormValues,
-} from "@/components/campaigns/campaign-form";
+import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import {
   StatusChangeDialog,
   type CampaignTransition,
@@ -41,12 +38,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { FormDialog } from "@/components/ui/form-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -162,50 +153,6 @@ const FILTER_ALL = "__all__";
 const FILTER_ME = "__me__";
 const FILTER_UNASSIGNED = "__unassigned__";
 
-// Map form values → API request body. Empty strings become undefined so the
-// server sees them as omitted rather than blank.
-function buildCreateBody(
-  values: CampaignFormValues,
-  saveAsDraft: boolean,
-): Record<string, unknown> {
-  return {
-    name: values.name.trim(),
-    human_id: values.human_id.trim() ? values.human_id.trim() : undefined,
-    notes: values.notes.trim() ? values.notes.trim() : undefined,
-    brand_id: values.brand_id,
-    offer_id: values.offer_id,
-    routing_type_id: values.routing_type_id,
-    traffic_type_id: values.traffic_type_id,
-    assigned_to_user_id: values.assigned_to_user_id,
-    audience_segment_ids: values.audience_segment_ids,
-    audience_contact_group_ids: values.audience_contact_group_ids,
-    audience_filters: values.audience_filters,
-    audience_cap: values.audience_cap,
-    start_date: values.start_date || undefined,
-    end_date: values.end_date || undefined,
-    save_as_draft: saveAsDraft,
-  };
-}
-
-function buildPatchBody(values: CampaignFormValues): Record<string, unknown> {
-  return {
-    name: values.name.trim(),
-    human_id: values.human_id.trim() ? values.human_id.trim() : "",
-    notes: values.notes.trim() ? values.notes.trim() : "",
-    brand_id: values.brand_id,
-    offer_id: values.offer_id,
-    routing_type_id: values.routing_type_id,
-    traffic_type_id: values.traffic_type_id,
-    assigned_to_user_id: values.assigned_to_user_id,
-    audience_segment_ids: values.audience_segment_ids,
-    audience_contact_group_ids: values.audience_contact_group_ids,
-    audience_filters: values.audience_filters,
-    audience_cap: values.audience_cap,
-    start_date: values.start_date || undefined,
-    end_date: values.end_date || undefined,
-  };
-}
-
 export default function CampaignsPage() {
   const router = useRouter();
   const { auth, can } = useAuth();
@@ -238,13 +185,9 @@ export default function CampaignsPage() {
   const brandsApi = useApiCall<InfoListResponse>();
   const offersApi = useApiCall<InfoListResponse>();
   const membersApi = useApiCall<{ data: Member[] }>();
-  const createApi = useApiCall<Campaign>();
-  const activateApi = useApiCall<Campaign>();
-  const updateApi = useApiCall<Campaign>();
   const statusApi = useApiCall<Campaign>();
   const archiveApi = useApiCall<Campaign>();
   const restoreApi = useApiCall<Campaign>();
-  const detailApi = useApiCall<Campaign>();
 
   const [data, setData] = useState<Campaign[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -334,10 +277,6 @@ export default function CampaignsPage() {
   ]);
 
   // Dialog state
-  const [createOpen, setCreateOpen] = useState(false);
-  const [editing, setEditing] = useState<Campaign | null>(null);
-  const [editingValues, setEditingValues] =
-    useState<CampaignFormValues | null>(null);
   const [transitionTarget, setTransitionTarget] = useState<{
     campaign: Campaign;
     transition: CampaignTransition;
@@ -399,99 +338,6 @@ export default function CampaignsPage() {
   const canComplete = can("campaigns.complete");
   const canArchive = can("campaigns.archive");
   const canRestore = can("campaigns.restore");
-
-  // ============ Create flow ============
-
-  async function handleCreateDraft(values: CampaignFormValues) {
-    const result = await createApi.execute("/api/campaigns", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildCreateBody(values, true)),
-    });
-    if (!result.ok) {
-      toastApiError(result, "Couldn't save draft");
-      return;
-    }
-    toast.success("Draft saved");
-    setCreateOpen(false);
-    refetch();
-  }
-
-  async function handleCreateActivate(values: CampaignFormValues) {
-    const result = await activateApi.execute("/api/campaigns", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildCreateBody(values, false)),
-    });
-    if (!result.ok) {
-      toastApiError(result, "Couldn't activate campaign");
-      return;
-    }
-    const count = result.data.audience_snapshot_count.toLocaleString();
-    toast.success(`Campaign activated — ${count} contacts in audience pool`);
-    setCreateOpen(false);
-    refetch();
-  }
-
-  // ============ Edit flow ============
-
-  async function openEdit(c: Campaign) {
-    // Fetch fresh data so we have the latest state for the form.
-    const result = await detailApi.execute(`/api/campaigns/${c.id}`);
-    if (!result.ok) {
-      toastApiError(result, "Couldn't load campaign");
-      return;
-    }
-    const d = result.data;
-    setEditing(d);
-    setEditingValues({
-      name: d.name,
-      human_id: d.human_id ?? "",
-      notes: d.notes ?? "",
-      brand_id: d.brand_id,
-      offer_id: d.offer_id,
-      routing_type_id: d.routing_type_id,
-      traffic_type_id: d.traffic_type_id,
-      assigned_to_user_id: d.assigned_to_user_id,
-      audience_segment_ids: d.audience_segment_ids ?? [],
-      audience_contact_group_ids: d.audience_contact_group_ids ?? [],
-      audience_filters: {
-        include_no_status: d.audience_filters?.include_no_status ?? true,
-        include_opt_in: d.audience_filters?.include_opt_in ?? false,
-        include_clickers: d.audience_filters?.include_clickers ?? false,
-        include_not_clicked: d.audience_filters?.include_not_clicked ?? true,
-      },
-      audience_cap: d.audience_cap ?? null,
-      start_date: d.start_date ?? "",
-      end_date: d.end_date ?? "",
-    });
-  }
-
-  async function handleEditSubmit(values: CampaignFormValues) {
-    if (!editing) return;
-    // Strip audience fields if the campaign isn't a draft — the server
-    // rejects them and we already disabled those inputs.
-    const body = buildPatchBody(values);
-    if (editing.status !== "draft") {
-      delete body.audience_segment_ids;
-      delete body.audience_contact_group_ids;
-      delete body.audience_filters;
-      delete body.audience_cap;
-    }
-    const result = await updateApi.execute(`/api/campaigns/${editing.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!result.ok) {
-      toastApiError(result, "Couldn't save changes");
-      return;
-    }
-    toast.success("Campaign saved");
-    setEditing(null);
-    setEditingValues(null);
-    refetch();
-  }
 
   // ============ Status transitions ============
 
@@ -761,7 +607,9 @@ export default function CampaignsPage() {
                   onClick={(e) => e.stopPropagation()}
                 >
                   {showEdit ? (
-                    <DropdownMenuItem onSelect={() => void openEdit(c)}>
+                    <DropdownMenuItem
+                      onSelect={() => router.push(`/campaigns/${c.id}/edit`)}
+                    >
                       <Pencil className="size-4" aria-hidden /> Edit
                     </DropdownMenuItem>
                   ) : null}
@@ -852,8 +700,10 @@ export default function CampaignsPage() {
           </p>
         </div>
         {canCreate ? (
-          <Button onClick={() => setCreateOpen(true)}>
-            <Plus className="size-4" aria-hidden /> New Campaign
+          <Button asChild>
+            <Link href="/campaigns/new">
+              <Plus className="size-4" aria-hidden /> New Campaign
+            </Link>
           </Button>
         ) : null}
       </header>
@@ -1001,8 +851,10 @@ export default function CampaignsPage() {
             </p>
           </div>
           {canCreate ? (
-            <Button onClick={() => setCreateOpen(true)}>
-              <Plus className="size-4" aria-hidden /> New Campaign
+            <Button asChild>
+              <Link href="/campaigns/new">
+                <Plus className="size-4" aria-hidden /> New Campaign
+              </Link>
             </Button>
           ) : null}
         </div>
@@ -1114,64 +966,6 @@ export default function CampaignsPage() {
           />
         </>
       )}
-
-      {/* Create dialog */}
-      <FormDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
-      >
-        <DialogHeader>
-          <DialogTitle>New campaign</DialogTitle>
-          <DialogDescription>
-            Set the brand and offer, pick an audience, and launch — or save
-            as a draft to fill in details later.
-          </DialogDescription>
-        </DialogHeader>
-        <CampaignForm
-          mode="create"
-          onSubmitDraft={handleCreateDraft}
-          onSubmitActivate={handleCreateActivate}
-          onCancel={() => setCreateOpen(false)}
-          isSubmittingDraft={createApi.isLoading}
-          isSubmittingActivate={activateApi.isLoading}
-        />
-      </FormDialog>
-
-      {/* Edit dialog */}
-      <FormDialog
-        open={editing !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setEditing(null);
-            setEditingValues(null);
-          }
-        }}
-        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
-      >
-        <DialogHeader>
-          <DialogTitle>Edit campaign</DialogTitle>
-          <DialogDescription>
-            {editing ? editing.name : ""}
-          </DialogDescription>
-        </DialogHeader>
-        {editing && editingValues ? (
-          <CampaignForm
-            key={`edit-${editing.id}`}
-            mode="edit"
-            initialValues={editingValues}
-            currentStatus={editing.status}
-            onSubmitDraft={handleEditSubmit}
-            onSubmitActivate={handleEditSubmit}
-            onCancel={() => {
-              setEditing(null);
-              setEditingValues(null);
-            }}
-            isSubmittingDraft={false}
-            isSubmittingActivate={updateApi.isLoading}
-          />
-        ) : null}
-      </FormDialog>
 
       {/* Status transition dialog */}
       <StatusChangeDialog

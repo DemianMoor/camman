@@ -38,6 +38,16 @@ export interface AudiencePreviewResult {
   // cap is in effect.
   total_matching: number;
   applied_cap: number | null;
+  // Composition breakdown. All counts are post-filter (qualified for
+  // sending) unless noted. Sum from_segments + from_groups - overlap =
+  // total_matching.
+  from_segments: number;
+  from_groups: number;
+  overlap: number;
+  // Count of contacts in the union (across all selected sources) who
+  // have an opt_out record and were therefore dropped. Independent of
+  // the include_* filter toggles.
+  excluded_for_optout: number;
 }
 
 export interface AudienceSnapshotResult {
@@ -224,27 +234,140 @@ export async function computeStageAudienceCount(
   };
 }
 
-// Compute the count for the UI's audience preview. No DB write.
+// Compute the count + composition breakdown for the UI's audience
+// preview. No DB write.
 //
-// Returns total_matching (pre-cap) and count (post-cap, what actually
-// gets sent to). When no cap is set or the cap is >= total, the two are
-// equal. The preview never executes the random sample — that would be
-// wasted work since the snapshot does its own.
+// Returns total_matching (pre-cap), count (post-cap, what actually gets
+// sent to), and a per-source breakdown so the UI can show how segments
+// vs contact groups vs overlap contribute. One SQL round-trip; the
+// breakdown reuses the same CTE chain as the count.
+//
+// The snapshot path (snapshotAudience) keeps using
+// buildQualifyingContactsSql for the actual insert — its row-level
+// projection is required by the pool insert. The preview takes a
+// different shape because it aggregates instead.
 export async function previewAudience(
   input: AudiencePreviewInput,
 ): Promise<AudiencePreviewResult> {
-  if (!hasAnySource(input)) {
-    return { count: 0, total_matching: 0, applied_cap: input.cap ?? null };
-  }
-  const qualifying = await buildQualifyingContactsSql(input);
-  const result = (await db.execute(drizzleSql`
-    select count(*)::int as count from (${qualifying}) q
-  `)) as unknown as { count: number }[];
-  const row = Array.isArray(result) ? result[0] : null;
-  const total = row?.count ?? 0;
   const cap = input.cap ?? null;
+  if (!hasAnySource(input)) {
+    return {
+      count: 0,
+      total_matching: 0,
+      applied_cap: cap,
+      from_segments: 0,
+      from_groups: 0,
+      overlap: 0,
+      excluded_for_optout: 0,
+    };
+  }
+
+  const { orgId, segmentIds, contactGroupIds = [], filters } = input;
+  const includeNoStatus = filters.include_no_status === true;
+  const includeOptIn = filters.include_opt_in === true;
+  const includeClickers = filters.include_clickers === true;
+  const includeNotClicked = filters.include_not_clicked === true;
+
+  // Per-segment clauses tagged with a from_segment=true / from_group=false
+  // marker so the aggregate query can attribute each contact to a source.
+  // We use UNION ALL because the GROUP BY downstream dedupes via BOOL_OR.
+  const perSegmentClauses = await Promise.all(
+    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
+  );
+  const segmentBranches = perSegmentClauses.map(
+    (clause) => drizzleSql`
+      SELECT contact_id, true::boolean AS from_segment, false::boolean AS from_group
+      FROM (${clause}) seg_inner
+    `,
+  );
+  const groupBranches =
+    contactGroupIds.length > 0
+      ? [
+          drizzleSql`
+            SELECT contact_id, false::boolean AS from_segment, true::boolean AS from_group
+            FROM contact_contact_groups
+            WHERE org_id = ${orgId}::uuid
+              AND contact_group_id = ANY(${drizzleSql.raw(
+                "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+              )})
+          `,
+        ]
+      : [];
+  const allBranches = [...segmentBranches, ...groupBranches];
+  const unionedWithSources = allBranches.reduce(
+    (acc, branch, i) =>
+      i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
+  );
+
+  const rows = (await db.execute(drizzleSql`
+    with unionized as (${unionedWithSources}),
+    sources as (
+      select
+        contact_id,
+        bool_or(from_segment) as from_segment,
+        bool_or(from_group) as from_group
+      from unionized
+      group by contact_id
+    ),
+    flagged as (
+      select
+        s.contact_id,
+        s.from_segment,
+        s.from_group,
+        exists (
+          select 1 from opt_outs oo
+          where oo.contact_id = s.contact_id and oo.org_id = ${orgId}::uuid
+        ) as has_opt_out,
+        exists (
+          select 1 from opt_ins oi
+          where oi.contact_id = s.contact_id and oi.org_id = ${orgId}::uuid
+        ) as has_opt_in,
+        exists (
+          select 1 from clickers c
+          where c.contact_id = s.contact_id and c.org_id = ${orgId}::uuid
+        ) as has_clicker
+      from sources s
+    ),
+    qualified as (
+      select
+        f.*,
+        (
+          not has_opt_out and (
+            (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
+            or (${includeOptIn}::boolean and has_opt_in)
+            or (${includeClickers}::boolean and has_clicker)
+            or (${includeNotClicked}::boolean and not has_clicker)
+          )
+        ) as qualifies
+      from flagged f
+    )
+    select
+      count(*) filter (where qualifies)::int as total_matching,
+      count(*) filter (where qualifies and from_segment)::int as from_segments,
+      count(*) filter (where qualifies and from_group)::int as from_groups,
+      count(*) filter (where qualifies and from_segment and from_group)::int as overlap,
+      count(*) filter (where has_opt_out)::int as excluded_for_optout
+    from qualified
+  `)) as unknown as {
+    total_matching: number;
+    from_segments: number;
+    from_groups: number;
+    overlap: number;
+    excluded_for_optout: number;
+  }[];
+
+  const row = Array.isArray(rows) ? rows[0] : null;
+  const total = row?.total_matching ?? 0;
   const effective = cap !== null && cap < total ? cap : total;
-  return { count: effective, total_matching: total, applied_cap: cap };
+  return {
+    count: effective,
+    total_matching: total,
+    applied_cap: cap,
+    from_segments: row?.from_segments ?? 0,
+    from_groups: row?.from_groups ?? 0,
+    overlap: row?.overlap ?? 0,
+    excluded_for_optout: row?.excluded_for_optout ?? 0,
+  };
 }
 
 // Snapshot the audience for a campaign: inserts one row into

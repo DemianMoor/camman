@@ -192,15 +192,30 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const watchedEnd = form.watch("end_date");
 
   // Audience preview, debounced. Tracks its own cancel signal so a fast
-  // toggle doesn't apply a stale count. Returns both the post-cap count
-  // and the full matching pool so the UI can show "5,000 of 12,547".
+  // toggle doesn't apply a stale count. The endpoint returns the full
+  // composition breakdown so the right-rail panel can show how segments
+  // vs groups vs overlap contribute to the post-cap count.
   const previewApi = useApiCall<{
     count: number;
     total_matching: number;
     applied_cap: number | null;
+    from_segments: number;
+    from_groups: number;
+    overlap: number;
+    excluded_for_optout: number;
   }>();
   const [previewCount, setPreviewCount] = useState<number | null>(null);
   const [previewTotalMatching, setPreviewTotalMatching] = useState<
+    number | null
+  >(null);
+  const [previewFromSegments, setPreviewFromSegments] = useState<number | null>(
+    null,
+  );
+  const [previewFromGroups, setPreviewFromGroups] = useState<number | null>(
+    null,
+  );
+  const [previewOverlap, setPreviewOverlap] = useState<number | null>(null);
+  const [previewExcludedOptOut, setPreviewExcludedOptOut] = useState<
     number | null
   >(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -218,6 +233,10 @@ export function useCampaignFormState(props: CampaignFormProps) {
     ) {
       setPreviewCount(null);
       setPreviewTotalMatching(null);
+      setPreviewFromSegments(null);
+      setPreviewFromGroups(null);
+      setPreviewOverlap(null);
+      setPreviewExcludedOptOut(null);
       setPreviewError(null);
       return;
     }
@@ -242,11 +261,19 @@ export function useCampaignFormState(props: CampaignFormProps) {
       if (result.ok) {
         setPreviewCount(result.data.count);
         setPreviewTotalMatching(result.data.total_matching);
+        setPreviewFromSegments(result.data.from_segments);
+        setPreviewFromGroups(result.data.from_groups);
+        setPreviewOverlap(result.data.overlap);
+        setPreviewExcludedOptOut(result.data.excluded_for_optout);
         setPreviewError(null);
       } else {
         setPreviewError(result.error);
         setPreviewCount(null);
         setPreviewTotalMatching(null);
+        setPreviewFromSegments(null);
+        setPreviewFromGroups(null);
+        setPreviewOverlap(null);
+        setPreviewExcludedOptOut(null);
       }
     }, 400);
     return () => {
@@ -349,6 +376,10 @@ export function useCampaignFormState(props: CampaignFormProps) {
     watchedCap,
     previewCount,
     previewTotalMatching,
+    previewFromSegments,
+    previewFromGroups,
+    previewOverlap,
+    previewExcludedOptOut,
     previewError,
     previewLoading,
     hasAudienceSource,

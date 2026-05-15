@@ -33,7 +33,6 @@ import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
 
-import { AudiencePreviewCard } from "./campaign-form-fields";
 import {
   NONE,
   useCampaignFormState,
@@ -414,7 +413,7 @@ function Inner({
             <AudienceCard state={state} />
           </div>
           <aside className="grid gap-3">
-            <AudiencePreviewCard state={state} />
+            <AudienceCompositionPanel state={state} />
             {!isEdit && activateBlockedReason ? (
               <p className="text-xs text-muted-foreground">
                 {activateBlockedReason}
@@ -881,6 +880,167 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
         />
       </CardContent>
     </Card>
+  );
+}
+
+// =============== Audience composition panel ===============
+
+function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
+  const {
+    hasAudienceSource,
+    previewCount,
+    previewTotalMatching,
+    previewFromSegments,
+    previewFromGroups,
+    previewOverlap,
+    previewExcludedOptOut,
+    previewError,
+    previewLoading,
+    watchedSegments,
+    watchedContactGroups,
+    watchedCap,
+  } = state;
+
+  const hasSegments = watchedSegments.length > 0;
+  const hasGroups = watchedContactGroups.length > 0;
+  const showOverlap = hasSegments && hasGroups;
+  const capActive =
+    watchedCap !== null &&
+    previewTotalMatching !== null &&
+    watchedCap < previewTotalMatching;
+  const sampledPct =
+    capActive && previewTotalMatching !== null && previewTotalMatching > 0
+      ? Math.round(((previewCount ?? 0) / previewTotalMatching) * 100)
+      : null;
+
+  return (
+    <Card>
+      <CardHeader className="border-b py-2">
+        <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Audience preview
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-3 p-4 text-sm">
+        {!hasAudienceSource ? (
+          <p className="text-muted-foreground">
+            Pick segments or contact groups to see your reach.
+          </p>
+        ) : previewError ? (
+          <p className="text-muted-foreground">
+            Could not preview audience — fix any issues above.
+          </p>
+        ) : previewCount === null ? (
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" aria-hidden />
+            Calculating…
+          </div>
+        ) : (
+          <>
+            <div className="flex items-baseline justify-between gap-3">
+              <div>
+                <div className="text-2xl font-semibold tabular-nums">
+                  {previewCount.toLocaleString()}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {previewCount === 1 ? "contact" : "contacts"}
+                </div>
+              </div>
+              {previewLoading ? (
+                <Loader2
+                  className="size-4 animate-spin text-muted-foreground"
+                  aria-hidden
+                />
+              ) : null}
+            </div>
+
+            <div className="grid gap-1.5 border-t pt-3 text-xs">
+              {hasSegments && previewFromSegments !== null ? (
+                <BreakdownRow
+                  label="From segments"
+                  value={previewFromSegments}
+                />
+              ) : null}
+              {hasGroups && previewFromGroups !== null ? (
+                <BreakdownRow
+                  label="From contact groups"
+                  value={previewFromGroups}
+                />
+              ) : null}
+              {showOverlap && previewOverlap !== null ? (
+                <BreakdownRow
+                  label="In both"
+                  value={previewOverlap}
+                  muted
+                />
+              ) : null}
+              {previewExcludedOptOut !== null &&
+              previewExcludedOptOut > 0 ? (
+                <BreakdownRow
+                  label="Opt-outs excluded"
+                  value={previewExcludedOptOut}
+                  muted
+                />
+              ) : null}
+            </div>
+
+            {capActive && previewTotalMatching !== null ? (
+              <div className="grid gap-1.5 border-t pt-3 text-xs">
+                <div className="flex items-center justify-between text-muted-foreground">
+                  <span>
+                    Cap:{" "}
+                    <span className="font-mono tabular-nums text-foreground">
+                      {(previewCount ?? 0).toLocaleString()}
+                    </span>{" "}
+                    of{" "}
+                    <span className="font-mono tabular-nums text-foreground">
+                      {previewTotalMatching.toLocaleString()}
+                    </span>
+                  </span>
+                  {sampledPct !== null ? (
+                    <span className="tabular-nums">{sampledPct}%</span>
+                  ) : null}
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full bg-foreground transition-all"
+                    style={{ width: `${sampledPct ?? 0}%` }}
+                  />
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Random sample frozen at activation.
+                </p>
+              </div>
+            ) : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BreakdownRow({
+  label,
+  value,
+  muted = false,
+}: {
+  label: string;
+  value: number;
+  muted?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className={cn(muted ? "text-muted-foreground" : undefined)}>
+        {label}
+      </span>
+      <span
+        className={cn(
+          "font-mono tabular-nums",
+          muted ? "text-muted-foreground" : undefined,
+        )}
+      >
+        {value.toLocaleString()}
+      </span>
+    </div>
   );
 }
 

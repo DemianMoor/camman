@@ -26,7 +26,8 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ResultsImportForm } from "@/components/campaigns/results-import-form";
-import { StageForm, type StageFormValues } from "@/components/campaigns/stage-form";
+import { StageEditDrawer } from "@/components/campaigns/stage-edit-drawer";
+import { StageInlineCreator } from "@/components/campaigns/stage-inline-creator";
 import {
   StageStatusChangeDialog,
   type StageTransition,
@@ -68,11 +69,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
-import {
-  campaignLocalInputToUtcIso,
-  formatCampaignDateTime,
-  utcToCampaignLocalInput,
-} from "@/lib/campaign-timezone";
+import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
@@ -267,26 +264,6 @@ const DEFAULT_STAGE_FILTERS: StagesFilters = {
   pageSize: 20,
 };
 
-function buildStageCreateBody(values: StageFormValues): Record<string, unknown> {
-  return {
-    label: values.label.trim() ? values.label.trim() : undefined,
-    creative_id: values.creative_id,
-    sms_provider_id: values.sms_provider_id,
-    provider_phone_id: values.provider_phone_id,
-    sales_page_label: values.sales_page_label || undefined,
-    short_url: values.short_url.trim() || undefined,
-    full_url: values.full_url.trim() || undefined,
-    stop_text: values.stop_text,
-    include_no_status: values.include_no_status,
-    include_clickers: values.include_clickers,
-    exclude_clickers: values.exclude_clickers,
-    scheduled_at: values.scheduled_at
-      ? campaignLocalInputToUtcIso(values.scheduled_at)
-      : null,
-    notes: values.notes.trim() ? values.notes.trim() : undefined,
-  };
-}
-
 export default function CampaignDetailPage() {
   const params = useParams<{ id: string }>();
   const campaignId = Number(params.id);
@@ -298,8 +275,6 @@ export default function CampaignDetailPage() {
   const campaignStatusApi = useApiCall<CampaignDetail>();
   const campaignArchiveApi = useApiCall<CampaignDetail>();
   const campaignRestoreApi = useApiCall<CampaignDetail>();
-  const stageCreateApi = useApiCall<Stage>();
-  const stageUpdateApi = useApiCall<Stage>();
   const stageStatusApi = useApiCall<Stage>();
   const stageArchiveApi = useApiCall<Stage>();
   const stageRestoreApi = useApiCall<Stage>();
@@ -497,44 +472,6 @@ export default function CampaignDetailPage() {
     toast.success(isArchive ? "Campaign archived" : "Campaign restored");
     setCampaignArchiveConfirm(null);
     refetchCampaign();
-  }
-
-  async function handleStageCreate(values: StageFormValues) {
-    const result = await stageCreateApi.execute(
-      `/api/campaigns/${campaignId}/stages`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildStageCreateBody(values)),
-      },
-    );
-    if (!result.ok) {
-      toastApiError(result, "Couldn't create stage");
-      return;
-    }
-    toast.success(`Stage ${result.data.stage_number} created`);
-    setAddStageOpen(false);
-    refetchStages();
-    refetchCampaign();
-  }
-
-  async function handleStageEdit(values: StageFormValues) {
-    if (!editingStage) return;
-    const result = await stageUpdateApi.execute(
-      `/api/campaigns/${campaignId}/stages/${editingStage.id}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildStageCreateBody(values)),
-      },
-    );
-    if (!result.ok) {
-      toastApiError(result, "Couldn't save stage");
-      return;
-    }
-    toast.success("Stage saved");
-    setEditingStage(null);
-    refetchStages();
   }
 
   async function handleStageTransition() {
@@ -997,25 +934,6 @@ export default function CampaignDetailPage() {
       ? "No stages yet"
       : `${campaign.stage_count_total} stage${campaign.stage_count_total === 1 ? "" : "s"} — ${roleUpParts.join(", ")}`;
 
-  // Edit-stage initial values
-  const editStageValues: StageFormValues | null = editingStage
-    ? {
-        label: editingStage.label ?? "",
-        creative_id: editingStage.creative_id,
-        sms_provider_id: editingStage.sms_provider_id,
-        provider_phone_id: editingStage.provider_phone_id,
-        sales_page_label: editingStage.sales_page_label ?? "",
-        short_url: editingStage.short_url ?? "",
-        full_url: editingStage.full_url ?? "",
-        stop_text: editingStage.stop_text,
-        include_no_status: editingStage.include_no_status,
-        include_clickers: editingStage.include_clickers,
-        exclude_clickers: editingStage.exclude_clickers,
-        scheduled_at: utcToCampaignLocalInput(editingStage.scheduled_at),
-        notes: editingStage.notes ?? "",
-      }
-    : null;
-
   return (
     <div className="space-y-6">
       <BackLink />
@@ -1202,21 +1120,14 @@ export default function CampaignDetailPage() {
 
       {/* ============ Stages section ============ */}
       <section className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-medium">Stages</h2>
-            <p className="text-sm text-muted-foreground">{rollupSubtitle}</p>
-          </div>
-          {canCreateStage && campaign.status !== "archived" ? (
-            <Button onClick={() => setAddStageOpen(true)}>
-              <Plus className="size-4" aria-hidden /> Add stage
-            </Button>
-          ) : null}
+        <div>
+          <h2 className="text-lg font-medium">Stages</h2>
+          <p className="text-sm text-muted-foreground">{rollupSubtitle}</p>
         </div>
 
         {stages.length === 0 && !stagesApi.isLoading ? (
-          <div className="flex flex-col items-center justify-center gap-4 rounded-md border border-dashed py-16 text-center">
-            <Send className="size-12 text-muted-foreground/40" aria-hidden />
+          <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed py-10 text-center">
+            <Send className="size-10 text-muted-foreground/40" aria-hidden />
             <div className="space-y-1">
               <p className="text-sm font-medium">No stages yet</p>
               <p className="text-sm text-muted-foreground">
@@ -1224,11 +1135,6 @@ export default function CampaignDetailPage() {
                 audience.
               </p>
             </div>
-            {canCreateStage && campaign.status !== "archived" ? (
-              <Button onClick={() => setAddStageOpen(true)}>
-                <Plus className="size-4" aria-hidden /> Add your first stage
-              </Button>
-            ) : null}
           </div>
         ) : (
           <>
@@ -1380,6 +1286,19 @@ export default function CampaignDetailPage() {
             )}
           </>
         )}
+
+        {canCreateStage && campaign.status !== "archived" ? (
+          <StageInlineCreator
+            campaign={campaign}
+            campaignId={campaignId}
+            isOpen={addStageOpen}
+            onOpenChange={setAddStageOpen}
+            onCreated={() => {
+              refetchStages();
+              refetchCampaign();
+            }}
+          />
+        ) : null}
       </section>
 
       {/* ============ Dialogs ============ */}
@@ -1433,79 +1352,32 @@ export default function CampaignDetailPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <FormDialog
-        open={addStageOpen}
-        onOpenChange={setAddStageOpen}
-        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
-      >
-        <DialogHeader>
-          <DialogTitle>Add stage</DialogTitle>
-          <DialogDescription>
-            A new SMS send under {campaign.name}.
-          </DialogDescription>
-        </DialogHeader>
-        <StageForm
-          mode="create"
-          campaignId={campaign.id}
-          campaign={campaign}
-          onSubmit={handleStageCreate}
-          onCancel={() => setAddStageOpen(false)}
-          isSubmitting={stageCreateApi.isLoading}
-        />
-      </FormDialog>
-
-      <FormDialog
+      <StageEditDrawer
+        campaign={campaign}
+        campaignId={campaignId}
+        stage={editingStage}
         open={editingStage !== null}
         onOpenChange={(open) => {
           if (!open) setEditingStage(null);
         }}
-        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
-      >
-        <DialogHeader>
-          <DialogTitle>Edit stage</DialogTitle>
-          <DialogDescription>
-            {editingStage
-              ? `Stage ${editingStage.stage_number}${editingStage.label ? ` · ${editingStage.label}` : ""}`
-              : ""}
-          </DialogDescription>
-        </DialogHeader>
-        {editingStage && editStageValues ? (
-          <StageForm
-            key={`edit-stage-${editingStage.id}`}
-            mode="edit"
-            campaignId={campaign.id}
-            stageId={editingStage.id}
-            campaign={campaign}
-            resultsCounters={{
-              sms_count: editingStage.sms_count,
-              delivered_count: editingStage.delivered_count,
-              opt_out_count: editingStage.opt_out_count,
-              click_count: editingStage.click_count,
-              total_cost: editingStage.total_cost,
-            }}
-            onImportResults={
-              canImportResults
-                ? () => {
-                    setImportStage(editingStage);
-                    setEditingStage(null);
-                  }
-                : undefined
-            }
-            onViewImportHistory={
-              canViewImports
-                ? () => {
-                    setHistoryStage(editingStage);
-                    setEditingStage(null);
-                  }
-                : undefined
-            }
-            initialValues={editStageValues}
-            onSubmit={handleStageEdit}
-            onCancel={() => setEditingStage(null)}
-            isSubmitting={stageUpdateApi.isLoading}
-          />
-        ) : null}
-      </FormDialog>
+        onUpdated={refetchStages}
+        onImportResults={
+          canImportResults && editingStage
+            ? () => {
+                setImportStage(editingStage);
+                setEditingStage(null);
+              }
+            : undefined
+        }
+        onViewImportHistory={
+          canViewImports && editingStage
+            ? () => {
+                setHistoryStage(editingStage);
+                setEditingStage(null);
+              }
+            : undefined
+        }
+      />
 
       <StageStatusChangeDialog
         transition={stageTransitionTarget?.transition ?? null}

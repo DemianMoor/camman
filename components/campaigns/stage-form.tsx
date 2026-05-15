@@ -7,6 +7,7 @@ import { useForm } from "react-hook-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { campaignLocalInputToUtcIso } from "@/lib/campaign-timezone";
 import {
   Form,
   FormControl,
@@ -94,6 +95,13 @@ type AudiencePreview = {
   pool_size: number;
 };
 
+export interface StageFormActionContext {
+  isEdit: boolean;
+  isSubmitting: boolean;
+  onSave: () => Promise<void>;
+  onCancel: () => void;
+}
+
 export interface StageFormProps {
   mode: "create" | "edit";
   campaignId: number;
@@ -121,9 +129,38 @@ export interface StageFormProps {
   onSubmit: (values: StageFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting: boolean;
+  // Optional renderer for the action row. When set, the form skips its
+  // default Cancel/Save row and renders this instead. The drawer host
+  // uses this to put Cancel/Save in a sticky footer outside the form's
+  // scroll container.
+  renderActions?: (ctx: StageFormActionContext) => React.ReactNode;
 }
 
 const NONE = "__none__";
+
+// Shared helper — maps form values to the API request body. Used by the
+// inline creator and edit drawer.
+export function buildStageCreateBody(
+  values: StageFormValues,
+): Record<string, unknown> {
+  return {
+    label: values.label.trim() ? values.label.trim() : undefined,
+    creative_id: values.creative_id,
+    sms_provider_id: values.sms_provider_id,
+    provider_phone_id: values.provider_phone_id,
+    sales_page_label: values.sales_page_label || undefined,
+    short_url: values.short_url.trim() || undefined,
+    full_url: values.full_url.trim() || undefined,
+    stop_text: values.stop_text,
+    include_no_status: values.include_no_status,
+    include_clickers: values.include_clickers,
+    exclude_clickers: values.exclude_clickers,
+    scheduled_at: values.scheduled_at
+      ? campaignLocalInputToUtcIso(values.scheduled_at)
+      : null,
+    notes: values.notes.trim() ? values.notes.trim() : undefined,
+  };
+}
 
 const DEFAULT_VALUES: StageFormValues = {
   label: "",
@@ -155,6 +192,7 @@ export function StageForm({
   onSubmit,
   onCancel,
   isSubmitting,
+  renderActions,
 }: StageFormProps) {
   const isEdit = mode === "edit";
 
@@ -875,22 +913,31 @@ export function StageForm({
           />
         </section>
 
-        <div className="flex items-center justify-end gap-2 pt-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={onCancel}
-            disabled={isSubmitting}
-          >
-            Cancel
-          </Button>
-          <Button type="submit" disabled={isSubmitting}>
-            {isSubmitting ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden />
-            ) : null}
-            {isEdit ? "Save changes" : "Create stage"}
-          </Button>
-        </div>
+        {renderActions ? (
+          renderActions({
+            isEdit,
+            isSubmitting,
+            onSave: handleSave,
+            onCancel,
+          })
+        ) : (
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onCancel}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+              ) : null}
+              {isEdit ? "Save changes" : "Create stage"}
+            </Button>
+          </div>
+        )}
       </form>
     </Form>
   );

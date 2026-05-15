@@ -6,6 +6,7 @@ import {
   ArchiveRestore,
   Archive as ArchiveIcon,
   CheckCircle2,
+  Copy,
   MoreHorizontal,
   Pause,
   Pencil,
@@ -188,6 +189,7 @@ export default function CampaignsPage() {
   const statusApi = useApiCall<Campaign>();
   const archiveApi = useApiCall<Campaign>();
   const restoreApi = useApiCall<Campaign>();
+  const duplicateApi = useApiCall<Campaign>();
 
   const [data, setData] = useState<Campaign[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -359,6 +361,23 @@ export default function CampaignsPage() {
     toast.success(`Campaign ${next}`);
     setTransitionTarget(null);
     refetch();
+  }
+
+  async function handleDuplicate(c: Campaign) {
+    const result = await duplicateApi.execute(
+      `/api/campaigns/${c.id}/duplicate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ include_stages: true }),
+      },
+    );
+    if (!result.ok) {
+      toastApiError(result, "Couldn't duplicate campaign");
+      return;
+    }
+    toast.success(`Duplicated as "${result.data.name}"`);
+    router.push(`/campaigns/${result.data.id}`);
   }
 
   async function handleArchiveRestoreConfirm() {
@@ -586,6 +605,7 @@ export default function CampaignsPage() {
             !showEdit &&
             !showArchive &&
             !showRestore &&
+            !canCreate &&
             transitions.length === 0
           )
             return null;
@@ -611,6 +631,13 @@ export default function CampaignsPage() {
                       onSelect={() => router.push(`/campaigns/${c.id}/edit`)}
                     >
                       <Pencil className="size-4" aria-hidden /> Edit
+                    </DropdownMenuItem>
+                  ) : null}
+                  {canCreate ? (
+                    <DropdownMenuItem
+                      onSelect={() => void handleDuplicate(c)}
+                    >
+                      <Copy className="size-4" aria-hidden /> Duplicate
                     </DropdownMenuItem>
                   ) : null}
                   {transitions.length > 0 ? (

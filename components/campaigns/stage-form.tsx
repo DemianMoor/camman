@@ -7,7 +7,12 @@ import { useForm } from "react-hook-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { campaignLocalInputToUtcIso } from "@/lib/campaign-timezone";
+import { formatInTimeZone } from "date-fns-tz";
+
+import {
+  campaignLocalInputToUtcIso,
+  CAMPAIGN_TIMEZONE,
+} from "@/lib/campaign-timezone";
 import {
   Form,
   FormControl,
@@ -372,6 +377,27 @@ export function StageForm({
           e.preventDefault();
           void handleSave();
         }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            if (!isSubmitting) void handleSave();
+            return;
+          }
+          if (
+            e.key === "Escape" &&
+            !e.defaultPrevented &&
+            !isSubmitting
+          ) {
+            if (
+              form.formState.isDirty &&
+              !window.confirm("Discard unsaved changes?")
+            ) {
+              return;
+            }
+            e.preventDefault();
+            onCancel();
+          }
+        }}
         className="grid gap-6"
         noValidate
       >
@@ -404,18 +430,26 @@ export function StageForm({
                 control={form.control}
                 name="scheduled_at"
                 render={({ field }) => (
-                  <FormItem className="flex items-center gap-3 space-y-0">
-                    <FormLabel className="shrink-0">Scheduled</FormLabel>
-                    <div className="flex-1">
-                      <FormControl>
-                        <Input
-                          type="datetime-local"
-                          disabled={isSubmitting}
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
+                  <FormItem className="space-y-1">
+                    <div className="flex items-center gap-3">
+                      <FormLabel className="shrink-0">Scheduled</FormLabel>
+                      <div className="flex-1">
+                        <FormControl>
+                          <Input
+                            type="datetime-local"
+                            disabled={isSubmitting}
+                            {...field}
+                          />
+                        </FormControl>
+                      </div>
                     </div>
+                    <ScheduledPresets
+                      disabled={isSubmitting}
+                      onPick={(v) =>
+                        form.setValue("scheduled_at", v, { shouldDirty: true })
+                      }
+                    />
+                    <FormMessage />
                   </FormItem>
                 )}
               />
@@ -996,6 +1030,50 @@ function ResultMetric({
             ? value.toLocaleString()
             : value}
       </div>
+    </div>
+  );
+}
+
+function ScheduledPresets({
+  disabled,
+  onPick,
+}: {
+  disabled?: boolean;
+  onPick: (yyyyMmDdTHHmm: string) => void;
+}) {
+  // ET wall-clock string for {today + daysOffset} at the given HH:mm.
+  // datetime-local inputs are interpreted as ET wall-clock by the
+  // server-side helper (campaignLocalInputToUtcIso).
+  function etAt(daysOffset: number, hhmm: string): string {
+    const d = new Date();
+    d.setDate(d.getDate() + daysOffset);
+    const ymd = formatInTimeZone(d, CAMPAIGN_TIMEZONE, "yyyy-MM-dd");
+    return `${ymd}T${hhmm}`;
+  }
+  return (
+    <div className="flex flex-wrap gap-1">
+      <button
+        type="button"
+        onClick={() => onPick(etAt(0, "10:00"))}
+        disabled={disabled}
+        className={cn(
+          "rounded-full border border-border bg-background px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+          disabled && "cursor-not-allowed opacity-60",
+        )}
+      >
+        Today 10am ET
+      </button>
+      <button
+        type="button"
+        onClick={() => onPick(etAt(1, "10:00"))}
+        disabled={disabled}
+        className={cn(
+          "rounded-full border border-border bg-background px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+          disabled && "cursor-not-allowed opacity-60",
+        )}
+      >
+        Tomorrow 10am ET
+      </button>
     </div>
   );
 }

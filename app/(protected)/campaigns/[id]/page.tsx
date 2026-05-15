@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
+  Copy,
   Download,
   History,
   MoreHorizontal,
@@ -277,6 +278,7 @@ export default function CampaignDetailPage() {
   const stageStatusApi = useApiCall<Stage>();
   const stageArchiveApi = useApiCall<Stage>();
   const stageRestoreApi = useApiCall<Stage>();
+  const stageDuplicateApi = useApiCall<Stage>();
 
   const [campaign, setCampaign] = useState<CampaignDetail | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
@@ -490,6 +492,20 @@ export default function CampaignDetailPage() {
     }
     toast.success(`Stage ${next}`);
     setStageTransitionTarget(null);
+    refetchStages();
+    refetchCampaign();
+  }
+
+  async function handleStageDuplicate(stage: Stage) {
+    const result = await stageDuplicateApi.execute(
+      `/api/campaigns/${campaignId}/stages/${stage.id}/duplicate`,
+      { method: "POST" },
+    );
+    if (!result.ok) {
+      toastApiError(result, "Couldn't duplicate stage");
+      return;
+    }
+    toast.success(`Stage ${result.data.stage_number} created`);
     refetchStages();
     refetchCampaign();
   }
@@ -789,6 +805,13 @@ export default function CampaignDetailPage() {
                       }}
                     >
                       <Pencil className="size-4" aria-hidden /> Edit
+                    </DropdownMenuItem>
+                  ) : null}
+                  {canCreateStage ? (
+                    <DropdownMenuItem
+                      onSelect={() => void handleStageDuplicate(s)}
+                    >
+                      <Copy className="size-4" aria-hidden /> Duplicate
                     </DropdownMenuItem>
                   ) : null}
                   {canTransition ? (

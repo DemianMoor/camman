@@ -325,6 +325,33 @@ function Inner({
           else if (activateReady) void handleActivateClick();
           else if (draftReady) void handleDraftClick();
         }}
+        onKeyDown={(e) => {
+          // Cmd/Ctrl+Enter: trigger the primary action (Activate if
+          // ready, else Save draft, else Save changes in edit mode).
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            if (isEdit) void handleActivateClick();
+            else if (activateReady) void handleActivateClick();
+            else if (draftReady) void handleDraftClick();
+            return;
+          }
+          // Esc: cancel out. Skip when another element already handled
+          // Escape (Radix Select/Popover preventDefault before bubble).
+          if (
+            e.key === "Escape" &&
+            !e.defaultPrevented &&
+            !anySubmitting
+          ) {
+            if (
+              form.formState.isDirty &&
+              !window.confirm("Discard unsaved changes?")
+            ) {
+              return;
+            }
+            e.preventDefault();
+            goBack();
+          }
+        }}
         className="space-y-4"
         noValidate
       >
@@ -659,6 +686,12 @@ function SetupCard({ state }: { state: CampaignFormState }) {
                 <FormControl>
                   <Input type="date" disabled={anySubmitting} {...field} />
                 </FormControl>
+                <DatePresets
+                  disabled={anySubmitting}
+                  onPick={(v) =>
+                    form.setValue("start_date", v, { shouldDirty: true })
+                  }
+                />
                 <FormMessage />
               </FormItem>
             )}
@@ -672,6 +705,12 @@ function SetupCard({ state }: { state: CampaignFormState }) {
                 <FormControl>
                   <Input type="date" disabled={anySubmitting} {...field} />
                 </FormControl>
+                <DatePresets
+                  disabled={anySubmitting}
+                  onPick={(v) =>
+                    form.setValue("end_date", v, { shouldDirty: true })
+                  }
+                />
                 {dateError ? (
                   <p className="text-xs text-destructive">{dateError}</p>
                 ) : null}
@@ -1029,6 +1068,68 @@ function BreakdownRow({
         {value.toLocaleString()}
       </span>
     </div>
+  );
+}
+
+// =============== Date preset chips ===============
+
+function DatePresets({
+  disabled,
+  onPick,
+}: {
+  disabled?: boolean;
+  onPick: (yyyyMmDd: string) => void;
+}) {
+  function addDays(days: number): string {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return (
+    <div className="flex flex-wrap gap-1 pt-0.5">
+      <PresetChip
+        label="Today"
+        onClick={() => onPick(addDays(0))}
+        disabled={disabled}
+      />
+      <PresetChip
+        label="+1d"
+        onClick={() => onPick(addDays(1))}
+        disabled={disabled}
+      />
+      <PresetChip
+        label="+1w"
+        onClick={() => onPick(addDays(7))}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
+function PresetChip({
+  label,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "rounded-full border border-border bg-background px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+        disabled && "cursor-not-allowed opacity-60",
+      )}
+    >
+      {label}
+    </button>
   );
 }
 

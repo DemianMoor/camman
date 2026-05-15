@@ -26,7 +26,12 @@ const NULLABLE_OPTIONAL_STRING = new Set(["original_name"]);
 // (see contact_contact_groups). The detail payload no longer includes a
 // `segment_groups` aggregation; the audience picker/rule editor surfaces
 // group membership separately when relevant.
-const ROW_FIELDS = new Set(["name", "segment_id", "original_name"]);
+const ROW_FIELDS = new Set([
+  "name",
+  "segment_id",
+  "original_name",
+  "exclude_in_use_contacts",
+]);
 
 export async function GET(
   _req: NextRequest,
@@ -58,6 +63,7 @@ export async function GET(
       status: segments.status,
       archived_at: segments.archived_at,
       created_at: segments.created_at,
+      exclude_in_use_contacts: segments.exclude_in_use_contacts,
       stats: {
         total_count: segment_stats.total_count,
         opt_out_count: segment_stats.opt_out_count,

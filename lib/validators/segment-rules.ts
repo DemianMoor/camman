@@ -49,6 +49,9 @@ const baseRuleObject = z.object({
   // post-validate it via the refinement below.
   value: z.unknown().optional(),
   is_active: z.boolean().default(true),
+  // Joins this rule to the running AND/OR of the prior rules. The
+  // first rule's combinator is read but ignored at eval time.
+  combinator: z.enum(["and", "or"]).default("and"),
 });
 
 export const segmentRuleCreateSchema = baseRuleObject
@@ -76,6 +79,7 @@ export const segmentRuleUpdateSchema = z
     operator: z.string().optional(),
     value: z.unknown().optional(),
     is_active: z.boolean().optional(),
+    combinator: z.enum(["and", "or"]).optional(),
   })
   .refine((d) => Object.values(d).some((v) => v !== undefined), {
     message: "At least one field must be provided",

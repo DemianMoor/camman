@@ -91,6 +91,7 @@ export async function GET(req: NextRequest) {
         status: segments.status,
         archived_at: segments.archived_at,
         created_at: segments.created_at,
+        exclude_in_use_contacts: segments.exclude_in_use_contacts,
         stats: {
           total_count: segment_stats.total_count,
           opt_out_count: segment_stats.opt_out_count,

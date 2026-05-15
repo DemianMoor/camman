@@ -18,6 +18,7 @@ export const segmentCreateSchema = z.object({
       "segment_id may only contain letters, digits, hyphens, and underscores",
     ),
   original_name: z.string().trim().max(120).optional(),
+  exclude_in_use_contacts: z.boolean().optional(),
 });
 
 export const segmentUpdateSchema = segmentCreateSchema

@@ -12,7 +12,6 @@ import {
   Pencil,
   RefreshCw,
   Trash2,
-  X,
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -20,7 +19,6 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
-import { ExportButton } from "@/components/export-button";
 import {
   PhoneUploadForm,
   type UploadResultSummary,
@@ -63,7 +61,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
-import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import { cn } from "@/lib/utils";
 
@@ -85,43 +82,10 @@ type Segment = {
   status: "active" | "archived";
   archived_at: string | null;
   created_at: string;
+  exclude_in_use_contacts: boolean;
   stats: SegmentStats;
   active_rules_count: number;
 };
-
-type ContactRow = {
-  contact_id: string;
-  phone_number: string;
-  is_archived: boolean;
-  joined_at: string;
-  is_opt_out: boolean;
-  is_opt_in: boolean;
-  is_clicker: boolean;
-  last_sent_at: string | null;
-};
-
-type ContactsResponse = {
-  data: ContactRow[];
-  totalCount: number;
-};
-
-type ContactsFilters = {
-  search: string;
-  page: number;
-  pageSize: number;
-  sortBy: string;
-  sortDir: "asc" | "desc";
-};
-
-const DEFAULT_CONTACTS_FILTERS: ContactsFilters = {
-  search: "",
-  page: 0,
-  pageSize: 20,
-  sortBy: "created_at",
-  sortDir: "desc",
-};
-
-const SEARCH_DEBOUNCE_MS = 300;
 
 function StatusPill({ status }: { status: Segment["status"] }) {
   if (status === "active") {
@@ -418,7 +382,6 @@ export default function SegmentDetailPage() {
   const restoreApi = useApiCall<Segment>();
   const deleteApi = useApiCall<{ deleted: boolean }>();
   const refreshApi = useApiCall<SegmentStats>();
-  const contactsApi = useApiCall<ContactsResponse>();
   const removeApi = useApiCall<{ submitted: number; removed: number; not_found: number }>();
 
   const [segment, setSegment] = useState<Segment | null>(null);
@@ -441,75 +404,10 @@ export default function SegmentDetailPage() {
     };
   }, [segmentIdNum, refreshTick, segmentApi.execute]);
 
-  const [filters, updateFilters, resetFilters] =
-    usePersistedFilters<ContactsFilters>(
-      `segment-detail.${segmentIdNum}.filters`,
-      DEFAULT_CONTACTS_FILTERS,
-    );
-  const [searchInput, setSearchInput] = useState(filters.search);
-  useEffect(() => {
-    setSearchInput(filters.search);
-  }, [filters.search]);
-  useEffect(() => {
-    if (searchInput === filters.search) return;
-    const t = setTimeout(() => {
-      updateFilters({ search: searchInput, page: 0 });
-    }, SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(t);
-  }, [searchInput, filters.search, updateFilters]);
-
-  const [contacts, setContacts] = useState<ContactRow[]>([]);
-  const [contactsTotal, setContactsTotal] = useState(0);
-  const [contactsError, setContactsError] = useState<string | null>(null);
-  const [contactsTick, setContactsTick] = useState(0);
-  const refetchContacts = useCallback(
-    () => setContactsTick((n) => n + 1),
-    [],
-  );
-
-  useEffect(() => {
-    if (!Number.isInteger(segmentIdNum) || segmentIdNum <= 0) return;
-    let cancelled = false;
-    setContactsError(null);
-    const sp = new URLSearchParams({
-      page: String(filters.page),
-      pageSize: String(filters.pageSize),
-      sortBy: filters.sortBy,
-      sortDir: filters.sortDir,
-    });
-    if (filters.search) sp.set("search", filters.search);
-    (async () => {
-      const result = await contactsApi.execute(
-        `/api/segments/${segmentIdNum}/contacts?${sp.toString()}`,
-      );
-      if (cancelled) return;
-      if (result.ok) {
-        setContacts(result.data.data);
-        setContactsTotal(result.data.totalCount);
-      } else {
-        setContactsError(result.error);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    segmentIdNum,
-    filters.search,
-    filters.sortBy,
-    filters.sortDir,
-    filters.page,
-    filters.pageSize,
-    contactsTick,
-    contactsApi.execute,
-  ]);
-
   const [editOpen, setEditOpen] = useState(false);
   const [confirming, setConfirming] = useState<
     "archive" | "restore" | "delete" | null
   >(null);
-  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
-  const [bulkRemoveConfirm, setBulkRemoveConfirm] = useState(false);
   const [removePhonesValue, setRemovePhonesValue] = useState("");
   const [removeResult, setRemoveResult] = useState<{
     submitted: number;
@@ -517,8 +415,8 @@ export default function SegmentDetailPage() {
     not_found: number;
   } | null>(null);
   const [activeTab, setActiveTab] = useState<
-    "contacts" | "audience" | "rules" | "upload" | "remove"
-  >("contacts");
+    "audience" | "rules" | "upload" | "remove"
+  >("audience");
 
   const canUpdate = can("segments.update");
   const canArchive = can("segments.archive");
@@ -528,15 +426,6 @@ export default function SegmentDetailPage() {
   const canRemove = can("segment_contacts.remove");
   const canViewRules = can("segment_rules.view");
   const canEditRules = can("segment_rules.update");
-
-  function toggleRow(id: string) {
-    setSelectedRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
 
   async function handleEdit(values: SegmentFormValues) {
     if (!segment) return;
@@ -604,33 +493,6 @@ export default function SegmentDetailPage() {
       `Added ${summary.inserted.toLocaleString()} contact${summary.inserted === 1 ? "" : "s"} to segment`,
     );
     refetchSegment();
-    refetchContacts();
-  }
-
-  async function handleBulkRemove() {
-    if (!segment) return;
-    // Build phone list from selected contact rows.
-    const phones = contacts
-      .filter((c) => selectedRows.has(c.contact_id))
-      .map((c) => c.phone_number);
-    if (phones.length === 0) return;
-    const result = await removeApi.execute(
-      `/api/segments/${segment.id}/contacts/remove`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phones: phones.join("\n") }),
-      },
-    );
-    if (!result.ok) {
-      toastApiError(result, "Couldn't remove contacts");
-      return;
-    }
-    toast.success(`Removed ${result.data.removed} contacts from segment`);
-    setBulkRemoveConfirm(false);
-    setSelectedRows(new Set());
-    refetchSegment();
-    refetchContacts();
   }
 
   async function handleRemovePhonesSubmit() {
@@ -650,88 +512,7 @@ export default function SegmentDetailPage() {
     setRemoveResult(result.data);
     setRemovePhonesValue("");
     refetchSegment();
-    refetchContacts();
   }
-
-  const columns = useMemo<ColumnDef<ContactRow>[]>(
-    () => [
-      {
-        id: "select",
-        header: () => null,
-        enableSorting: false,
-        cell: ({ row }) => (
-          <input
-            type="checkbox"
-            checked={selectedRows.has(row.original.contact_id)}
-            onClick={(e) => e.stopPropagation()}
-            onChange={() => toggleRow(row.original.contact_id)}
-            aria-label="Select row"
-            className="size-4 cursor-pointer"
-          />
-        ),
-      },
-      {
-        id: "phone_number",
-        header: "Phone",
-        cell: ({ row }) => <PhoneCell phone={row.original.phone_number} />,
-        enableSorting: true,
-      },
-      {
-        id: "last_sent_at",
-        header: "Last Sent",
-        enableSorting: false,
-        cell: () => <span className="text-muted-foreground">—</span>,
-      },
-      {
-        id: "opt_out",
-        header: "Opt-Out",
-        enableSorting: false,
-        cell: ({ row }) =>
-          row.original.is_opt_out ? (
-            <Badge className="border-rose-200 bg-rose-100 text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200">
-              Yes
-            </Badge>
-          ) : (
-            <span className="text-muted-foreground">—</span>
-          ),
-      },
-      {
-        id: "opt_in",
-        header: "Opt-In",
-        enableSorting: false,
-        cell: ({ row }) =>
-          row.original.is_opt_in ? (
-            <Badge className="border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
-              Yes
-            </Badge>
-          ) : (
-            <span className="text-muted-foreground">—</span>
-          ),
-      },
-      {
-        id: "clicker",
-        header: "Clicker",
-        enableSorting: false,
-        cell: ({ row }) =>
-          row.original.is_clicker ? (
-            <Badge variant="secondary">Yes</Badge>
-          ) : (
-            <span className="text-muted-foreground">—</span>
-          ),
-      },
-      {
-        id: "joined_at",
-        header: "Joined",
-        cell: ({ row }) => (
-          <span className="text-muted-foreground">
-            {format(new Date(row.original.joined_at), "MMM d, yyyy")}
-          </span>
-        ),
-        enableSorting: true,
-      },
-    ],
-    [selectedRows],
-  );
 
   if (!auth) return null;
 
@@ -909,24 +690,13 @@ export default function SegmentDetailPage() {
         value={activeTab}
         onValueChange={(v) =>
           setActiveTab(
-            v as "contacts" | "audience" | "rules" | "upload" | "remove",
+            v as "audience" | "rules" | "upload" | "remove",
           )
         }
         className="space-y-4"
       >
         <TabsList>
-          <TabsTrigger value="contacts">Contacts</TabsTrigger>
-          <TabsTrigger value="audience">
-            Audience
-            {segment.active_rules_count > 0 ? (
-              <Badge
-                className="ml-1.5 h-4 border-violet-200 bg-violet-50 px-1 text-[10px] uppercase tracking-wide text-violet-700 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200"
-                title="UNION of manual members + contacts matching active rules"
-              >
-                union
-              </Badge>
-            ) : null}
-          </TabsTrigger>
+          <TabsTrigger value="audience">Audience</TabsTrigger>
           {canViewRules ? (
             <TabsTrigger value="rules">
               Rules
@@ -944,128 +714,6 @@ export default function SegmentDetailPage() {
             <TabsTrigger value="remove">Remove Phones</TabsTrigger>
           ) : null}
         </TabsList>
-
-        <TabsContent value="contacts" className="space-y-3">
-          {segment.active_rules_count > 0 ? (
-            <div className="rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-900 dark:border-violet-900 dark:bg-violet-950/40 dark:text-violet-100">
-              <span className="font-medium">Manual members only.</span> This
-              segment has{" "}
-              <span className="font-medium">
-                {segment.active_rules_count} active rule
-                {segment.active_rules_count === 1 ? "" : "s"}
-              </span>{" "}
-              that add{segment.active_rules_count === 1 ? "s" : ""}{" "}
-              {segment.stats.rule_filtered_count !== null &&
-              segment.stats.rule_filtered_count > segment.stats.total_count
-                ? `${(segment.stats.rule_filtered_count - segment.stats.total_count).toLocaleString()} more contact${segment.stats.rule_filtered_count - segment.stats.total_count === 1 ? "" : "s"} to the audience`
-                : "more contacts to the audience"}
-              . Open the <span className="font-medium">Rules</span> tab to view
-              or change them. Rule-matched contacts can't be removed
-              individually here — change the rule instead.
-            </div>
-          ) : null}
-          <div className="flex flex-wrap items-center gap-3">
-            <Input
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search by phone…"
-              className="h-9 w-full max-w-sm"
-            />
-            {filters.search !== DEFAULT_CONTACTS_FILTERS.search ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  resetFilters();
-                  setSearchInput("");
-                }}
-              >
-                Reset filters
-              </Button>
-            ) : null}
-            <div className="ml-auto">
-              <ExportButton
-                endpoint={`/api/segments/${segment.id}/contacts/export`}
-                permission="segments.view"
-                filenamePrefix={`segment-${segment.segment_id}-contacts`}
-                queryParams={{
-                  search: filters.search || undefined,
-                  sortBy: filters.sortBy,
-                  sortDir: filters.sortDir,
-                }}
-                disabledIfEmpty={contactsTotal}
-              />
-            </div>
-          </div>
-
-          {selectedRows.size > 0 ? (
-            <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2 text-sm">
-              <div>
-                <span className="font-medium">{selectedRows.size}</span>{" "}
-                selected
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSelectedRows(new Set())}
-                >
-                  Clear
-                </Button>
-                {canRemove ? (
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => setBulkRemoveConfirm(true)}
-                  >
-                    <X className="size-4" aria-hidden /> Remove from segment
-                  </Button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-
-          {contactsError ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">
-              <p className="text-destructive">{contactsError}</p>
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-3"
-                onClick={refetchContacts}
-              >
-                Retry
-              </Button>
-            </div>
-          ) : !contactsApi.isLoading && contacts.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed py-12 text-center">
-              <p className="text-sm font-medium">No contacts in this segment</p>
-              <p className="text-sm text-muted-foreground">
-                Use the Upload tab to add phone numbers.
-              </p>
-            </div>
-          ) : (
-            <DataTable<ContactRow>
-              data={contacts}
-              columns={columns}
-              isLoading={contactsApi.isLoading}
-              pageIndex={filters.page}
-              pageSize={filters.pageSize}
-              totalCount={contactsTotal}
-              onPageChange={(p) => updateFilters({ page: p })}
-              onPageSizeChange={(s) => updateFilters({ pageSize: s, page: 0 })}
-              sortBy={filters.sortBy || null}
-              sortDir={filters.sortDir}
-              onSortChange={(by, dir) =>
-                updateFilters({
-                  sortBy: by ?? "created_at",
-                  sortDir: dir,
-                  page: 0,
-                })
-              }
-            />
-          )}
-        </TabsContent>
 
         <TabsContent value="audience" className="space-y-3">
           <AudiencePanel segmentId={segment.id} segmentSlug={segment.segment_id} />
@@ -1091,7 +739,7 @@ export default function SegmentDetailPage() {
             <PhoneUploadForm
               endpoint={`/api/segments/${segment.id}/contacts/upload`}
               onSuccess={handleUploadSuccess}
-              onCancel={() => setActiveTab("contacts")}
+              onCancel={() => setActiveTab("audience")}
               submitLabel="Add to segment"
               successLabel="Contacts added to segment"
             />
@@ -1165,6 +813,7 @@ export default function SegmentDetailPage() {
             name: segment.name,
             segment_id: segment.segment_id,
             original_name: segment.original_name ?? "",
+            exclude_in_use_contacts: segment.exclude_in_use_contacts,
           }}
           onSubmit={handleEdit}
           onCancel={() => setEditOpen(false)}
@@ -1232,39 +881,6 @@ export default function SegmentDetailPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Bulk remove confirm */}
-      <AlertDialog
-        open={bulkRemoveConfirm}
-        onOpenChange={setBulkRemoveConfirm}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Remove {selectedRows.size} contact
-              {selectedRows.size === 1 ? "" : "s"} from segment?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Removes the selected contacts from this segment. The contacts
-              themselves remain in your registry.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={removeApi.isLoading}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault();
-                void handleBulkRemove();
-              }}
-              disabled={removeApi.isLoading}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Remove from segment
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }

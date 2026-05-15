@@ -607,6 +607,13 @@ export const segments = pgTable(
     original_name: text("original_name"),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
+    // When true, the segment's effective audience subtracts any contacts
+    // already snapshotted into a campaign_audience_pool for a campaign
+    // with status='active'. Lets the operator reserve contacts to a
+    // single in-flight campaign without manual exclusion lists.
+    exclude_in_use_contacts: boolean("exclude_in_use_contacts")
+      .notNull()
+      .default(false),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -727,6 +734,10 @@ export const segment_rules = pgTable(
     value: jsonb("value"),
     position: integer("position").notNull(),
     is_active: boolean("is_active").notNull().default(true),
+    // Joins this rule to the running AND/OR of the prior rules. The
+    // first rule (lowest position) has no prior context; its combinator
+    // is read but ignored at eval time.
+    combinator: text("combinator").notNull().default("and"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -759,6 +770,10 @@ export const segment_rules = pgTable(
     check(
       "segment_rules_operator_check",
       sql`${table.operator} IN ('is', 'is_not')`,
+    ),
+    check(
+      "segment_rules_combinator_check",
+      sql`${table.combinator} IN ('and', 'or')`,
     ),
   ],
 );

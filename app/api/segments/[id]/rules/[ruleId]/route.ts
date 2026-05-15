@@ -136,6 +136,7 @@ export async function PATCH(
   if (patch.operator !== undefined) updates.operator = patch.operator;
   if ("value" in patch) updates.value = patch.value ?? null;
   if (patch.is_active !== undefined) updates.is_active = patch.is_active;
+  if (patch.combinator !== undefined) updates.combinator = patch.combinator;
 
   const [updated] = await db
     .update(segment_rules)

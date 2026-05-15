@@ -44,6 +44,7 @@ export type SegmentRule = {
   value: unknown;
   position: number;
   is_active: boolean;
+  combinator: "and" | "or";
   created_at: string;
   updated_at: string;
   ref: RefInfo;
@@ -315,6 +316,7 @@ export function RulesPanel({
       operator: defaultOperator,
       value: null,
       is_active: true,
+      combinator: "and" as const,
     };
     const r = await createApi.execute(`/api/segments/${segmentId}/rules`, {
       method: "POST",
@@ -441,6 +443,7 @@ export function RulesPanel({
               rule={rule}
               segmentId={segmentId}
               canEdit={canEdit}
+              isFirst={idx === 0}
               brands={brands}
               offers={offers}
               segments={segmentsList}
@@ -479,6 +482,9 @@ interface RuleRowProps {
   rule: SegmentRule;
   segmentId: number;
   canEdit: boolean;
+  // True for the topmost rule. Its combinator is ignored at eval time,
+  // so we hide the AND/OR toggle for it.
+  isFirst: boolean;
   brands: PickerOption[];
   offers: PickerOption[];
   segments: PickerOption[];
@@ -497,6 +503,7 @@ function RuleRow({
   rule,
   segmentId,
   canEdit,
+  isFirst,
   brands,
   offers,
   segments,
@@ -517,6 +524,7 @@ function RuleRow({
   const [operator, setOperator] = useState<"is" | "is_not">(rule.operator);
   const [value, setValue] = useState<unknown>(rule.value);
   const [isActive, setIsActive] = useState<boolean>(rule.is_active);
+  const [combinator, setCombinator] = useState<"and" | "or">(rule.combinator);
   const [saving, setSaving] = useState(false);
 
   // Note: there is no `useEffect` to re-sync local state from `rule`. The
@@ -535,6 +543,7 @@ function RuleRow({
       operator: "is" | "is_not";
       value: unknown;
       is_active: boolean;
+      combinator: "and" | "or";
     }>) => {
       const merged = {
         rule_type: patch.rule_type ?? ruleType,
@@ -575,6 +584,11 @@ function RuleRow({
     },
     [ruleType, operator, value, isActive, segmentId, rule.id, onSaved],
   );
+
+  function handleCombinatorChange(next: "and" | "or") {
+    setCombinator(next);
+    void savePatch({ combinator: next });
+  }
 
   function handleRuleTypeChange(next: RuleType) {
     setRuleType(next);
@@ -617,18 +631,41 @@ function RuleRow({
   const incomplete = isRuleIncomplete(ruleType, value);
 
   return (
-    <div
-      className={cn(
-        "flex flex-wrap items-center gap-2 rounded-md border bg-background p-3",
-        !isActive && "opacity-60",
-        incomplete && "border-amber-300 dark:border-amber-700",
-      )}
-      title={
-        incomplete
-          ? "Pick a value to activate this rule. Incomplete rules don't affect the audience."
-          : undefined
-      }
-    >
+    <div className="space-y-2">
+      {/* Combinator: how this rule joins to the running result of the
+          prior rules. Hidden for the first rule (no prior context). */}
+      {!isFirst ? (
+        <div className="flex items-center gap-2 pl-7 text-xs uppercase tracking-wide text-muted-foreground">
+          <Select
+            value={combinator}
+            onValueChange={(v) =>
+              handleCombinatorChange(v as "and" | "or")
+            }
+            disabled={!canEdit || saving}
+          >
+            <SelectTrigger className="h-7 w-[78px] font-semibold text-foreground">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="and">AND</SelectItem>
+              <SelectItem value="or">OR</SelectItem>
+            </SelectContent>
+          </Select>
+          <span>with above</span>
+        </div>
+      ) : null}
+      <div
+        className={cn(
+          "flex flex-wrap items-center gap-2 rounded-md border bg-background p-3",
+          !isActive && "opacity-60",
+          incomplete && "border-amber-300 dark:border-amber-700",
+        )}
+        title={
+          incomplete
+            ? "Pick a value to activate this rule. Incomplete rules don't affect the audience."
+            : undefined
+        }
+      >
       {/* Reorder controls */}
       <div className="flex flex-col">
         <button
@@ -737,6 +774,7 @@ function RuleRow({
             <Trash2 className="size-4" aria-hidden />
           </Button>
         ) : null}
+      </div>
       </div>
     </div>
   );

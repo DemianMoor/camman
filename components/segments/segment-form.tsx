@@ -15,6 +15,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   segmentCreateSchema,
   type SegmentFormValues,
@@ -47,6 +48,8 @@ export function SegmentForm({
       name: initialValues?.name ?? "",
       segment_id: initialValues?.segment_id ?? "",
       original_name: initialValues?.original_name ?? "",
+      exclude_in_use_contacts:
+        initialValues?.exclude_in_use_contacts ?? false,
     },
   });
 
@@ -95,6 +98,33 @@ export function SegmentForm({
                   : "Letters, digits, hyphens, and underscores only."}
               </FormDescription>
               <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="exclude_in_use_contacts"
+          render={({ field }) => (
+            <FormItem className="flex items-start justify-between gap-3 rounded-md border p-3">
+              <div className="grid gap-0.5">
+                <FormLabel className="text-sm font-medium">
+                  Exclude contacts in active campaigns
+                </FormLabel>
+                <FormDescription className="text-xs">
+                  When on, contacts already snapshotted into another
+                  active campaign&apos;s audience are removed from this
+                  segment&apos;s effective audience. Lets you reserve
+                  contacts to one in-flight campaign at a time.
+                </FormDescription>
+              </div>
+              <FormControl>
+                <Switch
+                  checked={field.value ?? false}
+                  onCheckedChange={field.onChange}
+                  disabled={isSubmitting}
+                />
+              </FormControl>
             </FormItem>
           )}
         />

@@ -87,6 +87,7 @@ type Segment = {
   status: "active" | "archived";
   archived_at: string | null;
   created_at: string;
+  exclude_in_use_contacts: boolean;
   active_rules_count: number;
   stats: SegmentStats;
 };
@@ -762,6 +763,7 @@ export default function SegmentsPage() {
               name: editing.name,
               segment_id: editing.segment_id,
               original_name: editing.original_name ?? "",
+              exclude_in_use_contacts: editing.exclude_in_use_contacts,
             }}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}

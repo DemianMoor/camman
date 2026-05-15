@@ -144,15 +144,22 @@ Drafts can be saved with zero required fields and no segments. The audience snap
 
 ## 10e. Segment rules — UNION with manual membership (Model C)
 
-A segment's effective audience is the **UNION** of its manual `segment_contacts` membership and the contacts matching ALL active rules:
+A segment's effective audience is the **UNION** of its manual `segment_contacts` membership and the contacts matching the segment's active rules combined left-to-right via per-rule `combinator`:
 
 ```
-final audience = (manual membership) ∪ (contacts matching every active rule)
+final audience = (manual membership) ∪ (contacts matching the rule chain)
+
+rule chain = rule[0]  comb[1]  rule[1]  comb[2]  rule[2]  …
+             (left-associative; comb[0] is ignored)
 ```
 
 A segment with **zero active rules** short-circuits to manual membership only. The SQL builder (`lib/segment-rules-eval.ts`) checks for active rules first and emits the bare `SELECT contact_id FROM segment_contacts …` clause when there are none — **preserve this property in any future refactor**. With rules active, the builder emits a `SELECT … FROM (manual UNION rule_matches) AS combined` shape. Manual members are always included regardless of whether they match the rules; rules only ever ADD contacts to the audience.
 
-- **Schema:** [db/schema.ts](db/schema.ts) `segment_rules` table. Rules carry `rule_type`, `operator` (`is` / `is_not`), `value` (JSONB; shape per rule_type), `position` (display order; no UNIQUE constraint — reorder briefly produces duplicates and renumbers in a two-phase update), `is_active` boolean. CHECK constraints enforce valid types and operators at the DB level.
+Each rule carries `combinator` (`and` / `or`, default `and`) that joins it to the running result of the prior rules. The first rule's combinator is read but ignored. **Left-associative**: `A OR B AND C` is `(A OR B) AND C`, not the standard SQL precedence — we wrap each step in parens so the planner doesn't reinterpret it. Reordering rules can change the effective audience because of this.
+
+- **Schema:** [db/schema.ts](db/schema.ts) `segment_rules` table. Rules carry `rule_type`, `operator` (`is` / `is_not`), `value` (JSONB; shape per rule_type), `position` (display order; no UNIQUE constraint — reorder briefly produces duplicates and renumbers in a two-phase update), `is_active` boolean, `combinator` (`and` / `or`, default `and`). CHECK constraints enforce valid types, operators, and combinators at the DB level.
+- **Eval uses SQL set arithmetic, not boolean predicates.** [lib/segment-rules-eval.ts](lib/segment-rules-eval.ts) combines rule-matched sets via `UNION` / `INTERSECT` / `EXCEPT` (combinator + operator → set op). This was a perf fix: `c.id IN (sub1) OR c.id IN (sub2)` against a >100K-row contacts table picks a terrible plan (seqscan); the set-arithmetic form lets each branch use its own index plan. Mapping: AND+is → INTERSECT, OR+is → UNION, AND+is_not → EXCEPT, OR+is_not → UNION with `(org_contacts EXCEPT inner)` (slow; rare).
+- **`exclude_in_use_contacts` flag on the segment** (`segments.exclude_in_use_contacts`, default false): when on, the eval EXCEPTs `campaign_audience_pool.contact_id` for any campaign with `status='active'` from the final clause. Lets the operator reserve contacts to one in-flight campaign at a time. Paused/completed/archived campaigns DO NOT block — only `active` counts.
 - **Validation source of truth:** [lib/validators/segment-rule-types.ts](lib/validators/segment-rule-types.ts) maps each `rule_type` → allowed operators + value shape. Both server (Zod schemas in [lib/validators/segment-rules.ts](lib/validators/segment-rules.ts)) and client (`RulesPanel`) read from this map — don't fork.
 - **Operators are constrained per rule type.** Time-based rule types (`*_in_last_n_days`, `*_more_than_n_days_ago`) accept `is` only — the direction is encoded in the type name. The form hides the operator select for these.
 - **FK ownership.** Brand/offer/segment/contact_group IDs in rule values are re-verified against the user's org before insert/update (`verifyValueOwnership` in [app/api/segments/[id]/rules/route.ts](app/api/segments/[id]/rules/route.ts)). RLS is defense-in-depth.

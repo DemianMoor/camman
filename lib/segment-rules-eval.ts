@@ -4,7 +4,7 @@ import { and, asc, eq, sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { segment_rules } from "@/db/schema";
+import { segment_rules, segments } from "@/db/schema";
 
 import { getValueShapeForRuleType } from "./validators/segment-rule-types";
 import type { RuleType } from "./validators/segment-rule-types";
@@ -125,15 +125,17 @@ function ruleInnerQuery(
 // as a `SELECT contact_id FROM ...` subquery suitable for embedding in
 // `(SELECT ... FROM (<frag>) sub)`.
 //
-// Semantics (Model C — UNION):
+// Semantics (Model C — UNION + per-rule combinator):
 //
 //   final audience =  (manual segment_contacts membership)
-//                  ∪  (org contacts matching ALL active rules)
+//                  ∪  (org contacts matching the per-rule combinator chain)
 //
 //   - Zero ACTIVE rules → short-circuits to manual membership only.
 //     CRITICAL: any rewrite must preserve this property.
 //   - 1+ active rules → UNION of manual + rule-matched contacts.
-//     Rules within the segment combine via AND. `is_not` negates per-rule.
+//     Rules combine left-to-right by `combinator`: rule N joins to the
+//     running result with `AND` or `OR`. The FIRST rule's combinator is
+//     ignored (no prior context to join to). `is_not` negates per-rule.
 //
 // Manual members are always included regardless of whether they match the
 // rules — that's the difference from the prior intersection behaviour.
@@ -143,11 +145,22 @@ export async function buildSegmentAudienceClause(
   segmentId: number,
   orgId: string,
 ): Promise<SQL> {
+  // One read to pull the segment's exclude_in_use_contacts flag alongside
+  // its rules. The flag wraps the final audience clause in an EXCEPT
+  // against the live in-use pool.
+  const segRow = await db
+    .select({ exclude_in_use: segments.exclude_in_use_contacts })
+    .from(segments)
+    .where(and(eq(segments.id, segmentId), eq(segments.org_id, orgId)))
+    .limit(1);
+  const excludeInUse = segRow[0]?.exclude_in_use === true;
+
   const allRules = await db
     .select({
       rule_type: segment_rules.rule_type,
       operator: segment_rules.operator,
       value: segment_rules.value,
+      combinator: segment_rules.combinator,
     })
     .from(segment_rules)
     .where(
@@ -164,48 +177,105 @@ export async function buildSegmentAudienceClause(
   // audience = manual.
   const rules = allRules.filter(isRuleComplete);
 
+  // The "in-use" pool: contacts already snapshotted into a campaign with
+  // status='active'. Wrapped around the segment's audience as an EXCEPT
+  // when the segment's exclude_in_use_contacts flag is on. Note we read
+  // from campaign_audience_pool directly; that table holds frozen
+  // snapshots independent of opt-out activity.
+  function applyInUseExclusion(audience: SQL): SQL {
+    if (!excludeInUse) return audience;
+    return drizzleSql`
+      ${audience}
+      EXCEPT
+      SELECT p.contact_id
+      FROM campaign_audience_pool p
+      INNER JOIN campaigns ca ON ca.id = p.campaign_id
+      WHERE p.org_id = ${orgId}::uuid
+        AND ca.org_id = ${orgId}::uuid
+        AND ca.status = 'active'
+    `;
+  }
+
   // Zero-rule short-circuit: identical to pre-rules behavior — manual only.
   // Tested explicitly in scripts/test-segment-rules-api.ts.
   if (rules.length === 0) {
-    return drizzleSql`
+    return applyInUseExclusion(drizzleSql`
       SELECT sc.contact_id
       FROM segment_contacts sc
       WHERE sc.segment_id = ${segmentId}::int
         AND sc.org_id = ${orgId}::uuid
+    `);
+  }
+
+  // Combine rules via SQL set arithmetic (UNION / INTERSECT / EXCEPT) so
+  // each rule's subquery can pick its own optimal index plan. Mapping:
+  //
+  //   AND with "is"      → INTERSECT  (running ∩ inner)
+  //   OR  with "is"      → UNION      (running ∪ inner)
+  //   AND with "is_not"  → EXCEPT     (running ∖ inner)
+  //   OR  with "is_not"  → UNION  (running ∪ (all_contacts ∖ inner))   *
+  //
+  //   * The OR-is_not case expands the negation to "all org contacts
+  //     except inner" before UNION-ing — full table scan on contacts.
+  //     Rare path (the UI defaults each rule to "is" + combinator=and),
+  //     but correct.
+  //
+  // The first rule has no prior context: its combinator is ignored, and
+  // we seed `running` from it directly. For a first rule with operator
+  // "is_not", the seed becomes (all_contacts ∖ inner).
+  //
+  // Left-associative — `(R1 OP2 R2) OP3 R3 …` — so we wrap each step in
+  // parens. (Postgres gives INTERSECT higher precedence than UNION/EXCEPT
+  // by default; the parens force left-to-right regardless.)
+  function ruleSet(rule: (typeof rules)[number]): SQL {
+    const inner = ruleInnerQuery(rule, segmentId, orgId);
+    if (rule.operator !== "is_not") return inner;
+    return drizzleSql`
+      SELECT id AS contact_id FROM contacts WHERE org_id = ${orgId}::uuid
+      EXCEPT
+      ${inner}
     `;
   }
 
-  // Build per-rule predicates that reference `c.id` (the outer contacts
-  // alias of the rule_matches scan). Each rule becomes a `c.id IN (...)`
-  // or `c.id NOT IN (...)` test. Rules combine via AND.
-  const conditions = rules.map((r) => {
-    const inner = ruleInnerQuery(r, segmentId, orgId);
-    return r.operator === "is_not"
-      ? drizzleSql`c.id NOT IN (${inner})`
-      : drizzleSql`c.id IN (${inner})`;
-  });
-  const joined = conditions.reduce(
-    (acc, cnd, i) => (i === 0 ? cnd : drizzleSql`${acc} AND ${cnd}`),
-  );
+  function combinedOp(rule: (typeof rules)[number]): string {
+    // Operator + combinator → set operator.
+    // is_not + AND → EXCEPT; otherwise drop is_not into UNION via ruleSet.
+    if (rule.operator === "is_not" && rule.combinator !== "or") {
+      return "EXCEPT";
+    }
+    return rule.combinator === "or" ? "UNION" : "INTERSECT";
+  }
 
-  // UNION ALL + DISTINCT is cheaper than UNION when overlaps are few, but
-  // UNION suffices here (Postgres collapses duplicates implicitly). We
-  // could switch to UNION ALL + an outer SELECT DISTINCT if profiling shows
-  // overlap-heavy workloads dominating, but the planner currently chooses
-  // sensibly for both shapes.
-  return drizzleSql`
+  // For EXCEPT we want the inner subquery directly (so EXCEPT subtracts it),
+  // not its negation. For all other ops we want the rule's matched set
+  // (which already handles is_not by EXCEPT-expansion).
+  function operandFor(rule: (typeof rules)[number]): SQL {
+    if (rule.operator === "is_not" && rule.combinator !== "or") {
+      return ruleInnerQuery(rule, segmentId, orgId);
+    }
+    return ruleSet(rule);
+  }
+
+  const ruleMatches = rules.reduce<SQL>((acc, rule, i) => {
+    if (i === 0) return ruleSet(rule);
+    const op = combinedOp(rule);
+    const next = operandFor(rule);
+    return drizzleSql`(${acc}) ${drizzleSql.raw(op)} (${next})`;
+  }, drizzleSql``);
+
+  // Manual membership ∪ rule-matched. UNION dedupes; UNION ALL would be
+  // cheaper but the dedup is needed when a manual member also matches a
+  // rule (otherwise the count is inflated).
+  return applyInUseExclusion(drizzleSql`
     SELECT contact_id FROM (
       SELECT sc.contact_id AS contact_id
       FROM segment_contacts sc
       WHERE sc.segment_id = ${segmentId}::int
         AND sc.org_id = ${orgId}::uuid
       UNION
-      SELECT c.id AS contact_id
-      FROM contacts c
-      WHERE c.org_id = ${orgId}::uuid
-        AND (${joined})
+      (${ruleMatches})
     ) AS combined
-  `;
+  `);
 }
 
 // Helper for the rules preview endpoint and refresh-stats endpoint:

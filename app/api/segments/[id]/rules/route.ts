@@ -46,6 +46,7 @@ type RuleRow = {
   value: unknown;
   position: number;
   is_active: boolean;
+  combinator: string;
   created_at: Date;
   updated_at: Date;
 };
@@ -248,6 +249,7 @@ export async function POST(
         value: (input.value as Record<string, unknown>) ?? null,
         position: nextPos,
         is_active: input.is_active,
+        combinator: input.combinator,
       })
       .returning();
     return row;

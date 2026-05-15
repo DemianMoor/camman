@@ -52,6 +52,7 @@ export async function POST(req: NextRequest) {
         segment_id: parsed.data.segment_id,
         original_name: nullIfEmpty(parsed.data.original_name),
         status: "active",
+        exclude_in_use_contacts: parsed.data.exclude_in_use_contacts ?? false,
       })
       .returning();
     return NextResponse.json(created, { status: 201 });

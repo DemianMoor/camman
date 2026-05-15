@@ -1037,90 +1037,11 @@ export default function CampaignDetailPage() {
         </div>
       </header>
 
-      {/* ============ Metadata ============ */}
-      <Card>
-        <CardContent className="grid gap-4 pt-6 text-sm md:grid-cols-3">
-          <MetaCell label="Brand" value={
-            campaign.brand ? (
-              <span className="inline-flex items-center gap-1.5">
-                <span
-                  className="size-2 rounded-full"
-                  style={{
-                    backgroundColor: campaign.brand.color ?? "#64748B",
-                  }}
-                />
-                {campaign.brand.name}
-              </span>
-            ) : "—"
-          } />
-          <MetaCell label="Offer" value={
-            campaign.offer ? (
-              <span className="inline-flex items-center gap-1.5">
-                <span
-                  className="size-2 rounded-full"
-                  style={{
-                    backgroundColor: campaign.offer.color ?? "#64748B",
-                  }}
-                />
-                {campaign.offer.name}
-              </span>
-            ) : "—"
-          } />
-          <MetaCell
-            label="Routing"
-            value={campaign.routing_type?.name ?? "—"}
-          />
-          <MetaCell
-            label="Traffic"
-            value={campaign.traffic_type?.name ?? "—"}
-          />
-          <MetaCell
-            label="Assigned to"
-            value={memberLabel(campaign.assigned_to_user_id) ?? "Unassigned"}
-          />
-          <MetaCell
-            label="Created by"
-            value={memberLabel(campaign.created_by_user_id) ?? "—"}
-          />
-          <MetaCell
-            label="Created"
-            value={format(new Date(campaign.created_at), "MMM d, yyyy")}
-          />
-          <MetaCell
-            label="Start / End"
-            value={
-              campaign.start_date || campaign.end_date
-                ? `${campaign.start_date ?? "—"} → ${campaign.end_date ?? "—"}`
-                : "—"
-            }
-          />
-          <MetaCell
-            label="Audience"
-            value={
-              <span
-                title={
-                  `Segments: ${campaign.audience_segment_ids.join(", ") || "—"}\n` +
-                  `Contact groups: ${campaign.audience_contact_group_ids.join(", ") || "—"}\n` +
-                  `Cap: ${campaign.audience_cap ?? "none"}\n` +
-                  `Filters: ${JSON.stringify(campaign.audience_filters)}`
-                }
-              >
-                {campaign.audience_snapshot_count.toLocaleString()} contacts
-                frozen
-                {campaign.audience_cap !== null
-                  ? ` (capped at ${campaign.audience_cap.toLocaleString()})`
-                  : ""}
-              </span>
-            }
-          />
-        </CardContent>
-        {campaign.notes ? (
-          <CardContent className="border-t pt-4 text-sm">
-            <div className="text-xs uppercase text-muted-foreground">Notes</div>
-            <p className="mt-1 whitespace-pre-wrap">{campaign.notes}</p>
-          </CardContent>
-        ) : null}
-      </Card>
+      {/* ============ Metadata (compact two-line summary + expand) ============ */}
+      <CampaignMetaCompact
+        campaign={campaign}
+        memberLabel={memberLabel}
+      />
 
       {/* ============ Stages section ============ */}
       <section className="space-y-4">
@@ -1535,5 +1456,161 @@ function MetaCell({
       <span className="text-xs uppercase text-muted-foreground">{label}</span>
       <span className="text-sm">{value}</span>
     </div>
+  );
+}
+
+function CampaignMetaCompact({
+  campaign,
+  memberLabel,
+}: {
+  campaign: CampaignDetail;
+  memberLabel: (userId: string | null) => string | null;
+}) {
+  const [showDetails, setShowDetails] = useState(false);
+  const assigned = memberLabel(campaign.assigned_to_user_id) ?? "Unassigned";
+  const createdBy = memberLabel(campaign.created_by_user_id) ?? "—";
+  const createdDate = format(new Date(campaign.created_at), "MMM d, yyyy");
+  const audienceCount = campaign.audience_snapshot_count;
+  const capSuffix =
+    campaign.audience_cap !== null
+      ? ` (cap ${campaign.audience_cap.toLocaleString()})`
+      : "";
+  const dateRange =
+    campaign.start_date || campaign.end_date
+      ? `${campaign.start_date ?? "—"} → ${campaign.end_date ?? "—"}`
+      : "—";
+
+  return (
+    <Card>
+      <CardContent className="grid gap-2 p-4 text-sm">
+        {/* Line 1: Brand · Offer · Routing */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          {campaign.brand ? (
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className="size-2 rounded-full"
+                style={{ backgroundColor: campaign.brand.color ?? "#64748B" }}
+                aria-hidden
+              />
+              <span className="font-medium">{campaign.brand.name}</span>
+            </span>
+          ) : null}
+          {campaign.brand && campaign.offer ? (
+            <span className="text-muted-foreground">·</span>
+          ) : null}
+          {campaign.offer ? (
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className="size-2 rounded-full"
+                style={{ backgroundColor: campaign.offer.color ?? "#64748B" }}
+                aria-hidden
+              />
+              <span>{campaign.offer.name}</span>
+            </span>
+          ) : null}
+          {campaign.routing_type ? (
+            <>
+              <span className="text-muted-foreground">·</span>
+              <span>{campaign.routing_type.name}</span>
+            </>
+          ) : null}
+        </div>
+
+        {/* Line 2: Traffic · Assigned · Created · Audience [Details ▾] */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <span>
+            Traffic:{" "}
+            <span className="text-foreground">
+              {campaign.traffic_type?.name ?? "—"}
+            </span>
+          </span>
+          <span>·</span>
+          <span>
+            Assigned: <span className="text-foreground">{assigned}</span>
+          </span>
+          <span>·</span>
+          <span>
+            Created <span className="text-foreground">{createdDate}</span>
+          </span>
+          <span>·</span>
+          <span>
+            Audience:{" "}
+            <span className="font-mono tabular-nums text-foreground">
+              {audienceCount.toLocaleString()}
+            </span>{" "}
+            frozen
+            {capSuffix}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowDetails((s) => !s)}
+            className="ml-auto inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground"
+            aria-expanded={showDetails}
+          >
+            Details
+            <ChevronDown
+              className={cn(
+                "size-3.5 transition-transform",
+                showDetails && "rotate-180",
+              )}
+              aria-hidden
+            />
+          </button>
+        </div>
+
+        {showDetails ? (
+          <div className="grid gap-3 border-t pt-3 md:grid-cols-3">
+            <MetaCell label="Created by" value={createdBy} />
+            <MetaCell label="Start / End" value={dateRange} />
+            <MetaCell
+              label="Segments"
+              value={
+                campaign.audience_segment_ids.length > 0
+                  ? campaign.audience_segment_ids.join(", ")
+                  : "—"
+              }
+            />
+            <MetaCell
+              label="Contact groups"
+              value={
+                campaign.audience_contact_group_ids.length > 0
+                  ? campaign.audience_contact_group_ids.join(", ")
+                  : "—"
+              }
+            />
+            <MetaCell
+              label="Audience cap"
+              value={
+                campaign.audience_cap !== null
+                  ? campaign.audience_cap.toLocaleString()
+                  : "None"
+              }
+            />
+            <MetaCell
+              label="Filters"
+              value={
+                <span className="font-mono text-xs">
+                  {Object.entries(campaign.audience_filters)
+                    .filter(([, v]) => v === true)
+                    .map(([k]) => k.replace(/^include_/, ""))
+                    .join(", ") || "—"}
+                </span>
+              }
+            />
+          </div>
+        ) : null}
+
+        {campaign.notes ? (
+          <div className="border-t pt-3">
+            <div className="text-xs uppercase text-muted-foreground">
+              Notes
+            </div>
+            <p className="mt-1 whitespace-pre-wrap text-sm">
+              {campaign.notes}
+            </p>
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }

@@ -865,10 +865,17 @@ export default function SegmentDetailPage() {
               : "sm:grid-cols-5",
           )}
         >
-          <StatCard label="Total contacts" value={segment.stats.total_count} />
+          <StatCard
+            label={
+              segment.active_rules_count > 0
+                ? "Manual members"
+                : "Total contacts"
+            }
+            value={segment.stats.total_count}
+          />
           {segment.active_rules_count > 0 ? (
             <StatCard
-              label="Rule-filtered"
+              label="Audience (manual + rules)"
               value={
                 segment.stats.rule_filtered_count !== null
                   ? segment.stats.rule_filtered_count

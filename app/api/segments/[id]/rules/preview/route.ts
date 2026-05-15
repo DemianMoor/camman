@@ -2,7 +2,7 @@ import { and, eq, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { segment_contacts, segments } from "@/db/schema";
+import { segment_contacts, segment_stats, segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
@@ -70,6 +70,29 @@ export async function POST(
       truncated: true,
     });
   }
+
+  // Persist the freshly computed count to segment_stats so the segments
+  // list + detail header show the rule-matched audience without a manual
+  // /refresh-stats round trip. Fire-and-forget — failures here don't
+  // affect the preview response. The org_id filter on the segment_stats
+  // row matches the existing one in /refresh-stats.
+  try {
+    await db
+      .update(segment_stats)
+      .set({
+        rule_filtered_count: result.count,
+        updated_at: drizzleSql`now()`,
+      })
+      .where(
+        and(
+          eq(segment_stats.segment_id, segmentId),
+          eq(segment_stats.org_id, orgId),
+        ),
+      );
+  } catch {
+    // Swallow — caching is best-effort.
+  }
+
   return NextResponse.json({
     count: result.count,
     manual_count: manualCount,

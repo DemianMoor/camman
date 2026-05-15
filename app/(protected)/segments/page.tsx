@@ -370,7 +370,38 @@ export default function SegmentsPage() {
         id: "total",
         header: "Contacts",
         enableSorting: false,
-        cell: ({ row }) => <CountBadge count={row.original.stats.total_count} />,
+        cell: ({ row }) => {
+          // When the segment has active rules, show the rule-matched
+          // audience (manual ∪ rule-matched) — that's the count the user
+          // cares about. Fall back to total_count (manual only) when
+          // rule_filtered_count hasn't been computed yet.
+          const hasRules = row.original.active_rules_count > 0;
+          const ruleCount = row.original.stats.rule_filtered_count;
+          if (hasRules) {
+            if (ruleCount === null) {
+              return (
+                <span
+                  className="inline-flex items-center gap-1"
+                  title="Audience count hasn't been refreshed — open the Rules tab to compute it"
+                >
+                  <CountBadge count={row.original.stats.total_count} />
+                  <span className="text-xs text-muted-foreground">
+                    + rules
+                  </span>
+                </span>
+              );
+            }
+            return (
+              <span
+                className="inline-flex items-center gap-1"
+                title={`Manual ${row.original.stats.total_count.toLocaleString()} · Rule-matched UNION`}
+              >
+                <CountBadge count={ruleCount} />
+              </span>
+            );
+          }
+          return <CountBadge count={row.original.stats.total_count} />;
+        },
       },
       {
         id: "opt_outs",

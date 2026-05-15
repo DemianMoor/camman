@@ -522,9 +522,9 @@ export default function CreativesPage() {
         },
       },
       {
-        id: "spam",
+        id: "spam_score",
         header: "Spam Score",
-        enableSorting: false,
+        enableSorting: true,
         cell: ({ row }) => <SpamScoreCell creative={row.original} />,
       },
       {

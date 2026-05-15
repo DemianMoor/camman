@@ -35,6 +35,11 @@ const SORT_COLUMNS = {
   text: creatives.text,
   quality: creatives.quality,
   sequence_placement: creatives.sequence_placement,
+  // Sorts by the per-row column directly. Unscored rows (NULL) bubble to
+  // the end of the asc/desc range courtesy of Postgres's NULLS LAST
+  // default. We append a stable tiebreaker on id so ordering is
+  // deterministic across paginated requests.
+  spam_score: creatives.spam_score,
 } as const;
 
 const VALID_STATUSES = new Set<string>(CREATIVE_STATUSES);
@@ -131,6 +136,17 @@ export async function GET(req: NextRequest) {
   const sortKey = (params.sortBy ?? "created_at") as keyof typeof SORT_COLUMNS;
   const sortColumn = SORT_COLUMNS[sortKey] ?? creatives.created_at;
   const orderFn = params.sortDir === "asc" ? asc : desc;
+  // Postgres defaults NULLs LAST for asc and NULLs FIRST for desc. For
+  // spam_score we always want unscored rows at the end (a desc sort by
+  // spam score should surface the highest scores first, not the NULLs).
+  // Tiebreaker on id keeps pagination deterministic.
+  const orderByClause =
+    sortKey === "spam_score"
+      ? [
+          drizzleSql`${creatives.spam_score} ${drizzleSql.raw(params.sortDir === "asc" ? "ASC" : "DESC")} NULLS LAST`,
+          asc(creatives.id),
+        ]
+      : [orderFn(sortColumn)];
 
   const [rows, countRows] = await Promise.all([
     db
@@ -158,7 +174,7 @@ export async function GET(req: NextRequest) {
       })
       .from(creatives)
       .where(where)
-      .orderBy(orderFn(sortColumn))
+      .orderBy(...orderByClause)
       .limit(params.pageSize)
       .offset(params.page * params.pageSize),
     db

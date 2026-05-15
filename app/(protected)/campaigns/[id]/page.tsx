@@ -26,8 +26,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ResultsImportForm } from "@/components/campaigns/results-import-form";
-import { StageEditDrawer } from "@/components/campaigns/stage-edit-drawer";
-import { StageInlineCreator } from "@/components/campaigns/stage-inline-creator";
+import { StageInlineEditor } from "@/components/campaigns/stage-inline-creator";
 import {
   StageStatusChangeDialog,
   type StageTransition,
@@ -783,7 +782,12 @@ export default function CampaignDetailPage() {
                   onClick={(e) => e.stopPropagation()}
                 >
                   {showEdit ? (
-                    <DropdownMenuItem onSelect={() => setEditingStage(s)}>
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        setEditingStage(s);
+                        setAddStageOpen(true);
+                      }}
+                    >
                       <Pencil className="size-4" aria-hidden /> Edit
                     </DropdownMenuItem>
                   ) : null}
@@ -1279,7 +1283,12 @@ export default function CampaignDetailPage() {
                   sortDir="asc"
                   onSortChange={() => {}}
                   onRowClick={
-                    canUpdateStage ? (s) => setEditingStage(s) : undefined
+                    canUpdateStage
+                      ? (s) => {
+                          setEditingStage(s);
+                          setAddStageOpen(true);
+                        }
+                      : undefined
                   }
                 />
               </>
@@ -1288,15 +1297,37 @@ export default function CampaignDetailPage() {
         )}
 
         {canCreateStage && campaign.status !== "archived" ? (
-          <StageInlineCreator
+          <StageInlineEditor
             campaign={campaign}
             campaignId={campaignId}
+            stage={editingStage}
             isOpen={addStageOpen}
-            onOpenChange={setAddStageOpen}
-            onCreated={() => {
+            onOpenChange={(open) => {
+              setAddStageOpen(open);
+              if (!open) setEditingStage(null);
+            }}
+            onSaved={() => {
               refetchStages();
               refetchCampaign();
             }}
+            onImportResults={
+              canImportResults && editingStage
+                ? () => {
+                    setImportStage(editingStage);
+                    setAddStageOpen(false);
+                    setEditingStage(null);
+                  }
+                : undefined
+            }
+            onViewImportHistory={
+              canViewImports && editingStage
+                ? () => {
+                    setHistoryStage(editingStage);
+                    setAddStageOpen(false);
+                    setEditingStage(null);
+                  }
+                : undefined
+            }
           />
         ) : null}
       </section>
@@ -1351,33 +1382,6 @@ export default function CampaignDetailPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      <StageEditDrawer
-        campaign={campaign}
-        campaignId={campaignId}
-        stage={editingStage}
-        open={editingStage !== null}
-        onOpenChange={(open) => {
-          if (!open) setEditingStage(null);
-        }}
-        onUpdated={refetchStages}
-        onImportResults={
-          canImportResults && editingStage
-            ? () => {
-                setImportStage(editingStage);
-                setEditingStage(null);
-              }
-            : undefined
-        }
-        onViewImportHistory={
-          canViewImports && editingStage
-            ? () => {
-                setHistoryStage(editingStage);
-                setEditingStage(null);
-              }
-            : undefined
-        }
-      />
 
       <StageStatusChangeDialog
         transition={stageTransitionTarget?.transition ?? null}

@@ -135,6 +135,8 @@ export async function GET(
       click_count: campaign_stages.click_count,
       notes: campaign_stages.notes,
       tracking_id: campaign_stages.tracking_id,
+      split_index: campaign_stages.split_index,
+      split_total: campaign_stages.split_total,
       archived_at: campaign_stages.archived_at,
       created_at: campaign_stages.created_at,
       creative: {
@@ -180,6 +182,8 @@ export async function GET(
         include_no_status: r.include_no_status,
         include_clickers: r.include_clickers,
         exclude_clickers: r.exclude_clickers,
+        split_index: r.split_index,
+        split_total: r.split_total,
       }).then((res) => res.count),
     ),
   );

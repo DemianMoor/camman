@@ -162,6 +162,11 @@ export interface StageAudienceFilters {
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
+  // Optional A/B partition. When both are set, the audience is filtered
+  // by `mod(hashtext(contact_id::text), split_total) = split_index - 1`.
+  // Either-NULL ⇒ no partition. Bounds are enforced by the DB CHECK.
+  split_index?: number | null;
+  split_total?: number | null;
 }
 
 export interface StageAudienceCountResult {
@@ -188,6 +193,9 @@ export async function computeStageAudienceCount(
   filters: StageAudienceFilters,
 ): Promise<StageAudienceCountResult> {
   const { include_no_status, include_clickers, exclude_clickers } = filters;
+  const splitIndex = filters.split_index ?? null;
+  const splitTotal = filters.split_total ?? null;
+  const splitActive = splitIndex !== null && splitTotal !== null;
   const rows = (await db.execute(drizzleSql`
     with joined as (
       select
@@ -197,13 +205,20 @@ export async function computeStageAudienceCount(
         exists (
           select 1 from opt_outs oo
           where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
-        ) as is_opt_out_now
+        ) as is_opt_out_now,
+        case
+          when ${splitActive}::boolean
+            then mod(hashtext(p.contact_id::text), ${splitTotal ?? 1}::int) =
+                 (${(splitIndex ?? 1) - 1})::int
+          else true
+        end as in_split
       from campaign_audience_pool p
       where p.campaign_id = ${campaignId}::int and p.org_id = ${orgId}::uuid
     )
     select
       count(*) filter (
         where not is_opt_out_now
+          and in_split
           and (
             (${include_no_status}::boolean and was_no_status_at_snapshot)
             or (${include_clickers}::boolean and was_clicker_at_snapshot)
@@ -211,12 +226,12 @@ export async function computeStageAudienceCount(
           and not (${exclude_clickers}::boolean and was_clicker_at_snapshot)
       )::int as count,
       count(*) filter (
-        where not is_opt_out_now and was_no_status_at_snapshot
+        where not is_opt_out_now and in_split and was_no_status_at_snapshot
       )::int as no_status,
       count(*) filter (
-        where not is_opt_out_now and was_clicker_at_snapshot
+        where not is_opt_out_now and in_split and was_clicker_at_snapshot
       )::int as clickers,
-      count(*) filter (where is_opt_out_now)::int as excluded_for_optout
+      count(*) filter (where is_opt_out_now and in_split)::int as excluded_for_optout
     from joined
   `)) as unknown as {
     count: number;

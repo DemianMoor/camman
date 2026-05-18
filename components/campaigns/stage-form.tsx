@@ -128,6 +128,19 @@ export interface StageFormProps {
   // where one can be generated). Always null in create mode — the ID is
   // generated on save and surfaced only after the next fetch.
   trackingId?: string | null;
+  // Edit-mode only: existing split assignment (NULL when the stage isn't
+  // part of a split). Controls whether the "Split for A/B" action is
+  // shown and renders a "Split X of Y" badge in the audience block.
+  splitIndex?: number | null;
+  splitTotal?: number | null;
+  // Edit-mode only: invoked after the split endpoint succeeds. Parent
+  // should refetch its stages list and close the editor (the source
+  // stage's label/audience change in place plus N-1 new siblings appear).
+  onSplit?: (result: {
+    source_id: number;
+    new_stage_ids: number[];
+    split_total: number;
+  }) => void;
   campaign: {
     id: number;
     name: string;
@@ -213,6 +226,9 @@ export function StageForm({
   campaignId,
   stageId,
   trackingId,
+  splitIndex,
+  splitTotal,
+  onSplit,
   campaign,
   resultsCounters,
   onImportResults,
@@ -231,10 +247,19 @@ export function StageForm({
   const phonesApi = useApiCall<{ data: ProviderPhone[] }>();
   const previewApi = useApiCall<AudiencePreview>();
   const createCreativeApi = useApiCall<{ id: number }>();
+  const splitApi = useApiCall<{
+    source_id: number;
+    new_stage_ids: number[];
+    split_total: number;
+  }>();
   const [creatives, setCreatives] = useState<Creative[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [phones, setPhones] = useState<ProviderPhone[]>([]);
   const [newCreativeOpen, setNewCreativeOpen] = useState(false);
+  const [splitOpen, setSplitOpen] = useState(false);
+  // 2–5 in the UI per product spec; the endpoint caps at 10 if someone
+  // POSTs directly.
+  const [splitCount, setSplitCount] = useState<number>(2);
 
   // Creatives are filtered by the campaign's offer + status=active so we
   // don't accidentally send unfinished copy. If the campaign has no offer
@@ -476,6 +501,35 @@ export function StageForm({
       form.setValue("creative_id", newId, { shouldDirty: true });
     }
   }
+
+  async function handleSplitSubmit() {
+    if (!isEdit || !stageId) return;
+    const result = await splitApi.execute(
+      `/api/campaigns/${campaignId}/stages/${stageId}/split`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ count: splitCount }),
+      },
+    );
+    if (!result.ok) {
+      toastApiError(result, "Couldn't split stage");
+      return;
+    }
+    setSplitOpen(false);
+    toast.success(
+      `Stage split into ${result.data.split_total} siblings for A/B`,
+    );
+    onSplit?.(result.data);
+  }
+
+  const isAlreadySplit = splitTotal != null && splitTotal >= 2;
+  const canSplit =
+    isEdit &&
+    !isAlreadySplit &&
+    stageId != null &&
+    audiencePreview !== null &&
+    audiencePreview.count >= 2;
 
   const offerSalesPages = campaign.offer?.sales_pages ?? [];
   const audienceEmpty =
@@ -955,12 +1009,19 @@ export function StageForm({
                   <div className="text-xs uppercase text-muted-foreground">
                     Stage audience
                   </div>
-                  {audienceLoading ? (
-                    <Loader2
-                      className="size-4 animate-spin text-muted-foreground"
-                      aria-hidden
-                    />
-                  ) : null}
+                  <div className="flex items-center gap-2">
+                    {isAlreadySplit ? (
+                      <Badge variant="secondary" className="text-[10px]">
+                        Split {splitIndex} of {splitTotal}
+                      </Badge>
+                    ) : null}
+                    {audienceLoading ? (
+                      <Loader2
+                        className="size-4 animate-spin text-muted-foreground"
+                        aria-hidden
+                      />
+                    ) : null}
+                  </div>
                 </div>
                 {audienceError ? (
                   <p className="text-sm text-muted-foreground">
@@ -1000,6 +1061,32 @@ export function StageForm({
                       <p className="text-xs text-amber-700 dark:text-amber-400">
                         Empty audience. Adjust filters or check the parent
                         campaign.
+                      </p>
+                    ) : null}
+                    {canSplit ? (
+                      <div className="border-t pt-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            setSplitCount(2);
+                            setSplitOpen(true);
+                          }}
+                          disabled={isSubmitting || splitApi.isLoading}
+                          className="w-full"
+                        >
+                          Split for A/B test…
+                        </Button>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          Partition this stage&apos;s audience into 2–5 siblings.
+                          Each sibling can hold its own creative.
+                        </p>
+                      </div>
+                    ) : isAlreadySplit ? (
+                      <p className="border-t pt-2 text-[11px] text-muted-foreground">
+                        This stage is split {splitIndex} of {splitTotal}. To
+                        re-split, delete the sibling splits first.
                       </p>
                     ) : null}
                   </>
@@ -1153,6 +1240,80 @@ export function StageForm({
           onCancel={() => setNewCreativeOpen(false)}
           isSubmitting={createCreativeApi.isLoading}
         />
+      </FormDialog>
+
+      {/* Split-for-A/B dialog. Confirms count, fires the split endpoint,
+          and lets the parent refetch. The source stage becomes split 1
+          of N; (N-1) sibling stages are created with cloned config. */}
+      <FormDialog
+        open={splitOpen}
+        onOpenChange={(open) => {
+          if (!splitApi.isLoading) setSplitOpen(open);
+        }}
+        className="sm:max-w-md"
+      >
+        <DialogHeader>
+          <DialogTitle>Split stage for A/B test</DialogTitle>
+          <DialogDescription>
+            This stage&apos;s audience will be partitioned into the chosen
+            number of siblings. Each sibling clones the current
+            configuration so you can swap the creative or other settings
+            per variant. The split is deterministic — the same contact
+            always lands in the same bucket.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-3 py-2">
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium">Number of variants</label>
+            <div className="flex flex-wrap gap-1.5">
+              {[2, 3, 4, 5].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setSplitCount(n)}
+                  disabled={splitApi.isLoading}
+                  className={cn(
+                    "rounded-full border px-3 py-1 text-sm transition-colors",
+                    splitCount === n
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border bg-background text-muted-foreground hover:bg-muted",
+                  )}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {audiencePreview
+                ? `~${Math.floor(
+                    audiencePreview.count / splitCount,
+                  ).toLocaleString()} contacts per variant (estimate based on current preview).`
+                : "Estimate unavailable until the preview loads."}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setSplitOpen(false)}
+            disabled={splitApi.isLoading}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            onClick={() => void handleSplitSubmit()}
+            disabled={splitApi.isLoading}
+          >
+            {splitApi.isLoading ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden />
+            ) : null}
+            Split into {splitCount}
+          </Button>
+        </div>
       </FormDialog>
     </Form>
   );

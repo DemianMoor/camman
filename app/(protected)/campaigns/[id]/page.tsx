@@ -147,6 +147,8 @@ type Stage = {
   click_count: number;
   notes: string | null;
   tracking_id: string | null;
+  split_index: number | null;
+  split_total: number | null;
   archived_at: string | null;
   created_at: string;
   audience_count: number;
@@ -578,11 +580,18 @@ export default function CampaignDetailPage() {
         enableSorting: false,
         cell: ({ row }) => (
           <div className="min-w-0">
-            {row.original.label ? (
-              <div className="text-sm">{row.original.label}</div>
-            ) : (
-              <div className="text-sm text-muted-foreground">(no label)</div>
-            )}
+            <div className="flex items-center gap-1.5">
+              {row.original.label ? (
+                <span className="text-sm">{row.original.label}</span>
+              ) : (
+                <span className="text-sm text-muted-foreground">(no label)</span>
+              )}
+              {row.original.split_total && row.original.split_index ? (
+                <Badge variant="secondary" className="text-[10px]">
+                  Split {row.original.split_index}/{row.original.split_total}
+                </Badge>
+              ) : null}
+            </div>
             {row.original.tracking_id ? (
               <button
                 type="button"

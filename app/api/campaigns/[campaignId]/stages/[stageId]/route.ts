@@ -51,6 +51,10 @@ const NON_UPDATABLE = new Set([
   // a backstop in case the validator changes. Mutating creative_id does
   // NOT regenerate tracking_id — the historical reference stays.
   "tracking_id",
+  // Split partition fields are owned by the /split endpoint; PATCH
+  // silently drops them rather than mutating in place.
+  "split_index",
+  "split_total",
 ]);
 
 export async function GET(
@@ -103,6 +107,8 @@ export async function GET(
       click_count: campaign_stages.click_count,
       notes: campaign_stages.notes,
       tracking_id: campaign_stages.tracking_id,
+      split_index: campaign_stages.split_index,
+      split_total: campaign_stages.split_total,
       archived_at: campaign_stages.archived_at,
       created_at: campaign_stages.created_at,
       creative: {

@@ -1029,6 +1029,15 @@ export const campaign_stages = pgTable(
     opt_out_count: integer("opt_out_count").notNull().default(0),
     click_count: integer("click_count").notNull().default(0),
     notes: text("notes"),
+    // A/B split partitioning. Both NULL ⇒ stage targets the entire
+    // qualifying audience. When set, split_index is 1..split_total and
+    // the stage's audience is filtered by
+    // `mod(hashtext(contact_id::text), split_total) = split_index - 1`,
+    // so the same contact always lands in the same bucket for a given
+    // total. Set only by POST /api/campaigns/[campaignId]/stages/[stageId]/split;
+    // immutable via PATCH like tracking_id. See db/migrations/0039_stage_splits.sql.
+    split_index: integer("split_index"),
+    split_total: integer("split_total"),
     // Auto-generated, immutable tracking ID. Format:
     // `<campaign_tracking_id>_s<stage_number>_c<creative_id>`. NULL until
     // the parent campaign has a tracking_id AND the stage has a
@@ -1057,6 +1066,12 @@ export const campaign_stages = pgTable(
     check(
       "campaign_stages_clickers_mutex",
       sql`NOT (${table.include_clickers} AND ${table.exclude_clickers})`,
+    ),
+    check(
+      "campaign_stages_split_pair_check",
+      sql`(${table.split_index} IS NULL AND ${table.split_total} IS NULL)
+          OR (${table.split_index} BETWEEN 1 AND ${table.split_total}
+              AND ${table.split_total} BETWEEN 2 AND 1000)`,
     ),
   ],
 );

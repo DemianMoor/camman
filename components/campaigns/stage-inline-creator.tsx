@@ -51,6 +51,8 @@ export interface EditableStage {
   click_count: number;
   total_cost: string;
   tracking_id: string | null;
+  split_index: number | null;
+  split_total: number | null;
 }
 
 export interface StageInlineEditorProps {
@@ -171,6 +173,12 @@ export function StageInlineEditor({
           campaignId={campaignId}
           stageId={isEdit ? stage!.id : undefined}
           trackingId={isEdit ? stage!.tracking_id : null}
+          splitIndex={isEdit ? stage!.split_index : null}
+          splitTotal={isEdit ? stage!.split_total : null}
+          onSplit={() => {
+            onOpenChange(false);
+            onSaved();
+          }}
           campaign={campaign}
           resultsCounters={
             isEdit

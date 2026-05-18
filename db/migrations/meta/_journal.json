@@ -274,6 +274,13 @@
       "when": 1779580800000,
       "tag": "0038_tracking_ids",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1779667200000,
+      "tag": "0039_stage_splits",
+      "breakpoints": true
     }
   ]
 }

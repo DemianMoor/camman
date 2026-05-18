@@ -208,8 +208,18 @@ export async function computeStageAudienceCount(
         ) as is_opt_out_now,
         case
           when ${splitActive}::boolean
-            then mod(hashtext(p.contact_id::text), ${splitTotal ?? 1}::int) =
-                 (${(splitIndex ?? 1) - 1})::int
+            -- Positive-modulo. hashtext returns int4 which can be
+            -- negative, and Postgres mod() follows the dividend sign.
+            -- Plain mod(...) = split_index-1 would silently drop the
+            -- ~half of rows whose hash is negative (since the rhs is
+            -- always non-negative). Cast to bigint, then bias back
+            -- into [0, n) before comparing.
+            then (
+              ((hashtext(p.contact_id::text)::bigint
+                  % ${splitTotal ?? 1}::int)
+                + ${splitTotal ?? 1}::int)
+              % ${splitTotal ?? 1}::int
+            ) = (${(splitIndex ?? 1) - 1})::int
           else true
         end as in_split
       from campaign_audience_pool p
@@ -354,8 +364,17 @@ export async function computeStageAudienceCountForDraft(
         ) as has_clicker,
         case
           when ${splitActive}::boolean
-            then mod(hashtext(s.contact_id::text), ${splitTotal ?? 1}::int) =
-                 (${(splitIndex ?? 1) - 1})::int
+            -- Positive-modulo. hashtext returns int4 which can be
+            -- negative, and Postgres mod() follows the dividend sign,
+            -- so plain mod(...) = split_index-1 would silently drop
+            -- the ~half of rows whose hash is negative. Cast to
+            -- bigint, then bias back into [0, n) before comparing.
+            then (
+              ((hashtext(s.contact_id::text)::bigint
+                  % ${splitTotal ?? 1}::int)
+                + ${splitTotal ?? 1}::int)
+              % ${splitTotal ?? 1}::int
+            ) = (${(splitIndex ?? 1) - 1})::int
           else true
         end as in_split
       from sources s

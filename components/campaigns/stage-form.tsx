@@ -1,13 +1,25 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, Plus } from "lucide-react";
 import { useForm } from "react-hook-form";
+import { toast } from "sonner";
 
+import {
+  CreativeForm,
+  type CreativeFormValues,
+} from "@/components/creatives/creative-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { CopyableId } from "@/components/ui/copyable-id";
+import {
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
+import { toastApiError } from "@/lib/api/toast-error";
 import { formatInTimeZone } from "date-fns-tz";
 
 import {
@@ -146,6 +158,9 @@ export interface StageFormProps {
 }
 
 const NONE = "__none__";
+// Special sentinel value for the Creative <Select>. Picking it opens the
+// new-creative dialog instead of mutating creative_id.
+const NEW_CREATIVE = "__new_creative__";
 
 // Shared helper — maps form values to the API request body. Used by the
 // inline creator and edit drawer.
@@ -181,7 +196,11 @@ const DEFAULT_VALUES: StageFormValues = {
   full_url: "",
   stop_text: "Stop to END",
   include_no_status: true,
-  include_clickers: false,
+  // Default to including clickers so a fresh stage shows the maximum
+  // audience drawn from the campaign's frozen pool. Operators who want
+  // to exclude past clickers can flip exclude_clickers — or unselect
+  // include_clickers — explicitly.
+  include_clickers: true,
   exclude_clickers: false,
   scheduled_at: "",
   notes: "",
@@ -211,25 +230,35 @@ export function StageForm({
   const providersApi = useApiCall<{ data: Provider[] }>();
   const phonesApi = useApiCall<{ data: ProviderPhone[] }>();
   const previewApi = useApiCall<AudiencePreview>();
+  const createCreativeApi = useApiCall<{ id: number }>();
   const [creatives, setCreatives] = useState<Creative[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [phones, setPhones] = useState<ProviderPhone[]>([]);
+  const [newCreativeOpen, setNewCreativeOpen] = useState(false);
 
-  // Creatives are filtered by the campaign's offer + status=ready so we
+  // Creatives are filtered by the campaign's offer + status=active so we
   // don't accidentally send unfinished copy. If the campaign has no offer
   // yet (rare — drafts), skip the fetch.
   // Picker eligibility: active creatives that either apply to all offers
   // OR are linked to this campaign's offer via the creative_offers junction.
   // The list endpoint's offer_id filter handles the OR-with-all logic.
-  useEffect(() => {
-    if (!campaign.offer?.id) return;
-    (async () => {
+  const refetchCreatives = useMemo(
+    () => async () => {
+      if (!campaign.offer?.id) return [] as Creative[];
       const r = await creativesApi.execute(
-        `/api/creatives/list?pageSize=200&offer_id=${campaign.offer!.id}&status=active`,
+        `/api/creatives/list?pageSize=200&offer_id=${campaign.offer.id}&status=active`,
       );
-      if (r.ok) setCreatives(r.data.data);
-    })();
-  }, [campaign.offer?.id, creativesApi.execute]);
+      if (r.ok) {
+        setCreatives(r.data.data);
+        return r.data.data;
+      }
+      return [] as Creative[];
+    },
+    [campaign.offer?.id, creativesApi.execute],
+  );
+  useEffect(() => {
+    void refetchCreatives();
+  }, [refetchCreatives]);
 
   useEffect(() => {
     (async () => {
@@ -413,6 +442,41 @@ export function StageForm({
     await onSubmit(form.getValues());
   }
 
+  // Inline "+ New creative" flow. POSTs a single creative bound to the
+  // campaign's offer, refetches the picker list, and auto-selects the
+  // freshly created creative on success. Skipped silently when the
+  // campaign has no offer (the menu item is also hidden in that case).
+  async function handleCreateInlineCreative(values: CreativeFormValues) {
+    if (!campaign.offer?.id) return;
+    const result = await createCreativeApi.execute("/api/creatives", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: values.text,
+        creative_id:
+          values.creative_id && values.creative_id !== ""
+            ? values.creative_id
+            : undefined,
+        quality: values.quality,
+        sequence_placement: values.sequence_placement,
+        applies_to_all_offers: values.applies_to_all_offers,
+        offer_ids: values.offer_ids,
+      }),
+    });
+    if (!result.ok) {
+      toastApiError(result, "Couldn't create creative");
+      return;
+    }
+    const newId = result.data.id;
+    setNewCreativeOpen(false);
+    toast.success("Creative created");
+    // Refresh the picker list so the new row is present, then select it.
+    const next = await refetchCreatives();
+    if (next.some((c) => c.id === newId)) {
+      form.setValue("creative_id", newId, { shouldDirty: true });
+    }
+  }
+
   const offerSalesPages = campaign.offer?.sales_pages ?? [];
   const audienceEmpty =
     audiencePreview !== null && audiencePreview.count === 0;
@@ -536,9 +600,17 @@ export function StageForm({
                     <FormLabel>Creative</FormLabel>
                     <Select
                       value={field.value === null ? NONE : String(field.value)}
-                      onValueChange={(v) =>
-                        field.onChange(v === NONE ? null : Number(v))
-                      }
+                      onValueChange={(v) => {
+                        // Sentinel: open the new-creative dialog and leave
+                        // the current selection alone. Without the explicit
+                        // setValue call below, Radix would still treat the
+                        // sentinel as the chosen value visually.
+                        if (v === NEW_CREATIVE) {
+                          setNewCreativeOpen(true);
+                          return;
+                        }
+                        field.onChange(v === NONE ? null : Number(v));
+                      }}
                       disabled={isSubmitting}
                     >
                       <FormControl>
@@ -563,6 +635,16 @@ export function StageForm({
                             </span>
                           </SelectItem>
                         ))}
+                        {campaign.offer?.id ? (
+                          <SelectItem value={NEW_CREATIVE}>
+                            <span className="inline-flex items-center gap-2 text-foreground">
+                              <Plus className="size-3.5" aria-hidden />
+                              <span>
+                                New creative for &ldquo;{campaign.offer.name}&rdquo;
+                              </span>
+                            </span>
+                          </SelectItem>
+                        ) : null}
                       </SelectContent>
                     </Select>
                     <FormMessage />
@@ -1037,6 +1119,41 @@ export function StageForm({
           </div>
         )}
       </form>
+
+      {/* Inline new-creative dialog. Pre-fills the offer from the parent
+          campaign so the new creative is immediately eligible for this
+          stage's picker. Uses CreativeForm in create mode so the rendering
+          stays consistent with /creatives. */}
+      <FormDialog
+        open={newCreativeOpen}
+        onOpenChange={(open) => {
+          if (!createCreativeApi.isLoading) setNewCreativeOpen(open);
+        }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
+      >
+        <DialogHeader>
+          <DialogTitle>New creative</DialogTitle>
+          <DialogDescription>
+            {campaign.offer?.name
+              ? `Pre-linked to "${campaign.offer.name}". After saving, it will be selected for this stage.`
+              : "Saved creative will be selected for this stage."}
+          </DialogDescription>
+        </DialogHeader>
+        <CreativeForm
+          mode="create"
+          initialValues={{
+            text: "",
+            creative_id: "",
+            quality: "unknown",
+            sequence_placement: "unknown",
+            applies_to_all_offers: false,
+            offer_ids: campaign.offer?.id ? [campaign.offer.id] : [],
+          }}
+          onSubmit={handleCreateInlineCreative}
+          onCancel={() => setNewCreativeOpen(false)}
+          isSubmitting={createCreativeApi.isLoading}
+        />
+      </FormDialog>
     </Form>
   );
 }

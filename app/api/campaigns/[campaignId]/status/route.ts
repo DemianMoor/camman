@@ -110,9 +110,10 @@ export async function POST(
 
   // ============ draft → active: complete the campaign + snapshot audience
   // Drafts may have been saved empty. Enforce the launch invariants here
-  // (name, brand, offer, ≥1 segment) so a stale draft can't slip through
-  // without the data needed to actually send. Compute the audience pool
-  // now if it wasn't computed at create time, and freeze the count.
+  // (name, brand, offer, ≥1 contact group) so a stale draft can't slip
+  // through without the data needed to actually send. Segments are
+  // optional. Compute the audience pool now if it wasn't computed at
+  // create time, and freeze the count.
   if (from === "draft" && next === "active") {
     const missing: string[] = [];
     if (!c.name || c.name.trim().length === 0) missing.push("name");
@@ -120,8 +121,8 @@ export async function POST(
     if (c.offer_id == null) missing.push("offer_id");
     const segmentIds = c.audience_segment_ids ?? [];
     const contactGroupIds = c.audience_contact_group_ids ?? [];
-    if (segmentIds.length === 0 && contactGroupIds.length === 0) {
-      missing.push("audience_segment_ids");
+    if (contactGroupIds.length === 0) {
+      missing.push("audience_contact_group_ids");
     }
     if (missing.length > 0) {
       return apiError(

@@ -265,6 +265,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     from_groups: number;
     overlap: number;
     excluded_for_optout: number;
+    in_use_in_other_campaigns: number;
   }>();
   const [previewCount, setPreviewCount] = useState<number | null>(null);
   const [previewTotalMatching, setPreviewTotalMatching] = useState<
@@ -278,6 +279,9 @@ export function useCampaignFormState(props: CampaignFormProps) {
   );
   const [previewOverlap, setPreviewOverlap] = useState<number | null>(null);
   const [previewExcludedOptOut, setPreviewExcludedOptOut] = useState<
+    number | null
+  >(null);
+  const [previewInUseElsewhere, setPreviewInUseElsewhere] = useState<
     number | null
   >(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -299,6 +303,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
       setPreviewFromGroups(null);
       setPreviewOverlap(null);
       setPreviewExcludedOptOut(null);
+      setPreviewInUseElsewhere(null);
       setPreviewError(null);
       return;
     }
@@ -327,6 +332,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
         setPreviewFromGroups(result.data.from_groups);
         setPreviewOverlap(result.data.overlap);
         setPreviewExcludedOptOut(result.data.excluded_for_optout);
+        setPreviewInUseElsewhere(result.data.in_use_in_other_campaigns);
         setPreviewError(null);
       } else {
         setPreviewError(result.error);
@@ -336,6 +342,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
         setPreviewFromGroups(null);
         setPreviewOverlap(null);
         setPreviewExcludedOptOut(null);
+        setPreviewInUseElsewhere(null);
       }
     }, 400);
     return () => {
@@ -355,11 +362,11 @@ export function useCampaignFormState(props: CampaignFormProps) {
       : null;
 
   // Drafts are a scratchpad — always saveable. Activation requires the
-  // launch invariants (name + brand + offer + at least one segment OR
-  // contact group as audience source).
+  // launch invariants (name + brand + offer + at least one contact
+  // group). Segments are optional — they widen the audience when
+  // present but a campaign can launch with just a contact-group pool.
   const draftReady = !dateError;
-  const hasAudienceSource =
-    watchedSegments.length > 0 || watchedContactGroups.length > 0;
+  const hasAudienceSource = watchedContactGroups.length > 0;
   const activateReady =
     !!watchedName.trim() &&
     watchedBrandId !== null &&
@@ -369,7 +376,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const activateBlockedReason = dateError
     ? dateError
     : !activateReady
-      ? "Fill in name, brand, offer, and at least one segment or contact group to activate."
+      ? "Fill in name, brand, offer, and at least one contact group to activate."
       : null;
   const anySubmitting = isSubmittingDraft || isSubmittingActivate;
 
@@ -442,6 +449,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     previewFromGroups,
     previewOverlap,
     previewExcludedOptOut,
+    previewInUseElsewhere,
     previewError,
     previewLoading,
     hasAudienceSource,

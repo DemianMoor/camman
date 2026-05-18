@@ -786,12 +786,7 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
 
         <div className="grid gap-3 md:grid-cols-3">
           <div className="grid gap-1.5">
-            <Label>
-              Segments
-              <span aria-hidden className="text-destructive ml-0.5">
-                *
-              </span>
-            </Label>
+            <Label>Segments</Label>
             <SegmentPicker
               segments={segments}
               value={watchedSegments}
@@ -804,7 +799,12 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
             />
           </div>
           <div className="grid gap-1.5">
-            <Label>Contact groups</Label>
+            <Label>
+              Contact groups
+              <span aria-hidden className="text-destructive ml-0.5">
+                *
+              </span>
+            </Label>
             <MultiSelectPicker
               options={contactGroups.map((g) => ({
                 id: g.id,
@@ -944,6 +944,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     previewFromGroups,
     previewOverlap,
     previewExcludedOptOut,
+    previewInUseElsewhere,
     previewError,
     previewLoading,
     watchedSegments,
@@ -962,6 +963,19 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     capActive && previewTotalMatching !== null && previewTotalMatching > 0
       ? Math.round(((previewCount ?? 0) / previewTotalMatching) * 100)
       : null;
+  // Stacked progress bar — pool composition.
+  // Bar length = total_matching (the qualifying pool).
+  // Two segments: will-send (emerald) and above-cap (slate). `count`
+  // equals total_matching when no cap is set or cap >= pool, so the
+  // slate segment naturally collapses to 0 in that case.
+  // `in_use_in_other_campaigns` is rendered separately below the bar
+  // as an informational callout — it's a subset of the pool that
+  // can intersect either bar segment.
+  const poolTotal = previewTotalMatching ?? 0;
+  const willSend = previewCount ?? 0;
+  const aboveCap = Math.max(0, poolTotal - willSend);
+  const willSendPct = poolTotal > 0 ? (willSend / poolTotal) * 100 : 0;
+  const aboveCapPct = poolTotal > 0 ? (aboveCap / poolTotal) * 100 : 0;
 
   return (
     <Card>
@@ -973,7 +987,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
       <CardContent className="grid gap-3 p-4 text-sm">
         {!hasAudienceSource ? (
           <p className="text-muted-foreground">
-            Pick segments or contact groups to see your reach.
+            Pick at least one contact group to see your reach.
           </p>
         ) : previewError ? (
           <p className="text-muted-foreground">
@@ -1002,6 +1016,75 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                 />
               ) : null}
             </div>
+
+            {poolTotal > 0 ? (
+              <div className="grid gap-2 border-t pt-3">
+                <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full bg-emerald-500 transition-all dark:bg-emerald-400"
+                    style={{ width: `${willSendPct}%` }}
+                    title={`${willSend.toLocaleString()} will be sent`}
+                  />
+                  <div
+                    className="h-full bg-slate-300 transition-all dark:bg-slate-600"
+                    style={{ width: `${aboveCapPct}%` }}
+                    title={`${aboveCap.toLocaleString()} above cap, won't be sent`}
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span
+                      className="size-2 rounded-full bg-emerald-500 dark:bg-emerald-400"
+                      aria-hidden
+                    />
+                    Will send{" "}
+                    <span className="font-mono tabular-nums text-foreground">
+                      {willSend.toLocaleString()}
+                    </span>
+                  </span>
+                  {aboveCap > 0 ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <span
+                        className="size-2 rounded-full bg-slate-300 dark:bg-slate-600"
+                        aria-hidden
+                      />
+                      Above cap{" "}
+                      <span className="font-mono tabular-nums text-foreground">
+                        {aboveCap.toLocaleString()}
+                      </span>
+                    </span>
+                  ) : null}
+                  <span className="ml-auto">
+                    Pool{" "}
+                    <span className="font-mono tabular-nums text-foreground">
+                      {poolTotal.toLocaleString()}
+                    </span>
+                    {sampledPct !== null ? (
+                      <span className="ml-1 tabular-nums">({sampledPct}%)</span>
+                    ) : null}
+                  </span>
+                </div>
+                {previewInUseElsewhere !== null &&
+                previewInUseElsewhere > 0 ? (
+                  <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] dark:border-amber-900 dark:bg-amber-950/40">
+                    <span
+                      className="mt-1 size-2 shrink-0 rounded-full bg-amber-500 dark:bg-amber-400"
+                      aria-hidden
+                    />
+                    <div className="text-amber-900 dark:text-amber-200">
+                      <span className="font-mono tabular-nums">
+                        {previewInUseElsewhere.toLocaleString()}
+                      </span>{" "}
+                      contact{previewInUseElsewhere === 1 ? "" : "s"} in this
+                      pool {previewInUseElsewhere === 1 ? "is" : "are"} also in
+                      another active campaign&apos;s audience. Toggle{" "}
+                      <span className="font-mono">exclude_in_use_contacts</span>{" "}
+                      on a segment to drop them.
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="grid gap-1.5 border-t pt-3 text-xs">
               {hasSegments && previewFromSegments !== null ? (
@@ -1033,33 +1116,10 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
               ) : null}
             </div>
 
-            {capActive && previewTotalMatching !== null ? (
-              <div className="grid gap-1.5 border-t pt-3 text-xs">
-                <div className="flex items-center justify-between text-muted-foreground">
-                  <span>
-                    Cap:{" "}
-                    <span className="font-mono tabular-nums text-foreground">
-                      {(previewCount ?? 0).toLocaleString()}
-                    </span>{" "}
-                    of{" "}
-                    <span className="font-mono tabular-nums text-foreground">
-                      {previewTotalMatching.toLocaleString()}
-                    </span>
-                  </span>
-                  {sampledPct !== null ? (
-                    <span className="tabular-nums">{sampledPct}%</span>
-                  ) : null}
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full bg-foreground transition-all"
-                    style={{ width: `${sampledPct ?? 0}%` }}
-                  />
-                </div>
-                <p className="text-[11px] text-muted-foreground">
-                  Random sample frozen at activation.
-                </p>
-              </div>
+            {capActive ? (
+              <p className="text-[11px] text-muted-foreground">
+                Random sample frozen at activation.
+              </p>
             ) : null}
           </>
         )}

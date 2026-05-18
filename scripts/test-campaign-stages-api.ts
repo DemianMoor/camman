@@ -178,6 +178,7 @@ async function main() {
         brand_id: brand.id,
         offer_id: offer.id,
         audience_segment_ids: [seg.id],
+        audience_contact_group_ids: [grp.id],
         audience_filters: {
           include_no_status: true,
           include_not_clicked: true,
@@ -461,6 +462,7 @@ async function main() {
         brand_id: brand.id,
         offer_id: offer.id,
         audience_segment_ids: [previewSeg.id],
+        audience_contact_group_ids: [grp.id],
         audience_filters: {
           include_no_status: true,
           include_clickers: true,

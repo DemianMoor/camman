@@ -197,6 +197,7 @@ async function main() {
         brand_id: brand.id,
         offer_id: offer.id,
         audience_segment_ids: [seg.id],
+        audience_contact_group_ids: [grp.id],
         audience_filters: {
           include_no_status: true,
           include_not_clicked: true,
@@ -242,6 +243,7 @@ async function main() {
         brand_id: brand.id,
         offer_id: offer.id,
         audience_segment_ids: [seg.id],
+        audience_contact_group_ids: [grp.id],
         audience_filters: { include_no_status: true, include_not_clicked: true },
         save_as_draft: false,
       }),
@@ -385,6 +387,7 @@ async function main() {
         brand_id: brand.id,
         offer_id: offer.id,
         audience_segment_ids: [seg.id],
+        audience_contact_group_ids: [grp.id],
         audience_filters: {
           include_no_status: true,
           include_not_clicked: true,
@@ -452,11 +455,11 @@ async function main() {
     );
     const missing = c2dBody.details?.missing ?? [];
     check(
-      "details.missing includes name, brand_id, offer_id, audience_segment_ids",
+      "details.missing includes name, brand_id, offer_id, audience_contact_group_ids",
       Array.isArray(missing) &&
         missing.includes("brand_id") &&
         missing.includes("offer_id") &&
-        missing.includes("audience_segment_ids"),
+        missing.includes("audience_contact_group_ids"),
       `got ${JSON.stringify(missing)}`,
     );
 
@@ -529,6 +532,10 @@ async function main() {
         brand_id: brand.id,
         offer_id: offer.id,
         audience_segment_ids: [optOutSeg.id],
+        // Group is required on launch even though the activation will
+        // ultimately fail on empty_audience — without it, activation
+        // would fail earlier on missing audience_contact_group_ids.
+        audience_contact_group_ids: [grp.id],
         audience_filters: {
           include_no_status: true,
           include_not_clicked: true,

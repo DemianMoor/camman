@@ -77,7 +77,8 @@ const campaignCreateBaseSchema = z.object({
 });
 
 // Drafts: a scratchpad — every field is optional. Activations (the launch
-// path) require name + brand + offer + ≥1 segment. The same check runs
+// path) require name + brand + offer + ≥1 contact group. Segments are
+// optional (they widen the audience when present). The same checks run
 // again in the status endpoint at draft → active so a stale draft can't
 // slip through with missing fields.
 export const campaignCreateSchema = campaignCreateBaseSchema.superRefine(
@@ -104,18 +105,14 @@ export const campaignCreateSchema = campaignCreateBaseSchema.superRefine(
         message: "offer_id is required when launching",
       });
     }
-    const hasSegments =
-      data.audience_segment_ids != null &&
-      data.audience_segment_ids.length > 0;
     const hasGroups =
       data.audience_contact_group_ids != null &&
       data.audience_contact_group_ids.length > 0;
-    if (!hasSegments && !hasGroups) {
+    if (!hasGroups) {
       ctx.addIssue({
-        path: ["audience_segment_ids"],
+        path: ["audience_contact_group_ids"],
         code: z.ZodIssueCode.custom,
-        message:
-          "At least one segment or contact group is required when launching",
+        message: "At least one contact group is required when launching",
       });
     }
   },

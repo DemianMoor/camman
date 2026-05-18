@@ -48,6 +48,13 @@ export interface AudiencePreviewResult {
   // have an opt_out record and were therefore dropped. Independent of
   // the include_* filter toggles.
   excluded_for_optout: number;
+  // Count of qualifying contacts who are also in another *active*
+  // campaign's audience_pool. Informational — whether they're excluded
+  // from the snapshot depends on the per-segment exclude_in_use_contacts
+  // flag (see segments.exclude_in_use_contacts). Drafts and the current
+  // campaign itself are not counted as conflicts because they don't have
+  // pool rows yet (pools materialize at activation).
+  in_use_in_other_campaigns: number;
 }
 
 export interface AudienceSnapshotResult {
@@ -259,6 +266,7 @@ export async function previewAudience(
       from_groups: 0,
       overlap: 0,
       excluded_for_optout: 0,
+      in_use_in_other_campaigns: 0,
     };
   }
 
@@ -325,7 +333,15 @@ export async function previewAudience(
         exists (
           select 1 from clickers c
           where c.contact_id = s.contact_id and c.org_id = ${orgId}::uuid
-        ) as has_clicker
+        ) as has_clicker,
+        exists (
+          select 1
+          from campaign_audience_pool cap
+          join campaigns camp on camp.id = cap.campaign_id
+          where cap.contact_id = s.contact_id
+            and cap.org_id = ${orgId}::uuid
+            and camp.status = 'active'
+        ) as is_in_use_elsewhere
       from sources s
     ),
     qualified as (
@@ -346,7 +362,8 @@ export async function previewAudience(
       count(*) filter (where qualifies and from_segment)::int as from_segments,
       count(*) filter (where qualifies and from_group)::int as from_groups,
       count(*) filter (where qualifies and from_segment and from_group)::int as overlap,
-      count(*) filter (where has_opt_out)::int as excluded_for_optout
+      count(*) filter (where has_opt_out)::int as excluded_for_optout,
+      count(*) filter (where qualifies and is_in_use_elsewhere)::int as in_use_in_other_campaigns
     from qualified
   `)) as unknown as {
     total_matching: number;
@@ -354,6 +371,7 @@ export async function previewAudience(
     from_groups: number;
     overlap: number;
     excluded_for_optout: number;
+    in_use_in_other_campaigns: number;
   }[];
 
   const row = Array.isArray(rows) ? rows[0] : null;
@@ -367,6 +385,7 @@ export async function previewAudience(
     from_groups: row?.from_groups ?? 0,
     overlap: row?.overlap ?? 0,
     excluded_for_optout: row?.excluded_for_optout ?? 0,
+    in_use_in_other_campaigns: row?.in_use_in_other_campaigns ?? 0,
   };
 }
 

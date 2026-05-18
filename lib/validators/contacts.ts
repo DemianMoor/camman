@@ -27,13 +27,15 @@ export const contactBulkUploadSchema = z.object({
     .max(MAX_PAYLOAD_BYTES, "Payload too large (max ~5MB)"),
   // Optional: assign uploaded contacts directly to a single segment.
   assign_to_segment_id: z.number().int().positive().nullable().optional(),
-  // Optional: tag every uploaded contact with these contact groups.
-  // Replaces the old assign_to_segment_group_id (removed in 0031 — groups
-  // are now applied to contacts directly, not through segment membership).
+  // Required: every contact upload must tag with at least one contact
+  // group. Enforced at the schema layer so direct API hits can't bypass
+  // the UI requirement. The opt-outs / opt-ins / clickers upload
+  // endpoints still treat their own assign_to_group_ids as optional —
+  // this requirement is specific to contacts.
   assign_to_group_ids: z
     .array(z.number().int().positive())
-    .max(50, "At most 50 groups per upload")
-    .optional(),
+    .min(1, "Select at least one contact group")
+    .max(50, "At most 50 groups per upload"),
 });
 
 // List-query schema is just a shape marker for the parseListParams output plus

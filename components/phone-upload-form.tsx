@@ -52,6 +52,11 @@ export interface PhoneUploadFormProps {
   // input. Selected group IDs are sent as `assign_to_group_ids` on submit.
   // Caller is responsible for ensuring the endpoint supports the field.
   enableContactGroups?: boolean;
+  // When true (only valid alongside enableContactGroups), block submit
+  // until at least one group is selected and surface a required-field
+  // marker. Used by the contacts upload to enforce the policy that every
+  // contact must land in a group.
+  requireContactGroups?: boolean;
 }
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
@@ -78,6 +83,7 @@ export function PhoneUploadForm({
   successLabel = "Uploaded successfully",
   acceptCsv = true,
   enableContactGroups = false,
+  requireContactGroups = false,
 }: PhoneUploadFormProps) {
   const uploadApi = useApiCall<UploadResultSummary>();
   const contactGroupsApi = useApiCall<{ data: ContactGroupOption[] }>();
@@ -198,10 +204,11 @@ export function PhoneUploadForm({
     onSuccess?.(result.data);
   }
 
-  const canSubmit =
-    !uploadApi.isLoading &&
-    ((activeTab === "paste" && pasteValue.trim().length > 0) ||
-      (activeTab === "csv" && csvLines.length > 0));
+  const phonesProvided =
+    (activeTab === "paste" && pasteValue.trim().length > 0) ||
+    (activeTab === "csv" && csvLines.length > 0);
+  const groupsSatisfied = !requireContactGroups || selectedGroupIds.length > 0;
+  const canSubmit = !uploadApi.isLoading && phonesProvided && groupsSatisfied;
 
   // === Result screen ===
   if (result) {
@@ -294,7 +301,14 @@ export function PhoneUploadForm({
     <div className="grid gap-4">
       {enableContactGroups ? (
         <div className="grid gap-2">
-          <Label>Apply contact groups</Label>
+          <Label>
+            Apply contact groups
+            {requireContactGroups ? (
+              <span aria-hidden className="text-destructive ml-0.5">
+                *
+              </span>
+            ) : null}
+          </Label>
           <MultiSelectPicker
             options={contactGroups.map((g) => ({
               id: g.id,
@@ -313,8 +327,17 @@ export function PhoneUploadForm({
             searchPlaceholder="Search groups…"
           />
           <p className="text-xs text-muted-foreground">
-            Every uploaded contact will be tagged with the selected groups.
+            {requireContactGroups
+              ? "At least one contact group is required. Every uploaded contact will be tagged with the selected groups."
+              : "Every uploaded contact will be tagged with the selected groups."}
           </p>
+          {requireContactGroups &&
+          selectedGroupIds.length === 0 &&
+          phonesProvided ? (
+            <p className="text-xs text-amber-700 dark:text-amber-400">
+              Select at least one contact group to enable upload.
+            </p>
+          ) : null}
         </div>
       ) : null}
 

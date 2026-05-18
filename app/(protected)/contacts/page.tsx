@@ -915,8 +915,9 @@ export default function ContactsPage() {
               ) : null}
             </div>
             <p className="text-xs text-muted-foreground">
-              Use the contact-groups picker below to tag uploaded contacts with
-              one or more groups. Groups and segments are independent.
+              Segments are independent of contact groups. The contact-groups
+              picker below is required — every uploaded contact must be tagged
+              with at least one group.
             </p>
           </div>
 
@@ -932,6 +933,7 @@ export default function ContactsPage() {
               onCancel={() => setUploadOpen(false)}
               submitLabel="Upload contacts"
               enableContactGroups
+              requireContactGroups
             />
           )}
       </FormDialog>

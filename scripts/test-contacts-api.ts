@@ -34,6 +34,7 @@ type UploadSummary = {
   invalid_samples: { input: string; error: string }[];
   segments_assigned: number;
   groups_applied: number;
+  updated_contacts: number;
 };
 
 type ListResponse = { data: Contact[]; totalCount: number };
@@ -364,8 +365,21 @@ async function main() {
     });
     check("returns 201", r14.status === 201);
     const s14 = (await r14.json()) as UploadSummary;
-    check("groups_applied = 1", s14.groups_applied === 1);
+    // groups_applied is the count of NEW (contact, group) rows inserted —
+    // 4 contacts × 1 group = 4 new memberships.
+    check(
+      "groups_applied = 4 (4 new memberships)",
+      s14.groups_applied === 4,
+      `got ${s14.groups_applied}`,
+    );
     check("segments_assigned = 0", s14.segments_assigned === 0);
+    // All 4 contacts are brand-new, so updated_contacts = 0 (those
+    // contacts are reported in `inserted`, not "updated").
+    check(
+      "updated_contacts = 0 for brand-new contacts",
+      s14.updated_contacts === 0,
+      `got ${s14.updated_contacts}`,
+    );
     // Each uploaded contact should now appear in contact_contact_groups.
     const phonesNorm = assignPhones2;
     const cRows = await db
@@ -388,6 +402,87 @@ async function main() {
       `got ${tagged.length}`,
     );
 
+    console.log(
+      "\n[14b] Re-upload the same 4 phones with a NEW group → updated_contacts = 4, all groups preserved",
+    );
+    // Create a second group, then re-upload the same phones with both
+    // groups selected. The contacts already exist, but the new group is
+    // brand-new for them — exactly the duplicate-with-new-group case.
+    const grp2R = await apiFetch("/api/contact-groups", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Test Group B ${u4}`,
+        contact_group_id: `CT-GRP-B-${u4}`,
+      }),
+    });
+    const grp2 = (await grp2R.json()) as { id: number };
+    createdGroupIds.push(grp2.id);
+
+    const r14b = await apiFetch("/api/contacts/upload", {
+      method: "POST",
+      body: JSON.stringify({
+        phones: assignPhones2.join("\n"),
+        assign_to_group_ids: [grp.id, grp2.id],
+      }),
+    });
+    check("returns 201", r14b.status === 201);
+    const s14b = (await r14b.json()) as UploadSummary;
+    check(
+      "inserted = 0 (all duplicates)",
+      s14b.inserted === 0,
+      `got ${s14b.inserted}`,
+    );
+    check(
+      "duplicates_in_db = 4",
+      s14b.duplicates_in_db === 4,
+      `got ${s14b.duplicates_in_db}`,
+    );
+    check(
+      "groups_applied = 4 (only grp2 was new for these contacts)",
+      s14b.groups_applied === 4,
+      `got ${s14b.groups_applied}`,
+    );
+    check(
+      "updated_contacts = 4 (existing contacts gained ≥1 new membership)",
+      s14b.updated_contacts === 4,
+      `got ${s14b.updated_contacts}`,
+    );
+    // Original group memberships preserved AND new ones added.
+    const taggedBoth = await db
+      .select({
+        contact_id: contact_contact_groups.contact_id,
+        contact_group_id: contact_contact_groups.contact_group_id,
+      })
+      .from(contact_contact_groups)
+      .where(inArray(contact_contact_groups.contact_id, cIds));
+    check(
+      "8 total memberships across the 4 contacts (2 groups each)",
+      taggedBoth.length === 8,
+      `got ${taggedBoth.length}`,
+    );
+
+    console.log(
+      "\n[14c] Re-upload again with the SAME groups → updated_contacts = 0",
+    );
+    const r14c = await apiFetch("/api/contacts/upload", {
+      method: "POST",
+      body: JSON.stringify({
+        phones: assignPhones2.join("\n"),
+        assign_to_group_ids: [grp.id, grp2.id],
+      }),
+    });
+    const s14c = (await r14c.json()) as UploadSummary;
+    check(
+      "groups_applied = 0 (no new memberships)",
+      s14c.groups_applied === 0,
+      `got ${s14c.groups_applied}`,
+    );
+    check(
+      "updated_contacts = 0 (no contact gained anything new)",
+      s14c.updated_contacts === 0,
+      `got ${s14c.updated_contacts}`,
+    );
+
     console.log("\n[15] Upload with BOTH segment + groups (both apply)");
     const bothPhones: string[] = [];
     for (let i = 0; i < 2; i++) {
@@ -405,7 +500,12 @@ async function main() {
     check("returns 201", r15.status === 201, `got ${r15.status}`);
     const s15 = (await r15.json()) as UploadSummary;
     check("segments_assigned = 1", s15.segments_assigned === 1);
-    check("groups_applied = 1", s15.groups_applied === 1);
+    // 2 new contacts × 1 group = 2 new memberships.
+    check(
+      "groups_applied = 2 (2 new memberships)",
+      s15.groups_applied === 2,
+      `got ${s15.groups_applied}`,
+    );
 
     console.log("\n[16] Upload with NO assignment → segments_assigned/groups_applied = 0");
     const noAssignPhone = `+1214000${u4.padStart(4, "0")}`;
@@ -418,6 +518,7 @@ async function main() {
     const s16 = (await r16.json()) as UploadSummary;
     check("segments_assigned = 0", s16.segments_assigned === 0);
     check("groups_applied = 0", s16.groups_applied === 0);
+    check("updated_contacts = 0", s16.updated_contacts === 0);
 
     // ====================================================================
     // 6.5p2: contacts list `groups` column + `group_ids` filter +

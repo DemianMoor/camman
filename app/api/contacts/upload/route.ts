@@ -27,7 +27,14 @@ export type UploadResultSummary = {
   inserted: number;
   invalid_samples: { input: string; error: string }[];
   segments_assigned: number;
+  // Total new (contact, group) memberships created across the upload.
+  // A contact tagged with 3 groups it didn't have yet contributes 3 here.
   groups_applied: number;
+  // Number of *already-existing* contacts that gained at least one new
+  // group membership from this upload. Brand-new contacts being tagged
+  // for the first time are NOT counted (they're in `inserted`); existing
+  // contacts uploaded with no new groups are NOT counted either.
+  updated_contacts: number;
 };
 
 export async function POST(req: NextRequest) {
@@ -136,6 +143,10 @@ export async function POST(req: NextRequest) {
 
   let inserted_count = 0;
   const resolvedContactIds: string[] = [];
+  // Track which resolved IDs were already in the DB BEFORE this upload —
+  // used below to compute `updated_contacts` (existing contacts that
+  // gained ≥1 new group membership).
+  const existingContactIds = new Set<string>();
 
   if (needsResolvedIds) {
     for (let i = 0; i < dedupedValid.length; i += CHUNK_SIZE) {
@@ -145,7 +156,7 @@ export async function POST(req: NextRequest) {
       }));
       const chunkPhones = chunk.map((c) => c.phone_number);
       const existing = await db
-        .select({ phone_number: contacts.phone_number })
+        .select({ id: contacts.id, phone_number: contacts.phone_number })
         .from(contacts)
         .where(
           and(
@@ -153,7 +164,8 @@ export async function POST(req: NextRequest) {
             inArray(contacts.phone_number, chunkPhones),
           ),
         );
-      const existingSet = new Set(existing.map((e) => e.phone_number));
+      const existingPhoneSet = new Set(existing.map((e) => e.phone_number));
+      for (const e of existing) existingContactIds.add(e.id);
 
       const upserted = await db
         .insert(contacts)
@@ -169,7 +181,7 @@ export async function POST(req: NextRequest) {
 
       for (const row of upserted) {
         resolvedContactIds.push(row.id);
-        if (!existingSet.has(row.phone_number)) inserted_count++;
+        if (!existingPhoneSet.has(row.phone_number)) inserted_count++;
       }
     }
   } else {
@@ -208,14 +220,20 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Apply contact groups (tags) to every uploaded contact. Idempotent via
-  // the (contact_id, contact_group_id) primary key + ON CONFLICT DO NOTHING.
+  // Apply contact groups (tags) to every resolved contact (new and
+  // duplicate). Idempotent via the (contact_id, contact_group_id) primary
+  // key + ON CONFLICT DO NOTHING — RETURNING gives us the *newly created*
+  // membership rows only, which is how we tally `groups_applied`
+  // (total new memberships) and `updated_contacts` (distinct existing
+  // contacts that gained ≥1 new membership).
+  let groups_applied = 0;
+  const updatedContactIds = new Set<string>();
   if (requestedGroupIds.length > 0 && resolvedContactIds.length > 0) {
     await db.transaction(async (tx) => {
       for (const groupId of requestedGroupIds) {
         for (let i = 0; i < resolvedContactIds.length; i += CHUNK_SIZE) {
           const chunk = resolvedContactIds.slice(i, i + CHUNK_SIZE);
-          await tx
+          const tagged = await tx
             .insert(contact_contact_groups)
             .values(
               chunk.map((cid) => ({
@@ -224,7 +242,14 @@ export async function POST(req: NextRequest) {
                 org_id: orgId,
               })),
             )
-            .onConflictDoNothing();
+            .onConflictDoNothing()
+            .returning({ contact_id: contact_contact_groups.contact_id });
+          groups_applied += tagged.length;
+          for (const t of tagged) {
+            if (existingContactIds.has(t.contact_id)) {
+              updatedContactIds.add(t.contact_id);
+            }
+          }
         }
       }
     });
@@ -239,7 +264,8 @@ export async function POST(req: NextRequest) {
     inserted: inserted_count,
     invalid_samples: invalid.slice(0, INVALID_SAMPLE_LIMIT),
     segments_assigned: targetSegmentIds.length,
-    groups_applied: requestedGroupIds.length,
+    groups_applied,
+    updated_contacts: updatedContactIds.size,
   };
 
   return NextResponse.json(summary, { status: 201 });

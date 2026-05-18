@@ -24,8 +24,12 @@ export type UploadResultSummary = {
   invalid_samples: { input: string; error: string }[];
   // Optional: present on endpoints that participate in the group-tagging
   // pipeline (contacts/upload, opt-outs/upload, etc.) when the user
-  // selected groups in the form below.
+  // selected groups in the form below. Total new (contact, group) rows
+  // inserted across the upload.
   groups_applied?: number;
+  // Optional: distinct count of *already-existing* contacts that gained
+  // at least one new group membership. Same endpoints as `groups_applied`.
+  updated_contacts?: number;
 };
 
 type ContactGroupOption = {
@@ -226,10 +230,18 @@ export function PhoneUploadForm({
             value={result.duplicates_in_input}
             tone="muted"
           />
+          {typeof result.updated_contacts === "number" &&
+          result.updated_contacts > 0 ? (
+            <Stat
+              label="Updated contacts"
+              value={result.updated_contacts}
+              tone="success"
+            />
+          ) : null}
           {typeof result.groups_applied === "number" &&
           result.groups_applied > 0 ? (
             <Stat
-              label="Group tags applied"
+              label="New group tags"
               value={result.groups_applied}
               tone="success"
             />

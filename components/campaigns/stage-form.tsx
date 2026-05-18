@@ -256,6 +256,8 @@ export function StageForm({
 
   // Provider phones reload when the selected provider changes. If the
   // currently selected phone doesn't belong to the new provider, clear it.
+  // In create mode, also auto-select when the active provider exposes
+  // exactly one phone — saves a click in the common single-phone case.
   useEffect(() => {
     if (watchedProviderId === null) {
       setPhones([]);
@@ -280,6 +282,15 @@ export function StageForm({
         ) {
           form.setValue("provider_phone_id", null, { shouldDirty: true });
         }
+        if (
+          !isEdit &&
+          r.data.data.length === 1 &&
+          form.getValues("provider_phone_id") === null
+        ) {
+          form.setValue("provider_phone_id", r.data.data[0].id, {
+            shouldDirty: false,
+          });
+        }
       }
     })();
     return () => {
@@ -287,6 +298,35 @@ export function StageForm({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchedProviderId, phonesApi.execute]);
+
+  // Auto-select dropdowns that have exactly one option when creating a
+  // new stage. Edit mode is intentionally skipped so we don't override
+  // an explicit historical choice. shouldDirty: false to keep the form's
+  // dirty state honest (auto-fills don't trigger the discard prompt).
+  useEffect(() => {
+    if (isEdit) return;
+    if (creatives.length === 1 && form.getValues("creative_id") === null) {
+      form.setValue("creative_id", creatives[0].id, { shouldDirty: false });
+    }
+  }, [isEdit, creatives, form]);
+  useEffect(() => {
+    if (isEdit) return;
+    if (providers.length === 1 && form.getValues("sms_provider_id") === null) {
+      form.setValue("sms_provider_id", providers[0].id, {
+        shouldDirty: false,
+      });
+    }
+  }, [isEdit, providers, form]);
+  // Sales-page list comes from the campaign's offer (campaign.offer.sales_pages),
+  // not an API. Auto-select when the offer has exactly one entry. Stored
+  // as a string label, not an id.
+  useEffect(() => {
+    if (isEdit) return;
+    const pages = campaign.offer?.sales_pages ?? [];
+    if (pages.length === 1 && form.getValues("sales_page_label") === "") {
+      form.setValue("sales_page_label", pages[0].label, { shouldDirty: false });
+    }
+  }, [isEdit, campaign.offer?.sales_pages, form]);
 
   // ============ SMS preview ============
   const selectedCreative = useMemo(

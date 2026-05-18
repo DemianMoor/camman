@@ -191,6 +191,68 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const watchedStart = form.watch("start_date");
   const watchedEnd = form.watch("end_date");
 
+  // Auto-select dropdowns that resolve to exactly one option when
+  // *creating* a new campaign. Edit mode is skipped — the existing
+  // record's choice (even null on a stale draft) wins, per the user's
+  // "when creating" scope. shouldDirty: false so an auto-fill doesn't
+  // trigger the "discard unsaved changes?" prompt on cancel.
+  useEffect(() => {
+    if (isEdit) return;
+    if (brands.length === 1 && form.getValues("brand_id") === null) {
+      form.setValue("brand_id", brands[0].id, { shouldDirty: false });
+    }
+  }, [isEdit, brands, form]);
+  useEffect(() => {
+    if (isEdit) return;
+    if (offers.length === 1 && form.getValues("offer_id") === null) {
+      form.setValue("offer_id", offers[0].id, { shouldDirty: false });
+    }
+  }, [isEdit, offers, form]);
+  useEffect(() => {
+    if (isEdit) return;
+    if (
+      routingTypes.length === 1 &&
+      form.getValues("routing_type_id") === null
+    ) {
+      form.setValue("routing_type_id", routingTypes[0].id, {
+        shouldDirty: false,
+      });
+    }
+  }, [isEdit, routingTypes, form]);
+  useEffect(() => {
+    if (isEdit) return;
+    if (
+      trafficTypes.length === 1 &&
+      form.getValues("traffic_type_id") === null
+    ) {
+      form.setValue("traffic_type_id", trafficTypes[0].id, {
+        shouldDirty: false,
+      });
+    }
+  }, [isEdit, trafficTypes, form]);
+  useEffect(() => {
+    if (isEdit) return;
+    if (
+      segments.length === 1 &&
+      form.getValues("audience_segment_ids").length === 0
+    ) {
+      form.setValue("audience_segment_ids", [segments[0].id], {
+        shouldDirty: false,
+      });
+    }
+  }, [isEdit, segments, form]);
+  useEffect(() => {
+    if (isEdit) return;
+    if (
+      contactGroups.length === 1 &&
+      form.getValues("audience_contact_group_ids").length === 0
+    ) {
+      form.setValue("audience_contact_group_ids", [contactGroups[0].id], {
+        shouldDirty: false,
+      });
+    }
+  }, [isEdit, contactGroups, form]);
+
   // Audience preview, debounced. Tracks its own cancel signal so a fast
   // toggle doesn't apply a stale count. The endpoint returns the full
   // composition breakdown so the right-rail panel can show how segments

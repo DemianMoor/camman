@@ -147,6 +147,17 @@ export function CreativeForm({
   const segments = useMemo(() => calculateSmsSegments(text ?? ""), [text]);
   const isLongText = (text?.length ?? 0) > TEXT_WARN_THRESHOLD;
 
+  // Auto-select offers when creating a creative and exactly one active
+  // offer exists. Skipped in edit mode and when the org-wide toggle is
+  // on (offer list is a fallback when applies_to_all is true).
+  useEffect(() => {
+    if (isEdit) return;
+    if (appliesToAll) return;
+    if (offers.length === 1 && (form.getValues("offer_ids") ?? []).length === 0) {
+      form.setValue("offer_ids", [offers[0].id], { shouldDirty: false });
+    }
+  }, [isEdit, appliesToAll, offers, form]);
+
   async function copySlug() {
     if (!slug) return;
     try {

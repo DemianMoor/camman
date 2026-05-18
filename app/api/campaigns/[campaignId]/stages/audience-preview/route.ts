@@ -6,7 +6,10 @@ import { db } from "@/db/client";
 import { campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
-import { computeStageAudienceCount } from "@/lib/audience-snapshot";
+import {
+  computeStageAudienceCount,
+  computeStageAudienceCountForDraft,
+} from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 
 function parseId(idParam: string) {
@@ -20,6 +23,11 @@ const previewSchema = z
     include_no_status: z.boolean().default(true),
     include_clickers: z.boolean().default(false),
     exclude_clickers: z.boolean().default(false),
+    // Optional split partition. The form may send these when previewing
+    // a split sibling stage; otherwise both are null and no partition is
+    // applied.
+    split_index: z.number().int().min(1).nullable().optional(),
+    split_total: z.number().int().min(2).nullable().optional(),
   })
   .refine((d) => !(d.include_clickers && d.exclude_clickers), {
     path: ["include_clickers"],
@@ -54,12 +62,18 @@ export async function POST(
     });
   }
 
-  // Confirm the campaign is in this org. Also pulls the pool count so we
-  // can return a consistent "out of N frozen" framing in the UI.
+  // Confirm the campaign is in this org. Pull the full audience config
+  // so we can route between frozen-pool mode (active+) and projected
+  // mode (draft, pool empty).
   const campaignRow = await db
     .select({
       id: campaigns.id,
+      status: campaigns.status,
       audience_snapshot_count: campaigns.audience_snapshot_count,
+      audience_segment_ids: campaigns.audience_segment_ids,
+      audience_contact_group_ids: campaigns.audience_contact_group_ids,
+      audience_filters: campaigns.audience_filters,
+      audience_cap: campaigns.audience_cap,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
@@ -84,11 +98,39 @@ export async function POST(
       API_ERROR_CODES.VALIDATION,
     );
   }
-  const result = await computeStageAudienceCount(cid, orgId, parsed.data);
+
+  // Draft campaigns don't have a frozen pool yet — compute against the
+  // campaign's planned audience instead so the operator can preview and
+  // split stages before activation. After activation we always go
+  // through the pool query (faster + reflects the random sample).
+  const isDraft = campaignRow[0].status === "draft";
+  const result = isDraft
+    ? await computeStageAudienceCountForDraft(
+        {
+          id: cid,
+          orgId,
+          segmentIds: campaignRow[0].audience_segment_ids ?? [],
+          contactGroupIds:
+            campaignRow[0].audience_contact_group_ids ?? [],
+          filters: campaignRow[0].audience_filters ?? {},
+          cap: campaignRow[0].audience_cap ?? null,
+        },
+        parsed.data,
+      )
+    : await computeStageAudienceCount(cid, orgId, parsed.data);
+
+  // For "projected" mode the pool count we display is the cap (the
+  // ceiling at activation). For "frozen" mode it's the actual snapshot.
+  const pool_size = isDraft
+    ? campaignRow[0].audience_cap ?? result.count
+    : campaignRow[0].audience_snapshot_count;
 
   return NextResponse.json({
     count: result.count,
     breakdown: result.breakdown,
-    pool_size: campaignRow[0].audience_snapshot_count,
+    pool_size,
+    // `mode` lets the UI swap the "frozen" / "projected" labels without
+    // duplicating the campaign-status check on the client.
+    mode: isDraft ? "projected" : "frozen",
   });
 }

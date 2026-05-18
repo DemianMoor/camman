@@ -109,6 +109,10 @@ type AudiencePreview = {
     excluded_for_optout: number;
   };
   pool_size: number;
+  // "projected" when the parent campaign is still a draft (pool not yet
+  // frozen); "frozen" once the campaign has been activated. The UI uses
+  // it to swap labels and to nudge the operator about draft state.
+  mode: "projected" | "frozen";
 };
 
 export interface StageFormActionContext {
@@ -427,6 +431,8 @@ export function StageForm({
             include_no_status: watchedIncludeNoStatus,
             include_clickers: watchedIncludeClickers,
             exclude_clickers: watchedExcludeClickers,
+            split_index: splitIndex ?? null,
+            split_total: splitTotal ?? null,
           }),
         },
       );
@@ -449,6 +455,8 @@ export function StageForm({
     watchedIncludeNoStatus,
     watchedIncludeClickers,
     watchedExcludeClickers,
+    splitIndex,
+    splitTotal,
     previewApi.execute,
   ]);
 
@@ -1034,9 +1042,19 @@ export function StageForm({
                     <div className="text-2xl font-semibold tabular-nums">
                       {audiencePreview.count.toLocaleString()} contacts
                       <span className="ml-2 text-sm font-normal text-muted-foreground">
-                        of {audiencePreview.pool_size.toLocaleString()} frozen
+                        of {audiencePreview.pool_size.toLocaleString()}{" "}
+                        {audiencePreview.mode === "projected"
+                          ? "projected"
+                          : "frozen"}
                       </span>
                     </div>
+                    {audiencePreview.mode === "projected" ? (
+                      <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                        Parent campaign is still a draft — the pool freezes at
+                        activation. Numbers may shift slightly when the random
+                        sample is taken.
+                      </p>
+                    ) : null}
                     <div className="grid gap-0.5 text-xs text-muted-foreground">
                       <span>
                         No-status:{" "}

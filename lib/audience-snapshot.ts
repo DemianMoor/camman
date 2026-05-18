@@ -256,6 +256,163 @@ export async function computeStageAudienceCount(
   };
 }
 
+// Projected stage audience for *draft* campaigns whose pool hasn't been
+// frozen yet. Computes the count live against the campaign's selected
+// segments + contact groups + campaign-level filters, then layers the
+// stage filters on top. Returns the same shape as
+// computeStageAudienceCount for a drop-in swap at the call site.
+//
+// Cap is honored as a clamp on the final count (the at-activation
+// snapshot will random-sample, but for preview a clamp gives the right
+// upper bound). Splits are honored by ANDing the hashtext partition
+// into the WHERE.
+//
+// This intentionally lives parallel to previewAudience instead of
+// merging: previewAudience handles the campaign-level question ("how
+// many contacts would this campaign reach if activated now"), whereas
+// this answers the stage-level question ("how many would THIS stage
+// reach inside that campaign"). The two queries share buildSegment-
+// AudienceClause and the qualifier SQL, but the SELECT shape differs.
+export async function computeStageAudienceCountForDraft(
+  campaign: {
+    id: number;
+    orgId: string;
+    segmentIds: number[];
+    contactGroupIds: number[];
+    filters: AudienceFilters;
+    cap: number | null;
+  },
+  stageFilters: StageAudienceFilters,
+): Promise<StageAudienceCountResult> {
+  const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
+  // No audience source on the parent campaign → trivially zero.
+  if (segmentIds.length === 0 && contactGroupIds.length === 0) {
+    return {
+      count: 0,
+      breakdown: { no_status: 0, clickers: 0, excluded_for_optout: 0 },
+    };
+  }
+
+  const includeNoStatus = filters.include_no_status === true;
+  const includeOptIn = filters.include_opt_in === true;
+  const includeClickers = filters.include_clickers === true;
+  const includeNotClicked = filters.include_not_clicked === true;
+
+  const stageIncludeNoStatus = stageFilters.include_no_status;
+  const stageIncludeClickers = stageFilters.include_clickers;
+  const stageExcludeClickers = stageFilters.exclude_clickers;
+  const splitIndex = stageFilters.split_index ?? null;
+  const splitTotal = stageFilters.split_total ?? null;
+  const splitActive = splitIndex !== null && splitTotal !== null;
+
+  // Mirror previewAudience's source union — UNION the segments' rule-
+  // filtered clauses with the contact-group memberships.
+  const perSegmentClauses = await Promise.all(
+    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
+  );
+  const segmentBranches = perSegmentClauses.map(
+    (clause) => drizzleSql`
+      SELECT contact_id FROM (${clause}) seg_inner
+    `,
+  );
+  const groupBranches =
+    contactGroupIds.length > 0
+      ? [
+          drizzleSql`
+            SELECT contact_id FROM contact_contact_groups
+            WHERE org_id = ${orgId}::uuid
+              AND contact_group_id = ANY(${drizzleSql.raw(
+                "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+              )})
+          `,
+        ]
+      : [];
+  const allBranches = [...segmentBranches, ...groupBranches];
+  const unioned = allBranches.reduce(
+    (acc, branch, i) =>
+      i === 0 ? branch : drizzleSql`${acc} UNION ${branch}`,
+  );
+
+  const rows = (await db.execute(drizzleSql`
+    with sources as (
+      select distinct contact_id from (${unioned}) u
+    ),
+    flagged as (
+      select
+        s.contact_id,
+        exists (
+          select 1 from opt_outs oo
+          where oo.contact_id = s.contact_id and oo.org_id = ${orgId}::uuid
+        ) as has_opt_out,
+        exists (
+          select 1 from opt_ins oi
+          where oi.contact_id = s.contact_id and oi.org_id = ${orgId}::uuid
+        ) as has_opt_in,
+        exists (
+          select 1 from clickers c
+          where c.contact_id = s.contact_id and c.org_id = ${orgId}::uuid
+        ) as has_clicker,
+        case
+          when ${splitActive}::boolean
+            then mod(hashtext(s.contact_id::text), ${splitTotal ?? 1}::int) =
+                 (${(splitIndex ?? 1) - 1})::int
+          else true
+        end as in_split
+      from sources s
+    )
+    select
+      count(*) filter (
+        where in_split
+          and has_opt_out = false
+          and (
+            (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
+            or (${includeOptIn}::boolean and has_opt_in)
+            or (${includeClickers}::boolean and has_clicker)
+            or (${includeNotClicked}::boolean and not has_clicker)
+          )
+          and (
+            (${stageIncludeNoStatus}::boolean and not has_opt_in and not has_clicker)
+            or (${stageIncludeClickers}::boolean and has_clicker)
+          )
+          and not (${stageExcludeClickers}::boolean and has_clicker)
+      )::int as count,
+      count(*) filter (
+        where in_split and has_opt_out = false
+          and not has_opt_in and not has_clicker
+      )::int as no_status,
+      count(*) filter (
+        where in_split and has_opt_out = false and has_clicker
+      )::int as clickers,
+      count(*) filter (where in_split and has_opt_out)::int as excluded_for_optout
+    from flagged
+  `)) as unknown as {
+    count: number;
+    no_status: number;
+    clickers: number;
+    excluded_for_optout: number;
+  }[];
+
+  const row = rows[0] ?? {
+    count: 0,
+    no_status: 0,
+    clickers: 0,
+    excluded_for_optout: 0,
+  };
+  // Apply the campaign cap as an upper-bound clamp. At activation the
+  // snapshot will random-sample, but a clamp here gives the right
+  // ceiling for the preview.
+  const cappedCount =
+    cap !== null && cap < row.count ? cap : row.count;
+  return {
+    count: cappedCount,
+    breakdown: {
+      no_status: row.no_status,
+      clickers: row.clickers,
+      excluded_for_optout: row.excluded_for_optout,
+    },
+  };
+}
+
 // Compute the count + composition breakdown for the UI's audience
 // preview. No DB write.
 //

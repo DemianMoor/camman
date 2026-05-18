@@ -17,7 +17,10 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
-import { computeStageAudienceCount } from "@/lib/audience-snapshot";
+import {
+  computeStageAudienceCount,
+  computeStageAudienceCountForDraft,
+} from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 import {
   generateCampaignTrackingId,
@@ -63,8 +66,18 @@ export async function GET(
     });
   }
 
+  // Pull the campaign's full audience config so the per-row audience
+  // count below can switch to projected-mode computation when the
+  // campaign is still a draft (pool not yet materialized).
   const campaignRow = await db
-    .select({ id: campaigns.id })
+    .select({
+      id: campaigns.id,
+      status: campaigns.status,
+      audience_segment_ids: campaigns.audience_segment_ids,
+      audience_contact_group_ids: campaigns.audience_contact_group_ids,
+      audience_filters: campaigns.audience_filters,
+      audience_cap: campaigns.audience_cap,
+    })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
     .limit(1);
@@ -73,6 +86,15 @@ export async function GET(
       entity: "campaign",
     });
   }
+  const isDraft = campaignRow[0].status === "draft";
+  const draftAudienceInput = {
+    id: cid,
+    orgId,
+    segmentIds: campaignRow[0].audience_segment_ids ?? [],
+    contactGroupIds: campaignRow[0].audience_contact_group_ids ?? [],
+    filters: campaignRow[0].audience_filters ?? {},
+    cap: campaignRow[0].audience_cap ?? null,
+  };
 
   const listParams = parseListParams(req);
   const sp = req.nextUrl.searchParams;
@@ -178,13 +200,22 @@ export async function GET(
   // later step, or batching all stages into a single query with FILTERs.
   const audienceCounts = await Promise.all(
     rows.map((r) =>
-      computeStageAudienceCount(cid, orgId, {
-        include_no_status: r.include_no_status,
-        include_clickers: r.include_clickers,
-        exclude_clickers: r.exclude_clickers,
-        split_index: r.split_index,
-        split_total: r.split_total,
-      }).then((res) => res.count),
+      (isDraft
+        ? computeStageAudienceCountForDraft(draftAudienceInput, {
+            include_no_status: r.include_no_status,
+            include_clickers: r.include_clickers,
+            exclude_clickers: r.exclude_clickers,
+            split_index: r.split_index,
+            split_total: r.split_total,
+          })
+        : computeStageAudienceCount(cid, orgId, {
+            include_no_status: r.include_no_status,
+            include_clickers: r.include_clickers,
+            exclude_clickers: r.exclude_clickers,
+            split_index: r.split_index,
+            split_total: r.split_total,
+          })
+      ).then((res) => res.count),
     ),
   );
 

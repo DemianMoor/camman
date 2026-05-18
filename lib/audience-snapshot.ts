@@ -196,6 +196,15 @@ export async function computeStageAudienceCount(
   const splitIndex = filters.split_index ?? null;
   const splitTotal = filters.split_total ?? null;
   const splitActive = splitIndex !== null && splitTotal !== null;
+  // Row-number partitioning instead of hash partitioning so splits are
+  // ALWAYS as equal as possible: every sibling gets either floor(N/M)
+  // or ceil(N/M) contacts, never the ±2-5% variance hashtext produces.
+  // The qualifying set is established first (opt-outs excluded, stage
+  // filters applied), then ROW_NUMBER over a stable ORDER BY contact_id
+  // assigns each contact to a bucket = (rn-1) % split_total. Bucket
+  // membership is stable across previews so long as the qualifying set
+  // is stable (i.e. same filter on each sibling, as the split endpoint
+  // clones).
   const rows = (await db.execute(drizzleSql`
     with joined as (
       select
@@ -205,44 +214,33 @@ export async function computeStageAudienceCount(
         exists (
           select 1 from opt_outs oo
           where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
-        ) as is_opt_out_now,
-        case
-          when ${splitActive}::boolean
-            -- Positive-modulo. hashtext returns int4 which can be
-            -- negative, and Postgres mod() follows the dividend sign.
-            -- Plain mod(...) = split_index-1 would silently drop the
-            -- ~half of rows whose hash is negative (since the rhs is
-            -- always non-negative). Cast to bigint, then bias back
-            -- into [0, n) before comparing.
-            then (
-              ((hashtext(p.contact_id::text)::bigint
-                  % ${splitTotal ?? 1}::int)
-                + ${splitTotal ?? 1}::int)
-              % ${splitTotal ?? 1}::int
-            ) = (${(splitIndex ?? 1) - 1})::int
-          else true
-        end as in_split
+        ) as is_opt_out_now
       from campaign_audience_pool p
       where p.campaign_id = ${campaignId}::int and p.org_id = ${orgId}::uuid
+    ),
+    qualified as (
+      select
+        contact_id,
+        was_clicker_at_snapshot,
+        was_no_status_at_snapshot,
+        row_number() over (order by contact_id) - 1 as rn
+      from joined
+      where not is_opt_out_now
+        and (
+          (${include_no_status}::boolean and was_no_status_at_snapshot)
+          or (${include_clickers}::boolean and was_clicker_at_snapshot)
+        )
+        and not (${exclude_clickers}::boolean and was_clicker_at_snapshot)
     )
     select
       count(*) filter (
-        where not is_opt_out_now
-          and in_split
-          and (
-            (${include_no_status}::boolean and was_no_status_at_snapshot)
-            or (${include_clickers}::boolean and was_clicker_at_snapshot)
-          )
-          and not (${exclude_clickers}::boolean and was_clicker_at_snapshot)
+        where not ${splitActive}::boolean
+          or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
       )::int as count,
-      count(*) filter (
-        where not is_opt_out_now and in_split and was_no_status_at_snapshot
-      )::int as no_status,
-      count(*) filter (
-        where not is_opt_out_now and in_split and was_clicker_at_snapshot
-      )::int as clickers,
-      count(*) filter (where is_opt_out_now and in_split)::int as excluded_for_optout
-    from joined
+      (select count(*) from joined where not is_opt_out_now and was_no_status_at_snapshot)::int as no_status,
+      (select count(*) from joined where not is_opt_out_now and was_clicker_at_snapshot)::int as clickers,
+      (select count(*) from joined where is_opt_out_now)::int as excluded_for_optout
+    from qualified
   `)) as unknown as {
     count: number;
     no_status: number;
@@ -343,6 +341,8 @@ export async function computeStageAudienceCountForDraft(
       i === 0 ? branch : drizzleSql`${acc} UNION ${branch}`,
   );
 
+  // Row-number partitioning over the qualified set so splits are as
+  // equal as possible. Mirrors the active-pool path.
   const rows = (await db.execute(drizzleSql`
     with sources as (
       select distinct contact_id from (${unioned}) u
@@ -361,49 +361,38 @@ export async function computeStageAudienceCountForDraft(
         exists (
           select 1 from clickers c
           where c.contact_id = s.contact_id and c.org_id = ${orgId}::uuid
-        ) as has_clicker,
-        case
-          when ${splitActive}::boolean
-            -- Positive-modulo. hashtext returns int4 which can be
-            -- negative, and Postgres mod() follows the dividend sign,
-            -- so plain mod(...) = split_index-1 would silently drop
-            -- the ~half of rows whose hash is negative. Cast to
-            -- bigint, then bias back into [0, n) before comparing.
-            then (
-              ((hashtext(s.contact_id::text)::bigint
-                  % ${splitTotal ?? 1}::int)
-                + ${splitTotal ?? 1}::int)
-              % ${splitTotal ?? 1}::int
-            ) = (${(splitIndex ?? 1) - 1})::int
-          else true
-        end as in_split
+        ) as has_clicker
       from sources s
+    ),
+    qualified as (
+      select
+        contact_id,
+        row_number() over (order by contact_id) - 1 as rn
+      from flagged
+      where has_opt_out = false
+        and (
+          (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
+          or (${includeOptIn}::boolean and has_opt_in)
+          or (${includeClickers}::boolean and has_clicker)
+          or (${includeNotClicked}::boolean and not has_clicker)
+        )
+        and (
+          (${stageIncludeNoStatus}::boolean and not has_opt_in and not has_clicker)
+          or (${stageIncludeClickers}::boolean and has_clicker)
+        )
+        and not (${stageExcludeClickers}::boolean and has_clicker)
     )
     select
       count(*) filter (
-        where in_split
-          and has_opt_out = false
-          and (
-            (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
-            or (${includeOptIn}::boolean and has_opt_in)
-            or (${includeClickers}::boolean and has_clicker)
-            or (${includeNotClicked}::boolean and not has_clicker)
-          )
-          and (
-            (${stageIncludeNoStatus}::boolean and not has_opt_in and not has_clicker)
-            or (${stageIncludeClickers}::boolean and has_clicker)
-          )
-          and not (${stageExcludeClickers}::boolean and has_clicker)
+        where not ${splitActive}::boolean
+          or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
       )::int as count,
-      count(*) filter (
-        where in_split and has_opt_out = false
-          and not has_opt_in and not has_clicker
-      )::int as no_status,
-      count(*) filter (
-        where in_split and has_opt_out = false and has_clicker
-      )::int as clickers,
-      count(*) filter (where in_split and has_opt_out)::int as excluded_for_optout
-    from flagged
+      (select count(*) from flagged
+        where has_opt_out = false and not has_opt_in and not has_clicker)::int as no_status,
+      (select count(*) from flagged
+        where has_opt_out = false and has_clicker)::int as clickers,
+      (select count(*) from flagged where has_opt_out)::int as excluded_for_optout
+    from qualified
   `)) as unknown as {
     count: number;
     no_status: number;

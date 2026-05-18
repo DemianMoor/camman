@@ -251,6 +251,12 @@ export function StageForm({
   const phonesApi = useApiCall<{ data: ProviderPhone[] }>();
   const previewApi = useApiCall<AudiencePreview>();
   const createCreativeApi = useApiCall<{ id: number }>();
+  // Create-then-split path: when the user clicks "Split for A/B test…"
+  // on a brand-new (unsaved) stage, we save it first via this call so
+  // the split endpoint has a stage_id to operate on, then immediately
+  // POST /split. Bypasses the parent's onSubmit (which would close the
+  // editor) and lets onSplit handle the refetch+close in one beat.
+  const createForSplitApi = useApiCall<{ id: number }>();
   const splitApi = useApiCall<{
     source_id: number;
     new_stage_ids: number[];
@@ -511,9 +517,29 @@ export function StageForm({
   }
 
   async function handleSplitSubmit() {
-    if (!isEdit || !stageId) return;
+    // Two paths:
+    //   edit mode → split the existing stageId directly.
+    //   create mode → save the stage first (using the form's current
+    //     values) and split the freshly-minted row. The user sees one
+    //     click; under the hood it's POST /stages then POST /split.
+    let sourceStageId: number | null = isEdit ? stageId ?? null : null;
+    if (sourceStageId === null) {
+      const createRes = await createForSplitApi.execute(
+        `/api/campaigns/${campaignId}/stages`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildStageCreateBody(form.getValues())),
+        },
+      );
+      if (!createRes.ok) {
+        toastApiError(createRes, "Couldn't save stage before splitting");
+        return;
+      }
+      sourceStageId = createRes.data.id;
+    }
     const result = await splitApi.execute(
-      `/api/campaigns/${campaignId}/stages/${stageId}/split`,
+      `/api/campaigns/${campaignId}/stages/${sourceStageId}/split`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -533,9 +559,7 @@ export function StageForm({
 
   const isAlreadySplit = splitTotal != null && splitTotal >= 2;
   const canSplit =
-    isEdit &&
     !isAlreadySplit &&
-    stageId != null &&
     audiencePreview !== null &&
     audiencePreview.count >= 2;
 
@@ -1091,14 +1115,19 @@ export function StageForm({
                             setSplitCount(2);
                             setSplitOpen(true);
                           }}
-                          disabled={isSubmitting || splitApi.isLoading}
+                          disabled={
+                            isSubmitting ||
+                            splitApi.isLoading ||
+                            createForSplitApi.isLoading
+                          }
                           className="w-full"
                         >
                           Split for A/B test…
                         </Button>
                         <p className="mt-1 text-[11px] text-muted-foreground">
-                          Partition this stage&apos;s audience into 2–5 siblings.
-                          Each sibling can hold its own creative.
+                          {isEdit
+                            ? "Partition this stage's audience into 2–5 siblings. Each sibling can hold its own creative."
+                            : "Saves this stage first, then partitions its audience into 2–5 siblings. Each sibling can hold its own creative."}
                         </p>
                       </div>
                     ) : isAlreadySplit ? (
@@ -1266,18 +1295,18 @@ export function StageForm({
       <FormDialog
         open={splitOpen}
         onOpenChange={(open) => {
-          if (!splitApi.isLoading) setSplitOpen(open);
+          if (!splitApi.isLoading && !createForSplitApi.isLoading) {
+            setSplitOpen(open);
+          }
         }}
         className="sm:max-w-md"
       >
         <DialogHeader>
           <DialogTitle>Split stage for A/B test</DialogTitle>
           <DialogDescription>
-            This stage&apos;s audience will be partitioned into the chosen
-            number of siblings. Each sibling clones the current
-            configuration so you can swap the creative or other settings
-            per variant. The split is deterministic — the same contact
-            always lands in the same bucket.
+            {isEdit
+              ? "This stage's audience will be partitioned into the chosen number of siblings. Each sibling clones the current configuration so you can swap the creative or other settings per variant. The split is deterministic — the same contact always lands in the same bucket."
+              : "We'll save this stage first, then partition its audience into the chosen number of siblings. Each sibling clones the configuration you just filled in so you can swap the creative or other settings per variant. The split is deterministic — the same contact always lands in the same bucket."}
           </DialogDescription>
         </DialogHeader>
 
@@ -1317,19 +1346,23 @@ export function StageForm({
             type="button"
             variant="outline"
             onClick={() => setSplitOpen(false)}
-            disabled={splitApi.isLoading}
+            disabled={splitApi.isLoading || createForSplitApi.isLoading}
           >
             Cancel
           </Button>
           <Button
             type="button"
             onClick={() => void handleSplitSubmit()}
-            disabled={splitApi.isLoading}
+            disabled={splitApi.isLoading || createForSplitApi.isLoading}
           >
-            {splitApi.isLoading ? (
+            {splitApi.isLoading || createForSplitApi.isLoading ? (
               <Loader2 className="size-4 animate-spin" aria-hidden />
             ) : null}
-            Split into {splitCount}
+            {createForSplitApi.isLoading
+              ? "Saving…"
+              : splitApi.isLoading
+                ? "Splitting…"
+                : `Split into ${splitCount}`}
           </Button>
         </div>
       </FormDialog>

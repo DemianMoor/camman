@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
+import { Select as SelectPrimitive } from "radix-ui";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 
@@ -700,26 +701,46 @@ export function StageForm({
                       disabled={isSubmitting}
                     >
                       <FormControl>
-                        <SelectTrigger>
+                        {/* w-full pins the trigger to the grid cell so a
+                            long ItemText can't push the trigger wider
+                            than the cell into the Sales page column. */}
+                        <SelectTrigger className="w-full">
                           <SelectValue placeholder="Pick a creative" />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
                         <SelectItem value={NONE}>None</SelectItem>
                         {creatives.map((c) => (
-                          <SelectItem key={c.id} value={String(c.id)}>
-                            <span className="inline-flex items-center gap-2">
-                              <SpamScoreDot
-                                score={c.spam_score}
-                                verdict={c.spam_verdict}
-                              />
-                              <span className="font-mono text-xs">{c.slug}</span>
-                              <span className="truncate text-xs text-muted-foreground">
-                                {c.text.slice(0, 40)}
-                                {c.text.length > 40 ? "…" : ""}
+                          // SelectPrimitive.Item directly (not shadcn's
+                          // SelectItem) so we can separate what the
+                          // TRIGGER displays (compact: dot + slug only,
+                          // via ItemText) from what the DROPDOWN displays
+                          // (rich: dot + slug + 40-char excerpt). Same
+                          // base classes as shadcn's SelectItem.
+                          <SelectPrimitive.Item
+                            key={c.id}
+                            value={String(c.id)}
+                            data-slot="select-item"
+                            className="relative flex w-full cursor-default items-center gap-1.5 rounded-md py-1 pr-8 pl-1.5 text-sm outline-hidden select-none focus:bg-accent focus:text-accent-foreground data-disabled:pointer-events-none data-disabled:opacity-50"
+                          >
+                            <SelectPrimitive.ItemText>
+                              <span className="inline-flex items-center gap-2">
+                                <SpamScoreDot
+                                  score={c.spam_score}
+                                  verdict={c.spam_verdict}
+                                />
+                                <span className="font-mono text-xs">
+                                  {c.slug}
+                                </span>
                               </span>
+                            </SelectPrimitive.ItemText>
+                            {/* Visible only in the dropdown — sits outside
+                                ItemText so the trigger stays compact. */}
+                            <span className="ml-1 truncate text-xs text-muted-foreground">
+                              {c.text.slice(0, 40)}
+                              {c.text.length > 40 ? "…" : ""}
                             </span>
-                          </SelectItem>
+                          </SelectPrimitive.Item>
                         ))}
                         {campaign.offer?.id ? (
                           <SelectItem value={NEW_CREATIVE}>
@@ -733,6 +754,19 @@ export function StageForm({
                         ) : null}
                       </SelectContent>
                     </Select>
+                    {/* Full creative text under the picker so the operator
+                        can read what they selected in one place. Hidden
+                        until a creative is actually picked. */}
+                    {selectedCreative ? (
+                      <div className="mt-1 rounded-md border bg-muted/40 px-2.5 py-1.5 text-xs">
+                        <div className="mb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                          Creative text
+                        </div>
+                        <p className="whitespace-pre-wrap font-mono text-sm leading-snug text-foreground">
+                          {selectedCreative.text}
+                        </p>
+                      </div>
+                    ) : null}
                     <FormMessage />
                   </FormItem>
                 )}

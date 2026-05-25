@@ -668,6 +668,7 @@ async function main() {
       {
         method: "POST",
         body: JSON.stringify({
+          creative_id: cre.id,
           include_no_status: true,
           include_clickers: false,
           exclude_clickers: false,
@@ -728,10 +729,8 @@ async function main() {
       `got ${cd}`,
     );
     check(
-      "Filename matches campaign-<slug>-stage-N-phones-YYYY-MM-DD-HHmmss.csv",
-      /filename="campaign-.+-stage-\d+-phones-\d{4}-\d{2}-\d{2}-\d{6}\.csv"/.test(
-        cd,
-      ),
+      "Filename matches stage tracking_id (<brand>_<offer>_<MMDDYY>_<seq>_sN_cM.csv)",
+      /filename="\d+_\d+_\d{6}_\d+_s\d+_c\d+\.csv"/.test(cd),
       `got ${cd}`,
     );
 
@@ -771,6 +770,7 @@ async function main() {
       {
         method: "POST",
         body: JSON.stringify({
+          creative_id: cre.id,
           include_no_status: false,
           include_clickers: false,
           exclude_clickers: false,
@@ -794,7 +794,7 @@ async function main() {
     );
     check(
       "empty-audience filename still well-formed",
-      /filename="campaign-.+-stage-\d+-phones-\d{4}-\d{2}-\d{2}-\d{6}\.csv"/.test(
+      /filename="\d+_\d+_\d{6}_\d+_s\d+_c\d+\.csv"/.test(
         emptyExportR.headers.get("content-disposition") ?? "",
       ),
     );

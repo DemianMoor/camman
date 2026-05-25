@@ -6,7 +6,6 @@ import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import {
-  buildExportFilename,
   chunkedQuery,
   streamCsvResponse,
 } from "@/lib/csv/stream-export";
@@ -45,9 +44,12 @@ export async function GET(
     return apiError(400, "Invalid campaign id", API_ERROR_CODES.VALIDATION);
   }
 
-  // Verify ownership + grab the campaign slug for the filename.
+  // Verify ownership + grab the tracking ID for the filename.
   const campaignRows = await db
-    .select({ slug: campaigns.slug, status: campaigns.status })
+    .select({
+      tracking_id: campaigns.tracking_id,
+      status: campaigns.status,
+    })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
     .limit(1);
@@ -57,6 +59,15 @@ export async function GET(
     });
   }
   const campaign = campaignRows[0];
+
+  if (!campaign.tracking_id) {
+    return apiError(
+      409,
+      "Campaign is missing a tracking ID. Set the brand and offer before exporting.",
+      API_ERROR_CODES.VALIDATION,
+      { reason: "missing_tracking_id" },
+    );
+  }
 
   // Gather the non-archived stages we'll union over.
   const stages = await db
@@ -139,7 +150,7 @@ export async function GET(
         });
 
   return streamCsvResponse({
-    filename: buildExportFilename(`campaign-${campaign.slug}-all-phones`),
+    filename: `${campaign.tracking_id}_all.csv`,
     columns: [
       { key: "phone_number", label: "Phone Number" },
       { key: "stage_number", label: "Stage Number" },

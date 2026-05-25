@@ -7,7 +7,6 @@ import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import {
-  buildExportFilename,
   chunkedQuery,
   streamCsvResponse,
 } from "@/lib/csv/stream-export";
@@ -74,7 +73,7 @@ export async function GET(
       include_no_status: campaign_stages.include_no_status,
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,
-      campaign_slug: campaigns.slug,
+      tracking_id: campaign_stages.tracking_id,
     })
     .from(campaign_stages)
     .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
@@ -92,6 +91,15 @@ export async function GET(
     });
   }
   const stage = rows[0];
+
+  if (!stage.tracking_id) {
+    return apiError(
+      409,
+      "Stage is missing a tracking ID. Set the campaign brand and offer, and the stage creative, before exporting.",
+      API_ERROR_CODES.VALIDATION,
+      { reason: "missing_tracking_id" },
+    );
+  }
 
   // Build the filter snippets once. Same logic as the audience-count helper,
   // but here we need to select phone_number per row and apply offset/limit
@@ -136,9 +144,7 @@ export async function GET(
   });
 
   return streamCsvResponse({
-    filename: buildExportFilename(
-      `campaign-${stage.campaign_slug}-stage-${stage.stage_number}-phones`,
-    ),
+    filename: `${stage.tracking_id}.csv`,
     columns: [{ key: "phone_number", label: "Phone Number" }],
     rowSource,
     rowMapper: (row) => ({

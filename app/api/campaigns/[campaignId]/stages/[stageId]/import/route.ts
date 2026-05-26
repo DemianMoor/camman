@@ -281,18 +281,161 @@ export async function POST(
       }
     }
 
-    // 4. Resolve propagation: for each optout/scrubbed/bounced/clicker row,
-    //    either reuse the existing opt_out/clicker for this org (per-brand
-    //    for clickers), or insert a new one. These are usually a small
-    //    fraction of total rows so per-row roundtrips are acceptable.
-    //    Within-batch dedup avoids a second roundtrip when the same
-    //    contact appears twice.
+    // 4. Resolve propagation. Scrubbed/bounced share the opt_outs path
+    //    (tagged via the `reason` column) so the audience-snapshot
+    //    exclusion query handles them uniformly. Unlike STOP opt-outs,
+    //    they do NOT get an opt_out_brands row — they're universal, not
+    //    brand-specific.
     //
-    //    Scrubbed/bounced share the opt_outs propagation path (tagged via
-    //    the `reason` column) so the audience-snapshot exclusion query
-    //    handles them uniformly. Unlike STOP opt-outs, they do NOT get an
-    //    opt_out_brands row — they're universal, not brand-specific.
-    const rowOptOutId = new Map<number, number>(); // processable idx → opt_out id
+    //    Perf note: an earlier draft did per-row INSERT … RETURNING for
+    //    each new opt_out / clicker. With opt-outs at <2% of total rows
+    //    that was fine, but scrubbed/bounced changed the math (10K-row
+    //    CSVs commonly have ~10% scrubbed → 1,000+ INSERTs in one
+    //    transaction → Vercel function timeout). Now we collect the
+    //    needed rows up front and bulk-insert in CHUNK_SIZE batches —
+    //    ~2 roundtrips total instead of 1,000+.
+    //
+    //    Within-batch dedup: a contact appearing multiple times in the
+    //    CSV gets ONE opt_out row. The FIRST outcome seen for that
+    //    contact determines `reason` — same semantics as the prior
+    //    per-row loop.
+
+    // 4a. Plan: walk processable, gather unique (contact_id → reason /
+    //     phone) tuples for rows that need a NEW opt_out / clicker.
+    const newOptOutsByContact = new Map<
+      string,
+      { phone_number: string; reason: "opt_out" | "scrubbed" | "bounced" }
+    >();
+    const newClickersByContact = new Map<
+      string,
+      { phone_number: string }
+    >();
+    for (let i = 0; i < processable.length; i++) {
+      const p = processable[i];
+      const contactId = phoneToContact.get(p.phone_number);
+      if (!contactId) continue;
+
+      const isExclusionOutcome =
+        p.outcome.outcome === "optout" ||
+        p.outcome.outcome === "scrubbed" ||
+        p.outcome.outcome === "bounced";
+
+      if (isExclusionOutcome) {
+        if (
+          !existingOptoutByContact.has(contactId) &&
+          !newOptOutsByContact.has(contactId)
+        ) {
+          let reason: "opt_out" | "scrubbed" | "bounced";
+          if (p.outcome.outcome === "optout") reason = "opt_out";
+          else if (p.outcome.outcome === "scrubbed") reason = "scrubbed";
+          else reason = "bounced";
+          newOptOutsByContact.set(contactId, {
+            phone_number: p.phone_number,
+            reason,
+          });
+        }
+      } else if (
+        p.outcome.outcome === "clicker" &&
+        campaignBrandId !== null
+      ) {
+        if (
+          !existingClickerByContact.has(contactId) &&
+          !newClickersByContact.has(contactId)
+        ) {
+          newClickersByContact.set(contactId, {
+            phone_number: p.phone_number,
+          });
+        }
+      }
+    }
+
+    // 4b. Bulk-insert new opt_outs in chunks; RETURNING (id, contact_id)
+    //     so we can populate existingOptoutByContact. Each (contact_id)
+    //     in this set is unique by Map construction, so no conflict.
+    const newOptOutEntries = Array.from(newOptOutsByContact.entries());
+    for (let i = 0; i < newOptOutEntries.length; i += CHUNK_SIZE) {
+      const chunk = newOptOutEntries.slice(i, i + CHUNK_SIZE);
+      if (chunk.length === 0) continue;
+      const inserted = await tx
+        .insert(opt_outs)
+        .values(
+          chunk.map(([contactId, v]) => ({
+            org_id: orgId,
+            contact_id: contactId,
+            phone_number: v.phone_number,
+            source: `stage-import:${importRow.id}`,
+            reason: v.reason,
+          })),
+        )
+        .returning({
+          id: opt_outs.id,
+          contact_id: opt_outs.contact_id,
+        });
+      for (const row of inserted) {
+        existingOptoutByContact.set(row.contact_id, row.id);
+      }
+    }
+
+    // 4c. Bulk-insert opt_out_brands for the subset whose `reason` is
+    //     'opt_out' (scrubbed/bounced are universal — no brand junction).
+    if (campaignBrandId !== null) {
+      const brandJunctionValues: Array<{
+        opt_out_id: number;
+        brand_id: number;
+      }> = [];
+      for (const [contactId, v] of newOptOutEntries) {
+        if (v.reason !== "opt_out") continue;
+        const optOutId = existingOptoutByContact.get(contactId);
+        if (optOutId === undefined) continue; // defensive; unreachable
+        brandJunctionValues.push({
+          opt_out_id: optOutId,
+          brand_id: campaignBrandId,
+        });
+      }
+      for (let i = 0; i < brandJunctionValues.length; i += CHUNK_SIZE) {
+        const chunk = brandJunctionValues.slice(i, i + CHUNK_SIZE);
+        if (chunk.length === 0) continue;
+        await tx
+          .insert(opt_out_brands)
+          .values(chunk)
+          .onConflictDoNothing();
+      }
+    }
+
+    // 4d. Bulk-insert new clickers. Clickers are gated on a brand_id
+    //     (FK NOT NULL), so we only do this when the campaign has one.
+    const newClickerEntries = Array.from(newClickersByContact.entries());
+    if (campaignBrandId !== null) {
+      for (let i = 0; i < newClickerEntries.length; i += CHUNK_SIZE) {
+        const chunk = newClickerEntries.slice(i, i + CHUNK_SIZE);
+        if (chunk.length === 0) continue;
+        const inserted = await tx
+          .insert(clickers)
+          .values(
+            chunk.map(([contactId, v]) => ({
+              org_id: orgId,
+              contact_id: contactId,
+              phone_number: v.phone_number,
+              brand_id: campaignBrandId,
+              provider_id: stageProviderId ?? null,
+              offer_id: stageCtx[0].offer_id ?? null,
+              source: `stage-import:${importRow.id}`,
+            })),
+          )
+          .returning({
+            id: clickers.id,
+            contact_id: clickers.contact_id,
+          });
+        for (const row of inserted) {
+          existingClickerByContact.set(row.contact_id, row.id);
+        }
+      }
+    }
+
+    // 4e. Map each processable row → its opt_out / clicker id, using the
+    //     now-fully-populated existingOptoutByContact / existingClicker-
+    //     ByContact maps. Per-row, no DB roundtrips.
+    const rowOptOutId = new Map<number, number>();
     const rowClickerId = new Map<number, number>();
     for (let i = 0; i < processable.length; i++) {
       const p = processable[i];
@@ -305,61 +448,11 @@ export async function POST(
         p.outcome.outcome === "bounced";
 
       if (isExclusionOutcome) {
-        const existing = existingOptoutByContact.get(contactId);
-        if (existing !== undefined) {
-          rowOptOutId.set(i, existing);
-        } else {
-          const reason = p.outcome.outcome === "optout"
-            ? "opt_out"
-            : p.outcome.outcome; // "scrubbed" | "bounced"
-          const [newRow] = await tx
-            .insert(opt_outs)
-            .values({
-              org_id: orgId,
-              contact_id: contactId,
-              phone_number: p.phone_number,
-              source: `stage-import:${importRow.id}`,
-              reason,
-            })
-            .returning({ id: opt_outs.id });
-          existingOptoutByContact.set(contactId, newRow.id);
-          rowOptOutId.set(i, newRow.id);
-          // Only STOP opt-outs are brand-scoped. Scrubbed/bounced are
-          // universal — non-mobile / carrier-rejected numbers are
-          // unsendable for ANY brand in the org.
-          if (p.outcome.outcome === "optout" && campaignBrandId !== null) {
-            await tx
-              .insert(opt_out_brands)
-              .values({
-                opt_out_id: newRow.id,
-                brand_id: campaignBrandId,
-              })
-              .onConflictDoNothing();
-          }
-        }
-      } else if (
-        p.outcome.outcome === "clicker" &&
-        campaignBrandId !== null
-      ) {
-        const existing = existingClickerByContact.get(contactId);
-        if (existing !== undefined) {
-          rowClickerId.set(i, existing);
-        } else {
-          const [newRow] = await tx
-            .insert(clickers)
-            .values({
-              org_id: orgId,
-              contact_id: contactId,
-              phone_number: p.phone_number,
-              brand_id: campaignBrandId,
-              provider_id: stageProviderId ?? null,
-              offer_id: stageCtx[0].offer_id ?? null,
-              source: `stage-import:${importRow.id}`,
-            })
-            .returning({ id: clickers.id });
-          existingClickerByContact.set(contactId, newRow.id);
-          rowClickerId.set(i, newRow.id);
-        }
+        const ooId = existingOptoutByContact.get(contactId);
+        if (ooId !== undefined) rowOptOutId.set(i, ooId);
+      } else if (p.outcome.outcome === "clicker") {
+        const clId = existingClickerByContact.get(contactId);
+        if (clId !== undefined) rowClickerId.set(i, clId);
       }
     }
 

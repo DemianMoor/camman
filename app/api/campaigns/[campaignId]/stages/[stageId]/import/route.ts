@@ -185,14 +185,24 @@ export async function POST(
       .returning();
 
     // 2. Upsert contacts in chunks, building a phone → contact_id map.
+    //    Dedupe phone numbers BEFORE chunking — the same number can appear
+    //    multiple times in a results CSV (one row per send/event), and
+    //    Postgres's ON CONFLICT DO UPDATE rejects multiple rows targeting
+    //    the same constraint key within one statement with "cannot affect
+    //    row a second time". The upsert payload is just (org_id,
+    //    phone_number) + an updated_at touch, identical for every dup, so
+    //    inserting once per unique phone is loss-less.
     const phoneToContact = new Map<string, string>();
-    for (let i = 0; i < processable.length; i += CHUNK_SIZE) {
-      const chunk = processable.slice(i, i + CHUNK_SIZE);
-      const values = chunk.map((p) => ({
+    const uniquePhones = Array.from(
+      new Set(processable.map((p) => p.phone_number)),
+    );
+    for (let i = 0; i < uniquePhones.length; i += CHUNK_SIZE) {
+      const chunk = uniquePhones.slice(i, i + CHUNK_SIZE);
+      if (chunk.length === 0) continue;
+      const values = chunk.map((phone) => ({
         org_id: orgId,
-        phone_number: p.phone_number,
+        phone_number: phone,
       }));
-      if (values.length === 0) continue;
       const upserted = await tx
         .insert(contacts)
         .values(values)

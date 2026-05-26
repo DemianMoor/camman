@@ -252,3 +252,35 @@ export function deriveOutcome(
 // Re-export the heuristic clicked set so the UI can use it for the
 // status-value-mapping suggestion preview.
 export const CLICKED_HEURISTIC = HEURISTIC_CLICKED;
+
+// Priority for collapsing duplicate phone numbers within a single CSV
+// import. When the same number appears multiple times — typically one
+// row per provider event (sent → delivered → clicked → STOP) — the row
+// with the HIGHEST priority outcome wins. The losing rows are dropped
+// (their cost / raw_row data is lost; only the winner is stored in
+// stage_result_rows).
+//
+// Order — highest priority first:
+//   7. optout    — recipient said STOP, strongest signal
+//   6. scrubbed  — provider rejected the number as non-mobile
+//   5. bounced   — carrier rejected delivery
+//   4. clicker   — recipient engagement
+//   3. delivered — passive delivery success
+//   2. failed    — delivery failure (potentially transient)
+//   1. noop      — no signal
+//
+// Rationale: opt-out trumps everything because it's the user's explicit
+// instruction and overrides any prior engagement / delivery. Exclusion
+// signals (scrubbed/bounced) trump engagement and success because they
+// indicate the number can't reach the recipient going forward.
+// Engagement (clicker) trumps passive delivery. Delivered trumps failed
+// because positive confirmation outweighs a transient failure.
+export const OUTCOME_PRIORITY: Record<RowOutcome, number> = {
+  optout: 7,
+  scrubbed: 6,
+  bounced: 5,
+  clicker: 4,
+  delivered: 3,
+  failed: 2,
+  noop: 1,
+};

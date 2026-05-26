@@ -11,7 +11,11 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { CSV_MAX_BYTES, parseCsv } from "@/lib/imports/parse-csv";
-import { deriveOutcome, type RowOutcome } from "@/lib/imports/outcome";
+import {
+  deriveOutcome,
+  OUTCOME_PRIORITY,
+  type RowOutcome,
+} from "@/lib/imports/outcome";
 import { can } from "@/lib/permissions";
 import {
   mappingColumnsSchema,
@@ -104,6 +108,33 @@ export async function POST(
 
   const { rows, submitted } = parseCsv(csv_content, mapping);
 
+  // Walk the parsed rows once, collapsing duplicates by phone number
+  // using OUTCOME_PRIORITY (same logic the import endpoint applies). The
+  // per-bucket and sample counts below reflect the post-collapse state
+  // so the preview matches what the import will actually store.
+  let invalidPhone = 0;
+  let parsedCount = 0;
+  type PreviewWinner = {
+    outcome: RowOutcome;
+    raw: Record<string, string>;
+  };
+  const winners = new Map<string, PreviewWinner>();
+  for (const r of rows) {
+    if (r.phone_number === null) {
+      invalidPhone++;
+      continue;
+    }
+    parsedCount++;
+    const o = deriveOutcome(r, status_value_map ?? undefined);
+    const existing = winners.get(r.phone_number);
+    if (
+      !existing ||
+      OUTCOME_PRIORITY[o.outcome] > OUTCOME_PRIORITY[existing.outcome]
+    ) {
+      winners.set(r.phone_number, { outcome: o.outcome, raw: r.raw });
+    }
+  }
+
   const byOutcome: Record<RowOutcome, number> = {
     delivered: 0,
     failed: 0,
@@ -113,8 +144,6 @@ export async function POST(
     bounced: 0,
     noop: 0,
   };
-  let invalidPhone = 0;
-  let parsedCount = 0;
   const samples: Record<
     RowOutcome,
     Array<{
@@ -132,26 +161,21 @@ export async function POST(
     noop: [],
   };
   const phonesForDedup: string[] = [];
-
-  for (const r of rows) {
-    if (r.phone_number === null) {
-      invalidPhone++;
-      continue;
-    }
-    parsedCount++;
-    const o = deriveOutcome(r, status_value_map ?? undefined);
-    byOutcome[o.outcome]++;
-    phonesForDedup.push(r.phone_number);
-    if (samples[o.outcome].length < SAMPLE_LIMIT_PER_OUTCOME) {
-      samples[o.outcome].push({
-        outcome: o.outcome,
-        phone_number: r.phone_number,
-        raw: r.raw,
+  for (const [phone, winner] of winners) {
+    byOutcome[winner.outcome]++;
+    phonesForDedup.push(phone);
+    if (samples[winner.outcome].length < SAMPLE_LIMIT_PER_OUTCOME) {
+      samples[winner.outcome].push({
+        outcome: winner.outcome,
+        phone_number: phone,
+        raw: winner.raw,
       });
     }
   }
+  const uniqueNumbers = winners.size;
+  const eventsCollapsed = parsedCount - uniqueNumbers;
 
-  // Count how many of the parsed phones already exist in stage_result_rows
+  // Count how many of the unique phones already exist in stage_result_rows
   // for this stage. These will be idempotent-skipped on actual import.
   // Cap the IN list to avoid massive query plans; chunk if huge.
   let existingInDb = 0;
@@ -185,6 +209,12 @@ export async function POST(
     submitted,
     parsed: parsedCount,
     invalid_phone: invalidPhone,
+    // Post-priority-dedup unique-phone count. Per-bucket counts in
+    // by_outcome sum to this number.
+    unique_numbers: uniqueNumbers,
+    // Number of CSV rows dropped because the same phone already had a
+    // higher- or equal-priority outcome from another row.
+    events_collapsed: eventsCollapsed,
     by_outcome: byOutcome,
     sample_rows: flatSamples,
     existing_in_db: existingInDb,

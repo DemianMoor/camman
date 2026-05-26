@@ -41,6 +41,11 @@ type PreviewResponse = {
   submitted: number;
   parsed: number;
   invalid_phone: number;
+  // Post-priority-dedup unique-phone count. Equals the sum of by_outcome.
+  unique_numbers: number;
+  // CSV rows dropped because the same phone had a higher- or equal-
+  // priority outcome from another row.
+  events_collapsed: number;
   by_outcome: {
     delivered: number;
     failed: number;
@@ -545,8 +550,22 @@ export function ResultsImportForm({
                 <Metric label="Submitted" value={preview.submitted} />
                 <Metric label="Parsed" value={preview.parsed} />
                 <Metric label="Invalid phone" value={preview.invalid_phone} />
+                <Metric label="Unique numbers" value={preview.unique_numbers} />
+                <Metric
+                  label="Duplicates merged"
+                  value={preview.events_collapsed}
+                />
                 <Metric label="Already imported" value={preview.existing_in_db} />
               </div>
+              {preview.events_collapsed > 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  {preview.events_collapsed.toLocaleString()} duplicate row
+                  {preview.events_collapsed === 1 ? "" : "s"} collapsed by
+                  priority: opt-out &gt; scrubbed &gt; bounced &gt; clicker
+                  &gt; delivered &gt; failed &gt; no-op. Bucket counts below
+                  reflect the winning outcome per number.
+                </p>
+              ) : null}
               <div className="grid grid-cols-2 gap-2 border-t pt-3 text-sm sm:grid-cols-4">
                 <Metric label="Delivered" value={preview.by_outcome.delivered} />
                 <Metric label="Failed" value={preview.by_outcome.failed} />
@@ -590,10 +609,10 @@ export function ResultsImportForm({
               Back to mapping
             </Button>
             <Button
-              disabled={importApi.isLoading || preview.parsed === 0}
+              disabled={importApi.isLoading || preview.unique_numbers === 0}
               onClick={runImport}
             >
-              Import {preview.parsed.toLocaleString()} rows
+              Import {preview.unique_numbers.toLocaleString()} rows
             </Button>
           </div>
         </section>

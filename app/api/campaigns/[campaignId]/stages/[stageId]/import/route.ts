@@ -18,6 +18,7 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { CSV_MAX_BYTES, parseCsv } from "@/lib/imports/parse-csv";
 import {
   deriveOutcome,
+  OUTCOME_PRIORITY,
   type OutcomeResult,
   type ParsedRow,
 } from "@/lib/imports/outcome";
@@ -148,23 +149,36 @@ export async function POST(
 
   const { rows, submitted } = parseCsv(csv_content, mapping);
 
-  // Filter to rows with valid phones; pre-compute outcomes so we can do the
-  // contacts upsert in chunks then map back.
+  // Filter to rows with valid phones; pre-compute outcomes; collapse
+  // duplicates by phone keeping the HIGHEST-priority outcome (see
+  // OUTCOME_PRIORITY in lib/imports/outcome.ts). Provider CSVs commonly
+  // include multiple events per recipient (delivered + clicked + STOP);
+  // we store one row per phone in stage_result_rows and want it tagged
+  // with the most consequential signal.
   type ProcessableRow = {
     phone_number: string;
     parsed: ParsedRow;
     outcome: OutcomeResult;
   };
-  const processable: ProcessableRow[] = [];
+  const byPhone = new Map<string, ProcessableRow>();
   for (const r of rows) {
     if (r.phone_number === null) continue;
     const o = deriveOutcome(r, status_value_map ?? undefined);
-    processable.push({
+    const candidate: ProcessableRow = {
       phone_number: r.phone_number,
       parsed: r,
       outcome: o,
-    });
+    };
+    const existing = byPhone.get(r.phone_number);
+    if (
+      !existing ||
+      OUTCOME_PRIORITY[candidate.outcome.outcome] >
+        OUTCOME_PRIORITY[existing.outcome.outcome]
+    ) {
+      byPhone.set(r.phone_number, candidate);
+    }
   }
+  const processable: ProcessableRow[] = Array.from(byPhone.values());
 
   // Run the entire write path in one transaction.
   const result = await db.transaction(async (tx) => {
@@ -185,23 +199,17 @@ export async function POST(
       .returning();
 
     // 2. Upsert contacts in chunks, building a phone → contact_id map.
-    //    Dedupe phone numbers BEFORE chunking — the same number can appear
-    //    multiple times in a results CSV (one row per send/event), and
-    //    Postgres's ON CONFLICT DO UPDATE rejects multiple rows targeting
-    //    the same constraint key within one statement with "cannot affect
-    //    row a second time". The upsert payload is just (org_id,
-    //    phone_number) + an updated_at touch, identical for every dup, so
-    //    inserting once per unique phone is loss-less.
+    //    `processable` is already unique by phone (collapsed above via
+    //    OUTCOME_PRIORITY), so a single INSERT per phone is sufficient —
+    //    no risk of Postgres's "ON CONFLICT DO UPDATE command cannot
+    //    affect row a second time" error.
     const phoneToContact = new Map<string, string>();
-    const uniquePhones = Array.from(
-      new Set(processable.map((p) => p.phone_number)),
-    );
-    for (let i = 0; i < uniquePhones.length; i += CHUNK_SIZE) {
-      const chunk = uniquePhones.slice(i, i + CHUNK_SIZE);
+    for (let i = 0; i < processable.length; i += CHUNK_SIZE) {
+      const chunk = processable.slice(i, i + CHUNK_SIZE);
       if (chunk.length === 0) continue;
-      const values = chunk.map((phone) => ({
+      const values = chunk.map((p) => ({
         org_id: orgId,
-        phone_number: phone,
+        phone_number: p.phone_number,
       }));
       const upserted = await tx
         .insert(contacts)

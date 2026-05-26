@@ -96,7 +96,12 @@ export async function GET(
       archived_at: campaigns.archived_at,
       created_at: campaigns.created_at,
       brand: { id: brands.id, name: brands.name, color: brands.color },
-      offer: { id: offers.id, name: offers.name, color: offers.color },
+      offer: {
+        id: offers.id,
+        name: offers.name,
+        color: offers.color,
+        sales_pages: offers.sales_pages,
+      },
       routing_type: {
         id: routing_types.id,
         name: routing_types.name,

@@ -1168,7 +1168,8 @@ export default function CampaignDetailPage() {
           </Card>
         ) : null}
 
-        {stages.length === 0 && !stagesApi.isLoading ? (
+        {campaign.stage_count_total === 0 && !stagesApi.isLoading ? (
+          // Truly empty: no stages exist in this campaign at all.
           <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed py-10 text-center">
             <Send className="size-10 text-muted-foreground/40" aria-hidden />
             <div className="space-y-1">
@@ -1246,6 +1247,42 @@ export default function CampaignDetailPage() {
                 >
                   Retry
                 </Button>
+              </div>
+            ) : stages.length === 0 && !stagesApi.isLoading ? (
+              // Filtered to zero: stages exist in this campaign, but the
+              // current filter set hides all of them. Surface the count and
+              // a one-click reset so the user isn't stranded.
+              <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed py-10 text-center">
+                <Send className="size-10 text-muted-foreground/40" aria-hidden />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">
+                    No stages match the current filters
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    This campaign has {campaign.stage_count_total} stage
+                    {campaign.stage_count_total === 1 ? "" : "s"} (
+                    {rollupSubtitle.includes("—")
+                      ? rollupSubtitle.split("—")[1]?.trim()
+                      : ""}
+                    ). Reset filters or toggle{" "}
+                    <span className="font-mono">Show archived</span> to see
+                    them.
+                  </p>
+                </div>
+                {(stageFilters.statuses.length > 0 ||
+                  stageFilters.showArchived) ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => resetStageFilters()}
+                  >
+                    Reset filters
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={refetchStages}>
+                    Refresh
+                  </Button>
+                )}
               </div>
             ) : (
               <>

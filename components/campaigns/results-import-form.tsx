@@ -140,6 +140,10 @@ export function ResultsImportForm({
   );
   const [saveAsMapping, setSaveAsMapping] = useState<boolean>(true);
   const [saveAsName, setSaveAsName] = useState<string>("");
+  // Per-import, not part of the saved mapping. When non-empty (and a
+  // valid number), the import endpoint uses this as the total cost
+  // instead of summing the per-row `cost` column from the CSV.
+  const [totalCostOverride, setTotalCostOverride] = useState<string>("");
 
   // Step 3: preview
   const previewApi = useApiCall<PreviewResponse>();
@@ -295,6 +299,17 @@ export function ResultsImportForm({
       }
     }
 
+    // Parse the optional total cost override. Empty string → omit;
+    // unparseable → omit (the server validator would reject NaN anyway,
+    // but omitting keeps the existing per-row sum path).
+    const overrideTrimmed = totalCostOverride.trim();
+    const parsedOverride =
+      overrideTrimmed === "" ? null : Number(overrideTrimmed);
+    const totalCostOverrideForBody =
+      parsedOverride !== null && Number.isFinite(parsedOverride) && parsedOverride >= 0
+        ? parsedOverride
+        : null;
+
     setStep(4);
     const r = await importApi.execute(
       `/api/campaigns/${campaignId}/stages/${stageId}/import`,
@@ -307,6 +322,7 @@ export function ResultsImportForm({
           status_value_map: statusValueMap ?? undefined,
           mapping_id: mappingIdToUse,
           filename: file?.name ?? null,
+          total_cost_override: totalCostOverrideForBody,
           confirm: true,
         }),
       },
@@ -450,6 +466,36 @@ export function ResultsImportForm({
                 </Select>
               </div>
             ))}
+          </div>
+
+          <div className="grid gap-1.5 rounded-md border p-4">
+            <Label htmlFor="total-cost-override" className="text-xs">
+              Total cost (USD)
+            </Label>
+            <div className="relative">
+              <span
+                aria-hidden
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground"
+              >
+                $
+              </span>
+              <Input
+                id="total-cost-override"
+                type="number"
+                inputMode="decimal"
+                min={0}
+                step="0.01"
+                placeholder="0.00"
+                value={totalCostOverride}
+                onChange={(e) => setTotalCostOverride(e.target.value)}
+                className="pl-6"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Optional. When set, this overrides the per-row cost summed
+              from the CSV — useful when the provider reports a single
+              lump-sum charge instead of per-message pricing.
+            </p>
           </div>
 
           {selectedMappingId === null && stage.sms_provider_id !== null ? (

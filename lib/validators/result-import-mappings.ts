@@ -22,6 +22,7 @@ export const statusValueMapSchema = z
     opt_out: z.array(z.string().trim().min(1)).optional(),
     scrubbed: z.array(z.string().trim().min(1)).optional(),
     bounced: z.array(z.string().trim().min(1)).optional(),
+    clicker: z.array(z.string().trim().min(1)).optional(),
   })
   .optional();
 

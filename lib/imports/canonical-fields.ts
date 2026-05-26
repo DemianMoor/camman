@@ -34,14 +34,25 @@ export type MappingColumns = Partial<Record<CanonicalFieldKey, string>>;
 
 // Per-provider status word lists, keyed by the canonical outcome they map to.
 // e.g. { delivered: ['DELIVERED', 'OK'], failed: ['FAILED'], opt_out: ['STOP'],
-//        scrubbed: ['REJECTED_NON_MOBILE'], bounced: ['BOUNCE'] }
+//        scrubbed: ['REJECTED_NON_MOBILE'], bounced: ['BOUNCE'],
+//        clicker: ['CLICKED', 'CLICK'] }
 //
 // scrubbed and bounced both propagate into opt_outs with their respective
 // `reason` value, so the contact is excluded from future audience snapshots
 // — the same mechanism opt_out uses, but without a brand junction row.
+//
+// opt_out and clicker both have an alternative legacy detection path: a
+// boolean-like is_optout / is_clicker column in the CSV. When the status
+// column itself carries the signal (e.g. provider returns status='clicked'
+// instead of a separate column), the per-bucket word lists do the work.
 export type StatusValueMap = Partial<
   Record<
-    "delivered" | "failed" | "opt_out" | "scrubbed" | "bounced",
+    | "delivered"
+    | "failed"
+    | "opt_out"
+    | "scrubbed"
+    | "bounced"
+    | "clicker",
     string[]
   >
 >;

@@ -51,16 +51,60 @@ const HEURISTIC_FAILED = new Set([
   "filtered",
 ]);
 const HEURISTIC_OPT_OUT = new Set([
-  "stop",
-  "unsubscribe",
-  "unsub",
-  "optout",
-  "opt-out",
+  // Boolean-ish (matches the legacy is_optout column too)
   "true",
   "1",
   "yes",
+  // STOP-style — single and plural, present and past tense
+  "stop",
+  "stops",
+  "stopped",
+  "stopping",
+  // Unsubscribe family
+  "unsub",
+  "unsubs",
+  "unsubscribe",
+  "unsubscribes",
+  "unsubscribed",
+  "unsubscribing",
+  // Opt-out family (space / hyphen / underscore / no-separator + plurals)
+  "optout",
+  "optouts",
+  "opt-out",
+  "opt-outs",
+  "opt_out",
+  "opt_outs",
+  "opt out",
+  "opt outs",
+  // Removed / blocked are also occasionally used by providers
+  "removed",
+  "blocked",
 ]);
-const HEURISTIC_CLICKED = new Set(["clicked", "true", "1", "yes"]);
+const HEURISTIC_CLICKED = new Set([
+  // Boolean-ish (matches the legacy is_clicker column too)
+  "true",
+  "1",
+  "yes",
+  // Click family — singular, plural, present, past
+  "click",
+  "clicks",
+  "clicked",
+  "clicking",
+  "clicker",
+  "clickers",
+  // Click-through variants
+  "clickthrough",
+  "click-through",
+  "click_through",
+  "click through",
+  "clickthroughs",
+  "click-throughs",
+  "click_throughs",
+  "click throughs",
+  // Engagement aliases
+  "engaged",
+  "engagement",
+]);
 // Scrubbed = provider rejected the number as non-mobile (landline, invalid,
 // not_mobile, etc.). Universal exclusion (no brand junction created).
 const HEURISTIC_SCRUBBED = new Set([
@@ -103,10 +147,11 @@ function statusMatches(
 //                  reason='scrubbed'.
 //   3. bounced   — carrier rejected the delivery. Universal exclusion
 //                  bucket; propagated into opt_outs with reason='bounced'.
-//   4. clicker   — is_clicker_raw truthy. Can co-occur with delivered;
-//                  we set both flags but the outcome bucket is "clicker"
-//                  because that drives downstream propagation into the
-//                  clickers table.
+//   4. clicker   — explicit is_clicker column truthy OR status_raw matches
+//                  clicker values. Can co-occur with delivered; we set
+//                  both flags but the outcome bucket is "clicker" because
+//                  that drives downstream propagation into the clickers
+//                  table.
 //   5. delivered — status_raw matches delivered values
 //   6. failed    — status_raw matches failed values (includes "filtered")
 //   7. noop      — none of the above; recorded as audit but no counter.
@@ -161,10 +206,15 @@ export function deriveOutcome(
     return result;
   }
 
-  // 4. Clicker — can co-occur with delivered. We still classify the row
-  // as "clicker" in the outcome bucket, but the is_delivered flag will be
-  // set too if the status says so.
-  if (isTruthy(row.is_clicker_raw)) {
+  // 4. Clicker — explicit is_clicker column OR status word matches.
+  // Can co-occur with delivered (a row that says status='delivered' and
+  // is_clicker=true is BOTH); we classify the bucket as "clicker" because
+  // that drives downstream propagation, but the is_delivered flag is
+  // also set when the status agrees.
+  if (
+    isTruthy(row.is_clicker_raw) ||
+    statusMatches(row.status_raw, statusValueMap?.clicker, HEURISTIC_CLICKED)
+  ) {
     result.outcome = "clicker";
     result.is_clicker = true;
     if (

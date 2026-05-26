@@ -39,6 +39,17 @@ const importSchema = z.object({
   status_value_map: statusValueMapSchema,
   mapping_id: z.number().int().positive().nullable().optional(),
   filename: z.string().trim().max(255).nullable().optional(),
+  // When set, this single value is used as the import's total_cost_added
+  // instead of summing the per-row costs from the CSV. Useful when the
+  // provider doesn't expose per-row costs (or when the operator wants to
+  // record a flat lump-sum). Per-row `cost` values are still parsed and
+  // stored on stage_result_rows for auditing.
+  total_cost_override: z
+    .number()
+    .nonnegative()
+    .finite()
+    .nullable()
+    .optional(),
   confirm: z.literal(true),
 });
 
@@ -96,6 +107,7 @@ export async function POST(
     status_value_map,
     mapping_id,
     filename,
+    total_cost_override,
   } = parsed.data;
 
   if (Buffer.byteLength(csv_content, "utf-8") > CSV_MAX_BYTES) {
@@ -394,7 +406,7 @@ export async function POST(
     let clickersAdded = 0;
     let scrubbedAdded = 0;
     let bouncedAdded = 0;
-    let totalCostAdded = 0;
+    let totalCostFromRows = 0;
     for (const p of processable) {
       if (!insertedPhones.has(p.phone_number)) continue;
       processedRows++;
@@ -404,8 +416,14 @@ export async function POST(
       if (p.outcome.is_clicker) clickersAdded++;
       if (p.outcome.is_scrubbed) scrubbedAdded++;
       if (p.outcome.is_bounced) bouncedAdded++;
-      if (p.parsed.cost != null) totalCostAdded += p.parsed.cost;
+      if (p.parsed.cost != null) totalCostFromRows += p.parsed.cost;
     }
+    // Operator-supplied total wins over the per-row sum. When the override
+    // is null/undefined, fall back to the CSV-derived sum.
+    const totalCostAdded =
+      total_cost_override != null && total_cost_override !== undefined
+        ? total_cost_override
+        : totalCostFromRows;
 
     // 7. Update the import row's final counters.
     await tx

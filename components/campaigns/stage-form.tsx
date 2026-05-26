@@ -160,6 +160,8 @@ export interface StageFormProps {
     delivered_count: number;
     opt_out_count: number;
     click_count: number;
+    scrubbed_count: number;
+    bounced_count: number;
     total_cost: string;
   };
   onImportResults?: () => void;
@@ -1248,6 +1250,14 @@ export function StageForm({
                     <ResultMetric
                       label="Clickers"
                       value={resultsCounters.click_count}
+                    />
+                    <ResultMetric
+                      label="Scrubbed"
+                      value={resultsCounters.scrubbed_count}
+                    />
+                    <ResultMetric
+                      label="Bounced"
+                      value={resultsCounters.bounced_count}
                     />
                     <ResultMetric
                       label="Total cost"

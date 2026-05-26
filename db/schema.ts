@@ -453,6 +453,15 @@ export type NewContact = typeof contacts.$inferInsert;
 // Opt-Outs: append-only records of suppressions. Multiple opt_out rows can
 // exist for the same contact over time (different sources, different brand
 // scopes). Junction tables link each opt_out to one or more brands/providers.
+//
+// `reason` distinguishes the WHY:
+//   - 'opt_out'  — the recipient said STOP (brand-scoped via opt_out_brands).
+//   - 'scrubbed' — provider rejected the number as non-mobile. Universal
+//                  (no opt_out_brands row). Originates from stage results.
+//   - 'bounced'  — carrier rejected delivery. Universal. Originates from
+//                  stage results.
+// All three exclude the contact from future audience snapshots — the
+// audience query checks for any opt_outs row regardless of reason.
 export const opt_outs = pgTable(
   "opt_outs",
   {
@@ -465,6 +474,7 @@ export const opt_outs = pgTable(
       .references(() => contacts.id, { onDelete: "cascade" }),
     phone_number: text("phone_number").notNull(),
     source: text("source"),
+    reason: text("reason").notNull().default("opt_out"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -473,6 +483,10 @@ export const opt_outs = pgTable(
     index("opt_outs_org_id_idx").on(table.org_id),
     index("opt_outs_contact_id_idx").on(table.contact_id),
     index("opt_outs_phone_number_idx").on(table.phone_number),
+    check(
+      "opt_outs_reason_check",
+      sql`${table.reason} IN ('opt_out', 'scrubbed', 'bounced')`,
+    ),
   ],
 );
 
@@ -1028,6 +1042,8 @@ export const campaign_stages = pgTable(
     delivered_count: integer("delivered_count").notNull().default(0),
     opt_out_count: integer("opt_out_count").notNull().default(0),
     click_count: integer("click_count").notNull().default(0),
+    scrubbed_count: integer("scrubbed_count").notNull().default(0),
+    bounced_count: integer("bounced_count").notNull().default(0),
     notes: text("notes"),
     // A/B split partitioning. Both NULL ⇒ stage targets the entire
     // qualifying audience. When set, split_index is 1..split_total and
@@ -1227,6 +1243,8 @@ export const stage_results_imports = pgTable(
     failed_added: integer("failed_added").notNull().default(0),
     optouts_added: integer("optouts_added").notNull().default(0),
     clickers_added: integer("clickers_added").notNull().default(0),
+    scrubbed_added: integer("scrubbed_added").notNull().default(0),
+    bounced_added: integer("bounced_added").notNull().default(0),
     total_cost_added: numeric("total_cost_added", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
@@ -1303,7 +1321,7 @@ export const stage_result_rows = pgTable(
     ),
     check(
       "stage_result_rows_outcome_check",
-      sql`${table.outcome} IN ('delivered', 'failed', 'optout', 'clicker', 'noop')`,
+      sql`${table.outcome} IN ('delivered', 'failed', 'optout', 'clicker', 'scrubbed', 'bounced', 'noop')`,
     ),
   ],
 );

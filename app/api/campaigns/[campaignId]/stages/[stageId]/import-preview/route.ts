@@ -109,6 +109,8 @@ export async function POST(
     failed: 0,
     optout: 0,
     clicker: 0,
+    scrubbed: 0,
+    bounced: 0,
     noop: 0,
   };
   let invalidPhone = 0;
@@ -125,6 +127,8 @@ export async function POST(
     failed: [],
     optout: [],
     clicker: [],
+    scrubbed: [],
+    bounced: [],
     noop: [],
   };
   const phonesForDedup: string[] = [];
@@ -172,6 +176,8 @@ export async function POST(
     ...samples.failed,
     ...samples.optout,
     ...samples.clicker,
+    ...samples.scrubbed,
+    ...samples.bounced,
     ...samples.noop,
   ];
 

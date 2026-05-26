@@ -52,6 +52,8 @@ type StatsResponse = {
     delivered: number;
     opt_outs_added: number;
     clickers_added: number;
+    scrubbed_added: number;
+    bounced_added: number;
     total_spend: number;
   };
 };
@@ -95,6 +97,8 @@ type RecentStage = {
   delivered_count: number;
   opt_out_count: number;
   click_count: number;
+  scrubbed_count: number;
+  bounced_count: number;
   total_cost: number;
   campaign: { id: number; name: string; slug: string; status: string };
   creative: { id: number; slug: string; text: string } | null;
@@ -107,6 +111,11 @@ type BaseStatsResponse = {
   total: number;
   archived: number;
   opt_out_count: number;
+  opt_out_count_by_reason: {
+    opt_out: number;
+    scrubbed: number;
+    bounced: number;
+  };
   opt_in_count: number;
   clicker_count: number;
 };
@@ -408,12 +417,13 @@ export default function DashboardPage() {
     },
     {
       id: "metrics",
-      header: "D / OO / CL",
+      header: "D / OO / CL / SC / BC",
       enableSorting: false,
       cell: ({ row }) => (
         <span className="font-mono text-xs tabular-nums">
           {row.original.delivered_count} / {row.original.opt_out_count} /{" "}
-          {row.original.click_count}
+          {row.original.click_count} / {row.original.scrubbed_count} /{" "}
+          {row.original.bounced_count}
         </span>
       ),
     },
@@ -486,9 +496,13 @@ export default function DashboardPage() {
         />
         <StatTile
           icon={<UserMinus className="size-4" aria-hidden />}
-          label="Opt-outs this week"
-          value={stats?.totals.opt_outs_added ?? 0}
-          sublabel={`${(baseStats?.opt_out_count ?? 0).toLocaleString()} total`}
+          label="Exclusions this week"
+          value={
+            (stats?.totals.opt_outs_added ?? 0) +
+            (stats?.totals.scrubbed_added ?? 0) +
+            (stats?.totals.bounced_added ?? 0)
+          }
+          sublabel={`${stats?.totals.opt_outs_added ?? 0} opt-outs · ${stats?.totals.scrubbed_added ?? 0} scrubbed · ${stats?.totals.bounced_added ?? 0} bounced`}
           href={`/opt-outs?from=${fromIso}`}
           loading={statsApi.isLoading && stats === null}
         />
@@ -637,9 +651,13 @@ export default function DashboardPage() {
           />
           <StatTile
             icon={<UserMinus className="size-4" aria-hidden />}
-            label="Total opt-outs"
+            label="Total excluded"
             value={baseStats?.opt_out_count ?? 0}
-            sublabel="unique contacts"
+            sublabel={
+              baseStats
+                ? `${baseStats.opt_out_count_by_reason.opt_out} opt-outs · ${baseStats.opt_out_count_by_reason.scrubbed} scrubbed · ${baseStats.opt_out_count_by_reason.bounced} bounced`
+                : "unique contacts"
+            }
             href="/opt-outs"
             loading={baseApi.isLoading && baseStats === null}
           />

@@ -5,6 +5,8 @@ export type RowOutcome =
   | "failed"
   | "optout"
   | "clicker"
+  | "scrubbed"
+  | "bounced"
   | "noop";
 
 export interface ParsedRow {
@@ -22,6 +24,8 @@ export interface OutcomeResult {
   is_failed: boolean;
   is_optout: boolean;
   is_clicker: boolean;
+  is_scrubbed: boolean;
+  is_bounced: boolean;
 }
 
 // Truthy-string set used for explicit boolean-like columns. Anything else
@@ -44,6 +48,7 @@ const HEURISTIC_FAILED = new Set([
   "error",
   "rejected",
   "undelivered",
+  "filtered",
 ]);
 const HEURISTIC_OPT_OUT = new Set([
   "stop",
@@ -56,6 +61,18 @@ const HEURISTIC_OPT_OUT = new Set([
   "yes",
 ]);
 const HEURISTIC_CLICKED = new Set(["clicked", "true", "1", "yes"]);
+// Scrubbed = provider rejected the number as non-mobile (landline, invalid,
+// not_mobile, etc.). Universal exclusion (no brand junction created).
+const HEURISTIC_SCRUBBED = new Set([
+  "scrubbed",
+  "scrub",
+  "invalid",
+  "not_mobile",
+  "not-mobile",
+  "landline",
+]);
+// Bounced = carrier rejected the actual delivery. Universal exclusion.
+const HEURISTIC_BOUNCED = new Set(["bounced", "bounce"]);
 
 function isTruthy(v: string | null): boolean {
   if (v == null) return false;
@@ -78,16 +95,27 @@ function statusMatches(
 
 // Derive the outcome for a single parsed CSV row.
 //
-// Priority (matches spec):
-//   1. opt-out  — explicit is_optout column truthy OR status_raw matches
-//                 opt_out values
-//   2. clicker  — is_clicker_raw truthy. Note: a row can be BOTH a clicker
-//                 AND delivered; we set both flags but the outcome bucket
-//                 is "clicker" because that drives downstream propagation
-//                 into the clickers table.
-//   3. delivered — status_raw matches delivered values
-//   4. failed    — status_raw matches failed values
-//   5. noop      — none of the above; recorded as audit but no counter.
+// Priority order:
+//   1. opt-out   — explicit is_optout column truthy OR status_raw matches
+//                  opt_out values. Recipient said STOP.
+//   2. scrubbed  — provider rejected the number as non-mobile. Universal
+//                  exclusion bucket; propagated into opt_outs with
+//                  reason='scrubbed'.
+//   3. bounced   — carrier rejected the delivery. Universal exclusion
+//                  bucket; propagated into opt_outs with reason='bounced'.
+//   4. clicker   — is_clicker_raw truthy. Can co-occur with delivered;
+//                  we set both flags but the outcome bucket is "clicker"
+//                  because that drives downstream propagation into the
+//                  clickers table.
+//   5. delivered — status_raw matches delivered values
+//   6. failed    — status_raw matches failed values (includes "filtered")
+//   7. noop      — none of the above; recorded as audit but no counter.
+//
+// Opt-out wins over everything because the explicit is_optout column is
+// the most reliable signal. Scrubbed and bounced go BEFORE clicker /
+// delivered / failed because a number can't simultaneously be "delivered
+// but also scrubbed" — if the provider says "scrubbed" the message did
+// not go out, period.
 //
 // Pass statusValueMap when the user has configured explicit per-provider
 // status words. Without it, the heuristic word lists are used.
@@ -101,6 +129,8 @@ export function deriveOutcome(
     is_failed: false,
     is_optout: false,
     is_clicker: false,
+    is_scrubbed: false,
+    is_bounced: false,
   };
 
   // 1. Opt-out wins over everything.
@@ -113,7 +143,25 @@ export function deriveOutcome(
     return result;
   }
 
-  // 2. Clicker — can co-occur with delivered. We still classify the row
+  // 2. Scrubbed — provider didn't recognize the number as mobile.
+  if (
+    statusMatches(row.status_raw, statusValueMap?.scrubbed, HEURISTIC_SCRUBBED)
+  ) {
+    result.outcome = "scrubbed";
+    result.is_scrubbed = true;
+    return result;
+  }
+
+  // 3. Bounced — carrier rejected delivery.
+  if (
+    statusMatches(row.status_raw, statusValueMap?.bounced, HEURISTIC_BOUNCED)
+  ) {
+    result.outcome = "bounced";
+    result.is_bounced = true;
+    return result;
+  }
+
+  // 4. Clicker — can co-occur with delivered. We still classify the row
   // as "clicker" in the outcome bucket, but the is_delivered flag will be
   // set too if the status says so.
   if (isTruthy(row.is_clicker_raw)) {
@@ -131,7 +179,7 @@ export function deriveOutcome(
     return result;
   }
 
-  // 3. Delivered
+  // 5. Delivered
   if (
     statusMatches(row.status_raw, statusValueMap?.delivered, HEURISTIC_DELIVERED)
   ) {
@@ -140,14 +188,14 @@ export function deriveOutcome(
     return result;
   }
 
-  // 4. Failed
+  // 6. Failed
   if (statusMatches(row.status_raw, statusValueMap?.failed, HEURISTIC_FAILED)) {
     result.outcome = "failed";
     result.is_failed = true;
     return result;
   }
 
-  // 5. No recognizable outcome.
+  // 7. No recognizable outcome.
   return result;
 }
 

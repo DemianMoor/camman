@@ -44,6 +44,8 @@ const NON_UPDATABLE = new Set([
   "delivered_count",
   "opt_out_count",
   "click_count",
+  "scrubbed_count",
+  "bounced_count",
   "archived_at",
   "created_at",
   // tracking_id is system-generated and immutable; rejected upstream by
@@ -105,6 +107,8 @@ export async function GET(
       delivered_count: campaign_stages.delivered_count,
       opt_out_count: campaign_stages.opt_out_count,
       click_count: campaign_stages.click_count,
+      scrubbed_count: campaign_stages.scrubbed_count,
+      bounced_count: campaign_stages.bounced_count,
       notes: campaign_stages.notes,
       tracking_id: campaign_stages.tracking_id,
       split_index: campaign_stages.split_index,

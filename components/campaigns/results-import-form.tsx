@@ -46,6 +46,8 @@ type PreviewResponse = {
     failed: number;
     optout: number;
     clicker: number;
+    scrubbed: number;
+    bounced: number;
     noop: number;
   };
   sample_rows: Array<{
@@ -64,6 +66,8 @@ type ImportResponse = {
   failed_added: number;
   optouts_added: number;
   clickers_added: number;
+  scrubbed_added: number;
+  bounced_added: number;
   total_cost_added: number;
   skipped_idempotent: number;
 };
@@ -497,11 +501,13 @@ export function ResultsImportForm({
                 <Metric label="Invalid phone" value={preview.invalid_phone} />
                 <Metric label="Already imported" value={preview.existing_in_db} />
               </div>
-              <div className="grid grid-cols-2 gap-2 border-t pt-3 text-sm sm:grid-cols-5">
+              <div className="grid grid-cols-2 gap-2 border-t pt-3 text-sm sm:grid-cols-4">
                 <Metric label="Delivered" value={preview.by_outcome.delivered} />
                 <Metric label="Failed" value={preview.by_outcome.failed} />
                 <Metric label="Opt-outs" value={preview.by_outcome.optout} />
                 <Metric label="Clickers" value={preview.by_outcome.clicker} />
+                <Metric label="Scrubbed" value={preview.by_outcome.scrubbed} />
+                <Metric label="Bounced" value={preview.by_outcome.bounced} />
                 <Metric label="No-op" value={preview.by_outcome.noop} />
               </div>
             </CardContent>
@@ -576,6 +582,8 @@ export function ResultsImportForm({
                   <Metric label="Failed" value={importResult.failed_added} />
                   <Metric label="Opt-outs" value={importResult.optouts_added} />
                   <Metric label="Clickers" value={importResult.clickers_added} />
+                  <Metric label="Scrubbed" value={importResult.scrubbed_added} />
+                  <Metric label="Bounced" value={importResult.bounced_added} />
                 </div>
               </CardContent>
             </Card>

@@ -211,6 +211,8 @@ export async function POST(
           delivered_count: drizzleSql`${campaign_stages.delivered_count} - ${importRow.delivered_added}`,
           opt_out_count: drizzleSql`${campaign_stages.opt_out_count} - ${importRow.optouts_added}`,
           click_count: drizzleSql`${campaign_stages.click_count} - ${importRow.clickers_added}`,
+          scrubbed_count: drizzleSql`${campaign_stages.scrubbed_count} - ${importRow.scrubbed_added}`,
+          bounced_count: drizzleSql`${campaign_stages.bounced_count} - ${importRow.bounced_added}`,
           total_cost: drizzleSql`${campaign_stages.total_cost} - ${importRow.total_cost_added}`,
         })
         .where(

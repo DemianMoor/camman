@@ -68,6 +68,8 @@ export async function GET(
       failed_added: stage_results_imports.failed_added,
       optouts_added: stage_results_imports.optouts_added,
       clickers_added: stage_results_imports.clickers_added,
+      scrubbed_added: stage_results_imports.scrubbed_added,
+      bounced_added: stage_results_imports.bounced_added,
       total_cost_added: stage_results_imports.total_cost_added,
       mapping_id: stage_results_imports.mapping_id,
       imported_by_user_id: stage_results_imports.imported_by_user_id,

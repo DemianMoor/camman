@@ -30,6 +30,8 @@ type ImportRow = {
   failed_added: number;
   optouts_added: number;
   clickers_added: number;
+  scrubbed_added: number;
+  bounced_added: number;
   total_cost_added: string;
   mapping_id: number | null;
   imported_by_user_id: string | null;
@@ -147,7 +149,8 @@ export function ImportHistoryDialog({
                         ) : (
                           <span className="font-mono text-muted-foreground">
                             ✓{row.delivered_added} ✗{row.failed_added} ⊘
-                            {row.optouts_added} ↗{row.clickers_added}
+                            {row.optouts_added} ↗{row.clickers_added} ⊗
+                            {row.scrubbed_added} ⤬{row.bounced_added}
                           </span>
                         )}
                       </td>

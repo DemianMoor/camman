@@ -39,6 +39,8 @@ export async function GET() {
       delivered_count: campaign_stages.delivered_count,
       opt_out_count: campaign_stages.opt_out_count,
       click_count: campaign_stages.click_count,
+      scrubbed_count: campaign_stages.scrubbed_count,
+      bounced_count: campaign_stages.bounced_count,
       total_cost: campaign_stages.total_cost,
       campaign: {
         id: campaigns.id,
@@ -82,6 +84,8 @@ export async function GET() {
     delivered_count: r.delivered_count,
     opt_out_count: r.opt_out_count,
     click_count: r.click_count,
+    scrubbed_count: r.scrubbed_count,
+    bounced_count: r.bounced_count,
     total_cost: Number(r.total_cost),
     campaign: r.campaign,
     creative: r.creative?.id ? r.creative : null,

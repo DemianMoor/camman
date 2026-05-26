@@ -49,6 +49,8 @@ export interface EditableStage {
   delivered_count: number;
   opt_out_count: number;
   click_count: number;
+  scrubbed_count: number;
+  bounced_count: number;
   total_cost: string;
   tracking_id: string | null;
   split_index: number | null;
@@ -187,6 +189,8 @@ export function StageInlineEditor({
                   delivered_count: stage!.delivered_count,
                   opt_out_count: stage!.opt_out_count,
                   click_count: stage!.click_count,
+                  scrubbed_count: stage!.scrubbed_count,
+                  bounced_count: stage!.bounced_count,
                   total_cost: stage!.total_cost,
                 }
               : undefined

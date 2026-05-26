@@ -20,6 +20,8 @@ export const statusValueMapSchema = z
     delivered: z.array(z.string().trim().min(1)).optional(),
     failed: z.array(z.string().trim().min(1)).optional(),
     opt_out: z.array(z.string().trim().min(1)).optional(),
+    scrubbed: z.array(z.string().trim().min(1)).optional(),
+    bounced: z.array(z.string().trim().min(1)).optional(),
   })
   .optional();
 

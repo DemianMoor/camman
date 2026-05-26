@@ -55,6 +55,8 @@ export async function GET(req: NextRequest) {
         delivered: drizzleSql<number>`coalesce(sum(${campaign_stages.delivered_count}), 0)::int`,
         opt_outs_added: drizzleSql<number>`coalesce(sum(${campaign_stages.opt_out_count}), 0)::int`,
         clickers_added: drizzleSql<number>`coalesce(sum(${campaign_stages.click_count}), 0)::int`,
+        scrubbed_added: drizzleSql<number>`coalesce(sum(${campaign_stages.scrubbed_count}), 0)::int`,
+        bounced_added: drizzleSql<number>`coalesce(sum(${campaign_stages.bounced_count}), 0)::int`,
         total_spend: drizzleSql<string>`coalesce(sum(${campaign_stages.total_cost}), 0)::numeric(12,4)::text`,
       })
       .from(campaign_stages)
@@ -81,6 +83,8 @@ export async function GET(req: NextRequest) {
     delivered: 0,
     opt_outs_added: 0,
     clickers_added: 0,
+    scrubbed_added: 0,
+    bounced_added: 0,
     total_spend: "0",
   };
 
@@ -103,6 +107,8 @@ export async function GET(req: NextRequest) {
       delivered: s.delivered,
       opt_outs_added: s.opt_outs_added,
       clickers_added: s.clickers_added,
+      scrubbed_added: s.scrubbed_added,
+      bounced_added: s.bounced_added,
       total_spend: Number(s.total_spend),
     },
   });

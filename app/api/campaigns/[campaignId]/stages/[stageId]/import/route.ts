@@ -192,12 +192,19 @@ export async function POST(
       for (const c of upserted) phoneToContact.set(c.phone_number, c.id);
     }
 
-    // 3. Pre-load existing opt-outs (by contact_id) for this org+brand so we
-    //    don't double-insert when many rows in the same CSV opt out the
-    //    same contact (rare, but possible). Filter to the contacts we
-    //    actually need to consider.
-    const optoutCandidates = processable
-      .filter((p) => p.outcome.outcome === "optout")
+    // 3. Pre-load existing opt-outs (by contact_id) for this org so we don't
+    //    double-insert when many rows in the same CSV exclude the same
+    //    contact (rare, but possible). Scrubbed and bounced rows also
+    //    propagate into opt_outs (with their own `reason`), so all three
+    //    outcomes share this lookup map — any existing opt_outs row is
+    //    enough to satisfy the exclusion, regardless of its reason.
+    const exclusionCandidates = processable
+      .filter(
+        (p) =>
+          p.outcome.outcome === "optout" ||
+          p.outcome.outcome === "scrubbed" ||
+          p.outcome.outcome === "bounced",
+      )
       .map((p) => phoneToContact.get(p.phone_number))
       .filter((cid): cid is string => !!cid);
     const clickerCandidates = processable
@@ -209,8 +216,8 @@ export async function POST(
     // store the FIRST opt_out_id per contact — if multiple exist (rare),
     // it doesn't matter which we reference.
     const existingOptoutByContact = new Map<string, number>();
-    if (optoutCandidates.length > 0) {
-      const uniq = Array.from(new Set(optoutCandidates));
+    if (exclusionCandidates.length > 0) {
+      const uniq = Array.from(new Set(exclusionCandidates));
       for (let i = 0; i < uniq.length; i += CHUNK_SIZE) {
         const chunk = uniq.slice(i, i + CHUNK_SIZE);
         const found = await tx
@@ -262,11 +269,17 @@ export async function POST(
       }
     }
 
-    // 4. Resolve propagation: for each optout/clicker row, either reuse the
-    //    existing opt_out/clicker for this org (per-brand for clickers), or
-    //    insert a new one. These are usually a small fraction of total rows
-    //    so per-row roundtrips are acceptable. Within-batch dedup avoids a
-    //    second roundtrip when the same contact appears twice.
+    // 4. Resolve propagation: for each optout/scrubbed/bounced/clicker row,
+    //    either reuse the existing opt_out/clicker for this org (per-brand
+    //    for clickers), or insert a new one. These are usually a small
+    //    fraction of total rows so per-row roundtrips are acceptable.
+    //    Within-batch dedup avoids a second roundtrip when the same
+    //    contact appears twice.
+    //
+    //    Scrubbed/bounced share the opt_outs propagation path (tagged via
+    //    the `reason` column) so the audience-snapshot exclusion query
+    //    handles them uniformly. Unlike STOP opt-outs, they do NOT get an
+    //    opt_out_brands row — they're universal, not brand-specific.
     const rowOptOutId = new Map<number, number>(); // processable idx → opt_out id
     const rowClickerId = new Map<number, number>();
     for (let i = 0; i < processable.length; i++) {
@@ -274,11 +287,19 @@ export async function POST(
       const contactId = phoneToContact.get(p.phone_number);
       if (!contactId) continue;
 
-      if (p.outcome.outcome === "optout") {
+      const isExclusionOutcome =
+        p.outcome.outcome === "optout" ||
+        p.outcome.outcome === "scrubbed" ||
+        p.outcome.outcome === "bounced";
+
+      if (isExclusionOutcome) {
         const existing = existingOptoutByContact.get(contactId);
         if (existing !== undefined) {
           rowOptOutId.set(i, existing);
         } else {
+          const reason = p.outcome.outcome === "optout"
+            ? "opt_out"
+            : p.outcome.outcome; // "scrubbed" | "bounced"
           const [newRow] = await tx
             .insert(opt_outs)
             .values({
@@ -286,11 +307,15 @@ export async function POST(
               contact_id: contactId,
               phone_number: p.phone_number,
               source: `stage-import:${importRow.id}`,
+              reason,
             })
             .returning({ id: opt_outs.id });
           existingOptoutByContact.set(contactId, newRow.id);
           rowOptOutId.set(i, newRow.id);
-          if (campaignBrandId !== null) {
+          // Only STOP opt-outs are brand-scoped. Scrubbed/bounced are
+          // universal — non-mobile / carrier-rejected numbers are
+          // unsendable for ANY brand in the org.
+          if (p.outcome.outcome === "optout" && campaignBrandId !== null) {
             await tx
               .insert(opt_out_brands)
               .values({
@@ -367,6 +392,8 @@ export async function POST(
     let failedAdded = 0;
     let optoutsAdded = 0;
     let clickersAdded = 0;
+    let scrubbedAdded = 0;
+    let bouncedAdded = 0;
     let totalCostAdded = 0;
     for (const p of processable) {
       if (!insertedPhones.has(p.phone_number)) continue;
@@ -375,6 +402,8 @@ export async function POST(
       if (p.outcome.is_failed) failedAdded++;
       if (p.outcome.is_optout) optoutsAdded++;
       if (p.outcome.is_clicker) clickersAdded++;
+      if (p.outcome.is_scrubbed) scrubbedAdded++;
+      if (p.outcome.is_bounced) bouncedAdded++;
       if (p.parsed.cost != null) totalCostAdded += p.parsed.cost;
     }
 
@@ -387,6 +416,8 @@ export async function POST(
         failed_added: failedAdded,
         optouts_added: optoutsAdded,
         clickers_added: clickersAdded,
+        scrubbed_added: scrubbedAdded,
+        bounced_added: bouncedAdded,
         total_cost_added: String(totalCostAdded),
       })
       .where(eq(stage_results_imports.id, importRow.id));
@@ -400,6 +431,8 @@ export async function POST(
           delivered_count: drizzleSql`${campaign_stages.delivered_count} + ${deliveredAdded}`,
           opt_out_count: drizzleSql`${campaign_stages.opt_out_count} + ${optoutsAdded}`,
           click_count: drizzleSql`${campaign_stages.click_count} + ${clickersAdded}`,
+          scrubbed_count: drizzleSql`${campaign_stages.scrubbed_count} + ${scrubbedAdded}`,
+          bounced_count: drizzleSql`${campaign_stages.bounced_count} + ${bouncedAdded}`,
           total_cost: drizzleSql`${campaign_stages.total_cost} + ${String(totalCostAdded)}`,
         })
         .where(
@@ -418,6 +451,8 @@ export async function POST(
       failed_added: failedAdded,
       optouts_added: optoutsAdded,
       clickers_added: clickersAdded,
+      scrubbed_added: scrubbedAdded,
+      bounced_added: bouncedAdded,
       total_cost_added: totalCostAdded,
       skipped_idempotent: processable.length - processedRows,
     };

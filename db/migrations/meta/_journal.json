@@ -281,6 +281,13 @@
       "when": 1779667200000,
       "tag": "0039_stage_splits",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1779840000000,
+      "tag": "0040_opt_out_reason_and_scrubbed_bounced",
+      "breakpoints": true
     }
   ]
 }

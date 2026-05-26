@@ -145,6 +145,8 @@ type Stage = {
   delivered_count: number;
   opt_out_count: number;
   click_count: number;
+  scrubbed_count: number;
+  bounced_count: number;
   notes: string | null;
   tracking_id: string | null;
   split_index: number | null;
@@ -760,12 +762,17 @@ export default function CampaignDetailPage() {
         header: "Results",
         enableSorting: false,
         cell: ({ row }) => {
-          const { opt_out_count: oo, click_count: cl } = row.original;
-          if (oo === 0 && cl === 0)
+          const {
+            opt_out_count: oo,
+            click_count: cl,
+            scrubbed_count: sc,
+            bounced_count: bc,
+          } = row.original;
+          if (oo === 0 && cl === 0 && sc === 0 && bc === 0)
             return <span className="text-muted-foreground">—</span>;
           return (
             <span className="font-mono text-xs tabular-nums">
-              OO: {oo} · CL: {cl}
+              OO: {oo} · CL: {cl} · SC: {sc} · BC: {bc}
             </span>
           );
         },
@@ -914,6 +921,31 @@ export default function CampaignDetailPage() {
       selectedStageIds,
     ],
   );
+
+  // Aggregate results across non-archived stages. Shown above the stage
+  // table once there's any send activity. Archived stages are excluded so
+  // operators can keep historical stages around without inflating totals.
+  const campaignTotals = useMemo(() => {
+    let sms = 0;
+    let delivered = 0;
+    let optOuts = 0;
+    let clickers = 0;
+    let scrubbed = 0;
+    let bounced = 0;
+    let cost = 0;
+    for (const s of stages) {
+      if (s.archived_at) continue;
+      sms += s.sms_count;
+      delivered += s.delivered_count;
+      optOuts += s.opt_out_count;
+      clickers += s.click_count;
+      scrubbed += s.scrubbed_count;
+      bounced += s.bounced_count;
+      cost += Number(s.total_cost);
+    }
+    return { sms, delivered, optOuts, clickers, scrubbed, bounced, cost };
+  }, [stages]);
+  const hasResults = campaignTotals.sms > 0;
 
   if (!auth) return null;
 
@@ -1102,6 +1134,39 @@ export default function CampaignDetailPage() {
           <h2 className="text-lg font-medium">Stages</h2>
           <p className="text-sm text-muted-foreground">{rollupSubtitle}</p>
         </div>
+
+        {hasResults ? (
+          <Card>
+            <CardContent className="grid grid-cols-2 gap-3 pt-6 sm:grid-cols-4 lg:grid-cols-7">
+              <TotalsMetric label="SMS sent" value={campaignTotals.sms} />
+              <TotalsMetric
+                label="Delivered"
+                value={campaignTotals.delivered}
+              />
+              <TotalsMetric
+                label="Opt-outs"
+                value={campaignTotals.optOuts}
+              />
+              <TotalsMetric
+                label="Clickers"
+                value={campaignTotals.clickers}
+              />
+              <TotalsMetric
+                label="Scrubbed"
+                value={campaignTotals.scrubbed}
+              />
+              <TotalsMetric
+                label="Bounced"
+                value={campaignTotals.bounced}
+              />
+              <TotalsMetric
+                label="Total cost"
+                value={`$${campaignTotals.cost.toFixed(2)}`}
+                raw
+              />
+            </CardContent>
+          </Card>
+        ) : null}
 
         {stages.length === 0 && !stagesApi.isLoading ? (
           <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed py-10 text-center">
@@ -1485,6 +1550,25 @@ export default function CampaignDetailPage() {
 }
 
 // =============== Sub-components ===============
+
+function TotalsMetric({
+  label,
+  value,
+  raw,
+}: {
+  label: string;
+  value: number | string;
+  raw?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-xs uppercase text-muted-foreground">{label}</div>
+      <div className="font-mono text-lg tabular-nums">
+        {raw ? value : typeof value === "number" ? value.toLocaleString() : value}
+      </div>
+    </div>
+  );
+}
 
 function BackLink() {
   return (

@@ -10,7 +10,18 @@ import { can } from "@/lib/permissions";
 export type ContactBaseStats = {
   total: number;
   archived: number;
+  // opt_out_count is the count of DISTINCT contacts with any opt_outs row
+  // — i.e. "total contacts excluded from future audiences", regardless of
+  // why they were excluded. The per-reason breakdown follows.
   opt_out_count: number;
+  // Per-reason breakdown of opt_outs rows (NOT distinct contacts — a
+  // contact opted-out under multiple reasons would be double-counted
+  // across these buckets). The unique-contact total is opt_out_count.
+  opt_out_count_by_reason: {
+    opt_out: number;
+    scrubbed: number;
+    bounced: number;
+  };
   opt_in_count: number;
   clicker_count: number;
 };
@@ -24,7 +35,7 @@ export async function GET() {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
-  const [activeRow, archivedRow, optOutRow, optInRow, clickerRow] =
+  const [activeRow, archivedRow, optOutRow, optOutByReason, optInRow, clickerRow] =
     await Promise.all([
       db
         .select({ count: drizzleSql<number>`count(*)::int` })
@@ -46,6 +57,14 @@ export async function GET() {
         .where(eq(opt_outs.org_id, orgId)),
       db
         .select({
+          opt_out: drizzleSql<number>`count(*) filter (where ${opt_outs.reason} = 'opt_out')::int`,
+          scrubbed: drizzleSql<number>`count(*) filter (where ${opt_outs.reason} = 'scrubbed')::int`,
+          bounced: drizzleSql<number>`count(*) filter (where ${opt_outs.reason} = 'bounced')::int`,
+        })
+        .from(opt_outs)
+        .where(eq(opt_outs.org_id, orgId)),
+      db
+        .select({
           count: drizzleSql<number>`count(distinct ${opt_ins.contact_id})::int`,
         })
         .from(opt_ins)
@@ -62,6 +81,11 @@ export async function GET() {
     total: activeRow[0]?.count ?? 0,
     archived: archivedRow[0]?.count ?? 0,
     opt_out_count: optOutRow[0]?.count ?? 0,
+    opt_out_count_by_reason: {
+      opt_out: optOutByReason[0]?.opt_out ?? 0,
+      scrubbed: optOutByReason[0]?.scrubbed ?? 0,
+      bounced: optOutByReason[0]?.bounced ?? 0,
+    },
     opt_in_count: optInRow[0]?.count ?? 0,
     clicker_count: clickerRow[0]?.count ?? 0,
   };

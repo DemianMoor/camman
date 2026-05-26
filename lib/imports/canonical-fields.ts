@@ -33,7 +33,15 @@ export type CanonicalFieldKey = keyof typeof CANONICAL_FIELDS;
 export type MappingColumns = Partial<Record<CanonicalFieldKey, string>>;
 
 // Per-provider status word lists, keyed by the canonical outcome they map to.
-// e.g. { delivered: ['DELIVERED', 'OK'], failed: ['FAILED'], opt_out: ['STOP'] }
+// e.g. { delivered: ['DELIVERED', 'OK'], failed: ['FAILED'], opt_out: ['STOP'],
+//        scrubbed: ['REJECTED_NON_MOBILE'], bounced: ['BOUNCE'] }
+//
+// scrubbed and bounced both propagate into opt_outs with their respective
+// `reason` value, so the contact is excluded from future audience snapshots
+// — the same mechanism opt_out uses, but without a brand junction row.
 export type StatusValueMap = Partial<
-  Record<"delivered" | "failed" | "opt_out", string[]>
+  Record<
+    "delivered" | "failed" | "opt_out" | "scrubbed" | "bounced",
+    string[]
+  >
 >;

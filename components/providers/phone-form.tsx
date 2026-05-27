@@ -27,14 +27,17 @@ import {
 import { isEntityAvailable } from "@/lib/feature-flags";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
+import { cn } from "@/lib/utils";
 import {
+  NUMBER_TYPES,
+  NUMBER_TYPE_LABELS,
   providerPhoneCreateSchema,
   providerPhoneUpdateSchema,
 } from "@/lib/validators/provider-phones";
 
-// Shape of "create" form values (raw input phone_number + cost + optional brand).
-// We don't use UpdateSchema directly; in edit mode we omit phone_number from
-// the form values and just send the patch.
+// Shape of "create" form values (raw input phone_number + number_type + cost +
+// optional brand). In edit mode we omit phone_number/number_type from the
+// submit (both immutable) and just send the cost/brand patch.
 export type PhoneFormValues = z.input<typeof providerPhoneCreateSchema>;
 
 type Brand = {
@@ -50,7 +53,7 @@ const UNASSIGNED = "__unassigned__";
 export interface PhoneFormProps {
   mode: "create" | "edit";
   /** create mode: only `cost_per_sms` / `brand_id` are used.
-   *  edit mode: `phone_number` is used for read-only display. */
+   *  edit mode: `phone_number` / `number_type` are used for read-only display. */
   initialValues?: Partial<PhoneFormValues>;
   /** Required in edit mode for the read-only display. */
   existingPhoneNumber?: string;
@@ -69,9 +72,8 @@ export function PhoneForm({
 }: PhoneFormProps) {
   const isEdit = mode === "edit";
 
-  // In edit mode we hide phone_number from validation by using the update
-  // schema (which omits it). In create mode we use the create schema.
-  // RHF needs a single resolver; we use a conditional schema below.
+  // In edit mode we hide phone_number/number_type from validation by using the
+  // update schema (which omits them). In create mode we use the create schema.
   const form = useForm<PhoneFormValues>({
     resolver: zodResolver(
       isEdit
@@ -80,10 +82,14 @@ export function PhoneForm({
     ),
     defaultValues: {
       phone_number: initialValues?.phone_number ?? "",
+      number_type: initialValues?.number_type ?? "10dlc",
       cost_per_sms: initialValues?.cost_per_sms ?? 0,
       brand_id: initialValues?.brand_id ?? null,
     },
   });
+
+  const watchedType = form.watch("number_type");
+  const isShortCode = watchedType === "short_code";
 
   // Brands picker — gated on feature flag (brands is true, so the fetch fires).
   const brandsAvailable = isEntityAvailable("brands");
@@ -110,22 +116,91 @@ export function PhoneForm({
         className="grid gap-4"
         noValidate
       >
+        {/* Number type — one per number. Immutable after creation. */}
         {isEdit ? (
           <FormItem>
-            <FormLabel>Phone number</FormLabel>
+            <FormLabel>Number type</FormLabel>
+            <FormControl>
+              <Input
+                readOnly
+                disabled
+                value={
+                  NUMBER_TYPE_LABELS[
+                    (initialValues?.number_type ?? "10dlc") as
+                      | "10dlc"
+                      | "toll_free"
+                      | "short_code"
+                  ]
+                }
+              />
+            </FormControl>
+            <FormDescription>
+              Number type can&apos;t be changed after creation.
+            </FormDescription>
+          </FormItem>
+        ) : (
+          <FormField
+            control={form.control}
+            name="number_type"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel required>Number type</FormLabel>
+                <div className="flex flex-wrap gap-2">
+                  {NUMBER_TYPES.map((t) => {
+                    const active = field.value === t;
+                    return (
+                      <button
+                        key={t}
+                        type="button"
+                        disabled={isSubmitting}
+                        onClick={() =>
+                          form.setValue("number_type", t, {
+                            shouldDirty: true,
+                            shouldValidate: true,
+                          })
+                        }
+                        className={cn(
+                          "rounded-full border px-3 py-1 text-sm transition-colors",
+                          active
+                            ? "border-foreground bg-foreground text-background"
+                            : "border-border bg-background text-muted-foreground hover:bg-muted",
+                        )}
+                      >
+                        {NUMBER_TYPE_LABELS[t]}
+                      </button>
+                    );
+                  })}
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        )}
+
+        {isEdit ? (
+          <FormItem>
+            <FormLabel>
+              {initialValues?.number_type === "short_code"
+                ? "Short code"
+                : "Phone number"}
+            </FormLabel>
             <FormControl>
               <Input
                 readOnly
                 disabled
                 value={
                   existingPhoneNumber
-                    ? formatPhoneInternational(existingPhoneNumber)
+                    ? initialValues?.number_type === "short_code"
+                      ? existingPhoneNumber
+                      : formatPhoneInternational(existingPhoneNumber)
                     : ""
                 }
               />
             </FormControl>
             <FormDescription>
-              Phone number can&apos;t be changed after creation.
+              {initialValues?.number_type === "short_code"
+                ? "Short code can't be changed after creation."
+                : "Phone number can't be changed after creation."}
             </FormDescription>
           </FormItem>
         ) : (
@@ -134,17 +209,30 @@ export function PhoneForm({
             name="phone_number"
             render={({ field }) => (
               <FormItem>
-                <FormLabel required>Phone number</FormLabel>
+                <FormLabel required>
+                  {isShortCode ? "Short code" : "Phone number"}
+                </FormLabel>
                 <FormControl>
-                  <Input
-                    placeholder="+1 202 555 0199 or 2025550199"
-                    disabled={isSubmitting}
-                    {...field}
-                  />
+                  {isShortCode ? (
+                    <Input
+                      inputMode="numeric"
+                      placeholder="12345"
+                      maxLength={6}
+                      disabled={isSubmitting}
+                      {...field}
+                    />
+                  ) : (
+                    <Input
+                      placeholder="+1 202 555 0199 or 2025550199"
+                      disabled={isSubmitting}
+                      {...field}
+                    />
+                  )}
                 </FormControl>
                 <FormDescription>
-                  E.164 (international) format preferred. US numbers without a
-                  country code will be auto-prepended with +1.
+                  {isShortCode
+                    ? "A 5- or 6-digit numeric short code."
+                    : "E.164 (international) format preferred. US numbers without a country code will be auto-prepended with +1."}
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -220,7 +308,7 @@ export function PhoneForm({
                   </SelectContent>
                 </Select>
                 <FormDescription>
-                  Associate this phone with a brand for reporting.
+                  Associate this number with a brand for reporting.
                 </FormDescription>
                 <FormMessage />
               </FormItem>

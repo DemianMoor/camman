@@ -44,6 +44,7 @@ export async function GET(
       dial_code: provider_phones.dial_code,
       local_number: provider_phones.local_number,
       cost_per_sms: provider_phones.cost_per_sms,
+      number_type: provider_phones.number_type,
       status: provider_phones.status,
       archived_at: provider_phones.archived_at,
       created_at: provider_phones.created_at,

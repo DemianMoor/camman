@@ -92,6 +92,7 @@ export async function GET(
       dial_code: provider_phones.dial_code,
       local_number: provider_phones.local_number,
       cost_per_sms: provider_phones.cost_per_sms,
+      number_type: provider_phones.number_type,
       status: provider_phones.status,
       archived_at: provider_phones.archived_at,
       created_at: provider_phones.created_at,
@@ -166,14 +167,29 @@ export async function POST(
     );
   }
 
-  const validation = validatePhone(parsed.data.phone_number);
-  if (!validation.valid || !validation.normalized) {
-    return apiError(
-      400,
-      validation.error ?? "Invalid phone number",
-      API_ERROR_CODES.VALIDATION,
-      { field: "phone_number" },
-    );
+  // Short codes are 5–6 digit numeric codes (already shape-checked by the
+  // validator) — no E.164 parsing, geo columns stay NULL. Everything else
+  // (10DLC / toll-free) is a phone number normalized via validatePhone.
+  let normalized: string;
+  let countryCode: string | null = null;
+  let dialCode: string | null = null;
+  let localNumber: string | null = null;
+  if (parsed.data.number_type === "short_code") {
+    normalized = parsed.data.phone_number.trim();
+  } else {
+    const validation = validatePhone(parsed.data.phone_number);
+    if (!validation.valid || !validation.normalized) {
+      return apiError(
+        400,
+        validation.error ?? "Invalid phone number",
+        API_ERROR_CODES.VALIDATION,
+        { field: "phone_number" },
+      );
+    }
+    normalized = validation.normalized;
+    countryCode = validation.country_code;
+    dialCode = validation.dial_code;
+    localNumber = validation.local_number;
   }
 
   try {
@@ -183,11 +199,12 @@ export async function POST(
         org_id: orgId,
         provider_id: pid,
         brand_id: parsed.data.brand_id ?? null,
-        phone_number: validation.normalized,
-        country_code: validation.country_code,
-        dial_code: validation.dial_code,
-        local_number: validation.local_number,
+        phone_number: normalized,
+        country_code: countryCode,
+        dial_code: dialCode,
+        local_number: localNumber,
         cost_per_sms: String(parsed.data.cost_per_sms),
+        number_type: parsed.data.number_type,
         status: "active",
       })
       .returning();
@@ -196,7 +213,9 @@ export async function POST(
     if (isUniqueViolation(err)) {
       return apiError(
         409,
-        "This phone number already exists in your organization",
+        parsed.data.number_type === "short_code"
+          ? "This number already exists in your organization"
+          : "This phone number already exists in your organization",
         API_ERROR_CODES.DUPLICATE,
         { field: "phone_number" },
       );

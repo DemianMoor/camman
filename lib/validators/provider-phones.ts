@@ -11,14 +11,44 @@ import { z } from "zod";
 
 export const PHONE_STATUSES = ["active", "suspended", "blocked"] as const;
 
-export const providerPhoneCreateSchema = z.object({
-  phone_number: z.string().trim().min(1, "Phone number is required").max(30),
-  cost_per_sms: z
-    .number()
-    .min(0, "Cost per SMS must be 0 or greater")
-    .max(999999, "Cost per SMS is too large"),
-  brand_id: z.number().int().positive().nullable().optional(),
-});
+// Number categories. '10dlc' and 'toll_free' are E.164 phone numbers
+// (validated via validatePhone in the route); 'short_code' is a 5–6 digit
+// numeric code (validated against SHORT_CODE_REGEX, no E.164 parsing).
+export const NUMBER_TYPES = ["10dlc", "toll_free", "short_code"] as const;
+export type NumberType = (typeof NUMBER_TYPES)[number];
+
+export const SHORT_CODE_REGEX = /^\d{5,6}$/;
+
+export const NUMBER_TYPE_LABELS: Record<NumberType, string> = {
+  "10dlc": "10DLC",
+  toll_free: "Toll-Free",
+  short_code: "Short Code",
+};
+
+export const providerPhoneCreateSchema = z
+  .object({
+    phone_number: z.string().trim().min(1, "Phone number is required").max(30),
+    number_type: z.enum(NUMBER_TYPES),
+    cost_per_sms: z
+      .number()
+      .min(0, "Cost per SMS must be 0 or greater")
+      .max(999999, "Cost per SMS is too large"),
+    brand_id: z.number().int().positive().nullable().optional(),
+  })
+  .superRefine((data, ctx) => {
+    // Short codes have a fixed numeric shape; phone numbers are validated
+    // (and normalized) server-side via validatePhone.
+    if (
+      data.number_type === "short_code" &&
+      !SHORT_CODE_REGEX.test(data.phone_number.trim())
+    ) {
+      ctx.addIssue({
+        path: ["phone_number"],
+        code: z.ZodIssueCode.custom,
+        message: "Short code must be 5 or 6 digits",
+      });
+    }
+  });
 
 export const providerPhoneUpdateSchema = z
   .object({

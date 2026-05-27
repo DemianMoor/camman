@@ -36,11 +36,6 @@ export type Permission =
   | "provider_phones.update"
   | "provider_phones.archive"
   | "provider_phones.restore"
-  | "provider_short_codes.view"
-  | "provider_short_codes.create"
-  | "provider_short_codes.update"
-  | "provider_short_codes.archive"
-  | "provider_short_codes.restore"
   | "routing_types.view"
   | "routing_types.create"
   | "routing_types.update"
@@ -147,7 +142,6 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "networks.view",
   "providers.view",
   "provider_phones.view",
-  "provider_short_codes.view",
   "routing_types.view",
   "traffic_types.view",
   "utm_tags.view",
@@ -224,10 +218,6 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "provider_phones.update",
   "provider_phones.archive",
   "provider_phones.restore",
-  "provider_short_codes.create",
-  "provider_short_codes.update",
-  "provider_short_codes.archive",
-  "provider_short_codes.restore",
   "routing_types.create",
   "routing_types.update",
   "routing_types.archive",

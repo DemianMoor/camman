@@ -26,7 +26,6 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/provider-form";
-import { ProviderShortCodesSection } from "@/components/providers/short-codes-section";
 import { useAuth } from "@/components/protected/auth-context";
 import {
   StatusDropdown,
@@ -62,6 +61,10 @@ import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
+import {
+  NUMBER_TYPE_LABELS,
+  type NumberType,
+} from "@/lib/validators/provider-phones";
 import { cn } from "@/lib/utils";
 
 type Provider = {
@@ -90,6 +93,7 @@ type Phone = {
   dial_code: string | null;
   local_number: string | null;
   cost_per_sms: string;
+  number_type: NumberType;
   status: PhoneStatus;
   archived_at: string | null;
   created_at: string;
@@ -152,7 +156,11 @@ function PhoneNumberCell({ phone }: { phone: Phone }) {
       }}
       className="inline-flex items-center gap-1.5 font-mono text-sm hover:text-foreground"
     >
-      <span>{formatPhoneInternational(phone.phone_number)}</span>
+      <span>
+        {phone.number_type === "short_code"
+          ? phone.phone_number
+          : formatPhoneInternational(phone.phone_number)}
+      </span>
       {copied ? (
         <Check className="size-3 text-emerald-600" aria-hidden />
       ) : (
@@ -432,6 +440,16 @@ export default function ProviderDetailPage() {
         header: "Phone Number",
         cell: ({ row }) => <PhoneNumberCell phone={row.original} />,
         enableSorting: true,
+      },
+      {
+        id: "number_type",
+        header: "Type",
+        enableSorting: false,
+        cell: ({ row }) => (
+          <Badge variant="secondary" className="font-normal">
+            {NUMBER_TYPE_LABELS[row.original.number_type]}
+          </Badge>
+        ),
       },
       {
         id: "country",
@@ -772,11 +790,6 @@ export default function ProviderDetailPage() {
         )}
       </section>
 
-      <ProviderShortCodesSection
-        providerId={provider.id}
-        providerName={provider.name}
-      />
-
       {/* Edit Provider dialog */}
       <FormDialog
         open={editProviderOpen}
@@ -846,6 +859,7 @@ export default function ProviderDetailPage() {
             existingPhoneNumber={editingPhone.phone_number}
             initialValues={{
               phone_number: editingPhone.phone_number,
+              number_type: editingPhone.number_type,
               cost_per_sms: Number(editingPhone.cost_per_sms),
               brand_id: editingPhone.brand_id,
             }}

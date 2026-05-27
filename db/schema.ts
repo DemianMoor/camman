@@ -264,6 +264,9 @@ export const provider_phones = pgTable(
     cost_per_sms: numeric("cost_per_sms", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
+    // Number category. '10dlc' and 'toll_free' are E.164 phone numbers;
+    // 'short_code' is a 5–6 digit numeric code (geo columns stay NULL).
+    number_type: text("number_type").notNull().default("10dlc"),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
@@ -282,52 +285,15 @@ export const provider_phones = pgTable(
       "provider_phones_status_check",
       sql`${table.status} IN ('active', 'suspended', 'blocked', 'archived')`,
     ),
+    check(
+      "provider_phones_number_type_check",
+      sql`${table.number_type} IN ('10dlc', 'toll_free', 'short_code')`,
+    ),
   ],
 );
 
 export type ProviderPhone = typeof provider_phones.$inferSelect;
 export type NewProviderPhone = typeof provider_phones.$inferInsert;
-
-export const provider_short_codes = pgTable(
-  "provider_short_codes",
-  {
-    id: serial("id").primaryKey(),
-    org_id: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    provider_id: integer("provider_id")
-      .notNull()
-      .references(() => sms_providers.id, { onDelete: "cascade" }),
-    brand_id: integer("brand_id").references(() => brands.id, {
-      onDelete: "set null",
-    }),
-    short_code: text("short_code").notNull(),
-    cost_per_sms: numeric("cost_per_sms", { precision: 12, scale: 4 })
-      .notNull()
-      .default("0"),
-    status: text("status").notNull().default("active"),
-    archived_at: timestamp("archived_at", { withTimezone: true }),
-    created_at: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    unique("provider_short_codes_org_id_short_code_unique").on(
-      table.org_id,
-      table.short_code,
-    ),
-    index("provider_short_codes_provider_id_idx").on(table.provider_id),
-    index("provider_short_codes_brand_id_idx").on(table.brand_id),
-    index("provider_short_codes_org_id_idx").on(table.org_id),
-    check(
-      "provider_short_codes_status_check",
-      sql`${table.status} IN ('active', 'suspended', 'blocked', 'archived')`,
-    ),
-  ],
-);
-
-export type ProviderShortCode = typeof provider_short_codes.$inferSelect;
-export type NewProviderShortCode = typeof provider_short_codes.$inferInsert;
 
 export const routing_types = pgTable(
   "routing_types",

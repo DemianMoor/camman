@@ -29,17 +29,16 @@ import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialo
 import { ResultsImportForm } from "@/components/campaigns/results-import-form";
 import { StageInlineEditor } from "@/components/campaigns/stage-inline-creator";
 import {
-  StageStatusChangeDialog,
-  type StageTransition,
-  transitionToStageStatus,
-} from "@/components/campaigns/stage-status-change-dialog";
-import {
   StatusChangeDialog,
   type CampaignTransition,
   transitionToStatus,
 } from "@/components/campaigns/status-change-dialog";
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
+import {
+  StatusDropdown,
+  type StatusOption,
+} from "@/components/status-dropdown";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -207,57 +206,17 @@ const ALL_STAGE_STATUSES: StageStatus[] = [
   "failed",
 ];
 
-// Per-current-status legal transitions (mirrors the stage API state
-// machine — UI just disables disallowed picks).
-const STAGE_TRANSITION_MAP: Record<
-  ActiveStageStatus,
-  { label: string; t: StageTransition; icon: React.ReactNode }[]
-> = {
-  draft: [
-    {
-      label: "Mark pending",
-      t: "to_pending",
-      icon: <Send className="size-4" aria-hidden />,
-    },
-    {
-      label: "Cancel",
-      t: "to_cancelled",
-      icon: <ArchiveIcon className="size-4" aria-hidden />,
-    },
-  ],
-  pending: [
-    {
-      label: "Back to draft",
-      t: "to_draft",
-      icon: <Pencil className="size-4" aria-hidden />,
-    },
-    {
-      label: "Mark sent",
-      t: "to_sent",
-      icon: <Send className="size-4" aria-hidden />,
-    },
-    {
-      label: "Cancel",
-      t: "to_cancelled",
-      icon: <ArchiveIcon className="size-4" aria-hidden />,
-    },
-  ],
-  sent: [
-    {
-      label: "Mark successful",
-      t: "to_success",
-      icon: <CheckCircle2 className="size-4" aria-hidden />,
-    },
-    {
-      label: "Mark failed",
-      t: "to_failed",
-      icon: <ArchiveIcon className="size-4" aria-hidden />,
-    },
-  ],
-  success: [],
-  cancelled: [],
-  failed: [],
-};
+// Stage status is freely assignable among the non-archived states via an
+// inline dropdown, so an operator can record the resulting status directly.
+// (archived is reached through the Archive action, not this list.)
+const STAGE_STATUS_OPTIONS: StatusOption<ActiveStageStatus>[] = [
+  { value: "draft", label: "Draft", color: "gray" },
+  { value: "pending", label: "Pending", color: "amber" },
+  { value: "sent", label: "Sent", color: "sky" },
+  { value: "success", label: "Success", color: "green" },
+  { value: "cancelled", label: "Cancelled", color: "gray" },
+  { value: "failed", label: "Failed", color: "red" },
+];
 
 type StagesFilters = {
   statuses: StageStatus[];
@@ -418,10 +377,6 @@ export default function CampaignDetailPage() {
 
   const [addStageOpen, setAddStageOpen] = useState(false);
   const [editingStage, setEditingStage] = useState<Stage | null>(null);
-  const [stageTransitionTarget, setStageTransitionTarget] = useState<{
-    stage: Stage;
-    transition: StageTransition;
-  } | null>(null);
   const [stageArchiveConfirm, setStageArchiveConfirm] = useState<{
     kind: "archive" | "restore";
     stage: Stage;
@@ -482,11 +437,12 @@ export default function CampaignDetailPage() {
     refetchCampaign();
   }
 
-  async function handleStageTransition() {
-    if (!stageTransitionTarget) return;
-    const next = transitionToStageStatus(stageTransitionTarget.transition);
+  async function handleStageStatusChange(
+    stage: Stage,
+    next: ActiveStageStatus,
+  ) {
     const result = await stageStatusApi.execute(
-      `/api/campaigns/${campaignId}/stages/${stageTransitionTarget.stage.id}/status`,
+      `/api/campaigns/${campaignId}/stages/${stage.id}/status`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -497,8 +453,7 @@ export default function CampaignDetailPage() {
       toastApiError(result, "Couldn't change stage status");
       return;
     }
-    toast.success(`Stage ${next}`);
-    setStageTransitionTarget(null);
+    toast.success(`Stage marked ${next}`);
     refetchStages();
     refetchCampaign();
   }
@@ -723,13 +678,27 @@ export default function CampaignDetailPage() {
         id: "status",
         header: "Status",
         enableSorting: false,
-        cell: ({ row }) => (
-          <Badge
-            className={cn("capitalize", STAGE_STATUS_COLOR[row.original.status])}
-          >
-            {row.original.status}
-          </Badge>
-        ),
+        cell: ({ row }) => {
+          const s = row.original;
+          if (s.status === "archived") {
+            return (
+              <Badge
+                className={cn("capitalize", STAGE_STATUS_COLOR.archived)}
+              >
+                archived
+              </Badge>
+            );
+          }
+          return (
+            <StatusDropdown<ActiveStageStatus>
+              current={s.status as ActiveStageStatus}
+              options={STAGE_STATUS_OPTIONS}
+              onChange={(next) => handleStageStatusChange(s, next)}
+              isUpdating={stageStatusApi.isLoading}
+              isTerminal={!canSendStage}
+            />
+          );
+        },
       },
       {
         id: "sms_count",
@@ -787,17 +756,11 @@ export default function CampaignDetailPage() {
           const showEdit = canUpdateStage && s.status !== "archived";
           const showArchive = s.status !== "archived" && canArchiveStage;
           const showRestore = s.status === "archived" && canRestoreStage;
-          const transitions =
-            s.status === "archived"
-              ? []
-              : STAGE_TRANSITION_MAP[s.status as ActiveStageStatus] ?? [];
-          const canTransition = canSendStage && transitions.length > 0;
           const audienceEmpty = s.audience_count === 0;
           const exportTitle = audienceEmpty
             ? "Stage has no audience — adjust filters to enable export."
             : undefined;
-          if (!showEdit && !showArchive && !showRestore && !canTransition)
-            return null;
+          if (!showEdit && !showArchive && !showRestore) return null;
           return (
             <div className="flex items-center justify-end gap-1">
               <Button
@@ -852,24 +815,6 @@ export default function CampaignDetailPage() {
                       <Copy className="size-4" aria-hidden /> Duplicate
                     </DropdownMenuItem>
                   ) : null}
-                  {canTransition ? (
-                    <>
-                      {showEdit ? <DropdownMenuSeparator /> : null}
-                      {transitions.map((tr) => (
-                        <DropdownMenuItem
-                          key={tr.t}
-                          onSelect={() =>
-                            setStageTransitionTarget({
-                              stage: s,
-                              transition: tr.t,
-                            })
-                          }
-                        >
-                          {tr.icon} {tr.label}
-                        </DropdownMenuItem>
-                      ))}
-                    </>
-                  ) : null}
                   <DropdownMenuSeparator />
                   {canImportResults ? (
                     <DropdownMenuItem onSelect={() => setImportStage(s)}>
@@ -920,6 +865,7 @@ export default function CampaignDetailPage() {
       canImportResults,
       canViewImports,
       selectedStageIds,
+      stageStatusApi.isLoading,
     ],
   );
 
@@ -1459,18 +1405,6 @@ export default function CampaignDetailPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      <StageStatusChangeDialog
-        transition={stageTransitionTarget?.transition ?? null}
-        stageLabel={
-          stageTransitionTarget
-            ? `Stage ${stageTransitionTarget.stage.stage_number}${stageTransitionTarget.stage.label ? ` · ${stageTransitionTarget.stage.label}` : ""}`
-            : null
-        }
-        isPending={stageStatusApi.isLoading}
-        onCancel={() => setStageTransitionTarget(null)}
-        onConfirm={handleStageTransition}
-      />
 
       <AlertDialog
         open={stageArchiveConfirm !== null}

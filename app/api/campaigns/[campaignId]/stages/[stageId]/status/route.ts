@@ -14,17 +14,13 @@ function parseId(idParam: string) {
   return n;
 }
 
-// Stage state machine. `sent` is the transitioning state that records
-// `sent_at`. `success`, `cancelled`, `failed` are terminal until archive.
-const TRANSITIONS: Record<string, ReadonlySet<string>> = {
-  draft: new Set(["pending", "cancelled"]),
-  pending: new Set(["draft", "sent", "cancelled"]),
-  sent: new Set(["success", "failed"]),
-  success: new Set<string>(),
-  cancelled: new Set<string>(),
-  failed: new Set<string>(),
-  archived: new Set<string>(),
-};
+// Stage status is freely assignable among the non-archived states so an
+// operator can record the resulting status of a send directly (e.g. mark a
+// stage 'success' or 'failed' after importing results) without stepping
+// through the lifecycle. `archived` is NOT a target here — that goes through
+// /archive — and an archived stage must be restored before its status can
+// change again. Moving INTO 'sent' stamps `sent_at`; the validator already
+// restricts `next` to the six active statuses.
 
 export async function POST(
   req: NextRequest,
@@ -80,13 +76,12 @@ export async function POST(
     });
   }
   const from = current[0].status;
-  const allowed = TRANSITIONS[from] ?? new Set<string>();
-  if (!allowed.has(next)) {
+  if (from === "archived") {
     return apiError(
       409,
-      `Cannot transition from "${from}" to "${next}"`,
+      "Restore the stage before changing its status",
       API_ERROR_CODES.CONFLICT,
-      { reason: "invalid_transition", from, to: next },
+      { reason: "stage_is_archived" },
     );
   }
 

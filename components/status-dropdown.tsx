@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
-export type StatusColor = "green" | "amber" | "red" | "gray" | "orange";
+export type StatusColor = "green" | "amber" | "red" | "gray" | "orange" | "sky";
 
 export interface StatusOption<S extends string> {
   value: S;
@@ -39,6 +39,7 @@ const COLOR_CLASSES: Record<StatusColor, string> = {
     "border-slate-200 bg-slate-100 text-slate-800 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200",
   orange:
     "border-orange-200 bg-orange-100 text-orange-800 dark:border-orange-900 dark:bg-orange-950 dark:text-orange-200",
+  sky: "border-sky-200 bg-sky-100 text-sky-800 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200",
 };
 
 const DOT_CLASSES: Record<StatusColor, string> = {
@@ -47,6 +48,7 @@ const DOT_CLASSES: Record<StatusColor, string> = {
   red: "bg-red-500",
   gray: "bg-slate-400",
   orange: "bg-orange-500",
+  sky: "bg-sky-500",
 };
 
 export function StatusDropdown<S extends string>({

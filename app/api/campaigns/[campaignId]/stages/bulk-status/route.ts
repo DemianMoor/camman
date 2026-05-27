@@ -32,28 +32,17 @@ function permissionFor(to: StageBulkTarget): Permission {
   return "stages.send";
 }
 
-// Allowed source states per target. Mirrors TRANSITIONS in
-// app/api/campaigns/[campaignId]/stages/[stageId]/status/route.ts plus
-// 'archive (any non-archived)'.
-function allowedFrom(to: StageBulkTarget): ReadonlySet<string> {
-  switch (to) {
-    case "success":
-      return new Set(["sent"]);
-    case "failed":
-      return new Set(["sent"]);
-    case "cancelled":
-      return new Set(["draft", "pending"]);
-    case "archived":
-      return new Set([
-        "draft",
-        "pending",
-        "sent",
-        "success",
-        "cancelled",
-        "failed",
-      ]);
-  }
-}
+// Any non-archived stage can be moved to any bulk target — matching the
+// freely-assignable single /status endpoint. Archived stages are excluded
+// (they must be restored first) for every target, including archive itself.
+const NON_ARCHIVED_SOURCES: ReadonlySet<string> = new Set([
+  "draft",
+  "pending",
+  "sent",
+  "success",
+  "cancelled",
+  "failed",
+]);
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -111,7 +100,7 @@ export async function POST(
     );
   const byId = new Map<number, string>();
   for (const r of rows) byId.set(r.id, r.status);
-  const allowed = allowedFrom(target_status);
+  const allowed = NON_ARCHIVED_SOURCES;
 
   const succeeded: number[] = [];
   const failed: { id: number; reason: string }[] = [];

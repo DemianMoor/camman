@@ -996,6 +996,15 @@ export const campaigns = pgTable(
     // the matching pool is a no-op. Frozen with the rest of the audience
     // after the draft → active transition.
     audience_cap: integer("audience_cap"),
+    // When true, the snapshot excludes any contact already snapshotted into
+    // another campaign with status='active' (across the WHOLE audience —
+    // segments and contact groups). The cap then samples from the unused
+    // pool only, falling back to all-unused when fewer exist than the cap.
+    // Defaults true (on). Broader counterpart to segments.exclude_in_use_contacts;
+    // frozen with the rest of the audience after draft → active.
+    exclude_in_use_contacts: boolean("exclude_in_use_contacts")
+      .notNull()
+      .default(true),
     start_date: date("start_date"),
     end_date: date("end_date"),
     status: text("status").notNull().default("draft"),

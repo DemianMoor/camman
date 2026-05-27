@@ -86,6 +86,9 @@ export async function POST(req: NextRequest) {
     contactGroupIds: groupIds,
     filters: parsed.data.audience_filters ?? {},
     cap: parsed.data.audience_cap ?? null,
+    // Default true to mirror the campaign column default — a preview with
+    // the flag omitted matches a campaign created without specifying it.
+    excludeInUse: parsed.data.exclude_in_use_contacts ?? true,
   });
   return NextResponse.json(result);
 }

@@ -107,6 +107,7 @@ type CampaignDetail = {
   audience_filters: AudienceFilters;
   audience_snapshot_count: number;
   audience_cap: number | null;
+  exclude_in_use_contacts: boolean;
   start_date: string | null;
   end_date: string | null;
   status: CampaignStatus;
@@ -1791,6 +1792,10 @@ function CampaignMetaCompact({
                     .join(", ") || "—"}
                 </span>
               }
+            />
+            <MetaCell
+              label="Exclude in-use"
+              value={campaign.exclude_in_use_contacts ? "Yes" : "No"}
             />
           </div>
         ) : null}

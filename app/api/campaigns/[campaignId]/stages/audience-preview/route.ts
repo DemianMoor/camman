@@ -74,6 +74,7 @@ export async function POST(
       audience_contact_group_ids: campaigns.audience_contact_group_ids,
       audience_filters: campaigns.audience_filters,
       audience_cap: campaigns.audience_cap,
+      exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
@@ -114,6 +115,7 @@ export async function POST(
             campaignRow[0].audience_contact_group_ids ?? [],
           filters: campaignRow[0].audience_filters ?? {},
           cap: campaignRow[0].audience_cap ?? null,
+          excludeInUse: campaignRow[0].exclude_in_use_contacts,
         },
         parsed.data,
       )

@@ -117,6 +117,7 @@ export async function POST(
             audience_filters: source.audience_filters,
             audience_snapshot_count: 0,
             audience_cap: source.audience_cap,
+            exclude_in_use_contacts: source.exclude_in_use_contacts,
             start_date: source.start_date,
             end_date: source.end_date,
             status: "draft",

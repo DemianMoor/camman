@@ -62,6 +62,7 @@ export function CampaignFormFields({
     watchedSegments,
     watchedContactGroups,
     watchedFilters,
+    watchedExcludeInUse,
     toggleSegment,
     setFilter,
     dateError,
@@ -525,6 +526,17 @@ export function CampaignFormFields({
               <FormMessage />
             </FormItem>
           )}
+        />
+
+        {/* Exclude contacts already in use by another active campaign */}
+        <FilterToggle
+          label="Exclude contacts in use"
+          description="Drop contacts already in another active campaign's audience. The cap then draws from unused contacts only."
+          checked={watchedExcludeInUse}
+          onChange={(v) =>
+            form.setValue("exclude_in_use_contacts", v, { shouldDirty: true })
+          }
+          disabled={audienceLocked || anySubmitting}
         />
 
         {omitAudiencePreview ? null : <AudiencePreviewCard state={state} />}

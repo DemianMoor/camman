@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -62,6 +63,7 @@ type CampaignDetail = {
   audience_contact_group_ids: number[];
   audience_filters: AudienceFilters;
   audience_cap: number | null;
+  exclude_in_use_contacts: boolean;
   start_date: string | null;
   end_date: string | null;
   status: Status;
@@ -189,6 +191,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
       include_not_clicked: data.audience_filters?.include_not_clicked ?? true,
     },
     audience_cap: data.audience_cap ?? null,
+    exclude_in_use_contacts: data.exclude_in_use_contacts ?? true,
     start_date: data.start_date ?? "",
     end_date: data.end_date ?? "",
   };
@@ -279,6 +282,7 @@ function Inner({
       delete body.audience_contact_group_ids;
       delete body.audience_filters;
       delete body.audience_cap;
+      delete body.exclude_in_use_contacts;
     }
     const result = await updateApi.execute(`/api/campaigns/${campaignId}`, {
       method: "PATCH",
@@ -760,6 +764,7 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
     watchedSegments,
     watchedContactGroups,
     watchedFilters,
+    watchedExcludeInUse,
     setFilter,
   } = state;
 
@@ -863,6 +868,26 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
               </FormItem>
             )}
           />
+          <div className="flex items-start justify-between gap-3 rounded-md border p-3">
+            <div className="grid gap-0.5">
+              <span className="text-sm font-medium">
+                Exclude contacts in use
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Skip contacts already in another active campaign&apos;s
+                audience. The cap then draws from unused contacts only.
+              </span>
+            </div>
+            <Switch
+              checked={watchedExcludeInUse}
+              onCheckedChange={(v) =>
+                form.setValue("exclude_in_use_contacts", v, {
+                  shouldDirty: true,
+                })
+              }
+              disabled={audienceLocked || anySubmitting}
+            />
+          </div>
         </div>
 
         {/* Filter chips */}
@@ -950,6 +975,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     watchedSegments,
     watchedContactGroups,
     watchedCap,
+    watchedExcludeInUse,
   } = state;
 
   const hasSegments = watchedSegments.length > 0;
@@ -1066,22 +1092,45 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                 </div>
                 {previewInUseElsewhere !== null &&
                 previewInUseElsewhere > 0 ? (
-                  <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] dark:border-amber-900 dark:bg-amber-950/40">
-                    <span
-                      className="mt-1 size-2 shrink-0 rounded-full bg-amber-500 dark:bg-amber-400"
-                      aria-hidden
-                    />
-                    <div className="text-amber-900 dark:text-amber-200">
-                      <span className="font-mono tabular-nums">
-                        {previewInUseElsewhere.toLocaleString()}
-                      </span>{" "}
-                      contact{previewInUseElsewhere === 1 ? "" : "s"} in this
-                      pool {previewInUseElsewhere === 1 ? "is" : "are"} also in
-                      another active campaign&apos;s audience. Toggle{" "}
-                      <span className="font-mono">exclude_in_use_contacts</span>{" "}
-                      on a segment to drop them.
+                  watchedExcludeInUse ? (
+                    // Toggle ON: the in-use contacts are already dropped from
+                    // the pool above. Report it as a confirmation, not a warning.
+                    <div className="flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                      <span
+                        className="mt-1 size-2 shrink-0 rounded-full bg-slate-400 dark:bg-slate-500"
+                        aria-hidden
+                      />
+                      <div>
+                        <span className="font-mono tabular-nums text-foreground">
+                          {previewInUseElsewhere.toLocaleString()}
+                        </span>{" "}
+                        in-use contact
+                        {previewInUseElsewhere === 1 ? "" : "s"} excluded —
+                        drawing from unused contacts only.
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    // Toggle OFF: the in-use contacts are still in the pool and
+                    // may be sent. Warn, and point at the toggle to drop them.
+                    <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] dark:border-amber-900 dark:bg-amber-950/40">
+                      <span
+                        className="mt-1 size-2 shrink-0 rounded-full bg-amber-500 dark:bg-amber-400"
+                        aria-hidden
+                      />
+                      <div className="text-amber-900 dark:text-amber-200">
+                        <span className="font-mono tabular-nums">
+                          {previewInUseElsewhere.toLocaleString()}
+                        </span>{" "}
+                        contact{previewInUseElsewhere === 1 ? "" : "s"} in this
+                        pool {previewInUseElsewhere === 1 ? "is" : "are"} also in
+                        another active campaign&apos;s audience. Turn on{" "}
+                        <span className="font-medium">
+                          Exclude contacts in use
+                        </span>{" "}
+                        to drop them.
+                      </div>
+                    </div>
+                  )
                 ) : null}
               </div>
             ) : null}
@@ -1250,6 +1299,7 @@ function buildCreateBody(
     audience_contact_group_ids: values.audience_contact_group_ids,
     audience_filters: values.audience_filters,
     audience_cap: values.audience_cap,
+    exclude_in_use_contacts: values.exclude_in_use_contacts,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
     save_as_draft: saveAsDraft,
@@ -1270,6 +1320,7 @@ function buildPatchBody(values: CampaignFormValues): Record<string, unknown> {
     audience_contact_group_ids: values.audience_contact_group_ids,
     audience_filters: values.audience_filters,
     audience_cap: values.audience_cap,
+    exclude_in_use_contacts: values.exclude_in_use_contacts,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
   };

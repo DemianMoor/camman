@@ -87,6 +87,7 @@ export async function GET(
       audience_filters: campaigns.audience_filters,
       audience_snapshot_count: campaigns.audience_snapshot_count,
       audience_cap: campaigns.audience_cap,
+      exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
       start_date: campaigns.start_date,
       end_date: campaigns.end_date,
       status: campaigns.status,
@@ -236,7 +237,8 @@ export async function PATCH(
     (input.audience_segment_ids !== undefined ||
       input.audience_contact_group_ids !== undefined ||
       input.audience_filters !== undefined ||
-      input.audience_cap !== undefined)
+      input.audience_cap !== undefined ||
+      input.exclude_in_use_contacts !== undefined)
   ) {
     return apiError(
       400,

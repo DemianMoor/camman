@@ -67,6 +67,10 @@ const campaignCreateBaseSchema = z.object({
   // Optional cap on the random-sampled audience. Null clears the cap.
   // Validated as positive; the DB has a matching CHECK.
   audience_cap: z.number().int().positive().nullable().optional(),
+  // Campaign-level "exclude contacts in use by another active campaign".
+  // DB column is NOT NULL DEFAULT true, so a missing field means "no
+  // change" (PATCH) / "use default" (create) — not "set to false".
+  exclude_in_use_contacts: z.boolean().optional(),
   start_date: dateStringSchema.nullable().optional(),
   end_date: dateStringSchema.nullable().optional(),
   notes: z
@@ -159,6 +163,7 @@ export const audiencePreviewSchema = z
       .default([]),
     audience_filters: audienceFiltersSchema.optional(),
     audience_cap: z.number().int().positive().nullable().optional(),
+    exclude_in_use_contacts: z.boolean().optional(),
   })
   .refine(
     (d) =>

@@ -168,6 +168,8 @@ export async function POST(req: NextRequest) {
 
   const filters = input.audience_filters ?? {};
   const audienceCap = input.audience_cap ?? null;
+  // Default true (on) when the form omits it — matches the DB column default.
+  const excludeInUse = input.exclude_in_use_contacts ?? true;
 
   // Auto-generate a name for empty drafts so the list page has something
   // to render. The pattern is intentionally readable so an operator can
@@ -207,6 +209,7 @@ export async function POST(req: NextRequest) {
             audience_filters: filters,
             audience_snapshot_count: 0,
             audience_cap: audienceCap,
+            exclude_in_use_contacts: excludeInUse,
             start_date: input.start_date ?? null,
             end_date: input.end_date ?? null,
             status: "draft",
@@ -242,6 +245,7 @@ export async function POST(req: NextRequest) {
               contactGroupIds,
               filters,
               cap: audienceCap,
+              excludeInUse,
             },
             tx,
           );

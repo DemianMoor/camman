@@ -23,6 +23,11 @@ export interface AudiencePreviewInput {
   // count and the effective count (= min(total, cap)). The snapshot path
   // takes a random sample of `cap` contacts at activation time.
   cap?: number | null;
+  // When true, drop any contact already snapshotted into another campaign
+  // with status='active' from the WHOLE audience (segments + groups). The
+  // cap then samples from the remaining unused pool only. Campaign-level
+  // counterpart to the per-segment segments.exclude_in_use_contacts flag.
+  excludeInUse?: boolean;
 }
 
 export interface AudienceSnapshotInput extends AudiencePreviewInput {
@@ -83,6 +88,7 @@ async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
   const includeOptIn = filters.include_opt_in === true;
   const includeClickers = filters.include_clickers === true;
   const includeNotClicked = filters.include_not_clicked === true;
+  const excludeInUse = input.excludeInUse === true;
 
   // Per-segment rule-filtered clauses. Each yields a set of contact_ids
   // honoring that segment's rules + manual membership UNION.
@@ -131,7 +137,15 @@ async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
         exists (
           select 1 from clickers c
           where c.contact_id = sm.contact_id and c.org_id = ${orgId}::uuid
-        ) as has_clicker
+        ) as has_clicker,
+        exists (
+          select 1
+          from campaign_audience_pool p
+          join campaigns ca on ca.id = p.campaign_id
+          where p.contact_id = sm.contact_id
+            and p.org_id = ${orgId}::uuid
+            and ca.status = 'active'
+        ) as is_in_use_elsewhere
       from segment_members sm
     )
     select
@@ -147,6 +161,7 @@ async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
         or (${includeClickers}::boolean and has_clicker)
         or (${includeNotClicked}::boolean and not has_clicker)
       )
+      and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
   `;
 }
 
@@ -289,10 +304,12 @@ export async function computeStageAudienceCountForDraft(
     contactGroupIds: number[];
     filters: AudienceFilters;
     cap: number | null;
+    excludeInUse?: boolean;
   },
   stageFilters: StageAudienceFilters,
 ): Promise<StageAudienceCountResult> {
   const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
+  const excludeInUse = campaign.excludeInUse === true;
   // No audience source on the parent campaign → trivially zero.
   if (segmentIds.length === 0 && contactGroupIds.length === 0) {
     return {
@@ -361,7 +378,15 @@ export async function computeStageAudienceCountForDraft(
         exists (
           select 1 from clickers c
           where c.contact_id = s.contact_id and c.org_id = ${orgId}::uuid
-        ) as has_clicker
+        ) as has_clicker,
+        exists (
+          select 1
+          from campaign_audience_pool p
+          join campaigns ca on ca.id = p.campaign_id
+          where p.contact_id = s.contact_id
+            and p.org_id = ${orgId}::uuid
+            and ca.status = 'active'
+        ) as is_in_use_elsewhere
       from sources s
     ),
     qualified as (
@@ -376,6 +401,7 @@ export async function computeStageAudienceCountForDraft(
           or (${includeClickers}::boolean and has_clicker)
           or (${includeNotClicked}::boolean and not has_clicker)
         )
+        and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
         and (
           (${stageIncludeNoStatus}::boolean and not has_opt_in and not has_clicker)
           or (${stageIncludeClickers}::boolean and has_clicker)
@@ -455,6 +481,7 @@ export async function previewAudience(
   const includeOptIn = filters.include_opt_in === true;
   const includeClickers = filters.include_clickers === true;
   const includeNotClicked = filters.include_not_clicked === true;
+  const excludeInUse = input.excludeInUse === true;
 
   // Per-segment clauses tagged with a from_segment=true / from_group=false
   // marker so the aggregate query can attribute each contact to a source.
@@ -536,15 +563,29 @@ export async function previewAudience(
           )
         ) as qualifies
       from flagged f
+    ),
+    eligible as (
+      -- The actual pool the cap samples from. When the campaign-level
+      -- exclude_in_use flag is on, in-use contacts are dropped here so
+      -- total_matching / the per-source counts reflect the unused pool.
+      select
+        q.*,
+        (
+          q.qualifies
+          and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
+        ) as is_eligible
+      from qualified q
     )
     select
-      count(*) filter (where qualifies)::int as total_matching,
-      count(*) filter (where qualifies and from_segment)::int as from_segments,
-      count(*) filter (where qualifies and from_group)::int as from_groups,
-      count(*) filter (where qualifies and from_segment and from_group)::int as overlap,
+      count(*) filter (where is_eligible)::int as total_matching,
+      count(*) filter (where is_eligible and from_segment)::int as from_segments,
+      count(*) filter (where is_eligible and from_group)::int as from_groups,
+      count(*) filter (where is_eligible and from_segment and from_group)::int as overlap,
       count(*) filter (where has_opt_out)::int as excluded_for_optout,
+      -- Reported on the qualifying set (pre-exclusion) so the UI can show
+      -- how many were/are in use regardless of whether they were dropped.
       count(*) filter (where qualifies and is_in_use_elsewhere)::int as in_use_in_other_campaigns
-    from qualified
+    from eligible
   `)) as unknown as {
     total_matching: number;
     from_segments: number;

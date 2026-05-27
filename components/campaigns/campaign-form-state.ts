@@ -44,6 +44,9 @@ export interface CampaignFormValues {
   audience_filters: AudienceFilters;
   // Null = no cap. The form represents an empty input as null.
   audience_cap: number | null;
+  // Exclude contacts already in use by another active campaign. On by
+  // default for new campaigns.
+  exclude_in_use_contacts: boolean;
   start_date: string;
   end_date: string;
 }
@@ -175,6 +178,9 @@ export function useCampaignFormState(props: CampaignFormProps) {
         initialValues?.audience_contact_group_ids ?? [],
       audience_filters: initialValues?.audience_filters ?? DEFAULT_FILTERS,
       audience_cap: initialValues?.audience_cap ?? null,
+      // Default ON for new campaigns; edit mode loads the stored value
+      // (?? leaves an explicit false intact).
+      exclude_in_use_contacts: initialValues?.exclude_in_use_contacts ?? true,
       start_date: initialValues?.start_date ?? "",
       end_date: initialValues?.end_date ?? "",
     },
@@ -188,6 +194,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const watchedContactGroups = form.watch("audience_contact_group_ids");
   const watchedFilters = form.watch("audience_filters");
   const watchedCap = form.watch("audience_cap");
+  const watchedExcludeInUse = form.watch("exclude_in_use_contacts");
   const watchedStart = form.watch("start_date");
   const watchedEnd = form.watch("end_date");
 
@@ -291,6 +298,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const groupsKey = watchedContactGroups.join(",");
   const filtersKey = JSON.stringify(watchedFilters);
   const capKey = watchedCap ?? "";
+  const excludeInUseKey = watchedExcludeInUse ? "1" : "0";
 
   useEffect(() => {
     if (
@@ -320,6 +328,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
             audience_contact_group_ids: watchedContactGroups,
             audience_filters: watchedFilters,
             audience_cap: watchedCap,
+            exclude_in_use_contacts: watchedExcludeInUse,
           }),
         },
       );
@@ -349,10 +358,11 @@ export function useCampaignFormState(props: CampaignFormProps) {
       cancelled = true;
       clearTimeout(t);
     };
-    // segmentsKey / groupsKey / filtersKey / capKey collapse identity to
-    // stable primitives so this only re-runs on real change.
+    // segmentsKey / groupsKey / filtersKey / capKey / excludeInUseKey
+    // collapse identity to stable primitives so this only re-runs on real
+    // change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segmentsKey, groupsKey, filtersKey, capKey, previewApi.execute]);
+  }, [segmentsKey, groupsKey, filtersKey, capKey, excludeInUseKey, previewApi.execute]);
 
   // Date sanity (purely client-side hint; the server doesn't refuse
   // end<start because either field can be null).
@@ -443,6 +453,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     watchedSegments,
     watchedContactGroups,
     watchedCap,
+    watchedExcludeInUse,
     previewCount,
     previewTotalMatching,
     previewFromSegments,

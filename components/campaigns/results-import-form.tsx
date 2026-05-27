@@ -112,6 +112,45 @@ const CANONICAL_ORDER: CanonicalFieldKey[] = [
   "cost",
 ];
 
+// Canonical outcomes the Status column can map to, with example provider
+// words shown as placeholders. Leaving a row blank falls back to built-in
+// detection (which already treats Completed/Delivered/Opened as delivered
+// and Filtered as failed).
+type StatusMapKey = keyof StatusValueMap;
+const STATUS_MAP_OUTCOMES: { key: StatusMapKey; label: string; eg: string }[] =
+  [
+    { key: "delivered", label: "Delivered", eg: "Completed, Delivered, Opened" },
+    { key: "failed", label: "Failed", eg: "Filtered, Failed" },
+    { key: "opt_out", label: "Opt-out", eg: "Stop, Unsubscribe" },
+    { key: "clicker", label: "Clicker", eg: "Clicked" },
+    { key: "scrubbed", label: "Scrubbed", eg: "Invalid, Landline" },
+    { key: "bounced", label: "Bounced", eg: "Bounced" },
+  ];
+
+// The editor edits raw comma-separated strings (one per outcome) so typing
+// stays smooth; the StatusValueMap is derived from them on submit/save.
+function statusMapToRaw(m: StatusValueMap | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!m) return out;
+  for (const { key } of STATUS_MAP_OUTCOMES) {
+    const arr = m[key];
+    if (arr && arr.length > 0) out[key] = arr.join(", ");
+  }
+  return out;
+}
+
+function rawToStatusMap(raw: Record<string, string>): StatusValueMap | null {
+  const out: StatusValueMap = {};
+  for (const { key } of STATUS_MAP_OUTCOMES) {
+    const values = (raw[key] ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (values.length > 0) out[key] = values;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 const MAX_BYTES = 25 * 1024 * 1024;
 
 // =============== Component ===============
@@ -140,9 +179,9 @@ export function ResultsImportForm({
     null,
   );
   const [mappingColumns, setMappingColumns] = useState<MappingColumns>({});
-  const [statusValueMap, setStatusValueMap] = useState<StatusValueMap | null>(
-    null,
-  );
+  // Raw comma-separated status words per outcome (editor buffer). Derived
+  // into a StatusValueMap when previewing / importing / saving.
+  const [statusRaw, setStatusRaw] = useState<Record<string, string>>({});
   const [saveAsMapping, setSaveAsMapping] = useState<boolean>(true);
   const [saveAsName, setSaveAsName] = useState<string>("");
   // Per-import, not part of the saved mapping. When non-empty (and a
@@ -172,7 +211,7 @@ export function ResultsImportForm({
         if (def) {
           setSelectedMappingId(def.id);
           setMappingColumns(def.mapping);
-          setStatusValueMap(def.status_value_map ?? null);
+          setStatusRaw(statusMapToRaw(def.status_value_map ?? null));
         }
       }
     })();
@@ -231,7 +270,7 @@ export function ResultsImportForm({
     if (idStr === NONE) {
       setSelectedMappingId(null);
       setMappingColumns({});
-      setStatusValueMap(null);
+      setStatusRaw({});
       return;
     }
     const id = Number(idStr);
@@ -239,7 +278,7 @@ export function ResultsImportForm({
     if (!m) return;
     setSelectedMappingId(id);
     setMappingColumns(m.mapping);
-    setStatusValueMap(m.status_value_map ?? null);
+    setStatusRaw(statusMapToRaw(m.status_value_map ?? null));
   }
 
   const mappingValid = useMemo(() => {
@@ -260,7 +299,7 @@ export function ResultsImportForm({
         body: JSON.stringify({
           csv_content: csvText,
           mapping: mappingColumns,
-          status_value_map: statusValueMap ?? undefined,
+          status_value_map: rawToStatusMap(statusRaw) ?? undefined,
         }),
       },
     );
@@ -292,7 +331,7 @@ export function ResultsImportForm({
             name: saveAsName.trim() || "Untitled mapping",
             is_default: savedMappings.length === 0, // first one becomes default
             mapping: mappingColumns,
-            status_value_map: statusValueMap ?? undefined,
+            status_value_map: rawToStatusMap(statusRaw) ?? undefined,
           }),
         },
       );
@@ -324,7 +363,7 @@ export function ResultsImportForm({
         body: JSON.stringify({
           csv_content: csvText,
           mapping: mappingColumns,
-          status_value_map: statusValueMap ?? undefined,
+          status_value_map: rawToStatusMap(statusRaw) ?? undefined,
           mapping_id: mappingIdToUse,
           filename: file?.name ?? null,
           total_cost_override: totalCostOverrideForBody,
@@ -472,6 +511,43 @@ export function ResultsImportForm({
               </div>
             ))}
           </div>
+
+          {/* Status value mapping — only relevant when a Status column is set. */}
+          {mappingColumns.status ? (
+            <div className="grid gap-3 rounded-md border p-4">
+              <div className="grid gap-0.5">
+                <Label className="text-sm font-medium">
+                  Status value mapping
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  List the values your provider puts in the{" "}
+                  <span className="font-mono">
+                    &ldquo;{mappingColumns.status}&rdquo;
+                  </span>{" "}
+                  column for each outcome (comma-separated, case-insensitive).
+                  Leave a row blank to use built-in detection.
+                </p>
+              </div>
+              {STATUS_MAP_OUTCOMES.map(({ key, label, eg }) => (
+                <div
+                  key={key}
+                  className="grid gap-1.5 sm:grid-cols-[110px_1fr] sm:items-center sm:gap-3"
+                >
+                  <Label className="text-xs">{label}</Label>
+                  <Input
+                    value={statusRaw[key] ?? ""}
+                    placeholder={`e.g. ${eg}`}
+                    onChange={(e) =>
+                      setStatusRaw((prev) => ({
+                        ...prev,
+                        [key]: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          ) : null}
 
           <div className="grid gap-1.5 rounded-md border p-4">
             <Label htmlFor="total-cost-override" className="text-xs">

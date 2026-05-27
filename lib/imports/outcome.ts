@@ -36,6 +36,8 @@ const TRUTHY = new Set(["1", "true", "yes", "y", "t"]);
 // what the spec lays out; keep in sync if you extend them.
 const HEURISTIC_DELIVERED = new Set([
   "delivered",
+  "completed",
+  "opened",
   "ok",
   "sent",
   "success",

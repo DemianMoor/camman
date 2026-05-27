@@ -12,7 +12,14 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { brands, campaign_stages, campaigns, offers } from "@/db/schema";
+import {
+  brands,
+  campaign_stages,
+  campaigns,
+  offers,
+  provider_phones,
+  sms_providers,
+} from "@/db/schema";
 import {
   apiError,
   parseListParams,
@@ -141,11 +148,77 @@ export async function GET(req: NextRequest) {
       .where(where),
   ]);
 
-  const data = rows.map((r) => ({
-    ...r,
-    brand: r.brand && r.brand.id !== null ? r.brand : null,
-    offer: r.offer && r.offer.id !== null ? r.offer : null,
-  }));
+  // Provider + phone are per-stage; a campaign can span several stages with
+  // different ones. Gather the DISTINCT providers/phones across each
+  // campaign's non-archived stages so the list can show one value (or a
+  // count when there's more than one).
+  const pageIds = rows.map((r) => r.id);
+  type ProviderInfo = { id: number; name: string; color: string | null };
+  type PhoneInfo = { id: number; phone_number: string; number_type: string };
+  const metaByCampaign = new Map<
+    number,
+    { providers: Map<number, ProviderInfo>; phones: Map<number, PhoneInfo> }
+  >();
+  if (pageIds.length > 0) {
+    const stageMeta = await db
+      .selectDistinct({
+        campaign_id: campaign_stages.campaign_id,
+        provider_id: sms_providers.id,
+        provider_name: sms_providers.name,
+        provider_color: sms_providers.color,
+        phone_id: provider_phones.id,
+        phone_number: provider_phones.phone_number,
+        number_type: provider_phones.number_type,
+      })
+      .from(campaign_stages)
+      .leftJoin(
+        sms_providers,
+        eq(sms_providers.id, campaign_stages.sms_provider_id),
+      )
+      .leftJoin(
+        provider_phones,
+        eq(provider_phones.id, campaign_stages.provider_phone_id),
+      )
+      .where(
+        and(
+          eq(campaign_stages.org_id, orgId),
+          inArray(campaign_stages.campaign_id, pageIds),
+          drizzleSql`${campaign_stages.status} <> 'archived'`,
+        ),
+      );
+    for (const m of stageMeta) {
+      let entry = metaByCampaign.get(m.campaign_id);
+      if (!entry) {
+        entry = { providers: new Map(), phones: new Map() };
+        metaByCampaign.set(m.campaign_id, entry);
+      }
+      if (m.provider_id !== null) {
+        entry.providers.set(m.provider_id, {
+          id: m.provider_id,
+          name: m.provider_name ?? "",
+          color: m.provider_color,
+        });
+      }
+      if (m.phone_id !== null) {
+        entry.phones.set(m.phone_id, {
+          id: m.phone_id,
+          phone_number: m.phone_number ?? "",
+          number_type: m.number_type ?? "10dlc",
+        });
+      }
+    }
+  }
+
+  const data = rows.map((r) => {
+    const entry = metaByCampaign.get(r.id);
+    return {
+      ...r,
+      brand: r.brand && r.brand.id !== null ? r.brand : null,
+      offer: r.offer && r.offer.id !== null ? r.offer : null,
+      providers: entry ? [...entry.providers.values()] : [],
+      phones: entry ? [...entry.phones.values()] : [],
+    };
+  });
 
   return NextResponse.json({
     data,

@@ -288,6 +288,13 @@
       "when": 1779840000000,
       "tag": "0040_opt_out_reason_and_scrubbed_bounced",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1779926400000,
+      "tag": "0041_provider_short_codes",
+      "breakpoints": true
     }
   ]
 }

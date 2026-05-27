@@ -26,6 +26,7 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/provider-form";
+import { ProviderShortCodesSection } from "@/components/providers/short-codes-section";
 import { useAuth } from "@/components/protected/auth-context";
 import {
   StatusDropdown,
@@ -770,6 +771,11 @@ export default function ProviderDetailPage() {
           />
         )}
       </section>
+
+      <ProviderShortCodesSection
+        providerId={provider.id}
+        providerName={provider.name}
+      />
 
       {/* Edit Provider dialog */}
       <FormDialog

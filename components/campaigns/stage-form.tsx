@@ -165,6 +165,7 @@ export interface StageFormProps {
     total_cost: string;
   };
   onImportResults?: () => void;
+  onManualResults?: () => void;
   onViewImportHistory?: () => void;
   initialValues?: Partial<StageFormValues>;
   onSubmit: (values: StageFormValues) => Promise<void>;
@@ -239,6 +240,7 @@ export function StageForm({
   campaign,
   resultsCounters,
   onImportResults,
+  onManualResults,
   onViewImportHistory,
   initialValues,
   onSubmit,
@@ -1220,6 +1222,16 @@ export function StageForm({
                           onClick={onViewImportHistory}
                         >
                           History
+                        </Button>
+                      ) : null}
+                      {onManualResults ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={onManualResults}
+                        >
+                          Manual
                         </Button>
                       ) : null}
                       {onImportResults ? (

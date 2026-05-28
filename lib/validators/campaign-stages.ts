@@ -92,6 +92,24 @@ export const stageUpdateSchema = stageBaseSchema
     }
   });
 
+// Manual results entry. Directly SETS the stage's aggregate result
+// counters by hand, for providers that don't expose a CSV/report to
+// import. Distinct from the CSV import path: no phone-level rows, no
+// opt-out/clicker propagation — just the headline numbers.
+export const stageManualResultsSchema = z.object({
+  sms_count: z.number().int().nonnegative(),
+  delivered_count: z.number().int().nonnegative(),
+  opt_out_count: z.number().int().nonnegative(),
+  click_count: z.number().int().nonnegative(),
+  scrubbed_count: z.number().int().nonnegative(),
+  bounced_count: z.number().int().nonnegative(),
+  total_cost: z.number().nonnegative().finite(),
+});
+
+export type StageManualResultsInput = z.infer<
+  typeof stageManualResultsSchema
+>;
+
 // Note: `archived` transitions go through the dedicated archive endpoint,
 // not this one — same pattern as creatives.
 export const stageStatusChangeSchema = z.object({

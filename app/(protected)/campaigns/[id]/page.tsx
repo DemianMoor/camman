@@ -14,6 +14,7 @@ import {
   MoreHorizontal,
   Pause,
   Pencil,
+  PenLine,
   Play,
   Plus,
   Send,
@@ -26,6 +27,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
+import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
 import { ResultsImportForm } from "@/components/campaigns/results-import-form";
 import { StageInlineEditor } from "@/components/campaigns/stage-inline-creator";
 import {
@@ -382,6 +384,7 @@ export default function CampaignDetailPage() {
     stage: Stage;
   } | null>(null);
   const [importStage, setImportStage] = useState<Stage | null>(null);
+  const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
 
   const canUpdateCampaign = can("campaigns.update");
@@ -820,6 +823,12 @@ export default function CampaignDetailPage() {
                     <DropdownMenuItem onSelect={() => setImportStage(s)}>
                       <Upload className="size-4" aria-hidden /> Import results
                       (CSV)
+                    </DropdownMenuItem>
+                  ) : null}
+                  {canImportResults ? (
+                    <DropdownMenuItem onSelect={() => setManualStage(s)}>
+                      <PenLine className="size-4" aria-hidden /> Enter results
+                      manually
                     </DropdownMenuItem>
                   ) : null}
                   {canViewImports ? (
@@ -1342,6 +1351,15 @@ export default function CampaignDetailPage() {
                   }
                 : undefined
             }
+            onManualResults={
+              canImportResults && editingStage
+                ? () => {
+                    setManualStage(editingStage);
+                    setAddStageOpen(false);
+                    setEditingStage(null);
+                  }
+                : undefined
+            }
             onViewImportHistory={
               canViewImports && editingStage
                 ? () => {
@@ -1475,6 +1493,45 @@ export default function CampaignDetailPage() {
               provider: importStage.provider,
             }}
             onClose={() => setImportStage(null)}
+            onComplete={() => {
+              refetchCampaign();
+              refetchStages();
+            }}
+          />
+        ) : null}
+      </FormDialog>
+
+      {/* Manual results entry — set the stage's totals by hand */}
+      <FormDialog
+        open={manualStage !== null}
+        onOpenChange={(open) => {
+          if (!open) setManualStage(null);
+        }}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>Enter results manually</DialogTitle>
+          <DialogDescription>
+            {manualStage
+              ? `Stage ${manualStage.stage_number}${manualStage.label ? ` · ${manualStage.label}` : ""}`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {manualStage ? (
+          <ManualResultsForm
+            key={`manual-${manualStage.id}`}
+            campaignId={campaignId}
+            stageId={manualStage.id}
+            initial={{
+              sms_count: manualStage.sms_count,
+              delivered_count: manualStage.delivered_count,
+              opt_out_count: manualStage.opt_out_count,
+              click_count: manualStage.click_count,
+              scrubbed_count: manualStage.scrubbed_count,
+              bounced_count: manualStage.bounced_count,
+              total_cost: manualStage.total_cost,
+            }}
+            onClose={() => setManualStage(null)}
             onComplete={() => {
               refetchCampaign();
               refetchStages();

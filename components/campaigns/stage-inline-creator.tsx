@@ -69,6 +69,7 @@ export interface StageInlineEditorProps {
   onSaved: () => void;
   // Edit-only optional callbacks.
   onImportResults?: () => void;
+  onManualResults?: () => void;
   onViewImportHistory?: () => void;
 }
 
@@ -82,6 +83,7 @@ export function StageInlineEditor({
   onOpenChange,
   onSaved,
   onImportResults,
+  onManualResults,
   onViewImportHistory,
 }: StageInlineEditorProps) {
   const createApi = useApiCall<{ id: number; stage_number: number }>();
@@ -196,6 +198,7 @@ export function StageInlineEditor({
               : undefined
           }
           onImportResults={isEdit ? onImportResults : undefined}
+          onManualResults={isEdit ? onManualResults : undefined}
           onViewImportHistory={isEdit ? onViewImportHistory : undefined}
           initialValues={initialValues}
           onSubmit={handleSubmit}

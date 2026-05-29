@@ -467,7 +467,9 @@ export type NewContact = typeof contacts.$inferInsert;
 //                  (no opt_out_brands row). Originates from stage results.
 //   - 'bounced'  — carrier rejected delivery. Universal. Originates from
 //                  stage results.
-// All three exclude the contact from future audience snapshots — the
+//   - 'suppressed' — Global Suppression. Universal (no opt_out_brands row).
+//                  A contact-level status set via the Contacts status import.
+// All four exclude the contact from future audience snapshots — the
 // audience query checks for any opt_outs row regardless of reason.
 export const opt_outs = pgTable(
   "opt_outs",
@@ -492,7 +494,7 @@ export const opt_outs = pgTable(
     index("opt_outs_phone_number_idx").on(table.phone_number),
     check(
       "opt_outs_reason_check",
-      sql`${table.reason} IN ('opt_out', 'scrubbed', 'bounced')`,
+      sql`${table.reason} IN ('opt_out', 'scrubbed', 'bounced', 'suppressed')`,
     ),
   ],
 );

@@ -44,5 +44,33 @@ export const contactListQuerySchema = z.object({
   segment_id: z.number().int().positive().optional(),
 });
 
+// Bulk status import on the Contacts screen. Each row carries a raw phone and a
+// raw status string; the smart reader (lib/imports/contact-status.ts) maps the
+// status to a reason server-side, so the client doesn't fork the mapping. Rows
+// whose phone is invalid OR whose status is unrecognized are skipped & reported
+// rather than rejecting the whole upload. 50k-row ceiling keeps a single import
+// inside one transaction's reasonable bound (matches the contacts upload scale).
+const MAX_STATUS_IMPORT_ROWS = 50_000;
+
+export const contactStatusImportSchema = z.object({
+  rows: z
+    .array(
+      z.object({
+        phone: z.string().max(64),
+        status: z.string().max(200),
+      }),
+    )
+    .min(1, "At least one row is required")
+    .max(
+      MAX_STATUS_IMPORT_ROWS,
+      `At most ${MAX_STATUS_IMPORT_ROWS.toLocaleString()} rows per import`,
+    ),
+  // Optional free-text audit source recorded on every opt_outs row created.
+  source: z.string().trim().max(100).optional(),
+});
+
 export type ContactUpdateInput = z.infer<typeof contactUpdateSchema>;
 export type ContactBulkUploadInput = z.infer<typeof contactBulkUploadSchema>;
+export type ContactStatusImportInput = z.infer<
+  typeof contactStatusImportSchema
+>;

@@ -174,6 +174,14 @@ export async function GET(req: NextRequest) {
     where ccg."contact_id" = "contacts"."id"
   )`;
 
+  // Distinct opt_outs reasons per contact, driving the "Status indicators"
+  // column. Empty array when the contact has no suppressions.
+  const statusesAggSql = drizzleSql<string[]>`(
+    select coalesce(array_agg(distinct oo."reason"), array[]::text[])
+    from "opt_outs" oo
+    where oo."contact_id" = "contacts"."id" and oo."org_id" = ${orgId}
+  )`;
+
   const [data, countRows] = await Promise.all([
     db
       .select({
@@ -185,6 +193,7 @@ export async function GET(req: NextRequest) {
         created_at: contacts.created_at,
         updated_at: contacts.updated_at,
         groups: groupsAggSql,
+        statuses: statusesAggSql,
       })
       .from(contacts)
       .where(where)

@@ -10,12 +10,14 @@ import {
   MoreHorizontal,
   Phone,
   Plus,
+  ShieldX,
   Trash2,
   Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
+import { ContactStatusImportForm } from "@/components/contacts/contact-status-import-form";
 import { DataTable } from "@/components/data-table";
 import { ExportButton } from "@/components/export-button";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
@@ -58,6 +60,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toastApiError } from "@/lib/api/toast-error";
+import { CONTACT_STATUS_LABELS } from "@/lib/imports/contact-status";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
@@ -78,7 +81,38 @@ type Contact = {
   created_at: string;
   updated_at: string;
   groups: ContactGroupBadge[];
+  // Distinct opt_outs reasons present for this contact. Drives the
+  // "Status indicators" column. Empty when the contact has no suppressions.
+  statuses: string[];
 };
+
+// Reason → badge label + classes. Covers the three import statuses plus
+// 'bounced' (set by campaign-result imports) so every opt_outs reason renders.
+const STATUS_DISPLAY: Record<string, { label: string; className: string }> = {
+  opt_out: {
+    label: CONTACT_STATUS_LABELS.opt_out,
+    className:
+      "border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
+  },
+  suppressed: {
+    label: CONTACT_STATUS_LABELS.suppressed,
+    className:
+      "border-rose-200 bg-rose-100 text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200",
+  },
+  scrubbed: {
+    label: CONTACT_STATUS_LABELS.scrubbed,
+    className:
+      "border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300",
+  },
+  bounced: {
+    label: "Bounced",
+    className:
+      "border-orange-200 bg-orange-100 text-orange-800 dark:border-orange-900 dark:bg-orange-950 dark:text-orange-200",
+  },
+};
+
+// Stable display order so the badges don't reshuffle per row.
+const STATUS_ORDER: string[] = ["opt_out", "suppressed", "scrubbed", "bounced"];
 
 type ContactView = "active" | "archived" | "opt_outs" | "opt_ins" | "clickers";
 
@@ -412,8 +446,11 @@ export default function ContactsPage() {
   >(null);
 
   const canUpload = can("contacts.upload");
+  const canImportStatuses = can("opt_outs.upload");
   const canArchive = can("contacts.archive");
   const canDelete = can("contacts.delete");
+
+  const [statusImportOpen, setStatusImportOpen] = useState(false);
 
   async function handleConfirm() {
     if (!confirming) return;
@@ -509,7 +546,32 @@ export default function ContactsPage() {
         id: "indicators",
         header: "Status indicators",
         enableSorting: false,
-        cell: () => <span className="text-muted-foreground">—</span>,
+        cell: ({ row }) => {
+          const statuses = row.original.statuses ?? [];
+          if (statuses.length === 0)
+            return <span className="text-muted-foreground">—</span>;
+          const ordered = (STATUS_ORDER as string[]).filter((s) =>
+            statuses.includes(s),
+          );
+          return (
+            <div className="flex flex-wrap gap-1">
+              {ordered.map((s) => {
+                const d = STATUS_DISPLAY[s];
+                return (
+                  <span
+                    key={s}
+                    className={cn(
+                      "inline-flex items-center rounded-md border px-1.5 py-0.5 text-xs",
+                      d?.className,
+                    )}
+                  >
+                    {d?.label ?? s}
+                  </span>
+                );
+              })}
+            </div>
+          );
+        },
       },
       {
         id: "groups",
@@ -640,11 +702,18 @@ export default function ContactsPage() {
             All phone numbers in your audience. Bulk upload via paste or CSV.
           </p>
         </div>
-        {canUpload ? (
-          <Button onClick={() => setUploadOpen(true)}>
-            <Plus className="size-4" aria-hidden /> Upload contacts
-          </Button>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {canImportStatuses ? (
+            <Button variant="outline" onClick={() => setStatusImportOpen(true)}>
+              <ShieldX className="size-4" aria-hidden /> Import statuses
+            </Button>
+          ) : null}
+          {canUpload ? (
+            <Button onClick={() => setUploadOpen(true)}>
+              <Plus className="size-4" aria-hidden /> Upload contacts
+            </Button>
+          ) : null}
+        </div>
       </header>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
@@ -936,6 +1005,35 @@ export default function ContactsPage() {
               requireContactGroups
             />
           )}
+      </FormDialog>
+
+      {/* Import statuses dialog */}
+      <FormDialog
+        open={statusImportOpen}
+        onOpenChange={setStatusImportOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-xl"
+      >
+        <DialogHeader>
+          <DialogTitle>Import contact statuses</DialogTitle>
+          <DialogDescription>
+            Update Opt-out, Suppressed, and Scrubbed statuses in bulk from a CSV.
+            Statuses exclude contacts from future campaigns; campaigns already
+            created keep their locked audience.
+          </DialogDescription>
+        </DialogHeader>
+        <ContactStatusImportForm
+          onSuccess={(summary) => {
+            toast.success(
+              `Applied ${summary.applied.toLocaleString()} status${
+                summary.applied === 1 ? "" : "es"
+              } across ${summary.contacts_affected.toLocaleString()} contact${
+                summary.contacts_affected === 1 ? "" : "s"
+              }`,
+            );
+            refetch();
+          }}
+          onCancel={() => setStatusImportOpen(false)}
+        />
       </FormDialog>
 
       {/* Bulk apply-groups dialog */}

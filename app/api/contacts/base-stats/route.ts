@@ -21,6 +21,7 @@ export type ContactBaseStats = {
     opt_out: number;
     scrubbed: number;
     bounced: number;
+    suppressed: number;
   };
   opt_in_count: number;
   clicker_count: number;
@@ -60,6 +61,7 @@ export async function GET() {
           opt_out: drizzleSql<number>`count(*) filter (where ${opt_outs.reason} = 'opt_out')::int`,
           scrubbed: drizzleSql<number>`count(*) filter (where ${opt_outs.reason} = 'scrubbed')::int`,
           bounced: drizzleSql<number>`count(*) filter (where ${opt_outs.reason} = 'bounced')::int`,
+          suppressed: drizzleSql<number>`count(*) filter (where ${opt_outs.reason} = 'suppressed')::int`,
         })
         .from(opt_outs)
         .where(eq(opt_outs.org_id, orgId)),
@@ -85,6 +87,7 @@ export async function GET() {
       opt_out: optOutByReason[0]?.opt_out ?? 0,
       scrubbed: optOutByReason[0]?.scrubbed ?? 0,
       bounced: optOutByReason[0]?.bounced ?? 0,
+      suppressed: optOutByReason[0]?.suppressed ?? 0,
     },
     opt_in_count: optInRow[0]?.count ?? 0,
     clicker_count: clickerRow[0]?.count ?? 0,

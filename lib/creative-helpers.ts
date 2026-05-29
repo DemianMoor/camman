@@ -81,6 +81,18 @@ export function calculateSmsSegments(text: string): SmsSegments {
   };
 }
 
+// =============== Em-dash detection ===============
+//
+// The em dash (—, U+2014) is a common "AI-written" / non-standard tell in SMS
+// copy and is outside the GSM-7 set, so a single one forces the whole message
+// into UCS-2 framing (70-char segments instead of 160). We surface a soft,
+// non-blocking warning so the author can swap it for a hyphen or rephrase.
+export const EM_DASH = "—";
+
+export function containsEmDash(text: string): boolean {
+  return text.includes(EM_DASH);
+}
+
 // =============== Slug generation ===============
 //
 // Lowercase alphanumeric, ambiguous-looking characters removed. Used as a

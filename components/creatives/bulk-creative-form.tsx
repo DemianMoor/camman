@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2, Plus, Trash2, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -17,7 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { SpamCheckStrip } from "@/components/spam/spam-check-strip";
-import { calculateSmsSegments } from "@/lib/creative-helpers";
+import { calculateSmsSegments, containsEmDash } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
 import {
@@ -129,6 +129,7 @@ export function BulkCreativeForm({
         id: r.id,
         characters: r.text.length,
         long: r.text.length > TEXT_WARN_THRESHOLD,
+        emDash: containsEmDash(r.text),
         segments: calculateSmsSegments(r.text).segments,
       })),
     [rows],
@@ -328,6 +329,19 @@ export function BulkCreativeForm({
                   </span>
                 ) : null}
               </div>
+              {count?.emDash ? (
+                <div className="flex items-start gap-1.5 pt-1 text-xs text-amber-700 dark:text-amber-400">
+                  <TriangleAlert
+                    className="mt-0.5 size-3.5 shrink-0"
+                    aria-hidden
+                  />
+                  <span>
+                    Contains an em dash (—). It forces UCS-2 encoding (shorter
+                    segments) and reads as a spam/AI tell — consider a hyphen
+                    (-) instead.
+                  </span>
+                </div>
+              ) : null}
               <SpamCheckStrip
                 text={row.text}
                 disabled={isSubmitting}

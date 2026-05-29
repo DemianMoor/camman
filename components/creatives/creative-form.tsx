@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Copy, Loader2 } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Loader2,
+  TriangleAlert,
+} from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -29,7 +36,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
-import { calculateSmsSegments } from "@/lib/creative-helpers";
+import { calculateSmsSegments, containsEmDash } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
 import {
@@ -146,6 +153,7 @@ export function CreativeForm({
   const appliesToAll = form.watch("applies_to_all_offers");
   const segments = useMemo(() => calculateSmsSegments(text ?? ""), [text]);
   const isLongText = (text?.length ?? 0) > TEXT_WARN_THRESHOLD;
+  const hasEmDash = containsEmDash(text ?? "");
 
   // Auto-select offers when creating a creative and exactly one active
   // offer exists. Skipped in edit mode and when the org-wide toggle is
@@ -256,6 +264,19 @@ export function CreativeForm({
                   Long creative — over {TEXT_WARN_THRESHOLD} characters may
                   push past 1 SMS segment when assembled with brand prefix and
                   stop text.
+                </FormDescription>
+              ) : null}
+              {hasEmDash ? (
+                <FormDescription className="flex items-start gap-1.5 text-amber-700 dark:text-amber-400">
+                  <TriangleAlert
+                    className="mt-0.5 size-3.5 shrink-0"
+                    aria-hidden
+                  />
+                  <span>
+                    Contains an em dash (—). It forces UCS-2 encoding (shorter
+                    segments) and reads as a spam/AI tell — consider a hyphen
+                    (-) instead.
+                  </span>
                 </FormDescription>
               ) : null}
               <SpamCheckStrip

@@ -32,6 +32,7 @@ const previewSchema = z.object({
   csv_content: z.string().min(1),
   mapping: mappingColumnsSchema,
   status_value_map: statusValueMapSchema,
+  clicker_phase: z.enum(["day1", "late"]).default("day1"),
 });
 
 const SAMPLE_LIMIT_PER_OUTCOME = 5;
@@ -95,7 +96,9 @@ export async function POST(
     );
   }
 
-  const { csv_content, mapping, status_value_map } = parsed.data;
+  const { csv_content, mapping, status_value_map, clicker_phase } =
+    parsed.data;
+  const isLate = clicker_phase === "late";
   // Use Buffer.byteLength to enforce the 25MB cap on multi-byte content too.
   if (Buffer.byteLength(csv_content, "utf-8") > CSV_MAX_BYTES) {
     return apiError(
@@ -178,7 +181,7 @@ export async function POST(
   // Count how many of the unique phones already exist in stage_result_rows
   // for this stage. These will be idempotent-skipped on actual import.
   // Cap the IN list to avoid massive query plans; chunk if huge.
-  let existingInDb = 0;
+  const existingPhones = new Set<string>();
   const dedupChunk = 5000;
   for (let i = 0; i < phonesForDedup.length; i += dedupChunk) {
     const chunk = phonesForDedup.slice(i, i + dedupChunk);
@@ -192,7 +195,21 @@ export async function POST(
           inArray(stage_result_rows.phone_number, chunk),
         ),
       );
-    existingInDb += found.length;
+    for (const f of found) existingPhones.add(f.phone_number);
+  }
+  const existingInDb = existingPhones.size;
+
+  // For a late clicker report, the actionable figure is how many clicker
+  // numbers are genuinely new (not already recorded for the stage). Numbers
+  // already present — whatever their prior outcome — are deduped out.
+  let newLateClickers = 0;
+  let existingLateClickers = 0;
+  if (isLate) {
+    for (const [phone, winner] of winners) {
+      if (winner.outcome !== "clicker") continue;
+      if (existingPhones.has(phone)) existingLateClickers++;
+      else newLateClickers++;
+    }
   }
 
   const flatSamples = [
@@ -218,5 +235,9 @@ export async function POST(
     by_outcome: byOutcome,
     sample_rows: flatSamples,
     existing_in_db: existingInDb,
+    clicker_phase,
+    // Only meaningful when clicker_phase === 'late'.
+    new_late_clickers: newLateClickers,
+    existing_late_clickers: existingLateClickers,
   });
 }

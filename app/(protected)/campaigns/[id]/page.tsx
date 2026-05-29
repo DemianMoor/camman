@@ -28,6 +28,12 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
+import {
+  formatRevenue,
+  formatRoi,
+  stageRevenue,
+  stageRoi,
+} from "@/lib/stage-results";
 import { ResultsImportForm } from "@/components/campaigns/results-import-form";
 import { StageInlineEditor } from "@/components/campaigns/stage-inline-creator";
 import {
@@ -147,8 +153,12 @@ type Stage = {
   delivered_count: number;
   opt_out_count: number;
   click_count: number;
+  late_click_count: number;
   scrubbed_count: number;
   bounced_count: number;
+  checkout_click_count: number;
+  sales_count: number;
+  sales_payout_each: string | null;
   notes: string | null;
   tracking_id: string | null;
   split_index: number | null;
@@ -159,6 +169,7 @@ type Stage = {
   creative: { id: number; slug: string; text: string } | null;
   provider: Info | null;
   provider_phone: { id: number; phone_number: string } | null;
+  offer: { id: number; name: string; color: string | null; payout_cpa: string | null } | null;
 };
 
 type StagesListResponse = { data: Stage[]; totalCount: number };
@@ -738,14 +749,46 @@ export default function CampaignDetailPage() {
           const {
             opt_out_count: oo,
             click_count: cl,
+            late_click_count: lc,
             scrubbed_count: sc,
             bounced_count: bc,
+            checkout_click_count: co,
+            sales_count: sl,
           } = row.original;
-          if (oo === 0 && cl === 0 && sc === 0 && bc === 0)
+          if (
+            oo === 0 &&
+            cl === 0 &&
+            lc === 0 &&
+            sc === 0 &&
+            bc === 0 &&
+            co === 0 &&
+            sl === 0
+          )
             return <span className="text-muted-foreground">—</span>;
           return (
             <span className="font-mono text-xs tabular-nums">
-              OO: {oo} · CL: {cl} · SC: {sc} · BC: {bc}
+              OO: {oo} · CL: {cl} · LC: {lc} · SC: {sc} · BC: {bc} · CO: {co} ·
+              SL: {sl}
+            </span>
+          );
+        },
+      },
+      {
+        id: "revenue",
+        header: "Revenue / ROI",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const s = row.original;
+          if (s.sales_count === 0)
+            return <span className="text-muted-foreground">—</span>;
+          const revenue = stageRevenue(
+            s.sales_count,
+            s.sales_payout_each === null ? null : Number(s.sales_payout_each),
+          );
+          const roi = stageRoi(revenue, Number(s.total_cost));
+          return (
+            <span className="font-mono text-xs tabular-nums">
+              {formatRevenue(revenue)} · {formatRoi(roi)}
             </span>
           );
         },
@@ -886,20 +929,51 @@ export default function CampaignDetailPage() {
     let delivered = 0;
     let optOuts = 0;
     let clickers = 0;
+    let lateClickers = 0;
     let scrubbed = 0;
     let bounced = 0;
+    let checkoutClicks = 0;
+    let sales = 0;
     let cost = 0;
+    // Sum revenue only over stages with a known per-sale payout so the rollup
+    // ROI stays trustworthy. revenueKnown stays false until at least one stage
+    // contributes, so we can render "—" rather than a misleading $0.
+    let revenue = 0;
+    let revenueKnown = false;
     for (const s of stages) {
       if (s.archived_at) continue;
       sms += s.sms_count;
       delivered += s.delivered_count;
       optOuts += s.opt_out_count;
       clickers += s.click_count;
+      lateClickers += s.late_click_count;
       scrubbed += s.scrubbed_count;
       bounced += s.bounced_count;
+      checkoutClicks += s.checkout_click_count;
+      sales += s.sales_count;
       cost += Number(s.total_cost);
+      const r = stageRevenue(
+        s.sales_count,
+        s.sales_payout_each === null ? null : Number(s.sales_payout_each),
+      );
+      if (r !== null) {
+        revenue += r;
+        revenueKnown = true;
+      }
     }
-    return { sms, delivered, optOuts, clickers, scrubbed, bounced, cost };
+    return {
+      sms,
+      delivered,
+      optOuts,
+      clickers,
+      lateClickers,
+      scrubbed,
+      bounced,
+      checkoutClicks,
+      sales,
+      cost,
+      revenue: revenueKnown ? revenue : null,
+    };
   }, [stages]);
   const hasResults = campaignTotals.sms > 0;
 
@@ -1093,7 +1167,7 @@ export default function CampaignDetailPage() {
 
         {hasResults ? (
           <Card>
-            <CardContent className="grid grid-cols-2 gap-3 pt-6 sm:grid-cols-4 lg:grid-cols-7">
+            <CardContent className="grid grid-cols-2 gap-3 pt-6 sm:grid-cols-4 lg:grid-cols-6">
               <TotalsMetric label="SMS sent" value={campaignTotals.sms} />
               <TotalsMetric
                 label="Delivered"
@@ -1104,8 +1178,12 @@ export default function CampaignDetailPage() {
                 value={campaignTotals.optOuts}
               />
               <TotalsMetric
-                label="Clickers"
+                label="Clicker 1st Day"
                 value={campaignTotals.clickers}
+              />
+              <TotalsMetric
+                label="Late Clickers"
+                value={campaignTotals.lateClickers}
               />
               <TotalsMetric
                 label="Scrubbed"
@@ -1114,6 +1192,21 @@ export default function CampaignDetailPage() {
               <TotalsMetric
                 label="Bounced"
                 value={campaignTotals.bounced}
+              />
+              <TotalsMetric
+                label="Checkout Clicks"
+                value={campaignTotals.checkoutClicks}
+              />
+              <TotalsMetric label="Sales" value={campaignTotals.sales} />
+              <TotalsMetric
+                label="Revenue"
+                value={formatRevenue(campaignTotals.revenue)}
+                raw
+              />
+              <TotalsMetric
+                label="ROI"
+                value={formatRoi(stageRoi(campaignTotals.revenue, campaignTotals.cost))}
+                raw
               />
               <TotalsMetric
                 label="Total cost"
@@ -1527,10 +1620,18 @@ export default function CampaignDetailPage() {
               delivered_count: manualStage.delivered_count,
               opt_out_count: manualStage.opt_out_count,
               click_count: manualStage.click_count,
+              late_click_count: manualStage.late_click_count,
               scrubbed_count: manualStage.scrubbed_count,
               bounced_count: manualStage.bounced_count,
+              checkout_click_count: manualStage.checkout_click_count,
+              sales_count: manualStage.sales_count,
               total_cost: manualStage.total_cost,
             }}
+            offerPayoutCpa={
+              manualStage.offer?.payout_cpa != null
+                ? Number(manualStage.offer.payout_cpa)
+                : null
+            }
             onClose={() => setManualStage(null)}
             onComplete={() => {
               refetchCampaign();

@@ -61,6 +61,9 @@ type PreviewResponse = {
     raw: Record<string, string>;
   }>;
   existing_in_db: number;
+  clicker_phase: ClickerPhase;
+  new_late_clickers: number;
+  existing_late_clickers: number;
 };
 
 type ImportResponse = {
@@ -71,11 +74,15 @@ type ImportResponse = {
   failed_added: number;
   optouts_added: number;
   clickers_added: number;
+  late_clickers_added: number;
   scrubbed_added: number;
   bounced_added: number;
   total_cost_added: number;
+  clicker_phase: ClickerPhase;
   skipped_idempotent: number;
 };
+
+type ClickerPhase = "day1" | "late";
 
 export interface ResultsImportFormProps {
   campaignId: number;
@@ -188,6 +195,10 @@ export function ResultsImportForm({
   // valid number), the import endpoint uses this as the total cost
   // instead of summing the per-row `cost` column from the CSV.
   const [totalCostOverride, setTotalCostOverride] = useState<string>("");
+  // 'day1' = a normal full-results import; 'late' = a clicker-only follow-up
+  // report whose new numbers feed Late Clickers without moving any other
+  // counter. Per-import, not saved with the mapping.
+  const [clickerPhase, setClickerPhase] = useState<ClickerPhase>("day1");
 
   // Step 3: preview
   const previewApi = useApiCall<PreviewResponse>();
@@ -300,6 +311,7 @@ export function ResultsImportForm({
           csv_content: csvText,
           mapping: mappingColumns,
           status_value_map: rawToStatusMap(statusRaw) ?? undefined,
+          clicker_phase: clickerPhase,
         }),
       },
     );
@@ -367,6 +379,7 @@ export function ResultsImportForm({
           mapping_id: mappingIdToUse,
           filename: file?.name ?? null,
           total_cost_override: totalCostOverrideForBody,
+          clicker_phase: clickerPhase,
           confirm: true,
         }),
       },
@@ -549,6 +562,34 @@ export function ResultsImportForm({
             </div>
           ) : null}
 
+          <div className="grid gap-2 rounded-md border p-4">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="late-clicker-report"
+                checked={clickerPhase === "late"}
+                onCheckedChange={(v) =>
+                  setClickerPhase(v === true ? "late" : "day1")
+                }
+              />
+              <Label
+                htmlFor="late-clicker-report"
+                className="cursor-pointer"
+              >
+                This is a late clicker report
+              </Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Turn on for a follow-up clicker list uploaded a day or more after
+              the send. Only clicker numbers that aren&apos;t already recorded
+              for this stage are counted, and they feed{" "}
+              <span className="font-medium">Late Clickers</span> — no other
+              counter (SMS, delivered, opt-outs, cost) is touched. Leave off for
+              the initial results report (clicks feed{" "}
+              <span className="font-medium">Clicker 1st Day</span>).
+            </p>
+          </div>
+
+          {clickerPhase === "late" ? null : (
           <div className="grid gap-1.5 rounded-md border p-4">
             <Label htmlFor="total-cost-override" className="text-xs">
               Total cost (USD)
@@ -578,6 +619,7 @@ export function ResultsImportForm({
               lump-sum charge instead of per-message pricing.
             </p>
           </div>
+          )}
 
           {selectedMappingId === null && stage.sms_provider_id !== null ? (
             <div className="grid gap-2 rounded-md border bg-muted/30 p-4">
@@ -620,6 +662,38 @@ export function ResultsImportForm({
 
       {step === 3 && preview ? (
         <section className="grid gap-4">
+          {preview.clicker_phase === "late" ? (
+            <Card>
+              <CardContent className="grid gap-3 pt-6">
+                <p className="text-sm font-medium">Late clicker report</p>
+                <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
+                  <Metric
+                    label="New late clickers"
+                    value={preview.new_late_clickers}
+                  />
+                  <Metric
+                    label="Already recorded"
+                    value={preview.existing_late_clickers}
+                  />
+                  <Metric
+                    label="Non-clicker rows ignored"
+                    value={
+                      preview.unique_numbers -
+                      preview.new_late_clickers -
+                      preview.existing_late_clickers
+                    }
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Only the {preview.new_late_clickers.toLocaleString()} new
+                  clicker number
+                  {preview.new_late_clickers === 1 ? "" : "s"} will be added to
+                  Late Clickers. Numbers already recorded for this stage are
+                  skipped, and non-clicker rows are ignored.
+                </p>
+              </CardContent>
+            </Card>
+          ) : null}
           <Card>
             <CardContent className="grid gap-3 pt-6">
               <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
@@ -684,12 +758,22 @@ export function ResultsImportForm({
             <Button variant="outline" onClick={() => setStep(2)}>
               Back to mapping
             </Button>
-            <Button
-              disabled={importApi.isLoading || preview.unique_numbers === 0}
-              onClick={runImport}
-            >
-              Import {preview.unique_numbers.toLocaleString()} rows
-            </Button>
+            {preview.clicker_phase === "late" ? (
+              <Button
+                disabled={importApi.isLoading || preview.new_late_clickers === 0}
+                onClick={runImport}
+              >
+                Add {preview.new_late_clickers.toLocaleString()} late clicker
+                {preview.new_late_clickers === 1 ? "" : "s"}
+              </Button>
+            ) : (
+              <Button
+                disabled={importApi.isLoading || preview.unique_numbers === 0}
+                onClick={runImport}
+              >
+                Import {preview.unique_numbers.toLocaleString()} rows
+              </Button>
+            )}
           </div>
         </section>
       ) : null}
@@ -722,7 +806,14 @@ export function ResultsImportForm({
                   <Metric label="Delivered" value={importResult.delivered_added} />
                   <Metric label="Failed" value={importResult.failed_added} />
                   <Metric label="Opt-outs" value={importResult.optouts_added} />
-                  <Metric label="Clickers" value={importResult.clickers_added} />
+                  <Metric
+                    label="Clicker 1st Day"
+                    value={importResult.clickers_added}
+                  />
+                  <Metric
+                    label="Late Clickers"
+                    value={importResult.late_clickers_added}
+                  />
                   <Metric label="Scrubbed" value={importResult.scrubbed_added} />
                   <Metric label="Bounced" value={importResult.bounced_added} />
                 </div>

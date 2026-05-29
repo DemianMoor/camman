@@ -1057,9 +1057,28 @@ export const campaign_stages = pgTable(
       .default("0"),
     delivered_count: integer("delivered_count").notNull().default(0),
     opt_out_count: integer("opt_out_count").notNull().default(0),
+    // click_count is the "Clicker 1st Day" bucket (clicks recorded from the
+    // initial / day-1 results report). late_click_count holds clicks recorded
+    // from follow-up ("late") clicker reports uploaded on subsequent days,
+    // deduped against every clicker already recorded for the stage so the
+    // same number never counts twice. See the import route's clicker_phase.
     click_count: integer("click_count").notNull().default(0),
+    late_click_count: integer("late_click_count").notNull().default(0),
     scrubbed_count: integer("scrubbed_count").notNull().default(0),
     bounced_count: integer("bounced_count").notNull().default(0),
+    // Checkout clicks and sales are manual-only for now (no CSV path yet).
+    checkout_click_count: integer("checkout_click_count")
+      .notNull()
+      .default(0),
+    sales_count: integer("sales_count").notNull().default(0),
+    // Offer payout-per-sale (CPA) snapshotted at the moment the sales count
+    // was last entered, so revenue/ROI reflect the offer's payout "on the
+    // date the sale was mapped" and don't shift if the offer is edited
+    // later. NULL when there are no sales (or the offer had no CPA payout).
+    sales_payout_each: numeric("sales_payout_each", {
+      precision: 12,
+      scale: 4,
+    }),
     notes: text("notes"),
     // A/B split partitioning. Both NULL ⇒ stage targets the entire
     // qualifying audience. When set, split_index is 1..split_total and
@@ -1259,11 +1278,19 @@ export const stage_results_imports = pgTable(
     failed_added: integer("failed_added").notNull().default(0),
     optouts_added: integer("optouts_added").notNull().default(0),
     clickers_added: integer("clickers_added").notNull().default(0),
+    // Clicks added by a "late" clicker report (clicker_phase = 'late'). Kept
+    // separate from clickers_added (day-1) so revert can undo the right
+    // stage counter. Always 0 for day-1 imports.
+    late_clickers_added: integer("late_clickers_added").notNull().default(0),
     scrubbed_added: integer("scrubbed_added").notNull().default(0),
     bounced_added: integer("bounced_added").notNull().default(0),
     total_cost_added: numeric("total_cost_added", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
+    // Which clicker bucket this import fed. 'day1' (or NULL for legacy rows)
+    // = a normal full-results import; 'late' = a clicker-only follow-up that
+    // only touched late_click_count. Revert branches on this.
+    clicker_phase: text("clicker_phase"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1278,6 +1305,10 @@ export const stage_results_imports = pgTable(
       table.org_id,
       table.stage_id,
       table.created_at,
+    ),
+    check(
+      "stage_results_imports_clicker_phase_check",
+      sql`${table.clicker_phase} IS NULL OR ${table.clicker_phase} IN ('day1', 'late')`,
     ),
   ],
 );

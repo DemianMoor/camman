@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { campaign_stages, campaigns } from "@/db/schema";
+import { campaign_stages, campaigns, offers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
@@ -54,11 +54,19 @@ export async function POST(
   }
   const input = parsed.data;
 
-  // Verify the stage belongs to this campaign and org before writing.
+  // Verify the stage belongs to this campaign and org before writing. Pull
+  // the current sales snapshot and the campaign's offer CPA payout so we can
+  // (re)snapshot sales_payout_each when the sales count changes.
   const owns = await db
-    .select({ id: campaign_stages.id })
+    .select({
+      id: campaign_stages.id,
+      sales_count: campaign_stages.sales_count,
+      sales_payout_each: campaign_stages.sales_payout_each,
+      offer_payout_cpa: offers.payout_cpa,
+    })
     .from(campaign_stages)
     .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
+    .leftJoin(offers, eq(offers.id, campaigns.offer_id))
     .where(
       and(
         eq(campaign_stages.id, sid),
@@ -73,6 +81,23 @@ export async function POST(
     });
   }
 
+  // Snapshot the offer's CPA payout onto the stage so revenue/ROI reflect the
+  // payout "on the date the sale was mapped". Re-snapshot only when the sales
+  // count actually changes (or was never snapshotted) so editing other
+  // counters doesn't silently re-rate existing sales at a newer payout. No
+  // sales ⇒ no snapshot.
+  let salesPayoutEach: string | null;
+  if (input.sales_count === 0) {
+    salesPayoutEach = null;
+  } else if (
+    input.sales_count !== owns[0].sales_count ||
+    owns[0].sales_payout_each === null
+  ) {
+    salesPayoutEach = owns[0].offer_payout_cpa ?? null;
+  } else {
+    salesPayoutEach = owns[0].sales_payout_each;
+  }
+
   const [updated] = await db
     .update(campaign_stages)
     .set({
@@ -80,8 +105,12 @@ export async function POST(
       delivered_count: input.delivered_count,
       opt_out_count: input.opt_out_count,
       click_count: input.click_count,
+      late_click_count: input.late_click_count,
       scrubbed_count: input.scrubbed_count,
       bounced_count: input.bounced_count,
+      checkout_click_count: input.checkout_click_count,
+      sales_count: input.sales_count,
+      sales_payout_each: salesPayoutEach,
       total_cost: String(input.total_cost),
     })
     .where(

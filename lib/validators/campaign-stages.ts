@@ -100,10 +100,16 @@ export const stageManualResultsSchema = z.object({
   sms_count: z.number().int().nonnegative(),
   delivered_count: z.number().int().nonnegative(),
   opt_out_count: z.number().int().nonnegative(),
+  // click_count = "Clicker 1st Day"; late_click_count = "Late Clickers".
   click_count: z.number().int().nonnegative(),
+  late_click_count: z.number().int().nonnegative(),
   scrubbed_count: z.number().int().nonnegative(),
   bounced_count: z.number().int().nonnegative(),
+  checkout_click_count: z.number().int().nonnegative(),
+  sales_count: z.number().int().nonnegative(),
   total_cost: z.number().nonnegative().finite(),
+  // sales_payout_each is NOT accepted from the client — the server snapshots
+  // it from the campaign's offer payout to keep revenue trustworthy.
 });
 
 export type StageManualResultsInput = z.infer<

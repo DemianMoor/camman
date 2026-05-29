@@ -157,8 +157,12 @@ export async function GET(
       delivered_count: campaign_stages.delivered_count,
       opt_out_count: campaign_stages.opt_out_count,
       click_count: campaign_stages.click_count,
+      late_click_count: campaign_stages.late_click_count,
       scrubbed_count: campaign_stages.scrubbed_count,
       bounced_count: campaign_stages.bounced_count,
+      checkout_click_count: campaign_stages.checkout_click_count,
+      sales_count: campaign_stages.sales_count,
+      sales_payout_each: campaign_stages.sales_payout_each,
       notes: campaign_stages.notes,
       tracking_id: campaign_stages.tracking_id,
       split_index: campaign_stages.split_index,
@@ -180,7 +184,12 @@ export async function GET(
         phone_number: provider_phones.phone_number,
       },
       brand: { id: brands.id, name: brands.name, color: brands.color },
-      offer: { id: offers.id, name: offers.name, color: offers.color },
+      offer: {
+        id: offers.id,
+        name: offers.name,
+        color: offers.color,
+        payout_cpa: offers.payout_cpa,
+      },
     })
     .from(campaign_stages)
     .leftJoin(creatives, eq(creatives.id, campaign_stages.creative_id))

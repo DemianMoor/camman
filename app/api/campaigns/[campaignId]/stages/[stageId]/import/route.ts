@@ -51,6 +51,12 @@ const importSchema = z.object({
     .finite()
     .nullable()
     .optional(),
+  // 'day1' (default) = a normal full-results import: every outcome is
+  // processed and clickers feed click_count ("Clicker 1st Day"). 'late' = a
+  // clicker-only follow-up report: only clicker rows are recorded, deduped
+  // against everything already on the stage, feeding late_click_count. A
+  // late import does NOT touch sms/delivered/opt-out/etc. counters.
+  clicker_phase: z.enum(["day1", "late"]).default("day1"),
   confirm: z.literal(true),
 });
 
@@ -109,7 +115,9 @@ export async function POST(
     mapping_id,
     filename,
     total_cost_override,
+    clicker_phase,
   } = parsed.data;
+  const isLate = clicker_phase === "late";
 
   if (Buffer.byteLength(csv_content, "utf-8") > CSV_MAX_BYTES) {
     return apiError(
@@ -178,7 +186,16 @@ export async function POST(
       byPhone.set(r.phone_number, candidate);
     }
   }
-  const processable: ProcessableRow[] = Array.from(byPhone.values());
+  let processable: ProcessableRow[] = Array.from(byPhone.values());
+
+  // A "late" clicker report only records clicks. Drop every non-clicker
+  // outcome so the import touches nothing but late_click_count: no SMS /
+  // delivered / opt-out counters move, and only genuinely-new clicker
+  // numbers (deduped via the UNIQUE(stage_id, phone_number) on
+  // stage_result_rows) are added.
+  if (isLate) {
+    processable = processable.filter((p) => p.outcome.outcome === "clicker");
+  }
 
   // Run the entire write path in one transaction.
   const result = await db.transaction(async (tx) => {
@@ -530,11 +547,20 @@ export async function POST(
       if (p.parsed.cost != null) totalCostFromRows += p.parsed.cost;
     }
     // Operator-supplied total wins over the per-row sum. When the override
-    // is null/undefined, fall back to the CSV-derived sum.
-    const totalCostAdded =
-      total_cost_override != null && total_cost_override !== undefined
+    // is null/undefined, fall back to the CSV-derived sum. A late report
+    // never contributes cost.
+    const totalCostAdded = isLate
+      ? 0
+      : total_cost_override != null && total_cost_override !== undefined
         ? total_cost_override
         : totalCostFromRows;
+
+    // Route clicks to the day-1 or late bucket. For a late import every other
+    // counter is 0 (non-clicker rows were filtered out) and SMS/cost must not
+    // move — so smsAdded is forced to 0 too.
+    const dayClickersAdded = isLate ? 0 : clickersAdded;
+    const lateClickersAdded = isLate ? clickersAdded : 0;
+    const smsAdded = isLate ? 0 : processedRows;
 
     // 7. Update the import row's final counters.
     await tx
@@ -544,22 +570,26 @@ export async function POST(
         delivered_added: deliveredAdded,
         failed_added: failedAdded,
         optouts_added: optoutsAdded,
-        clickers_added: clickersAdded,
+        clickers_added: dayClickersAdded,
+        late_clickers_added: lateClickersAdded,
         scrubbed_added: scrubbedAdded,
         bounced_added: bouncedAdded,
         total_cost_added: String(totalCostAdded),
+        clicker_phase,
       })
       .where(eq(stage_results_imports.id, importRow.id));
 
-    // 8. Update the stage's running counters.
+    // 8. Update the stage's running counters. The single expression works for
+    //    both phases: a late import zeroes everything but late_click_count.
     if (processedRows > 0) {
       await tx
         .update(campaign_stages)
         .set({
-          sms_count: drizzleSql`${campaign_stages.sms_count} + ${processedRows}`,
+          sms_count: drizzleSql`${campaign_stages.sms_count} + ${smsAdded}`,
           delivered_count: drizzleSql`${campaign_stages.delivered_count} + ${deliveredAdded}`,
           opt_out_count: drizzleSql`${campaign_stages.opt_out_count} + ${optoutsAdded}`,
-          click_count: drizzleSql`${campaign_stages.click_count} + ${clickersAdded}`,
+          click_count: drizzleSql`${campaign_stages.click_count} + ${dayClickersAdded}`,
+          late_click_count: drizzleSql`${campaign_stages.late_click_count} + ${lateClickersAdded}`,
           scrubbed_count: drizzleSql`${campaign_stages.scrubbed_count} + ${scrubbedAdded}`,
           bounced_count: drizzleSql`${campaign_stages.bounced_count} + ${bouncedAdded}`,
           total_cost: drizzleSql`${campaign_stages.total_cost} + ${String(totalCostAdded)}`,
@@ -579,10 +609,12 @@ export async function POST(
       delivered_added: deliveredAdded,
       failed_added: failedAdded,
       optouts_added: optoutsAdded,
-      clickers_added: clickersAdded,
+      clickers_added: dayClickersAdded,
+      late_clickers_added: lateClickersAdded,
       scrubbed_added: scrubbedAdded,
       bounced_added: bouncedAdded,
       total_cost_added: totalCostAdded,
+      clicker_phase,
       skipped_idempotent: processable.length - processedRows,
     };
   });

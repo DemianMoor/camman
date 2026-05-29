@@ -66,16 +66,25 @@ const SUPPRESSED_WORDS = new Set([
   "suppression list",
 ]);
 
-// Non-mobile scrub family — Landline & VoIP collapse into a single 'scrubbed'.
+// Non-mobile scrub family — Landline, VoIP & Bounced collapse into a single
+// 'scrubbed' status on import. (A separate 'bounced' opt_outs reason still
+// exists from campaign-result imports; this only governs how the Contacts
+// status importer reads the word "bounced".)
 const SCRUBBED_WORDS = new Set([
   "scrub",
   "scrubbed",
+  "bounce",
+  "bounced",
   "landline",
   "land line",
   "land-line",
   "fixed line",
   "fixed-line",
   "fixedline",
+  // Carrier-lookup line types (Twilio / numverify etc.) that aren't a
+  // confirmed mobile — treat the ambiguous "fixed line or mobile" as scrubbed.
+  "fixed line or mobile",
+  "fixed_line_or_mobile",
   "voip",
   "voice over ip",
   "invalid",

@@ -12,7 +12,6 @@ import type { UtmTagForUrl } from "@/lib/stage-url";
 
 export type StageUrlContext = {
   salesPageUrl: string | null;
-  baseUrl: string | null;
   postfix: string | null;
   utmTags: UtmTagForUrl[];
 };
@@ -30,14 +29,12 @@ export async function loadStageUrlContext({
 }): Promise<
   { ok: true; ctx: StageUrlContext } | { ok: false; invalidUtmTagId: number }
 > {
-  let baseUrl: string | null = null;
   let postfix: string | null = null;
   let salesPageUrl: string | null = null;
 
   if (offerId != null) {
     const o = await db
       .select({
-        base_url: offers.base_url,
         postfix: offers.postfix,
         sales_pages: offers.sales_pages,
       })
@@ -45,7 +42,6 @@ export async function loadStageUrlContext({
       .where(and(eq(offers.id, offerId), eq(offers.org_id, orgId)))
       .limit(1);
     if (o[0]) {
-      baseUrl = o[0].base_url;
       postfix = o[0].postfix;
       if (salesPageLabel) {
         const sp = (o[0].sales_pages ?? []).find(
@@ -61,7 +57,7 @@ export async function loadStageUrlContext({
     const rows = await db
       .select({
         id: utm_tags.id,
-        label: utm_tags.label,
+        tag_id: utm_tags.tag_id,
         value_source: utm_tags.value_source,
       })
       .from(utm_tags)
@@ -73,9 +69,9 @@ export async function loadStageUrlContext({
     // Preserve the operator's chosen order — it's the URL param order.
     utmTags = utmTagIds.map((id) => {
       const r = byId.get(id)!;
-      return { label: r.label, value_source: r.value_source };
+      return { tag_id: r.tag_id, value_source: r.value_source };
     });
   }
 
-  return { ok: true, ctx: { salesPageUrl, baseUrl, postfix, utmTags } };
+  return { ok: true, ctx: { salesPageUrl, postfix, utmTags } };
 }

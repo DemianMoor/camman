@@ -341,7 +341,6 @@ export async function PATCH(
       updates.full_url =
         buildStageFullUrl({
           salesPageUrl: ctxResult.ctx.salesPageUrl,
-          baseUrl: ctxResult.ctx.baseUrl,
           postfix: ctxResult.ctx.postfix,
           trackingId: existing[0].tracking_id,
           utmTags: ctxResult.ctx.utmTags,

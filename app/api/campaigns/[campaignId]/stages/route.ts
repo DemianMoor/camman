@@ -469,7 +469,6 @@ export async function POST(
       setOnUpdate.full_url =
         buildStageFullUrl({
           salesPageUrl: urlCtx.salesPageUrl,
-          baseUrl: urlCtx.baseUrl,
           postfix: urlCtx.postfix,
           trackingId: stageTrackingId,
           utmTags: urlCtx.utmTags,

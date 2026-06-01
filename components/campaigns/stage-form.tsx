@@ -37,7 +37,6 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { MultiSelectPicker } from "@/components/multi-select-picker";
 import {
   Select,
   SelectContent,
@@ -50,7 +49,11 @@ import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { isEntityAvailable } from "@/lib/feature-flags";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
-import { buildStageFullUrl } from "@/lib/stage-url";
+import {
+  appendUrlParam,
+  buildStageFullUrl,
+  removeUrlParam,
+} from "@/lib/stage-url";
 import { formatStageTrackingId } from "@/lib/tracking-id-format";
 import { cn } from "@/lib/utils";
 
@@ -85,6 +88,7 @@ export interface StageFormValues {
 
 type UtmTag = {
   id: number;
+  tag_id: string;
   label: string;
   value_source: string;
   color: string | null;
@@ -583,22 +587,40 @@ export function StageForm({
     );
     return buildStageFullUrl({
       salesPageUrl: sp?.url ?? null,
-      baseUrl: campaign.offer?.base_url ?? null,
       postfix: campaign.offer?.postfix ?? null,
       trackingId: effectiveTrackingId,
       utmTags: selectedUtmTags.map((t) => ({
-        label: t.label,
+        tag_id: t.tag_id,
         value_source: t.value_source,
       })),
     });
   }, [
     campaign.offer?.sales_pages,
-    campaign.offer?.base_url,
     campaign.offer?.postfix,
     watchedSalesPageLabel,
     effectiveTrackingId,
     selectedUtmTags,
   ]);
+
+  // Toggle a UTM tag's param. utm_tag_ids is the source of truth (persisted +
+  // re-built server-side). In auto mode the generated URL re-derives; in
+  // hand-edited (custom) mode we append/remove the param at the end of the
+  // current Full URL text so a chip click still "adds it to the end".
+  function toggleUtmTag(tag: UtmTag) {
+    const ids = form.getValues("utm_tag_ids") ?? [];
+    const selected = ids.includes(tag.id);
+    const nextIds = selected
+      ? ids.filter((x) => x !== tag.id)
+      : [...ids, tag.id];
+    form.setValue("utm_tag_ids", nextIds, { shouldDirty: true });
+    if (!form.getValues("full_url_auto")) {
+      const current = form.getValues("full_url");
+      const next = selected
+        ? removeUrlParam(current, tag.tag_id)
+        : appendUrlParam(current, tag.tag_id, tag.value_source);
+      form.setValue("full_url", next, { shouldDirty: true });
+    }
+  }
 
   // full_url auto-derives from the selections (and re-derives as they change)
   // but stays hand-editable. On edit we reconcile once UTM tags load: if the
@@ -1041,27 +1063,25 @@ export function StageForm({
                   </FormControl>
                   <FormDescription className="text-xs">
                     {watchedFullUrlAuto
-                      ? "Auto-built from the selected sales page + the offer's tracking param + tracking ID + UTM tags below. Edit to override."
+                      ? "Auto-built from the sales page + the offer's tracking param + tracking ID + the UTM tags below."
                       : "Custom — edited by hand. Use “Reset to generated” to rebuild from the selections."}
                   </FormDescription>
+                  {/* UTM tag chips — click to append &<tag_id>=<value_source>
+                      to the end of the Full URL (toggle to remove). */}
+                  {utmAvailable ? (
+                    <UtmTagChips
+                      tags={utmTags}
+                      loading={utmApi.isLoading && !utmLoaded}
+                      selectedIds={watchedUtmIds ?? []}
+                      disabled={isSubmitting}
+                      onToggle={toggleUtmTag}
+                    />
+                  ) : null}
                   <FormMessage />
                 </FormItem>
               )}
             />
           </div>
-
-          {/* UTM tags — appended to the Full URL as &label=value_source */}
-          {utmAvailable ? (
-            <UtmTagPicker
-              tags={utmTags}
-              loading={utmApi.isLoading && !utmLoaded}
-              selectedIds={watchedUtmIds ?? []}
-              disabled={isSubmitting}
-              onChange={(ids) =>
-                form.setValue("utm_tag_ids", ids, { shouldDirty: true })
-              }
-            />
-          ) : null}
         </div>
 
         {/* ============ Provider, phone & audience filters ============ */}
@@ -1668,92 +1688,67 @@ function SpamScoreDot({
   );
 }
 
-// UTM-tag selector for the Full URL builder. Shows up to 3 active tags as
-// quick-toggle pills plus a searchable popup (MultiSelectPicker) for the
-// full list. Selected tags append &<label>=<value_source> to full_url.
-function UtmTagPicker({
+// UTM-tag chips for the Full URL builder, shown directly below the field.
+// Each chip is a UTM tag (labelled by its tag_id — the URL param name).
+// Clicking toggles it: the param &<tag_id>=<value_source> is appended to the
+// end of the Full URL (and removed when toggled off). Hover shows the
+// human label + the value it appends.
+function UtmTagChips({
   tags,
   loading,
   selectedIds,
   disabled,
-  onChange,
+  onToggle,
 }: {
   tags: UtmTag[];
   loading: boolean;
   selectedIds: number[];
   disabled?: boolean;
-  onChange: (ids: number[]) => void;
+  onToggle: (tag: UtmTag) => void;
 }) {
   const selectedSet = new Set(selectedIds);
-  function toggle(id: number) {
-    if (selectedSet.has(id)) {
-      onChange(selectedIds.filter((x) => x !== id));
-    } else {
-      onChange([...selectedIds, id]);
-    }
-  }
-  const quick = tags.slice(0, 3);
   return (
-    <div className="grid gap-1.5">
-      <span className="text-xs font-medium">UTM tags</span>
+    <div className="grid gap-1">
+      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+        UTM tags
+      </span>
       {loading ? (
         <span className="text-xs text-muted-foreground">Loading tags…</span>
       ) : tags.length === 0 ? (
         <span className="text-xs text-muted-foreground">
-          No UTM tags yet. Create some under UTM tags to append them here.
+          No UTM tags yet — create them under UTM tags to append them here.
         </span>
       ) : (
-        <>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {quick.map((t) => {
-              const active = selectedSet.has(t.id);
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => toggle(t.id)}
-                  title={`${t.label}=${t.value_source}`}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition-colors",
-                    active
-                      ? "border-foreground bg-foreground text-background"
-                      : "border-border bg-background text-muted-foreground hover:bg-muted",
-                    disabled && "cursor-not-allowed opacity-60",
-                  )}
-                >
-                  {t.color ? (
-                    <span
-                      className="size-2 rounded-full"
-                      style={{ backgroundColor: t.color }}
-                      aria-hidden
-                    />
-                  ) : null}
-                  {t.label}
-                </button>
-              );
-            })}
-            {tags.length > 3 ? (
-              <span className="text-[11px] text-muted-foreground">
-                + {tags.length - 3} more in the list below
-              </span>
-            ) : null}
-          </div>
-          <MultiSelectPicker
-            options={tags.map((t) => ({
-              id: t.id,
-              label: t.label,
-              color: t.color,
-              meta: t.value_source,
-            }))}
-            value={selectedIds}
-            onChange={(ids) => onChange(ids.map(Number))}
-            placeholder="Select UTM tags…"
-            selectedLabel={(n) => `${n} UTM tag${n === 1 ? "" : "s"} selected`}
-            searchPlaceholder="Search UTM tags…"
-            disabled={disabled}
-          />
-        </>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {tags.map((t) => {
+            const active = selectedSet.has(t.id);
+            return (
+              <button
+                key={t.id}
+                type="button"
+                disabled={disabled}
+                onClick={() => onToggle(t)}
+                title={`${t.label} — appends ${t.tag_id}=${t.value_source}`}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-xs transition-colors",
+                  active
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-border bg-background text-muted-foreground hover:bg-muted",
+                  disabled && "cursor-not-allowed opacity-60",
+                )}
+              >
+                {t.color ? (
+                  <span
+                    className="size-2 rounded-full"
+                    style={{ backgroundColor: t.color }}
+                    aria-hidden
+                  />
+                ) : null}
+                {t.tag_id}
+              </button>
+            );
+          })}
+        </div>
       )}
     </div>
   );

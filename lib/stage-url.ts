@@ -3,34 +3,33 @@
 // (authoritative rebuild on save) so the two can never diverge.
 //
 // Shape (see CLAUDE.md §10g and the stage form):
-//   <sales page URL>?<offer postfix>=<stage tracking ID>&<label>=<value source>&…
-//   e.g. https://www.guidekn.com/lp/orv?sub_id3=8_3_052726_1_s1_c101&utm_source=facebook
+//   <sales page URL>?<offer postfix>=<stage tracking ID>&<tag_id>=<value source>&…
+//   e.g. https://www.guidekn.com/lp/orv?sub_id3=8_3_052726_1_s1_c101&subid5=facebook
 //
-// - Base is the selected sales page's URL; falls back to the offer's base_url
-//   when no sales page is chosen. Empty base ⇒ empty URL (nothing to build on).
+// - Base is the SELECTED SALES PAGE's URL (the offer's affiliate/base_url is
+//   intentionally NOT used here). No sales page ⇒ empty URL.
 // - The offer's `postfix` is the query-param NAME that carries the stage
 //   tracking ID. Omitted when the offer has no postfix or the stage has no
 //   tracking ID yet.
-// - Each selected UTM tag appends `&<label>=<value_source>` (literal).
+// - Each selected UTM tag appends `&<tag_id>=<value_source>` (the tag_id is
+//   the param name; value_source is the literal value).
 // - Keys and values are URL-encoded. If the base already contains "?", params
 //   are appended with "&".
 
-export type UtmTagForUrl = { label: string; value_source: string };
+export type UtmTagForUrl = { tag_id: string; value_source: string };
 
 export function buildStageFullUrl({
   salesPageUrl,
-  baseUrl,
   postfix,
   trackingId,
   utmTags,
 }: {
   salesPageUrl?: string | null;
-  baseUrl?: string | null;
   postfix?: string | null;
   trackingId?: string | null;
   utmTags?: UtmTagForUrl[] | null;
 }): string {
-  const base = (salesPageUrl ?? "").trim() || (baseUrl ?? "").trim();
+  const base = (salesPageUrl ?? "").trim();
   if (!base) return "";
 
   const params: Array<[string, string]> = [];
@@ -42,7 +41,7 @@ export function buildStageFullUrl({
   }
 
   for (const tag of utmTags ?? []) {
-    const key = (tag.label ?? "").trim();
+    const key = (tag.tag_id ?? "").trim();
     if (!key) continue;
     params.push([key, (tag.value_source ?? "").trim()]);
   }
@@ -54,4 +53,60 @@ export function buildStageFullUrl({
     .join("&");
   const sep = base.includes("?") ? "&" : "?";
   return `${base}${sep}${qs}`;
+}
+
+// Append `key=value` to the end of a URL string (no-op if `key` is already
+// present, or if the URL is empty). Used when the operator clicks a UTM chip
+// while the Full URL is in hand-edited (custom) mode.
+export function appendUrlParam(
+  url: string,
+  key: string,
+  value: string,
+): string {
+  const u = url.trim();
+  if (!u || !key.trim()) return u;
+  if (hasUrlParam(u, key)) return u;
+  const sep = u.includes("?") ? "&" : "?";
+  return `${u}${sep}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+}
+
+// Remove the `key=…` segment from a URL's query string (custom-mode chip
+// toggle-off). Leaves the rest of the query intact.
+export function removeUrlParam(url: string, key: string): string {
+  const qIdx = url.indexOf("?");
+  if (qIdx < 0) return url;
+  const base = url.slice(0, qIdx);
+  const query = url.slice(qIdx + 1);
+  const kept = query
+    .split("&")
+    .filter((seg) => seg.length > 0)
+    .filter((seg) => {
+      const rawKey = seg.split("=")[0];
+      let decoded = rawKey;
+      try {
+        decoded = decodeURIComponent(rawKey);
+      } catch {
+        // Malformed escape — fall back to the raw key.
+      }
+      return decoded !== key;
+    });
+  return kept.length ? `${base}?${kept.join("&")}` : base;
+}
+
+function hasUrlParam(url: string, key: string): boolean {
+  const qIdx = url.indexOf("?");
+  if (qIdx < 0) return false;
+  return url
+    .slice(qIdx + 1)
+    .split("&")
+    .some((seg) => {
+      const rawKey = seg.split("=")[0];
+      let decoded = rawKey;
+      try {
+        decoded = decodeURIComponent(rawKey);
+      } catch {
+        // ignore
+      }
+      return decoded === key;
+    });
 }

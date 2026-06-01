@@ -78,7 +78,6 @@ export function OfferForm({
       payout_cpa: initialValues?.payout_cpa,
       payout_revshare: initialValues?.payout_revshare,
       sales_pages: initialValues?.sales_pages ?? [],
-      avatar_url: initialValues?.avatar_url ?? "",
       color: initialValues?.color ?? "",
     },
   });
@@ -200,7 +199,7 @@ export function OfferForm({
             name="base_url"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Base URL</FormLabel>
+                <FormLabel>Affiliate URL</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="https://network.example/offer"
@@ -209,26 +208,9 @@ export function OfferForm({
                     value={field.value ?? ""}
                   />
                 </FormControl>
-                <FormDescription>Destination URL stem.</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-
-          <FormField
-            control={form.control}
-            name="avatar_url"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Avatar URL</FormLabel>
-                <FormControl>
-                  <Input
-                    placeholder="https://…"
-                    disabled={isSubmitting}
-                    {...field}
-                    value={field.value ?? ""}
-                  />
-                </FormControl>
+                <FormDescription>
+                  Affiliate network destination URL.
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}

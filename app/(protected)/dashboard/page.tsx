@@ -4,12 +4,18 @@ import { useCallback, useEffect, useState } from "react";
 import { formatDistanceToNow } from "date-fns";
 import {
   Activity,
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
   DollarSign,
   MessageSquare,
+  Minus,
+  Percent,
+  ShoppingCart,
   TrendingUp,
   UserMinus,
   UserPlus,
+  Wallet,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -24,47 +30,67 @@ import {
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
+import {
+  DashboardFilters,
+  type DashboardFilterState,
+} from "@/components/dashboard/dashboard-filters";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
 
 // =============== Types ===============
 
-type StatsResponse = {
-  range: { from: string; to: string };
-  campaigns: {
-    active: number;
-    paused: number;
-    draft: number;
-    completed_in_range: number;
-  };
+type Totals = {
+  sms_sent: number;
+  delivered: number;
+  opt_outs_added: number;
+  clickers_added: number;
+  scrubbed_added: number;
+  bounced_added: number;
+  total_spend: number;
+  total_sales: number;
+  total_revenue: number;
+  roi: number | null;
+};
+
+type PeriodBlock = {
+  campaigns: { completed_in_range: number };
   stages: {
     sent_in_range: number;
     success_in_range: number;
     failed_in_range: number;
     cancelled_in_range: number;
   };
-  totals: {
-    sms_sent: number;
-    delivered: number;
-    opt_outs_added: number;
-    clickers_added: number;
-    scrubbed_added: number;
-    bounced_added: number;
-    total_spend: number;
+  totals: Totals;
+};
+
+type StatsResponse = {
+  range: { preset: string; label: string; from: string; to: string };
+  compare: boolean;
+  previousRange: { from: string; to: string } | null;
+  campaigns: {
+    active: number;
+    paused: number;
+    draft: number;
+    completed_in_range: number;
   };
+  stages: PeriodBlock["stages"];
+  totals: Totals;
+  previous: PeriodBlock | null;
 };
 
 type DailyResponse = {
   days: Array<{
     date: string;
-    campaigns_created: number;
     stages_sent: number;
     sms_count: number;
     cost: number;
+    revenue: number;
+    sales: number;
     opt_outs: number;
     clickers: number;
   }>;
@@ -148,9 +174,31 @@ function fmtUsd(n: number): string {
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function fmtRoi(roi: number | null): string {
+  if (roi == null) return "—";
+  return `${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%`;
+}
+
 function sevenDaysAgoIso(): string {
   const d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   return d.toISOString().slice(0, 10);
+}
+
+const DEFAULT_FILTERS: DashboardFilterState = {
+  preset: "last_7_days",
+  customFrom: "",
+  customTo: "",
+  compare: false,
+};
+
+function buildRangeQuery(f: DashboardFilterState): string {
+  const params = new URLSearchParams();
+  params.set("preset", f.preset);
+  if (f.preset === "custom") {
+    if (f.customFrom) params.set("from", f.customFrom);
+    if (f.customTo) params.set("to", f.customTo);
+  }
+  return params.toString();
 }
 
 // =============== Page ===============
@@ -162,6 +210,11 @@ export default function DashboardPage() {
   const stagesApi = useApiCall<RecentStagesResponse>();
   const baseApi = useApiCall<BaseStatsResponse>();
 
+  const [filters, updateFilters] = usePersistedFilters<DashboardFilterState>(
+    "/dashboard",
+    DEFAULT_FILTERS,
+  );
+
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [daily, setDaily] = useState<DailyResponse | null>(null);
   const [activeCampaigns, setActiveCampaigns] = useState<ActiveCampaign[]>([]);
@@ -169,20 +222,33 @@ export default function DashboardPage() {
   const [baseStats, setBaseStats] = useState<BaseStatsResponse | null>(null);
 
   const refetch = useCallback(async () => {
-    // Parallel fetch of all 5 endpoints. Independent — no waterfall.
-    const [s, d, ac, rs, bs] = await Promise.all([
-      statsApi.execute("/api/dashboard/stats"),
-      dailyApi.execute("/api/dashboard/daily-activity?days=7"),
+    // Range-dependent calls only fire once a custom range is fully picked.
+    const rangeReady =
+      filters.preset !== "custom" ||
+      (Boolean(filters.customFrom) && Boolean(filters.customTo));
+    const q = buildRangeQuery(filters);
+
+    const [ac, rs, bs] = await Promise.all([
       activeApi.execute("/api/dashboard/active-campaigns"),
       stagesApi.execute("/api/dashboard/recent-stages"),
       baseApi.execute("/api/contacts/base-stats"),
     ]);
-    if (s.ok) setStats(s.data);
-    if (d.ok) setDaily(d.data);
     if (ac.ok) setActiveCampaigns(ac.data.campaigns);
     if (rs.ok) setRecentStages(rs.data.stages);
     if (bs.ok) setBaseStats(bs.data);
+
+    if (rangeReady) {
+      const [s, d] = await Promise.all([
+        statsApi.execute(
+          `/api/dashboard/stats?${q}&compare=${filters.compare}`,
+        ),
+        dailyApi.execute(`/api/dashboard/daily-activity?${q}`),
+      ]);
+      if (s.ok) setStats(s.data);
+      if (d.ok) setDaily(d.data);
+    }
   }, [
+    filters,
     statsApi.execute,
     dailyApi.execute,
     activeApi.execute,
@@ -443,25 +509,45 @@ export default function DashboardPage() {
     },
   ];
 
-  // =============== Tiles ===============
+  // =============== Derived ===============
 
-  const fromIso = sevenDaysAgoIso();
   const totalActiveOrPaused =
     (stats?.campaigns.active ?? 0) + (stats?.campaigns.paused ?? 0);
   const chartHasData =
     daily?.days.some((d) => d.stages_sent > 0 || d.sms_count > 0) ?? false;
+  const t = stats?.totals;
+  const prev = stats?.compare ? (stats.previous?.totals ?? null) : null;
+  const rangeLabel = stats?.range.label ?? null;
+  const rangeFromIso = stats?.range.from?.slice(0, 10) ?? sevenDaysAgoIso();
+  const statsLoading = statsApi.isLoading && stats === null;
+
+  const exclusionsCurrent =
+    (t?.opt_outs_added ?? 0) +
+    (t?.scrubbed_added ?? 0) +
+    (t?.bounced_added ?? 0);
+  const exclusionsPrev = prev
+    ? prev.opt_outs_added + prev.scrubbed_added + prev.bounced_added
+    : null;
 
   return (
     <div className="space-y-6">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
         <p className="text-sm text-muted-foreground">
-          What&apos;s happening across your campaigns right now.
+          What&apos;s happening across your campaigns
+          {rangeLabel ? ` · ${rangeLabel} (ET)` : ""}.
         </p>
       </header>
 
+      {/* ============ Filters ============ */}
+      <DashboardFilters
+        value={filters}
+        onChange={updateFilters}
+        rangeLabel={rangeLabel}
+      />
+
       {/* ============ Top stat tiles ============ */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile
           icon={<Activity className="size-4" aria-hidden />}
           label="Active campaigns"
@@ -472,62 +558,135 @@ export default function DashboardPage() {
               : "running"
           }
           href="/campaigns?status=active,paused"
-          loading={statsApi.isLoading && stats === null}
+          loading={statsLoading}
         />
         <StatTile
           icon={<MessageSquare className="size-4" aria-hidden />}
-          label="SMS this week"
-          value={stats?.totals.sms_sent ?? 0}
-          sublabel={`${(stats?.totals.delivered ?? 0).toLocaleString()} delivered`}
+          label="SMS sent"
+          value={t?.sms_sent ?? 0}
+          sublabel={`${(t?.delivered ?? 0).toLocaleString()} delivered`}
           href="/campaigns?status=active,paused"
-          loading={statsApi.isLoading && stats === null}
+          loading={statsLoading}
+          delta={
+            <DeltaBadge current={t?.sms_sent ?? 0} previous={prev?.sms_sent ?? null} />
+          }
         />
         <StatTile
           icon={<DollarSign className="size-4" aria-hidden />}
-          label="Spend this week"
-          value={fmtUsd(stats?.totals.total_spend ?? 0)}
+          label="Spend"
+          value={fmtUsd(t?.total_spend ?? 0)}
           sublabel={
             totalActiveOrPaused > 0
-              ? `${fmtUsd((stats?.totals.total_spend ?? 0) / totalActiveOrPaused)} per active campaign`
+              ? `${fmtUsd((t?.total_spend ?? 0) / totalActiveOrPaused)} per active campaign`
               : "no active campaigns"
           }
           href="/campaigns"
-          loading={statsApi.isLoading && stats === null}
+          loading={statsLoading}
           isString
+          delta={
+            <DeltaBadge
+              current={t?.total_spend ?? 0}
+              previous={prev?.total_spend ?? null}
+              higherIsBetter={false}
+            />
+          }
+        />
+        <StatTile
+          icon={<Wallet className="size-4" aria-hidden />}
+          label="Income"
+          value={fmtUsd(t?.total_revenue ?? 0)}
+          sublabel={`${(t?.total_sales ?? 0).toLocaleString()} sales`}
+          href="/campaigns"
+          loading={statsLoading}
+          isString
+          delta={
+            <DeltaBadge
+              current={t?.total_revenue ?? 0}
+              previous={prev?.total_revenue ?? null}
+            />
+          }
+        />
+        <StatTile
+          icon={<ShoppingCart className="size-4" aria-hidden />}
+          label="Sales"
+          value={t?.total_sales ?? 0}
+          sublabel="conversions"
+          href="/campaigns"
+          loading={statsLoading}
+          delta={
+            <DeltaBadge
+              current={t?.total_sales ?? 0}
+              previous={prev?.total_sales ?? null}
+            />
+          }
+        />
+        <StatTile
+          icon={<Percent className="size-4" aria-hidden />}
+          label="ROI"
+          value={fmtRoi(t?.roi ?? null)}
+          valueClassName={
+            t?.roi == null
+              ? undefined
+              : t.roi >= 0
+                ? "text-emerald-600"
+                : "text-rose-600"
+          }
+          sublabel={`${fmtUsd(t?.total_revenue ?? 0)} income · ${fmtUsd(t?.total_spend ?? 0)} spend`}
+          href="/campaigns"
+          loading={statsLoading}
+          isString
+          delta={
+            <DeltaBadge
+              current={t?.roi ?? null}
+              previous={prev?.roi ?? null}
+              points
+            />
+          }
         />
         <StatTile
           icon={<UserMinus className="size-4" aria-hidden />}
-          label="Exclusions this week"
-          value={
-            (stats?.totals.opt_outs_added ?? 0) +
-            (stats?.totals.scrubbed_added ?? 0) +
-            (stats?.totals.bounced_added ?? 0)
+          label="Exclusions"
+          value={exclusionsCurrent}
+          sublabel={`${t?.opt_outs_added ?? 0} opt-outs · ${t?.scrubbed_added ?? 0} scrubbed · ${t?.bounced_added ?? 0} bounced`}
+          href={`/opt-outs?from=${rangeFromIso}`}
+          loading={statsLoading}
+          delta={
+            <DeltaBadge
+              current={exclusionsCurrent}
+              previous={exclusionsPrev}
+              higherIsBetter={false}
+            />
           }
-          sublabel={`${stats?.totals.opt_outs_added ?? 0} opt-outs · ${stats?.totals.scrubbed_added ?? 0} scrubbed · ${stats?.totals.bounced_added ?? 0} bounced`}
-          href={`/opt-outs?from=${fromIso}`}
-          loading={statsApi.isLoading && stats === null}
         />
         <StatTile
           icon={<UserPlus className="size-4" aria-hidden />}
-          label="Clickers this week"
-          value={stats?.totals.clickers_added ?? 0}
+          label="Clickers"
+          value={t?.clickers_added ?? 0}
           sublabel={`${(baseStats?.clicker_count ?? 0).toLocaleString()} total`}
-          href={`/clickers?from=${fromIso}`}
-          loading={statsApi.isLoading && stats === null}
+          href={`/clickers?from=${rangeFromIso}`}
+          loading={statsLoading}
+          delta={
+            <DeltaBadge
+              current={t?.clickers_added ?? 0}
+              previous={prev?.clickers_added ?? null}
+            />
+          }
         />
       </div>
 
       {/* ============ Activity charts ============ */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Last 7 days</CardTitle>
+          <CardTitle className="text-base">
+            {rangeLabel ? `Daily activity · ${rangeLabel}` : "Daily activity"}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           {dailyApi.isLoading && daily === null ? (
             <Skeleton className="h-[220px] w-full" />
           ) : !chartHasData ? (
             <div className="rounded-md border bg-muted/30 py-12 text-center text-sm text-muted-foreground">
-              No activity in the last 7 days yet.
+              No activity in this period yet.
             </div>
           ) : (
             <div className="grid gap-4 lg:grid-cols-2">
@@ -548,6 +707,26 @@ export default function DashboardPage() {
                 }))}
                 color="#10b981"
                 yLabel="messages"
+              />
+              <ChartPanel
+                title="Spend per day"
+                data={daily!.days.map((d) => ({
+                  date: shortDay(d.date),
+                  value: d.cost,
+                }))}
+                color="#f59e0b"
+                yLabel="spend"
+                isCurrency
+              />
+              <ChartPanel
+                title="Income per day"
+                data={daily!.days.map((d) => ({
+                  date: shortDay(d.date),
+                  value: d.revenue,
+                }))}
+                color="#8b5cf6"
+                yLabel="income"
+                isCurrency
               />
             </div>
           )}
@@ -686,6 +865,8 @@ function StatTile({
   href,
   loading,
   isString,
+  delta,
+  valueClassName,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -694,6 +875,8 @@ function StatTile({
   href: string;
   loading?: boolean;
   isString?: boolean;
+  delta?: React.ReactNode;
+  valueClassName?: string;
 }) {
   return (
     <Link href={href} className="block">
@@ -706,12 +889,20 @@ function StatTile({
           {loading ? (
             <Skeleton className="h-7 w-24" />
           ) : (
-            <div className="text-2xl font-semibold tabular-nums">
-              {isString
-                ? value
-                : typeof value === "number"
-                  ? value.toLocaleString()
-                  : value}
+            <div className="flex items-baseline gap-2">
+              <div
+                className={cn(
+                  "text-2xl font-semibold tabular-nums",
+                  valueClassName,
+                )}
+              >
+                {isString
+                  ? value
+                  : typeof value === "number"
+                    ? value.toLocaleString()
+                    : value}
+              </div>
+              {delta}
             </div>
           )}
           <div className="text-xs text-muted-foreground">{sublabel}</div>
@@ -721,16 +912,69 @@ function StatTile({
   );
 }
 
+// Period-over-period delta indicator. Renders nothing unless both current and
+// previous are present (i.e. compare mode is on and the stats came back).
+// `points` mode shows the absolute difference in percentage points (for ROI);
+// otherwise it shows the percent change. `higherIsBetter` controls coloring.
+function DeltaBadge({
+  current,
+  previous,
+  higherIsBetter = true,
+  points = false,
+}: {
+  current: number | null;
+  previous: number | null;
+  higherIsBetter?: boolean;
+  points?: boolean;
+}) {
+  if (current == null || previous == null) return null;
+  const diff = current - previous;
+  const flat = Math.abs(diff) < 1e-9;
+
+  let text: string;
+  if (points) {
+    text = `${diff >= 0 ? "+" : ""}${diff.toFixed(1)} pts`;
+  } else if (previous === 0) {
+    text = current === 0 ? "0%" : "new";
+  } else {
+    const pct = (diff / Math.abs(previous)) * 100;
+    text = `${pct >= 0 ? "+" : ""}${pct.toFixed(0)}%`;
+  }
+
+  const good = flat ? null : diff > 0 === higherIsBetter;
+  const color = flat
+    ? "text-muted-foreground"
+    : good
+      ? "text-emerald-600"
+      : "text-rose-600";
+  const Icon = flat ? Minus : diff > 0 ? ArrowUp : ArrowDown;
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-0.5 text-xs font-medium",
+        color,
+      )}
+      title="vs. previous period"
+    >
+      <Icon className="size-3" aria-hidden />
+      {text}
+    </span>
+  );
+}
+
 function ChartPanel({
   title,
   data,
   color,
   yLabel,
+  isCurrency,
 }: {
   title: string;
   data: Array<{ date: string; value: number }>;
   color: string;
   yLabel: string;
+  isCurrency?: boolean;
 }) {
   return (
     <div className="rounded-md border bg-card p-3">
@@ -744,12 +988,17 @@ function ChartPanel({
         >
           <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
           <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-          <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+          <YAxis allowDecimals={isCurrency} tick={{ fontSize: 11 }} />
           <Tooltip
-            formatter={(value) => [
-              typeof value === "number" ? value.toLocaleString() : String(value),
-              yLabel,
-            ]}
+            formatter={(value) => {
+              const n = typeof value === "number" ? value : Number(value);
+              return [
+                isCurrency
+                  ? `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  : n.toLocaleString(),
+                yLabel,
+              ];
+            }}
             labelFormatter={(label) => String(label)}
             contentStyle={{ fontSize: 12 }}
           />

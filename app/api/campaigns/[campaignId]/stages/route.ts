@@ -463,16 +463,11 @@ export async function POST(
       });
       setOnUpdate.tracking_id = stageTrackingId;
     }
-    // Auto-build full_url now that the real stage tracking ID is known
-    // (null when no tracking ID yet — just sales page + UTM params).
+    // Auto full_url is the BARE sales-page URL — tracking ID and UTM params
+    // are attached manually in the form (stored verbatim once edited).
     if (fullUrlAuto) {
       setOnUpdate.full_url =
-        buildStageFullUrl({
-          salesPageUrl: urlCtx.salesPageUrl,
-          postfix: urlCtx.postfix,
-          trackingId: stageTrackingId,
-          utmTags: urlCtx.utmTags,
-        }) || null;
+        buildStageFullUrl({ salesPageUrl: urlCtx.salesPageUrl }) || null;
     }
 
     if (Object.keys(setOnUpdate).length > 0) {

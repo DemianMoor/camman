@@ -338,13 +338,10 @@ export async function PATCH(
       );
     }
     if (fullUrlAuto) {
+      // Auto full_url is the BARE sales-page URL; tracking/UTM params are
+      // attached manually and stored verbatim once the URL is hand-edited.
       updates.full_url =
-        buildStageFullUrl({
-          salesPageUrl: ctxResult.ctx.salesPageUrl,
-          postfix: ctxResult.ctx.postfix,
-          trackingId: existing[0].tracking_id,
-          utmTags: ctxResult.ctx.utmTags,
-        }) || null;
+        buildStageFullUrl({ salesPageUrl: ctxResult.ctx.salesPageUrl }) || null;
     }
   }
 

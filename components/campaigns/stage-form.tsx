@@ -51,7 +51,7 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import {
   appendUrlParam,
-  buildStageFullUrl,
+  hasUrlParam,
   removeUrlParam,
 } from "@/lib/stage-url";
 import { formatStageTrackingId } from "@/lib/tracking-id-format";
@@ -387,7 +387,7 @@ export function StageForm({
   const watchedIncludeClickers = form.watch("include_clickers");
   const watchedExcludeClickers = form.watch("exclude_clickers");
   const watchedSalesPageLabel = form.watch("sales_page_label");
-  const watchedUtmIds = form.watch("utm_tag_ids");
+  const watchedFullUrl = form.watch("full_url");
   const watchedFullUrlAuto = form.watch("full_url_auto");
 
   // Provider phones reload when the selected provider changes. If the
@@ -574,52 +574,45 @@ export function StageForm({
     nextStageNumber,
   ]);
 
-  const selectedUtmTags = useMemo(() => {
-    const byId = new Map(utmTags.map((t) => [t.id, t] as const));
-    return (watchedUtmIds ?? [])
-      .map((id) => byId.get(id))
-      .filter((t): t is UtmTag => t !== undefined);
-  }, [utmTags, watchedUtmIds]);
-
   const generatedFullUrl = useMemo(() => {
+    // Auto value is the BARE sales-page URL. The tracking ID and UTM params
+    // are attached manually via the chips below the field.
     const sp = (campaign.offer?.sales_pages ?? []).find(
       (p) => p.label === watchedSalesPageLabel,
     );
-    return buildStageFullUrl({
-      salesPageUrl: sp?.url ?? null,
-      postfix: campaign.offer?.postfix ?? null,
-      trackingId: effectiveTrackingId,
-      utmTags: selectedUtmTags.map((t) => ({
-        tag_id: t.tag_id,
-        value_source: t.value_source,
-      })),
-    });
-  }, [
-    campaign.offer?.sales_pages,
-    campaign.offer?.postfix,
-    watchedSalesPageLabel,
-    effectiveTrackingId,
-    selectedUtmTags,
-  ]);
+    return (sp?.url ?? "").trim();
+  }, [campaign.offer?.sales_pages, watchedSalesPageLabel]);
 
-  // Toggle a UTM tag's param. utm_tag_ids is the source of truth (persisted +
-  // re-built server-side). In auto mode the generated URL re-derives; in
-  // hand-edited (custom) mode we append/remove the param at the end of the
-  // current Full URL text so a chip click still "adds it to the end".
+  // The query-param NAME that carries the stage tracking ID — the offer's
+  // postfix (falls back to a literal "tracking_id" when the offer has none).
+  const trackingParamKey =
+    (campaign.offer?.postfix ?? "").trim() || "tracking_id";
+
+  // Toggle a query param on the Full URL: append `key=value` to the end, or
+  // remove it if already present. Any chip click flips the field to
+  // hand-edited so the server stores it verbatim (instead of rebuilding it to
+  // the bare sales-page URL).
+  function toggleUrlParam(key: string, value: string) {
+    const current = form.getValues("full_url");
+    const next = hasUrlParam(current, key)
+      ? removeUrlParam(current, key)
+      : appendUrlParam(current, key, value);
+    form.setValue("full_url", next, { shouldDirty: true });
+    form.setValue("full_url_auto", false, { shouldDirty: true });
+  }
+
+  // UTM chip toggle — edits the URL and keeps utm_tag_ids in sync (persisted
+  // record), both keyed on whether the param is currently in the URL text.
   function toggleUtmTag(tag: UtmTag) {
+    const present = hasUrlParam(form.getValues("full_url"), tag.tag_id);
+    toggleUrlParam(tag.tag_id, tag.value_source);
     const ids = form.getValues("utm_tag_ids") ?? [];
-    const selected = ids.includes(tag.id);
-    const nextIds = selected
+    const nextIds = present
       ? ids.filter((x) => x !== tag.id)
-      : [...ids, tag.id];
+      : ids.includes(tag.id)
+        ? ids
+        : [...ids, tag.id];
     form.setValue("utm_tag_ids", nextIds, { shouldDirty: true });
-    if (!form.getValues("full_url_auto")) {
-      const current = form.getValues("full_url");
-      const next = selected
-        ? removeUrlParam(current, tag.tag_id)
-        : appendUrlParam(current, tag.tag_id, tag.value_source);
-      form.setValue("full_url", next, { shouldDirty: true });
-    }
   }
 
   // full_url auto-derives from the selections (and re-derives as they change)
@@ -631,11 +624,10 @@ export function StageForm({
 
   useEffect(() => {
     if (!reconciledRef.current) {
-      // Wait until UTM tags are loaded so `generatedFullUrl` is complete
-      // before comparing it to the stored value.
-      if (!utmLoaded) return;
       reconciledRef.current = true;
       const stored = initialFullUrlRef.current.trim();
+      // A stored URL that isn't just the bare sales-page URL has manual
+      // params (tracking/UTM) — treat it as hand-edited so we don't wipe them.
       if (stored && stored !== generatedFullUrl) {
         form.setValue("full_url_auto", false, { shouldDirty: false });
         return;
@@ -646,7 +638,7 @@ export function StageForm({
         form.setValue("full_url", generatedFullUrl, { shouldDirty: false });
       }
     }
-  }, [generatedFullUrl, utmLoaded, form]);
+  }, [generatedFullUrl, form]);
 
   function resetFullUrlToGenerated() {
     reconciledRef.current = true;
@@ -1066,17 +1058,25 @@ export function StageForm({
                       ? "Auto-built from the sales page + the offer's tracking param + tracking ID + the UTM tags below."
                       : "Custom — edited by hand. Use “Reset to generated” to rebuild from the selections."}
                   </FormDescription>
-                  {/* UTM tag chips — click to append &<tag_id>=<value_source>
-                      to the end of the Full URL (toggle to remove). */}
-                  {utmAvailable ? (
-                    <UtmTagChips
-                      tags={utmTags}
-                      loading={utmApi.isLoading && !utmLoaded}
-                      selectedIds={watchedUtmIds ?? []}
-                      disabled={isSubmitting}
-                      onToggle={toggleUtmTag}
-                    />
-                  ) : null}
+                  {/* Param chips — click to append the param to the end of
+                      the Full URL (toggle to remove). The tracking_id chip
+                      inserts the offer postfix = stage tracking ID; each UTM
+                      chip inserts <tag_id>=<value_source>. */}
+                  <UrlParamChips
+                    trackingKey={trackingParamKey}
+                    trackingId={effectiveTrackingId}
+                    utmAvailable={utmAvailable}
+                    utmTags={utmTags}
+                    utmLoading={utmApi.isLoading && !utmLoaded}
+                    fullUrl={watchedFullUrl ?? ""}
+                    disabled={isSubmitting}
+                    onToggleTracking={() => {
+                      if (effectiveTrackingId) {
+                        toggleUrlParam(trackingParamKey, effectiveTrackingId);
+                      }
+                    }}
+                    onToggleUtm={toggleUtmTag}
+                  />
                   <FormMessage />
                 </FormItem>
               )}
@@ -1688,69 +1688,120 @@ function SpamScoreDot({
   );
 }
 
-// UTM-tag chips for the Full URL builder, shown directly below the field.
-// Each chip is a UTM tag (labelled by its tag_id — the URL param name).
-// Clicking toggles it: the param &<tag_id>=<value_source> is appended to the
-// end of the Full URL (and removed when toggled off). Hover shows the
-// human label + the value it appends.
-function UtmTagChips({
-  tags,
-  loading,
-  selectedIds,
+// Param chips shown directly below the Full URL. Clicking a chip appends its
+// query param to the end of the URL (toggle to remove). The tracking_id chip
+// inserts the offer postfix = stage tracking ID; each UTM chip inserts
+// <tag_id>=<value_source>. Active state is derived from the URL text so it
+// stays correct even when the field is hand-edited.
+function UrlParamChips({
+  trackingKey,
+  trackingId,
+  utmAvailable,
+  utmTags,
+  utmLoading,
+  fullUrl,
   disabled,
-  onToggle,
+  onToggleTracking,
+  onToggleUtm,
 }: {
-  tags: UtmTag[];
-  loading: boolean;
-  selectedIds: number[];
+  trackingKey: string;
+  trackingId: string | null;
+  utmAvailable: boolean;
+  utmTags: UtmTag[];
+  utmLoading: boolean;
+  fullUrl: string;
   disabled?: boolean;
-  onToggle: (tag: UtmTag) => void;
+  onToggleTracking: () => void;
+  onToggleUtm: (tag: UtmTag) => void;
 }) {
-  const selectedSet = new Set(selectedIds);
   return (
     <div className="grid gap-1">
       <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-        UTM tags
+        Attach to URL
       </span>
-      {loading ? (
-        <span className="text-xs text-muted-foreground">Loading tags…</span>
-      ) : tags.length === 0 ? (
-        <span className="text-xs text-muted-foreground">
-          No UTM tags yet — create them under UTM tags to append them here.
-        </span>
-      ) : (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {tags.map((t) => {
-            const active = selectedSet.has(t.id);
-            return (
-              <button
+      <div className="flex flex-wrap items-center gap-1.5">
+        <ParamChip
+          label="tracking_id"
+          active={Boolean(trackingId) && hasUrlParam(fullUrl, trackingKey)}
+          disabled={disabled || !trackingId}
+          accent
+          title={
+            trackingId
+              ? `Appends ${trackingKey}=${trackingId}`
+              : "Pick a creative (and set brand + offer) to generate the tracking ID"
+          }
+          onClick={onToggleTracking}
+        />
+        {utmAvailable ? (
+          utmLoading ? (
+            <span className="text-xs text-muted-foreground">
+              Loading UTM tags…
+            </span>
+          ) : utmTags.length === 0 ? (
+            <span className="text-xs text-muted-foreground">
+              No UTM tags yet.
+            </span>
+          ) : (
+            utmTags.map((t) => (
+              <ParamChip
                 key={t.id}
-                type="button"
+                label={t.tag_id}
+                color={t.color}
+                active={hasUrlParam(fullUrl, t.tag_id)}
                 disabled={disabled}
-                onClick={() => onToggle(t)}
                 title={`${t.label} — appends ${t.tag_id}=${t.value_source}`}
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-xs transition-colors",
-                  active
-                    ? "border-foreground bg-foreground text-background"
-                    : "border-border bg-background text-muted-foreground hover:bg-muted",
-                  disabled && "cursor-not-allowed opacity-60",
-                )}
-              >
-                {t.color ? (
-                  <span
-                    className="size-2 rounded-full"
-                    style={{ backgroundColor: t.color }}
-                    aria-hidden
-                  />
-                ) : null}
-                {t.tag_id}
-              </button>
-            );
-          })}
-        </div>
-      )}
+                onClick={() => onToggleUtm(t)}
+              />
+            ))
+          )
+        ) : null}
+      </div>
     </div>
+  );
+}
+
+function ParamChip({
+  label,
+  active,
+  disabled,
+  title,
+  onClick,
+  color,
+  accent,
+}: {
+  label: string;
+  active: boolean;
+  disabled?: boolean;
+  title: string;
+  onClick: () => void;
+  color?: string | null;
+  accent?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-xs transition-colors",
+        active
+          ? "border-foreground bg-foreground text-background"
+          : accent
+            ? "border-primary/40 bg-primary/5 text-foreground hover:bg-primary/10"
+            : "border-border bg-background text-muted-foreground hover:bg-muted",
+        disabled && "cursor-not-allowed opacity-60",
+      )}
+    >
+      {color ? (
+        <span
+          className="size-2 rounded-full"
+          style={{ backgroundColor: color }}
+          aria-hidden
+        />
+      ) : null}
+      {label}
+    </button>
   );
 }
 

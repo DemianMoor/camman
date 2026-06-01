@@ -93,7 +93,7 @@ export function removeUrlParam(url: string, key: string): string {
   return kept.length ? `${base}?${kept.join("&")}` : base;
 }
 
-function hasUrlParam(url: string, key: string): boolean {
+export function hasUrlParam(url: string, key: string): boolean {
   const qIdx = url.indexOf("?");
   if (qIdx < 0) return false;
   return url

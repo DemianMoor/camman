@@ -102,6 +102,8 @@ export async function GET(
         name: offers.name,
         color: offers.color,
         sales_pages: offers.sales_pages,
+        base_url: offers.base_url,
+        postfix: offers.postfix,
       },
       routing_type: {
         id: routing_types.id,

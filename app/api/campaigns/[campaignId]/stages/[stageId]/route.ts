@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import {
   campaign_stages,
+  campaigns,
   creatives,
   provider_phones,
   sms_providers,
@@ -11,6 +12,8 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { buildStageFullUrl } from "@/lib/stage-url";
+import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
   nullIfEmpty,
   stageUpdateSchema,
@@ -57,6 +60,8 @@ const NON_UPDATABLE = new Set([
   // silently drops them rather than mutating in place.
   "split_index",
   "split_total",
+  // Transient request-only flag (see validator); never a column.
+  "full_url_auto",
 ]);
 
 export async function GET(
@@ -93,6 +98,7 @@ export async function GET(
       sales_page_label: campaign_stages.sales_page_label,
       short_url: campaign_stages.short_url,
       full_url: campaign_stages.full_url,
+      utm_tag_ids: campaign_stages.utm_tag_ids,
       stop_text: campaign_stages.stop_text,
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,
@@ -274,8 +280,75 @@ export async function PATCH(
       updates[k] = typeof v === "string" ? new Date(v) : null;
       continue;
     }
+    if (k === "utm_tag_ids") {
+      updates[k] = (v as number[] | null) ?? [];
+      continue;
+    }
     updates[k] = NULLABLE_OPTIONAL_STRING.has(k) ? nullIfEmpty(v as string) : v;
   }
+
+  // Full URL handling: verify UTM tag ownership when the selection changes,
+  // and — when full_url_auto — authoritatively rebuild full_url from the
+  // effective sales page + offer postfix + the stage's (immutable) tracking
+  // ID + selected UTM tags, overriding any full_url text in the payload.
+  const fullUrlAuto = input.full_url_auto === true;
+  if (fullUrlAuto || input.utm_tag_ids !== undefined) {
+    const existing = await db
+      .select({
+        tracking_id: campaign_stages.tracking_id,
+        sales_page_label: campaign_stages.sales_page_label,
+        utm_tag_ids: campaign_stages.utm_tag_ids,
+        offer_id: campaigns.offer_id,
+      })
+      .from(campaign_stages)
+      .leftJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
+      .where(
+        and(
+          eq(campaign_stages.id, sid),
+          eq(campaign_stages.campaign_id, cid),
+          eq(campaign_stages.org_id, orgId),
+        ),
+      )
+      .limit(1);
+    if (!existing[0]) {
+      return apiError(404, "Stage not found", API_ERROR_CODES.NOT_FOUND, {
+        entity: "stage",
+      });
+    }
+    const effLabel =
+      input.sales_page_label !== undefined
+        ? nullIfEmpty(input.sales_page_label)
+        : existing[0].sales_page_label;
+    const effUtmIds =
+      input.utm_tag_ids !== undefined
+        ? (input.utm_tag_ids ?? [])
+        : (existing[0].utm_tag_ids ?? []);
+    const ctxResult = await loadStageUrlContext({
+      orgId,
+      offerId: existing[0].offer_id,
+      salesPageLabel: effLabel,
+      utmTagIds: effUtmIds,
+    });
+    if (!ctxResult.ok) {
+      return apiError(
+        400,
+        "A selected UTM tag doesn't belong to your organization",
+        API_ERROR_CODES.VALIDATION,
+        { field: "utm_tag_ids" },
+      );
+    }
+    if (fullUrlAuto) {
+      updates.full_url =
+        buildStageFullUrl({
+          salesPageUrl: ctxResult.ctx.salesPageUrl,
+          baseUrl: ctxResult.ctx.baseUrl,
+          postfix: ctxResult.ctx.postfix,
+          trackingId: existing[0].tracking_id,
+          utmTags: ctxResult.ctx.utmTags,
+        }) || null;
+    }
+  }
+
   if (Object.keys(updates).length === 0) {
     return apiError(
       400,

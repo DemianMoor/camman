@@ -1042,6 +1042,14 @@ export const campaign_stages = pgTable(
     // the creative text and the stop text.
     short_url: text("short_url"),
     full_url: text("full_url"),
+    // Ordered list of utm_tags.id selected for this stage's Full URL
+    // link-builder. The selected tags append `&<label>=<value_source>` to
+    // full_url (see lib/stage-url.ts). Stored as an ordered jsonb int array;
+    // FK ownership is verified in the API (jsonb can't carry a FK).
+    utm_tag_ids: jsonb("utm_tag_ids")
+      .$type<number[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     stop_text: text("stop_text").notNull().default("Stop to END"),
     include_clickers: boolean("include_clickers").notNull().default(false),
     exclude_clickers: boolean("exclude_clickers").notNull().default(false),

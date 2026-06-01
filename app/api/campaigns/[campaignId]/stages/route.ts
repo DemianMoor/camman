@@ -22,6 +22,8 @@ import {
   computeStageAudienceCountForDraft,
 } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
+import { buildStageFullUrl } from "@/lib/stage-url";
+import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
   generateCampaignTrackingId,
   generateStageTrackingId,
@@ -143,6 +145,7 @@ export async function GET(
       sales_page_label: campaign_stages.sales_page_label,
       short_url: campaign_stages.short_url,
       full_url: campaign_stages.full_url,
+      utm_tag_ids: campaign_stages.utm_tag_ids,
       stop_text: campaign_stages.stop_text,
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,
@@ -367,6 +370,26 @@ export async function POST(
     }
   }
 
+  // Resolve the Full URL build context (offer base_url/postfix, sales page
+  // URL, selected UTM tags) — also the FK ownership check for utm_tag_ids.
+  const utmTagIds = input.utm_tag_ids ?? [];
+  const fullUrlAuto = input.full_url_auto === true;
+  const urlCtxResult = await loadStageUrlContext({
+    orgId,
+    offerId: campaignRow[0].offer_id,
+    salesPageLabel: nullIfEmpty(input.sales_page_label),
+    utmTagIds,
+  });
+  if (!urlCtxResult.ok) {
+    return apiError(
+      400,
+      "A selected UTM tag doesn't belong to your organization",
+      API_ERROR_CODES.VALIDATION,
+      { field: "utm_tag_ids" },
+    );
+  }
+  const urlCtx = urlCtxResult.ctx;
+
   // stage_number is auto-assigned by the BEFORE INSERT trigger; we pass
   // undefined and let the trigger fill it in. The TS shape requires the
   // field, so we cast.
@@ -383,7 +406,11 @@ export async function POST(
     provider_phone_id: input.provider_phone_id ?? null,
     sales_page_label: nullIfEmpty(input.sales_page_label),
     short_url: nullIfEmpty(input.short_url),
-    full_url: nullIfEmpty(input.full_url),
+    // When full_url_auto, full_url is (re)built in the transaction below
+    // once the real stage tracking ID is known; insert null as a
+    // placeholder. Otherwise store the client's value verbatim.
+    full_url: fullUrlAuto ? null : nullIfEmpty(input.full_url),
+    utm_tag_ids: utmTagIds,
     stop_text: input.stop_text,
     include_clickers: input.include_clickers,
     exclude_clickers: input.exclude_clickers,
@@ -426,18 +453,36 @@ export async function POST(
         .where(eq(campaigns.id, cid));
     }
 
+    const setOnUpdate: Partial<typeof campaign_stages.$inferInsert> = {};
+    let stageTrackingId: string | null = null;
     if (parentTrackingId != null && row.creative_id != null) {
-      const stageTrackingId = generateStageTrackingId({
+      stageTrackingId = generateStageTrackingId({
         campaignTrackingId: parentTrackingId,
         stageNumber: row.stage_number,
         creativeId: row.creative_id,
       });
-      const [withTracking] = await tx
+      setOnUpdate.tracking_id = stageTrackingId;
+    }
+    // Auto-build full_url now that the real stage tracking ID is known
+    // (null when no tracking ID yet — just sales page + UTM params).
+    if (fullUrlAuto) {
+      setOnUpdate.full_url =
+        buildStageFullUrl({
+          salesPageUrl: urlCtx.salesPageUrl,
+          baseUrl: urlCtx.baseUrl,
+          postfix: urlCtx.postfix,
+          trackingId: stageTrackingId,
+          utmTags: urlCtx.utmTags,
+        }) || null;
+    }
+
+    if (Object.keys(setOnUpdate).length > 0) {
+      const [withUpdates] = await tx
         .update(campaign_stages)
-        .set({ tracking_id: stageTrackingId })
+        .set(setOnUpdate)
         .where(eq(campaign_stages.id, row.id))
         .returning();
-      return withTracking;
+      return withUpdates;
     }
 
     return row;

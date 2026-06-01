@@ -85,7 +85,11 @@ import { cn } from "@/lib/utils";
 // =============== Types ===============
 
 type Info = { id: number; name: string; color: string | null };
-type Offer = Info & { sales_pages?: { label: string; url: string }[] };
+type Offer = Info & {
+  sales_pages?: { label: string; url: string }[];
+  base_url?: string | null;
+  postfix?: string | null;
+};
 type CampaignStatus = "draft" | "active" | "paused" | "completed" | "archived";
 type StageStatus =
   | "draft"
@@ -141,6 +145,7 @@ type Stage = {
   sales_page_label: string | null;
   short_url: string | null;
   full_url: string | null;
+  utm_tag_ids: number[] | null;
   stop_text: string;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -1425,6 +1430,10 @@ export default function CampaignDetailPage() {
           <StageInlineEditor
             campaign={campaign}
             campaignId={campaignId}
+            campaignTrackingId={campaign.tracking_id}
+            nextStageNumber={
+              stages.reduce((m, s) => Math.max(m, s.stage_number), 0) + 1
+            }
             stage={editingStage}
             isOpen={addStageOpen}
             onOpenChange={(open) => {

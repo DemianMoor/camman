@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { db } from "@/db/client";
 
 import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
+import { formatStageTrackingId } from "@/lib/tracking-id-format";
 
 // No `"server-only"` import: this module is used by API routes AND by
 // scripts/backfill-tracking-ids.ts (a plain Node entry point). The module
@@ -106,5 +107,7 @@ export function generateStageTrackingId({
   stageNumber,
   creativeId,
 }: GenerateStageTrackingIdInput): string {
-  return `${campaignTrackingId}_s${stageNumber}_c${creativeId}`;
+  // Delegates to the pure, client-safe formatter so the stage form's live
+  // preview and this server-side generation can never diverge.
+  return formatStageTrackingId({ campaignTrackingId, stageNumber, creativeId });
 }

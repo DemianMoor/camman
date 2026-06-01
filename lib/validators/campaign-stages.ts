@@ -38,6 +38,16 @@ const stageBaseSchema = z.object({
     .union([z.string().trim().max(2000), z.literal("")])
     .nullable()
     .optional(),
+  // Ordered list of utm_tags.id selected for the Full URL link-builder.
+  // FK ownership is verified server-side. Capped well above any realistic
+  // selection.
+  utm_tag_ids: z.array(z.number().int().positive()).max(20).nullable().optional(),
+  // Transient (not stored): when true, the server (re)builds full_url
+  // authoritatively from the sales page + offer postfix + real tracking ID
+  // + selected UTM tags, ignoring any full_url text in the payload. When
+  // false/absent, full_url is stored verbatim. Lets the form keep an
+  // editable-but-auto-derived field without a "is custom" column.
+  full_url_auto: z.boolean().optional(),
   stop_text: z.string().trim().min(1).max(80).default("Stop to END"),
   include_clickers: z.boolean().default(false),
   exclude_clickers: z.boolean().default(false),

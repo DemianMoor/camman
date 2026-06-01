@@ -25,6 +25,8 @@ interface CampaignLite {
     name: string;
     color: string | null;
     sales_pages?: { label: string; url: string }[];
+    base_url?: string | null;
+    postfix?: string | null;
   } | null;
   audience_snapshot_count: number;
 }
@@ -39,6 +41,7 @@ export interface EditableStage {
   sales_page_label: string | null;
   short_url: string | null;
   full_url: string | null;
+  utm_tag_ids: number[] | null;
   stop_text: string;
   include_no_status: boolean;
   include_clickers: boolean;
@@ -63,6 +66,11 @@ export interface EditableStage {
 export interface StageInlineEditorProps {
   campaign: CampaignLite;
   campaignId: number;
+  // The parent campaign's tracking_id (when brand+offer are set) and the
+  // stage_number the next new stage will get — powers the create-mode
+  // tracking-ID preview.
+  campaignTrackingId?: string | null;
+  nextStageNumber?: number;
   // When set, the editor opens in edit mode for this stage. Null = create
   // mode (the "+ Add stage" trigger).
   stage: EditableStage | null;
@@ -81,6 +89,8 @@ export interface StageInlineEditorProps {
 export function StageInlineEditor({
   campaign,
   campaignId,
+  campaignTrackingId,
+  nextStageNumber,
   stage,
   isOpen,
   onOpenChange,
@@ -129,7 +139,11 @@ export function StageInlineEditor({
     onSaved();
   }
 
-  const initialValues: StageFormValues | undefined = stage
+  // Edit mode: seed the form from the stage. full_url_auto is intentionally
+  // omitted so it defaults to true; the form reconciles once UTM tags load —
+  // if the stored full_url matches the generated value it keeps re-deriving,
+  // otherwise it treats the URL as hand-customized and preserves it.
+  const initialValues: Partial<StageFormValues> | undefined = stage
     ? {
         label: stage.label ?? "",
         creative_id: stage.creative_id,
@@ -138,6 +152,7 @@ export function StageInlineEditor({
         sales_page_label: stage.sales_page_label ?? "",
         short_url: stage.short_url ?? "",
         full_url: stage.full_url ?? "",
+        utm_tag_ids: stage.utm_tag_ids ?? [],
         stop_text: stage.stop_text,
         include_no_status: stage.include_no_status,
         include_clickers: stage.include_clickers,
@@ -180,6 +195,8 @@ export function StageInlineEditor({
           campaignId={campaignId}
           stageId={isEdit ? stage!.id : undefined}
           trackingId={isEdit ? stage!.tracking_id : null}
+          campaignTrackingId={campaignTrackingId ?? null}
+          nextStageNumber={nextStageNumber}
           splitIndex={isEdit ? stage!.split_index : null}
           splitTotal={isEdit ? stage!.split_total : null}
           onSplit={() => {

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Loader2, Plus } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, Plus, RotateCcw } from "lucide-react";
 import { Select as SelectPrimitive } from "radix-ui";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -37,6 +37,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import {
   Select,
   SelectContent,
@@ -46,8 +47,11 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
+import { isEntityAvailable } from "@/lib/feature-flags";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
+import { buildStageFullUrl } from "@/lib/stage-url";
+import { formatStageTrackingId } from "@/lib/tracking-id-format";
 import { cn } from "@/lib/utils";
 
 // =============== Types ===============
@@ -63,6 +67,14 @@ export interface StageFormValues {
   // metadata only (not sent).
   short_url: string;
   full_url: string;
+  // Selected UTM tag ids (ordered) that append &<label>=<value_source> to
+  // full_url. Persisted on the stage so the selection round-trips on edit.
+  utm_tag_ids: number[];
+  // When true, full_url is auto-derived (sales page + offer postfix +
+  // tracking ID + UTM tags) and the server rebuilds it with the real
+  // tracking ID on save. Set false the moment the operator hand-edits the
+  // field; flipped back on by "Reset to generated".
+  full_url_auto: boolean;
   stop_text: string;
   include_no_status: boolean;
   include_clickers: boolean;
@@ -70,6 +82,13 @@ export interface StageFormValues {
   scheduled_at: string;
   notes: string;
 }
+
+type UtmTag = {
+  id: number;
+  label: string;
+  value_source: string;
+  color: string | null;
+};
 
 type Creative = {
   id: number;
@@ -100,6 +119,10 @@ type OfferInfo = {
   name: string;
   color: string | null;
   sales_pages?: SalesPage[];
+  // Needed for the Full URL builder: postfix is the tracking-param NAME,
+  // base_url is the fallback stem when no sales page is selected.
+  base_url?: string | null;
+  postfix?: string | null;
 };
 
 type AudiencePreview = {
@@ -133,6 +156,14 @@ export interface StageFormProps {
   // where one can be generated). Always null in create mode — the ID is
   // generated on save and surfaced only after the next fetch.
   trackingId?: string | null;
+  // The parent campaign's tracking_id (when it has one — i.e. brand+offer
+  // are set). Used together with nextStageNumber to compute a LIVE stage
+  // tracking-ID preview in create mode so the operator can copy it before
+  // saving.
+  campaignTrackingId?: string | null;
+  // Create-mode only: the stage_number this new stage will be assigned
+  // (max existing + 1). Powers the tracking-ID preview.
+  nextStageNumber?: number;
   // Edit-mode only: existing split assignment (NULL when the stage isn't
   // part of a split). Controls whether the "Split for A/B" action is
   // shown and renders a "Split X of Y" badge in the audience block.
@@ -199,6 +230,8 @@ export function buildStageCreateBody(
     sales_page_label: values.sales_page_label || undefined,
     short_url: values.short_url.trim() || undefined,
     full_url: values.full_url.trim() || undefined,
+    utm_tag_ids: values.utm_tag_ids,
+    full_url_auto: values.full_url_auto,
     stop_text: values.stop_text,
     include_no_status: values.include_no_status,
     include_clickers: values.include_clickers,
@@ -218,6 +251,8 @@ const DEFAULT_VALUES: StageFormValues = {
   sales_page_label: "",
   short_url: "",
   full_url: "",
+  utm_tag_ids: [],
+  full_url_auto: true,
   stop_text: "Stop to END",
   include_no_status: true,
   // Default to including clickers so a fresh stage shows the maximum
@@ -237,6 +272,8 @@ export function StageForm({
   campaignId,
   stageId,
   trackingId,
+  campaignTrackingId,
+  nextStageNumber,
   splitIndex,
   splitTotal,
   onSplit,
@@ -270,9 +307,16 @@ export function StageForm({
     new_stage_ids: number[];
     split_total: number;
   }>();
+  const utmApi = useApiCall<{ data: UtmTag[] }>();
   const [creatives, setCreatives] = useState<Creative[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [phones, setPhones] = useState<ProviderPhone[]>([]);
+  const [utmTags, setUtmTags] = useState<UtmTag[]>([]);
+  // UTM tags are gated on the feature flag; treat the list as "loaded" up
+  // front when the entity is unavailable so the full_url reconcile below
+  // doesn't wait forever.
+  const utmAvailable = isEntityAvailable("utm_tags");
+  const [utmLoaded, setUtmLoaded] = useState(!utmAvailable);
   const [newCreativeOpen, setNewCreativeOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
   // 2–5 in the UI per product spec; the endpoint caps at 10 if someone
@@ -312,6 +356,19 @@ export function StageForm({
     })();
   }, [providersApi.execute]);
 
+  // UTM tags for the Full URL link-builder. Gated on the feature flag so we
+  // don't make a speculative request when the entity isn't built.
+  useEffect(() => {
+    if (!utmAvailable) return;
+    (async () => {
+      const r = await utmApi.execute(
+        "/api/utm-tags/list?pageSize=200&status=active",
+      );
+      if (r.ok) setUtmTags(r.data.data);
+      setUtmLoaded(true);
+    })();
+  }, [utmApi.execute, utmAvailable]);
+
   // Form setup
   const form = useForm<StageFormValues>({
     defaultValues: { ...DEFAULT_VALUES, ...initialValues },
@@ -325,6 +382,9 @@ export function StageForm({
   const watchedIncludeNoStatus = form.watch("include_no_status");
   const watchedIncludeClickers = form.watch("include_clickers");
   const watchedExcludeClickers = form.watch("exclude_clickers");
+  const watchedSalesPageLabel = form.watch("sales_page_label");
+  const watchedUtmIds = form.watch("utm_tag_ids");
+  const watchedFullUrlAuto = form.watch("full_url_auto");
 
   // Provider phones reload when the selected provider changes. If the
   // currently selected phone doesn't belong to the new provider, clear it.
@@ -482,6 +542,94 @@ export function StageForm({
   function setExcludeClickers(v: boolean) {
     form.setValue("exclude_clickers", v, { shouldDirty: true });
     if (v) form.setValue("include_clickers", false, { shouldDirty: true });
+  }
+
+  // ============ Tracking ID preview + Full URL builder ============
+  // Live stage tracking-ID: the real value in edit mode; a computed preview
+  // in create mode (campaign tracking ID + predicted stage number + creative)
+  // so the operator can copy it before saving.
+  const effectiveTrackingId = useMemo(() => {
+    if (isEdit) return trackingId ?? null;
+    if (
+      campaignTrackingId &&
+      watchedCreativeId != null &&
+      nextStageNumber != null
+    ) {
+      return formatStageTrackingId({
+        campaignTrackingId,
+        stageNumber: nextStageNumber,
+        creativeId: watchedCreativeId,
+      });
+    }
+    return null;
+  }, [
+    isEdit,
+    trackingId,
+    campaignTrackingId,
+    watchedCreativeId,
+    nextStageNumber,
+  ]);
+
+  const selectedUtmTags = useMemo(() => {
+    const byId = new Map(utmTags.map((t) => [t.id, t] as const));
+    return (watchedUtmIds ?? [])
+      .map((id) => byId.get(id))
+      .filter((t): t is UtmTag => t !== undefined);
+  }, [utmTags, watchedUtmIds]);
+
+  const generatedFullUrl = useMemo(() => {
+    const sp = (campaign.offer?.sales_pages ?? []).find(
+      (p) => p.label === watchedSalesPageLabel,
+    );
+    return buildStageFullUrl({
+      salesPageUrl: sp?.url ?? null,
+      baseUrl: campaign.offer?.base_url ?? null,
+      postfix: campaign.offer?.postfix ?? null,
+      trackingId: effectiveTrackingId,
+      utmTags: selectedUtmTags.map((t) => ({
+        label: t.label,
+        value_source: t.value_source,
+      })),
+    });
+  }, [
+    campaign.offer?.sales_pages,
+    campaign.offer?.base_url,
+    campaign.offer?.postfix,
+    watchedSalesPageLabel,
+    effectiveTrackingId,
+    selectedUtmTags,
+  ]);
+
+  // full_url auto-derives from the selections (and re-derives as they change)
+  // but stays hand-editable. On edit we reconcile once UTM tags load: if the
+  // stored URL looks hand-customized, switch auto off so we don't clobber it;
+  // otherwise keep it synced to the generated value.
+  const initialFullUrlRef = useRef(initialValues?.full_url ?? "");
+  const reconciledRef = useRef(!isEdit);
+
+  useEffect(() => {
+    if (!reconciledRef.current) {
+      // Wait until UTM tags are loaded so `generatedFullUrl` is complete
+      // before comparing it to the stored value.
+      if (!utmLoaded) return;
+      reconciledRef.current = true;
+      const stored = initialFullUrlRef.current.trim();
+      if (stored && stored !== generatedFullUrl) {
+        form.setValue("full_url_auto", false, { shouldDirty: false });
+        return;
+      }
+    }
+    if (form.getValues("full_url_auto")) {
+      if (form.getValues("full_url") !== generatedFullUrl) {
+        form.setValue("full_url", generatedFullUrl, { shouldDirty: false });
+      }
+    }
+  }, [generatedFullUrl, utmLoaded, form]);
+
+  function resetFullUrlToGenerated() {
+    reconciledRef.current = true;
+    form.setValue("full_url_auto", true, { shouldDirty: true });
+    form.setValue("full_url", generatedFullUrl, { shouldDirty: true });
   }
 
   // Submit
@@ -660,23 +808,27 @@ export function StageForm({
               />
             </div>
 
-            {isEdit ? (
-              <CopyableId
-                label="Tracking ID"
-                value={trackingId ?? null}
-                placeholder="ID pending — pick a creative and save to generate"
-                helperText={
-                  trackingId
+            <CopyableId
+              label="Tracking ID"
+              value={effectiveTrackingId}
+              placeholder={
+                isEdit
+                  ? "ID pending — pick a creative and save to generate"
+                  : campaignTrackingId
+                    ? "Pick a creative to generate the tracking ID"
+                    : "Set a brand & offer on the campaign to generate"
+              }
+              helperText={
+                isEdit
+                  ? effectiveTrackingId
                     ? "Auto-generated. Used in analytics URLs."
                     : "Auto-generated when the campaign and creative are set."
-                }
-                copiedMessage="Tracking ID copied"
-              />
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Tracking ID is auto-generated on save.
-              </p>
-            )}
+                  : effectiveTrackingId
+                    ? "Preview — finalized on save. Copy it now for tracking."
+                    : "Auto-generated on save once a creative is picked."
+              }
+              copiedMessage="Tracking ID copied"
+            />
 
         {/* ============ Sales page & URLs ============ */}
         <div className="grid gap-3 border-t pt-3">
@@ -857,31 +1009,59 @@ export function StageForm({
               name="full_url"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Full URL</FormLabel>
+                  <div className="flex items-center justify-between">
+                    <FormLabel>Full URL</FormLabel>
+                    {!watchedFullUrlAuto ? (
+                      <button
+                        type="button"
+                        onClick={resetFullUrlToGenerated}
+                        disabled={isSubmitting}
+                        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-60"
+                      >
+                        <RotateCcw className="size-3" aria-hidden />
+                        Reset to generated
+                      </button>
+                    ) : null}
+                  </div>
                   <FormControl>
                     <Input
-                      placeholder="e.g. https://example.com/lp?sub1={campaign_tracking_id}&sub2={stage_tracking_id}"
+                      placeholder="Auto-fills from the sales page, tracking ID & UTM tags"
                       disabled={isSubmitting}
                       {...field}
+                      onChange={(e) => {
+                        // Hand-edit ⇒ stop auto-deriving and store verbatim.
+                        field.onChange(e);
+                        if (form.getValues("full_url_auto")) {
+                          form.setValue("full_url_auto", false, {
+                            shouldDirty: true,
+                          });
+                        }
+                      }}
                     />
                   </FormControl>
                   <FormDescription className="text-xs">
-                    Tracking metadata only. Reference tokens:{" "}
-                    <code className="font-mono">{`{campaign_tracking_id}`}</code>
-                    ,{" "}
-                    <code className="font-mono">{`{stage_tracking_id}`}</code>
-                    ,{" "}
-                    <code className="font-mono">{`{brand_id}`}</code>,{" "}
-                    <code className="font-mono">{`{offer_id}`}</code>,{" "}
-                    <code className="font-mono">{`{creative_id}`}</code>,{" "}
-                    <code className="font-mono">{`{stage_number}`}</code>. Tokens are NOT auto-substituted in the SMS or
-                    on export — this field is for your records.
+                    {watchedFullUrlAuto
+                      ? "Auto-built from the selected sales page + the offer's tracking param + tracking ID + UTM tags below. Edit to override."
+                      : "Custom — edited by hand. Use “Reset to generated” to rebuild from the selections."}
                   </FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
             />
           </div>
+
+          {/* UTM tags — appended to the Full URL as &label=value_source */}
+          {utmAvailable ? (
+            <UtmTagPicker
+              tags={utmTags}
+              loading={utmApi.isLoading && !utmLoaded}
+              selectedIds={watchedUtmIds ?? []}
+              disabled={isSubmitting}
+              onChange={(ids) =>
+                form.setValue("utm_tag_ids", ids, { shouldDirty: true })
+              }
+            />
+          ) : null}
         </div>
 
         {/* ============ Provider, phone & audience filters ============ */}
@@ -1485,6 +1665,97 @@ function SpamScoreDot({
         {score}
       </span>
     </span>
+  );
+}
+
+// UTM-tag selector for the Full URL builder. Shows up to 3 active tags as
+// quick-toggle pills plus a searchable popup (MultiSelectPicker) for the
+// full list. Selected tags append &<label>=<value_source> to full_url.
+function UtmTagPicker({
+  tags,
+  loading,
+  selectedIds,
+  disabled,
+  onChange,
+}: {
+  tags: UtmTag[];
+  loading: boolean;
+  selectedIds: number[];
+  disabled?: boolean;
+  onChange: (ids: number[]) => void;
+}) {
+  const selectedSet = new Set(selectedIds);
+  function toggle(id: number) {
+    if (selectedSet.has(id)) {
+      onChange(selectedIds.filter((x) => x !== id));
+    } else {
+      onChange([...selectedIds, id]);
+    }
+  }
+  const quick = tags.slice(0, 3);
+  return (
+    <div className="grid gap-1.5">
+      <span className="text-xs font-medium">UTM tags</span>
+      {loading ? (
+        <span className="text-xs text-muted-foreground">Loading tags…</span>
+      ) : tags.length === 0 ? (
+        <span className="text-xs text-muted-foreground">
+          No UTM tags yet. Create some under UTM tags to append them here.
+        </span>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {quick.map((t) => {
+              const active = selectedSet.has(t.id);
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => toggle(t.id)}
+                  title={`${t.label}=${t.value_source}`}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition-colors",
+                    active
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border bg-background text-muted-foreground hover:bg-muted",
+                    disabled && "cursor-not-allowed opacity-60",
+                  )}
+                >
+                  {t.color ? (
+                    <span
+                      className="size-2 rounded-full"
+                      style={{ backgroundColor: t.color }}
+                      aria-hidden
+                    />
+                  ) : null}
+                  {t.label}
+                </button>
+              );
+            })}
+            {tags.length > 3 ? (
+              <span className="text-[11px] text-muted-foreground">
+                + {tags.length - 3} more in the list below
+              </span>
+            ) : null}
+          </div>
+          <MultiSelectPicker
+            options={tags.map((t) => ({
+              id: t.id,
+              label: t.label,
+              color: t.color,
+              meta: t.value_source,
+            }))}
+            value={selectedIds}
+            onChange={(ids) => onChange(ids.map(Number))}
+            placeholder="Select UTM tags…"
+            selectedLabel={(n) => `${n} UTM tag${n === 1 ? "" : "s"} selected`}
+            searchPlaceholder="Search UTM tags…"
+            disabled={disabled}
+          />
+        </>
+      )}
+    </div>
   );
 }
 

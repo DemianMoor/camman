@@ -93,6 +93,36 @@ export function removeUrlParam(url: string, key: string): string {
   return kept.length ? `${base}?${kept.join("&")}` : base;
 }
 
+// Append just a parameter NAME with a trailing "=" (no value), e.g. turns
+// "https://x/lp" into "https://x/lp?sub_id5=". Uses "?" for the first param,
+// "&" thereafter. A following appendRawValue() supplies the value. No-op on
+// empty url/name.
+export function appendParamName(url: string, name: string): string {
+  const u = url.trim();
+  const n = (name ?? "").trim();
+  if (!u || !n) return u;
+  const sep = u.includes("?") ? "&" : "?";
+  return `${u}${sep}${n}=`;
+}
+
+// Append a raw value to the end of the URL (no key, no separator) — used by
+// the tracking_id chip so the tracking ID lands right after the "=" of the
+// parameter name added just before it.
+export function appendRawValue(url: string, value: string): string {
+  const v = (value ?? "").trim();
+  if (!v) return url;
+  return `${url}${v}`;
+}
+
+// Remove the first occurrence of a raw value substring (tracking_id toggle-off).
+export function removeRawValue(url: string, value: string): string {
+  const v = (value ?? "").trim();
+  if (!v) return url;
+  const i = url.indexOf(v);
+  if (i < 0) return url;
+  return url.slice(0, i) + url.slice(i + v.length);
+}
+
 export function hasUrlParam(url: string, key: string): boolean {
   const qIdx = url.indexOf("?");
   if (qIdx < 0) return false;

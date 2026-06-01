@@ -50,8 +50,10 @@ import { isEntityAvailable } from "@/lib/feature-flags";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import {
-  appendUrlParam,
+  appendParamName,
+  appendRawValue,
   hasUrlParam,
+  removeRawValue,
   removeUrlParam,
 } from "@/lib/stage-url";
 import { formatStageTrackingId } from "@/lib/tracking-id-format";
@@ -583,29 +585,19 @@ export function StageForm({
     return (sp?.url ?? "").trim();
   }, [campaign.offer?.sales_pages, watchedSalesPageLabel]);
 
-  // The query-param NAME that carries the stage tracking ID — the offer's
-  // postfix (falls back to a literal "tracking_id" when the offer has none).
-  const trackingParamKey =
-    (campaign.offer?.postfix ?? "").trim() || "tracking_id";
-
-  // Toggle a query param on the Full URL: append `key=value` to the end, or
-  // remove it if already present. Any chip click flips the field to
-  // hand-edited so the server stores it verbatim (instead of rebuilding it to
-  // the bare sales-page URL).
-  function toggleUrlParam(key: string, value: string) {
+  // A UTM chip brings only the parameter NAME (the tag's Value Source) with a
+  // trailing "=", e.g. clicking "subid5" appends "?sub_id5=". Toggling off
+  // removes that whole param segment. Any chip click flips the field to
+  // hand-edited so the server stores it verbatim (not the bare sales-page URL).
+  function toggleUtmTag(tag: UtmTag) {
     const current = form.getValues("full_url");
-    const next = hasUrlParam(current, key)
-      ? removeUrlParam(current, key)
-      : appendUrlParam(current, key, value);
+    const present = hasUrlParam(current, tag.value_source);
+    const next = present
+      ? removeUrlParam(current, tag.value_source)
+      : appendParamName(current, tag.value_source);
     form.setValue("full_url", next, { shouldDirty: true });
     form.setValue("full_url_auto", false, { shouldDirty: true });
-  }
-
-  // UTM chip toggle — edits the URL and keeps utm_tag_ids in sync (persisted
-  // record), both keyed on whether the param is currently in the URL text.
-  function toggleUtmTag(tag: UtmTag) {
-    const present = hasUrlParam(form.getValues("full_url"), tag.tag_id);
-    toggleUrlParam(tag.tag_id, tag.value_source);
+    // Keep utm_tag_ids in sync (persisted record).
     const ids = form.getValues("utm_tag_ids") ?? [];
     const nextIds = present
       ? ids.filter((x) => x !== tag.id)
@@ -613,6 +605,19 @@ export function StageForm({
         ? ids
         : [...ids, tag.id];
     form.setValue("utm_tag_ids", nextIds, { shouldDirty: true });
+  }
+
+  // The tracking_id chip brings only the VALUE — it appends the stage tracking
+  // ID to the end of the URL (right after the "=" of the param added before
+  // it). Toggling off removes that value substring.
+  function toggleTrackingId() {
+    if (!effectiveTrackingId) return;
+    const current = form.getValues("full_url");
+    const next = current.includes(effectiveTrackingId)
+      ? removeRawValue(current, effectiveTrackingId)
+      : appendRawValue(current, effectiveTrackingId);
+    form.setValue("full_url", next, { shouldDirty: true });
+    form.setValue("full_url_auto", false, { shouldDirty: true });
   }
 
   // full_url auto-derives from the selections (and re-derives as they change)
@@ -1058,23 +1063,18 @@ export function StageForm({
                       ? "Auto-built from the sales page + the offer's tracking param + tracking ID + the UTM tags below."
                       : "Custom — edited by hand. Use “Reset to generated” to rebuild from the selections."}
                   </FormDescription>
-                  {/* Param chips — click to append the param to the end of
-                      the Full URL (toggle to remove). The tracking_id chip
-                      inserts the offer postfix = stage tracking ID; each UTM
-                      chip inserts <tag_id>=<value_source>. */}
+                  {/* Param chips — click to build the URL. A UTM chip appends
+                      its Value Source as a param name (e.g. "sub_id5="); the
+                      tracking_id chip appends the tracking ID value after it.
+                      Toggle a chip to remove its contribution. */}
                   <UrlParamChips
-                    trackingKey={trackingParamKey}
                     trackingId={effectiveTrackingId}
                     utmAvailable={utmAvailable}
                     utmTags={utmTags}
                     utmLoading={utmApi.isLoading && !utmLoaded}
                     fullUrl={watchedFullUrl ?? ""}
                     disabled={isSubmitting}
-                    onToggleTracking={() => {
-                      if (effectiveTrackingId) {
-                        toggleUrlParam(trackingParamKey, effectiveTrackingId);
-                      }
-                    }}
+                    onToggleTracking={toggleTrackingId}
                     onToggleUtm={toggleUtmTag}
                   />
                   <FormMessage />
@@ -1694,7 +1694,6 @@ function SpamScoreDot({
 // <tag_id>=<value_source>. Active state is derived from the URL text so it
 // stays correct even when the field is hand-edited.
 function UrlParamChips({
-  trackingKey,
   trackingId,
   utmAvailable,
   utmTags,
@@ -1704,7 +1703,6 @@ function UrlParamChips({
   onToggleTracking,
   onToggleUtm,
 }: {
-  trackingKey: string;
   trackingId: string | null;
   utmAvailable: boolean;
   utmTags: UtmTag[];
@@ -1722,12 +1720,12 @@ function UrlParamChips({
       <div className="flex flex-wrap items-center gap-1.5">
         <ParamChip
           label="tracking_id"
-          active={Boolean(trackingId) && hasUrlParam(fullUrl, trackingKey)}
+          active={trackingId ? fullUrl.includes(trackingId) : false}
           disabled={disabled || !trackingId}
           accent
           title={
             trackingId
-              ? `Appends ${trackingKey}=${trackingId}`
+              ? `Appends the tracking ID value: ${trackingId}`
               : "Pick a creative (and set brand + offer) to generate the tracking ID"
           }
           onClick={onToggleTracking}
@@ -1747,9 +1745,9 @@ function UrlParamChips({
                 key={t.id}
                 label={t.tag_id}
                 color={t.color}
-                active={hasUrlParam(fullUrl, t.tag_id)}
+                active={hasUrlParam(fullUrl, t.value_source)}
                 disabled={disabled}
-                title={`${t.label} — appends ${t.tag_id}=${t.value_source}`}
+                title={`${t.label} — appends ${t.value_source}=`}
                 onClick={() => onToggleUtm(t)}
               />
             ))

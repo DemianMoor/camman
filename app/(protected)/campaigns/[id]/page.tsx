@@ -752,28 +752,28 @@ export default function CampaignDetailPage() {
         enableSorting: false,
         cell: ({ row }) => {
           const {
+            sms_count: sms,
+            delivered_count: delivered,
             opt_out_count: oo,
             click_count: cl,
             late_click_count: lc,
-            scrubbed_count: sc,
-            bounced_count: bc,
-            checkout_click_count: co,
-            sales_count: sl,
           } = row.original;
-          if (
-            oo === 0 &&
-            cl === 0 &&
-            lc === 0 &&
-            sc === 0 &&
-            bc === 0 &&
-            co === 0 &&
-            sl === 0
-          )
+          // Results are considered entered (manually or imported) once any
+          // send/outcome counter is non-zero.
+          const hasResults =
+            sms > 0 || delivered > 0 || oo > 0 || cl > 0 || lc > 0;
+          if (!hasResults)
             return <span className="text-muted-foreground">—</span>;
+          // Late clickers supersede 1st-day clickers once a follow-up report
+          // arrives; otherwise use the 1st-day count.
+          const clicks = lc > 0 ? lc : cl;
+          // Rate denominator: delivered, falling back to SMS sent.
+          const denom = delivered > 0 ? delivered : sms;
+          const pct = (n: number) =>
+            denom > 0 ? `${((n / denom) * 100).toFixed(1)}%` : "—";
           return (
             <span className="font-mono text-xs tabular-nums">
-              OO: {oo} · CL: {cl} · LC: {lc} · SC: {sc} · BC: {bc} · CO: {co} ·
-              SL: {sl}
+              Clicks: {clicks} · CTR: {pct(clicks)} · OptOut: {pct(oo)}
             </span>
           );
         },

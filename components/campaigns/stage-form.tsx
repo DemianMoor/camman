@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Plus, RotateCcw } from "lucide-react";
+import { Copy, Loader2, Plus, RotateCcw } from "lucide-react";
 import { Select as SelectPrimitive } from "radix-ui";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -1011,13 +1011,20 @@ export function StageForm({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Short URL</FormLabel>
-                  <FormControl>
-                    <Input
-                      placeholder="e.g. lnk.example.com/abc123"
+                  <div className="flex items-stretch gap-1.5">
+                    <FormControl>
+                      <Input
+                        placeholder="e.g. lnk.example.com/abc123"
+                        disabled={isSubmitting}
+                        {...field}
+                      />
+                    </FormControl>
+                    <FieldCopyButton
+                      value={field.value ?? ""}
+                      label="Short URL"
                       disabled={isSubmitting}
-                      {...field}
                     />
-                  </FormControl>
+                  </div>
                   <FormMessage />
                 </FormItem>
               )}
@@ -1042,22 +1049,29 @@ export function StageForm({
                       </button>
                     ) : null}
                   </div>
-                  <FormControl>
-                    <Input
-                      placeholder="Auto-fills from the sales page, tracking ID & UTM tags"
+                  <div className="flex items-stretch gap-1.5">
+                    <FormControl>
+                      <Input
+                        placeholder="Auto-fills from the sales page, tracking ID & UTM tags"
+                        disabled={isSubmitting}
+                        {...field}
+                        onChange={(e) => {
+                          // Hand-edit ⇒ stop auto-deriving and store verbatim.
+                          field.onChange(e);
+                          if (form.getValues("full_url_auto")) {
+                            form.setValue("full_url_auto", false, {
+                              shouldDirty: true,
+                            });
+                          }
+                        }}
+                      />
+                    </FormControl>
+                    <FieldCopyButton
+                      value={field.value ?? ""}
+                      label="Full URL"
                       disabled={isSubmitting}
-                      {...field}
-                      onChange={(e) => {
-                        // Hand-edit ⇒ stop auto-deriving and store verbatim.
-                        field.onChange(e);
-                        if (form.getValues("full_url_auto")) {
-                          form.setValue("full_url_auto", false, {
-                            shouldDirty: true,
-                          });
-                        }
-                      }}
                     />
-                  </FormControl>
+                  </div>
                   <FormDescription className="text-xs">
                     {watchedFullUrlAuto
                       ? "Auto-built from the sales page + the offer's tracking param + tracking ID + the UTM tags below."
@@ -1685,6 +1699,45 @@ function SpamScoreDot({
         {score}
       </span>
     </span>
+  );
+}
+
+// Small copy-to-clipboard button placed inline next to an editable URL field.
+// Mirrors the CopyableId affordance but for a (hand-editable) <Input>: disabled
+// when empty, sonner toast on success.
+function FieldCopyButton({
+  value,
+  label,
+  disabled,
+}: {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}) {
+  const isEmpty = value.trim().length === 0;
+
+  async function handleCopy() {
+    if (isEmpty) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`${label} copied`);
+    } catch {
+      toast.error("Couldn't copy to clipboard");
+    }
+  }
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      onClick={handleCopy}
+      disabled={disabled || isEmpty}
+      aria-label={isEmpty ? `${label} is empty` : `Copy ${label}`}
+      title={isEmpty ? undefined : `Copy ${label}`}
+    >
+      <Copy className="size-4" aria-hidden />
+    </Button>
   );
 }
 

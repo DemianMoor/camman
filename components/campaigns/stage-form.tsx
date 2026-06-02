@@ -492,6 +492,16 @@ export function StageForm({
         ? "text-amber-700 dark:text-amber-400"
         : "text-muted-foreground";
 
+  async function handleCopySmsPreview() {
+    if (!assembledSms) return;
+    try {
+      await navigator.clipboard.writeText(assembledSms);
+      toast.success("SMS preview copied");
+    } catch {
+      toast.error("Couldn't copy to clipboard");
+    }
+  }
+
   // ============ Audience preview (debounced, stale-safe) ============
   const [audiencePreview, setAudiencePreview] =
     useState<AudiencePreview | null>(null);
@@ -1267,8 +1277,25 @@ export function StageForm({
             {/* SMS preview */}
             <Card>
               <CardContent className="grid gap-2 p-3 text-sm">
-                <div className="text-xs uppercase text-muted-foreground">
-                  SMS preview
+                <div className="flex items-center justify-between">
+                  <div className="text-xs uppercase text-muted-foreground">
+                    SMS preview
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={handleCopySmsPreview}
+                    disabled={!selectedCreative}
+                    aria-label={
+                      selectedCreative
+                        ? "Copy SMS preview"
+                        : "Select a creative to copy the SMS preview"
+                    }
+                    title={selectedCreative ? "Copy SMS preview" : undefined}
+                  >
+                    <Copy className="size-4" aria-hidden />
+                  </Button>
                 </div>
                 {selectedCreative ? (
                   <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-3 font-mono text-sm">

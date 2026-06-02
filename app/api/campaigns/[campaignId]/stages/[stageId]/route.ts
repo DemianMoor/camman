@@ -15,6 +15,10 @@ import { can } from "@/lib/permissions";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
+  generateCampaignTrackingId,
+  generateStageTrackingId,
+} from "@/lib/tracking-id";
+import {
   nullIfEmpty,
   stageUpdateSchema,
 } from "@/lib/validators/campaign-stages";
@@ -287,45 +291,57 @@ export async function PATCH(
     updates[k] = NULLABLE_OPTIONAL_STRING.has(k) ? nullIfEmpty(v as string) : v;
   }
 
+  // Load the current stage + parent campaign context once. Needed both for
+  // the Full URL rebuild (sales page / UTM / offer) and for backfilling the
+  // stage's tracking_id when a creative is added to a stage that didn't have
+  // one at create time (e.g. split siblings cloned from a creative-less
+  // source). Read unconditionally so the tracking backfill runs on any PATCH.
+  const existing = await db
+    .select({
+      tracking_id: campaign_stages.tracking_id,
+      creative_id: campaign_stages.creative_id,
+      stage_number: campaign_stages.stage_number,
+      sales_page_label: campaign_stages.sales_page_label,
+      utm_tag_ids: campaign_stages.utm_tag_ids,
+      campaign_tracking_id: campaigns.tracking_id,
+      campaign_brand_id: campaigns.brand_id,
+      campaign_offer_id: campaigns.offer_id,
+      campaign_created_at: campaigns.created_at,
+    })
+    .from(campaign_stages)
+    .leftJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
+    .where(
+      and(
+        eq(campaign_stages.id, sid),
+        eq(campaign_stages.campaign_id, cid),
+        eq(campaign_stages.org_id, orgId),
+      ),
+    )
+    .limit(1);
+  if (!existing[0]) {
+    return apiError(404, "Stage not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "stage",
+    });
+  }
+  const current = existing[0];
+
   // Full URL handling: verify UTM tag ownership when the selection changes,
   // and — when full_url_auto — authoritatively rebuild full_url from the
-  // effective sales page + offer postfix + the stage's (immutable) tracking
-  // ID + selected UTM tags, overriding any full_url text in the payload.
+  // effective sales page + offer postfix + selected UTM tags, overriding any
+  // full_url text in the payload.
   const fullUrlAuto = input.full_url_auto === true;
   if (fullUrlAuto || input.utm_tag_ids !== undefined) {
-    const existing = await db
-      .select({
-        tracking_id: campaign_stages.tracking_id,
-        sales_page_label: campaign_stages.sales_page_label,
-        utm_tag_ids: campaign_stages.utm_tag_ids,
-        offer_id: campaigns.offer_id,
-      })
-      .from(campaign_stages)
-      .leftJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
-      .where(
-        and(
-          eq(campaign_stages.id, sid),
-          eq(campaign_stages.campaign_id, cid),
-          eq(campaign_stages.org_id, orgId),
-        ),
-      )
-      .limit(1);
-    if (!existing[0]) {
-      return apiError(404, "Stage not found", API_ERROR_CODES.NOT_FOUND, {
-        entity: "stage",
-      });
-    }
     const effLabel =
       input.sales_page_label !== undefined
         ? nullIfEmpty(input.sales_page_label)
-        : existing[0].sales_page_label;
+        : current.sales_page_label;
     const effUtmIds =
       input.utm_tag_ids !== undefined
         ? (input.utm_tag_ids ?? [])
-        : (existing[0].utm_tag_ids ?? []);
+        : (current.utm_tag_ids ?? []);
     const ctxResult = await loadStageUrlContext({
       orgId,
-      offerId: existing[0].offer_id,
+      offerId: current.campaign_offer_id,
       salesPageLabel: effLabel,
       utmTagIds: effUtmIds,
     });
@@ -345,7 +361,25 @@ export async function PATCH(
     }
   }
 
-  if (Object.keys(updates).length === 0) {
+  // Stage tracking_id backfill. The ID is write-once and immutable, so we
+  // only ever set it when it's currently NULL. It needs the stage to have a
+  // creative AND the parent campaign to have (or be able to generate, from
+  // brand+offer) a tracking_id. This mirrors the stage POST path — it's what
+  // makes "pick a creative and save" actually produce an ID for a stage that
+  // was created without one (e.g. split siblings, or a draft stage whose
+  // creative is chosen later). The actual generation happens in the
+  // transaction below so type narrowing stays sound.
+  const effectiveCreativeId =
+    input.creative_id !== undefined ? input.creative_id : current.creative_id;
+  const canGenerateCampaignTracking =
+    current.campaign_tracking_id != null ||
+    (current.campaign_brand_id != null && current.campaign_offer_id != null);
+  const willGenerateStageTracking =
+    current.tracking_id == null &&
+    effectiveCreativeId != null &&
+    canGenerateCampaignTracking;
+
+  if (Object.keys(updates).length === 0 && !willGenerateStageTracking) {
     return apiError(
       400,
       "No editable fields provided",
@@ -353,17 +387,55 @@ export async function PATCH(
     );
   }
 
-  const [updated] = await db
-    .update(campaign_stages)
-    .set(updates)
-    .where(
-      and(
-        eq(campaign_stages.id, sid),
-        eq(campaign_stages.campaign_id, cid),
-        eq(campaign_stages.org_id, orgId),
-      ),
-    )
-    .returning();
+  // One transaction so a campaign-tracking-id backfill and the stage update
+  // can't half-apply.
+  const updated = await db.transaction(async (tx) => {
+    if (current.tracking_id == null && effectiveCreativeId != null) {
+      let campaignTrackingId = current.campaign_tracking_id;
+      if (
+        campaignTrackingId == null &&
+        current.campaign_brand_id != null &&
+        current.campaign_offer_id != null &&
+        current.campaign_created_at != null
+      ) {
+        // Pre-tracking-id campaigns / drafts upgraded out-of-band: generate
+        // the campaign's tracking_id now so the stage can reference it.
+        campaignTrackingId = await generateCampaignTrackingId(tx, {
+          orgId,
+          brandId: current.campaign_brand_id,
+          offerId: current.campaign_offer_id,
+          createdAt: current.campaign_created_at,
+        });
+        await tx
+          .update(campaigns)
+          .set({ tracking_id: campaignTrackingId })
+          .where(eq(campaigns.id, cid));
+      }
+      if (campaignTrackingId != null) {
+        // tracking_id is server-generated, not taken from the payload (the
+        // validator rejects a client-supplied one), so set it directly.
+        updates.tracking_id = generateStageTrackingId({
+          campaignTrackingId,
+          stageNumber: current.stage_number,
+          creativeId: effectiveCreativeId,
+        });
+      }
+    }
+
+    const [row] = await tx
+      .update(campaign_stages)
+      .set(updates)
+      .where(
+        and(
+          eq(campaign_stages.id, sid),
+          eq(campaign_stages.campaign_id, cid),
+          eq(campaign_stages.org_id, orgId),
+        ),
+      )
+      .returning();
+    return row;
+  });
+
   if (!updated) {
     return apiError(404, "Stage not found", API_ERROR_CODES.NOT_FOUND, {
       entity: "stage",

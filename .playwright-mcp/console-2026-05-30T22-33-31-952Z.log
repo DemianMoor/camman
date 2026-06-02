@@ -1,2 +1,0 @@
-[      60ms] Uncaught ReferenceError: $ is not defined
-    at <anonymous> (https://bdhujqomjvfgzbgicwev.supabase.co/storage/v1/object/public/landing-pages/nvb/uniscript.js?v=6333:0:4333)

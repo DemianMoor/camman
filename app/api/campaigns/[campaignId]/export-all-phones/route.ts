@@ -78,6 +78,8 @@ export async function GET(
       include_no_status: campaign_stages.include_no_status,
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,
+      split_index: campaign_stages.split_index,
+      split_total: campaign_stages.split_total,
     })
     .from(campaign_stages)
     .where(
@@ -113,26 +115,40 @@ export async function GET(
               const includeNs = s.include_no_status;
               const includeCl = s.include_clickers;
               const excludeCl = s.exclude_clickers;
+              const splitIndex = s.split_index ?? null;
+              const splitTotal = s.split_total ?? null;
+              const splitActive = splitIndex !== null && splitTotal !== null;
               const label = s.label ?? "";
+              // Each stage's resolved set, partitioned by split bucket so
+              // siblings don't overlap. Mirrors the per-stage export and
+              // computeStageAudienceCount: ROW_NUMBER over `order by
+              // contact_id`, keep bucket == split_index-1.
               return drizzleSql`
-                select
-                  c.phone_number,
-                  ${s.stage_number}::int as stage_number,
-                  ${label}::text as stage_label
-                from campaign_audience_pool p
-                inner join contacts c on c.id = p.contact_id
-                where p.campaign_id = ${cid}::int
-                  and p.org_id = ${orgId}::uuid
-                  and not exists (
-                    select 1 from opt_outs oo
-                    where oo.contact_id = p.contact_id
-                      and oo.org_id = ${orgId}::uuid
-                  )
-                  and (
-                    (${includeNs}::boolean and p.was_no_status_at_snapshot)
-                    or (${includeCl}::boolean and p.was_clicker_at_snapshot)
-                  )
-                  and not (${excludeCl}::boolean and p.was_clicker_at_snapshot)
+                select phone_number, stage_number, stage_label
+                from (
+                  select
+                    c.phone_number,
+                    p.contact_id,
+                    ${s.stage_number}::int as stage_number,
+                    ${label}::text as stage_label,
+                    row_number() over (order by p.contact_id) - 1 as rn
+                  from campaign_audience_pool p
+                  inner join contacts c on c.id = p.contact_id
+                  where p.campaign_id = ${cid}::int
+                    and p.org_id = ${orgId}::uuid
+                    and not exists (
+                      select 1 from opt_outs oo
+                      where oo.contact_id = p.contact_id
+                        and oo.org_id = ${orgId}::uuid
+                    )
+                    and (
+                      (${includeNs}::boolean and p.was_no_status_at_snapshot)
+                      or (${includeCl}::boolean and p.was_clicker_at_snapshot)
+                    )
+                    and not (${excludeCl}::boolean and p.was_clicker_at_snapshot)
+                ) stage_q
+                where not ${splitActive}::boolean
+                  or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
               `;
             });
             const unionAll = fragments.reduce((acc, frag, i) =>

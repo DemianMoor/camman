@@ -73,6 +73,8 @@ export async function GET(
       include_no_status: campaign_stages.include_no_status,
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,
+      split_index: campaign_stages.split_index,
+      split_total: campaign_stages.split_total,
       tracking_id: campaign_stages.tracking_id,
     })
     .from(campaign_stages)
@@ -108,6 +110,9 @@ export async function GET(
   const includeNs = stage.include_no_status;
   const includeCl = stage.include_clickers;
   const excludeCl = stage.exclude_clickers;
+  const splitIndex = stage.split_index ?? null;
+  const splitTotal = stage.split_total ?? null;
+  const splitActive = splitIndex !== null && splitTotal !== null;
 
   const rowSource = chunkedQuery({
     fetchChunk: async (offset, chunkLimit) => {
@@ -120,22 +125,38 @@ export async function GET(
 
       // Order by contact_id so re-exports return rows in the same order;
       // satisfies the deterministic-ordering test.
+      //
+      // Split stages: partition the qualified set by row-number so each
+      // sibling exports only its bucket. This MUST mirror
+      // computeStageAudienceCount in lib/audience-snapshot.ts exactly —
+      // ROW_NUMBER over a stable `order by contact_id`, bucket =
+      // (rn-1) % split_total, keep the rows where bucket == split_index-1.
+      // Without this, every split sibling exported the whole pool.
       const result = (await db.execute(drizzleSql`
-        select c.phone_number
-        from campaign_audience_pool p
-        inner join contacts c on c.id = p.contact_id
-        where p.campaign_id = ${cid}::int
-          and p.org_id = ${orgId}::uuid
-          and not exists (
-            select 1 from opt_outs oo
-            where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
-          )
-          and (
-            (${includeNs}::boolean and p.was_no_status_at_snapshot)
-            or (${includeCl}::boolean and p.was_clicker_at_snapshot)
-          )
-          and not (${excludeCl}::boolean and p.was_clicker_at_snapshot)
-        order by p.contact_id
+        with qualified as (
+          select
+            c.phone_number,
+            p.contact_id,
+            row_number() over (order by p.contact_id) - 1 as rn
+          from campaign_audience_pool p
+          inner join contacts c on c.id = p.contact_id
+          where p.campaign_id = ${cid}::int
+            and p.org_id = ${orgId}::uuid
+            and not exists (
+              select 1 from opt_outs oo
+              where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
+            )
+            and (
+              (${includeNs}::boolean and p.was_no_status_at_snapshot)
+              or (${includeCl}::boolean and p.was_clicker_at_snapshot)
+            )
+            and not (${excludeCl}::boolean and p.was_clicker_at_snapshot)
+        )
+        select phone_number
+        from qualified
+        where not ${splitActive}::boolean
+          or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
+        order by contact_id
         limit ${effectiveLimit}
         offset ${offset}
       `)) as unknown as { phone_number: string }[];

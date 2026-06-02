@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { format } from "date-fns";
 import {
   ArchiveRestore,
@@ -8,10 +8,12 @@ import {
   Check,
   Copy,
   Copy as DuplicateIcon,
+  ListChecks,
   MessageSquare,
   MoreHorizontal,
   Pencil,
   Plus,
+  ScanSearch,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
@@ -20,6 +22,10 @@ import {
   BulkCreativeForm,
   type BulkCreativeFormSubmit,
 } from "@/components/creatives/bulk-creative-form";
+import {
+  BulkEditForm,
+  type BulkEditPayload,
+} from "@/components/creatives/bulk-edit-form";
 import {
   CreativeForm,
   type CreativeFormValues,
@@ -314,6 +320,36 @@ function truncate(s: string, n: number) {
   return s.slice(0, n - 1) + "…";
 }
 
+// Checkbox with native indeterminate support (TanStack/React don't expose
+// `indeterminate` as a prop). Used for the header "select page" toggle.
+function TriStateCheckbox({
+  checked,
+  indeterminate,
+  onChange,
+  ariaLabel,
+}: {
+  checked: boolean;
+  indeterminate?: boolean;
+  onChange: () => void;
+  ariaLabel: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = !!indeterminate && !checked;
+  }, [indeterminate, checked]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      onClick={(e) => e.stopPropagation()}
+      onChange={onChange}
+      aria-label={ariaLabel}
+      className="size-4 cursor-pointer"
+    />
+  );
+}
+
 export default function CreativesPage() {
   const { auth, can } = useAuth();
 
@@ -347,6 +383,13 @@ export default function CreativesPage() {
   const restoreApi = useApiCall<Creative>();
   const duplicateApi = useApiCall<Creative>();
   const offersApi = useApiCall<OfferListResponse>();
+  const idsApi = useApiCall<{ ids: number[]; truncated: boolean }>();
+  const bulkUpdateApi = useApiCall<{ updated: number }>();
+  const bulkScoreApi = useApiCall<{
+    scored: number;
+    skipped: number;
+    failed: number;
+  }>();
 
   const [data, setData] = useState<Creative[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -420,6 +463,134 @@ export default function CreativesPage() {
   const canUpdate = can("creatives.update");
   const canArchive = can("creatives.archive");
   const canRestore = can("creatives.restore");
+  const canScore = can("spam.score");
+  // The selection column + bulk bar appear when the user can do at least
+  // one bulk action.
+  const canBulkAny = canUpdate || canArchive || canRestore || canScore;
+
+  // ---- Bulk selection ----
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkEditOpen, setBulkEditOpen] = useState(false);
+  const [confirmScoreOpen, setConfirmScoreOpen] = useState(false);
+  // Tracks chunked spam-scoring progress; null when idle.
+  const [scoreProgress, setScoreProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+
+  // Clear the selection whenever the filter set changes — the visible
+  // population is different, so a stale cross-page selection would be
+  // confusing. Page changes do NOT clear it, so manual cross-page
+  // selection keeps working.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [
+    filters.search,
+    filters.offer_id,
+    filters.qualities,
+    filters.sequences,
+    filters.showArchived,
+  ]);
+
+  function toggleSelected(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // Build the filter-only query string (no pagination/sort) for the
+  // "all matching ids" endpoint — mirrors the list fetch's filter params.
+  const buildFilterParams = useCallback(() => {
+    const sp = new URLSearchParams();
+    if (filters.search) sp.set("search", filters.search);
+    if (filters.offer_id !== null) sp.set("offer_id", String(filters.offer_id));
+    if (filters.qualities.length > 0)
+      sp.set("quality", filters.qualities.join(","));
+    if (filters.sequences.length > 0)
+      sp.set("sequence_placement", filters.sequences.join(","));
+    if (filters.showArchived) sp.set("showArchived", "true");
+    return sp;
+  }, [
+    filters.search,
+    filters.offer_id,
+    filters.qualities,
+    filters.sequences,
+    filters.showArchived,
+  ]);
+
+  async function handleSelectAllMatching() {
+    const sp = buildFilterParams();
+    const r = await idsApi.execute(`/api/creatives/ids?${sp.toString()}`);
+    if (!r.ok) {
+      toastApiError(r, "Couldn't select all matching creatives");
+      return;
+    }
+    setSelectedIds(new Set(r.data.ids));
+    if (r.data.truncated) {
+      toast.warning(
+        `Selected the first ${r.data.ids.length} matching creatives (cap reached)`,
+      );
+    }
+  }
+
+  async function handleBulkUpdate(payload: BulkEditPayload) {
+    if (selectedIds.size === 0) return;
+    const r = await bulkUpdateApi.execute("/api/creatives/bulk-update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        creative_ids: Array.from(selectedIds),
+        ...payload,
+      }),
+    });
+    if (!r.ok) {
+      toastApiError(r, "Couldn't apply bulk changes");
+      return;
+    }
+    const n = r.data.updated;
+    toast.success(`${n} creative${n === 1 ? "" : "s"} updated`);
+    setBulkEditOpen(false);
+    setSelectedIds(new Set());
+    refetch();
+  }
+
+  // Score the selected creatives in client-side chunks so each request
+  // stays short and we can show progress. The server skips already-scored
+  // rows; counts are summed across chunks.
+  async function handleBulkScore() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const CHUNK = 50;
+    let scored = 0;
+    let skipped = 0;
+    let failed = 0;
+    setScoreProgress({ done: 0, total: ids.length });
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const r = await bulkScoreApi.execute("/api/creatives/bulk-score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ creative_ids: chunk }),
+      });
+      if (!r.ok) {
+        setScoreProgress(null);
+        toastApiError(r, "Spam check failed");
+        return;
+      }
+      scored += r.data.scored;
+      skipped += r.data.skipped;
+      failed += r.data.failed;
+      setScoreProgress({ done: Math.min(i + CHUNK, ids.length), total: ids.length });
+    }
+    setScoreProgress(null);
+    toast.success(
+      `Spam check complete — ${scored} scored, ${skipped} skipped${failed > 0 ? `, ${failed} failed` : ""}`,
+    );
+    refetch();
+  }
 
   async function handleBulkCreate(values: BulkCreativeFormSubmit) {
     const result = await bulkCreateApi.execute("/api/creatives", {
@@ -492,8 +663,43 @@ export default function CreativesPage() {
     setEditing(result.data);
   }
 
-  const columns = useMemo<ColumnDef<Creative>[]>(
-    () => [
+  const columns = useMemo<ColumnDef<Creative>[]>(() => {
+    const pageIds = data.map((d) => d.id);
+    const allPageSelected =
+      pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
+    const somePageSelected = pageIds.some((id) => selectedIds.has(id));
+    function toggleSelectPage() {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (allPageSelected) pageIds.forEach((id) => next.delete(id));
+        else pageIds.forEach((id) => next.add(id));
+        return next;
+      });
+    }
+    const selectColumn: ColumnDef<Creative> = {
+      id: "select",
+      header: () => (
+        <TriStateCheckbox
+          checked={allPageSelected}
+          indeterminate={somePageSelected}
+          onChange={toggleSelectPage}
+          ariaLabel="Select all on this page"
+        />
+      ),
+      enableSorting: false,
+      cell: ({ row }) => (
+        <input
+          type="checkbox"
+          checked={selectedIds.has(row.original.id)}
+          onClick={(e) => e.stopPropagation()}
+          onChange={() => toggleSelected(row.original.id)}
+          aria-label="Select row"
+          className="size-4 cursor-pointer"
+        />
+      ),
+    };
+    return [
+      ...(canBulkAny ? [selectColumn] : []),
       {
         id: "slug",
         header: "Slug",
@@ -649,9 +855,16 @@ export default function CreativesPage() {
           );
         },
       },
-    ],
-    [canUpdate, canArchive, canRestore, canCreate],
-  );
+    ];
+  }, [
+    canUpdate,
+    canArchive,
+    canRestore,
+    canCreate,
+    canBulkAny,
+    data,
+    selectedIds,
+  ]);
 
   const isAuthLoading = !auth;
   const confirmBusy = archiveApi.isLoading || restoreApi.isLoading;
@@ -788,6 +1001,61 @@ export default function CreativesPage() {
           </Button>
         ) : null}
       </div>
+
+      {canBulkAny && selectedIds.size > 0 ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>
+              <span className="font-medium">{selectedIds.size}</span> selected
+            </span>
+            {selectedIds.size < totalCount ? (
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0"
+                onClick={handleSelectAllMatching}
+                disabled={idsApi.isLoading || !!scoreProgress}
+              >
+                Select all {totalCount} matching
+              </Button>
+            ) : null}
+            {scoreProgress ? (
+              <span className="text-muted-foreground">
+                Scoring {scoreProgress.done}/{scoreProgress.total}…
+              </span>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSelectedIds(new Set())}
+              disabled={!!scoreProgress}
+            >
+              Clear
+            </Button>
+            {canUpdate || canArchive || canRestore ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setBulkEditOpen(true)}
+                disabled={!!scoreProgress}
+              >
+                <ListChecks className="size-4" aria-hidden /> Bulk edit
+              </Button>
+            ) : null}
+            {canScore ? (
+              <Button
+                size="sm"
+                onClick={() => setConfirmScoreOpen(true)}
+                disabled={!!scoreProgress}
+              >
+                <ScanSearch className="size-4" aria-hidden /> Run spam check
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {fetchError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">
@@ -954,6 +1222,57 @@ export default function CreativesPage() {
               disabled={confirmBusy}
             >
               {confirming?.kind === "archive" ? "Archive" : "Restore"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <FormDialog
+        open={bulkEditOpen}
+        onOpenChange={setBulkEditOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>Bulk edit creatives</DialogTitle>
+          <DialogDescription>
+            Apply changes to the selected creatives at once.
+          </DialogDescription>
+        </DialogHeader>
+        <BulkEditForm
+          selectedCount={selectedIds.size}
+          offers={offers
+            .filter((o) => o.status === "active")
+            .map((o) => ({ id: o.id, name: o.name, color: o.color }))}
+          canEditMeta={canUpdate}
+          canArchive={canArchive}
+          canRestore={canRestore}
+          onSubmit={handleBulkUpdate}
+          onCancel={() => setBulkEditOpen(false)}
+          isSubmitting={bulkUpdateApi.isLoading}
+        />
+      </FormDialog>
+
+      <AlertDialog open={confirmScoreOpen} onOpenChange={setConfirmScoreOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Run spam check?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This scores {selectedIds.size} selected creative
+              {selectedIds.size === 1 ? "" : "s"}. Already-scored creatives are
+              skipped. Scoring calls the classifier service and may take a
+              moment for large selections.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                setConfirmScoreOpen(false);
+                void handleBulkScore();
+              }}
+            >
+              Run spam check
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

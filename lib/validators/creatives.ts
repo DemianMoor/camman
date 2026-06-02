@@ -107,10 +107,61 @@ export const creativeBulkCreateSchema = z
     { message: OFFER_REQUIREMENT_MSG, path: ["offer_ids"] },
   );
 
+// Bulk edit. Applies one set of changes to many existing creatives.
+// Every mutation field is optional; the refine guarantees at least one is
+// present. `add_offer_ids` is ADDITIVE — it appends to each creative's
+// existing offer set (union), never replacing. `status` doubles as a bulk
+// archive/restore (the route maps it to the archive/restore permissions).
+const BULK_EDIT_MAX_IDS = 5000;
+const BULK_EDIT_MAX_OFFERS = 200;
+
+export const creativeBulkUpdateSchema = z
+  .object({
+    creative_ids: z
+      .array(z.number().int().positive())
+      .min(1, "Select at least one creative")
+      .max(BULK_EDIT_MAX_IDS, `At most ${BULK_EDIT_MAX_IDS} creatives per request`),
+    quality: z.enum(QUALITY_VALUES).optional(),
+    sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES).optional(),
+    status: z.enum(CREATIVE_STATUSES).optional(),
+    add_offer_ids: z
+      .array(z.number().int().positive())
+      .max(BULK_EDIT_MAX_OFFERS)
+      .optional(),
+  })
+  .refine(
+    (d) =>
+      d.quality !== undefined ||
+      d.sequence_placement !== undefined ||
+      d.status !== undefined ||
+      (d.add_offer_ids !== undefined && d.add_offer_ids.length > 0),
+    { message: "At least one change must be provided" },
+  );
+
+// Bulk spam score. The route caps each request to a small batch and the
+// client chunks larger selections, so the per-request id cap is low to keep
+// each request well under the serverless function timeout.
+const BULK_SCORE_MAX_IDS = 100;
+
+export const creativeBulkScoreSchema = z.object({
+  creative_ids: z
+    .array(z.number().int().positive())
+    .min(1, "Select at least one creative")
+    .max(BULK_SCORE_MAX_IDS, `At most ${BULK_SCORE_MAX_IDS} creatives per request`),
+  force: z.boolean().optional(),
+});
+
 export type CreativeCreateInput = z.infer<typeof creativeCreateSchema>;
 export type CreativeUpdateInput = z.infer<typeof creativeUpdateSchema>;
 export type CreativeBulkCreateInput = z.infer<
   typeof creativeBulkCreateSchema
 >;
+export type CreativeBulkUpdateInput = z.infer<
+  typeof creativeBulkUpdateSchema
+>;
+export type CreativeBulkScoreInput = z.infer<
+  typeof creativeBulkScoreSchema
+>;
 
 export const BULK_CREATE_MAX = BULK_MAX_ROWS;
+export const BULK_SCORE_MAX = BULK_SCORE_MAX_IDS;

@@ -88,6 +88,7 @@ const QUALITY_LABEL: Record<CreativeQuality, string> = {
 };
 
 const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
+  warmup: "WarmUp",
   "1st": "1st",
   "2nd": "2nd",
   "3rd": "3rd",

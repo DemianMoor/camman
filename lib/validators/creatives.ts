@@ -17,6 +17,7 @@ export const QUALITY_VALUES = [
 export type CreativeQuality = (typeof QUALITY_VALUES)[number];
 
 export const SEQUENCE_PLACEMENT_VALUES = [
+  "warmup",
   "1st",
   "2nd",
   "3rd",

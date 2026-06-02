@@ -859,7 +859,7 @@ export const creatives = pgTable(
     ),
     check(
       "creatives_sequence_placement_check",
-      sql`${table.sequence_placement} IN ('1st', '2nd', '3rd', 'any', 'unknown')`,
+      sql`${table.sequence_placement} IN ('warmup', '1st', '2nd', '3rd', 'any', 'unknown')`,
     ),
     check(
       "creatives_spam_score_check",

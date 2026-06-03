@@ -49,6 +49,7 @@ import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { isEntityAvailable } from "@/lib/feature-flags";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
+import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   appendParamName,
   appendRawValue,
@@ -472,15 +473,17 @@ export function StageForm({
     [creatives, watchedCreativeId],
   );
   const brandName = campaign.brand?.name ?? "";
-  // When short_url is present it lands on its own line between the
-  // creative text and the stop text. full_url is tracking metadata and
-  // never enters the SMS.
+  // Shared composer (lib/sends/stage-sms.ts) — the SAME builder the send
+  // pipeline uses, so the preview and the sent body can never diverge. When a
+  // link is present it lands on its own line between the creative text and the
+  // stop text; full_url is tracking metadata and never enters the SMS.
   const trimmedShortUrl = (watchedShortUrl ?? "").trim();
-  const assembledSms = selectedCreative
-    ? trimmedShortUrl.length > 0
-      ? `${brandName}: ${selectedCreative.text}\n${trimmedShortUrl}\n${watchedStopText}`
-      : `${brandName}: ${selectedCreative.text}\n${watchedStopText}`
-    : "";
+  const assembledSms = buildStageSms({
+    brandName,
+    creativeText: selectedCreative?.text,
+    linkUrl: trimmedShortUrl,
+    stopText: watchedStopText,
+  });
   const segments = useMemo(
     () => calculateSmsSegments(assembledSms),
     [assembledSms],

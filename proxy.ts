@@ -59,6 +59,8 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|_next/data|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|woff|woff2|ttf)$).*)",
+    // `r/` is excluded so the public short-link redirect (app/r/[code]) never
+    // pays a Supabase auth round-trip — it's high-volume and unauthenticated.
+    "/((?!_next/static|_next/image|_next/data|favicon.ico|r/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|woff|woff2|ttf)$).*)",
   ],
 };

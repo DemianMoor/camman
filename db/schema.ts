@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
+  bigserial,
   boolean,
   check,
   date,
@@ -15,6 +17,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -100,7 +103,13 @@ export const brands = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    // LEGACY: free-text field, no longer surfaced in the UI and read by nothing
+    // functional. The brand↔short-domain mapping lives in short_domains (what
+    // mint reads). Kept to avoid data loss; safe to drop in a later migration.
     short_link_base: text("short_link_base"),
+    // Brand main website — target for a future bare-root redirect (short domain
+    // hit at "/"). Full URL; nullable.
+    website: text("website"),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -224,6 +233,10 @@ export const sms_providers = pgTable(
       .notNull()
       .default(false),
     short_link_example: text("short_link_example"),
+    // True when this provider can be sent through via API (TextHub). A stage
+    // can only do a tracked API send when its provider has this on AND a
+    // provider_credentials row — enforced at send kickoff (see lib/sends).
+    supports_api_send: boolean("supports_api_send").notNull().default(false),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -240,6 +253,49 @@ export const sms_providers = pgTable(
     ),
   ],
 );
+
+// Per-provider API credentials (TextHub api_key). One key per provider.
+// ⚠️ api_key is PLAINTEXT AT REST — a conscious v1 tradeoff (see
+// docs/security-notes.md). Protected by deny-by-default RLS (no policies — only
+// the privileged server connection touches it) + app-layer permission checks;
+// never sent to the browser. Encryption-at-rest / secrets manager is later.
+export const provider_credentials = pgTable(
+  "provider_credentials",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    provider_id: integer("provider_id")
+      .notNull()
+      .references(() => sms_providers.id, { onDelete: "cascade" }),
+    // Brand-scoped key. NULL = provider-wide default (used when a brand has no
+    // key of its own). Send-time resolution prefers the brand key, then default.
+    brand_id: integer("brand_id").references(() => brands.id, {
+      onDelete: "cascade",
+    }),
+    api_key: text("api_key").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("provider_credentials_org_id_idx").on(table.org_id),
+    index("provider_credentials_brand_id_idx").on(table.brand_id),
+    // One key per (provider, brand); a separate partial unique enforces at most
+    // one provider-default (brand_id IS NULL) — see migration 0051.
+    uniqueIndex("provider_credentials_provider_brand_uniq").on(
+      table.provider_id,
+      table.brand_id,
+    ),
+  ],
+);
+
+export type ProviderCredential = typeof provider_credentials.$inferSelect;
+export type NewProviderCredential = typeof provider_credentials.$inferInsert;
 
 export type SmsProvider = typeof sms_providers.$inferSelect;
 export type NewSmsProvider = typeof sms_providers.$inferInsert;
@@ -985,6 +1041,15 @@ export const campaigns = pgTable(
     // first of the day). NULL until both brand_id and offer_id are set.
     // Once non-NULL it never changes — see lib/tracking-id.ts.
     tracking_id: text("tracking_id"),
+    // Which link the send path reads at send time (see CLAUDE.md / the link
+    // shortener module). 'manual' (default) → the operator-pasted
+    // campaign_stages.short_url/full_url, exactly as before. 'tracked' → the
+    // send path mints a unique per-recipient link via lib/links/mint-link.ts
+    // instead. Switching modes never touches the manual short_url/full_url
+    // fields, so toggling back restores the original behavior unchanged.
+    // A campaign may only be set to 'tracked' when its brand has an active
+    // short_domains row (guarded in the API). Per-campaign, not per-stage.
+    link_mode: text("link_mode").notNull().default("manual"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -1000,6 +1065,10 @@ export const campaigns = pgTable(
     check(
       "campaigns_status_check",
       sql`${table.status} IN ('draft', 'active', 'paused', 'completed', 'archived')`,
+    ),
+    check(
+      "campaigns_link_mode_check",
+      sql`${table.link_mode} IN ('manual', 'tracked')`,
     ),
   ],
 );
@@ -1056,6 +1125,10 @@ export const campaign_stages = pgTable(
     include_no_status: boolean("include_no_status").notNull().default(true),
     scheduled_at: timestamp("scheduled_at", { withTimezone: true }),
     sent_at: timestamp("sent_at", { withTimezone: true }),
+    // Deliberate per-stage gate the real-send drain checks before sending.
+    // Default false — a stage's materialized batch is never drained until
+    // explicitly approved. One of three gates (also SEND_ENABLED + CRON_SECRET).
+    send_approved: boolean("send_approved").notNull().default(false),
     status_changed_at: timestamp("status_changed_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1432,3 +1505,254 @@ export const spam_scores = pgTable(
 
 export type SpamScore = typeof spam_scores.$inferSelect;
 export type NewSpamScore = typeof spam_scores.$inferInsert;
+
+// ============ Link shortener + click tracker ============
+// First piece of the TextHub SMS integration. In 'tracked' campaigns the
+// send path mints a unique short link per recipient (one per "message",
+// keyed by a caller-supplied send_token); a click resolves 1:1 to
+// (contact, campaign, stage, creative, destination) for attribution.
+// Bot/prefetch clicks are classified, never deleted — filtered at report
+// time. See db/migrations/0048_link_shortener.sql and lib/links/mint-link.ts.
+
+// A brand's short-link host(s), e.g. "go.brandx.co". A campaign can only be
+// switched to link_mode='tracked' when its brand has an active row here.
+export const short_domains = pgTable(
+  "short_domains",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    brand_id: integer("brand_id")
+      .notNull()
+      .references(() => brands.id, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("short_domains_org_id_domain_unique").on(table.org_id, table.domain),
+    index("short_domains_org_id_idx").on(table.org_id),
+    // One short domain per brand (migration 0052).
+    uniqueIndex("short_domains_brand_id_uniq").on(table.brand_id),
+    check(
+      "short_domains_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type ShortDomain = typeof short_domains.$inferSelect;
+export type NewShortDomain = typeof short_domains.$inferInsert;
+
+// Deduped destination URLs. Many links point at the same final URL, so the
+// full URL is stored once (keyed by a hash of its normalized form) and
+// referenced by id from `links`.
+export const link_destinations = pgTable(
+  "link_destinations",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    // SHA-256 of the normalized URL — the dedup key.
+    url_hash: text("url_hash").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("link_destinations_org_id_url_hash_unique").on(
+      table.org_id,
+      table.url_hash,
+    ),
+    index("link_destinations_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type LinkDestination = typeof link_destinations.$inferSelect;
+export type NewLinkDestination = typeof link_destinations.$inferInsert;
+
+// One minted short link. Skinny by design — the high-volume table. `code` is
+// the public short-code (globally unique: the redirect resolves by code
+// alone, with no org context on the URL). Idempotency is per "message":
+// (stage_id, contact_id, send_token) is unique, so a retry of the same send
+// reuses the link while each genuinely new message gets a fresh code. The
+// campaign/stage tracking IDs are denormalized here and NOT NULL because a
+// link is only ever minted once those exist (a missing tracking ID means
+// "the stage isn't ready to send yet").
+export const links = pgTable(
+  "links",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    code: text("code").notNull(),
+    short_domain_id: integer("short_domain_id")
+      .notNull()
+      .references(() => short_domains.id, { onDelete: "restrict" }),
+    destination_id: integer("destination_id")
+      .notNull()
+      .references(() => link_destinations.id, { onDelete: "restrict" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    // Present at mint time (the stage tracking_id requires a creative), but
+    // SET NULL on creative deletion so the link — and its click history —
+    // survive for attribution.
+    creative_id: integer("creative_id").references(() => creatives.id, {
+      onDelete: "set null",
+    }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    // Caller-supplied idempotency token identifying one outbound message.
+    send_token: text("send_token").notNull(),
+    campaign_tracking_id: text("campaign_tracking_id").notNull(),
+    stage_tracking_id: text("stage_tracking_id").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Global, not per-org: the public redirect has only the code to go on.
+    unique("links_code_unique").on(table.code),
+    // "One link per message" — retries reuse, new messages mint fresh.
+    unique("links_stage_contact_send_token_unique").on(
+      table.stage_id,
+      table.contact_id,
+      table.send_token,
+    ),
+    index("links_org_id_idx").on(table.org_id),
+    index("links_campaign_id_idx").on(table.campaign_id),
+    index("links_stage_id_idx").on(table.stage_id),
+    index("links_contact_id_idx").on(table.contact_id),
+    index("links_destination_id_idx").on(table.destination_id),
+  ],
+);
+
+export type Link = typeof links.$inferSelect;
+export type NewLink = typeof links.$inferInsert;
+
+// Click log. The redirect (Phase 2) inserts a raw row with a first-pass
+// `classification` (human/bot/prefetch/unknown from UA + headers). The Phase-3
+// scoring job (/api/clicks/score-pending) enriches it: asn/asn_org/country
+// from a MaxMind lookup, is_datacenter from a hosting-ASN list, and a
+// bot_score + final classification + bot_reasons. Append-only; classify-don't-
+// delete — raw rows are never mutated to "clean" data, reports filter on the
+// score. scored_at IS NULL marks an unscored row (the authoritative
+// scored-state flag); `classification` holds the inline first-pass verdict on
+// insert and is overwritten with the refined verdict by the scoring job.
+export const clicks = pgTable(
+  "clicks",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    link_id: bigint("link_id", { mode: "number" })
+      .notNull()
+      .references(() => links.id, { onDelete: "cascade" }),
+    clicked_at: timestamp("clicked_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    ip: text("ip"),
+    user_agent: text("user_agent"),
+    referer: text("referer"),
+    classification: text("classification").notNull().default("unknown"),
+    // Enrichment + scoring (populated by the scoring job; NULL/0 until scored).
+    asn: integer("asn"),
+    asn_org: text("asn_org"),
+    country: text("country"),
+    // NULL = not yet determined. Derived from the hosting-ASN list, not MaxMind
+    // (GeoLite2 has no hosting flag).
+    is_datacenter: boolean("is_datacenter"),
+    // DEFERRED: no send pipeline records a per-message send time yet. Stays
+    // NULL; ≈ clicked_at - links.created_at once minting runs at send time.
+    seconds_since_send: integer("seconds_since_send"),
+    bot_score: integer("bot_score").notNull().default(0),
+    // Array of signal strings that fired, recorded on EVERY scored row
+    // (including human) so near-misses are visible when retuning thresholds.
+    bot_reasons: jsonb("bot_reasons")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    // When the row was last scored. NULL = never scored.
+    scored_at: timestamp("scored_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("clicks_link_id_idx").on(table.link_id),
+    index("clicks_org_id_idx").on(table.org_id),
+    index("clicks_clicked_at_idx").on(table.clicked_at),
+    check(
+      "clicks_classification_check",
+      sql`${table.classification} IN ('human', 'suspect', 'prefetch', 'bot', 'unknown')`,
+    ),
+  ],
+);
+
+export type Click = typeof clicks.$inferSelect;
+export type NewClick = typeof clicks.$inferInsert;
+
+// ============ TextHub send pipeline ============
+// One row per recipient-message. `id` IS the send_token fed to mintLink()'s
+// (stage_id, contact_id, send_token) idempotency key: a retry of a row reuses
+// its link; a genuine resend is a new run with new rows/tokens. No
+// (stage_id, contact_id) unique constraint, by design. rendered_text is frozen
+// at materialization so the sent body can't drift from the preview. Kickoff
+// (materialize + mint) and the Step-3 owner-gated drain both operate here;
+// campaign_stages.status/sent_at are intentionally left untouched.
+export const stage_sends = pgTable(
+  "stage_sends",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    phone: text("phone").notNull(),
+    // bigint: links.id is bigserial. NULL in manual mode (no minted link).
+    link_id: bigint("link_id", { mode: "number" }).references(() => links.id, {
+      onDelete: "set null",
+    }),
+    rendered_text: text("rendered_text").notNull(),
+    status: text("status").notNull().default("pending"),
+    // TextHub's returned message id (set on send) — handle for later DLR.
+    texthub_message_id: text("texthub_message_id"),
+    attempts: integer("attempts").notNull().default(0),
+    last_error: text("last_error"),
+    lead_id: text("lead_id"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    sent_at: timestamp("sent_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("stage_sends_org_id_idx").on(table.org_id),
+    index("stage_sends_stage_id_idx").on(table.stage_id),
+    index("stage_sends_link_id_idx").on(table.link_id),
+    check(
+      "stage_sends_status_check",
+      sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected')`,
+    ),
+  ],
+);
+
+export type StageSend = typeof stage_sends.$inferSelect;
+export type NewStageSend = typeof stage_sends.$inferInsert;

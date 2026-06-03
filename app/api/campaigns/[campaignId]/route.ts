@@ -18,6 +18,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
 import {
   campaignUpdateSchema,
@@ -94,6 +95,7 @@ export async function GET(
       previous_status: campaigns.previous_status,
       status_changed_at: campaigns.status_changed_at,
       tracking_id: campaigns.tracking_id,
+      link_mode: campaigns.link_mode,
       archived_at: campaigns.archived_at,
       created_at: campaigns.created_at,
       brand: { id: brands.id, name: brands.name, color: brands.color },
@@ -289,6 +291,33 @@ export async function PATCH(
         "Reassigning a campaign requires the campaigns.reassign permission",
         API_ERROR_CODES.FORBIDDEN,
         { permission: "campaigns.reassign" },
+      );
+    }
+  }
+
+  // Guard the link_mode toggle: a campaign may only be set to 'tracked' when
+  // its (resolved) brand has an active short_domain. Switching to 'manual' is
+  // always allowed. Setting the mode never touches the manual short_url/
+  // full_url fields — only which field the send path reads.
+  if (input.link_mode === "tracked") {
+    const resolvedBrandId =
+      input.brand_id !== undefined
+        ? input.brand_id ?? null
+        : current[0].brand_id;
+    if (resolvedBrandId == null) {
+      return apiError(
+        400,
+        "Set a brand before enabling tracked links",
+        API_ERROR_CODES.VALIDATION,
+        { reason: "tracked_requires_brand" },
+      );
+    }
+    if (!(await brandHasActiveShortDomain(orgId, resolvedBrandId))) {
+      return apiError(
+        400,
+        "Add an active short domain for this brand before enabling tracked links",
+        API_ERROR_CODES.VALIDATION,
+        { reason: "tracked_requires_short_domain" },
       );
     }
   }

@@ -52,7 +52,8 @@ type Brand = {
   id: number;
   brand_id: string;
   name: string;
-  short_link_base: string | null;
+  short_domain: string | null;
+  website: string | null;
   avatar_url: string | null;
   color: string | null;
   status: "active" | "archived";
@@ -274,12 +275,12 @@ export default function BrandsPage() {
         enableSorting: true,
       },
       {
-        id: "short_link_base",
-        header: "Short link base",
+        id: "short_domain",
+        header: "Short domain",
         cell: ({ row }) =>
-          row.original.short_link_base ? (
+          row.original.short_domain ? (
             <span className="font-mono text-xs">
-              {row.original.short_link_base}
+              {row.original.short_domain}
             </span>
           ) : (
             <span className="text-muted-foreground">—</span>
@@ -534,7 +535,8 @@ export default function BrandsPage() {
             initialValues={{
               name: editing.name,
               brand_id: editing.brand_id,
-              short_link_base: editing.short_link_base ?? "",
+              short_domain: editing.short_domain ?? "",
+              website: editing.website ?? "",
               avatar_url: editing.avatar_url ?? "",
               color: editing.color ?? "",
             }}

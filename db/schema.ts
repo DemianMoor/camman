@@ -17,6 +17,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -261,15 +262,29 @@ export const provider_credentials = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     provider_id: integer("provider_id")
       .notNull()
-      .unique()
       .references(() => sms_providers.id, { onDelete: "cascade" }),
+    // Brand-scoped key. NULL = provider-wide default (used when a brand has no
+    // key of its own). Send-time resolution prefers the brand key, then default.
+    brand_id: integer("brand_id").references(() => brands.id, {
+      onDelete: "cascade",
+    }),
     api_key: text("api_key").notNull(),
     created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
   (table) => [
     index("provider_credentials_org_id_idx").on(table.org_id),
+    index("provider_credentials_brand_id_idx").on(table.brand_id),
+    // One key per (provider, brand); a separate partial unique enforces at most
+    // one provider-default (brand_id IS NULL) — see migration 0051.
+    uniqueIndex("provider_credentials_provider_brand_uniq").on(
+      table.provider_id,
+      table.brand_id,
+    ),
   ],
 );
 

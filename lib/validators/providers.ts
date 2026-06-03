@@ -17,6 +17,9 @@ export const providerCreateSchema = z.object({
     ),
   short_link_supported: z.boolean().optional().default(false),
   short_link_example: z.string().trim().max(200).optional(),
+  // Whether this provider can be sent through via API (TextHub). Toggled in the
+  // provider edit UI; a tracked send requires this on + a resolvable credential.
+  supports_api_send: z.boolean().optional().default(false),
   avatar_url: z
     .union([z.string().url("avatar_url must be a valid URL"), z.literal("")])
     .optional(),
@@ -39,3 +42,15 @@ export const providerUpdateSchema = providerCreateSchema
 export type ProviderCreateInput = z.infer<typeof providerCreateSchema>;
 export type ProviderUpdateInput = z.infer<typeof providerUpdateSchema>;
 export type ProviderFormValues = z.input<typeof providerCreateSchema>;
+
+// Set/rotate a provider's API key. brand_id null = the provider-wide default
+// key; a positive id scopes the key to that brand. The key itself is never
+// echoed back to the client (responses are masked).
+export const providerCredentialSetSchema = z.object({
+  brand_id: z.number().int().positive().nullable().optional().default(null),
+  api_key: z.string().trim().min(1, "API key is required").max(500),
+});
+
+export type ProviderCredentialSetInput = z.infer<
+  typeof providerCredentialSetSchema
+>;

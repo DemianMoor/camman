@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { mintLink } from "@/lib/links/mint-link";
+import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import { buildStageFullUrl } from "@/lib/stage-url";
@@ -156,11 +157,14 @@ export async function kickoffStageSend(
     return { ok: false, reason: "provider_not_api_capable" };
   }
 
-  const creds = (await tx.execute(sql`
-    SELECT 1 AS ok FROM provider_credentials
-    WHERE provider_id = ${row.sms_provider_id} AND org_id = ${orgId} LIMIT 1
-  `)) as unknown as { ok: number }[];
-  if (!creds[0]) return { ok: false, reason: "no_credentials" };
+  // Brand-aware: require a key resolvable for (provider, this campaign's brand)
+  // or the provider-default. Matches what the Step-3 drain will use to send.
+  const hasCred = await hasResolvableCredential(tx, {
+    orgId,
+    providerId: row.sms_provider_id,
+    brandId: row.brand_id,
+  });
+  if (!hasCred) return { ok: false, reason: "no_credentials" };
 
   // Deterministic short-domain pick: active, brand-scoped, stable order so a
   // brand always mints under the same domain. (No is_primary column exists; if

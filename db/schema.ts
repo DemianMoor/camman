@@ -1125,6 +1125,10 @@ export const campaign_stages = pgTable(
     include_no_status: boolean("include_no_status").notNull().default(true),
     scheduled_at: timestamp("scheduled_at", { withTimezone: true }),
     sent_at: timestamp("sent_at", { withTimezone: true }),
+    // Deliberate per-stage gate the real-send drain checks before sending.
+    // Default false — a stage's materialized batch is never drained until
+    // explicitly approved. One of three gates (also SEND_ENABLED + CRON_SECRET).
+    send_approved: boolean("send_approved").notNull().default(false),
     status_changed_at: timestamp("status_changed_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

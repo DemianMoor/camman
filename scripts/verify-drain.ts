@@ -6,7 +6,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { runStageDrain, type Sender } from "@/lib/sends/drain";
+import { decideDrainAuth, runStageDrain, type Sender } from "@/lib/sends/drain";
 
 // Verifies the real-send drain WITHOUT a real TextHub call (injected sender)
 // and WITHOUT persisting (rolled-back tx): both gates (send_approved +
@@ -39,6 +39,25 @@ const failSender: Sender = async () => ({
 });
 
 async function main() {
+  // Dual-auth gate (pure) — confirm there's NO gap between the cron path and
+  // the session path: a request with neither a valid Bearer nor a privileged
+  // session must be rejected.
+  console.log("Drain dual-auth (no gap):");
+  assert(
+    decideDrainAuth({ bearerMatches: true, sessionRole: null }).allow,
+    "valid CRON_SECRET Bearer → allowed (cron)",
+  );
+  const noAuth = decideDrainAuth({ bearerMatches: false, sessionRole: null });
+  assert(!noAuth.allow && noAuth.status === 401, "no Bearer + no session → 401 (no gap)");
+  const operator = decideDrainAuth({ bearerMatches: false, sessionRole: "operator" });
+  assert(!operator.allow && operator.status === 403, "operator session (no campaigns.drain) → 403");
+  assert(
+    decideDrainAuth({ bearerMatches: false, sessionRole: "manager" }).allow,
+    "manager session → allowed (session)",
+  );
+  const viewer = decideDrainAuth({ bearerMatches: false, sessionRole: "viewer" });
+  assert(!viewer.allow && viewer.status === 403, "viewer session → 403");
+
   const dbUrl = process.env.DATABASE_URL;
   if (!dbUrl) throw new Error("DATABASE_URL is not set");
   const pg = postgres(dbUrl, { prepare: false, max: 1 });

@@ -1,10 +1,31 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { can, type Role } from "@/lib/permissions";
 import { resolveProviderApiKey } from "@/lib/sends/provider-credential";
 import { sendSms as realSendSms, type SendSmsResult } from "@/lib/sends/texthub";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// Dual-auth decision for the drain endpoint, kept PURE so the "no gap between
+// the two paths" guarantee is testable. Either a matching CRON_SECRET Bearer
+// (programmatic/cron) OR an authenticated session with manager+ (campaigns.drain)
+// is accepted; anything else is rejected. A request with NEITHER a valid Bearer
+// NOR a session must reject (401), and an authenticated-but-under-privileged
+// session must reject (403) — never fall through to allow.
+export type DrainAuthDecision =
+  | { allow: true; via: "cron" | "session" }
+  | { allow: false; status: 401 | 403 };
+
+export function decideDrainAuth(opts: {
+  bearerMatches: boolean;
+  sessionRole: Role | null;
+}): DrainAuthDecision {
+  if (opts.bearerMatches) return { allow: true, via: "cron" };
+  if (!opts.sessionRole) return { allow: false, status: 401 };
+  if (!can(opts.sessionRole, "campaigns.drain")) return { allow: false, status: 403 };
+  return { allow: true, via: "session" };
+}
 
 // Injectable so verify-drain can supply a deterministic fake instead of hitting
 // TextHub. Default = the real client.

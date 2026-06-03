@@ -96,6 +96,9 @@ export type Permission =
   | "campaigns.archive"
   | "campaigns.restore"
   | "campaigns.reassign"
+  // Triggers the real-send drain (actual SMS, irreversible, costs money).
+  // Manager+ only — a higher bar than the reversible approve/kickoff actions.
+  | "campaigns.drain"
   | "stages.view"
   | "stages.create"
   | "stages.update"
@@ -249,6 +252,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "creatives.restore",
   "campaigns.restore",
   "campaigns.reassign",
+  "campaigns.drain",
   "stages.restore",
   "registry.create",
   "registry.update",

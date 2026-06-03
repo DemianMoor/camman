@@ -27,6 +27,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
+import { StageSendPanel } from "@/components/campaigns/stage-send-panel";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
 import {
@@ -403,6 +404,7 @@ export default function CampaignDetailPage() {
   const [importStage, setImportStage] = useState<Stage | null>(null);
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
+  const [sendStage, setSendStage] = useState<Stage | null>(null);
 
   const canUpdateCampaign = can("campaigns.update");
   const canActivate = can("campaigns.activate");
@@ -867,6 +869,11 @@ export default function CampaignDetailPage() {
                       <Copy className="size-4" aria-hidden /> Duplicate
                     </DropdownMenuItem>
                   ) : null}
+                  {canActivate ? (
+                    <DropdownMenuItem onSelect={() => setSendStage(s)}>
+                      <Send className="size-4" aria-hidden /> Send…
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuSeparator />
                   {canImportResults ? (
                     <DropdownMenuItem onSelect={() => setImportStage(s)}>
@@ -920,6 +927,7 @@ export default function CampaignDetailPage() {
       canArchiveStage,
       canRestoreStage,
       canSendStage,
+      canActivate,
       canImportResults,
       canViewImports,
       selectedStageIds,
@@ -1482,6 +1490,25 @@ export default function CampaignDetailPage() {
       </section>
 
       {/* ============ Dialogs ============ */}
+      <FormDialog
+        open={sendStage !== null}
+        onOpenChange={(open) => {
+          if (!open) setSendStage(null);
+        }}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>Send — Stage {sendStage?.stage_number}</DialogTitle>
+          <DialogDescription>
+            Approve, materialize + mint links, then send. Sending is gated and
+            irreversible.
+          </DialogDescription>
+        </DialogHeader>
+        {sendStage ? (
+          <StageSendPanel campaignId={campaignId} stageId={sendStage.id} />
+        ) : null}
+      </FormDialog>
+
       <StatusChangeDialog
         transition={campaignTransition}
         campaignName={campaign.name}

@@ -1,13 +1,19 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { runStageDrain, type DrainRefusal } from "@/lib/sends/drain";
+import { requireApiMembership } from "@/lib/api/helpers";
+import { decideDrainAuth, runStageDrain, type DrainRefusal } from "@/lib/sends/drain";
 
 // Real-send drain for one stage. Owner-triggered, explicit (NOT an always-on
-// cron). Three gates: CRON_SECRET on this endpoint, the SEND_ENABLED env
-// kill-switch (re-checked between batches in runStageDrain), and the per-stage
-// send_approved flag. No SMS goes out unless all three pass + credentials
-// resolve.
+// cron). Three gates inside runStageDrain: SEND_ENABLED env kill-switch
+// (re-checked between batches) + the per-stage send_approved flag + resolvable
+// credentials.
+//
+// Auth is DUAL (gate only — drain logic is unchanged): either a matching
+// CRON_SECRET Bearer (programmatic/cron) OR an authenticated session with
+// manager+ (campaigns.drain). The browser uses its session cookie, so the
+// CRON_SECRET is never exposed to the client. A request with neither is
+// rejected (decideDrainAuth — see verify-drain's auth-gap test).
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
@@ -33,11 +39,22 @@ export async function POST(
   { params }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
   const secret = process.env.CRON_SECRET;
-  if (!secret) {
-    return NextResponse.json({ error: "CRON_SECRET is not configured" }, { status: 503 });
-  }
-  if (req.headers.get("authorization") !== `Bearer ${secret}`) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const bearerMatches = !!secret && req.headers.get("authorization") === `Bearer ${secret}`;
+
+  // Only resolve the session when the Bearer didn't already authorize (cron).
+  const sessionRole = bearerMatches
+    ? null
+    : await (async () => {
+        const auth = await requireApiMembership();
+        return "error" in auth ? null : auth.role;
+      })();
+
+  const decision = decideDrainAuth({ bearerMatches, sessionRole });
+  if (!decision.allow) {
+    return NextResponse.json(
+      { error: decision.status === 401 ? "Unauthorized" : "Forbidden" },
+      { status: decision.status },
+    );
   }
 
   const { stageId: sParam } = await params;

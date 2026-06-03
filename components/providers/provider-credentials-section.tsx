@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { KeyRound, Plus, RotateCw, Trash2 } from "lucide-react";
+import { KeyRound, Plus, RotateCw, SendHorizonal, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -57,6 +57,45 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
   const [formBrandId, setFormBrandId] = useState<string>("default"); // "default" | "<id>"
   const [apiKey, setApiKey] = useState("");
   const [deleting, setDeleting] = useState<Cred | null>(null);
+
+  // Test-send dialog: send one real SMS using a specific stored key to confirm
+  // it works + URLs in `text` arrive un-rewritten.
+  const testApi = useApiCall<{
+    ok: boolean;
+    to: string;
+    sentText: string;
+    messageId: string | null;
+    error: string | null;
+  }>();
+  const [testing, setTesting] = useState<Cred | null>(null);
+  const [testNumber, setTestNumber] = useState("");
+  const [testText, setTestText] = useState("");
+  const [testResult, setTestResult] = useState<
+    { ok: boolean; to: string; sentText: string; messageId: string | null; error: string | null } | null
+  >(null);
+
+  function openTest(c: Cred) {
+    setTesting(c);
+    setTestNumber("");
+    setTestText("CamMan self-test https://go.yourbrand.co/r/SELFTEST1 (please ignore)");
+    setTestResult(null);
+  }
+
+  async function handleTest() {
+    if (!testing || !testNumber.trim() || !testText.trim()) return;
+    const r = await testApi.execute(`/api/providers/${providerId}/credentials/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credential_id: testing.id, number: testNumber, text: testText }),
+    });
+    if (!r.ok) {
+      toastApiError(r, "Test send failed");
+      return;
+    }
+    setTestResult(r.data);
+    if (r.data.ok) toast.success("Test SMS sent — check the phone");
+    else toast.error("TextHub rejected the test send");
+  }
 
   useEffect(() => {
     let active = true;
@@ -187,6 +226,9 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
                     </td>
                     <td className="px-4 py-2">
                       <div className="flex justify-end gap-1">
+                        <Button variant="ghost" size="sm" onClick={() => openTest(c)}>
+                          <SendHorizonal className="size-4" aria-hidden /> Send test
+                        </Button>
                         <Button variant="ghost" size="sm" onClick={() => openRotate(c)}>
                           <RotateCw className="size-4" aria-hidden /> Rotate
                         </Button>
@@ -291,6 +333,107 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
               }
             >
               {dialog?.mode === "rotate" ? "Rotate key" : "Save key"}
+            </Button>
+          </div>
+        </div>
+      </FormDialog>
+
+      {/* Send test dialog */}
+      <FormDialog
+        open={testing !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setTesting(null);
+            setTestResult(null);
+          }
+        }}
+        className="sm:max-w-md"
+      >
+        <DialogHeader>
+          <DialogTitle>Send a test SMS</DialogTitle>
+          <DialogDescription>
+            Sends one real SMS using the{" "}
+            {testing?.brand_id === null ? "default" : testing?.brand_name ?? "brand"} key.
+            Put your own number and a link you&apos;ll recognize, then check the phone:
+            the URL should arrive exactly as typed (no rewriting/shortening).
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="test-number">
+              Recipient number
+              <span aria-hidden className="text-destructive ml-0.5">*</span>
+            </label>
+            <Input
+              id="test-number"
+              value={testNumber}
+              onChange={(e) => setTestNumber(e.target.value)}
+              placeholder="+1 415 555 0123"
+              autoComplete="off"
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="test-text">
+              Message
+              <span aria-hidden className="text-destructive ml-0.5">*</span>
+            </label>
+            <textarea
+              id="test-text"
+              value={testText}
+              onChange={(e) => setTestText(e.target.value)}
+              rows={3}
+              className="rounded-md border border-input bg-background px-3 py-2 text-sm"
+            />
+            <p className="text-xs text-muted-foreground">
+              Swap in your real short link (e.g. https://&lt;your short domain&gt;/r/TEST).
+            </p>
+          </div>
+
+          {testResult ? (
+            <div
+              className={
+                "rounded-md border p-3 text-sm " +
+                (testResult.ok
+                  ? "border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950"
+                  : "border-destructive/40 bg-destructive/5")
+              }
+            >
+              {testResult.ok ? (
+                <>
+                  <p className="font-medium">Sent to {testResult.to}.</p>
+                  <p className="mt-1">
+                    Now open the SMS and confirm this URL arrived unchanged:
+                  </p>
+                  <p className="mt-1 break-all font-mono text-xs">{testResult.sentText}</p>
+                  {testResult.messageId ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      TextHub id: {testResult.messageId}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p>TextHub rejected it: {testResult.error ?? "unknown error"}</p>
+              )}
+            </div>
+          ) : null}
+
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setTesting(null);
+                setTestResult(null);
+              }}
+              disabled={testApi.isLoading}
+            >
+              Close
+            </Button>
+            <Button
+              onClick={() => void handleTest()}
+              disabled={testApi.isLoading || !testNumber.trim() || !testText.trim()}
+            >
+              {testApi.isLoading ? "Sending…" : "Send test"}
             </Button>
           </div>
         </div>

@@ -54,3 +54,16 @@ export const providerCredentialSetSchema = z.object({
 export type ProviderCredentialSetInput = z.infer<
   typeof providerCredentialSetSchema
 >;
+
+// Send a one-off test SMS using a specific stored credential. The key is
+// resolved server-side from credential_id (never sent by the client). number
+// is validated/normalized to E.164 in the route.
+export const providerCredentialTestSchema = z.object({
+  credential_id: z.number().int().positive(),
+  number: z.string().trim().min(1, "Recipient number is required").max(40),
+  text: z.string().trim().min(1, "Message text is required").max(1000),
+});
+
+export type ProviderCredentialTestInput = z.infer<
+  typeof providerCredentialTestSchema
+>;

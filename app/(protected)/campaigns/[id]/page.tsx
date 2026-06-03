@@ -26,6 +26,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
+import { ClickReportSection } from "@/components/campaigns/click-report-section";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
 import {
@@ -1473,6 +1474,11 @@ export default function CampaignDetailPage() {
             }
           />
         ) : null}
+      </section>
+
+      {/* ============ Click attribution section ============ */}
+      <section className="space-y-4">
+        <ClickReportSection campaignId={campaignId} />
       </section>
 
       {/* ============ Dialogs ============ */}

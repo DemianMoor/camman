@@ -227,17 +227,19 @@ Auto-generated, **immutable**, structured identifiers separate from the internal
 
 To keep scope tight, the following are explicitly OUT of scope for v1. Do not build them, do not stub them, do not "prepare for" them in ways that complicate v1 code:
 
-- Real-time SMS sending via provider APIs
 - Inbound SMS webhook handling
 - Two-way conversations / message threads
-- Background job queues (Inngest, etc.)
-- Provider API integrations of any kind
-- Per-recipient delivery status tracking from a provider
+- MMS sending
+- Per-recipient delivery status tracking / DLR polling from a provider (the send pipeline stores TextHub's message id so DLR is *possible* later, but does not poll it)
+- Background job queues (Inngest, etc.) — scheduled/deferred work uses Vercel Cron instead
 - Phone-number-to-campaign assignment ("Load Phones" workflow from the original spec)
-- Short link generation and click tracking infrastructure (we record clicker data via CSV import only)
 - Per-contact send history (`send_history` / `has_been_sent_*` rule types). Deferred until campaign-pool snapshotting captures per-recipient deltas. The segment-rules system is structured to absorb a future `has_been_sent_to_by_campaign` rule type without schema churn — add the type to `RULE_TYPES` and emit the corresponding sub-SELECT in [lib/segment-rules-eval.ts](lib/segment-rules-eval.ts).
 
 When the user wants these, they will be added in a separate phase.
+
+**Now IN scope (built in later phases, formerly listed here as out):**
+- Short link generation + click tracking + bot/prefetch scoring — the link shortener (`lib/links/`, `app/r/[code]`, migrations 0048–0049).
+- **Outbound** SMS sending via the TextHub provider API (`lib/sends/`, migration 0050): single-recipient transactional send that mints a tracked link per recipient. Outbound only — inbound/two-way/DLR/MMS remain out (above).
 
 ## 13. What This Project IS (for v1)
 

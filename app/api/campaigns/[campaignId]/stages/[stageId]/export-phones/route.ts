@@ -1,4 +1,4 @@
-import { and, eq, sql as drizzleSql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 
@@ -12,6 +12,7 @@ import {
 } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
+import { stageRecipientsSql } from "@/lib/sends/recipients";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -112,7 +113,6 @@ export async function GET(
   const excludeCl = stage.exclude_clickers;
   const splitIndex = stage.split_index ?? null;
   const splitTotal = stage.split_total ?? null;
-  const splitActive = splitIndex !== null && splitTotal !== null;
 
   const rowSource = chunkedQuery({
     fetchChunk: async (offset, chunkLimit) => {
@@ -123,43 +123,24 @@ export async function GET(
       if (remaining === 0) return [] as { phone_number: string }[];
       const effectiveLimit = Math.min(chunkLimit, remaining);
 
-      // Order by contact_id so re-exports return rows in the same order;
-      // satisfies the deterministic-ordering test.
-      //
-      // Split stages: partition the qualified set by row-number so each
-      // sibling exports only its bucket. This MUST mirror
-      // computeStageAudienceCount in lib/audience-snapshot.ts exactly —
-      // ROW_NUMBER over a stable `order by contact_id`, bucket =
-      // (rn-1) % split_total, keep the rows where bucket == split_index-1.
-      // Without this, every split sibling exported the whole pool.
-      const result = (await db.execute(drizzleSql`
-        with qualified as (
-          select
-            c.phone_number,
-            p.contact_id,
-            row_number() over (order by p.contact_id) - 1 as rn
-          from campaign_audience_pool p
-          inner join contacts c on c.id = p.contact_id
-          where p.campaign_id = ${cid}::int
-            and p.org_id = ${orgId}::uuid
-            and not exists (
-              select 1 from opt_outs oo
-              where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
-            )
-            and (
-              (${includeNs}::boolean and p.was_no_status_at_snapshot)
-              or (${includeCl}::boolean and p.was_clicker_at_snapshot)
-            )
-            and not (${excludeCl}::boolean and p.was_clicker_at_snapshot)
-        )
-        select phone_number
-        from qualified
-        where not ${splitActive}::boolean
-          or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
-        order by contact_id
-        limit ${effectiveLimit}
-        offset ${offset}
-      `)) as unknown as { phone_number: string }[];
+      // Shared recipient query (lib/sends/recipients.ts) — the same SELECT the
+      // send pipeline uses, so export and send can never diverge. Split
+      // partitioning + stable contact_id ordering live in that builder.
+      const result = (await db.execute(
+        stageRecipientsSql({
+          campaignId: cid,
+          orgId,
+          filters: {
+            includeNoStatus: includeNs,
+            includeClickers: includeCl,
+            excludeClickers: excludeCl,
+            splitIndex,
+            splitTotal,
+          },
+          limit: effectiveLimit,
+          offset,
+        }),
+      )) as unknown as { phone_number: string }[];
       return Array.isArray(result) ? result : [];
     },
   });

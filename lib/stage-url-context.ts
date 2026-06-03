@@ -4,6 +4,8 @@ import { db } from "@/db/client";
 import { offers, utm_tags } from "@/db/schema";
 import type { UtmTagForUrl } from "@/lib/stage-url";
 
+type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 // Server-side resolver for the inputs buildStageFullUrl needs: the offer's
 // base_url / postfix, the selected sales page's URL, and the selected UTM
 // tags' label/value_source in the chosen order. Also doubles as the FK
@@ -21,11 +23,15 @@ export async function loadStageUrlContext({
   offerId,
   salesPageLabel,
   utmTagIds,
+  dbc = db,
 }: {
   orgId: string;
   offerId: number | null;
   salesPageLabel: string | null;
   utmTagIds: number[];
+  // Optional db/tx handle. Defaults to the module db; the send kickoff passes
+  // its transaction so reads see the same snapshot as the rest of the kickoff.
+  dbc?: DbOrTx;
 }): Promise<
   { ok: true; ctx: StageUrlContext } | { ok: false; invalidUtmTagId: number }
 > {
@@ -33,7 +39,7 @@ export async function loadStageUrlContext({
   let salesPageUrl: string | null = null;
 
   if (offerId != null) {
-    const o = await db
+    const o = await dbc
       .select({
         postfix: offers.postfix,
         sales_pages: offers.sales_pages,
@@ -54,7 +60,7 @@ export async function loadStageUrlContext({
 
   let utmTags: UtmTagForUrl[] = [];
   if (utmTagIds.length > 0) {
-    const rows = await db
+    const rows = await dbc
       .select({
         id: utm_tags.id,
         tag_id: utm_tags.tag_id,

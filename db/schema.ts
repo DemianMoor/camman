@@ -226,6 +226,10 @@ export const sms_providers = pgTable(
       .notNull()
       .default(false),
     short_link_example: text("short_link_example"),
+    // True when this provider can be sent through via API (TextHub). A stage
+    // can only do a tracked API send when its provider has this on AND a
+    // provider_credentials row — enforced at send kickoff (see lib/sends).
+    supports_api_send: boolean("supports_api_send").notNull().default(false),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -242,6 +246,35 @@ export const sms_providers = pgTable(
     ),
   ],
 );
+
+// Per-provider API credentials (TextHub api_key). One key per provider.
+// ⚠️ api_key is PLAINTEXT AT REST — a conscious v1 tradeoff (see
+// docs/security-notes.md). Protected by deny-by-default RLS (no policies — only
+// the privileged server connection touches it) + app-layer permission checks;
+// never sent to the browser. Encryption-at-rest / secrets manager is later.
+export const provider_credentials = pgTable(
+  "provider_credentials",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    provider_id: integer("provider_id")
+      .notNull()
+      .unique()
+      .references(() => sms_providers.id, { onDelete: "cascade" }),
+    api_key: text("api_key").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("provider_credentials_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type ProviderCredential = typeof provider_credentials.$inferSelect;
+export type NewProviderCredential = typeof provider_credentials.$inferInsert;
 
 export type SmsProvider = typeof sms_providers.$inferSelect;
 export type NewSmsProvider = typeof sms_providers.$inferInsert;
@@ -1642,3 +1675,58 @@ export const clicks = pgTable(
 
 export type Click = typeof clicks.$inferSelect;
 export type NewClick = typeof clicks.$inferInsert;
+
+// ============ TextHub send pipeline ============
+// One row per recipient-message. `id` IS the send_token fed to mintLink()'s
+// (stage_id, contact_id, send_token) idempotency key: a retry of a row reuses
+// its link; a genuine resend is a new run with new rows/tokens. No
+// (stage_id, contact_id) unique constraint, by design. rendered_text is frozen
+// at materialization so the sent body can't drift from the preview. Kickoff
+// (materialize + mint) and the Step-3 owner-gated drain both operate here;
+// campaign_stages.status/sent_at are intentionally left untouched.
+export const stage_sends = pgTable(
+  "stage_sends",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    phone: text("phone").notNull(),
+    // bigint: links.id is bigserial. NULL in manual mode (no minted link).
+    link_id: bigint("link_id", { mode: "number" }).references(() => links.id, {
+      onDelete: "set null",
+    }),
+    rendered_text: text("rendered_text").notNull(),
+    status: text("status").notNull().default("pending"),
+    // TextHub's returned message id (set on send) — handle for later DLR.
+    texthub_message_id: text("texthub_message_id"),
+    attempts: integer("attempts").notNull().default(0),
+    last_error: text("last_error"),
+    lead_id: text("lead_id"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    sent_at: timestamp("sent_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("stage_sends_org_id_idx").on(table.org_id),
+    index("stage_sends_stage_id_idx").on(table.stage_id),
+    index("stage_sends_link_id_idx").on(table.link_id),
+    check(
+      "stage_sends_status_check",
+      sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected')`,
+    ),
+  ],
+);
+
+export type StageSend = typeof stage_sends.$inferSelect;
+export type NewStageSend = typeof stage_sends.$inferInsert;

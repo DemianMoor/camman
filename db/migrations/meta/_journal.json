@@ -351,6 +351,13 @@
       "when": 1780617600000,
       "tag": "0049_click_scoring",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1780704000000,
+      "tag": "0050_stage_sends",
+      "breakpoints": true
     }
   ]
 }

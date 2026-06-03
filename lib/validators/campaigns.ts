@@ -128,7 +128,14 @@ export const campaignUpdateSchema = campaignCreateBaseSchema
   // immutable tracking_id with a stable code rather than silently
   // stripping it. Other unknown keys still pass through (campaign create
   // schema is not strict), preserving existing PATCH behavior.
-  .extend({ tracking_id: z.unknown().optional() })
+  //
+  // link_mode is update-only (campaigns always start 'manual' at create).
+  // The route additionally guards that 'tracked' requires the campaign's
+  // brand to have an active short_domain.
+  .extend({
+    tracking_id: z.unknown().optional(),
+    link_mode: z.enum(["manual", "tracked"]).optional(),
+  })
   .superRefine((d, ctx) => {
     if (d.tracking_id !== undefined) {
       ctx.addIssue({

@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
+  bigserial,
   boolean,
   check,
   date,
@@ -985,6 +987,15 @@ export const campaigns = pgTable(
     // first of the day). NULL until both brand_id and offer_id are set.
     // Once non-NULL it never changes — see lib/tracking-id.ts.
     tracking_id: text("tracking_id"),
+    // Which link the send path reads at send time (see CLAUDE.md / the link
+    // shortener module). 'manual' (default) → the operator-pasted
+    // campaign_stages.short_url/full_url, exactly as before. 'tracked' → the
+    // send path mints a unique per-recipient link via lib/links/mint-link.ts
+    // instead. Switching modes never touches the manual short_url/full_url
+    // fields, so toggling back restores the original behavior unchanged.
+    // A campaign may only be set to 'tracked' when its brand has an active
+    // short_domains row (guarded in the API). Per-campaign, not per-stage.
+    link_mode: text("link_mode").notNull().default("manual"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -1000,6 +1011,10 @@ export const campaigns = pgTable(
     check(
       "campaigns_status_check",
       sql`${table.status} IN ('draft', 'active', 'paused', 'completed', 'archived')`,
+    ),
+    check(
+      "campaigns_link_mode_check",
+      sql`${table.link_mode} IN ('manual', 'tracked')`,
     ),
   ],
 );
@@ -1432,3 +1447,173 @@ export const spam_scores = pgTable(
 
 export type SpamScore = typeof spam_scores.$inferSelect;
 export type NewSpamScore = typeof spam_scores.$inferInsert;
+
+// ============ Link shortener + click tracker ============
+// First piece of the TextHub SMS integration. In 'tracked' campaigns the
+// send path mints a unique short link per recipient (one per "message",
+// keyed by a caller-supplied send_token); a click resolves 1:1 to
+// (contact, campaign, stage, creative, destination) for attribution.
+// Bot/prefetch clicks are classified, never deleted — filtered at report
+// time. See db/migrations/0048_link_shortener.sql and lib/links/mint-link.ts.
+
+// A brand's short-link host(s), e.g. "go.brandx.co". A campaign can only be
+// switched to link_mode='tracked' when its brand has an active row here.
+export const short_domains = pgTable(
+  "short_domains",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    brand_id: integer("brand_id")
+      .notNull()
+      .references(() => brands.id, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("short_domains_org_id_domain_unique").on(table.org_id, table.domain),
+    index("short_domains_org_id_idx").on(table.org_id),
+    index("short_domains_brand_id_idx").on(table.brand_id),
+    check(
+      "short_domains_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type ShortDomain = typeof short_domains.$inferSelect;
+export type NewShortDomain = typeof short_domains.$inferInsert;
+
+// Deduped destination URLs. Many links point at the same final URL, so the
+// full URL is stored once (keyed by a hash of its normalized form) and
+// referenced by id from `links`.
+export const link_destinations = pgTable(
+  "link_destinations",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    // SHA-256 of the normalized URL — the dedup key.
+    url_hash: text("url_hash").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("link_destinations_org_id_url_hash_unique").on(
+      table.org_id,
+      table.url_hash,
+    ),
+    index("link_destinations_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type LinkDestination = typeof link_destinations.$inferSelect;
+export type NewLinkDestination = typeof link_destinations.$inferInsert;
+
+// One minted short link. Skinny by design — the high-volume table. `code` is
+// the public short-code (globally unique: the redirect resolves by code
+// alone, with no org context on the URL). Idempotency is per "message":
+// (stage_id, contact_id, send_token) is unique, so a retry of the same send
+// reuses the link while each genuinely new message gets a fresh code. The
+// campaign/stage tracking IDs are denormalized here and NOT NULL because a
+// link is only ever minted once those exist (a missing tracking ID means
+// "the stage isn't ready to send yet").
+export const links = pgTable(
+  "links",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    code: text("code").notNull(),
+    short_domain_id: integer("short_domain_id")
+      .notNull()
+      .references(() => short_domains.id, { onDelete: "restrict" }),
+    destination_id: integer("destination_id")
+      .notNull()
+      .references(() => link_destinations.id, { onDelete: "restrict" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    // Present at mint time (the stage tracking_id requires a creative), but
+    // SET NULL on creative deletion so the link — and its click history —
+    // survive for attribution.
+    creative_id: integer("creative_id").references(() => creatives.id, {
+      onDelete: "set null",
+    }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    // Caller-supplied idempotency token identifying one outbound message.
+    send_token: text("send_token").notNull(),
+    campaign_tracking_id: text("campaign_tracking_id").notNull(),
+    stage_tracking_id: text("stage_tracking_id").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Global, not per-org: the public redirect has only the code to go on.
+    unique("links_code_unique").on(table.code),
+    // "One link per message" — retries reuse, new messages mint fresh.
+    unique("links_stage_contact_send_token_unique").on(
+      table.stage_id,
+      table.contact_id,
+      table.send_token,
+    ),
+    index("links_org_id_idx").on(table.org_id),
+    index("links_campaign_id_idx").on(table.campaign_id),
+    index("links_stage_id_idx").on(table.stage_id),
+    index("links_contact_id_idx").on(table.contact_id),
+    index("links_destination_id_idx").on(table.destination_id),
+  ],
+);
+
+export type Link = typeof links.$inferSelect;
+export type NewLink = typeof links.$inferInsert;
+
+// Click log. Defined now but UNWIRED in this phase — no endpoint writes it
+// yet (the redirect service is Phase 2). Append-only; bot/prefetch clicks
+// are classified, never deleted, and filtered at report time.
+export const clicks = pgTable(
+  "clicks",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    link_id: bigint("link_id", { mode: "number" })
+      .notNull()
+      .references(() => links.id, { onDelete: "cascade" }),
+    clicked_at: timestamp("clicked_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    ip: text("ip"),
+    user_agent: text("user_agent"),
+    referer: text("referer"),
+    classification: text("classification").notNull().default("unknown"),
+  },
+  (table) => [
+    index("clicks_link_id_idx").on(table.link_id),
+    index("clicks_org_id_idx").on(table.org_id),
+    index("clicks_clicked_at_idx").on(table.clicked_at),
+    check(
+      "clicks_classification_check",
+      sql`${table.classification} IN ('human', 'bot', 'prefetch', 'unknown')`,
+    ),
+  ],
+);
+
+export type Click = typeof clicks.$inferSelect;
+export type NewClick = typeof clicks.$inferInsert;

@@ -48,6 +48,7 @@ export function ProviderForm({
       sms_provider_id: initialValues?.sms_provider_id ?? "",
       short_link_supported: initialValues?.short_link_supported ?? false,
       short_link_example: initialValues?.short_link_example ?? "",
+      supports_api_send: initialValues?.supports_api_send ?? false,
       avatar_url: initialValues?.avatar_url ?? "",
       color: initialValues?.color ?? "",
     },
@@ -146,6 +147,29 @@ export function ProviderForm({
             )}
           />
         ) : null}
+
+        <FormField
+          control={form.control}
+          name="supports_api_send"
+          render={({ field }) => (
+            <FormItem className="flex flex-row items-start gap-3 rounded-md border p-3">
+              <FormControl>
+                <Switch
+                  checked={!!field.value}
+                  onCheckedChange={field.onChange}
+                  disabled={isSubmitting}
+                />
+              </FormControl>
+              <div className="grid gap-1">
+                <FormLabel>API sending enabled</FormLabel>
+                <FormDescription>
+                  This provider can be sent through via API (TextHub). Tracked
+                  campaigns also need an API key set below.
+                </FormDescription>
+              </div>
+            </FormItem>
+          )}
+        />
 
         <FormField
           control={form.control}

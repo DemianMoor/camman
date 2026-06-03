@@ -22,6 +22,7 @@ import {
   PhoneForm,
   type PhoneFormValues,
 } from "@/components/providers/phone-form";
+import { ProviderCredentialsSection } from "@/components/providers/provider-credentials-section";
 import {
   ProviderForm,
   type ProviderFormValues,
@@ -73,6 +74,7 @@ type Provider = {
   name: string;
   short_link_supported: boolean;
   short_link_example: string | null;
+  supports_api_send: boolean;
   avatar_url: string | null;
   color: string | null;
   status: "active" | "archived";
@@ -686,6 +688,12 @@ export default function ProviderDetailPage() {
             </span>
           </div>
           <div className="grid gap-1">
+            <span className="text-xs text-muted-foreground">API sending</span>
+            <span className="font-medium">
+              {provider.supports_api_send ? "Enabled" : "Off"}
+            </span>
+          </div>
+          <div className="grid gap-1">
             <span className="text-xs text-muted-foreground">Created</span>
             <span>
               {format(new Date(provider.created_at), "MMM d, yyyy")}
@@ -790,6 +798,11 @@ export default function ProviderDetailPage() {
         )}
       </section>
 
+      {/* API keys — manager+ only (matches the server-side gate). */}
+      {canUpdateProvider ? (
+        <ProviderCredentialsSection providerId={provider.id} />
+      ) : null}
+
       {/* Edit Provider dialog */}
       <FormDialog
         open={editProviderOpen}
@@ -808,6 +821,7 @@ export default function ProviderDetailPage() {
             sms_provider_id: provider.sms_provider_id,
             short_link_supported: provider.short_link_supported,
             short_link_example: provider.short_link_example ?? "",
+            supports_api_send: provider.supports_api_send,
             avatar_url: provider.avatar_url ?? "",
             color: provider.color ?? "",
           }}

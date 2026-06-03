@@ -44,6 +44,7 @@ export async function POST(req: NextRequest) {
         name: parsed.data.name,
         sms_provider_id: parsed.data.sms_provider_id,
         short_link_supported: parsed.data.short_link_supported ?? false,
+        supports_api_send: parsed.data.supports_api_send ?? false,
         short_link_example: nullIfEmpty(parsed.data.short_link_example),
         avatar_url: nullIfEmpty(parsed.data.avatar_url),
         color: nullIfEmpty(parsed.data.color),

@@ -120,7 +120,12 @@ type ProviderPhone = {
   status: string;
 };
 type SalesPage = { label: string; url: string };
-type BrandInfo = { id: number; name: string; color: string | null };
+type BrandInfo = {
+  id: number;
+  name: string;
+  color: string | null;
+  short_domain: string | null;
+};
 type OfferInfo = {
   id: number;
   name: string;
@@ -187,6 +192,7 @@ export interface StageFormProps {
   campaign: {
     id: number;
     name: string;
+    link_mode: "manual" | "tracked";
     brand: BrandInfo | null;
     offer: OfferInfo | null;
     audience_snapshot_count: number;
@@ -478,10 +484,26 @@ export function StageForm({
   // link is present it lands on its own line between the creative text and the
   // stop text; full_url is tracking metadata and never enters the SMS.
   const trimmedShortUrl = (watchedShortUrl ?? "").trim();
+
+  // Tracked mode: the real link is minted per-recipient at kickoff, so we
+  // preview a REPRESENTATIVE link of the exact shape + length —
+  // https://<brand active short domain>/r/<7-char code> (CODE_LENGTH=7) — so
+  // the character/segment count is exact. No minting happens here.
+  const isTracked = campaign.link_mode === "tracked";
+  const brandShortDomain = campaign.brand?.short_domain ?? null;
+  const TRACKED_CODE_PLACEHOLDER = "XXXXXXX"; // 7 chars = mint CODE_LENGTH
+  const trackedLinkPreview = brandShortDomain
+    ? `https://${brandShortDomain}/r/${TRACKED_CODE_PLACEHOLDER}`
+    : null;
+  // Which link line the preview composes with:
+  //  - tracked + brand has a short domain → the representative tracked link
+  //  - tracked + no short domain → none (a warning is shown instead of a fake link)
+  //  - manual → the pasted Short URL
+  const previewLinkUrl = isTracked ? (trackedLinkPreview ?? "") : trimmedShortUrl;
   const assembledSms = buildStageSms({
     brandName,
     creativeText: selectedCreative?.text,
-    linkUrl: trimmedShortUrl,
+    linkUrl: previewLinkUrl,
     stopText: watchedStopText,
   });
   const segments = useMemo(
@@ -1315,6 +1337,22 @@ export function StageForm({
                     {segments.segments} segment
                     {segments.segments === 1 ? "" : "s"} ({segments.charset})
                   </div>
+                ) : null}
+                {isTracked ? (
+                  trackedLinkPreview ? (
+                    <p className="text-xs text-muted-foreground">
+                      Tracked link:{" "}
+                      <span className="font-mono">{trackedLinkPreview}</span> — the
+                      real code is unique per recipient (7 chars), so the count
+                      above is exact.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-amber-700 dark:text-amber-400">
+                      No short domain set for {brandName || "this brand"} — set one
+                      in Brands before sending. The preview omits the link until
+                      then.
+                    </p>
+                  )
                 ) : null}
               </CardContent>
             </Card>

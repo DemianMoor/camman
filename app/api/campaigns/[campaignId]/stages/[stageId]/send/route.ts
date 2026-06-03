@@ -61,6 +61,15 @@ export async function GET(
 
   const c = counts[0] ?? { total: 0, pending: 0, sending: 0, sent: 0, failed: 0 };
 
+  // One materialized row's frozen body — the REAL composed message (with the
+  // real minted link) that will send. Representative: all rows share the same
+  // composition, differing only in the per-recipient code. Null before kickoff.
+  const sample = (await db.execute(drizzleSql`
+    SELECT rendered_text FROM stage_sends
+    WHERE stage_id = ${stageId} AND org_id = ${orgId}
+    ORDER BY created_at ASC, id ASC LIMIT 1
+  `)) as unknown as { rendered_text: string }[];
+
   return NextResponse.json({
     send_approved: stage[0].send_approved,
     send_enabled: process.env.SEND_ENABLED === "true",
@@ -71,5 +80,6 @@ export async function GET(
       sent: Number(c.sent),
       failed: Number(c.failed),
     },
+    sample_rendered_text: sample[0]?.rendered_text ?? null,
   });
 }

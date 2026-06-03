@@ -98,7 +98,18 @@ export async function GET(
       link_mode: campaigns.link_mode,
       archived_at: campaigns.archived_at,
       created_at: campaigns.created_at,
-      brand: { id: brands.id, name: brands.name, color: brands.color },
+      brand: {
+        id: brands.id,
+        name: brands.name,
+        color: brands.color,
+        // Brand's active short domain (for the tracked-mode SMS preview), via
+        // subquery to keep the single-row shape. NULL when none is set.
+        short_domain: drizzleSql<string | null>`(
+          SELECT sd.domain FROM short_domains sd
+          WHERE sd.brand_id = ${brands.id} AND sd.status = 'active'
+          ORDER BY sd.created_at ASC, sd.id ASC LIMIT 1
+        )`,
+      },
       offer: {
         id: offers.id,
         name: offers.name,

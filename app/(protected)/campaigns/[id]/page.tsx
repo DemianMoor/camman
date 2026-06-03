@@ -126,9 +126,10 @@ type CampaignDetail = {
   status: CampaignStatus;
   status_changed_at: string;
   tracking_id: string | null;
+  link_mode: "manual" | "tracked";
   archived_at: string | null;
   created_at: string;
-  brand: Info | null;
+  brand: (Info & { short_domain: string | null }) | null;
   offer: Offer | null;
   routing_type: Info | null;
   traffic_type: Info | null;

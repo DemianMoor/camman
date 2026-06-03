@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, CircleSlash } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
+import { calculateSmsSegments } from "@/lib/creative-helpers";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,6 +24,8 @@ type SendStatus = {
   send_approved: boolean;
   send_enabled: boolean;
   counts: { total: number; pending: number; sending: number; sent: number; failed: number };
+  // The real frozen message of one materialized row (null before kickoff).
+  sample_rendered_text: string | null;
 };
 
 // Operating surface for the riskiest action in the system: approve → kick off
@@ -163,6 +166,26 @@ export function StageSendPanel({
           <AlertTriangle className="size-3.5" aria-hidden />
           {status.counts.sending} stuck in “sending” (a send was interrupted) — never auto-retried; review manually.
         </p>
+      ) : null}
+
+      {/* The real frozen message that will send (post-kickoff) — the truth, with
+          the actual minted link, not a preview. */}
+      {status.sample_rendered_text ? (
+        <div className="space-y-1">
+          <div className="text-xs uppercase text-muted-foreground">This is what will send</div>
+          <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-3 font-mono text-xs">
+            {status.sample_rendered_text}
+          </pre>
+          {(() => {
+            const seg = calculateSmsSegments(status.sample_rendered_text);
+            return (
+              <div className="text-xs tabular-nums text-muted-foreground">
+                {seg.characters.toLocaleString()} characters · {seg.segments} segment
+                {seg.segments === 1 ? "" : "s"} ({seg.charset}) · link is unique per recipient
+              </div>
+            );
+          })()}
+        </div>
       ) : null}
 
       {/* Actions */}

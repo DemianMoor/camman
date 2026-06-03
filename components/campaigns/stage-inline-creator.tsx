@@ -19,7 +19,13 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 interface CampaignLite {
   id: number;
   name: string;
-  brand: { id: number; name: string; color: string | null } | null;
+  link_mode: "manual" | "tracked";
+  brand: {
+    id: number;
+    name: string;
+    color: string | null;
+    short_domain: string | null;
+  } | null;
   offer: {
     id: number;
     name: string;

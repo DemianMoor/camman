@@ -45,7 +45,8 @@ export function BrandForm({
     defaultValues: {
       name: initialValues?.name ?? "",
       brand_id: initialValues?.brand_id ?? "",
-      short_link_base: initialValues?.short_link_base ?? "",
+      short_domain: initialValues?.short_domain ?? "",
+      website: initialValues?.website ?? "",
       avatar_url: initialValues?.avatar_url ?? "",
       color: initialValues?.color ?? "",
     },
@@ -104,17 +105,45 @@ export function BrandForm({
 
         <FormField
           control={form.control}
-          name="short_link_base"
+          name="short_domain"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Short link base</FormLabel>
+              <FormLabel>Short domain</FormLabel>
               <FormControl>
                 <Input
-                  placeholder="lnk.example.com"
+                  placeholder="go.brand.co"
                   disabled={isSubmitting}
                   {...field}
+                  value={field.value ?? ""}
                 />
               </FormControl>
+              <FormDescription>
+                The brand&apos;s short-link host (bare hostname, no http:// or
+                path). Tracked links mint under this. One per brand; leave empty
+                to clear.
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="website"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Main website</FormLabel>
+              <FormControl>
+                <Input
+                  placeholder="https://www.brand.com"
+                  disabled={isSubmitting}
+                  {...field}
+                  value={field.value ?? ""}
+                />
+              </FormControl>
+              <FormDescription>
+                Where the short domain&apos;s bare root redirects to.
+              </FormDescription>
               <FormMessage />
             </FormItem>
           )}

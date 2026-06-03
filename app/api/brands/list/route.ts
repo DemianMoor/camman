@@ -1,4 +1,13 @@
-import { and, asc, desc, eq, ilike, or, sql as drizzleSql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  ilike,
+  or,
+  sql as drizzleSql,
+} from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
@@ -48,7 +57,12 @@ export async function GET(req: NextRequest) {
 
   const [data, countRows] = await Promise.all([
     db
-      .select()
+      .select({
+        ...getTableColumns(brands),
+        short_domain: drizzleSql<
+          string | null
+        >`(SELECT sd.domain FROM short_domains sd WHERE sd.brand_id = ${brands.id} LIMIT 1)`,
+      })
       .from(brands)
       .where(where)
       .orderBy(orderFn(sortColumn))

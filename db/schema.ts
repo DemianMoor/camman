@@ -103,7 +103,13 @@ export const brands = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    // LEGACY: free-text field, no longer surfaced in the UI and read by nothing
+    // functional. The brand↔short-domain mapping lives in short_domains (what
+    // mint reads). Kept to avoid data loss; safe to drop in a later migration.
     short_link_base: text("short_link_base"),
+    // Brand main website — target for a future bare-root redirect (short domain
+    // hit at "/"). Full URL; nullable.
+    website: text("website"),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -1526,7 +1532,8 @@ export const short_domains = pgTable(
   (table) => [
     unique("short_domains_org_id_domain_unique").on(table.org_id, table.domain),
     index("short_domains_org_id_idx").on(table.org_id),
-    index("short_domains_brand_id_idx").on(table.brand_id),
+    // One short domain per brand (migration 0052).
+    uniqueIndex("short_domains_brand_id_uniq").on(table.brand_id),
     check(
       "short_domains_status_check",
       sql`${table.status} IN ('active', 'archived')`,

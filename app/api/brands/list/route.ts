@@ -12,7 +12,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { brands } from "@/db/schema";
+import { brands, short_domains } from "@/db/schema";
 import {
   apiError,
   parseListParams,
@@ -56,14 +56,19 @@ export async function GET(req: NextRequest) {
   const orderFn = params.sortDir === "asc" ? asc : desc;
 
   const [data, countRows] = await Promise.all([
+    // short_domain comes via LEFT JOIN, not a correlated sub-select: when the
+    // outer query has a single FROM table, Drizzle renders `${brands.id}`
+    // inside a raw sql sub-select as the bare, unqualified `"id"`, which then
+    // binds to the SUBQUERY's own table (short_domains.id) and silently returns
+    // null. The join condition is always table-qualified, and the
+    // `short_domains_brand_id_uniq` index guarantees ≤1 row per brand.
     db
       .select({
         ...getTableColumns(brands),
-        short_domain: drizzleSql<
-          string | null
-        >`(SELECT sd.domain FROM short_domains sd WHERE sd.brand_id = ${brands.id} LIMIT 1)`,
+        short_domain: short_domains.domain,
       })
       .from(brands)
+      .leftJoin(short_domains, eq(short_domains.brand_id, brands.id))
       .where(where)
       .orderBy(orderFn(sortColumn))
       .limit(params.pageSize)

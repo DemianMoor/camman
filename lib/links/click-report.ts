@@ -27,6 +27,9 @@ export interface TrackedStageRow {
   prefetch: number;
   unknown: number;
   unscored: number;
+  // Enrichment canary: clicks that resolved an ASN. A drop in enriched/raw (or
+  // a climbing unscored) flags that MaxMind enrichment is degraded.
+  enriched: number;
 }
 
 export interface ManualStageRow {
@@ -65,7 +68,8 @@ export async function getCampaignClickReport(
         count(c.id) FILTER (WHERE c.classification = 'bot')::int      AS bot,
         count(c.id) FILTER (WHERE c.classification = 'prefetch')::int AS prefetch,
         count(c.id) FILTER (WHERE c.classification = 'unknown')::int  AS unknown,
-        count(c.id) FILTER (WHERE c.scored_at IS NULL)::int           AS unscored
+        count(c.id) FILTER (WHERE c.scored_at IS NULL)::int           AS unscored,
+        count(c.id) FILTER (WHERE c.asn IS NOT NULL)::int             AS enriched
       FROM campaign_stages cs
       LEFT JOIN links l  ON l.stage_id = cs.id
       LEFT JOIN clicks c ON c.link_id = l.id
@@ -82,6 +86,7 @@ export async function getCampaignClickReport(
       prefetch: number;
       unknown: number;
       unscored: number;
+      enriched: number;
     }>;
 
     return {
@@ -98,6 +103,7 @@ export async function getCampaignClickReport(
         prefetch: Number(r.prefetch),
         unknown: Number(r.unknown),
         unscored: Number(r.unscored),
+        enriched: Number(r.enriched),
       })),
     };
   }

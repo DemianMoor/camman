@@ -39,5 +39,16 @@ export async function GET(req: NextRequest) {
 
   const result = await scoreClicks(db, { mode, maxRows });
 
-  return NextResponse.json({ mode, ...result });
+  // Surface enrichment health explicitly so a degraded run (e.g. MaxMind 429 /
+  // missing key) is impossible to miss in the cron response — not just buried
+  // in logs. `degraded: true` means NO rows were scored; they were left pending
+  // (scored_at NULL) to be re-scored by a later healthy run.
+  return NextResponse.json({
+    mode,
+    scored: result.scored,
+    byClassification: result.byClassification,
+    capped: result.capped,
+    degraded: result.degraded,
+    enrichment: result.enrichment,
+  });
 }

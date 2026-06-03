@@ -17,6 +17,7 @@ interface TrackedStageRow {
   prefetch: number;
   unknown: number;
   unscored: number;
+  enriched: number;
 }
 interface ManualStageRow {
   stage_id: number;
@@ -80,11 +81,14 @@ export function ClickReportSection({ campaignId }: { campaignId: string | number
       </Card>
 
       {isTracked ? (
-        <p className="text-xs text-muted-foreground">
-          <span className="font-medium">Clean</span> excludes bot, prefetch, and
-          suspected-bot clicks. Raw is every logged click. Unscored clicks
-          haven&apos;t been through the scoring job yet.
-        </p>
+        <>
+          <EnrichmentHealth stages={(report as { stages: TrackedStageRow[] }).stages} />
+          <p className="text-xs text-muted-foreground">
+            <span className="font-medium">Clean</span> excludes bot, prefetch, and
+            suspected-bot clicks. Raw is every logged click. Unscored clicks
+            haven&apos;t been through the scoring job yet.
+          </p>
+        </>
       ) : (
         <p className="text-xs text-muted-foreground">
           Counts imported from the provider / CSV. Switch this campaign to
@@ -92,6 +96,28 @@ export function ClickReportSection({ campaignId }: { campaignId: string | number
         </p>
       )}
     </div>
+  );
+}
+
+// Human-visible enrichment canary. Of the clicks that have been scored, how
+// many resolved an ASN (MaxMind enrichment). A low % — or a large pending
+// backlog — is the unmissable signal that enrichment is degraded (MaxMind 429 /
+// missing key), since degraded scoring runs deliberately leave clicks pending.
+function EnrichmentHealth({ stages }: { stages: TrackedStageRow[] }) {
+  const raw = sum(stages, (s) => s.raw);
+  const unscored = sum(stages, (s) => s.unscored);
+  const enriched = sum(stages, (s) => s.enriched);
+  const scored = raw - unscored;
+  if (raw === 0) return null;
+  const pct = scored > 0 ? Math.round((enriched / scored) * 100) : null;
+  const degraded = (pct != null && pct < 90) || (scored === 0 && unscored > 0);
+  return (
+    <p className={`text-xs ${degraded ? "font-medium text-amber-600 dark:text-amber-500" : "text-muted-foreground"}`}>
+      ASN-enriched: {enriched} of {scored} scored {scored === 1 ? "click" : "clicks"}
+      {pct != null ? ` (${pct}%)` : ""}
+      {unscored > 0 ? ` · ${unscored} pending` : ""}
+      {degraded ? " — low enrichment can mean MaxMind is degraded; check the score-pending cron logs." : "."}
+    </p>
   );
 }
 

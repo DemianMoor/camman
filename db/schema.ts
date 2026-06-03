@@ -1583,9 +1583,15 @@ export const links = pgTable(
 export type Link = typeof links.$inferSelect;
 export type NewLink = typeof links.$inferInsert;
 
-// Click log. Defined now but UNWIRED in this phase — no endpoint writes it
-// yet (the redirect service is Phase 2). Append-only; bot/prefetch clicks
-// are classified, never deleted, and filtered at report time.
+// Click log. The redirect (Phase 2) inserts a raw row with a first-pass
+// `classification` (human/bot/prefetch/unknown from UA + headers). The Phase-3
+// scoring job (/api/clicks/score-pending) enriches it: asn/asn_org/country
+// from a MaxMind lookup, is_datacenter from a hosting-ASN list, and a
+// bot_score + final classification + bot_reasons. Append-only; classify-don't-
+// delete — raw rows are never mutated to "clean" data, reports filter on the
+// score. scored_at IS NULL marks an unscored row (the authoritative
+// scored-state flag); `classification` holds the inline first-pass verdict on
+// insert and is overwritten with the refined verdict by the scoring job.
 export const clicks = pgTable(
   "clicks",
   {
@@ -1603,6 +1609,25 @@ export const clicks = pgTable(
     user_agent: text("user_agent"),
     referer: text("referer"),
     classification: text("classification").notNull().default("unknown"),
+    // Enrichment + scoring (populated by the scoring job; NULL/0 until scored).
+    asn: integer("asn"),
+    asn_org: text("asn_org"),
+    country: text("country"),
+    // NULL = not yet determined. Derived from the hosting-ASN list, not MaxMind
+    // (GeoLite2 has no hosting flag).
+    is_datacenter: boolean("is_datacenter"),
+    // DEFERRED: no send pipeline records a per-message send time yet. Stays
+    // NULL; ≈ clicked_at - links.created_at once minting runs at send time.
+    seconds_since_send: integer("seconds_since_send"),
+    bot_score: integer("bot_score").notNull().default(0),
+    // Array of signal strings that fired, recorded on EVERY scored row
+    // (including human) so near-misses are visible when retuning thresholds.
+    bot_reasons: jsonb("bot_reasons")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    // When the row was last scored. NULL = never scored.
+    scored_at: timestamp("scored_at", { withTimezone: true }),
   },
   (table) => [
     index("clicks_link_id_idx").on(table.link_id),
@@ -1610,7 +1635,7 @@ export const clicks = pgTable(
     index("clicks_clicked_at_idx").on(table.clicked_at),
     check(
       "clicks_classification_check",
-      sql`${table.classification} IN ('human', 'bot', 'prefetch', 'unknown')`,
+      sql`${table.classification} IN ('human', 'suspect', 'prefetch', 'bot', 'unknown')`,
     ),
   ],
 );

@@ -21,6 +21,15 @@ export interface PrefetchSignals {
 const BOT_UA_PATTERN =
   /bot|crawler|spider|crawl|slurp|mediapartners|facebookexternalhit|whatsapp|telegrambot|discordbot|bingpreview|google-?(?:bot|other)|headless|phantomjs|curl|wget|python-requests|libwww|httpclient|go-http-client|axios|node-fetch|okhttp|java\//i;
 
+// True when the UA looks like an automated client (crawler, scanner,
+// headless browser, HTTP library). Exported so the Phase-3 scoring model
+// uses the exact same regex as the inline first-pass classifier.
+export function isBotUserAgent(userAgent: string | null | undefined): boolean {
+  const ua = (userAgent ?? "").trim();
+  if (!ua) return false;
+  return BOT_UA_PATTERN.test(ua);
+}
+
 function looksLikePrefetch(s: PrefetchSignals): boolean {
   const haystacks = [s.purpose, s.xPurpose, s.xMoz, s.secPurpose];
   return haystacks.some((h) => {
@@ -38,6 +47,6 @@ export function classifyClick(
 
   const ua = (userAgent ?? "").trim();
   if (!ua) return "unknown";
-  if (BOT_UA_PATTERN.test(ua)) return "bot";
+  if (isBotUserAgent(ua)) return "bot";
   return "human";
 }

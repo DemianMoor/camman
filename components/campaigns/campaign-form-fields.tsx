@@ -46,6 +46,7 @@ export function CampaignFormFields({
 }: CampaignFormFieldsProps) {
   const {
     form,
+    isEdit,
     brands,
     offers,
     routingTypes,
@@ -63,6 +64,9 @@ export function CampaignFormFields({
     watchedContactGroups,
     watchedFilters,
     watchedExcludeInUse,
+    watchedLinkMode,
+    selectedBrandShortDomain,
+    setLinkMode,
     toggleSegment,
     setFilter,
     dateError,
@@ -212,6 +216,37 @@ export function CampaignFormFields({
             </FormItem>
           )}
         />
+        {/* Send method (link_mode). Create-mode only; existing campaigns flip
+            it from the detail page. API Send is disabled until the selected
+            brand has an active short domain. */}
+        {!isEdit ? (
+        <div className="grid gap-1.5">
+          <Label>Send method</Label>
+          <Select
+            value={watchedLinkMode}
+            onValueChange={(v) => setLinkMode(v as "manual" | "tracked")}
+            disabled={anySubmitting}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="manual">Manual Send</SelectItem>
+              <SelectItem value="tracked" disabled={!selectedBrandShortDomain}>
+                API Send
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {watchedLinkMode === "tracked"
+              ? "Mints a unique tracked link per recipient at send time."
+              : "Uses the operator-pasted Short URL on each stage."}
+            {!selectedBrandShortDomain
+              ? " API Send needs an active short domain on the brand (set it in Brands)."
+              : ""}
+          </p>
+        </div>
+        ) : null}
         <div className="grid gap-4 sm:grid-cols-2">
           <FormField
             control={form.control}

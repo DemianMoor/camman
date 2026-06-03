@@ -247,14 +247,19 @@ export async function PATCH(
   // Audience fields lock once the campaign leaves draft. The frozen pool
   // can't change after a campaign has been activated even once. Covers
   // segments, contact groups, filters, and the random-sample cap.
-  if (
-    current[0].status !== "draft" &&
-    (input.audience_segment_ids !== undefined ||
-      input.audience_contact_group_ids !== undefined ||
-      input.audience_filters !== undefined ||
-      input.audience_cap !== undefined ||
-      input.exclude_in_use_contacts !== undefined)
-  ) {
+  //
+  // Check the RAW request body keys, not parsed.data: the schema injects
+  // defaults (e.g. audience_filters defaults to {}), so a PATCH that only sent
+  // { link_mode } would otherwise look like it "touched" the audience and get
+  // wrongly blocked. This keys off what the client actually sent.
+  const rawBody = (json ?? {}) as Record<string, unknown>;
+  const touchesAudience =
+    "audience_segment_ids" in rawBody ||
+    "audience_contact_group_ids" in rawBody ||
+    "audience_filters" in rawBody ||
+    "audience_cap" in rawBody ||
+    "exclude_in_use_contacts" in rawBody;
+  if (current[0].status !== "draft" && touchesAudience) {
     return apiError(
       400,
       "Audience can't be modified after the campaign has been activated",

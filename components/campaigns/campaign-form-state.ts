@@ -9,6 +9,9 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 // =============== Types ===============
 
 export type Info = { id: number; name: string; color: string | null };
+// Brands carry their active short domain (from /api/brands/list) so the form
+// can gate "API Send" without an extra fetch.
+export type BrandOption = Info & { short_domain: string | null };
 export type Offer = Info & { payout_model: string; payout_cpa: string | null };
 export type SegmentInfo = {
   id: number;
@@ -47,6 +50,10 @@ export interface CampaignFormValues {
   // Exclude contacts already in use by another active campaign. On by
   // default for new campaigns.
   exclude_in_use_contacts: boolean;
+  // Send method: 'manual' (pasted Short URL) or 'tracked' (API Send — mints a
+  // per-recipient link). 'tracked' requires the brand to have an active short
+  // domain (gated in the UI + on the server).
+  link_mode: "manual" | "tracked";
   start_date: string;
   end_date: string;
 }
@@ -95,14 +102,14 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const { auth } = useAuth();
 
   // Reference data
-  const brandsApi = useApiCall<{ data: Info[] }>();
+  const brandsApi = useApiCall<{ data: BrandOption[] }>();
   const offersApi = useApiCall<{ data: Offer[] }>();
   const routingApi = useApiCall<{ data: Info[] }>();
   const trafficApi = useApiCall<{ data: Info[] }>();
   const segmentsApi = useApiCall<{ data: SegmentInfo[] }>();
   const contactGroupsApi = useApiCall<{ data: Info[] }>();
   const membersApi = useApiCall<{ data: Member[] }>();
-  const [brands, setBrands] = useState<Info[]>([]);
+  const [brands, setBrands] = useState<BrandOption[]>([]);
   const [offers, setOffers] = useState<Offer[]>([]);
   const [routingTypes, setRoutingTypes] = useState<Info[]>([]);
   const [trafficTypes, setTrafficTypes] = useState<Info[]>([]);
@@ -181,6 +188,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
       // Default ON for new campaigns; edit mode loads the stored value
       // (?? leaves an explicit false intact).
       exclude_in_use_contacts: initialValues?.exclude_in_use_contacts ?? true,
+      link_mode: initialValues?.link_mode ?? "manual",
       start_date: initialValues?.start_date ?? "",
       end_date: initialValues?.end_date ?? "",
     },
@@ -189,6 +197,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   // Watched fields for live enablement + audience preview
   const watchedName = form.watch("name");
   const watchedBrandId = form.watch("brand_id");
+  const watchedLinkMode = form.watch("link_mode");
   const watchedOfferId = form.watch("offer_id");
   const watchedSegments = form.watch("audience_segment_ids");
   const watchedContactGroups = form.watch("audience_contact_group_ids");
@@ -417,6 +426,25 @@ export function useCampaignFormState(props: CampaignFormProps) {
     }
   }
 
+  // The selected brand's active short domain (null if none) — gates API Send.
+  const selectedBrandShortDomain = useMemo(
+    () => brands.find((b) => b.id === watchedBrandId)?.short_domain ?? null,
+    [brands, watchedBrandId],
+  );
+
+  function setLinkMode(mode: "manual" | "tracked") {
+    form.setValue("link_mode", mode, { shouldDirty: true });
+  }
+
+  // Keep API Send valid: if the (selected) brand has no active short domain,
+  // force back to Manual so a tracked campaign can't be submitted without a
+  // mintable link. shouldDirty:false so it doesn't trip the discard prompt.
+  useEffect(() => {
+    if (watchedLinkMode === "tracked" && !selectedBrandShortDomain) {
+      form.setValue("link_mode", "manual", { shouldDirty: false });
+    }
+  }, [watchedLinkMode, selectedBrandShortDomain, form]);
+
   function setFilter<K extends keyof AudienceFilters>(
     key: K,
     value: boolean,
@@ -454,6 +482,9 @@ export function useCampaignFormState(props: CampaignFormProps) {
     watchedContactGroups,
     watchedCap,
     watchedExcludeInUse,
+    watchedLinkMode,
+    selectedBrandShortDomain,
+    setLinkMode,
     previewCount,
     previewTotalMatching,
     previewFromSegments,

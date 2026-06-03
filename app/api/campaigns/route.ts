@@ -20,6 +20,7 @@ import {
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { snapshotAudience } from "@/lib/audience-snapshot";
 import { generateCampaignSlug } from "@/lib/campaign-helpers";
+import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { can } from "@/lib/permissions";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
 import {
@@ -72,6 +73,27 @@ export async function POST(req: NextRequest) {
         "brand_id doesn't belong to your organization",
         API_ERROR_CODES.VALIDATION,
         { field: "brand_id" },
+      );
+    }
+  }
+  // API Send (tracked) requires the brand to have an active short domain —
+  // same guard as the PATCH toggle, applied here so create can't make a
+  // tracked campaign that can't mint links.
+  if (input.link_mode === "tracked") {
+    if (input.brand_id == null) {
+      return apiError(
+        400,
+        "Set a brand before enabling API Send",
+        API_ERROR_CODES.VALIDATION,
+        { reason: "tracked_requires_brand" },
+      );
+    }
+    if (!(await brandHasActiveShortDomain(orgId, input.brand_id))) {
+      return apiError(
+        400,
+        "Add an active short domain for this brand before enabling API Send",
+        API_ERROR_CODES.VALIDATION,
+        { reason: "tracked_requires_short_domain" },
       );
     }
   }
@@ -210,6 +232,7 @@ export async function POST(req: NextRequest) {
             audience_snapshot_count: 0,
             audience_cap: audienceCap,
             exclude_in_use_contacts: excludeInUse,
+            link_mode: input.link_mode ?? "manual",
             start_date: input.start_date ?? null,
             end_date: input.end_date ?? null,
             status: "draft",

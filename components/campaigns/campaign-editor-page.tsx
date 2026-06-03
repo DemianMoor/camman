@@ -68,6 +68,7 @@ type CampaignDetail = {
   end_date: string | null;
   status: Status;
   tracking_id: string | null;
+  link_mode: "manual" | "tracked";
 };
 
 interface CreateModeProps {
@@ -192,6 +193,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
     },
     audience_cap: data.audience_cap ?? null,
     exclude_in_use_contacts: data.exclude_in_use_contacts ?? true,
+    link_mode: data.link_mode ?? "manual",
     start_date: data.start_date ?? "",
     end_date: data.end_date ?? "",
   };
@@ -475,12 +477,16 @@ function SetupCard({
 }) {
   const {
     form,
+    isEdit,
     brands,
     offers,
     routingTypes,
     trafficTypes,
     members,
     anySubmitting,
+    watchedLinkMode,
+    selectedBrandShortDomain,
+    setLinkMode,
     dateError,
   } = state;
 
@@ -594,6 +600,37 @@ function SetupCard({
               </FormItem>
             )}
           />
+          {/* Send method (link_mode). Create-mode only — existing campaigns flip
+              it from the detail page. API Send disabled until the selected brand
+              has an active short domain. */}
+          {!isEdit ? (
+            <div className="grid gap-1.5 md:col-span-2">
+              <div className="text-sm font-medium">Send method</div>
+              <Select
+                value={watchedLinkMode}
+                onValueChange={(v) => setLinkMode(v as "manual" | "tracked")}
+                disabled={anySubmitting}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="manual">Manual Send</SelectItem>
+                  <SelectItem value="tracked" disabled={!selectedBrandShortDomain}>
+                    API Send
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {watchedLinkMode === "tracked"
+                  ? "Mints a unique tracked link per recipient at send time."
+                  : "Uses the operator-pasted Short URL on each stage."}
+                {!selectedBrandShortDomain
+                  ? " API Send needs an active short domain on the brand (set it in Brands)."
+                  : ""}
+              </p>
+            </div>
+          ) : null}
           <FormField
             control={form.control}
             name="human_id"
@@ -1300,6 +1337,7 @@ function buildCreateBody(
     audience_filters: values.audience_filters,
     audience_cap: values.audience_cap,
     exclude_in_use_contacts: values.exclude_in_use_contacts,
+    link_mode: values.link_mode,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
     save_as_draft: saveAsDraft,

@@ -71,6 +71,10 @@ const campaignCreateBaseSchema = z.object({
   // DB column is NOT NULL DEFAULT true, so a missing field means "no
   // change" (PATCH) / "use default" (create) — not "set to false".
   exclude_in_use_contacts: z.boolean().optional(),
+  // Send method. 'manual' (default) uses the pasted Short URL; 'tracked' mints
+  // a per-recipient link. Accepted on create + update; the route guards that
+  // 'tracked' requires the brand to have an active short domain.
+  link_mode: z.enum(["manual", "tracked"]).optional(),
   start_date: dateStringSchema.nullable().optional(),
   end_date: dateStringSchema.nullable().optional(),
   notes: z
@@ -134,7 +138,6 @@ export const campaignUpdateSchema = campaignCreateBaseSchema
   // brand to have an active short_domain.
   .extend({
     tracking_id: z.unknown().optional(),
-    link_mode: z.enum(["manual", "tracked"]).optional(),
   })
   .superRefine((d, ctx) => {
     if (d.tracking_id !== undefined) {

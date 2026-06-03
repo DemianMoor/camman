@@ -26,6 +26,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
+import { CampaignSendMode } from "@/components/campaigns/campaign-send-mode";
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
 import { StageSendPanel } from "@/components/campaigns/stage-send-panel";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
@@ -1166,6 +1167,16 @@ export default function CampaignDetailPage() {
           ) : null}
         </div>
       </header>
+
+      {/* ============ Send method (Manual vs API/tracked) ============ */}
+      <CampaignSendMode
+        campaignId={campaign.id}
+        linkMode={campaign.link_mode}
+        brandName={campaign.brand?.name ?? null}
+        brandShortDomain={campaign.brand?.short_domain ?? null}
+        canEdit={canUpdateCampaign}
+        onChanged={refetchCampaign}
+      />
 
       {/* ============ Metadata (compact two-line summary + expand) ============ */}
       <CampaignMetaCompact

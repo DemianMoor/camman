@@ -79,6 +79,10 @@ type OptOut = {
   brands: BrandInfo[];
   providers: ProviderInfo[];
   campaign: CampaignRef | null;
+  // Provider + sending number the contact opted out from — derived from the
+  // most recent stage that sent to them. Null when not attributable.
+  send_provider: ProviderInfo | null;
+  sending_number: string | null;
 };
 
 type ListResponse = {
@@ -424,6 +428,35 @@ export default function OptOutsPage() {
             >
               {label}
             </Link>
+          );
+        },
+      },
+      {
+        id: "opted_out_via",
+        header: "Opted out via",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const p = row.original.send_provider;
+          const num = row.original.sending_number;
+          if (!p && !num)
+            return <span className="text-muted-foreground">—</span>;
+          return (
+            <div className="flex flex-col gap-0.5">
+              {p ? (
+                <span className="inline-flex items-center gap-1.5 text-sm">
+                  <span
+                    className="size-2 rounded-full"
+                    style={{ backgroundColor: p.color ?? "#64748B" }}
+                  />
+                  {p.name}
+                </span>
+              ) : null}
+              {num ? (
+                <span className="font-mono text-xs text-muted-foreground">
+                  {formatPhoneInternational(num)}
+                </span>
+              ) : null}
+            </div>
           );
         },
       },

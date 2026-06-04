@@ -157,24 +157,34 @@ export async function GET(req: NextRequest) {
     }, new Map<number, ProviderInfo[]>());
   }
 
-  // Derive the campaign associated with each opt-out: the most recent stage
-  // that actually SENT to the contact (via stage_sends) at/before the opt-out.
-  // Same attribution as the campaign "Inbound STOPs" metric. Only resolves for
-  // contacts sent through the API send pipeline; others get null.
+  // Derive what sent the contact the message they opted out of: the most recent
+  // stage that actually SENT to the contact (via stage_sends) at/before the
+  // opt-out. From that stage we surface the campaign, the SMS provider, and the
+  // sending number (provider_phone). Same attribution as the "Inbound STOPs"
+  // metric. Only resolves for contacts sent through the API send pipeline;
+  // others get nulls.
   type CampaignRef = {
     id: number;
     name: string | null;
     human_id: string | null;
     tracking_id: string | null;
   };
-  let campaignByOptOut = new Map<number, CampaignRef>();
+  type Attribution = {
+    campaign: CampaignRef | null;
+    send_provider: { id: number; name: string; color: string | null } | null;
+    sending_number: string | null;
+  };
+  let attributionByOptOut = new Map<number, Attribution>();
   if (ids.length > 0) {
-    const campRows = (await db.execute(drizzleSql`
-      SELECT oo.id AS opt_out_id, c.id AS campaign_id, c.name AS name,
-             c.human_id AS human_id, c.tracking_id AS tracking_id
+    const attrRows = (await db.execute(drizzleSql`
+      SELECT oo.id AS opt_out_id,
+             c.id AS campaign_id, c.name AS campaign_name,
+             c.human_id AS human_id, c.tracking_id AS tracking_id,
+             p.id AS provider_id, p.name AS provider_name, p.color AS provider_color,
+             pp.phone_number AS sending_number
       FROM opt_outs oo
       LEFT JOIN LATERAL (
-        SELECT ss.campaign_id
+        SELECT ss.campaign_id, ss.stage_id
         FROM stage_sends ss
         WHERE ss.contact_id = oo.contact_id AND ss.org_id = ${orgId}
           AND ss.status = 'sent' AND ss.sent_at <= oo.created_at
@@ -183,35 +193,61 @@ export async function GET(req: NextRequest) {
       ) latest ON true
       LEFT JOIN campaigns c
         ON c.id = latest.campaign_id AND c.org_id = ${orgId}
+      LEFT JOIN campaign_stages cs
+        ON cs.id = latest.stage_id AND cs.org_id = ${orgId}
+      LEFT JOIN sms_providers p
+        ON p.id = cs.sms_provider_id AND p.org_id = ${orgId}
+      LEFT JOIN provider_phones pp ON pp.id = cs.provider_phone_id
       WHERE oo.id IN (${drizzleSql.raw(ids.join(","))}) AND oo.org_id = ${orgId}
     `)) as unknown as {
       opt_out_id: number;
       campaign_id: number | null;
-      name: string | null;
+      campaign_name: string | null;
       human_id: string | null;
       tracking_id: string | null;
+      provider_id: number | null;
+      provider_name: string | null;
+      provider_color: string | null;
+      sending_number: string | null;
     }[];
-    campaignByOptOut = new Map(
-      campRows
-        .filter((r) => r.campaign_id != null)
-        .map((r) => [
-          Number(r.opt_out_id),
-          {
-            id: Number(r.campaign_id),
-            name: r.name,
-            human_id: r.human_id,
-            tracking_id: r.tracking_id,
-          },
-        ]),
+    attributionByOptOut = new Map(
+      attrRows.map((r) => [
+        Number(r.opt_out_id),
+        {
+          campaign:
+            r.campaign_id != null
+              ? {
+                  id: Number(r.campaign_id),
+                  name: r.campaign_name,
+                  human_id: r.human_id,
+                  tracking_id: r.tracking_id,
+                }
+              : null,
+          send_provider:
+            r.provider_id != null && r.provider_name != null
+              ? {
+                  id: Number(r.provider_id),
+                  name: r.provider_name,
+                  color: r.provider_color,
+                }
+              : null,
+          sending_number: r.sending_number,
+        },
+      ]),
     );
   }
 
-  const data = pageRows.map((r) => ({
-    ...r,
-    brands: brandsByOptOut.get(r.id) ?? [],
-    providers: providersByOptOut.get(r.id) ?? [],
-    campaign: campaignByOptOut.get(r.id) ?? null,
-  }));
+  const data = pageRows.map((r) => {
+    const attr = attributionByOptOut.get(r.id);
+    return {
+      ...r,
+      brands: brandsByOptOut.get(r.id) ?? [],
+      providers: providersByOptOut.get(r.id) ?? [],
+      campaign: attr?.campaign ?? null,
+      send_provider: attr?.send_provider ?? null,
+      sending_number: attr?.sending_number ?? null,
+    };
+  });
 
   return NextResponse.json({
     data,

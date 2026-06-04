@@ -17,6 +17,28 @@ function parseId(idParam: string) {
   return n;
 }
 
+// Resolve the app's public origin for building the callback URL. Prefer the
+// ACTUAL request host (the admin is, by definition, on the correct reachable
+// production origin when they click Register) — this makes the callback immune
+// to a mistyped NEXT_PUBLIC_SITE_URL (wrong host or missing scheme). Falls back
+// to NEXT_PUBLIC_SITE_URL (normalizing a missing scheme) only if the request
+// carries no host header (e.g. some test runners). Returns a scheme+host base
+// with no trailing slash, or null if nothing usable is available.
+//
+// NOTE: register from the stable production domain, not an ephemeral preview
+// deployment URL, or the callback will point at a URL that later disappears.
+function resolveOrigin(req: NextRequest): string | null {
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
+  if (host) {
+    const proto = req.headers.get("x-forwarded-proto") ?? "https";
+    return `${proto}://${host}`;
+  }
+  let env = (process.env.NEXT_PUBLIC_SITE_URL ?? "").trim();
+  if (!env) return null;
+  if (!/^https?:\/\//i.test(env)) env = `https://${env}`;
+  return env.replace(/\/+$/, "");
+}
+
 // POST — register this credential's inbound opt-out (STOP) callback with
 // TextHub (manager+). Mints a stable per-credential token on first call (reused
 // thereafter, so the callback URL never changes), then asks TextHub to deliver
@@ -59,11 +81,11 @@ export async function POST(
     );
   }
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
-  if (!siteUrl) {
+  const origin = resolveOrigin(req);
+  if (!origin) {
     return apiError(
       500,
-      "Server misconfiguration: NEXT_PUBLIC_SITE_URL is not set",
+      "Server misconfiguration: could not resolve the app origin (no request host and NEXT_PUBLIC_SITE_URL is unset)",
       API_ERROR_CODES.VALIDATION,
     );
   }
@@ -101,8 +123,27 @@ export async function POST(
       .where(eq(provider_credentials.id, cred[0].id));
   }
 
-  const base = siteUrl.replace(/\/+$/, "");
-  const callbackUrl = `${base}/api/webhooks/texthub/opt-out/${token}`;
+  const callbackUrl = `${origin}/api/webhooks/texthub/opt-out/${token}`;
+
+  // Defensive: never hand TextHub a malformed callback. Must be an absolute
+  // http(s) URL (a mistyped origin could otherwise slip through).
+  let parsedCallback: URL;
+  try {
+    parsedCallback = new URL(callbackUrl);
+  } catch {
+    return apiError(
+      500,
+      `Resolved an invalid callback URL: ${callbackUrl}`,
+      API_ERROR_CODES.VALIDATION,
+    );
+  }
+  if (parsedCallback.protocol !== "https:" && parsedCallback.protocol !== "http:") {
+    return apiError(
+      500,
+      `Callback URL must be http(s): ${callbackUrl}`,
+      API_ERROR_CODES.VALIDATION,
+    );
+  }
 
   const result = await registerOptOutCallback({
     apiKey: cred[0].api_key,

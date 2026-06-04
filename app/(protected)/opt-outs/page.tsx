@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { format } from "date-fns";
+import Link from "next/link";
 import {
   Check,
   Copy,
@@ -55,6 +55,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toastApiError } from "@/lib/api/toast-error";
+import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
@@ -63,6 +64,13 @@ import { cn } from "@/lib/utils";
 type BrandInfo = { id: number; name: string; color: string | null };
 type ProviderInfo = { id: number; name: string; color: string | null };
 
+type CampaignRef = {
+  id: number;
+  name: string | null;
+  human_id: string | null;
+  tracking_id: string | null;
+};
+
 type OptOut = {
   id: number;
   phone_number: string;
@@ -70,6 +78,7 @@ type OptOut = {
   created_at: string;
   brands: BrandInfo[];
   providers: ProviderInfo[];
+  campaign: CampaignRef | null;
 };
 
 type ListResponse = {
@@ -398,11 +407,32 @@ export default function OptOutsPage() {
         enableSorting: true,
       },
       {
+        id: "campaign",
+        header: "Campaign",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const c = row.original.campaign;
+          if (!c)
+            return <span className="text-muted-foreground">—</span>;
+          const label =
+            c.name ?? c.human_id ?? c.tracking_id ?? `Campaign #${c.id}`;
+          return (
+            <Link
+              href={`/campaigns/${c.id}`}
+              onClick={(e) => e.stopPropagation()}
+              className="text-primary underline-offset-2 hover:underline"
+            >
+              {label}
+            </Link>
+          );
+        },
+      },
+      {
         id: "created_at",
         header: "Created",
         cell: ({ row }) => (
           <span className="text-muted-foreground">
-            {format(new Date(row.original.created_at), "MMM d, yyyy")}
+            {formatCampaignDateTime(row.original.created_at)}
           </span>
         ),
         enableSorting: true,

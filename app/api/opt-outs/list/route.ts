@@ -157,10 +157,60 @@ export async function GET(req: NextRequest) {
     }, new Map<number, ProviderInfo[]>());
   }
 
+  // Derive the campaign associated with each opt-out: the most recent stage
+  // that actually SENT to the contact (via stage_sends) at/before the opt-out.
+  // Same attribution as the campaign "Inbound STOPs" metric. Only resolves for
+  // contacts sent through the API send pipeline; others get null.
+  type CampaignRef = {
+    id: number;
+    name: string | null;
+    human_id: string | null;
+    tracking_id: string | null;
+  };
+  let campaignByOptOut = new Map<number, CampaignRef>();
+  if (ids.length > 0) {
+    const campRows = (await db.execute(drizzleSql`
+      SELECT oo.id AS opt_out_id, c.id AS campaign_id, c.name AS name,
+             c.human_id AS human_id, c.tracking_id AS tracking_id
+      FROM opt_outs oo
+      LEFT JOIN LATERAL (
+        SELECT ss.campaign_id
+        FROM stage_sends ss
+        WHERE ss.contact_id = oo.contact_id AND ss.org_id = ${orgId}
+          AND ss.status = 'sent' AND ss.sent_at <= oo.created_at
+        ORDER BY ss.sent_at DESC, ss.id DESC
+        LIMIT 1
+      ) latest ON true
+      LEFT JOIN campaigns c
+        ON c.id = latest.campaign_id AND c.org_id = ${orgId}
+      WHERE oo.id IN (${drizzleSql.raw(ids.join(","))}) AND oo.org_id = ${orgId}
+    `)) as unknown as {
+      opt_out_id: number;
+      campaign_id: number | null;
+      name: string | null;
+      human_id: string | null;
+      tracking_id: string | null;
+    }[];
+    campaignByOptOut = new Map(
+      campRows
+        .filter((r) => r.campaign_id != null)
+        .map((r) => [
+          Number(r.opt_out_id),
+          {
+            id: Number(r.campaign_id),
+            name: r.name,
+            human_id: r.human_id,
+            tracking_id: r.tracking_id,
+          },
+        ]),
+    );
+  }
+
   const data = pageRows.map((r) => ({
     ...r,
     brands: brandsByOptOut.get(r.id) ?? [],
     providers: providersByOptOut.get(r.id) ?? [],
+    campaign: campaignByOptOut.get(r.id) ?? null,
   }));
 
   return NextResponse.json({

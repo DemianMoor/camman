@@ -1,0 +1,46 @@
+import { NextResponse, type NextRequest } from "next/server";
+
+import { db } from "@/db/client";
+import { requireApiMembership } from "@/lib/api/helpers";
+import { can } from "@/lib/permissions";
+import { pollOptOuts } from "@/lib/sends/poll-opt-outs";
+
+// Inbound opt-out (STOP) intake by polling TextHub's `?inbox=true`.
+//
+// Auth is DUAL:
+//   - CRON_SECRET Bearer (Vercel Cron, see vercel.json) -> polls ALL orgs'
+//     credentials. GET, matching the score-pending cron pattern.
+//   - Authenticated session with operator+ (opt_outs.upload) -> polls only the
+//     caller's org. POST, used by the "Poll opt-outs now" button.
+// Neither => 401/403. The browser uses its session cookie, so CRON_SECRET is
+// never exposed to the client.
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
+async function handle(req: NextRequest): Promise<NextResponse> {
+  const secret = process.env.CRON_SECRET;
+  const bearerMatches =
+    !!secret && req.headers.get("authorization") === `Bearer ${secret}`;
+
+  let orgId: string | undefined;
+  if (!bearerMatches) {
+    const auth = await requireApiMembership();
+    if ("error" in auth) return auth.error;
+    if (!can(auth.role, "opt_outs.upload")) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    orgId = auth.orgId; // scope the manual poll to the caller's org
+  }
+
+  const result = await pollOptOuts(db, { orgId });
+  return NextResponse.json(result);
+}
+
+// Cron (Bearer) hits GET; the manual button hits POST. Both share one handler.
+export async function GET(req: NextRequest) {
+  return handle(req);
+}
+
+export async function POST(req: NextRequest) {
+  return handle(req);
+}

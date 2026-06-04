@@ -3,6 +3,10 @@
     {
       "path": "/api/clicks/score-pending",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/opt-outs/poll",
+      "schedule": "*/15 * * * *"
     }
   ]
 }

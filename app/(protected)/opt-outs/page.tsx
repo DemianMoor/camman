@@ -5,6 +5,7 @@ import { format } from "date-fns";
 import {
   Check,
   Copy,
+  Inbox,
   MoreHorizontal,
   Plus,
   Trash2,
@@ -183,6 +184,12 @@ export default function OptOutsPage() {
     deleted_junctions: number;
     deleted_opt_outs: number;
   }>();
+  const pollApi = useApiCall<{
+    credentials_polled: number;
+    fetched: number;
+    new: number;
+    suppressed: number;
+  }>();
 
   const [data, setData] = useState<OptOut[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -274,6 +281,32 @@ export default function OptOutsPage() {
       `Added ${summary.inserted.toLocaleString()} opt-out${summary.inserted === 1 ? "" : "s"}`,
     );
     refetch();
+  }
+
+  async function handlePoll() {
+    const result = await pollApi.execute("/api/opt-outs/poll", {
+      method: "POST",
+    });
+    if (!result.ok) {
+      toastApiError(result, "Couldn't poll for opt-outs");
+      return;
+    }
+    const { suppressed, fetched, credentials_polled } = result.data;
+    if (credentials_polled === 0) {
+      toast.message("No TextHub API keys to poll", {
+        description: "Add an API-capable provider credential first.",
+      });
+    } else if (suppressed > 0) {
+      toast.success(
+        `Suppressed ${suppressed.toLocaleString()} from STOP repl${suppressed === 1 ? "y" : "ies"}`,
+        { description: `Polled ${fetched} inbound message${fetched === 1 ? "" : "s"}.` },
+      );
+      refetch();
+    } else {
+      toast.message("No new opt-outs", {
+        description: `Polled ${fetched} inbound message${fetched === 1 ? "" : "s"} across ${credentials_polled} inbox${credentials_polled === 1 ? "" : "es"}.`,
+      });
+    }
   }
 
   async function handleBulkDelete() {
@@ -427,6 +460,17 @@ export default function OptOutsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {canUpload ? (
+            <Button
+              variant="outline"
+              onClick={() => void handlePoll()}
+              disabled={pollApi.isLoading}
+              title="Pull inbound STOP replies from TextHub and suppress them"
+            >
+              <Inbox className="size-4" aria-hidden />
+              {pollApi.isLoading ? "Polling…" : "Poll opt-outs"}
+            </Button>
+          ) : null}
           {canDelete ? (
             <Button
               variant="outline"

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { KeyRound, Plus, RotateCw, SendHorizonal, Trash2 } from "lucide-react";
+import { Ban, KeyRound, Plus, RotateCw, SendHorizonal, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -79,6 +79,44 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
     setTestNumber("");
     setTestText("CamMan self-test https://go.yourbrand.co/r/SELFTEST1 (please ignore)");
     setTestResult(null);
+  }
+
+  // Register opt-out (STOP) callback: points TextHub at our inbound webhook for
+  // this key so STOPs are captured. Shows the raw TextHub response.
+  const registerApi = useApiCall<{
+    ok: boolean;
+    callbackUrl: string;
+    status: number;
+    response: string | null;
+    error: string | null;
+  }>();
+  const [registering, setRegistering] = useState<Cred | null>(null);
+  const [registerResult, setRegisterResult] = useState<
+    { ok: boolean; callbackUrl: string; status: number; response: string | null; error: string | null } | null
+  >(null);
+
+  function openRegister(c: Cred) {
+    setRegistering(c);
+    setRegisterResult(null);
+  }
+
+  async function handleRegister() {
+    if (!registering) return;
+    const r = await registerApi.execute(
+      `/api/providers/${providerId}/credentials/${registering.id}/register-callback`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    if (!r.ok) {
+      toastApiError(r, "Couldn't register the STOP callback");
+      return;
+    }
+    setRegisterResult(r.data);
+    if (r.data.ok) toast.success("Callback registered — now text STOP to capture the payload");
+    else toast.error("TextHub didn't accept the registration");
   }
 
   async function handleTest() {
@@ -228,6 +266,9 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
                       <div className="flex justify-end gap-1">
                         <Button variant="ghost" size="sm" onClick={() => openTest(c)}>
                           <SendHorizonal className="size-4" aria-hidden /> Send test
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => openRegister(c)}>
+                          <Ban className="size-4" aria-hidden /> STOP callback
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => openRotate(c)}>
                           <RotateCw className="size-4" aria-hidden /> Rotate
@@ -434,6 +475,85 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
               disabled={testApi.isLoading || !testNumber.trim() || !testText.trim()}
             >
               {testApi.isLoading ? "Sending…" : "Send test"}
+            </Button>
+          </div>
+        </div>
+      </FormDialog>
+
+      {/* Register STOP callback dialog */}
+      <FormDialog
+        open={registering !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRegistering(null);
+            setRegisterResult(null);
+          }
+        }}
+        className="sm:max-w-md"
+      >
+        <DialogHeader>
+          <DialogTitle>Register STOP callback</DialogTitle>
+          <DialogDescription>
+            Tells TextHub to deliver inbound STOP messages for the{" "}
+            {registering?.brand_id === null ? "default" : registering?.brand_name ?? "brand"} key
+            to this app. One-time setup per key. After it succeeds, text STOP from
+            your own phone to confirm what TextHub delivers.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          {registerResult ? (
+            <div
+              className={
+                "rounded-md border p-3 text-sm " +
+                (registerResult.ok
+                  ? "border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950"
+                  : "border-destructive/40 bg-destructive/5")
+              }
+            >
+              <p className="font-medium">
+                {registerResult.ok
+                  ? "TextHub accepted the registration."
+                  : `TextHub rejected it (HTTP ${registerResult.status}).`}
+              </p>
+              <p className="mt-2 text-xs text-muted-foreground">Callback URL:</p>
+              <p className="break-all font-mono text-xs">{registerResult.callbackUrl}</p>
+              {registerResult.response ? (
+                <>
+                  <p className="mt-2 text-xs text-muted-foreground">TextHub response:</p>
+                  <p className="break-all font-mono text-xs">{registerResult.response}</p>
+                </>
+              ) : null}
+              {registerResult.error ? (
+                <p className="mt-2 break-all font-mono text-xs">{registerResult.error}</p>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              This calls TextHub once to register the callback. No SMS is sent.
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setRegistering(null);
+                setRegisterResult(null);
+              }}
+              disabled={registerApi.isLoading}
+            >
+              Close
+            </Button>
+            <Button
+              onClick={() => void handleRegister()}
+              disabled={registerApi.isLoading}
+            >
+              {registerApi.isLoading
+                ? "Registering…"
+                : registerResult
+                  ? "Re-register"
+                  : "Register callback"}
             </Button>
           </div>
         </div>

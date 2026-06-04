@@ -275,6 +275,10 @@ export const provider_credentials = pgTable(
       onDelete: "cascade",
     }),
     api_key: text("api_key").notNull(),
+    // Per-credential secret embedded in the registered TextHub opt-out callback
+    // URL path. Authenticates the inbound webhook AND resolves it to this
+    // (org, provider, brand). NULL until the callback is registered for the key.
+    inbound_webhook_token: text("inbound_webhook_token"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -291,11 +295,56 @@ export const provider_credentials = pgTable(
       table.provider_id,
       table.brand_id,
     ),
+    // A separate partial unique enforces globally-unique inbound tokens (so an
+    // inbound callback resolves exactly one key) — see migration 0055.
   ],
 );
 
 export type ProviderCredential = typeof provider_credentials.$inferSelect;
 export type NewProviderCredential = typeof provider_credentials.$inferInsert;
+
+// Append-only capture of every authenticated inbound TextHub callback (opt-out
+// STOP intake). Stage A writes the raw payload verbatim so the contract can be
+// read off real data; Stage B reads provider_message_id for idempotency and
+// fills result / matched_contact_id / processed_at when it parses + suppresses.
+export const texthub_inbound_events = pgTable(
+  "texthub_inbound_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "set null" },
+    ),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    received_at: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    method: text("method").notNull(),
+    query: jsonb("query"),
+    headers: jsonb("headers"),
+    raw_body: text("raw_body"),
+    // Filled by Stage B (nullable here).
+    provider_message_id: text("provider_message_id"),
+    matched_contact_id: uuid("matched_contact_id").references(
+      () => contacts.id,
+      { onDelete: "set null" },
+    ),
+    result: text("result"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("texthub_inbound_events_org_id_idx").on(table.org_id),
+    index("texthub_inbound_events_received_at_idx").on(table.received_at),
+  ],
+);
+
+export type TexthubInboundEvent = typeof texthub_inbound_events.$inferSelect;
+export type NewTexthubInboundEvent = typeof texthub_inbound_events.$inferInsert;
 
 export type SmsProvider = typeof sms_providers.$inferSelect;
 export type NewSmsProvider = typeof sms_providers.$inferInsert;

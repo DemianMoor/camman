@@ -67,3 +67,18 @@ export const providerCredentialTestSchema = z.object({
 export type ProviderCredentialTestInput = z.infer<
   typeof providerCredentialTestSchema
 >;
+
+// Register the inbound opt-out (STOP) callback for a stored credential with
+// TextHub. Body is optional; keywords default to ["STOP"] in the route. The
+// api_key is resolved server-side from the credential — never sent by the
+// client.
+export const registerOptOutCallbackSchema = z.object({
+  keywords: z
+    .array(z.string().trim().min(1).max(40))
+    .max(20)
+    .optional(),
+});
+
+export type RegisterOptOutCallbackInput = z.infer<
+  typeof registerOptOutCallbackSchema
+>;

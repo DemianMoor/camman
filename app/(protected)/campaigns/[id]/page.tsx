@@ -161,6 +161,10 @@ type Stage = {
   total_cost: string;
   delivered_count: number;
   opt_out_count: number;
+  // Live, read-only: inbound STOP opt-outs (source sms_inbound) attributed to
+  // this stage (the most recent stage that sent to the contact). Distinct from
+  // the import-fed opt_out_count.
+  inbound_stop_count: number;
   click_count: number;
   late_click_count: number;
   scrubbed_count: number;
@@ -944,6 +948,7 @@ export default function CampaignDetailPage() {
     let sms = 0;
     let delivered = 0;
     let optOuts = 0;
+    let inboundStops = 0;
     let clickers = 0;
     let lateClickers = 0;
     let scrubbed = 0;
@@ -961,6 +966,7 @@ export default function CampaignDetailPage() {
       sms += s.sms_count;
       delivered += s.delivered_count;
       optOuts += s.opt_out_count;
+      inboundStops += s.inbound_stop_count;
       clickers += s.click_count;
       lateClickers += s.late_click_count;
       scrubbed += s.scrubbed_count;
@@ -981,6 +987,7 @@ export default function CampaignDetailPage() {
       sms,
       delivered,
       optOuts,
+      inboundStops,
       clickers,
       lateClickers,
       scrubbed,
@@ -991,7 +998,8 @@ export default function CampaignDetailPage() {
       revenue: revenueKnown ? revenue : null,
     };
   }, [stages]);
-  const hasResults = campaignTotals.sms > 0;
+  const hasResults =
+    campaignTotals.sms > 0 || campaignTotals.inboundStops > 0;
 
   if (!auth) return null;
 
@@ -1202,6 +1210,10 @@ export default function CampaignDetailPage() {
               <TotalsMetric
                 label="Opt-outs"
                 value={campaignTotals.optOuts}
+              />
+              <TotalsMetric
+                label="Inbound STOPs"
+                value={campaignTotals.inboundStops}
               />
               <TotalsMetric
                 label="Clicker 1st Day"

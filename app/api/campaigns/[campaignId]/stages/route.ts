@@ -235,6 +235,36 @@ export async function GET(
     ),
   );
 
+  // Live "inbound STOP" count per stage: opt_outs that arrived via the inbox
+  // poll (source 'sms_inbound'), attributed to the most recent stage that
+  // actually SENT to that contact (via stage_sends) at/before the opt-out.
+  // Read-only — separate from the import-fed opt_out_count. Only campaigns sent
+  // through the API pipeline (which writes stage_sends) can attribute here.
+  const inboundStopRows = (await db.execute(drizzleSql`
+    SELECT a.stage_id AS stage_id, count(*)::int AS n
+    FROM (
+      SELECT (
+        SELECT ss.stage_id FROM stage_sends ss
+        WHERE ss.contact_id = oo.contact_id AND ss.org_id = ${orgId}
+          AND ss.status = 'sent' AND ss.sent_at <= oo.created_at
+        ORDER BY ss.sent_at DESC, ss.id DESC
+        LIMIT 1
+      ) AS stage_id
+      FROM opt_outs oo
+      WHERE oo.org_id = ${orgId} AND oo.source = 'sms_inbound'
+        AND EXISTS (
+          SELECT 1 FROM stage_sends s2
+          WHERE s2.contact_id = oo.contact_id AND s2.org_id = ${orgId}
+            AND s2.campaign_id = ${cid}
+        )
+    ) a
+    JOIN campaign_stages cs ON cs.id = a.stage_id AND cs.campaign_id = ${cid}
+    GROUP BY a.stage_id
+  `)) as unknown as { stage_id: number; n: number }[];
+  const inboundStopByStage = new Map(
+    inboundStopRows.map((r) => [Number(r.stage_id), Number(r.n)]),
+  );
+
   let data = rows.map((r, i) => ({
     ...r,
     creative: r.creative?.id ? r.creative : null,
@@ -243,6 +273,7 @@ export async function GET(
     brand: r.brand?.id ? r.brand : null,
     offer: r.offer?.id ? r.offer : null,
     audience_count: audienceCounts[i],
+    inbound_stop_count: inboundStopByStage.get(r.id) ?? 0,
   }));
 
   // audience_count is derived in JS post-query; sort it here when the

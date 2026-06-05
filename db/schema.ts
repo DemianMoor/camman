@@ -246,6 +246,18 @@ export const sms_providers = pgTable(
     send_window_weekday_end: integer("send_window_weekday_end"),
     send_window_weekend_start: integer("send_window_weekend_start"),
     send_window_weekend_end: integer("send_window_weekend_end"),
+    // Circuit breakers (migration 0058). max_sends_per_run = SOFT per-invocation
+    // pacing cap (NULL ⇒ default 1000, hard-clamped to 2000 in code) — never
+    // pauses. max_sends_per_minute / max_sends_per_24h = SOFT rolling ceilings
+    // (NULL ⇒ 100 / 10000) counted org-wide as a proxy for this provider until
+    // provider #2. send_paused = LATCHING kill-switch (mid-run kill + manual
+    // panic); trips only on anomalies and requires a conscious human resume.
+    max_sends_per_run: integer("max_sends_per_run"),
+    max_sends_per_minute: integer("max_sends_per_minute"),
+    max_sends_per_24h: integer("max_sends_per_24h"),
+    send_paused: boolean("send_paused").notNull().default(false),
+    send_paused_reason: text("send_paused_reason"),
+    send_paused_at: timestamp("send_paused_at", { withTimezone: true }),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -1814,8 +1826,53 @@ export const stage_sends = pgTable(
       "stage_sends_status_check",
       sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected')`,
     ),
+    // Migration 0058. Partial unique: at most one LIVE send per (stage, contact)
+    // — structurally blocks double-materialization while leaving terminal rows
+    // ('sent'/'failed') free so a genuine resend mints fresh rows. Also a partial
+    // (org_id, sent_at) index to keep the rolling rate/24h breaker counts cheap.
+    uniqueIndex("stage_sends_active_contact_uniq")
+      .on(table.stage_id, table.contact_id)
+      .where(sql`status IN ('pending', 'sending')`),
+    index("stage_sends_org_sent_at_idx")
+      .on(table.org_id, table.sent_at)
+      .where(sql`sent_at IS NOT NULL`),
   ],
 );
 
 export type StageSend = typeof stage_sends.$inferSelect;
 export type NewStageSend = typeof stage_sends.$inferInsert;
+
+// Append-only circuit-breaker audit log (migration 0058): every pause (auto-trip
+// = actor_user_id NULL + system reason; manual panic = actor set) and resume
+// (actor = the session user who cleared it). The permanent who/when record for a
+// consequential loop-trip un-pause, and breaker-trip history. actor_user_id is
+// the auth user id stored WITHOUT a cross-schema FK (audit log, decoupled).
+export const send_circuit_events = pgTable(
+  "send_circuit_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    provider_id: integer("provider_id")
+      .notNull()
+      .references(() => sms_providers.id, { onDelete: "cascade" }),
+    event: text("event").notNull(),
+    reason: text("reason"),
+    actor_user_id: uuid("actor_user_id"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("send_circuit_events_provider_idx").on(table.provider_id, table.created_at),
+    index("send_circuit_events_org_id_idx").on(table.org_id),
+    check(
+      "send_circuit_events_event_check",
+      sql`${table.event} IN ('paused', 'resumed')`,
+    ),
+  ],
+);
+
+export type SendCircuitEvent = typeof send_circuit_events.$inferSelect;
+export type NewSendCircuitEvent = typeof send_circuit_events.$inferInsert;

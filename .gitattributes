@@ -1,0 +1,7 @@
+# Drizzle records an LF-normalized SHA-256 of each migration's SQL, and
+# scripts/verify-migration-integrity.ts cross-checks that recorded hash against
+# the file on disk. Pin everything under db/migrations to LF so Windows
+# autocrlf can't rewrite it to CRLF on checkout — a CRLF working copy hashes
+# differently and shows a FALSE "drift" mismatch, training us to ignore a
+# safety-critical integrity tool. The recorded hashes are LF; keep the disk LF.
+db/migrations/** text eol=lf

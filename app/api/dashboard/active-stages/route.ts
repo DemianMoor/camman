@@ -1,4 +1,4 @@
-import { and, desc, eq, sql as drizzleSql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
@@ -10,22 +10,17 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
-import {
-  stageEffectiveDate,
-  stageHasResults,
-  stageNotArchived,
-} from "@/lib/dashboard-stages";
 import { can } from "@/lib/permissions";
 
 const LIMIT = 10;
 
-// Recent stages carrying recorded results, newest first by effective report
-// date. The dashboard shows these as a "what just shipped" feed. Any stage
-// with results is interesting context — including cancelled / failed, and
-// stages whose results were entered/imported without ever stamping sent_at.
-// The `sent_at` field returned below is the effective report date
-// (COALESCE(scheduled_at, sent_at, status_changed_at, created_at)) so the feed
-// has a timestamp to render even when the stage never passed through `sent`.
+// Active stages — those still in flight. "Active" = status draft / pending /
+// sent; success / cancelled / failed are considered completed and excluded
+// (archived stages too). Ordered by most recently touched (status_changed_at),
+// so the freshest work surfaces first. Counters are shown as context — drafts
+// and pending stages typically have none yet.
+const ACTIVE_STATUSES = ["draft", "pending", "sent"] as const;
+
 export async function GET() {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -41,7 +36,7 @@ export async function GET() {
       stage_number: campaign_stages.stage_number,
       label: campaign_stages.label,
       status: campaign_stages.status,
-      sent_at: drizzleSql<string>`${stageEffectiveDate}`,
+      updated_at: campaign_stages.status_changed_at,
       sms_count: campaign_stages.sms_count,
       delivered_count: campaign_stages.delivered_count,
       opt_out_count: campaign_stages.opt_out_count,
@@ -75,11 +70,11 @@ export async function GET() {
     .where(
       and(
         eq(campaign_stages.org_id, orgId),
-        stageNotArchived,
-        stageHasResults,
+        isNull(campaign_stages.archived_at),
+        inArray(campaign_stages.status, ACTIVE_STATUSES as unknown as string[]),
       ),
     )
-    .orderBy(desc(stageEffectiveDate))
+    .orderBy(desc(campaign_stages.status_changed_at))
     .limit(LIMIT);
 
   const data = rows.map((r) => ({
@@ -87,7 +82,7 @@ export async function GET() {
     stage_number: r.stage_number,
     label: r.label,
     status: r.status,
-    sent_at: r.sent_at,
+    updated_at: r.updated_at,
     sms_count: r.sms_count,
     delivered_count: r.delivered_count,
     opt_out_count: r.opt_out_count,

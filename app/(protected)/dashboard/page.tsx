@@ -113,12 +113,12 @@ type ActiveCampaign = {
 
 type ActiveCampaignsResponse = { campaigns: ActiveCampaign[] };
 
-type RecentStage = {
+type ActiveStage = {
   id: number;
   stage_number: number;
   label: string | null;
   status: string;
-  sent_at: string;
+  updated_at: string;
   sms_count: number;
   delivered_count: number;
   opt_out_count: number;
@@ -131,7 +131,7 @@ type RecentStage = {
   brand: { id: number; name: string; color: string | null } | null;
 };
 
-type RecentStagesResponse = { stages: RecentStage[] };
+type ActiveStagesResponse = { stages: ActiveStage[] };
 
 type BaseStatsResponse = {
   total: number;
@@ -207,7 +207,7 @@ export default function DashboardPage() {
   const statsApi = useApiCall<StatsResponse>();
   const dailyApi = useApiCall<DailyResponse>();
   const activeApi = useApiCall<ActiveCampaignsResponse>();
-  const stagesApi = useApiCall<RecentStagesResponse>();
+  const activeStagesApi = useApiCall<ActiveStagesResponse>();
   const baseApi = useApiCall<BaseStatsResponse>();
 
   const [filters, updateFilters] = usePersistedFilters<DashboardFilterState>(
@@ -218,7 +218,7 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [daily, setDaily] = useState<DailyResponse | null>(null);
   const [activeCampaigns, setActiveCampaigns] = useState<ActiveCampaign[]>([]);
-  const [recentStages, setRecentStages] = useState<RecentStage[]>([]);
+  const [activeStages, setActiveStages] = useState<ActiveStage[]>([]);
   const [baseStats, setBaseStats] = useState<BaseStatsResponse | null>(null);
 
   const refetch = useCallback(async () => {
@@ -230,11 +230,11 @@ export default function DashboardPage() {
 
     const [ac, rs, bs] = await Promise.all([
       activeApi.execute("/api/dashboard/active-campaigns"),
-      stagesApi.execute("/api/dashboard/recent-stages"),
+      activeStagesApi.execute("/api/dashboard/active-stages"),
       baseApi.execute("/api/contacts/base-stats"),
     ]);
     if (ac.ok) setActiveCampaigns(ac.data.campaigns);
-    if (rs.ok) setRecentStages(rs.data.stages);
+    if (rs.ok) setActiveStages(rs.data.stages);
     if (bs.ok) setBaseStats(bs.data);
 
     if (rangeReady) {
@@ -252,7 +252,7 @@ export default function DashboardPage() {
     statsApi.execute,
     dailyApi.execute,
     activeApi.execute,
-    stagesApi.execute,
+    activeStagesApi.execute,
     baseApi.execute,
   ]);
 
@@ -382,9 +382,9 @@ export default function DashboardPage() {
     },
   ];
 
-  // =============== Recent-stages table columns ===============
+  // =============== Active-stages table columns ===============
 
-  const stageColumns: ColumnDef<RecentStage>[] = [
+  const activeStageColumns: ColumnDef<ActiveStage>[] = [
     {
       id: "n",
       header: "#",
@@ -448,12 +448,12 @@ export default function DashboardPage() {
         ),
     },
     {
-      id: "sent",
-      header: "Sent",
+      id: "updated",
+      header: "Updated",
       enableSorting: false,
       cell: ({ row }) => (
         <span className="text-sm text-muted-foreground">
-          {formatCampaignDateTime(row.original.sent_at)}
+          {formatCampaignDateTime(row.original.updated_at)}
         </span>
       ),
     },
@@ -733,6 +733,40 @@ export default function DashboardPage() {
         </CardContent>
       </Card>
 
+      {/* ============ Active stages ============ */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-semibold">Active stages</h2>
+          <span className="text-xs text-muted-foreground">
+            Draft, pending &amp; sent · times in ET
+          </span>
+        </div>
+        {activeStagesApi.isLoading && activeStages.length === 0 ? (
+          <Skeleton className="h-32 w-full" />
+        ) : activeStages.length === 0 ? (
+          <div className="rounded-md border bg-muted/30 py-8 text-center text-sm text-muted-foreground">
+            No active stages.
+          </div>
+        ) : (
+          <DataTable<ActiveStage>
+            data={activeStages}
+            columns={activeStageColumns}
+            isLoading={false}
+            pageIndex={0}
+            pageSize={activeStages.length || 10}
+            totalCount={activeStages.length}
+            onPageChange={() => {}}
+            onPageSizeChange={() => {}}
+            sortBy={null}
+            sortDir="desc"
+            onSortChange={() => {}}
+            onRowClick={(s) => {
+              window.location.href = `/campaigns/${s.campaign.id}`;
+            }}
+          />
+        )}
+      </section>
+
       {/* ============ Active campaigns ============ */}
       <section className="space-y-3">
         <div className="flex items-center justify-between">
@@ -768,40 +802,6 @@ export default function DashboardPage() {
             onSortChange={() => {}}
             onRowClick={(c) => {
               window.location.href = `/campaigns/${c.id}`;
-            }}
-          />
-        )}
-      </section>
-
-      {/* ============ Recent stages ============ */}
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold">Recent stages</h2>
-          <span className="text-xs text-muted-foreground">
-            10 most recent · times in ET
-          </span>
-        </div>
-        {stagesApi.isLoading && recentStages.length === 0 ? (
-          <Skeleton className="h-32 w-full" />
-        ) : recentStages.length === 0 ? (
-          <div className="rounded-md border bg-muted/30 py-8 text-center text-sm text-muted-foreground">
-            No stages have been sent yet.
-          </div>
-        ) : (
-          <DataTable<RecentStage>
-            data={recentStages}
-            columns={stageColumns}
-            isLoading={false}
-            pageIndex={0}
-            pageSize={recentStages.length || 10}
-            totalCount={recentStages.length}
-            onPageChange={() => {}}
-            onPageSizeChange={() => {}}
-            sortBy={null}
-            sortDir="desc"
-            onSortChange={() => {}}
-            onRowClick={(s) => {
-              window.location.href = `/campaigns/${s.campaign.id}`;
             }}
           />
         )}

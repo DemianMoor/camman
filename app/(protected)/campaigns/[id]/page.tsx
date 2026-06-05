@@ -28,6 +28,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { CampaignSendMode } from "@/components/campaigns/campaign-send-mode";
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
+import { ExportClickersDialog } from "@/components/campaigns/export-clickers-dialog";
 import { StageSendPanel } from "@/components/campaigns/stage-send-panel";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
@@ -1134,6 +1135,16 @@ export default function CampaignDetailPage() {
             >
               <Download className="size-4" aria-hidden /> Export all phones
             </Button>
+          ) : null}
+          {/* Tracked-clicker export — only for tracked campaigns, where clicks
+              are attributed via minted links. Manual campaigns have no tracked
+              clicks (use the manual clicker CSV workflow instead). */}
+          {campaign.link_mode === "tracked" &&
+          campaign.status !== "draft" ? (
+            <ExportClickersDialog
+              campaignId={campaign.id}
+              stages={stages}
+            />
           ) : null}
           {possibleCampaignTransitions.length > 0 ? (
             <DropdownMenu>

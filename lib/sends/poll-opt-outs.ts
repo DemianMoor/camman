@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { notifyTelegram } from "@/lib/alerts/telegram";
 import { isOptOutKeyword } from "@/lib/sends/opt-out-keywords";
 import { fetchInbox as realFetchInbox, type FetchInboxResult } from "@/lib/sends/texthub-inbox";
 import { validatePhone } from "@/lib/phone-validation";
@@ -62,7 +63,17 @@ async function pollCredential(
   const base = { credential_id: cred.credential_id, org_id: cred.org_id, ...EMPTY };
 
   const inbox = await fetchInbox({ apiKey: cred.api_key });
-  if (!inbox.ok) return { ...base, error: inbox.error };
+  if (!inbox.ok) {
+    // Compliance-critical: a failing opt-out poll means inbound STOPs aren't
+    // being ingested. This used to fail silently. Best-effort alert; never
+    // throws or blocks the rest of the poll (other credentials still run).
+    await notifyTelegram(
+      `⚠️ Opt-out poller FAILED (inbound STOPs not ingested)\n` +
+        `error: ${inbox.error ?? "unknown"}\n` +
+        `credential: ${cred.credential_id} · provider: ${cred.provider_id} (org ${cred.org_id})`,
+    );
+    return { ...base, error: inbox.error };
+  }
 
   let neu = 0;
   let suppressed = 0;

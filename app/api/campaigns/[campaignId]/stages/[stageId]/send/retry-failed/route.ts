@@ -24,6 +24,10 @@ const REFUSAL: Record<DrainRefusal, { status: number; message: string }> = {
   not_found: { status: 404, message: "Stage not found" },
   not_approved: { status: 409, message: "Stage isn't approved to send" },
   send_disabled: { status: 403, message: "Sending is disabled (SEND_ENABLED is off)" },
+  provider_paused: {
+    status: 409,
+    message: "Sending is paused for this provider (circuit breaker engaged)",
+  },
   no_provider: { status: 400, message: "Stage has no SMS provider" },
   no_credentials: {
     status: 400,

@@ -10,15 +10,20 @@ import {
   parsePreset,
   resolveDashboardRange,
 } from "@/lib/dashboard-range";
+import {
+  stageEffectiveDate,
+  stageHasResults,
+  stageNotArchived,
+} from "@/lib/dashboard-stages";
 import { can } from "@/lib/permissions";
 
 // Per-day activity buckets for the dashboard charts. Bucketing happens in the
-// campaign timezone (America/New_York) so a stage with an effective send date
+// campaign timezone (America/New_York) so a stage with an effective report date
 // of 11pm ET on May 14 lands in May 14's bucket, not May 15.
 //
-// Stages are bucketed by their EFFECTIVE SEND DATE — COALESCE(scheduled_at,
-// sent_at) — not the timestamp results were entered, matching the stats
-// endpoint. The window comes from the same preset/custom range params.
+// Stages are bucketed by their EFFECTIVE REPORT DATE (`stageEffectiveDate`) and
+// included whenever they carry recorded results (`stageHasResults`), matching
+// the stats endpoint. The window comes from the same preset/custom range params.
 export async function GET(req: NextRequest) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -46,7 +51,7 @@ export async function GET(req: NextRequest) {
   // the same effective expression so the bucket and the window agree.
   const stageRows = (await db.execute(drizzleSql`
     select
-      to_char((coalesce(scheduled_at, sent_at) at time zone ${CAMPAIGN_TIMEZONE})::date, 'YYYY-MM-DD') as day,
+      to_char((${stageEffectiveDate} at time zone ${CAMPAIGN_TIMEZONE})::date, 'YYYY-MM-DD') as day,
       count(*)::int as stages_sent,
       coalesce(sum(sms_count), 0)::int as sms_count,
       coalesce(sum(total_cost), 0)::numeric(12,4)::text as cost,
@@ -59,9 +64,10 @@ export async function GET(req: NextRequest) {
       coalesce(sum(click_count), 0)::int as clickers
     from campaign_stages
     where org_id = ${orgId}::uuid
-      and sent_at is not null
-      and coalesce(scheduled_at, sent_at) >= ${from.toISOString()}
-      and coalesce(scheduled_at, sent_at) < ${to.toISOString()}
+      and ${stageNotArchived}
+      and ${stageHasResults}
+      and ${stageEffectiveDate} >= ${from.toISOString()}
+      and ${stageEffectiveDate} < ${to.toISOString()}
     group by 1
   `)) as unknown as {
     day: string;

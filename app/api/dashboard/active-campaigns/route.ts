@@ -5,6 +5,11 @@ import { db } from "@/db/client";
 import { brands, campaign_stages, campaigns, offers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import {
+  stageEffectiveDate,
+  stageHasResults,
+  stageNotArchived,
+} from "@/lib/dashboard-stages";
 import { can } from "@/lib/permissions";
 
 const LIMIT = 10;
@@ -12,9 +17,11 @@ const LIMIT = 10;
 // Active/paused campaigns ordered by most recent stage activity, with a
 // per-status stage rollup. Used by the dashboard's Active Campaigns table.
 //
-// The "last_stage_sent_at" subquery sorts on the max sent_at of any stage
-// (null when no stages have shipped yet). NULLS LAST ordering puts those
-// at the bottom; tiebreak on created_at desc.
+// The "last_stage_sent_at" subquery sorts on the max effective report date of
+// any stage that carries recorded results (null when none have activity yet) —
+// so a stage whose results were imported without ever stamping sent_at still
+// counts as activity. NULLS LAST ordering puts campaigns with no activity at
+// the bottom; tiebreak on created_at desc.
 export async function GET() {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -47,9 +54,11 @@ export async function GET() {
         avatar_url: offers.avatar_url,
       },
       last_stage_sent_at: drizzleSql<string | null>`(
-        select max(${campaign_stages.sent_at})
+        select max(${stageEffectiveDate})
         from ${campaign_stages}
         where ${campaign_stages.campaign_id} = ${campaigns.id}
+          and ${stageNotArchived}
+          and ${stageHasResults}
       )`,
     })
     .from(campaigns)
@@ -63,9 +72,11 @@ export async function GET() {
     )
     .orderBy(
       drizzleSql`(
-        select max(${campaign_stages.sent_at})
+        select max(${stageEffectiveDate})
         from ${campaign_stages}
         where ${campaign_stages.campaign_id} = ${campaigns.id}
+          and ${stageNotArchived}
+          and ${stageHasResults}
       ) desc nulls last`,
       desc(campaigns.created_at),
     )

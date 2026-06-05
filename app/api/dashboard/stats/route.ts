@@ -10,15 +10,23 @@ import {
   resolveDashboardRange,
   type ResolvedDashboardRange,
 } from "@/lib/dashboard-range";
+import {
+  stageEffectiveDate,
+  stageHasResults,
+  stageNotArchived,
+} from "@/lib/dashboard-stages";
 import { can } from "@/lib/permissions";
 
 // Top-line counts for the dashboard's stat strip + activity context.
 // All counters scoped to the user's org.
 //
-// Stage results are attributed to the EFFECTIVE SEND DATE —
-// COALESCE(scheduled_at, sent_at) — not the timestamp results were entered.
-// So a stage scheduled for May 30 whose results are imported on Jun 1 counts
-// toward May 30. Only stages that have been sent (sent_at IS NOT NULL) count.
+// Any stage that carries recorded results counts (see `stageHasResults` in
+// lib/dashboard-stages.ts) — whether the results came from manual entry or a
+// CSV import, and regardless of whether the stage was ever walked through the
+// `sent` status. Results are attributed to the EFFECTIVE REPORT DATE
+// (`stageEffectiveDate`: COALESCE(scheduled_at, sent_at, status_changed_at,
+// created_at)) — so a stage scheduled for May 30 whose results are imported on
+// Jun 1 counts toward May 30. Archived stages are excluded.
 //
 // Date range is selected via `preset` (+ optional `from`/`to` for custom).
 // When `compare=true`, the same aggregates are also computed for the previous
@@ -62,7 +70,7 @@ async function aggregateStages(
   from: Date,
   to: Date,
 ): Promise<StageTotals> {
-  const effective = drizzleSql`coalesce(${campaign_stages.scheduled_at}, ${campaign_stages.sent_at})`;
+  const effective = stageEffectiveDate;
   const rows = await db
     .select({
       sent_in_range: drizzleSql<number>`count(*) filter (where ${campaign_stages.status} = 'sent')::int`,
@@ -87,7 +95,8 @@ async function aggregateStages(
     .where(
       and(
         eq(campaign_stages.org_id, orgId),
-        drizzleSql`${campaign_stages.sent_at} is not null`,
+        stageNotArchived,
+        stageHasResults,
         drizzleSql`${effective} >= ${from.toISOString()} and ${effective} < ${to.toISOString()}`,
       ),
     );

@@ -12,6 +12,7 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
@@ -329,28 +330,22 @@ export async function PATCH(
   }
   const current = existing[0];
 
-  // Did the scheduled time actually change? The form always includes
-  // scheduled_at in the payload, so compare values (epoch ms / null) rather
-  // than mere presence — an unchanged value must not trip the lock below.
-  let scheduledChanged = false;
-  if (input.scheduled_at !== undefined) {
-    const incoming =
-      input.scheduled_at === null ? null : new Date(input.scheduled_at).getTime();
-    const stored = current.current_scheduled_at
-      ? new Date(current.current_scheduled_at).getTime()
-      : null;
-    scheduledChanged = incoming !== stored;
-  }
-
-  // Scheduled-send lock (server-side enforcement; UI hiding is not enough).
+  // Scheduled-send edit lock (server-side enforcement; UI hiding is not enough).
   // Once a tracked (API) stage has fired (sent_at set), its scheduled time is
   // frozen. A MISSED scheduled attempt leaves sent_at NULL, so it stays
-  // reschedulable. Reject only an actual change.
-  if (
-    current.campaign_link_mode === "tracked" &&
-    current.sent_at != null &&
-    scheduledChanged
-  ) {
+  // reschedulable — see lib/sends/schedule-edit.ts. The form always echoes
+  // scheduled_at, so the decision compares values, not mere presence.
+  const scheduleEdit = decideScheduleEdit(
+    {
+      linkMode: current.campaign_link_mode,
+      sentAt: current.sent_at,
+      scheduleMissedAt: current.schedule_missed_at,
+      currentScheduledAt: current.current_scheduled_at,
+    },
+    input.scheduled_at,
+  );
+
+  if (scheduleEdit.locked) {
     return apiError(
       409,
       "The scheduled time is locked — this stage has already been sent",
@@ -361,7 +356,7 @@ export async function PATCH(
 
   // Rescheduling a missed scheduled send clears the marker and re-arms it for
   // the send-scheduled cron.
-  if (scheduledChanged && current.schedule_missed_at != null) {
+  if (scheduleEdit.clearMissed) {
     updates.schedule_missed_at = null;
   }
 

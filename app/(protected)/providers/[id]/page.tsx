@@ -79,6 +79,12 @@ type Provider = {
   send_window_weekday_end: number | null;
   send_window_weekend_start: number | null;
   send_window_weekend_end: number | null;
+  max_sends_per_run: number | null;
+  max_sends_per_minute: number | null;
+  max_sends_per_24h: number | null;
+  send_paused: boolean;
+  send_paused_reason: string | null;
+  send_paused_at: string | null;
   avatar_url: string | null;
   color: string | null;
   status: "active" | "archived";
@@ -214,6 +220,7 @@ export default function ProviderDetailPage() {
   const updateProviderApi = useApiCall<Provider>();
   const archiveProviderApi = useApiCall<Provider>();
   const restoreProviderApi = useApiCall<Provider>();
+  const circuitApi = useApiCall<{ ok: boolean; send_paused: boolean }>();
 
   const phonesApi = useApiCall<PhonesListResponse>();
   const createPhoneApi = useApiCall<Phone>();
@@ -308,6 +315,7 @@ export default function ProviderDetailPage() {
   const [confirmingProvider, setConfirmingProvider] = useState<
     "archive" | "restore" | null
   >(null);
+  const [confirmingResume, setConfirmingResume] = useState(false);
   const [confirmingPhone, setConfirmingPhone] = useState<
     | { kind: "archive"; phone: Phone }
     | { kind: "restore"; phone: Phone }
@@ -356,6 +364,25 @@ export default function ProviderDetailPage() {
     }
     toast.success(isArchive ? "Provider archived" : "Provider restored");
     setConfirmingProvider(null);
+    refetchProvider();
+  }
+
+  async function handleCircuit(action: "pause" | "resume") {
+    if (!provider) return;
+    const result = await circuitApi.execute(
+      `/api/providers/${provider.id}/send-circuit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      },
+    );
+    if (!result.ok) {
+      toastApiError(result, "Couldn't update sending circuit");
+      return;
+    }
+    toast.success(action === "pause" ? "Sending paused" : "Sending resumed");
+    setConfirmingResume(false);
     refetchProvider();
   }
 
@@ -807,6 +834,65 @@ export default function ProviderDetailPage() {
         <ProviderCredentialsSection providerId={provider.id} />
       ) : null}
 
+      {/* Sending circuit breaker — only meaningful for API-send providers. */}
+      {provider.supports_api_send ? (
+        <section className="space-y-3">
+          <h2 className="text-lg font-medium">Sending circuit</h2>
+          <Card>
+            <CardContent className="flex flex-wrap items-center justify-between gap-4 pt-6">
+              <div className="grid gap-1 text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">Status</span>
+                  {provider.send_paused ? (
+                    <Badge className="border-red-200 bg-red-100 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+                      Paused
+                    </Badge>
+                  ) : (
+                    <Badge className="border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
+                      Active
+                    </Badge>
+                  )}
+                </div>
+                {provider.send_paused ? (
+                  <p className="text-xs text-muted-foreground">
+                    {provider.send_paused_reason ?? "Paused"}
+                    {provider.send_paused_at
+                      ? ` · ${format(new Date(provider.send_paused_at), "MMM d, yyyy HH:mm")}`
+                      : ""}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Automated sends run normally. Pause to hard-stop all sending
+                    for this provider.
+                  </p>
+                )}
+              </div>
+              {canUpdateProvider ? (
+                provider.send_paused ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setConfirmingResume(true)}
+                    disabled={circuitApi.isLoading}
+                  >
+                    Resume sending
+                  </Button>
+                ) : (
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => void handleCircuit("pause")}
+                    disabled={circuitApi.isLoading}
+                  >
+                    Pause sending
+                  </Button>
+                )
+              ) : null}
+            </CardContent>
+          </Card>
+        </section>
+      ) : null}
+
       {/* Edit Provider dialog */}
       <FormDialog
         open={editProviderOpen}
@@ -830,6 +916,9 @@ export default function ProviderDetailPage() {
             send_window_weekday_end: provider.send_window_weekday_end,
             send_window_weekend_start: provider.send_window_weekend_start,
             send_window_weekend_end: provider.send_window_weekend_end,
+            max_sends_per_run: provider.max_sends_per_run,
+            max_sends_per_minute: provider.max_sends_per_minute,
+            max_sends_per_24h: provider.max_sends_per_24h,
             avatar_url: provider.avatar_url ?? "",
             color: provider.color ?? "",
           }}
@@ -930,6 +1019,42 @@ export default function ProviderDetailPage() {
               }
             >
               {confirmingProvider === "archive" ? "Archive" : "Restore"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Resume sending confirm — un-pausing after a trip is consequential. */}
+      <AlertDialog
+        open={confirmingResume}
+        onOpenChange={(open) => {
+          if (!open) setConfirmingResume(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Resume sending for this provider?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {provider.send_paused_reason
+                ? `Paused: ${provider.send_paused_reason}. `
+                : ""}
+              Resuming clears the circuit breaker and lets automated sends run
+              again. This is recorded against your account. Confirm the
+              underlying issue is resolved first.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={circuitApi.isLoading}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleCircuit("resume");
+              }}
+              disabled={circuitApi.isLoading}
+            >
+              Resume sending
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

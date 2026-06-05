@@ -59,6 +59,9 @@ export function ProviderForm({
       send_window_weekday_end: initialValues?.send_window_weekday_end ?? null,
       send_window_weekend_start: initialValues?.send_window_weekend_start ?? null,
       send_window_weekend_end: initialValues?.send_window_weekend_end ?? null,
+      max_sends_per_run: initialValues?.max_sends_per_run ?? null,
+      max_sends_per_minute: initialValues?.max_sends_per_minute ?? null,
+      max_sends_per_24h: initialValues?.max_sends_per_24h ?? null,
       avatar_url: initialValues?.avatar_url ?? "",
       color: initialValues?.color ?? "",
     },
@@ -223,6 +226,43 @@ export function ProviderForm({
           </div>
         ) : null}
 
+        {apiSendEnabled ? (
+          <div className="grid gap-3 rounded-md border p-3">
+            <div className="grid gap-1">
+              <FormLabel>Circuit-breaker caps</FormLabel>
+              <FormDescription>
+                Safety limits for automated sending. Leave blank for the
+                defaults (1000 per run, 100 per minute, 10,000 per 24h). The
+                per-run cap only paces a single drain — large audiences still
+                complete across ticks without tripping.
+              </FormDescription>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <NumberField
+                control={form.control}
+                name="max_sends_per_run"
+                label="Max per run"
+                placeholder="1000"
+                disabled={isSubmitting}
+              />
+              <NumberField
+                control={form.control}
+                name="max_sends_per_minute"
+                label="Max per minute"
+                placeholder="100"
+                disabled={isSubmitting}
+              />
+              <NumberField
+                control={form.control}
+                name="max_sends_per_24h"
+                label="Max per 24h"
+                placeholder="10000"
+                disabled={isSubmitting}
+              />
+            </div>
+          </div>
+        ) : null}
+
         <FormField
           control={form.control}
           name="avatar_url"
@@ -278,6 +318,47 @@ export function ProviderForm({
         </div>
       </form>
     </Form>
+  );
+}
+
+// A nullable integer cap field. Empty input → null (use the built-in default);
+// the wire/DB carry a plain integer.
+function NumberField({
+  control,
+  name,
+  label,
+  placeholder,
+  disabled,
+}: {
+  control: Control<ProviderFormValues>;
+  name: "max_sends_per_run" | "max_sends_per_minute" | "max_sends_per_24h";
+  label: string;
+  placeholder?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <FormField
+      control={control}
+      name={name}
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>{label}</FormLabel>
+          <FormControl>
+            <Input
+              type="number"
+              min={1}
+              placeholder={placeholder}
+              disabled={disabled}
+              value={field.value == null ? "" : String(field.value)}
+              onChange={(e) =>
+                field.onChange(e.target.value === "" ? null : Number(e.target.value))
+              }
+            />
+          </FormControl>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
   );
 }
 

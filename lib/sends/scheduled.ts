@@ -2,8 +2,8 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { decideScheduledSend, type ProviderSendWindow } from "@/lib/quiet-hours";
-import { isProviderPaused } from "@/lib/sends/circuit-breakers";
-import { runStageDrain, type Sender } from "@/lib/sends/drain";
+import { isProviderPaused, resolvePacingCap } from "@/lib/sends/circuit-breakers";
+import { runStageDrain, type DrainResult, type Sender } from "@/lib/sends/drain";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
 
 // The send-scheduled cron: fires DUE scheduled sends for API (tracked)
@@ -23,6 +23,7 @@ export interface DueRow {
   org_id: string;
   provider_id: number | null;
   scheduled_at: string;
+  max_sends_per_run: number | null;
   send_window_weekday_start: number | null;
   send_window_weekday_end: number | null;
   send_window_weekend_start: number | null;
@@ -46,6 +47,7 @@ export async function selectDueScheduledStages(
            c.org_id          AS org_id,
            s.sms_provider_id AS provider_id,
            s.scheduled_at    AS scheduled_at,
+           p.max_sends_per_run AS max_sends_per_run,
            p.send_window_weekday_start AS send_window_weekday_start,
            p.send_window_weekday_end   AS send_window_weekday_end,
            p.send_window_weekend_start AS send_window_weekend_start,
@@ -75,6 +77,7 @@ export interface ScheduledRunResult {
   fired: number; // stages whose drain ran
   held: number; // window not open yet (retry next tick)
   missed: number; // window closed -> marked missed
+  budget_held: number; // provider's per-tick pacing budget exhausted -> not claimed
   skipped_claimed: number; // lost the claim race (another tick/manual won)
   paused_skipped: number; // provider paused after selection -> not claimed
   refused: number; // pre-send refusal -> claim rolled back
@@ -89,6 +92,7 @@ const BASE: ScheduledRunResult = {
   fired: 0,
   held: 0,
   missed: 0,
+  budget_held: 0,
   skipped_claimed: 0,
   paused_skipped: 0,
   refused: 0,
@@ -110,6 +114,9 @@ export async function runScheduledSends(
     isEnabled?: () => boolean;
     sendSms?: Sender;
     maxStages?: number;
+    // Injectable for tests; defaults to the real per-stage drain. maxRows is the
+    // stage's remaining slice of its provider's per-tick pacing budget.
+    runDrain?: (stageId: number, maxRows: number) => Promise<DrainResult>;
   },
 ): Promise<ScheduledRunResult> {
   const now = opts?.now ?? new Date();
@@ -117,6 +124,10 @@ export async function runScheduledSends(
   const sendSms = opts?.sendSms;
   const maxStages = opts?.maxStages ?? 50;
   const orgId = opts?.orgId;
+  const runDrain =
+    opts?.runDrain ??
+    ((stageId: number, maxRows: number) =>
+      runStageDrain(dbc, { stageId, sendSms, isEnabled, maxRows }));
 
   // Master kill-switch: with global sending off, no-op entirely — don't claim,
   // don't mark missed. Everything waits for the next tick once enabled (subject
@@ -127,6 +138,13 @@ export async function runScheduledSends(
   const nowIso = now.toISOString(); // raw execute can't bind a JS Date
 
   const result: ScheduledRunResult = { ...BASE, considered: due.length };
+
+  // Cross-stage per-run budget: max_sends_per_run is a per-PROVIDER pacing cap
+  // for the WHOLE tick, not per stage. Without this accumulator a single tick
+  // firing N stages on one provider would send up to N× the cap. Tracks rows
+  // processed per provider so far this tick; each stage's drain is bounded by
+  // the provider's REMAINING budget.
+  const spentByProvider = new Map<number, number>();
 
   for (const row of due) {
     const cfg: ProviderSendWindow = {
@@ -161,6 +179,24 @@ export async function runScheduledSends(
     if (row.provider_id != null && (await isProviderPaused(dbc, row.provider_id))) {
       result.paused_skipped++;
       continue;
+    }
+
+    // Cross-stage per-run budget gate. A provider's per-tick pacing budget is
+    // its (clamped) max_sends_per_run shared across every stage fired this tick.
+    // If earlier stages already consumed it, HOLD this stage (don't claim) so
+    // sent_at stays NULL and it fires on a later tick with fresh budget — never
+    // claim-and-leave-everything-pending. Null-provider stages have no cap here;
+    // their drain refuses (no_provider) and rolls the claim back anyway.
+    const providerId = row.provider_id;
+    let budget = Number.POSITIVE_INFINITY;
+    if (providerId != null) {
+      const cap = resolvePacingCap(row.max_sends_per_run);
+      const remaining = cap - (spentByProvider.get(providerId) ?? 0);
+      if (remaining <= 0) {
+        result.budget_held++;
+        continue;
+      }
+      budget = remaining;
     }
 
     // Atomic stage claim.
@@ -200,15 +236,19 @@ export async function runScheduledSends(
       continue;
     }
 
-    const drain = await runStageDrain(dbc, {
-      stageId: row.stage_id,
-      sendSms,
-      isEnabled,
-    });
+    const drain = await runDrain(row.stage_id, budget);
     result.fired++;
     result.sent += drain.sent;
     result.failed += drain.failed;
     if (drain.pausedNow) result.paused_now++;
+    // Charge the provider's tick budget by rows actually processed (sent OR
+    // failed — both are send attempts the pacing cap governs).
+    if (providerId != null) {
+      spentByProvider.set(
+        providerId,
+        (spentByProvider.get(providerId) ?? 0) + drain.processed,
+      );
+    }
   }
 
   return result;

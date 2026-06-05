@@ -237,6 +237,15 @@ export const sms_providers = pgTable(
     // can only do a tracked API send when its provider has this on AND a
     // provider_credentials row — enforced at send kickoff (see lib/sends).
     supports_api_send: boolean("supports_api_send").notNull().default(false),
+    // Per-provider window (minute-of-day in ET, 0–1439) during which the
+    // send-scheduled cron may auto-send. Stored per day-type. A pair applies
+    // only when BOTH bounds are set and start < end; otherwise the default
+    // window (08:00–21:00 ET) applies. See lib/quiet-hours.ts. KNOWN v1 limit:
+    // evaluated in the sender's fixed ET zone, not each recipient's local zone.
+    send_window_weekday_start: integer("send_window_weekday_start"),
+    send_window_weekday_end: integer("send_window_weekday_end"),
+    send_window_weekend_start: integer("send_window_weekend_start"),
+    send_window_weekend_end: integer("send_window_weekend_end"),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -1174,6 +1183,11 @@ export const campaign_stages = pgTable(
     include_no_status: boolean("include_no_status").notNull().default(true),
     scheduled_at: timestamp("scheduled_at", { withTimezone: true }),
     sent_at: timestamp("sent_at", { withTimezone: true }),
+    // Terminal marker for a scheduled auto-send whose ET-day window closed
+    // before it could fire (approved too late, or SEND_ENABLED was off). sent_at
+    // stays NULL so the stage is NOT locked and stays reschedulable; editing
+    // scheduled_at clears this and re-arms the cron. See lib/quiet-hours.ts.
+    schedule_missed_at: timestamp("schedule_missed_at", { withTimezone: true }),
     // Deliberate per-stage gate the real-send drain checks before sending.
     // Default false — a stage's materialized batch is never drained until
     // explicitly approved. One of three gates (also SEND_ENABLED + CRON_SECRET).

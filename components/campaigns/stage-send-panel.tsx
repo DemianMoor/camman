@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
+import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,6 +24,11 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 type SendStatus = {
   send_approved: boolean;
   send_enabled: boolean;
+  // Scheduled-send state (see lib/quiet-hours.ts). sent_at set ⇒ fired/locked;
+  // schedule_missed_at set ⇒ the ET-day window closed before it fired.
+  scheduled_at: string | null;
+  sent_at: string | null;
+  schedule_missed_at: string | null;
   counts: { total: number; pending: number; sending: number; sent: number; failed: number };
   // The real frozen message of one materialized row (null before kickoff).
   sample_rendered_text: string | null;
@@ -52,6 +58,7 @@ export function StageSendPanel({
     stuck: number;
     remaining: number;
   }>();
+  const retryApi = useApiCall<{ ok: boolean; requeued: number; sent: number; failed: number }>();
   const { execute: statusExec } = statusApi;
 
   const [status, setStatus] = useState<SendStatus | null>(null);
@@ -122,6 +129,19 @@ export function StageSendPanel({
     refresh();
   }
 
+  async function retryFailed() {
+    const r = await retryApi.execute(
+      `/api/campaigns/${campaignId}/stages/${stageId}/send/retry-failed`,
+      { method: "POST" },
+    );
+    if (!r.ok) {
+      toastApiError(r, "Retry failed");
+      return;
+    }
+    toast.success(`Retried ${r.data.requeued} — sent ${r.data.sent}, failed ${r.data.failed}`);
+    refresh();
+  }
+
   if (!status) {
     return <p className="text-sm text-muted-foreground">Loading send status…</p>;
   }
@@ -144,6 +164,24 @@ export function StageSendPanel({
         <GateBadge on={status.send_enabled} onLabel="SEND_ENABLED: on" offLabel="SEND_ENABLED: off" />
         <GateBadge on={status.send_approved} onLabel="Approved to send" offLabel="Not approved" />
       </div>
+
+      {/* Schedule state */}
+      {status.schedule_missed_at ? (
+        <p className="flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+          <AlertTriangle className="size-3.5" aria-hidden />
+          Missed scheduled send — the sending window closed before it fired.
+          Reschedule the stage to re-arm it, or send now.
+        </p>
+      ) : status.sent_at ? (
+        <p className="text-xs text-muted-foreground">
+          Sent {formatCampaignDateTime(status.sent_at)}.
+        </p>
+      ) : status.scheduled_at ? (
+        <p className="text-xs text-muted-foreground">
+          Scheduled for {formatCampaignDateTime(status.scheduled_at)} — fires
+          automatically within the provider&apos;s sending hours once approved.
+        </p>
+      ) : null}
 
       {/* Live counts */}
       <div className="grid grid-cols-5 gap-2 text-center">
@@ -207,6 +245,16 @@ export function StageSendPanel({
         >
           {drainApi.isLoading ? "Sending…" : `Send now${pending > 0 ? ` (${pending})` : ""}`}
         </Button>
+        {canSend && status.counts.failed > 0 ? (
+          <Button
+            variant="outline"
+            onClick={() => void retryFailed()}
+            disabled={retryApi.isLoading || !status.send_enabled}
+            title={!status.send_enabled ? "Sending is globally off (set SEND_ENABLED)" : undefined}
+          >
+            {retryApi.isLoading ? "Retrying…" : `Retry failed (${status.counts.failed})`}
+          </Button>
+        ) : null}
       </div>
       {drainBlockedReason ? (
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">

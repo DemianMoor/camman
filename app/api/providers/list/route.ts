@@ -71,6 +71,12 @@ export async function GET(req: NextRequest) {
         avatar_url: sms_providers.avatar_url,
         color: sms_providers.color,
         status: sms_providers.status,
+        // Surfaced so the stage form can warn when a scheduled time falls
+        // outside the provider's auto-send window (see lib/quiet-hours.ts).
+        send_window_weekday_start: sms_providers.send_window_weekday_start,
+        send_window_weekday_end: sms_providers.send_window_weekday_end,
+        send_window_weekend_start: sms_providers.send_window_weekend_start,
+        send_window_weekend_end: sms_providers.send_window_weekend_end,
         archived_at: sms_providers.archived_at,
         created_at: sms_providers.created_at,
         phone_count: drizzleSql<number>`count(${provider_phones.id})::int`,

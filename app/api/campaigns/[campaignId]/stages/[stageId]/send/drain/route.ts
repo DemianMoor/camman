@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -69,5 +70,21 @@ export async function POST(
     const r = REFUSAL[result.reason];
     return NextResponse.json({ error: r.message, reason: result.reason }, { status: r.status });
   }
+
+  // Manual "Send now" backfill: once rows were actually attempted, stamp
+  // scheduled_at (if it was empty — immediate send) AND sent_at in ONE
+  // statement, so there's never a window where scheduled_at is set but sent_at
+  // is null for the send-scheduled cron to grab. sent_at also locks the stage's
+  // Scheduled field (see CLAUDE.md §10g / lib/quiet-hours.ts). COALESCE keeps a
+  // pre-existing scheduled_at and is idempotent across re-drains.
+  if (result.ok && result.processed > 0) {
+    await db.execute(sql`
+      UPDATE campaign_stages
+      SET scheduled_at = COALESCE(scheduled_at, now()),
+          sent_at = COALESCE(sent_at, now())
+      WHERE id = ${stageId}
+    `);
+  }
+
   return NextResponse.json(result);
 }

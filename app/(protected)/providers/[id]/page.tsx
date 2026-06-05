@@ -75,6 +75,10 @@ type Provider = {
   short_link_supported: boolean;
   short_link_example: string | null;
   supports_api_send: boolean;
+  send_window_weekday_start: number | null;
+  send_window_weekday_end: number | null;
+  send_window_weekend_start: number | null;
+  send_window_weekend_end: number | null;
   avatar_url: string | null;
   color: string | null;
   status: "active" | "archived";
@@ -822,6 +826,10 @@ export default function ProviderDetailPage() {
             short_link_supported: provider.short_link_supported,
             short_link_example: provider.short_link_example ?? "",
             supports_api_send: provider.supports_api_send,
+            send_window_weekday_start: provider.send_window_weekday_start,
+            send_window_weekday_end: provider.send_window_weekday_end,
+            send_window_weekend_start: provider.send_window_weekend_start,
+            send_window_weekend_end: provider.send_window_weekend_end,
             avatar_url: provider.avatar_url ?? "",
             color: provider.color ?? "",
           }}

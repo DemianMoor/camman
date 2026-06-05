@@ -303,10 +303,14 @@ export async function PATCH(
       stage_number: campaign_stages.stage_number,
       sales_page_label: campaign_stages.sales_page_label,
       utm_tag_ids: campaign_stages.utm_tag_ids,
+      current_scheduled_at: campaign_stages.scheduled_at,
+      sent_at: campaign_stages.sent_at,
+      schedule_missed_at: campaign_stages.schedule_missed_at,
       campaign_tracking_id: campaigns.tracking_id,
       campaign_brand_id: campaigns.brand_id,
       campaign_offer_id: campaigns.offer_id,
       campaign_created_at: campaigns.created_at,
+      campaign_link_mode: campaigns.link_mode,
     })
     .from(campaign_stages)
     .leftJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
@@ -324,6 +328,42 @@ export async function PATCH(
     });
   }
   const current = existing[0];
+
+  // Did the scheduled time actually change? The form always includes
+  // scheduled_at in the payload, so compare values (epoch ms / null) rather
+  // than mere presence — an unchanged value must not trip the lock below.
+  let scheduledChanged = false;
+  if (input.scheduled_at !== undefined) {
+    const incoming =
+      input.scheduled_at === null ? null : new Date(input.scheduled_at).getTime();
+    const stored = current.current_scheduled_at
+      ? new Date(current.current_scheduled_at).getTime()
+      : null;
+    scheduledChanged = incoming !== stored;
+  }
+
+  // Scheduled-send lock (server-side enforcement; UI hiding is not enough).
+  // Once a tracked (API) stage has fired (sent_at set), its scheduled time is
+  // frozen. A MISSED scheduled attempt leaves sent_at NULL, so it stays
+  // reschedulable. Reject only an actual change.
+  if (
+    current.campaign_link_mode === "tracked" &&
+    current.sent_at != null &&
+    scheduledChanged
+  ) {
+    return apiError(
+      409,
+      "The scheduled time is locked — this stage has already been sent",
+      API_ERROR_CODES.CONFLICT,
+      { reason: "scheduled_locked_after_send" },
+    );
+  }
+
+  // Rescheduling a missed scheduled send clears the marker and re-arms it for
+  // the send-scheduled cron.
+  if (scheduledChanged && current.schedule_missed_at != null) {
+    updates.schedule_missed_at = null;
+  }
 
   // Full URL handling: verify UTM tag ownership when the selection changes,
   // and — when full_url_auto — authoritatively rebuild full_url from the

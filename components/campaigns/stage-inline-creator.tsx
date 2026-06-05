@@ -53,6 +53,9 @@ export interface EditableStage {
   include_clickers: boolean;
   exclude_clickers: boolean;
   scheduled_at: string | null;
+  // When set on a tracked campaign, the send has fired → the form locks the
+  // Scheduled field. NULL keeps it editable (incl. after a missed attempt).
+  sent_at: string | null;
   notes: string | null;
   sms_count: number;
   delivered_count: number;
@@ -205,6 +208,7 @@ export function StageInlineEditor({
           nextStageNumber={nextStageNumber}
           splitIndex={isEdit ? stage!.split_index : null}
           splitTotal={isEdit ? stage!.split_total : null}
+          sentAt={isEdit ? stage!.sent_at : null}
           onSplit={() => {
             onOpenChange(false);
             onSaved();

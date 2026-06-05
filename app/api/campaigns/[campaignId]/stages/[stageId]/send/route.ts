@@ -35,7 +35,12 @@ export async function GET(
   }
 
   const stage = await db
-    .select({ send_approved: campaign_stages.send_approved })
+    .select({
+      send_approved: campaign_stages.send_approved,
+      scheduled_at: campaign_stages.scheduled_at,
+      sent_at: campaign_stages.sent_at,
+      schedule_missed_at: campaign_stages.schedule_missed_at,
+    })
     .from(campaign_stages)
     .where(and(eq(campaign_stages.id, stageId), eq(campaign_stages.org_id, orgId)))
     .limit(1);
@@ -73,6 +78,9 @@ export async function GET(
   return NextResponse.json({
     send_approved: stage[0].send_approved,
     send_enabled: process.env.SEND_ENABLED === "true",
+    scheduled_at: stage[0].scheduled_at,
+    sent_at: stage[0].sent_at,
+    schedule_missed_at: stage[0].schedule_missed_at,
     counts: {
       total: Number(c.total),
       pending: Number(c.pending),

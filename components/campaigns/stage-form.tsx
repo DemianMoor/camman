@@ -47,6 +47,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { isEntityAvailable } from "@/lib/feature-flags";
+import { isOutsideSendWindow } from "@/lib/quiet-hours";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import { buildStageSms } from "@/lib/sends/stage-sms";
@@ -112,6 +113,12 @@ type Provider = {
   name: string;
   color: string | null;
   status: string;
+  // Auto-send window bounds (minute-of-day ET); null = default window. Used to
+  // warn when a scheduled time falls in this provider's quiet hours.
+  send_window_weekday_start: number | null;
+  send_window_weekday_end: number | null;
+  send_window_weekend_start: number | null;
+  send_window_weekend_end: number | null;
 };
 type ProviderPhone = {
   id: number;
@@ -181,6 +188,11 @@ export interface StageFormProps {
   // shown and renders a "Split X of Y" badge in the audience block.
   splitIndex?: number | null;
   splitTotal?: number | null;
+  // Edit-mode only: the stage's sent_at. When set on a tracked (API) campaign,
+  // the send has fired and the Scheduled field locks (see CLAUDE.md §10g / the
+  // send-scheduled flow). NULL = not yet sent (editable / reschedulable, even
+  // if a prior scheduled attempt was missed).
+  sentAt?: string | null;
   // Edit-mode only: invoked after the split endpoint succeeds. Parent
   // should refetch its stages list and close the editor (the source
   // stage's label/audience change in place plus N-1 new siblings appear).
@@ -289,6 +301,7 @@ export function StageForm({
   nextStageNumber,
   splitIndex,
   splitTotal,
+  sentAt,
   onSplit,
   campaign,
   resultsCounters,
@@ -398,6 +411,7 @@ export function StageForm({
   const watchedSalesPageLabel = form.watch("sales_page_label");
   const watchedFullUrl = form.watch("full_url");
   const watchedFullUrlAuto = form.watch("full_url_auto");
+  const watchedScheduledAt = form.watch("scheduled_at");
 
   // Provider phones reload when the selected provider changes. If the
   // currently selected phone doesn't belong to the new provider, clear it.
@@ -490,6 +504,25 @@ export function StageForm({
   // https://<brand active short domain>/r/<7-char code> (CODE_LENGTH=7) — so
   // the character/segment count is exact. No minting happens here.
   const isTracked = campaign.link_mode === "tracked";
+
+  // Scheduled-send gating (tracked/API campaigns only):
+  // • Locked once the send has fired (sentAt set) — the time can no longer change.
+  //   A missed scheduled attempt leaves sentAt NULL, so it stays editable.
+  // • Quiet-hours warning (non-blocking) when the chosen time falls outside the
+  //   selected provider's auto-send window — the message just won't auto-send then.
+  const scheduledLocked = isTracked && !!sentAt;
+  const selectedProvider = providers.find((p) => p.id === watchedProviderId);
+  const scheduledOutsideWindow = (() => {
+    if (!isTracked || !watchedScheduledAt || !selectedProvider) return false;
+    try {
+      const utc = new Date(campaignLocalInputToUtcIso(watchedScheduledAt));
+      if (Number.isNaN(utc.getTime())) return false;
+      return isOutsideSendWindow(selectedProvider, utc);
+    } catch {
+      return false;
+    }
+  })();
+
   const brandShortDomain = campaign.brand?.short_domain ?? null;
   const TRACKED_CODE_PLACEHOLDER = "XXXXXXX"; // 7 chars = mint CODE_LENGTH
   const trackedLinkPreview = brandShortDomain
@@ -844,18 +877,33 @@ export function StageForm({
                         <FormControl>
                           <Input
                             type="datetime-local"
-                            disabled={isSubmitting}
+                            disabled={isSubmitting || scheduledLocked}
                             {...field}
                           />
                         </FormControl>
                       </div>
                     </div>
-                    <ScheduledPresets
-                      disabled={isSubmitting}
-                      onPick={(v) =>
-                        form.setValue("scheduled_at", v, { shouldDirty: true })
-                      }
-                    />
+                    {!scheduledLocked ? (
+                      <ScheduledPresets
+                        disabled={isSubmitting}
+                        onPick={(v) =>
+                          form.setValue("scheduled_at", v, { shouldDirty: true })
+                        }
+                      />
+                    ) : null}
+                    {scheduledLocked ? (
+                      <FormDescription>
+                        Locked — this stage has been sent. The scheduled time
+                        can&apos;t be changed.
+                      </FormDescription>
+                    ) : scheduledOutsideWindow ? (
+                      <p className="text-xs text-amber-700 dark:text-amber-400">
+                        This time is outside {selectedProvider?.name ?? "the provider"}&apos;s
+                        sending hours — the message won&apos;t auto-send then. It
+                        holds until the window opens, or is marked missed if the
+                        day&apos;s window has closed.
+                      </p>
+                    ) : null}
                     <FormMessage />
                   </FormItem>
                 )}

@@ -1,7 +1,7 @@
 "use client";
 
 import { Loader2 } from "lucide-react";
-import { useForm } from "react-hook-form";
+import { type Control, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,12 @@ import {
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { ColorPicker } from "@/components/color-picker";
+import {
+  DEFAULT_SEND_WINDOW_END_MIN,
+  DEFAULT_SEND_WINDOW_START_MIN,
+  hhmmToMinutes,
+  minutesToHhmm,
+} from "@/lib/quiet-hours";
 import {
   providerCreateSchema,
   type ProviderFormValues,
@@ -49,12 +55,17 @@ export function ProviderForm({
       short_link_supported: initialValues?.short_link_supported ?? false,
       short_link_example: initialValues?.short_link_example ?? "",
       supports_api_send: initialValues?.supports_api_send ?? false,
+      send_window_weekday_start: initialValues?.send_window_weekday_start ?? null,
+      send_window_weekday_end: initialValues?.send_window_weekday_end ?? null,
+      send_window_weekend_start: initialValues?.send_window_weekend_start ?? null,
+      send_window_weekend_end: initialValues?.send_window_weekend_end ?? null,
       avatar_url: initialValues?.avatar_url ?? "",
       color: initialValues?.color ?? "",
     },
   });
 
   const shortLinkSupported = form.watch("short_link_supported");
+  const apiSendEnabled = form.watch("supports_api_send");
 
   return (
     <Form {...form}>
@@ -171,6 +182,47 @@ export function ProviderForm({
           )}
         />
 
+        {apiSendEnabled ? (
+          <div className="grid gap-3 rounded-md border p-3">
+            <div className="grid gap-1">
+              <FormLabel>Sending hours (ET)</FormLabel>
+              <FormDescription>
+                Scheduled sends only auto-fire within these hours
+                (America/New_York). Leave blank to use the default{" "}
+                {minutesToHhmm(DEFAULT_SEND_WINDOW_START_MIN)}–
+                {minutesToHhmm(DEFAULT_SEND_WINDOW_END_MIN)}. Evaluated in ET,
+                not each recipient&apos;s local zone.
+              </FormDescription>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <TimeField
+                control={form.control}
+                name="send_window_weekday_start"
+                label="Weekday start"
+                disabled={isSubmitting}
+              />
+              <TimeField
+                control={form.control}
+                name="send_window_weekday_end"
+                label="Weekday end"
+                disabled={isSubmitting}
+              />
+              <TimeField
+                control={form.control}
+                name="send_window_weekend_start"
+                label="Weekend start"
+                disabled={isSubmitting}
+              />
+              <TimeField
+                control={form.control}
+                name="send_window_weekend_end"
+                label="Weekend end"
+                disabled={isSubmitting}
+              />
+            </div>
+          </div>
+        ) : null}
+
         <FormField
           control={form.control}
           name="avatar_url"
@@ -226,5 +278,48 @@ export function ProviderForm({
         </div>
       </form>
     </Form>
+  );
+}
+
+// A single send-window bound. The form value is minute-of-day (number | null);
+// HH:mm is only the rendered input value, so the wire/DB stay in minutes.
+function TimeField({
+  control,
+  name,
+  label,
+  disabled,
+}: {
+  control: Control<ProviderFormValues>;
+  name:
+    | "send_window_weekday_start"
+    | "send_window_weekday_end"
+    | "send_window_weekend_start"
+    | "send_window_weekend_end";
+  label: string;
+  disabled?: boolean;
+}) {
+  return (
+    <FormField
+      control={control}
+      name={name}
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>{label}</FormLabel>
+          <FormControl>
+            <Input
+              type="time"
+              disabled={disabled}
+              value={field.value == null ? "" : minutesToHhmm(field.value)}
+              onChange={(e) =>
+                field.onChange(
+                  e.target.value === "" ? null : hhmmToMinutes(e.target.value),
+                )
+              }
+            />
+          </FormControl>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
   );
 }

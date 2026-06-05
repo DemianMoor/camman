@@ -20,6 +20,14 @@ export const providerCreateSchema = z.object({
   // Whether this provider can be sent through via API (TextHub). Toggled in the
   // provider edit UI; a tracked send requires this on + a resolvable credential.
   supports_api_send: z.boolean().optional().default(false),
+  // Per-provider auto-send window, minute-of-day in ET (0–1439), per day-type.
+  // Null = use the default window (see lib/quiet-hours.ts). The form sends
+  // minutes (HH:mm is purely the rendered input), so these pass straight to the
+  // integer columns with no per-route conversion.
+  send_window_weekday_start: z.number().int().min(0).max(1439).nullable().optional(),
+  send_window_weekday_end: z.number().int().min(0).max(1439).nullable().optional(),
+  send_window_weekend_start: z.number().int().min(0).max(1439).nullable().optional(),
+  send_window_weekend_end: z.number().int().min(0).max(1439).nullable().optional(),
   avatar_url: z
     .union([z.string().url("avatar_url must be a valid URL"), z.literal("")])
     .optional(),

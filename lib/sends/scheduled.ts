@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { decideScheduledSend, type ProviderSendWindow } from "@/lib/quiet-hours";
+import { isProviderPaused } from "@/lib/sends/circuit-breakers";
 import { runStageDrain, type Sender } from "@/lib/sends/drain";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
 
@@ -20,6 +21,7 @@ export interface DueRow {
   stage_id: number;
   campaign_id: number;
   org_id: string;
+  provider_id: number | null;
   scheduled_at: string;
   send_window_weekday_start: number | null;
   send_window_weekday_end: number | null;
@@ -42,6 +44,7 @@ export async function selectDueScheduledStages(
     SELECT s.id              AS stage_id,
            s.campaign_id     AS campaign_id,
            c.org_id          AS org_id,
+           s.sms_provider_id AS provider_id,
            s.scheduled_at    AS scheduled_at,
            p.send_window_weekday_start AS send_window_weekday_start,
            p.send_window_weekday_end   AS send_window_weekday_end,
@@ -58,6 +61,9 @@ export async function selectDueScheduledStages(
       AND s.sent_at IS NULL
       AND s.schedule_missed_at IS NULL
       AND s.archived_at IS NULL
+      -- A paused provider holds ALL its scheduled stages: don't even consider
+      -- them, so sent_at stays NULL and they fire once a human resumes.
+      AND (p.send_paused IS NOT TRUE)
       ${orgId ? sql`AND c.org_id = ${orgId}` : sql``}
     ORDER BY s.scheduled_at ASC
     LIMIT ${maxStages}
@@ -70,10 +76,12 @@ export interface ScheduledRunResult {
   held: number; // window not open yet (retry next tick)
   missed: number; // window closed -> marked missed
   skipped_claimed: number; // lost the claim race (another tick/manual won)
+  paused_skipped: number; // provider paused after selection -> not claimed
   refused: number; // pre-send refusal -> claim rolled back
   send_disabled: boolean; // global kill-switch off -> whole run no-op'd
   sent: number; // total messages sent across stages
   failed: number; // total messages failed across stages
+  paused_now: number; // stages whose drain latched a circuit-breaker pause
 }
 
 const BASE: ScheduledRunResult = {
@@ -82,10 +90,12 @@ const BASE: ScheduledRunResult = {
   held: 0,
   missed: 0,
   skipped_claimed: 0,
+  paused_skipped: 0,
   refused: 0,
   send_disabled: false,
   sent: 0,
   failed: 0,
+  paused_now: 0,
 };
 
 function envSendEnabled(): boolean {
@@ -144,7 +154,16 @@ export async function runScheduledSends(
       continue;
     }
 
-    // decision === "fire" — atomic stage claim.
+    // decision === "fire". Re-check the pause right before claiming: a breaker
+    // that tripped DURING this run (e.g. a failure spike on an earlier stage of
+    // the same provider) must hold this stage too — leave sent_at NULL so it
+    // fires after a resume rather than being claimed-and-lost.
+    if (row.provider_id != null && (await isProviderPaused(dbc, row.provider_id))) {
+      result.paused_skipped++;
+      continue;
+    }
+
+    // Atomic stage claim.
     const claimed = (await dbc.execute(sql`
       UPDATE campaign_stages SET sent_at = ${nowIso}
       WHERE id = ${row.stage_id} AND sent_at IS NULL
@@ -157,15 +176,23 @@ export async function runScheduledSends(
 
     // Materialize (mint) then drain. Roll the claim back ONLY on a pre-send
     // refusal (nothing materialized). 'already_pending' means rows from a prior
-    // partial run exist — proceed to drain them, keep the claim.
-    const kickoff = await dbc.transaction((tx) =>
-      kickoffStageSend(tx, {
-        orgId: row.org_id,
-        campaignId: row.campaign_id,
-        stageId: row.stage_id,
-      }),
-    );
-    if (!kickoff.ok && kickoff.reason !== "already_pending") {
+    // partial run exist — proceed to drain them, keep the claim. A thrown error
+    // (e.g. the dedup unique index firing on a concurrent-kickoff race) is
+    // caught per-stage so ONE stage's race can't fail the whole cron run.
+    let kickoffOk: boolean;
+    try {
+      const kickoff = await dbc.transaction((tx) =>
+        kickoffStageSend(tx, {
+          orgId: row.org_id,
+          campaignId: row.campaign_id,
+          stageId: row.stage_id,
+        }),
+      );
+      kickoffOk = kickoff.ok || kickoff.reason === "already_pending";
+    } catch {
+      kickoffOk = false;
+    }
+    if (!kickoffOk) {
       await dbc.execute(sql`
         UPDATE campaign_stages SET sent_at = NULL WHERE id = ${row.stage_id}
       `);
@@ -181,6 +208,7 @@ export async function runScheduledSends(
     result.fired++;
     result.sent += drain.sent;
     result.failed += drain.failed;
+    if (drain.pausedNow) result.paused_now++;
   }
 
   return result;

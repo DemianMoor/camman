@@ -261,3 +261,27 @@ When the user wants these, they will be added in a separate phase.
 - **Migrations are NOT auto-applied on deploy.** After merging a schema change, run `npm run db:migrate` locally against the production `DATABASE_URL` BEFORE pushing the code that depends on the new schema. (Same connection string the deployed app uses — Vercel build doesn't touch the database.) After applying, run `npx tsx scripts/verify-migration-integrity.ts` to confirm the chain is clean.
 - **Supabase Auth URLs:** Authentication → URL Configuration in the Supabase dashboard must include the production origin under both Site URL and Redirect URLs (`/auth/callback`, `/auth/complete`, `/auth/reset-password`). Keep the localhost entries for development.
 - **NEXT_PUBLIC_SITE_URL** must match the deployed origin in production so absolute auth-callback URLs point at the right host. After the first deploy, update this in Vercel and trigger a redeploy.
+
+## Documentation maintenance (MANDATORY)
+
+The `docs/` folder is the source of truth for how CamMan works and must stay
+in sync with the code at all times.
+
+On EVERY change that affects behavior, data, or interfaces, before considering
+the task complete you MUST update the relevant documentation in the same change:
+
+1. Schema or migration change  -> update docs/03-data-model.md AND the Mermaid ERD.
+2. New/changed feature or module -> update or add the matching file in docs/04-features/.
+3. New/changed user journey, send path, or webhook -> update the sequence diagram(s) in docs/05-flows.md.
+4. New external dependency, env var, or integration -> update docs/06-integrations.md.
+5. New business rule, ID format, convention, or gotcha -> update docs/07-conventions.md.
+6. New setup/build/run step -> update docs/08-local-setup.md.
+7. ALWAYS append a one-line entry to docs/CHANGELOG.md: `YYYY-MM-DD — <what changed> — <docs updated>`.
+8. Update the "last updated" date on every doc you touch.
+
+Rules:
+- Documentation is part of "done". A change is incomplete if the docs don't reflect it.
+- Keep diagrams accurate — if a code change makes a diagram wrong, fix the diagram, don't leave it.
+- Reference real file paths so docs stay verifiable.
+- If you are unsure whether a change is doc-affecting, assume it is and check the checklist above.
+- Never write a value/secret into docs; document env var names and purpose only.

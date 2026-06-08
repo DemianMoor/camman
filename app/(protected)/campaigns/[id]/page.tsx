@@ -32,6 +32,7 @@ import { ExportClickersDialog } from "@/components/campaigns/export-clickers-dia
 import { StageSendPanel } from "@/components/campaigns/stage-send-panel";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
+import { PhoneUploadForm } from "@/components/phone-upload-form";
 import {
   formatRevenue,
   formatRoi,
@@ -412,8 +413,10 @@ export default function CampaignDetailPage() {
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
   const [sendStage, setSendStage] = useState<Stage | null>(null);
+  const [uploadContactsOpen, setUploadContactsOpen] = useState(false);
 
   const canUpdateCampaign = can("campaigns.update");
+  const canUploadContacts = canUpdateCampaign && can("contacts.upload");
   const canActivate = can("campaigns.activate");
   const canPause = can("campaigns.pause");
   const canComplete = can("campaigns.complete");
@@ -1115,6 +1118,17 @@ export default function CampaignDetailPage() {
               </Link>
             </Button>
           ) : null}
+          {/* Upload contacts straight onto a draft campaign's audience via CSV
+              or paste. Draft-only: the audience snapshot freezes at activation. */}
+          {canUploadContacts && campaign.status === "draft" ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setUploadContactsOpen(true)}
+            >
+              <Upload className="size-4" aria-hidden /> Upload contacts
+            </Button>
+          ) : null}
           {/* Union-of-all-stages export. Disabled for drafts because the
               audience snapshot is computed at activation time — no stage
               rows yet. Also hidden when every stage is archived, since
@@ -1542,6 +1556,35 @@ export default function CampaignDetailPage() {
         {sendStage ? (
           <StageSendPanel campaignId={campaignId} stageId={sendStage.id} />
         ) : null}
+      </FormDialog>
+
+      {/* Upload contacts onto the campaign audience (draft only) */}
+      <FormDialog
+        open={uploadContactsOpen}
+        onOpenChange={setUploadContactsOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>Upload contacts to this campaign</DialogTitle>
+          <DialogDescription>
+            Paste or upload a CSV of phone numbers. New numbers are created,
+            existing ones are reused, and all are tagged with the selected
+            contact group(s) — which are added to this campaign&apos;s
+            audience.
+          </DialogDescription>
+        </DialogHeader>
+        <PhoneUploadForm
+          endpoint={`/api/campaigns/${campaignId}/upload-contacts`}
+          enableContactGroups
+          requireContactGroups
+          submitLabel="Upload to campaign"
+          successLabel="Contacts uploaded to campaign"
+          onSuccess={() => {
+            toast.success("Audience updated");
+            refetchCampaign();
+          }}
+          onCancel={() => setUploadContactsOpen(false)}
+        />
       </FormDialog>
 
       <StatusChangeDialog

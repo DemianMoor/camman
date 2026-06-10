@@ -1,6 +1,6 @@
 # Feature — Audience Snapshot (freeze-at-activation)
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-10_
 
 ## 1. Purpose
 A campaign's audience is **computed and frozen** the moment it transitions `draft → active`, into `campaign_audience_pool`. The whole point: adding a contact to a referenced segment later does **not** retroactively expand a live campaign's reach. Drafts carry only the *recipe* (segment ids, group ids, filters, cap); the *contacts* are materialized once.
@@ -13,16 +13,16 @@ A campaign's audience is **computed and frozen** the moment it transitions `draf
 ## 3. How it works
 
 ### Recipe composition
-1. Per-segment audience clauses (`buildSegmentAudienceClause`, see [audience-segments.md](audience-segments.md)) are UNION'd across `audience_segment_ids`, then UNION'd with direct `contact_contact_groups` members for `audience_contact_group_ids` → the candidate pool.
+1. Per-segment audience clauses (`buildSegmentAudienceClause`, see [audience-segments.md](audience-segments.md)) are UNION'd across `audience_segment_ids` (the segment side); direct `contact_contact_groups` members for `audience_contact_group_ids` are UNION'd into the group side. The two dimensions then **INTERSECT** when both are populated — a contact must be in a selected segment **AND** a selected group — yielding the candidate pool. When only one dimension is filled, that side stands alone (the empty dimension is ignored, not treated as "match nothing"). Composition lives in `buildAudienceSourceClause`; the preview path applies the same intersection via a `membership_ok` flag so it can still report each side's pre-intersection contribution.
 2. Each candidate is LEFT JOINed against `opt_ins` / `clickers` to compute status flags, and `audience_filters` (`include_no_status`, `include_opt_in`, `include_clickers`, `include_not_clicked`) select which status buckets qualify (OR logic — any matching include flag keeps the contact).
 3. Contacts with **any** `opt_outs` row are excluded (live exclusion).
-4. **`exclude_in_use_contacts` (campaign-level, default true):** drops any contact already snapshotted into another `status='active'` campaign's pool — across the **whole** audience (groups *and* segments), which the per-segment flag can't reach for a group-only audience. Both flags compose (idempotent — they EXCEPT the same active-pool set).
+4. **`exclude_in_use_contacts` (campaign-level, default true):** drops any contact already snapshotted into another `status='active'` campaign's pool — applied to the **whole** candidate pool (i.e. the segment∩group intersection, or the single populated side), which the per-segment flag can't reach for a group-only audience. Both flags compose (idempotent — they EXCEPT the same active-pool set).
 5. **`audience_cap`:** random-sample (`ORDER BY RANDOM() LIMIT cap`) from the remaining pool. `min(cap, available)` — a cap larger than the pool is a no-op; with exclusion on, it samples from the unused pool only.
 
 ### Key functions
 | Function | Role |
 |----------|------|
-| `previewAudience(input)` | SELECT-only; returns counts: `count` (post-cap), `total_matching`, `from_segments`, `from_groups`, `overlap`, `excluded_for_optout`, `in_use_in_other_campaigns`. Powers the editor preview & "N excluded" UI. |
+| `previewAudience(input)` | SELECT-only; returns counts: `count` (post-cap), `total_matching` (the **intersected** audience when both dimensions are selected), `from_segments` / `from_groups` (each side's **pre-intersection** eligible pool), `overlap` (= `total_matching` when both sides selected), `excluded_for_optout`, `in_use_in_other_campaigns`. Powers the editor preview & "N excluded" UI. |
 | `buildQualifyingContactsSql(input)` | builds the candidate-with-flags CTE shared by preview + snapshot. |
 | `snapshotAudience(input, tx?)` | INSERTs the frozen rows into `campaign_audience_pool`; returns `{ count, total_matching }`. Runs inside the activation transaction. |
 | `computeStageAudienceCount(campaignId, orgId, filters)` | reads the **frozen** pool for an active campaign + applies stage-level filters + live opt-out exclusion. |

@@ -1,10 +1,40 @@
 import "server-only";
 
 import { sql as drizzleSql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
 
 import { buildSegmentAudienceClause } from "./segment-rules-eval";
+
+// Compose the audience-source set (contact_ids, before status filters /
+// opt-out / in-use exclusion) from the two selection dimensions:
+//
+//   * segments — OR'd together (a contact in ANY selected segment qualifies)
+//   * contact groups — OR'd together (a contact in ANY selected group)
+//
+// The two dimensions INTERSECT when both are present: a contact must be in a
+// selected segment AND a selected group. When only one dimension is
+// populated, that side is used alone (the empty dimension is ignored, not
+// treated as "match nothing"). Each `segmentBranch` must already be a plain
+// `SELECT contact_id …` (callers subquery-wrap the rule clauses) so the UNION
+// here can't be mis-parenthesized by a segment clause's own set operators.
+function buildAudienceSourceClause(
+  segmentBranches: SQL[],
+  groupClause: SQL | null,
+): SQL {
+  const segmentUnion =
+    segmentBranches.length > 0
+      ? segmentBranches.reduce((acc, branch, i) =>
+          i === 0 ? branch : drizzleSql`${acc} UNION ${branch}`,
+        )
+      : null;
+  if (segmentUnion && groupClause) {
+    return drizzleSql`(${segmentUnion}) INTERSECT (${groupClause})`;
+  }
+  // hasAnySource guards the callers, so at least one side is non-null here.
+  return (segmentUnion ?? groupClause) as SQL;
+}
 
 export interface AudienceFilters {
   include_no_status?: boolean;
@@ -77,11 +107,13 @@ export interface AudienceSnapshotResult {
 // contact is in if ANY enabled category includes them, and they're never
 // in if they have any opt-out record for this org.
 //
-// Audience source is the UNION of:
+// Audience source (see buildAudienceSourceClause):
 //   * per-segment rule-filtered membership (via buildSegmentAudienceClause)
 //   * contacts directly tagged in any of the selected contact_groups
-// Either source can be empty; the function returns the empty set if both
-// are empty (caller short-circuits before invoking).
+// Segments OR together, groups OR together, the two dimensions INTERSECT
+// when both are present. Either dimension can be empty; the function
+// returns the empty set if both are empty (caller short-circuits before
+// invoking).
 async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
   const { orgId, segmentIds, contactGroupIds = [], filters } = input;
   const includeNoStatus = filters.include_no_status === true;
@@ -91,37 +123,35 @@ async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
   const excludeInUse = input.excludeInUse === true;
 
   // Per-segment rule-filtered clauses. Each yields a set of contact_ids
-  // honoring that segment's rules + manual membership UNION.
+  // honoring that segment's rules + manual membership UNION. Subquery-wrap
+  // each so its own internal set operators can't bleed into the UNION below.
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
+  );
+  const segmentBranches = perSegmentClauses.map(
+    (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
   );
 
   // Contact-group clause: every contact tagged with any of the selected
   // groups. Built inline because the rules engine doesn't model groups
   // (groups are tags directly on contacts, not gated by segment rules).
-  const groupClauses =
+  const groupClause =
     contactGroupIds.length > 0
-      ? [
-          drizzleSql`
-            SELECT contact_id
-            FROM contact_contact_groups
-            WHERE org_id = ${orgId}::uuid
-              AND contact_group_id = ANY(${drizzleSql.raw(
-                "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
-              )})
-          `,
-        ]
-      : [];
+      ? drizzleSql`
+          SELECT contact_id
+          FROM contact_contact_groups
+          WHERE org_id = ${orgId}::uuid
+            AND contact_group_id = ANY(${drizzleSql.raw(
+              "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+            )})
+        `
+      : null;
 
-  const allClauses = [...perSegmentClauses, ...groupClauses];
-  const unioned = allClauses.reduce(
-    (acc, clause, i) =>
-      i === 0 ? clause : drizzleSql`${acc} UNION ${clause}`,
-  );
+  const source = buildAudienceSourceClause(segmentBranches, groupClause);
 
   return drizzleSql`
     with segment_members as (
-      select distinct contact_id from (${unioned}) sm_union
+      select distinct contact_id from (${source}) sm_union
     ),
     flagged as (
       select
@@ -330,39 +360,31 @@ export async function computeStageAudienceCountForDraft(
   const splitTotal = stageFilters.split_total ?? null;
   const splitActive = splitIndex !== null && splitTotal !== null;
 
-  // Mirror previewAudience's source union — UNION the segments' rule-
-  // filtered clauses with the contact-group memberships.
+  // Mirror previewAudience's source composition — segments OR together,
+  // groups OR together, the two dimensions INTERSECT when both are present.
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
   );
   const segmentBranches = perSegmentClauses.map(
-    (clause) => drizzleSql`
-      SELECT contact_id FROM (${clause}) seg_inner
-    `,
+    (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
   );
-  const groupBranches =
+  const groupClause =
     contactGroupIds.length > 0
-      ? [
-          drizzleSql`
-            SELECT contact_id FROM contact_contact_groups
-            WHERE org_id = ${orgId}::uuid
-              AND contact_group_id = ANY(${drizzleSql.raw(
-                "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
-              )})
-          `,
-        ]
-      : [];
-  const allBranches = [...segmentBranches, ...groupBranches];
-  const unioned = allBranches.reduce(
-    (acc, branch, i) =>
-      i === 0 ? branch : drizzleSql`${acc} UNION ${branch}`,
-  );
+      ? drizzleSql`
+          SELECT contact_id FROM contact_contact_groups
+          WHERE org_id = ${orgId}::uuid
+            AND contact_group_id = ANY(${drizzleSql.raw(
+              "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+            )})
+        `
+      : null;
+  const source = buildAudienceSourceClause(segmentBranches, groupClause);
 
   // Row-number partitioning over the qualified set so splits are as
   // equal as possible. Mirrors the active-pool path.
   const rows = (await db.execute(drizzleSql`
     with sources as (
-      select distinct contact_id from (${unioned}) u
+      select distinct contact_id from (${source}) u
     ),
     flagged as (
       select
@@ -482,6 +504,10 @@ export async function previewAudience(
   const includeClickers = filters.include_clickers === true;
   const includeNotClicked = filters.include_not_clicked === true;
   const excludeInUse = input.excludeInUse === true;
+  // When BOTH dimensions are selected the audience is their INTERSECTION:
+  // a contact must be in a selected segment AND a selected group. With only
+  // one dimension populated, that side stands alone (no intersection).
+  const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
 
   // Per-segment clauses tagged with a from_segment=true / from_group=false
   // marker so the aggregate query can attribute each contact to a source.
@@ -567,24 +593,32 @@ export async function previewAudience(
     eligible as (
       -- The actual pool the cap samples from. When the campaign-level
       -- exclude_in_use flag is on, in-use contacts are dropped here so
-      -- total_matching / the per-source counts reflect the unused pool.
+      -- total_matching reflects the unused pool. membership_ok applies the
+      -- cross-dimension intersection: when both a segment and a group are
+      -- selected, a contact must appear in both sides.
       select
         q.*,
         (
           q.qualifies
           and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
-        ) as is_eligible
+        ) as is_eligible,
+        (not ${bothSides}::boolean or (q.from_segment and q.from_group)) as membership_ok
       from qualified q
     )
     select
-      count(*) filter (where is_eligible)::int as total_matching,
+      -- The audience that actually sends = eligible ∩ membership rule.
+      count(*) filter (where is_eligible and membership_ok)::int as total_matching,
+      -- Per-source contributions stay PRE-intersection (eligible on each
+      -- side) so the UI can show how the two dimensions narrow down; the
+      -- intersection itself is the overlap column, which equals
+      -- total_matching when both dimensions are selected.
       count(*) filter (where is_eligible and from_segment)::int as from_segments,
       count(*) filter (where is_eligible and from_group)::int as from_groups,
       count(*) filter (where is_eligible and from_segment and from_group)::int as overlap,
       count(*) filter (where has_opt_out)::int as excluded_for_optout,
-      -- Reported on the qualifying set (pre-exclusion) so the UI can show
-      -- how many were/are in use regardless of whether they were dropped.
-      count(*) filter (where qualifies and is_in_use_elsewhere)::int as in_use_in_other_campaigns
+      -- Reported on the in-audience set (post-intersection, pre in-use
+      -- exclusion) so the UI's "N excluded" reflects the real audience.
+      count(*) filter (where qualifies and membership_ok and is_in_use_elsewhere)::int as in_use_in_other_campaigns
     from eligible
   `)) as unknown as {
     total_matching: number;

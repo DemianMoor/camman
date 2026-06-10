@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-10 — Campaign audience: segment ∩ group (was union)
+- Campaign audience composition now **intersects** the segment dimension with the contact-group dimension when both are selected (a contact must be in a selected segment AND a selected group); a single populated dimension is used alone. Previously the two were UNION'd. Affects `buildQualifyingContactsSql` (snapshot), `previewAudience` (editor preview), and `computeStageAudienceCountForDraft` (draft stage count) in [lib/audience-snapshot.ts](../lib/audience-snapshot.ts) via the new `buildAudienceSourceClause` helper. Preview `from_segments`/`from_groups` now report each side's pre-intersection pool; `total_matching`/`overlap` are the intersected audience. — Docs updated: [04-features/audience-snapshot.md](04-features/audience-snapshot.md), CLAUDE.md §10b.
+
 ## 2026-06-10 — Segment rule: in use in another campaign in last period
 - New `in_use_in_campaign_last_period` segment rule type (migration `0059`): include (`is`) / exclude (`is_not`) contacts that were in use in another campaign within a fixed lookback window (`1d`/`3d`/`1w`/`2w`/`1m`/`3m`/`6m`/`1y`). "In use" = in a `campaign_audience_pool` for a campaign with `status` active/paused/completed and ≥1 live stage (draft/pending/sent/success), windowed on `campaigns.created_at`. New `campaign_use_period` value shape. — Docs updated: [04-features/audience-segments.md](04-features/audience-segments.md), [03-data-model.md](03-data-model.md).
 

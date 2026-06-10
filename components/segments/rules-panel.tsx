@@ -26,7 +26,9 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { isEntityAvailable } from "@/lib/feature-flags";
 import { cn } from "@/lib/utils";
 import {
+  CAMPAIGN_USE_PERIODS,
   getValueShapeForRuleType,
+  isCampaignUsePeriod,
   isValidOperatorForRuleType,
   RULE_TYPES,
   RULE_TYPE_KEYS,
@@ -92,6 +94,9 @@ function coerceValueForShape(
     }
     return 1;
   }
+  if (shape === "campaign_use_period") {
+    return isCampaignUsePeriod(prior) ? prior : "1w";
+  }
   if (
     shape === "brand_id" ||
     shape === "offer_id" ||
@@ -127,6 +132,7 @@ function isRuleReadyToSave(
       value <= 36500
     );
   }
+  if (shape === "campaign_use_period") return isCampaignUsePeriod(value);
   if (value === null || value === undefined) return true;
   return typeof value === "number" && Number.isInteger(value) && value >= 1;
 }
@@ -140,7 +146,13 @@ function isRuleIncomplete(
 ): boolean {
   const shape = valueShapeFor(ruleType);
   if (!shape) return false;
-  if (shape === "none" || shape === "positive_integer") return false;
+  if (
+    shape === "none" ||
+    shape === "positive_integer" ||
+    shape === "campaign_use_period"
+  ) {
+    return false;
+  }
   return value === null || value === undefined;
 }
 
@@ -788,7 +800,7 @@ interface ValueControlProps {
   // selection (FK select). The handler receives the explicit new value
   // so callers don't read stale state from a closure.
   onBlur: () => void;
-  onValueCommit: (next: number) => void;
+  onValueCommit: (next: number | string) => void;
   disabled: boolean;
   brands: PickerOption[];
   offers: PickerOption[];
@@ -846,6 +858,30 @@ function ValueControl({
         />
         <span className="text-xs text-muted-foreground">days</span>
       </div>
+    );
+  }
+  if (shape === "campaign_use_period") {
+    const current = isCampaignUsePeriod(value) ? value : undefined;
+    return (
+      <Select
+        value={current ?? ""}
+        onValueChange={(v) => {
+          onChange(v);
+          onValueCommit(v);
+        }}
+        disabled={disabled}
+      >
+        <SelectTrigger className="h-9 w-[140px]">
+          <SelectValue placeholder="Select a period" />
+        </SelectTrigger>
+        <SelectContent>
+          {CAMPAIGN_USE_PERIODS.map((p) => (
+            <SelectItem key={p.code} value={p.code}>
+              {p.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     );
   }
   const options =

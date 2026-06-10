@@ -28,7 +28,13 @@ export async function verifyValueOwnership(
   currentSegmentId: number | null,
 ): Promise<OwnershipResult> {
   const shape = getValueShapeForRuleType(ruleType);
-  if (!shape || shape === "none" || shape === "positive_integer") {
+  if (
+    !shape ||
+    shape === "none" ||
+    shape === "positive_integer" ||
+    shape === "campaign_use_period"
+  ) {
+    // No FK reference to verify — value is a scalar/enum, not an entity id.
     return { ok: true };
   }
   // FK shapes accept null — an "incomplete" rule that the eval skips. The

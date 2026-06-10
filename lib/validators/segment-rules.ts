@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   getValueShapeForRuleType,
+  isCampaignUsePeriod,
   isValidOperatorForRuleType,
   RULE_TYPE_KEYS,
   type ValueShape,
@@ -27,6 +28,10 @@ function validateValueByShape(shape: ValueShape, value: unknown): boolean {
         value >= 1 &&
         value <= 36500
       );
+    case "campaign_use_period":
+      // Fixed enum of lookback codes. No "incomplete" null state — the UI
+      // coerces to a default code on rule-type switch.
+      return isCampaignUsePeriod(value);
     case "brand_id":
     case "offer_id":
     case "segment_id":

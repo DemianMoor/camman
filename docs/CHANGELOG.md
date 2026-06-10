@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-10 — Segment rule: in use in another campaign in last period
+- New `in_use_in_campaign_last_period` segment rule type (migration `0059`): include (`is`) / exclude (`is_not`) contacts that were in use in another campaign within a fixed lookback window (`1d`/`3d`/`1w`/`2w`/`1m`/`3m`/`6m`/`1y`). "In use" = in a `campaign_audience_pool` for a campaign with `status` active/paused/completed and ≥1 live stage (draft/pending/sent/success), windowed on `campaigns.created_at`. New `campaign_use_period` value shape. — Docs updated: [04-features/audience-segments.md](04-features/audience-segments.md), [03-data-model.md](03-data-model.md).
+
 ## 2026-06-08 — Upload contacts onto a draft campaign
 - New `POST /api/campaigns/[campaignId]/upload-contacts` + draft-only "Upload contacts" button on the campaign detail page: CSV/paste phone upload that upserts contacts, tags them into selected existing contact group(s), and UNIONs those groups into the campaign's `audience_contact_group_ids`. Draft-only (audience freezes at activation); requires `contacts.upload` + `campaigns.update`. — Docs updated: [04-features/campaigns-stages-creatives.md](04-features/campaigns-stages-creatives.md).
 

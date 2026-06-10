@@ -913,6 +913,7 @@ export const segment_rules = pgTable(
         'contact_added_more_than_n_days_ago',
         'joined_segment_in_last_n_days',
         'joined_segment_more_than_n_days_ago',
+        'in_use_in_campaign_last_period',
         'member_of_segment'
       )`,
     ),

@@ -1,8 +1,8 @@
 # 03 — Data Model
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-10_
 
-Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0058`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the `is_in_contact_group` note below).
+Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0059`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the `is_in_contact_group` note below).
 
 ## Multi-tenant boundary
 
@@ -140,6 +140,8 @@ erDiagram
 | `segment_rules` | `rule_type`, `operator` is/is_not, `value` jsonb, `position`, `is_active`, `combinator` and/or | see [audience-segments.md](04-features/audience-segments.md) |
 
 > **`is_in_contact_group` rule type:** the eval (`lib/segment-rules-eval.ts`) and migration `0031` support an `is_in_contact_group` rule type, but the `segment_rules_rule_type_check` CHECK list inlined in `db/schema.ts` omits it. The DB constraint (post-0031) is authoritative; treat `db/schema.ts`'s inline list as stale. `> [VERIFY]` the exact CHECK in the live DB if you touch rule types.
+>
+> **`in_use_in_campaign_last_period` rule type (migration `0059`):** widens `segment_rules_rule_type_check` to add this type. Because Postgres can't append a value to a CHECK, `0059` restates the full IN-list — including `is_in_contact_group` (which the generated snapshots never picked up). The generated `0059_snapshot.json` still mirrors `db/schema.ts`'s inline list (no `is_in_contact_group`); the **migration SQL** is authoritative for the live constraint.
 
 ### Creatives
 | Table | Key columns | Notes |

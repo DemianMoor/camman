@@ -6,8 +6,29 @@ import type { SQL } from "drizzle-orm";
 import { db } from "@/db/client";
 import { segment_rules, segments } from "@/db/schema";
 
-import { getValueShapeForRuleType } from "./validators/segment-rule-types";
-import type { RuleType } from "./validators/segment-rule-types";
+import {
+  getValueShapeForRuleType,
+  isCampaignUsePeriod,
+} from "./validators/segment-rule-types";
+import type {
+  CampaignUsePeriod,
+  RuleType,
+} from "./validators/segment-rule-types";
+
+// Code → SQL interval for the "in use in another campaign" lookback window.
+// Kept server-side: the wire/persisted form is only the opaque code. Built
+// with make_interval so the units are explicit (weeks/months/years, not a
+// flattened day count) and DST/calendar math is Postgres's job.
+const CAMPAIGN_USE_PERIOD_INTERVAL: Record<CampaignUsePeriod, SQL> = {
+  "1d": drizzleSql`make_interval(days => 1)`,
+  "3d": drizzleSql`make_interval(days => 3)`,
+  "1w": drizzleSql`make_interval(weeks => 1)`,
+  "2w": drizzleSql`make_interval(weeks => 2)`,
+  "1m": drizzleSql`make_interval(months => 1)`,
+  "3m": drizzleSql`make_interval(months => 3)`,
+  "6m": drizzleSql`make_interval(months => 6)`,
+  "1y": drizzleSql`make_interval(years => 1)`,
+};
 
 // A rule is "complete" — has all the inputs the eval needs — when its
 // value matches the shape required by its rule_type. Incomplete FK rules
@@ -22,6 +43,7 @@ function isRuleComplete(rule: {
   const shape = getValueShapeForRuleType(rule.rule_type);
   if (!shape) return false;
   if (shape === "none") return rule.value == null;
+  if (shape === "campaign_use_period") return isCampaignUsePeriod(rule.value);
   if (shape === "positive_integer") {
     return (
       typeof rule.value === "number" &&
@@ -98,6 +120,32 @@ function ruleInnerQuery(
           AND segment_id = ${segmentId}::int
           AND created_at < now() - make_interval(days => ${Number(v)})
       `;
+    case "in_use_in_campaign_last_period": {
+      // Contacts already snapshotted into a campaign that ran within the
+      // lookback window AND still has a live stage. "Live" = a stage in
+      // draft/pending/sent/success; if every stage is cancelled/failed (or
+      // there are none) the campaign has released its contacts and they no
+      // longer count as in use. Window anchors on campaigns.created_at.
+      // Campaign status restricted to active/paused/completed ("any that
+      // ran" — draft has no pool rows; archived is excluded by design).
+      const interval = CAMPAIGN_USE_PERIOD_INTERVAL[v as CampaignUsePeriod];
+      return drizzleSql`
+        SELECT DISTINCT p.contact_id
+        FROM campaign_audience_pool p
+        JOIN campaigns ca ON ca.id = p.campaign_id
+        WHERE p.org_id = ${orgId}::uuid
+          AND ca.org_id = ${orgId}::uuid
+          AND ca.status IN ('active', 'paused', 'completed')
+          AND ca.created_at >= now() - ${interval}
+          AND EXISTS (
+            SELECT 1
+            FROM campaign_stages s
+            WHERE s.campaign_id = ca.id
+              AND s.org_id = ${orgId}::uuid
+              AND s.status IN ('draft', 'pending', 'sent', 'success')
+          )
+      `;
+    }
     case "member_of_segment":
       return drizzleSql`
         SELECT contact_id

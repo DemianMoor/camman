@@ -11,7 +11,36 @@ export type ValueShape =
   | "brand_id"
   | "offer_id"
   | "segment_id"
-  | "contact_group_id";
+  | "contact_group_id"
+  | "campaign_use_period";
+
+// Fixed set of lookback windows for the "in use in another campaign" rule.
+// Stored in the rule's `value` as the code string (e.g. "1w"). The code →
+// SQL interval mapping lives server-side in lib/segment-rules-eval.ts so the
+// only thing crossing the wire / persisted is the opaque code.
+export const CAMPAIGN_USE_PERIODS = [
+  { code: "1d", label: "1 day" },
+  { code: "3d", label: "3 days" },
+  { code: "1w", label: "1 week" },
+  { code: "2w", label: "2 weeks" },
+  { code: "1m", label: "1 month" },
+  { code: "3m", label: "3 months" },
+  { code: "6m", label: "6 months" },
+  { code: "1y", label: "1 year" },
+] as const;
+
+export type CampaignUsePeriod = (typeof CAMPAIGN_USE_PERIODS)[number]["code"];
+
+export const CAMPAIGN_USE_PERIOD_CODES = CAMPAIGN_USE_PERIODS.map(
+  (p) => p.code,
+) as CampaignUsePeriod[];
+
+export function isCampaignUsePeriod(v: unknown): v is CampaignUsePeriod {
+  return (
+    typeof v === "string" &&
+    (CAMPAIGN_USE_PERIOD_CODES as readonly string[]).includes(v)
+  );
+}
 
 interface RuleTypeSpec {
   label: string;
@@ -74,6 +103,19 @@ export const RULE_TYPES = {
     label: "Joined this segment more than N days ago",
     operators: ["is"],
     value_shape: "positive_integer",
+  },
+
+  // === Campaign usage ===
+  // "In use in another campaign in the last <period>". A contact counts as
+  // in-use when it sits in a campaign_audience_pool for a campaign that ran
+  // (status active/paused/completed) within the window AND still has at
+  // least one live stage (draft/pending/sent/success) — a campaign whose
+  // stages are all cancelled/failed releases its contacts. The window
+  // anchors on campaigns.created_at. See lib/segment-rules-eval.ts.
+  in_use_in_campaign_last_period: {
+    label: "In use in another campaign in the last…",
+    operators: ["is", "is_not"],
+    value_shape: "campaign_use_period",
   },
 
   // === Cross-segment ===

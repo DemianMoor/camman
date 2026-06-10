@@ -414,6 +414,13 @@
       "when": 1781395200000,
       "tag": "0058_send_circuit_breakers",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1781481600000,
+      "tag": "0059_segment_rules_in_use_period",
+      "breakpoints": true
     }
   ]
 }

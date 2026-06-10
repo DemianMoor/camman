@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-10 — Creative picker: faster filtering + "ALL offers" toggle
+- Picker now fetches from the server only when the offer set or the new ALL toggle changes; search + sequence filter client-side (instant, no round-trip), and rows stay visible during an offer/ALL refetch ([components/campaigns/creative-picker-dialog.tsx](../components/campaigns/creative-picker-dialog.tsx)). Added an "ALL" checkbox (off by default) in the Offers panel that drives a new `include_all_offers` param on `/api/creatives/list` ([lib/creatives/list-filters.ts](../lib/creatives/list-filters.ts)): when `false`, `applies_to_all_offers` creatives are hidden until opted in; when true/absent, they're included (single `offer_id` path unchanged). — Docs updated: [04-features/campaigns-stages-creatives.md](04-features/campaigns-stages-creatives.md).
+
 ## 2026-06-10 — Stage form: rich creative picker dialog (+ multi-offer list filter)
 - Replaced the stage form's creative `<Select>` with a popup picker ([components/campaigns/creative-picker-dialog.tsx](../components/campaigns/creative-picker-dialog.tsx)): search, sequence filter, spam-dot/EPC/CTR columns, full-text-on-hover, live SMS preview with spam/multi-segment/Unicode warnings, and an Offers panel (campaign offer locked-on + other active offers as checkboxes to widen the list). Added a multi-offer `offer_ids` (CSV) param to `/api/creatives/list` via [lib/creatives/list-filters.ts](../lib/creatives/list-filters.ts) (eligible = applies_to_all_offers OR junction to ANY selected offer; single `offer_id` unchanged). One creative per stage; selection still sets `creative_id`. — Docs updated: [04-features/campaigns-stages-creatives.md](04-features/campaigns-stages-creatives.md).
 

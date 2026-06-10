@@ -140,22 +140,18 @@ export function CreativePickerDialog({
   const offersApi = useApiCall<OffersResponse>();
 
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sequences, setSequences] = useState<CreativeSequencePlacement[]>([]);
   const [offers, setOffers] = useState<OfferOption[]>([]);
   // Extra offers (beyond the campaign's) the operator checked to widen the list.
   const [extraOfferIds, setExtraOfferIds] = useState<number[]>([]);
+  // "All offers" toggle. OFF by default: creatives marked applies_to_all_offers
+  // are hidden until the operator opts in. ON ⇒ they're added to the list.
+  const [includeAllOffers, setIncludeAllOffers] = useState(false);
   const [creatives, setCreatives] = useState<PickerCreative[]>([]);
   // Highlighted (preview) row — seeded from the stage's current selection. The
   // dialog is mounted fresh each time it opens (parent gates on `open`), so
   // this initializer is the reset; no reset-on-open effect needed.
   const [activeId, setActiveId] = useState<number | null>(selectedCreativeId);
-
-  // Debounce the search box (no fetch on every keystroke).
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
-    return () => clearTimeout(t);
-  }, [search]);
 
   const offerIds = useMemo(() => {
     const ids = new Set<number>(extraOfferIds);
@@ -175,9 +171,10 @@ export function CreativePickerDialog({
     };
   }, [offersApi.execute]);
 
-  // (Re)fetch creatives whenever the offer set / search / sequence filter
-  // changes. setState lands inside the async callback (not synchronously in the
-  // effect body) so it doesn't trigger cascading renders.
+  // Fetch creatives only when the offer SET or the ALL toggle changes — these
+  // change the server-side eligibility. Search and sequence are filtered
+  // client-side below (instant, no round-trip), which is the main win when
+  // rapidly switching filters. setState lands inside the async callback.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -186,17 +183,31 @@ export function CreativePickerDialog({
         status: "active",
         sortBy: "epc",
         sortDir: "desc",
+        include_all_offers: includeAllOffers ? "true" : "false",
       });
       if (offerIds.length > 0) sp.set("offer_ids", offerIds.join(","));
-      if (debouncedSearch) sp.set("search", debouncedSearch);
-      if (sequences.length > 0) sp.set("sequence_placement", sequences.join(","));
       const r = await creativesApi.execute(`/api/creatives/list?${sp.toString()}`);
       if (!cancelled && r.ok) setCreatives(r.data.data);
     })();
     return () => {
       cancelled = true;
     };
-  }, [creativesApi.execute, offerIds, debouncedSearch, sequences]);
+  }, [creativesApi.execute, offerIds, includeAllOffers]);
+
+  // Client-side search (text/slug) + sequence filter over the fetched set. The
+  // server already ranked by EPC desc; filtering preserves that order.
+  const visibleCreatives = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return creatives.filter((c) => {
+      if (sequences.length > 0 && !sequences.includes(c.sequence_placement))
+        return false;
+      if (q) {
+        const hay = `${c.text} ${c.slug}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [creatives, search, sequences]);
 
   const activeCreative = useMemo(
     () => creatives.find((c) => c.id === activeId) ?? null,
@@ -274,20 +285,23 @@ export function CreativePickerDialog({
                     </tr>
                   </thead>
                   <tbody>
-                    {creativesApi.isLoading ? (
+                    {/* Spinner only on the first load (no rows yet). On a
+                        refetch (offer / ALL change) we keep the current rows
+                        visible so the list doesn't flash empty. */}
+                    {creativesApi.isLoading && creatives.length === 0 ? (
                       <tr>
                         <td colSpan={5} className="py-10 text-center text-muted-foreground">
                           <Loader2 className="mx-auto size-4 animate-spin" />
                         </td>
                       </tr>
-                    ) : creatives.length === 0 ? (
+                    ) : visibleCreatives.length === 0 ? (
                       <tr>
                         <td colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
                           No matching creatives.
                         </td>
                       </tr>
                     ) : (
-                      creatives.map((c) => {
+                      visibleCreatives.map((c) => {
                         const isActive = c.id === activeId;
                         return (
                           <tr
@@ -405,6 +419,20 @@ export function CreativePickerDialog({
                 <Loader2 className="size-4 animate-spin text-muted-foreground" />
               ) : (
                 <div className="flex max-h-[18vh] flex-col gap-1.5 overflow-y-auto">
+                  {/* "All offers": when on, creatives flagged applies_to_all_offers
+                      are added to the list. Off by default — they stay hidden. */}
+                  <label className="flex cursor-pointer items-center gap-2 border-b pb-1.5 text-sm font-medium">
+                    <input
+                      type="checkbox"
+                      checked={includeAllOffers}
+                      onChange={() => setIncludeAllOffers((v) => !v)}
+                      className="size-4"
+                    />
+                    <span>ALL</span>
+                    <span className="text-xs font-normal text-muted-foreground">
+                      include creatives for all offers
+                    </span>
+                  </label>
                   {offers.map((o) => {
                     const isCampaignOffer = campaignOffer?.id === o.id;
                     const checked = isCampaignOffer || extraOfferIds.includes(o.id);

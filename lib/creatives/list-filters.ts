@@ -87,24 +87,27 @@ export function buildCreativeListWhere(opts: {
     conditions.push(inArray(creatives.sequence_placement, sequenceFilter));
   }
 
-  // offer_ids filter (multi): eligible if applies_to_all_offers=true OR a
-  // junction row to ANY of the selected offers.
+  // offer_ids filter (multi): eligible if a junction row to ANY of the selected
+  // offers — and, when include_all_offers is not "false" (the default), also any
+  // creative flagged applies_to_all_offers. The picker's "ALL" toggle sends
+  // include_all_offers=false to hide those until the operator opts in.
   if (offerIds.length > 0) {
-    conditions.push(
-      or(
-        eq(creatives.applies_to_all_offers, true),
-        exists(
-          db
-            .select({ x: drizzleSql`1` })
-            .from(creative_offers)
-            .where(
-              and(
-                eq(creative_offers.creative_id, creatives.id),
-                inArray(creative_offers.offer_id, offerIds),
-              ),
-            ),
+    const includeAllOffers = sp.get("include_all_offers") !== "false";
+    const junctionMatch = exists(
+      db
+        .select({ x: drizzleSql`1` })
+        .from(creative_offers)
+        .where(
+          and(
+            eq(creative_offers.creative_id, creatives.id),
+            inArray(creative_offers.offer_id, offerIds),
+          ),
         ),
-      )!,
+    );
+    conditions.push(
+      includeAllOffers
+        ? or(eq(creatives.applies_to_all_offers, true), junctionMatch)!
+        : junctionMatch,
     );
   } else if (offerFilter !== null && /^\d+$/.test(offerFilter)) {
     const offerIdNum = Number(offerFilter);

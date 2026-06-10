@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-10 — Creatives list: 30-day performance columns (CTR / Checkout Rate / Sales CR / EPC)
+- Added four sortable, server-ranked 30-day metric columns to the creatives list and removed the `Campaigns` (placeholder) and `Quality` table columns. The list endpoint ([app/api/creatives/list/route.ts](../app/api/creatives/list/route.ts)) joins two per-creative aggregates (stage counters + tracked clean clicks) and returns a `metrics` object; ratios are NULL ("—") when their denominator is 0. Clean clicks combine manual-mode stage clicks and tracked-mode clean clicks (bot/prefetch/suspect excluded); stage counters window on `campaign_stages.created_at`, tracked clicks on `clicks.clicked_at`. — Docs updated: [04-features/campaigns-stages-creatives.md](04-features/campaigns-stages-creatives.md).
+
 ## 2026-06-10 — Campaign audience preview: ~24× faster
 - Audience preview/snapshot/draft-stage-count sped up from ~9s to ~0.4s on a 750K-contact org. Two changes in [lib/audience-snapshot.ts](../lib/audience-snapshot.ts) + [lib/segment-rules-eval.ts](../lib/segment-rules-eval.ts): (1) `buildSegmentAudienceClause` accepts an optional `restrictUniverse`, and the three audience functions pass the contact-group set when both dimensions are selected so a near-universal `is_not` rule no longer scans all contacts before the intersection narrows it; (2) opt-out/opt-in/clicker/in-use flags are LEFT-JOINed via deduped CTEs (`flagSetCtes`/`flagJoins`) instead of correlated `EXISTS` per row. Verified result-identical against a brute-force ground truth. Note: with both dimensions selected, the preview's `from_segments` now reflects the segment evaluated within the group (= the intersection). — Docs updated: [04-features/audience-snapshot.md](04-features/audience-snapshot.md).
 

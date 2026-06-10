@@ -99,7 +99,19 @@ type Creative = {
   archived_at: string | null;
   created_at: string;
   offers: Info[];
-  campaign_count: number;
+  // 30-day performance metrics. Ratios are null when their denominator
+  // (delivered for CTR; clean clicks for the rest) is 0.
+  metrics: {
+    delivered: number;
+    clean_clicks: number;
+    checkouts: number;
+    sales: number;
+    payout: number;
+    ctr: number | null;
+    checkout_rate: number | null;
+    sales_cr: number | null;
+    epc: number | null;
+  };
   // Spam scoring fields. spam_score is 0-100 (or null when unscored).
   // spam_label is the binary verdict mirrored from the cache; the list
   // endpoint also returns the 3-bucket cache label here for older rows.
@@ -154,15 +166,6 @@ const QUALITY_LABEL: Record<CreativeQuality, string> = {
   average: "Average",
   poor: "Poor",
   unknown: "Unknown",
-};
-
-const QUALITY_BADGE: Record<CreativeQuality, string> = {
-  high: "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
-  average:
-    "border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200",
-  poor: "border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
-  unknown:
-    "border-zinc-200 bg-zinc-100 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300",
 };
 
 const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
@@ -243,6 +246,40 @@ function ArchivedBadge() {
     <Badge className="border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
       Archived
     </Badge>
+  );
+}
+
+const numberFmt = new Intl.NumberFormat("en-US");
+
+function formatPercent(v: number): string {
+  return `${(v * 100).toFixed(1)}%`;
+}
+
+function formatEpc(v: number): string {
+  return `$${v.toFixed(3)}`;
+}
+
+// One right-aligned numeric metric cell. Renders "—" when the value is null
+// (no data / zero denominator); the title surfaces the underlying counts so a
+// rate is never a number without context.
+function MetricCell({
+  value,
+  format,
+  title,
+}: {
+  value: number | null;
+  format: (v: number) => string;
+  title: string;
+}) {
+  if (value === null) {
+    return (
+      <div className="text-right tabular-nums text-muted-foreground">—</div>
+    );
+  }
+  return (
+    <div className="text-right tabular-nums" title={title}>
+      {format(value)}
+    </div>
   );
 }
 
@@ -741,16 +778,6 @@ export default function CreativesPage() {
         cell: ({ row }) => <OffersCell creative={row.original} />,
       },
       {
-        id: "quality",
-        header: "Quality",
-        enableSorting: true,
-        cell: ({ row }) => (
-          <Badge className={cn("capitalize", QUALITY_BADGE[row.original.quality])}>
-            {QUALITY_LABEL[row.original.quality]}
-          </Badge>
-        ),
-      },
-      {
         id: "sequence",
         header: "Sequence",
         enableSorting: true,
@@ -774,13 +801,63 @@ export default function CreativesPage() {
         },
       },
       {
-        id: "campaigns",
-        header: "Campaigns",
-        enableSorting: false,
+        id: "ctr",
+        header: "CTR",
+        enableSorting: true,
         cell: ({ row }) => {
-          const n = row.original.campaign_count;
-          if (n === 0) return <span className="text-muted-foreground">—</span>;
-          return <Badge variant="secondary">{n}</Badge>;
+          const m = row.original.metrics;
+          return (
+            <MetricCell
+              value={m.ctr}
+              format={formatPercent}
+              title={`${numberFmt.format(m.clean_clicks)} clean clicks / ${numberFmt.format(m.delivered)} delivered (30d)`}
+            />
+          );
+        },
+      },
+      {
+        id: "checkout_rate",
+        header: "Checkout Rate",
+        enableSorting: true,
+        cell: ({ row }) => {
+          const m = row.original.metrics;
+          return (
+            <MetricCell
+              value={m.checkout_rate}
+              format={formatPercent}
+              title={`${numberFmt.format(m.checkouts)} checkouts / ${numberFmt.format(m.clean_clicks)} clean clicks (30d)`}
+            />
+          );
+        },
+      },
+      {
+        id: "sales_cr",
+        header: "Sales CR",
+        enableSorting: true,
+        cell: ({ row }) => {
+          const m = row.original.metrics;
+          return (
+            <MetricCell
+              value={m.sales_cr}
+              format={formatPercent}
+              title={`${numberFmt.format(m.sales)} sales / ${numberFmt.format(m.clean_clicks)} clean clicks (30d)`}
+            />
+          );
+        },
+      },
+      {
+        id: "epc",
+        header: "EPC",
+        enableSorting: true,
+        cell: ({ row }) => {
+          const m = row.original.metrics;
+          return (
+            <MetricCell
+              value={m.epc}
+              format={formatEpc}
+              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (30d)`}
+            />
+          );
         },
       },
       {

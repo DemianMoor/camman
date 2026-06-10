@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-06-08_
+_Last updated: 2026-06-10_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -38,6 +38,9 @@ The campaign core: a **campaign** is a long-running container with a frozen audi
 - `quality` (high/average/poor/unknown) and `sequence_placement` (warmup/1st/2nd/3rd/any/unknown) are user metadata for filtering.
 - Stage creative picker queries `/api/creatives/list?offer_id=X&status=active` → creatives with a junction row to X **or** `applies_to_all_offers=true`. The picker shows a spam color-dot + score from the list endpoint's cache join (read-only — listing does NOT trigger scoring). See [spam-classifier.md](spam-classifier.md).
 - Bulk-create: up to 50 rows/request, shared offer/quality/sequence, one transaction.
+- **30-day performance columns** (creatives list, [`app/api/creatives/list/route.ts`](../../app/api/creatives/list/route.ts)): the list endpoint joins two per-creative aggregates and returns a `metrics` object → four sortable, server-ranked columns. Clean clicks = manual-mode stage clicks (`click_count + late_click_count`) + tracked-mode clean clicks (clicks where `classification NOT IN ('bot','prefetch','suspect')`, same "clean" rule as the click report). Stage counters anchor on `campaign_stages.created_at`; tracked clicks anchor on `clicks.clicked_at`; both windowed to the last 30 days.
+  - **CTR** = clean clicks ÷ delivered · **Checkout Rate** = checkouts ÷ clean clicks · **Sales CR** = sales ÷ clean clicks · **EPC** = payout ÷ clean clicks (payout = `Σ sales_count × sales_payout_each`).
+  - Each ratio is NULL (renders "—") when its denominator is 0, so "no data" never shows as 0%. Sort uses the ratio expression with `NULLS LAST` + an `id` tiebreaker. (The former `Campaigns` and `Quality` table columns were removed; `quality` remains a field, form input, and list filter.)
 
 ### Tracking IDs ([`lib/tracking-id.ts`](../../lib/tracking-id.ts), [`lib/tracking-id-format.ts`](../../lib/tracking-id-format.ts))
 Auto-generated, **immutable**, separate from `id` and `human_id`.

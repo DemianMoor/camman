@@ -3,14 +3,25 @@ import {
   asc,
   desc,
   eq,
+  gte,
   inArray,
+  isNotNull,
   sql as drizzleSql,
 } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { creative_offers, creatives, offers, spam_scores } from "@/db/schema";
+import {
+  campaign_stages,
+  campaigns,
+  clicks,
+  creative_offers,
+  creatives,
+  links,
+  offers,
+  spam_scores,
+} from "@/db/schema";
 import { hashText } from "@/lib/spam/normalize";
 import { deriveVerdict } from "@/lib/spam/types";
 import {
@@ -54,20 +65,105 @@ export async function GET(req: NextRequest) {
     searchParams: sp,
   });
 
-  const sortKey = (params.sortBy ?? "created_at") as keyof typeof SORT_COLUMNS;
-  const sortColumn = SORT_COLUMNS[sortKey] ?? creatives.created_at;
+  // ---- 30-day performance metrics (per creative) ----
+  // Two aggregates joined into the main query so the four derived ratios are
+  // sortable server-side across the whole filtered set, not just one page.
+  // Stage counters are anchored on the stage's created_at; tracked clean
+  // clicks are anchored on the click's clicked_at (two distinct time bases,
+  // by design). Clean clicks = manual-mode stage clicks (click_count +
+  // late_click_count) + tracked-mode clean clicks (human + unknown, i.e.
+  // bot/prefetch/suspect excluded — same definition as the click report).
+  const WINDOW = drizzleSql`now() - interval '30 days'`;
+
+  const stageAgg = db
+    .select({
+      creative_id: campaign_stages.creative_id,
+      delivered:
+        drizzleSql<number>`coalesce(sum(${campaign_stages.delivered_count}), 0)::int`.as(
+          "delivered",
+        ),
+      checkouts:
+        drizzleSql<number>`coalesce(sum(${campaign_stages.checkout_click_count}), 0)::int`.as(
+          "checkouts",
+        ),
+      sales:
+        drizzleSql<number>`coalesce(sum(${campaign_stages.sales_count}), 0)::int`.as(
+          "sales",
+        ),
+      payout:
+        drizzleSql<string>`coalesce(sum(${campaign_stages.sales_count} * ${campaign_stages.sales_payout_each}) filter (where ${campaign_stages.sales_payout_each} is not null), 0)`.as(
+          "payout",
+        ),
+      manual_clean:
+        drizzleSql<number>`coalesce(sum(${campaign_stages.click_count} + ${campaign_stages.late_click_count}) filter (where ${campaigns.link_mode} = 'manual'), 0)::int`.as(
+          "manual_clean",
+        ),
+    })
+    .from(campaign_stages)
+    .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
+    .where(
+      and(
+        eq(campaign_stages.org_id, orgId),
+        isNotNull(campaign_stages.creative_id),
+        gte(campaign_stages.created_at, WINDOW),
+      ),
+    )
+    .groupBy(campaign_stages.creative_id)
+    .as("stage_agg");
+
+  const clickAgg = db
+    .select({
+      creative_id: links.creative_id,
+      tracked_clean:
+        drizzleSql<number>`count(${clicks.id}) filter (where ${clicks.classification} not in ('bot', 'prefetch', 'suspect'))::int`.as(
+          "tracked_clean",
+        ),
+    })
+    .from(clicks)
+    .innerJoin(links, eq(links.id, clicks.link_id))
+    .where(
+      and(
+        eq(clicks.org_id, orgId),
+        isNotNull(links.creative_id),
+        gte(clicks.clicked_at, WINDOW),
+      ),
+    )
+    .groupBy(links.creative_id)
+    .as("click_agg");
+
+  const cleanExpr = drizzleSql`(coalesce(${stageAgg.manual_clean}, 0) + coalesce(${clickAgg.tracked_clean}, 0))`;
+  const deliveredExpr = drizzleSql`coalesce(${stageAgg.delivered}, 0)`;
+  // CASE without ELSE yields NULL when the denominator is 0, so "no data"
+  // sorts/renders as "—" rather than a misleading 0%.
+  const RATIO_SQL = {
+    ctr: drizzleSql`CASE WHEN ${deliveredExpr} > 0 THEN ${cleanExpr}::numeric / ${deliveredExpr} END`,
+    checkout_rate: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(${stageAgg.checkouts}, 0)::numeric / ${cleanExpr} END`,
+    sales_cr: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(${stageAgg.sales}, 0)::numeric / ${cleanExpr} END`,
+    epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(${stageAgg.payout}, 0)::numeric / ${cleanExpr} END`,
+  } as const;
+
+  const sortBy = params.sortBy ?? "created_at";
+  const sortDirSql = params.sortDir === "asc" ? "ASC" : "DESC";
   const orderFn = params.sortDir === "asc" ? asc : desc;
   // Postgres defaults NULLs LAST for asc and NULLs FIRST for desc. For
-  // spam_score we always want unscored rows at the end (a desc sort by
-  // spam score should surface the highest scores first, not the NULLs).
+  // spam_score and the metric ratios we always want empty rows at the end.
   // Tiebreaker on id keeps pagination deterministic.
-  const orderByClause =
-    sortKey === "spam_score"
-      ? [
-          drizzleSql`${creatives.spam_score} ${drizzleSql.raw(params.sortDir === "asc" ? "ASC" : "DESC")} NULLS LAST`,
-          asc(creatives.id),
-        ]
-      : [orderFn(sortColumn)];
+  let orderByClause;
+  if (sortBy in RATIO_SQL) {
+    orderByClause = [
+      drizzleSql`${RATIO_SQL[sortBy as keyof typeof RATIO_SQL]} ${drizzleSql.raw(sortDirSql)} NULLS LAST`,
+      asc(creatives.id),
+    ];
+  } else if (sortBy === "spam_score") {
+    orderByClause = [
+      drizzleSql`${creatives.spam_score} ${drizzleSql.raw(sortDirSql)} NULLS LAST`,
+      asc(creatives.id),
+    ];
+  } else {
+    const sortColumn =
+      SORT_COLUMNS[sortBy as keyof typeof SORT_COLUMNS] ?? creatives.created_at;
+    orderByClause = [orderFn(sortColumn)];
+  }
 
   const [rows, countRows] = await Promise.all([
     db
@@ -92,8 +188,16 @@ export async function GET(req: NextRequest) {
         status: creatives.status,
         archived_at: creatives.archived_at,
         created_at: creatives.created_at,
+        m_delivered: stageAgg.delivered,
+        m_checkouts: stageAgg.checkouts,
+        m_sales: stageAgg.sales,
+        m_payout: stageAgg.payout,
+        m_manual_clean: stageAgg.manual_clean,
+        m_tracked_clean: clickAgg.tracked_clean,
       })
       .from(creatives)
+      .leftJoin(stageAgg, eq(stageAgg.creative_id, creatives.id))
+      .leftJoin(clickAgg, eq(clickAgg.creative_id, creatives.id))
       .where(where)
       .orderBy(...orderByClause)
       .limit(params.pageSize)
@@ -193,6 +297,14 @@ export async function GET(req: NextRequest) {
     const label = rowHasScore
       ? r.row_spam_label
       : spam?.label ?? null;
+    // 30-day performance metrics. Base counts power the ratio columns (and
+    // their tooltips); ratios are NULL when their denominator is 0.
+    const delivered = Number(r.m_delivered ?? 0);
+    const checkouts = Number(r.m_checkouts ?? 0);
+    const sales = Number(r.m_sales ?? 0);
+    const payout = Number(r.m_payout ?? 0);
+    const cleanClicks =
+      Number(r.m_manual_clean ?? 0) + Number(r.m_tracked_clean ?? 0);
     return {
       id: r.id,
       creative_id: r.creative_id,
@@ -206,7 +318,17 @@ export async function GET(req: NextRequest) {
       archived_at: r.archived_at,
       created_at: r.created_at,
       offers: offersByCreative.get(r.id) ?? [],
-      campaign_count: 0, // TODO: wire to real campaign references once those exist
+      metrics: {
+        delivered,
+        clean_clicks: cleanClicks,
+        checkouts,
+        sales,
+        payout,
+        ctr: delivered > 0 ? cleanClicks / delivered : null,
+        checkout_rate: cleanClicks > 0 ? checkouts / cleanClicks : null,
+        sales_cr: cleanClicks > 0 ? sales / cleanClicks : null,
+        epc: cleanClicks > 0 ? payout / cleanClicks : null,
+      },
       spam_score: score,
       spam_label: label,
       spam_verdict:

@@ -455,7 +455,7 @@ export default function CampaignsPage() {
                 ) : null}
               </div>
               <div className="font-mono text-xs text-muted-foreground">
-                {c.slug}
+                {c.tracking_id ?? c.slug}
               </div>
             </div>
           );

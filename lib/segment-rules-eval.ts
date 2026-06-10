@@ -188,10 +188,22 @@ function ruleInnerQuery(
 // Manual members are always included regardless of whether they match the
 // rules — that's the difference from the prior intersection behaviour.
 //
+// `restrictUniverse` (optional): a `SELECT contact_id …` clause that replaces
+// "all org contacts" as the universe for `is_not` complements. When the caller
+// already knows the result will be INTERSECTed with a small set (e.g. the
+// campaign's contact-group side), passing that set here keeps the negation
+// `(universe EXCEPT inner)` from materializing the entire contacts table —
+// a major perf win, since `is_not` on a near-universal rule otherwise scans
+// and sorts ~all contacts. Correctness is unchanged: the caller's outer
+// INTERSECT against the same set already constrains the result, so narrowing
+// the is_not base to that set can only drop rows the INTERSECT would drop
+// anyway.
+//
 // Caller wraps this in a CTE or subquery as needed.
 export async function buildSegmentAudienceClause(
   segmentId: number,
   orgId: string,
+  restrictUniverse?: SQL,
 ): Promise<SQL> {
   // One read to pull the segment's exclude_in_use_contacts flag alongside
   // its rules. The flag wraps the final audience clause in an EXCEPT
@@ -275,11 +287,17 @@ export async function buildSegmentAudienceClause(
   // Left-associative — `(R1 OP2 R2) OP3 R3 …` — so we wrap each step in
   // parens. (Postgres gives INTERSECT higher precedence than UNION/EXCEPT
   // by default; the parens force left-to-right regardless.)
+  // The universe for an `is_not` complement: either the full org contacts
+  // table or the caller-supplied restriction (see the doc comment above).
+  const universeBase = restrictUniverse
+    ? drizzleSql`SELECT contact_id FROM (${restrictUniverse}) ru_universe`
+    : drizzleSql`SELECT id AS contact_id FROM contacts WHERE org_id = ${orgId}::uuid`;
+
   function ruleSet(rule: (typeof rules)[number]): SQL {
     const inner = ruleInnerQuery(rule, segmentId, orgId);
     if (rule.operator !== "is_not") return inner;
     return drizzleSql`
-      SELECT id AS contact_id FROM contacts WHERE org_id = ${orgId}::uuid
+      ${universeBase}
       EXCEPT
       ${inner}
     `;

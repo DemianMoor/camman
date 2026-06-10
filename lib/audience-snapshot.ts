@@ -36,6 +36,55 @@ function buildAudienceSourceClause(
   return (segmentUnion ?? groupClause) as SQL;
 }
 
+// The raw contact-group membership clause (`SELECT contact_id …`) for the
+// selected groups, or null when none are selected. Reused as both the group
+// side of the audience and — when both dimensions are present — the universe
+// restriction handed to `buildSegmentAudienceClause` (see below).
+function buildGroupMembershipClause(
+  orgId: string,
+  contactGroupIds: number[],
+): SQL | null {
+  if (contactGroupIds.length === 0) return null;
+  return drizzleSql`
+    SELECT contact_id
+    FROM contact_contact_groups
+    WHERE org_id = ${orgId}::uuid
+      AND contact_group_id = ANY(${drizzleSql.raw(
+        "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+      )})
+  `;
+}
+
+// Deduped per-contact status sets, emitted as CTE bodies to splice into a
+// `WITH` list (no leading `with`, no trailing comma). LEFT JOINing these once
+// is dramatically cheaper than a correlated `EXISTS (…)` per candidate row —
+// the planner builds each hash once instead of probing per row. `clickers` /
+// `opt_ins` may be empty, in which case the join is a no-op.
+function flagSetCtes(orgId: string): SQL {
+  return drizzleSql`
+    oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid),
+    oi_set as (select distinct contact_id from opt_ins where org_id = ${orgId}::uuid),
+    cl_set as (select distinct contact_id from clickers where org_id = ${orgId}::uuid),
+    iu_set as (
+      select distinct p.contact_id
+      from campaign_audience_pool p
+      join campaigns ca on ca.id = p.campaign_id
+      where p.org_id = ${orgId}::uuid and ca.status = 'active'
+    )`;
+}
+
+// The LEFT JOINs that attach the flagSetCtes to a candidate relation aliased
+// `alias` (which must expose a `contact_id` column). Pair with the boolean
+// expressions `<set>.contact_id is not null` in the SELECT list.
+function flagJoins(alias: string): SQL {
+  const a = drizzleSql.raw(alias);
+  return drizzleSql`
+    left join oo_set on oo_set.contact_id = ${a}.contact_id
+    left join oi_set on oi_set.contact_id = ${a}.contact_id
+    left join cl_set on cl_set.contact_id = ${a}.contact_id
+    left join iu_set on iu_set.contact_id = ${a}.contact_id`;
+}
+
 export interface AudienceFilters {
   include_no_status?: boolean;
   include_opt_in?: boolean;
@@ -122,30 +171,25 @@ async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
   const includeNotClicked = filters.include_not_clicked === true;
   const excludeInUse = input.excludeInUse === true;
 
+  // Contact-group clause: every contact tagged with any of the selected
+  // groups. Built first so it can double as the universe restriction for the
+  // segment evaluation (see below).
+  const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
+  const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
+
   // Per-segment rule-filtered clauses. Each yields a set of contact_ids
   // honoring that segment's rules + manual membership UNION. Subquery-wrap
   // each so its own internal set operators can't bleed into the UNION below.
+  // When both dimensions are selected the result is the segment∩group
+  // intersection anyway, so we hand the group set as the is_not universe —
+  // this keeps a near-universal `is_not` rule from scanning all contacts.
+  const restrictUniverse = bothSides ? groupClause! : undefined;
   const perSegmentClauses = await Promise.all(
-    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
+    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId, restrictUniverse)),
   );
   const segmentBranches = perSegmentClauses.map(
     (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
   );
-
-  // Contact-group clause: every contact tagged with any of the selected
-  // groups. Built inline because the rules engine doesn't model groups
-  // (groups are tags directly on contacts, not gated by segment rules).
-  const groupClause =
-    contactGroupIds.length > 0
-      ? drizzleSql`
-          SELECT contact_id
-          FROM contact_contact_groups
-          WHERE org_id = ${orgId}::uuid
-            AND contact_group_id = ANY(${drizzleSql.raw(
-              "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
-            )})
-        `
-      : null;
 
   const source = buildAudienceSourceClause(segmentBranches, groupClause);
 
@@ -153,30 +197,16 @@ async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
     with segment_members as (
       select distinct contact_id from (${source}) sm_union
     ),
+    ${flagSetCtes(orgId)},
     flagged as (
       select
         sm.contact_id,
-        exists (
-          select 1 from opt_outs oo
-          where oo.contact_id = sm.contact_id and oo.org_id = ${orgId}::uuid
-        ) as has_opt_out,
-        exists (
-          select 1 from opt_ins oi
-          where oi.contact_id = sm.contact_id and oi.org_id = ${orgId}::uuid
-        ) as has_opt_in,
-        exists (
-          select 1 from clickers c
-          where c.contact_id = sm.contact_id and c.org_id = ${orgId}::uuid
-        ) as has_clicker,
-        exists (
-          select 1
-          from campaign_audience_pool p
-          join campaigns ca on ca.id = p.campaign_id
-          where p.contact_id = sm.contact_id
-            and p.org_id = ${orgId}::uuid
-            and ca.status = 'active'
-        ) as is_in_use_elsewhere
+        (oo_set.contact_id is not null) as has_opt_out,
+        (oi_set.contact_id is not null) as has_opt_in,
+        (cl_set.contact_id is not null) as has_clicker,
+        (iu_set.contact_id is not null) as is_in_use_elsewhere
       from segment_members sm
+      ${flagJoins("sm")}
     )
     select
       contact_id,
@@ -362,22 +392,17 @@ export async function computeStageAudienceCountForDraft(
 
   // Mirror previewAudience's source composition — segments OR together,
   // groups OR together, the two dimensions INTERSECT when both are present.
+  // The group set doubles as the is_not universe restriction when both
+  // dimensions are present (perf — see buildSegmentAudienceClause).
+  const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
+  const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
+  const restrictUniverse = bothSides ? groupClause! : undefined;
   const perSegmentClauses = await Promise.all(
-    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
+    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId, restrictUniverse)),
   );
   const segmentBranches = perSegmentClauses.map(
     (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
   );
-  const groupClause =
-    contactGroupIds.length > 0
-      ? drizzleSql`
-          SELECT contact_id FROM contact_contact_groups
-          WHERE org_id = ${orgId}::uuid
-            AND contact_group_id = ANY(${drizzleSql.raw(
-              "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
-            )})
-        `
-      : null;
   const source = buildAudienceSourceClause(segmentBranches, groupClause);
 
   // Row-number partitioning over the qualified set so splits are as
@@ -386,30 +411,16 @@ export async function computeStageAudienceCountForDraft(
     with sources as (
       select distinct contact_id from (${source}) u
     ),
+    ${flagSetCtes(orgId)},
     flagged as (
       select
         s.contact_id,
-        exists (
-          select 1 from opt_outs oo
-          where oo.contact_id = s.contact_id and oo.org_id = ${orgId}::uuid
-        ) as has_opt_out,
-        exists (
-          select 1 from opt_ins oi
-          where oi.contact_id = s.contact_id and oi.org_id = ${orgId}::uuid
-        ) as has_opt_in,
-        exists (
-          select 1 from clickers c
-          where c.contact_id = s.contact_id and c.org_id = ${orgId}::uuid
-        ) as has_clicker,
-        exists (
-          select 1
-          from campaign_audience_pool p
-          join campaigns ca on ca.id = p.campaign_id
-          where p.contact_id = s.contact_id
-            and p.org_id = ${orgId}::uuid
-            and ca.status = 'active'
-        ) as is_in_use_elsewhere
+        (oo_set.contact_id is not null) as has_opt_out,
+        (oi_set.contact_id is not null) as has_opt_in,
+        (cl_set.contact_id is not null) as has_clicker,
+        (iu_set.contact_id is not null) as is_in_use_elsewhere
       from sources s
+      ${flagJoins("s")}
     ),
     qualified as (
       select
@@ -509,11 +520,19 @@ export async function previewAudience(
   // one dimension populated, that side stands alone (no intersection).
   const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
 
+  // Group side, built first so it can double as the is_not universe
+  // restriction for the segment evaluation when both dimensions are present
+  // (see buildSegmentAudienceClause). This is the key perf lever: it keeps a
+  // near-universal `is_not` rule from materializing the entire contacts table
+  // before the intersection narrows it to the group.
+  const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
+  const restrictUniverse = bothSides ? groupClause! : undefined;
+
   // Per-segment clauses tagged with a from_segment=true / from_group=false
   // marker so the aggregate query can attribute each contact to a source.
   // We use UNION ALL because the GROUP BY downstream dedupes via BOOL_OR.
   const perSegmentClauses = await Promise.all(
-    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId)),
+    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId, restrictUniverse)),
   );
   const segmentBranches = perSegmentClauses.map(
     (clause) => drizzleSql`
@@ -521,19 +540,14 @@ export async function previewAudience(
       FROM (${clause}) seg_inner
     `,
   );
-  const groupBranches =
-    contactGroupIds.length > 0
-      ? [
-          drizzleSql`
-            SELECT contact_id, false::boolean AS from_segment, true::boolean AS from_group
-            FROM contact_contact_groups
-            WHERE org_id = ${orgId}::uuid
-              AND contact_group_id = ANY(${drizzleSql.raw(
-                "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
-              )})
-          `,
-        ]
-      : [];
+  const groupBranches = groupClause
+    ? [
+        drizzleSql`
+          SELECT contact_id, false::boolean AS from_segment, true::boolean AS from_group
+          FROM (${groupClause}) grp_inner
+        `,
+      ]
+    : [];
   const allBranches = [...segmentBranches, ...groupBranches];
   const unionedWithSources = allBranches.reduce(
     (acc, branch, i) =>
@@ -550,32 +564,18 @@ export async function previewAudience(
       from unionized
       group by contact_id
     ),
+    ${flagSetCtes(orgId)},
     flagged as (
       select
         s.contact_id,
         s.from_segment,
         s.from_group,
-        exists (
-          select 1 from opt_outs oo
-          where oo.contact_id = s.contact_id and oo.org_id = ${orgId}::uuid
-        ) as has_opt_out,
-        exists (
-          select 1 from opt_ins oi
-          where oi.contact_id = s.contact_id and oi.org_id = ${orgId}::uuid
-        ) as has_opt_in,
-        exists (
-          select 1 from clickers c
-          where c.contact_id = s.contact_id and c.org_id = ${orgId}::uuid
-        ) as has_clicker,
-        exists (
-          select 1
-          from campaign_audience_pool cap
-          join campaigns camp on camp.id = cap.campaign_id
-          where cap.contact_id = s.contact_id
-            and cap.org_id = ${orgId}::uuid
-            and camp.status = 'active'
-        ) as is_in_use_elsewhere
+        (oo_set.contact_id is not null) as has_opt_out,
+        (oi_set.contact_id is not null) as has_opt_in,
+        (cl_set.contact_id is not null) as has_clicker,
+        (iu_set.contact_id is not null) as is_in_use_elsewhere
       from sources s
+      ${flagJoins("s")}
     ),
     qualified as (
       select

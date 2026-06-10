@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-10 — Campaign audience preview: ~24× faster
+- Audience preview/snapshot/draft-stage-count sped up from ~9s to ~0.4s on a 750K-contact org. Two changes in [lib/audience-snapshot.ts](../lib/audience-snapshot.ts) + [lib/segment-rules-eval.ts](../lib/segment-rules-eval.ts): (1) `buildSegmentAudienceClause` accepts an optional `restrictUniverse`, and the three audience functions pass the contact-group set when both dimensions are selected so a near-universal `is_not` rule no longer scans all contacts before the intersection narrows it; (2) opt-out/opt-in/clicker/in-use flags are LEFT-JOINed via deduped CTEs (`flagSetCtes`/`flagJoins`) instead of correlated `EXISTS` per row. Verified result-identical against a brute-force ground truth. Note: with both dimensions selected, the preview's `from_segments` now reflects the segment evaluated within the group (= the intersection). — Docs updated: [04-features/audience-snapshot.md](04-features/audience-snapshot.md).
+
 ## 2026-06-10 — Campaign audience: segment ∩ group (was union)
 - Campaign audience composition now **intersects** the segment dimension with the contact-group dimension when both are selected (a contact must be in a selected segment AND a selected group); a single populated dimension is used alone. Previously the two were UNION'd. Affects `buildQualifyingContactsSql` (snapshot), `previewAudience` (editor preview), and `computeStageAudienceCountForDraft` (draft stage count) in [lib/audience-snapshot.ts](../lib/audience-snapshot.ts) via the new `buildAudienceSourceClause` helper. Preview `from_segments`/`from_groups` now report each side's pre-intersection pool; `total_matching`/`overlap` are the intersected audience. — Docs updated: [04-features/audience-snapshot.md](04-features/audience-snapshot.md), CLAUDE.md §10b.
 

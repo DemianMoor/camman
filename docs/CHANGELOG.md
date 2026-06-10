@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-10 — Stage form: rich creative picker dialog (+ multi-offer list filter)
+- Replaced the stage form's creative `<Select>` with a popup picker ([components/campaigns/creative-picker-dialog.tsx](../components/campaigns/creative-picker-dialog.tsx)): search, sequence filter, spam-dot/EPC/CTR columns, full-text-on-hover, live SMS preview with spam/multi-segment/Unicode warnings, and an Offers panel (campaign offer locked-on + other active offers as checkboxes to widen the list). Added a multi-offer `offer_ids` (CSV) param to `/api/creatives/list` via [lib/creatives/list-filters.ts](../lib/creatives/list-filters.ts) (eligible = applies_to_all_offers OR junction to ANY selected offer; single `offer_id` unchanged). One creative per stage; selection still sets `creative_id`. — Docs updated: [04-features/campaigns-stages-creatives.md](04-features/campaigns-stages-creatives.md).
+
 ## 2026-06-10 — Creatives list: 30-day performance columns (CTR / Checkout Rate / Sales CR / EPC)
 - Added four sortable, server-ranked 30-day metric columns to the creatives list and removed the `Campaigns` (placeholder) and `Quality` table columns. The list endpoint ([app/api/creatives/list/route.ts](../app/api/creatives/list/route.ts)) joins two per-creative aggregates (stage counters + tracked clean clicks) and returns a `metrics` object; ratios are NULL ("—") when their denominator is 0. Clean clicks combine manual-mode stage clicks and tracked-mode clean clicks (bot/prefetch/suspect excluded); stage counters window on `campaign_stages.created_at`, tracked clicks on `clicks.clicked_at`. — Docs updated: [04-features/campaigns-stages-creatives.md](04-features/campaigns-stages-creatives.md).
 

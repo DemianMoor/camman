@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, Loader2, Plus, RotateCcw } from "lucide-react";
-import { Select as SelectPrimitive } from "radix-ui";
+import { Copy, Loader2, RotateCcw } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 
+import {
+  CreativePickerDialog,
+  type PickerCreative,
+} from "@/components/campaigns/creative-picker-dialog";
 import {
   CreativeForm,
   type CreativeFormValues,
@@ -238,9 +241,6 @@ export interface StageFormProps {
 }
 
 const NONE = "__none__";
-// Special sentinel value for the Creative <Select>. Picking it opens the
-// new-creative dialog instead of mutating creative_id.
-const NEW_CREATIVE = "__new_creative__";
 
 // Shared helper — maps form values to the API request body. Used by the
 // inline creator and edit drawer.
@@ -318,6 +318,16 @@ export function StageForm({
 
   // Reference data
   const creativesApi = useApiCall<{ data: Creative[] }>();
+  // Single-creative fetch — fallback for the edit-load case where the saved
+  // creative belongs to an offer outside this campaign's (picked via the
+  // picker's offer widening), so the offer-scoped list above doesn't include it.
+  const creativeByIdApi = useApiCall<{
+    id: number;
+    slug: string;
+    text: string;
+    status: string;
+    spam_score: number | null;
+  }>();
   const providersApi = useApiCall<{ data: Provider[] }>();
   const phonesApi = useApiCall<{ data: ProviderPhone[] }>();
   const previewApi = useApiCall<AudiencePreview>();
@@ -344,6 +354,7 @@ export function StageForm({
   const utmAvailable = isEntityAvailable("utm_tags");
   const [utmLoaded, setUtmLoaded] = useState(!utmAvailable);
   const [newCreativeOpen, setNewCreativeOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
   // 2–5 in the UI per product spec; the endpoint caps at 10 if someone
   // POSTs directly.
@@ -412,6 +423,47 @@ export function StageForm({
   const watchedFullUrl = form.watch("full_url");
   const watchedFullUrlAuto = form.watch("full_url_auto");
   const watchedScheduledAt = form.watch("scheduled_at");
+
+  // Backfill the selected creative if the offer-scoped list doesn't include it
+  // (a cross-offer pick made via the picker's offer widening). Waits for the
+  // list fetch to settle so it doesn't fire for creatives that load normally.
+  // setState lands inside the async callback (not synchronously in the effect).
+  useEffect(() => {
+    const id = watchedCreativeId;
+    if (id === null || creativesApi.isLoading) return;
+    if (creatives.some((c) => c.id === id)) return;
+    let cancelled = false;
+    (async () => {
+      const r = await creativeByIdApi.execute(`/api/creatives/${id}`);
+      if (cancelled || !r.ok) return;
+      const c = r.data;
+      const verdict =
+        c.spam_score === null ? null : c.spam_score > 50 ? "spam" : "not_spam";
+      setCreatives((prev) =>
+        prev.some((x) => x.id === c.id)
+          ? prev
+          : [
+              {
+                id: c.id,
+                slug: c.slug,
+                text: c.text,
+                status: c.status,
+                spam_score: c.spam_score,
+                spam_verdict: verdict,
+              },
+              ...prev,
+            ],
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    watchedCreativeId,
+    creatives,
+    creativesApi.isLoading,
+    creativeByIdApi.execute,
+  ]);
 
   // Provider phones reload when the selected provider changes. If the
   // currently selected phone doesn't belong to the new provider, clear it.
@@ -728,6 +780,29 @@ export function StageForm({
   // campaign's offer, refetches the picker list, and auto-selects the
   // freshly created creative on success. Skipped silently when the
   // campaign has no offer (the menu item is also hidden in that case).
+  // Picker selection: the chosen creative may belong to an offer the parent's
+  // offer-scoped fetch didn't load (the picker can widen by offer), so merge it
+  // into local state to keep the SMS preview working before setting the field.
+  function handleCreativeSelected(c: PickerCreative) {
+    setCreatives((prev) =>
+      prev.some((x) => x.id === c.id)
+        ? prev
+        : [
+            {
+              id: c.id,
+              slug: c.slug,
+              text: c.text,
+              status: c.status,
+              spam_score: c.spam_score,
+              spam_verdict: c.spam_verdict,
+            },
+            ...prev,
+          ],
+    );
+    form.setValue("creative_id", c.id, { shouldDirty: true });
+    setPickerOpen(false);
+  }
+
   async function handleCreateInlineCreative(values: CreativeFormValues) {
     if (!campaign.offer?.id) return;
     const result = await createCreativeApi.execute("/api/creatives", {
@@ -943,78 +1018,37 @@ export function StageForm({
               <FormField
                 control={form.control}
                 name="creative_id"
-                render={({ field }) => (
+                render={() => (
                   <FormItem>
                     <FormLabel>Creative</FormLabel>
-                    <Select
-                      value={field.value === null ? NONE : String(field.value)}
-                      onValueChange={(v) => {
-                        // Sentinel: open the new-creative dialog and leave
-                        // the current selection alone. Without the explicit
-                        // setValue call below, Radix would still treat the
-                        // sentinel as the chosen value visually.
-                        if (v === NEW_CREATIVE) {
-                          setNewCreativeOpen(true);
-                          return;
-                        }
-                        field.onChange(v === NONE ? null : Number(v));
-                      }}
+                    {/* Opens the rich picker dialog (search, filters, EPC/CTR,
+                        live SMS preview). One creative per stage. */}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-9 w-full justify-start gap-2 overflow-hidden font-normal"
                       disabled={isSubmitting}
+                      onClick={() => setPickerOpen(true)}
                     >
-                      <FormControl>
-                        {/* w-full pins the trigger to the grid cell so a
-                            long ItemText can't push the trigger wider
-                            than the cell into the Sales page column. */}
-                        <SelectTrigger className="w-full">
-                          <SelectValue placeholder="Pick a creative" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value={NONE}>None</SelectItem>
-                        {creatives.map((c) => (
-                          // SelectPrimitive.Item directly (not shadcn's
-                          // SelectItem) so we can separate what the
-                          // TRIGGER displays (compact: dot + slug only,
-                          // via ItemText) from what the DROPDOWN displays
-                          // (rich: dot + slug + 40-char excerpt). Same
-                          // base classes as shadcn's SelectItem.
-                          <SelectPrimitive.Item
-                            key={c.id}
-                            value={String(c.id)}
-                            data-slot="select-item"
-                            className="relative flex w-full cursor-default items-center gap-1.5 rounded-md py-1 pr-8 pl-1.5 text-sm outline-hidden select-none focus:bg-accent focus:text-accent-foreground data-disabled:pointer-events-none data-disabled:opacity-50"
-                          >
-                            <SelectPrimitive.ItemText>
-                              <span className="inline-flex items-center gap-2">
-                                <SpamScoreDot
-                                  score={c.spam_score}
-                                  verdict={c.spam_verdict}
-                                />
-                                <span className="font-mono text-xs">
-                                  {c.slug}
-                                </span>
-                              </span>
-                            </SelectPrimitive.ItemText>
-                            {/* Visible only in the dropdown — sits outside
-                                ItemText so the trigger stays compact. */}
-                            <span className="ml-1 truncate text-xs text-muted-foreground">
-                              {c.text.slice(0, 40)}
-                              {c.text.length > 40 ? "…" : ""}
-                            </span>
-                          </SelectPrimitive.Item>
-                        ))}
-                        {campaign.offer?.id ? (
-                          <SelectItem value={NEW_CREATIVE}>
-                            <span className="inline-flex items-center gap-2 text-foreground">
-                              <Plus className="size-3.5" aria-hidden />
-                              <span>
-                                New creative for &ldquo;{campaign.offer.name}&rdquo;
-                              </span>
-                            </span>
-                          </SelectItem>
-                        ) : null}
-                      </SelectContent>
-                    </Select>
+                      {selectedCreative ? (
+                        <span className="inline-flex min-w-0 items-center gap-2">
+                          <SpamScoreDot
+                            score={selectedCreative.spam_score}
+                            verdict={selectedCreative.spam_verdict}
+                          />
+                          <span className="font-mono text-xs">
+                            {selectedCreative.slug}
+                          </span>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {selectedCreative.text}
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">
+                          Pick a creative
+                        </span>
+                      )}
+                    </Button>
                     {/* Full creative text under the picker so the operator
                         can read what they selected in one place. Hidden
                         until a creative is actually picked. */}
@@ -1654,6 +1688,35 @@ export function StageForm({
           </div>
         )}
       </form>
+
+      {/* Rich creative picker: search, sequence filter, offer widening,
+          EPC/CTR columns, and a live SMS preview. Selecting sets creative_id.
+          Mounted only while open so its internal filter/selection state resets
+          fresh on each open. */}
+      {pickerOpen ? (
+        <CreativePickerDialog
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        campaignOffer={
+          campaign.offer
+            ? { id: campaign.offer.id, name: campaign.offer.name }
+            : null
+        }
+        brandName={brandName}
+        stopText={watchedStopText}
+        linkPreviewUrl={previewLinkUrl}
+        selectedCreativeId={watchedCreativeId}
+        onSelect={handleCreativeSelected}
+        onCreateNew={
+          campaign.offer?.id
+            ? () => {
+                setPickerOpen(false);
+                setNewCreativeOpen(true);
+              }
+            : undefined
+        }
+        />
+      ) : null}
 
       {/* Inline new-creative dialog. Pre-fills the offer from the parent
           campaign so the new creative is immediately eligible for this

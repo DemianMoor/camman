@@ -50,6 +50,15 @@ export function buildCreativeListWhere(opts: {
   );
   const statusFilter = splitFilter(sp.get("status"), VALID_STATUSES);
   const offerFilter = sp.get("offer_id");
+  // Multi-offer variant (creative picker's "show more creatives" panel): a
+  // comma-separated list of offer ids. When present it supersedes the single
+  // offer_id — a creative is eligible if it applies to all offers OR is linked
+  // to ANY of the selected offers.
+  const offerIds = (sp.get("offer_ids") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => /^\d+$/.test(s))
+    .map(Number);
 
   const conditions = [eq(creatives.org_id, orgId)];
 
@@ -78,9 +87,26 @@ export function buildCreativeListWhere(opts: {
     conditions.push(inArray(creatives.sequence_placement, sequenceFilter));
   }
 
-  // offer_id filter: a creative is eligible if applies_to_all_offers=true
-  // OR there's a junction row to this offer.
-  if (offerFilter !== null && /^\d+$/.test(offerFilter)) {
+  // offer_ids filter (multi): eligible if applies_to_all_offers=true OR a
+  // junction row to ANY of the selected offers.
+  if (offerIds.length > 0) {
+    conditions.push(
+      or(
+        eq(creatives.applies_to_all_offers, true),
+        exists(
+          db
+            .select({ x: drizzleSql`1` })
+            .from(creative_offers)
+            .where(
+              and(
+                eq(creative_offers.creative_id, creatives.id),
+                inArray(creative_offers.offer_id, offerIds),
+              ),
+            ),
+        ),
+      )!,
+    );
+  } else if (offerFilter !== null && /^\d+$/.test(offerFilter)) {
     const offerIdNum = Number(offerFilter);
     conditions.push(
       or(

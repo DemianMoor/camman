@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-12_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -49,6 +49,8 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Drain requires all of: `send_approved` (per stage) + `SEND_ENABLED="true"` (env) + `CRON_SECRET`/`campaigns.drain` + provider not `send_paused`.
 - `send_paused` is a latching kill-switch — requires a conscious human resume; trips/resumes audited in `send_circuit_events`.
 - `SEND_ENABLED` is OFF in production; live sending has not fired.
+- **`campaign_stages.sent_at` is the scheduler fire-lock** — the `send-scheduled` cron only considers stages with `sent_at IS NULL`. Only the pipeline (scheduler / manual drain backfill) may write it on a tracked campaign. Marking a **tracked** stage `'sent'` via the manual status action is blocked (409) so bookkeeping can't silently cancel a scheduled send. The scheduler stamps `sent_at` **after** materializing (not before), so a timed-out tick can't strand a stage.
+- **Scheduled sends are batched + resumable.** Kickoff mints links in bulk (never per-recipient — that blew the 300s cron limit at ~178s/1000), and the drain resumes across `*/15` ticks (phase B drains `pending` rows in budget-bounded batches). Large audiences send over multiple ticks, paced by the provider's `max_sends_per_run` / `max_sends_per_minute`.
 
 ## UI
 - `<FormDialog>` for input dialogs (blocks accidental dismissal); `<AlertDialog>` for confirmations; bare `<Dialog>` read-only.

@@ -721,10 +721,17 @@ export default function CampaignDetailPage() {
               </Badge>
             );
           }
+          // Tracked stages are sent by the API pipeline, which owns 'sent'
+          // (and its sent_at fire-lock). Marking them 'sent' manually is
+          // rejected server-side, so hide the option here.
+          const statusOptions =
+            campaign?.link_mode === "tracked"
+              ? STAGE_STATUS_OPTIONS.filter((o) => o.value !== "sent")
+              : STAGE_STATUS_OPTIONS;
           return (
             <StatusDropdown<ActiveStageStatus>
               current={s.status as ActiveStageStatus}
-              options={STAGE_STATUS_OPTIONS}
+              options={statusOptions}
               onChange={(next) => handleStageStatusChange(s, next)}
               isUpdating={stageStatusApi.isLoading}
               isTerminal={!canSendStage}
@@ -933,6 +940,7 @@ export default function CampaignDetailPage() {
     ],
     [
       campaignId,
+      campaign?.link_mode,
       canUpdateStage,
       canArchiveStage,
       canRestoreStage,

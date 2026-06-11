@@ -19,7 +19,10 @@ async function main() {
   // 1. Kill-switch no-op. Injected isEnabled=false returns before any DB write.
   const off = await runScheduledSends(db, { isEnabled: () => false });
   check("SEND_ENABLED off -> send_disabled", off.send_disabled === true);
-  check("SEND_ENABLED off -> nothing considered", off.considered === 0 && off.fired === 0);
+  check(
+    "SEND_ENABLED off -> nothing considered/drained",
+    off.considered === 0 && off.materialized === 0 && off.drained === 0,
+  );
 
   // 2. Due-selection SQL is valid (read-only). We don't assert a count — just
   // that it executes and returns an array of the right shape.

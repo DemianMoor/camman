@@ -4,8 +4,10 @@
 // stage. This proves that when ONE cron tick fires several stages on the same
 // provider, the sum of rows processed across those stages never exceeds the
 // provider's cap — and that a stage whose provider budget is already exhausted
-// is HELD (not claimed: sent_at stays NULL so it fires next tick), while a
-// different provider gets its own fresh budget.
+// is HELD (skipped this tick, its pending rows untouched so phase B re-drains it
+// next tick), while a different provider gets its own fresh budget. The budget
+// is enforced in the resumable phase-B drain; these stages are pre-seeded with
+// pending stage_sends, so phase A considers none of them.
 //
 // Everything runs inside a single transaction that is ALWAYS rolled back, so no
 // fixture data persists. The drain is injected (a deterministic fake) — no real
@@ -152,8 +154,11 @@ async function main() {
       });
 
       // ── Assertions ──────────────────────────────────────────────────────
-      check("considered all 4 due stages", result.considered === 4, `got ${result.considered}`);
-      check("fired 3 stages (A1, A2, B1)", result.fired === 3, `got ${result.fired}`);
+      // The stages are pre-seeded with pending stage_sends, so they're already
+      // materialized — phase A considers none of them; the budget lives in the
+      // phase-B drain.
+      check("considered 0 (all pre-materialized)", result.considered === 0, `got ${result.considered}`);
+      check("drained 3 stages (A1, A2, B1)", result.drained === 3, `got ${result.drained}`);
       check("held 1 stage on budget (A3)", result.budget_held === 1, `got ${result.budget_held}`);
 
       // Drain budgets handed out, in order. A1 gets full cap (5); A2 gets the
@@ -184,27 +189,19 @@ async function main() {
         `processed ${provAprocessed}`,
       );
 
-      // Claim/hold persisted correctly: fired stages got sent_at stamped; the
-      // budget-held stage stays sent_at NULL so it re-fires next tick.
-      const sentAts = (await tx.execute(sql`
-        SELECT id, sent_at, schedule_missed_at FROM campaign_stages
-        WHERE id IN (${stageA1}, ${stageA2}, ${stageA3}, ${stageB1})
-      `)) as unknown as {
-        id: number;
-        sent_at: string | null;
-        schedule_missed_at: string | null;
-      }[];
-      const sa = new Map(sentAts.map((r) => [r.id, r]));
-      check("A1 claimed (sent_at set)", sa.get(stageA1)?.sent_at != null);
-      check("A2 claimed (sent_at set)", sa.get(stageA2)?.sent_at != null);
-      check("B1 claimed (sent_at set)", sa.get(stageB1)?.sent_at != null);
+      // Phase B never stamps sent_at (only phase-A materialization does), and a
+      // budget-held stage keeps all its pending rows so the next tick re-drains
+      // it. Assert the held stage A3 was never drained and still has its 4
+      // pending rows, while the drained stages were handed to the fake drain.
+      check("A3 never entered the drain", !drainCalls.some((c) => c.stageId === stageA3));
+      const a3pending = (await tx.execute(sql`
+        SELECT count(*)::int AS n FROM stage_sends
+        WHERE stage_id = ${stageA3} AND status = 'pending'
+      `)) as unknown as { n: number }[];
       check(
-        "A3 HELD (sent_at NULL — reschedulable next tick)",
-        sa.get(stageA3)?.sent_at == null,
-      );
-      check(
-        "no stage marked missed (all in-window)",
-        sentAts.every((r) => r.schedule_missed_at == null),
+        "A3 still has all 4 pending rows (re-drains next tick)",
+        Number(a3pending[0]?.n) === PENDING_PER_STAGE,
+        `got ${a3pending[0]?.n}`,
       );
 
       throw ROLLBACK; // never persist fixtures

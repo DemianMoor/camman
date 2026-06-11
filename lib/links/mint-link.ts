@@ -188,3 +188,113 @@ export async function mintLink(
     `mintLink: exhausted ${MAX_CODE_ATTEMPTS} attempts to generate a unique code`,
   );
 }
+
+// One outbound message to mint a link for: send_token IS the stage_sends row id.
+export interface MintLinkBatchItem {
+  contactId: string;
+  sendToken: string;
+}
+
+export interface MintLinkBatchInput {
+  orgId: string;
+  campaignId: number;
+  stageId: number;
+  creativeId: number | null;
+  shortDomainId: number;
+  destinationUrl: string;
+  campaignTrackingId: string | null;
+  stageTrackingId: string | null;
+  items: MintLinkBatchItem[];
+}
+
+const MINT_BATCH_CHUNK = 500;
+
+// Bulk equivalent of mintLink for a fresh send run (the kickoff path): all items
+// share ONE destination and ONE stage, so the destination is upserted ONCE and
+// links are inserted in multi-row chunks instead of per-recipient round-trips.
+// This is the difference between O(recipients) sequential round-trips (≈178s for
+// 1000) and a handful of statements (≈seconds).
+//
+// Unlike mintLink there is no idempotent "reuse" path — kickoff only calls this
+// after refusing on `already_pending`, so every send_token is brand new. The
+// only conflict that can occur is the rare global `code` collision, resolved by
+// regenerating just the colliding rows' codes and retrying that chunk.
+//
+// Returns a map send_token → { id, code } so the caller can build each row's
+// final tracked URL (the rendered text embeds the code, so it MUST be built from
+// the code that actually landed).
+export async function mintLinksBatch(
+  tx: DbOrTx,
+  input: MintLinkBatchInput,
+): Promise<Map<string, { id: number; code: string }>> {
+  const campaignTrackingId = (input.campaignTrackingId ?? "").trim();
+  const stageTrackingId = (input.stageTrackingId ?? "").trim();
+  if (!campaignTrackingId || !stageTrackingId) {
+    throw new Error(
+      "mintLinksBatch: stage isn't ready to send — both the campaign and stage " +
+        "tracking IDs must exist before tracked links can be minted",
+    );
+  }
+
+  const result = new Map<string, { id: number; code: string }>();
+  if (input.items.length === 0) return result;
+
+  // 1) Upsert the single shared destination ONCE.
+  const destHash = hashUrl(input.destinationUrl);
+  const destRows = (await tx.execute(sql`
+    INSERT INTO link_destinations (org_id, url, url_hash)
+    VALUES (${input.orgId}, ${input.destinationUrl}, ${destHash})
+    ON CONFLICT (org_id, url_hash)
+    DO UPDATE SET url = EXCLUDED.url
+    RETURNING id
+  `)) as unknown as { id: number }[];
+  const destinationId = Number(destRows[0]?.id);
+  if (!Number.isInteger(destinationId)) {
+    throw new Error("mintLinksBatch: failed to resolve destination id");
+  }
+
+  // 2) Insert links chunk-by-chunk, regenerating codes for the rare collision.
+  for (let start = 0; start < input.items.length; start += MINT_BATCH_CHUNK) {
+    const chunk = input.items.slice(start, start + MINT_BATCH_CHUNK);
+    // sendToken → { contactId, code }; entries drain out as they're confirmed.
+    const pending = new Map<string, { contactId: string; code: string }>();
+    for (const it of chunk) {
+      pending.set(it.sendToken, { contactId: it.contactId, code: generateCode() });
+    }
+
+    for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS && pending.size > 0; attempt++) {
+      const values = [...pending.entries()].map(
+        ([sendToken, v]) => sql`(
+          ${input.orgId}, ${v.code}, ${input.shortDomainId}, ${destinationId},
+          ${input.campaignId}, ${input.stageId}, ${input.creativeId},
+          ${v.contactId}, ${sendToken}, ${campaignTrackingId}, ${stageTrackingId}
+        )`,
+      );
+      const inserted = (await tx.execute(sql`
+        INSERT INTO links (
+          org_id, code, short_domain_id, destination_id, campaign_id,
+          stage_id, creative_id, contact_id, send_token,
+          campaign_tracking_id, stage_tracking_id
+        )
+        VALUES ${sql.join(values, sql`, `)}
+        ON CONFLICT (code) DO NOTHING
+        RETURNING id, code, send_token
+      `)) as unknown as { id: number; code: string; send_token: string }[];
+
+      for (const row of inserted) {
+        result.set(row.send_token, { id: Number(row.id), code: row.code });
+        pending.delete(row.send_token);
+      }
+      // Whatever didn't come back collided on `code` — give those fresh codes.
+      for (const v of pending.values()) v.code = generateCode();
+    }
+
+    if (pending.size > 0) {
+      throw new Error(
+        `mintLinksBatch: exhausted ${MAX_CODE_ATTEMPTS} attempts to mint ${pending.size} unique codes`,
+      );
+    }
+  }
+
+  return result;
+}

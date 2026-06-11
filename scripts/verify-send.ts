@@ -67,7 +67,15 @@ async function main() {
       if (!org[0]) { console.log("SKIP: no organizations."); throw new Rollback(); }
       const orgId = org[0].id as string;
 
-      const brand = await pick(sql`SELECT id, name FROM brands WHERE org_id = ${orgId} LIMIT 1`);
+      // Create a throwaway brand (rolled back) so the fixture owns a fresh
+      // short domain — the picked org's real brand may already have one (with
+      // links referencing it, so it can't be swapped).
+      const sfx = Date.now().toString().slice(-9);
+      const brand = await pick(sql`
+        INSERT INTO brands (org_id, brand_id, name, status)
+        VALUES (${orgId}, ${"vs-brand-" + sfx}, ${"VS Brand"}, 'active')
+        RETURNING id, name
+      `);
       const offer = await pick(sql`SELECT id FROM offers WHERE org_id = ${orgId} LIMIT 1`);
       const creative = await pick(sql`SELECT id, text FROM creatives WHERE org_id = ${orgId} LIMIT 1`);
       const contacts = await pick(sql`SELECT id, phone_number FROM contacts WHERE org_id = ${orgId} LIMIT 2`);

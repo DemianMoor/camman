@@ -4,18 +4,26 @@ import type { db } from "@/db/client";
 import { decideScheduledSend, type ProviderSendWindow } from "@/lib/quiet-hours";
 import { isProviderPaused, resolvePacingCap } from "@/lib/sends/circuit-breakers";
 import { runStageDrain, type DrainResult, type Sender } from "@/lib/sends/drain";
-import { kickoffStageSend } from "@/lib/sends/kickoff";
+import { kickoffStageSend, type KickoffRefusal } from "@/lib/sends/kickoff";
 
-// The send-scheduled cron: fires DUE scheduled sends for API (tracked)
-// campaigns. For each due stage it consults the provider's ET send window
-// (lib/quiet-hours.ts) and either holds (window not open yet), marks it missed
-// (its ET-day window has closed — NEVER rolls to a future day), or fires it.
+// The send-scheduled cron. Two phases per tick, both bounded by the SAME
+// per-provider per-tick send budget:
 //
-// Firing is at-most-once at the STAGE level via an atomic claim
-// (UPDATE … SET sent_at WHERE sent_at IS NULL RETURNING): only one cron tick —
-// or a concurrent manual "Send now" — can flip sent_at, so a drain that runs
-// past the next tick can't be double-processed. The row-level drain adds a
-// second at-most-once guard (FOR UPDATE SKIP LOCKED per recipient).
+//   Phase A — MATERIALIZE: for each DUE, not-yet-materialized scheduled stage,
+//     consult the provider's ET window (hold / missed / fire), then kickoff
+//     (mint links + stage_sends rows). `sent_at` is stamped only AFTER kickoff
+//     succeeds, so a tick killed mid-materialize can't strand the stage with a
+//     committed claim and zero rows — the next tick simply retries. Concurrency
+//     is guarded structurally by the `stage_sends_active_contact_uniq` dedup
+//     index (two ticks materializing the same stage → one wins, the other's
+//     INSERT raises 23505 and is caught), so no pre-claim is needed.
+//
+//   Phase B — DRAIN: any tracked stage that still has `pending` stage_sends is
+//     drained in a bounded batch (the provider's remaining per-tick budget).
+//     This is what makes large audiences safe: sending is RESUMABLE across
+//     ticks instead of trying to push the whole audience inside one 300s
+//     invocation. Just-materialized stages are picked up here in the same tick,
+//     so first-send still happens promptly.
 
 export interface DueRow {
   stage_id: number;
@@ -23,16 +31,17 @@ export interface DueRow {
   org_id: string;
   provider_id: number | null;
   scheduled_at: string;
-  max_sends_per_run: number | null;
   send_window_weekday_start: number | null;
   send_window_weekday_end: number | null;
   send_window_weekend_start: number | null;
   send_window_weekend_end: number | null;
 }
 
-// Read-only selection of DUE scheduled stages: tracked + active campaign,
-// approved, scheduled in the past, not yet fired (sent_at NULL) and not already
-// missed. Exported so it can be exercised in isolation without side effects.
+// Read-only selection of DUE, NOT-YET-MATERIALIZED scheduled stages: tracked +
+// active campaign, approved, scheduled in the past, not yet fired (sent_at
+// NULL), not already missed, and with NO stage_sends rows yet (so a stage that
+// was materialized but not stamped — a tick killed between the two — isn't
+// re-materialized; phase B drains it instead). Exported for isolated tests.
 export async function selectDueScheduledStages(
   dbc: typeof db,
   opts: { now: Date; orgId?: string; maxStages: number },
@@ -47,7 +56,6 @@ export async function selectDueScheduledStages(
            c.org_id          AS org_id,
            s.sms_provider_id AS provider_id,
            s.scheduled_at    AS scheduled_at,
-           p.max_sends_per_run AS max_sends_per_run,
            p.send_window_weekday_start AS send_window_weekday_start,
            p.send_window_weekday_end   AS send_window_weekday_end,
            p.send_window_weekend_start AS send_window_weekend_start,
@@ -64,23 +72,66 @@ export async function selectDueScheduledStages(
       AND s.schedule_missed_at IS NULL
       AND s.archived_at IS NULL
       -- A paused provider holds ALL its scheduled stages: don't even consider
-      -- them, so sent_at stays NULL and they fire once a human resumes.
+      -- them, so they materialize once a human resumes.
       AND (p.send_paused IS NOT TRUE)
+      -- Not yet materialized (idempotent re-entry after a killed tick).
+      AND NOT EXISTS (
+        SELECT 1 FROM stage_sends ss WHERE ss.stage_id = s.id
+      )
       ${orgId ? sql`AND c.org_id = ${orgId}` : sql``}
     ORDER BY s.scheduled_at ASC
     LIMIT ${maxStages}
   `)) as unknown as DueRow[];
 }
 
+export interface DrainableRow {
+  stage_id: number;
+  org_id: string;
+  provider_id: number | null;
+  max_sends_per_run: number | null;
+}
+
+// Read-only selection of tracked stages that still have `pending` sends to
+// drain (approved, active campaign, provider not paused). Independent of
+// sent_at — this is the resumable-drain feed, so a stage keeps being drained
+// across ticks until its pending rows are exhausted.
+export async function selectDrainableStages(
+  dbc: typeof db,
+  opts: { orgId?: string; maxStages: number },
+): Promise<DrainableRow[]> {
+  const { orgId, maxStages } = opts;
+  return (await dbc.execute(sql`
+    SELECT s.id              AS stage_id,
+           c.org_id          AS org_id,
+           s.sms_provider_id AS provider_id,
+           p.max_sends_per_run AS max_sends_per_run
+    FROM campaign_stages s
+    JOIN campaigns c ON c.id = s.campaign_id
+    LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
+    WHERE c.link_mode = 'tracked'
+      AND c.status = 'active'
+      AND s.send_approved = true
+      AND s.archived_at IS NULL
+      AND (p.send_paused IS NOT TRUE)
+      AND EXISTS (
+        SELECT 1 FROM stage_sends ss
+        WHERE ss.stage_id = s.id AND ss.status = 'pending'
+      )
+      ${orgId ? sql`AND c.org_id = ${orgId}` : sql``}
+    ORDER BY s.scheduled_at ASC NULLS LAST, s.id ASC
+    LIMIT ${maxStages}
+  `)) as unknown as DrainableRow[];
+}
+
 export interface ScheduledRunResult {
-  considered: number; // due stages selected this run
-  fired: number; // stages whose drain ran
+  considered: number; // due, un-materialized stages selected this run
+  materialized: number; // stages whose kickoff succeeded this tick
   held: number; // window not open yet (retry next tick)
-  missed: number; // window closed -> marked missed
-  budget_held: number; // provider's per-tick pacing budget exhausted -> not claimed
-  skipped_claimed: number; // lost the claim race (another tick/manual won)
-  paused_skipped: number; // provider paused after selection -> not claimed
-  refused: number; // pre-send refusal -> claim rolled back
+  missed: number; // window closed OR a permanent kickoff refusal -> marked missed
+  refused: number; // transient kickoff failure / lost a materialize race -> retry
+  drained: number; // stages whose drain ran this tick (phase B)
+  budget_held: number; // provider's per-tick send budget exhausted -> not drained
+  paused_skipped: number; // provider paused -> skipped
   send_disabled: boolean; // global kill-switch off -> whole run no-op'd
   sent: number; // total messages sent across stages
   failed: number; // total messages failed across stages
@@ -89,18 +140,34 @@ export interface ScheduledRunResult {
 
 const BASE: ScheduledRunResult = {
   considered: 0,
-  fired: 0,
+  materialized: 0,
   held: 0,
   missed: 0,
-  budget_held: 0,
-  skipped_claimed: 0,
-  paused_skipped: 0,
   refused: 0,
+  drained: 0,
+  budget_held: 0,
+  paused_skipped: 0,
   send_disabled: false,
   sent: 0,
   failed: 0,
   paused_now: 0,
 };
+
+// Kickoff refusals that won't self-resolve within the scheduled window — mark
+// the stage missed so it stops retrying every tick and surfaces for a human.
+// (`already_pending` is NOT here: it means another tick already materialized —
+// a benign race, not a config error.)
+const PERMANENT_REFUSALS: ReadonlySet<KickoffRefusal> = new Set([
+  "not_found",
+  "no_creative",
+  "no_recipients",
+  "stage_not_ready",
+  "no_provider",
+  "provider_not_api_capable",
+  "no_credentials",
+  "no_short_domain",
+  "no_destination",
+]);
 
 function envSendEnabled(): boolean {
   return process.env.SEND_ENABLED === "true";
@@ -115,7 +182,7 @@ export async function runScheduledSends(
     sendSms?: Sender;
     maxStages?: number;
     // Injectable for tests; defaults to the real per-stage drain. maxRows is the
-    // stage's remaining slice of its provider's per-tick pacing budget.
+    // stage's remaining slice of its provider's per-tick send budget.
     runDrain?: (stageId: number, maxRows: number) => Promise<DrainResult>;
   },
 ): Promise<ScheduledRunResult> {
@@ -129,22 +196,22 @@ export async function runScheduledSends(
     ((stageId: number, maxRows: number) =>
       runStageDrain(dbc, { stageId, sendSms, isEnabled, maxRows }));
 
-  // Master kill-switch: with global sending off, no-op entirely — don't claim,
-  // don't mark missed. Everything waits for the next tick once enabled (subject
-  // to the same window/missed rules then).
+  // Master kill-switch: with global sending off, no-op entirely — don't
+  // materialize, don't drain, don't mark missed. Everything waits for the next
+  // tick once enabled (subject to the same window/missed rules then).
   if (!isEnabled()) return { ...BASE, send_disabled: true };
 
-  const due = await selectDueScheduledStages(dbc, { now, orgId, maxStages });
+  const result: ScheduledRunResult = { ...BASE };
   const nowIso = now.toISOString(); // raw execute can't bind a JS Date
 
-  const result: ScheduledRunResult = { ...BASE, considered: due.length };
-
   // Cross-stage per-run budget: max_sends_per_run is a per-PROVIDER pacing cap
-  // for the WHOLE tick, not per stage. Without this accumulator a single tick
-  // firing N stages on one provider would send up to N× the cap. Tracks rows
-  // processed per provider so far this tick; each stage's drain is bounded by
-  // the provider's REMAINING budget.
+  // for the WHOLE tick, not per stage. Shared across BOTH phases so N stages on
+  // one provider can never exceed N× the cap in a single tick.
   const spentByProvider = new Map<number, number>();
+
+  // ─── Phase A: materialize due stages ───────────────────────────────────────
+  const due = await selectDueScheduledStages(dbc, { now, orgId, maxStages });
+  result.considered = due.length;
 
   for (const row of due) {
     const cfg: ProviderSendWindow = {
@@ -159,9 +226,7 @@ export async function runScheduledSends(
       result.held++;
       continue;
     }
-
     if (decision === "missed") {
-      // Guarded so a concurrent claim/manual send isn't clobbered.
       await dbc.execute(sql`
         UPDATE campaign_stages SET schedule_missed_at = ${nowIso}
         WHERE id = ${row.stage_id}
@@ -172,23 +237,64 @@ export async function runScheduledSends(
       continue;
     }
 
-    // decision === "fire". Re-check the pause right before claiming: a breaker
-    // that tripped DURING this run (e.g. a failure spike on an earlier stage of
-    // the same provider) must hold this stage too — leave sent_at NULL so it
-    // fires after a resume rather than being claimed-and-lost.
+    // decision === "fire". Re-check the pause right before materializing.
     if (row.provider_id != null && (await isProviderPaused(dbc, row.provider_id))) {
       result.paused_skipped++;
       continue;
     }
 
-    // Cross-stage per-run budget gate. A provider's per-tick pacing budget is
-    // its (clamped) max_sends_per_run shared across every stage fired this tick.
-    // If earlier stages already consumed it, HOLD this stage (don't claim) so
-    // sent_at stays NULL and it fires on a later tick with fresh budget — never
-    // claim-and-leave-everything-pending. Null-provider stages have no cap here;
-    // their drain refuses (no_provider) and rolls the claim back anyway.
-    const providerId = row.provider_id;
+    // Materialize. A thrown error (e.g. the dedup index firing on a concurrent
+    // materialize race) is caught per-stage so one stage can't fail the whole
+    // run; the stage simply retries next tick (its rows, if any, were rolled
+    // back with the transaction).
+    let kickoff: Awaited<ReturnType<typeof kickoffStageSend>> | null = null;
+    try {
+      kickoff = await dbc.transaction((tx) =>
+        kickoffStageSend(tx, {
+          orgId: row.org_id,
+          campaignId: row.campaign_id,
+          stageId: row.stage_id,
+        }),
+      );
+    } catch {
+      result.refused++;
+      continue;
+    }
+
+    if (kickoff.ok || kickoff.reason === "already_pending") {
+      // Stamp sent_at = "materialized & handed to the drain" (also locks the
+      // stage's Scheduled field). Guarded so a concurrent claim isn't clobbered.
+      await dbc.execute(sql`
+        UPDATE campaign_stages SET sent_at = ${nowIso}
+        WHERE id = ${row.stage_id} AND sent_at IS NULL
+      `);
+      result.materialized++;
+    } else if (PERMANENT_REFUSALS.has(kickoff.reason)) {
+      await dbc.execute(sql`
+        UPDATE campaign_stages SET schedule_missed_at = ${nowIso}
+        WHERE id = ${row.stage_id}
+          AND sent_at IS NULL
+          AND schedule_missed_at IS NULL
+      `);
+      result.missed++;
+    } else {
+      result.refused++;
+    }
+  }
+
+  // ─── Phase B: drain stages with pending rows (incl. just-materialized) ──────
+  const drainable = await selectDrainableStages(dbc, { orgId, maxStages });
+
+  for (const row of drainable) {
+    if (row.provider_id != null && (await isProviderPaused(dbc, row.provider_id))) {
+      result.paused_skipped++;
+      continue;
+    }
+
+    // Per-provider per-tick budget gate. Null-provider stages have no cap here;
+    // their drain refuses (no_provider) anyway.
     let budget = Number.POSITIVE_INFINITY;
+    const providerId = row.provider_id;
     if (providerId != null) {
       const cap = resolvePacingCap(row.max_sends_per_run);
       const remaining = cap - (spentByProvider.get(providerId) ?? 0);
@@ -199,50 +305,11 @@ export async function runScheduledSends(
       budget = remaining;
     }
 
-    // Atomic stage claim.
-    const claimed = (await dbc.execute(sql`
-      UPDATE campaign_stages SET sent_at = ${nowIso}
-      WHERE id = ${row.stage_id} AND sent_at IS NULL
-      RETURNING id
-    `)) as unknown as { id: number }[];
-    if (claimed.length === 0) {
-      result.skipped_claimed++;
-      continue;
-    }
-
-    // Materialize (mint) then drain. Roll the claim back ONLY on a pre-send
-    // refusal (nothing materialized). 'already_pending' means rows from a prior
-    // partial run exist — proceed to drain them, keep the claim. A thrown error
-    // (e.g. the dedup unique index firing on a concurrent-kickoff race) is
-    // caught per-stage so ONE stage's race can't fail the whole cron run.
-    let kickoffOk: boolean;
-    try {
-      const kickoff = await dbc.transaction((tx) =>
-        kickoffStageSend(tx, {
-          orgId: row.org_id,
-          campaignId: row.campaign_id,
-          stageId: row.stage_id,
-        }),
-      );
-      kickoffOk = kickoff.ok || kickoff.reason === "already_pending";
-    } catch {
-      kickoffOk = false;
-    }
-    if (!kickoffOk) {
-      await dbc.execute(sql`
-        UPDATE campaign_stages SET sent_at = NULL WHERE id = ${row.stage_id}
-      `);
-      result.refused++;
-      continue;
-    }
-
     const drain = await runDrain(row.stage_id, budget);
-    result.fired++;
+    result.drained++;
     result.sent += drain.sent;
     result.failed += drain.failed;
     if (drain.pausedNow) result.paused_now++;
-    // Charge the provider's tick budget by rows actually processed (sent OR
-    // failed — both are send attempts the pacing cap governs).
     if (providerId != null) {
       spentByProvider.set(
         providerId,

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
-import { mintLink } from "@/lib/links/mint-link";
+import { mintLinksBatch } from "@/lib/links/mint-link";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
 import { buildStageSms } from "@/lib/sends/stage-sms";
@@ -129,17 +129,23 @@ export async function kickoffStageSend(
       linkUrl: row.short_url,
       stopText: row.stop_text,
     });
-    for (const r of recipients) {
-      const id = randomUUID();
-      await tx.execute(sql`
-        INSERT INTO stage_sends
-          (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
-           rendered_text, status, lead_id)
-        VALUES
-          (${id}, ${orgId}, ${campaignId}, ${stageId}, ${r.contact_id},
-           ${r.phone_number}, NULL, ${renderedText}, 'pending', ${id})
-      `);
-    }
+    await bulkInsertStageSends(
+      tx,
+      recipients.map((r) => {
+        const id = randomUUID();
+        return {
+          id,
+          orgId,
+          campaignId,
+          stageId,
+          contactId: r.contact_id,
+          phone: r.phone_number,
+          linkId: null,
+          renderedText,
+          leadId: id,
+        };
+      }),
+    );
     return { ok: true, mode, materialized: recipients.length, shortDomain: null };
   }
 
@@ -195,36 +201,51 @@ export async function kickoffStageSend(
   });
   if (!destinationUrl) return { ok: false, reason: "no_destination" };
 
-  for (const r of recipients) {
-    const sendToken = randomUUID();
-    const link = await mintLink(tx, {
-      orgId,
-      campaignId,
-      stageId,
-      contactId: r.contact_id,
-      creativeId: row.creative_id,
-      shortDomainId: shortDomain.id,
-      destinationUrl,
-      sendToken,
-      campaignTrackingId: row.campaign_tracking_id,
-      stageTrackingId: row.stage_tracking_id,
-    });
-    const linkUrl = `https://${shortDomain.domain}/r/${link.code}`;
-    const renderedText = buildStageSms({
-      brandName,
-      creativeText: row.creative_text,
-      linkUrl,
-      stopText: row.stop_text,
-    });
-    await tx.execute(sql`
-      INSERT INTO stage_sends
-        (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
-         rendered_text, status, lead_id)
-      VALUES
-        (${sendToken}, ${orgId}, ${campaignId}, ${stageId}, ${r.contact_id},
-         ${r.phone_number}, ${link.id}, ${renderedText}, 'pending', ${sendToken})
-    `);
-  }
+  // One send_token (= the stage_sends row id) per recipient, minted in bulk.
+  const tokens = recipients.map((r) => ({
+    contactId: r.contact_id,
+    phone: r.phone_number,
+    sendToken: randomUUID(),
+  }));
+  const minted = await mintLinksBatch(tx, {
+    orgId,
+    campaignId,
+    stageId,
+    creativeId: row.creative_id,
+    shortDomainId: shortDomain.id,
+    destinationUrl,
+    campaignTrackingId: row.campaign_tracking_id,
+    stageTrackingId: row.stage_tracking_id,
+    items: tokens.map((t) => ({ contactId: t.contactId, sendToken: t.sendToken })),
+  });
+
+  // Build each row's frozen text from the code that actually landed, then bulk
+  // insert. The map is guaranteed complete — mintLinksBatch throws otherwise.
+  await bulkInsertStageSends(
+    tx,
+    tokens.map((t) => {
+      const link = minted.get(t.sendToken);
+      if (!link) {
+        throw new Error(`kickoff: missing minted link for send_token ${t.sendToken}`);
+      }
+      return {
+        id: t.sendToken,
+        orgId,
+        campaignId,
+        stageId,
+        contactId: t.contactId,
+        phone: t.phone,
+        linkId: link.id,
+        renderedText: buildStageSms({
+          brandName,
+          creativeText: row.creative_text!,
+          linkUrl: `https://${shortDomain.domain}/r/${link.code}`,
+          stopText: row.stop_text,
+        }),
+        leadId: t.sendToken,
+      };
+    }),
+  );
 
   return {
     ok: true,
@@ -232,4 +253,41 @@ export async function kickoffStageSend(
     materialized: recipients.length,
     shortDomain: shortDomain.domain,
   };
+}
+
+interface StageSendInsertRow {
+  id: string;
+  orgId: string;
+  campaignId: number;
+  stageId: number;
+  contactId: string;
+  phone: string;
+  linkId: number | null;
+  renderedText: string;
+  leadId: string;
+}
+
+const STAGE_SENDS_CHUNK = 500;
+
+// Chunked multi-row INSERT — replaces the per-recipient round-trip loop that
+// dominated kickoff latency at scale.
+async function bulkInsertStageSends(
+  tx: DbOrTx,
+  rows: StageSendInsertRow[],
+): Promise<void> {
+  for (let start = 0; start < rows.length; start += STAGE_SENDS_CHUNK) {
+    const chunk = rows.slice(start, start + STAGE_SENDS_CHUNK);
+    const values = chunk.map(
+      (r) => sql`(
+        ${r.id}, ${r.orgId}, ${r.campaignId}, ${r.stageId}, ${r.contactId},
+        ${r.phone}, ${r.linkId}, ${r.renderedText}, 'pending', ${r.leadId}
+      )`,
+    );
+    await tx.execute(sql`
+      INSERT INTO stage_sends
+        (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
+         rendered_text, status, lead_id)
+      VALUES ${sql.join(values, sql`, `)}
+    `);
+  }
 }

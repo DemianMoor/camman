@@ -1837,6 +1837,8 @@ export const stage_sends = pgTable(
     index("stage_sends_org_sent_at_idx")
       .on(table.org_id, table.sent_at)
       .where(sql`sent_at IS NOT NULL`),
+    // Migration 0060: campaign-level activity drill-down lists sends newest-first.
+    index("stage_sends_campaign_created_idx").on(table.campaign_id, table.created_at),
   ],
 );
 
@@ -1877,3 +1879,44 @@ export const send_circuit_events = pgTable(
 
 export type SendCircuitEvent = typeof send_circuit_events.$inferSelect;
 export type NewSendCircuitEvent = typeof send_circuit_events.$inferInsert;
+
+// Append-only campaign activity log (migration 0060). One row per meaningful
+// action on a campaign or its stages — lifecycle (status changes), authoring
+// (stage create), and the send pipeline (approve / kickoff / drain) plus result
+// imports. Drives the Activity tab's timeline. `event_type` is free-text
+// (extensible audit log; the allowed set is documented in
+// lib/campaign-events.ts, not CHECK-constrained, so new event kinds don't need a
+// migration). `actor_user_id` is the auth user id stored WITHOUT a cross-schema
+// FK (decoupled audit record); NULL ⇒ system/cron action. `metadata` carries
+// structured details (from/to status, counts, stop reason, …). The drill-down
+// of individual messages reads stage_sends live — it is NOT duplicated here.
+export const campaign_events = pgTable(
+  "campaign_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    // SET NULL: an archived/removed stage shouldn't erase its campaign history.
+    stage_id: integer("stage_id").references(() => campaign_stages.id, {
+      onDelete: "set null",
+    }),
+    event_type: text("event_type").notNull(),
+    actor_user_id: uuid("actor_user_id"),
+    summary: text("summary").notNull(),
+    metadata: jsonb("metadata"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("campaign_events_campaign_idx").on(table.campaign_id, table.created_at),
+    index("campaign_events_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type CampaignEvent = typeof campaign_events.$inferSelect;
+export type NewCampaignEvent = typeof campaign_events.$inferInsert;

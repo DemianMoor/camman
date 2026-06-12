@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { decideDrainAuth, runStageDrain, type DrainRefusal } from "@/lib/sends/drain";
 
 // Real-send drain for one stage. Owner-triggered, explicit (NOT an always-on
@@ -47,12 +48,11 @@ export async function POST(
   const bearerMatches = !!secret && req.headers.get("authorization") === `Bearer ${secret}`;
 
   // Only resolve the session when the Bearer didn't already authorize (cron).
-  const sessionRole = bearerMatches
-    ? null
-    : await (async () => {
-        const auth = await requireApiMembership();
-        return "error" in auth ? null : auth.role;
-      })();
+  // Capture the acting user for the activity log; a cron-driven drain has none.
+  const session = bearerMatches ? null : await requireApiMembership();
+  const sessionOk = session != null && !("error" in session);
+  const sessionRole = sessionOk ? session.role : null;
+  const actorUserId = sessionOk ? session.user.id : null;
 
   const decision = decideDrainAuth({ bearerMatches, sessionRole });
   if (!decision.allow) {
@@ -62,10 +62,11 @@ export async function POST(
     );
   }
 
-  const { stageId: sParam } = await params;
+  const { campaignId: cParam, stageId: sParam } = await params;
+  const campaignId = parseId(cParam);
   const stageId = parseId(sParam);
-  if (stageId === null) {
-    return NextResponse.json({ error: "Invalid stage id" }, { status: 400 });
+  if (campaignId === null || stageId === null) {
+    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   }
 
   const result = await runStageDrain(db, { stageId });
@@ -82,12 +83,38 @@ export async function POST(
   // Scheduled field (see CLAUDE.md §10g / lib/quiet-hours.ts). COALESCE keeps a
   // pre-existing scheduled_at and is idempotent across re-drains.
   if (result.ok && result.processed > 0) {
-    await db.execute(sql`
+    // RETURNING org_id + stage_number so the activity log below has its tenant
+    // and a human label — the drain (cron-capable) carries no auth orgId.
+    const stamp = (await db.execute(sql`
       UPDATE campaign_stages
       SET scheduled_at = COALESCE(scheduled_at, now()),
           sent_at = COALESCE(sent_at, now())
       WHERE id = ${stageId}
-    `);
+      RETURNING org_id, stage_number
+    `)) as unknown as { org_id: string; stage_number: number }[];
+
+    // Audit only runs that actually attempted sends — the */15 cron ticks past
+    // idle stages constantly, and a "0 processed" event every tick is noise.
+    const orgId = stamp[0]?.org_id;
+    if (orgId) {
+      const stopped = result.stopReason ? ` · stopped: ${result.stopReason}` : "";
+      await logCampaignEvent(db, {
+        orgId,
+        campaignId,
+        stageId,
+        actorUserId,
+        eventType: "send_drain",
+        summary: `Stage ${stamp[0].stage_number} send run: ${result.sent.toLocaleString()} sent, ${result.failed} failed${stopped}`,
+        metadata: {
+          sent: result.sent,
+          failed: result.failed,
+          processed: result.processed,
+          remaining: result.remaining,
+          stopReason: result.stopReason,
+          pausedNow: result.pausedNow,
+        },
+      });
+    }
   }
 
   return NextResponse.json(result);

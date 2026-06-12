@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { kickoffStageSend, type KickoffRefusal } from "@/lib/sends/kickoff";
 import { can } from "@/lib/permissions";
 
@@ -54,7 +55,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "campaigns.activate")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -67,9 +68,21 @@ export async function POST(
     return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION);
   }
 
-  const result = await db.transaction((tx) =>
-    kickoffStageSend(tx, { orgId, campaignId, stageId }),
-  );
+  const result = await db.transaction(async (tx) => {
+    const r = await kickoffStageSend(tx, { orgId, campaignId, stageId });
+    if (r.ok) {
+      await logCampaignEvent(tx, {
+        orgId,
+        campaignId,
+        stageId,
+        actorUserId: user.id,
+        eventType: "send_kickoff",
+        summary: `Send batch materialized: ${r.materialized.toLocaleString()} recipient${r.materialized === 1 ? "" : "s"} (${r.mode})`,
+        metadata: { materialized: r.materialized, mode: r.mode },
+      });
+    }
+    return r;
+  });
 
   if (!result.ok) {
     const r = REFUSAL[result.reason];

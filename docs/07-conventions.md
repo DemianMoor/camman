@@ -69,6 +69,13 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 | 4 | Original wishlist mentions a command palette | **No command palette / cmdk exists** in the codebase (confirmed absent 2026-06-05) | grep across `components/`, `app/` |
 | 5 | `proxy.ts` protected-prefix list (`/dashboard`,`/brands`,`/settings`) | Narrower than the full protected route set; the real gate is `requireOrgMembership()` in the protected layout | `proxy.ts`, `app/(protected)/layout.tsx` |
 
+## Campaign activity log (`campaign_events`)
+- Append-only audit of campaign/stage actions, written by `logCampaignEvent()` ([lib/campaign-events.ts](../lib/campaign-events.ts)) at each mutation point and shown in the campaign **Activity** tab. See [04-features/campaign-activity-log.md](04-features/campaign-activity-log.md).
+- `event_type` is **free-text, not CHECK-constrained** — the allowed set is the `CampaignEventType` union in code, so new kinds need no migration. Don't add a CHECK.
+- Logging is **best-effort** (the helper swallows its own errors) so an audit write can't break the user action. Inside a transaction it must be the **last** statement and is trusted — a thrown error there aborts the whole tx regardless of the catch (Postgres aborts on any error). Outside a tx, the swallow makes it truly non-fatal.
+- `actor_user_id` NULL ⇒ system/cron (e.g. the scheduled drain); the UI renders "System / automatic".
+- The Activity **Messages** drill-down reads `stage_sends` live — individual recipient sends are **never** copied into `campaign_events`.
+
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.
 - The live DB's `segment_rules` CHECK contents — discrepancy #2.

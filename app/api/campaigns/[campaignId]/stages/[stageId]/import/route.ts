@@ -15,6 +15,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { CSV_MAX_BYTES, parseCsv } from "@/lib/imports/parse-csv";
 import {
   deriveOutcome,
@@ -601,6 +602,25 @@ export async function POST(
           ),
         );
     }
+
+    await logCampaignEvent(tx, {
+      orgId,
+      campaignId: cid,
+      stageId: sid,
+      actorUserId: user.id,
+      eventType: "results_imported",
+      summary: `Results imported: ${processedRows.toLocaleString()} rows (${deliveredAdded} delivered, ${optoutsAdded} opt-outs, ${dayClickersAdded + lateClickersAdded} clickers)`,
+      metadata: {
+        import_id: importRow.id,
+        processed_rows: processedRows,
+        delivered_added: deliveredAdded,
+        failed_added: failedAdded,
+        optouts_added: optoutsAdded,
+        clickers_added: dayClickersAdded,
+        late_clickers_added: lateClickersAdded,
+        clicker_phase,
+      },
+    });
 
     return {
       id: importRow.id,

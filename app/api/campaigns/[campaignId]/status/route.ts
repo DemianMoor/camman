@@ -6,6 +6,7 @@ import { campaign_audience_pool, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { snapshotAudience } from "@/lib/audience-snapshot";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { can, type Permission } from "@/lib/permissions";
 import { campaignStatusChangeSchema } from "@/lib/validators/campaigns";
 
@@ -45,7 +46,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   const { campaignId: cIdParam } = await params;
   const campaignId = parseId(cIdParam);
@@ -183,6 +184,14 @@ export async function POST(
             and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)),
           )
           .returning();
+        await logCampaignEvent(tx, {
+          orgId,
+          campaignId,
+          actorUserId: user.id,
+          eventType: "campaign_status_changed",
+          summary: `Campaign activated (draft → active), audience frozen at ${count.toLocaleString()}`,
+          metadata: { from, to: "active", audience_count: count },
+        });
         return row;
       });
       return NextResponse.json(updated);
@@ -210,6 +219,14 @@ export async function POST(
     })
     .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
     .returning();
+  await logCampaignEvent(db, {
+    orgId,
+    campaignId,
+    actorUserId: user.id,
+    eventType: "campaign_status_changed",
+    summary: `Campaign status changed: ${from} → ${next}`,
+    metadata: { from, to: next },
+  });
   return NextResponse.json(updated);
 }
 

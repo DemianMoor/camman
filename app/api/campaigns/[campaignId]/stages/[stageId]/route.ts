@@ -11,6 +11,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
 import { buildStageFullUrl } from "@/lib/stage-url";
@@ -182,7 +183,7 @@ export async function PATCH(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "stages.update")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -476,5 +477,35 @@ export async function PATCH(
       entity: "stage",
     });
   }
+
+  // Audit a scheduled-time change (set / moved / cleared) — the most send-
+  // relevant stage edit. Compare values so a form that always echoes
+  // scheduled_at doesn't log a no-op event on every save.
+  if (input.scheduled_at !== undefined) {
+    const nextMs = input.scheduled_at
+      ? new Date(input.scheduled_at).getTime()
+      : null;
+    const prevMs = current.current_scheduled_at
+      ? new Date(current.current_scheduled_at).getTime()
+      : null;
+    if (nextMs !== prevMs) {
+      await logCampaignEvent(db, {
+        orgId,
+        campaignId: cid,
+        stageId: sid,
+        actorUserId: user.id,
+        eventType: "stage_scheduled",
+        summary: input.scheduled_at
+          ? `Stage ${current.stage_number} scheduled for ${input.scheduled_at}`
+          : `Stage ${current.stage_number} schedule cleared`,
+        metadata: {
+          stage_number: current.stage_number,
+          scheduled_at: input.scheduled_at ?? null,
+          previous_scheduled_at: current.current_scheduled_at,
+        },
+      });
+    }
+  }
+
   return NextResponse.json(updated);
 }

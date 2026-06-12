@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-06-10_
+_Last updated: 2026-06-12_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0059`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the `is_in_contact_group` note below).
 
@@ -20,7 +20,7 @@ graph TD
 
 ## Conventions (CLAUDE.md §6)
 
-- **IDs:** small lookup/registry tables use `serial` integer PKs; high-volume tables (`contacts`, `stage_sends`) use `uuid`; `links`/`clicks`/`send_circuit_events` use `bigserial`. Most registry tables also carry a separate **text business id** (`brand_id`, `offer_id`, `segment_id`, …) that is unique and user-facing.
+- **IDs:** small lookup/registry tables use `serial` integer PKs; high-volume tables (`contacts`, `stage_sends`) use `uuid`; `links`/`clicks`/`send_circuit_events`/`campaign_events` use `bigserial`. Most registry tables also carry a separate **text business id** (`brand_id`, `offer_id`, `segment_id`, …) that is unique and user-facing.
 - Every domain table has `created_at TIMESTAMPTZ DEFAULT now()`. Most have `status TEXT` + `archived_at TIMESTAMPTZ` (soft-delete via `status='archived'`).
 - **Money:** `NUMERIC(12,4)`. **Timestamps:** `TIMESTAMPTZ` (UTC), never naive.
 - Foreign keys are always declared; cascades are explicit (`cascade` / `restrict` / `set null` chosen per relationship).
@@ -97,6 +97,9 @@ erDiagram
 
   sms_providers ||--o{ send_circuit_events : "pause/resume audit"
   provider_credentials ||--o{ texthub_inbound_events : "STOP intake"
+
+  campaigns ||--o{ campaign_events : "activity log"
+  campaign_stages ||--o{ campaign_events : "stage events"
 ```
 
 ## Tables by domain
@@ -174,6 +177,7 @@ erDiagram
 | `clicks` | `id bigserial`, `link_id`, `classification`, `asn`/`country`/`is_datacenter`, `bot_score`/`bot_reasons`, `scored_at` (NULL=pending) | append-only click log |
 | `stage_sends` | `id uuid` (= send_token), `stage_id`, `contact_id`, `phone`, `link_id`, `rendered_text`, `status`, `texthub_message_id`, `attempts` | partial UNIQUE(stage_id, contact_id) WHERE status in (pending,sending) |
 | `send_circuit_events` | `provider_id`, `event` paused/resumed, `reason`, `actor_user_id` | append-only breaker audit |
+| `campaign_events` | `campaign_id`, `stage_id?`, `event_type` (free-text), `actor_user_id?` (NULL=system), `summary`, `metadata jsonb` | append-only campaign activity log (Activity tab timeline); migration 0060 |
 | `texthub_inbound_events` | `credential_id`, `provider_message_id`, `matched_contact_id`, `result` | raw inbound STOP capture |
 
 ## Triggers & DB-side logic (in migrations, not Drizzle)

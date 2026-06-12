@@ -12,6 +12,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 
 function parseId(idParam: string) {
@@ -268,6 +269,20 @@ export async function POST(
       })
       .where(eq(stage_results_imports.id, iid))
       .returning();
+
+    await logCampaignEvent(tx, {
+      orgId,
+      campaignId: cid,
+      stageId: sid,
+      actorUserId: user.id,
+      eventType: "results_reverted",
+      summary: `Results import #${iid} reverted (${toDeleteOptOuts.length} opt-outs, ${toDeleteClickers.length} clickers removed)`,
+      metadata: {
+        import_id: iid,
+        removed_opt_outs: toDeleteOptOuts.length,
+        removed_clickers: toDeleteClickers.length,
+      },
+    });
 
     return {
       kind: "ok" as const,

@@ -27,6 +27,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { CampaignSendMode } from "@/components/campaigns/campaign-send-mode";
+import { CampaignActivitySection } from "@/components/campaigns/campaign-activity-section";
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
 import { ExportClickersDialog } from "@/components/campaigns/export-clickers-dialog";
 import { StageSendPanel } from "@/components/campaigns/stage-send-panel";
@@ -1544,6 +1545,17 @@ export default function CampaignDetailPage() {
       {/* ============ Click attribution section ============ */}
       <section className="space-y-4">
         <ClickReportSection campaignId={campaignId} />
+      </section>
+
+      {/* ============ Activity log section ============ */}
+      <section className="space-y-4">
+        <CampaignActivitySection
+          campaignId={campaignId}
+          stages={stages.map((s) => ({
+            id: s.id,
+            stage_number: s.stage_number,
+          }))}
+        />
       </section>
 
       {/* ============ Dialogs ============ */}

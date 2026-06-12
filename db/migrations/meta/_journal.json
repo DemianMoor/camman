@@ -421,6 +421,13 @@
       "when": 1781481600000,
       "tag": "0059_segment_rules_in_use_period",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1781568000000,
+      "tag": "0060_campaign_events",
+      "breakpoints": true
     }
   ]
 }

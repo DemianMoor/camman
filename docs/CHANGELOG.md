@@ -2,6 +2,12 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-12 — Campaign Activity log (audit trail + send drill-down)
+- New **Activity** section at the bottom of the campaign detail page: summary cards (sent / failed / in-flight / replies / last send) + a **Timeline ⇄ Messages** toggle. Timeline = the `campaign_events` audit log; Messages = a live, filterable per-recipient `stage_sends` drill-down joined to TextHub replies.
+- New append-only `campaign_events` table (migration `0060_campaign_events`) + index `stage_sends_campaign_created_idx`. Written by best-effort `logCampaignEvent()` ([lib/campaign-events.ts](../lib/campaign-events.ts)) instrumented at campaign create / status / archive / restore, stage create / duplicate / status / schedule, send approve / kickoff / drain, and result import / revert.
+- New read-only endpoints `GET /api/campaigns/[campaignId]/activity` and `…/activity/messages` (gated by `campaigns.view`).
+- Docs updated: [03-data-model.md](03-data-model.md) (+ERD), new [04-features/campaign-activity-log.md](04-features/campaign-activity-log.md), [04-features/sms-send-pipeline.md](04-features/sms-send-pipeline.md), [07-conventions.md](07-conventions.md).
+
 ## 2026-06-12 — Fix: scheduled tracked sends timed out + got stranded (full pipeline fix)
 - **Root cause of "scheduled send never fired":** the cron materialized + sent a whole audience inside one 300s invocation, minting links **one-by-one** (~178s for 1000 recipients) AFTER committing the `sent_at` claim — so a timeout left the stage `sent_at`-locked with zero rows, and the scheduler never retried it. Three-part fix:
   1. **Batched minting** ([lib/links/mint-link.ts](../lib/links/mint-link.ts) `mintLinksBatch` + [lib/sends/kickoff.ts](../lib/sends/kickoff.ts) bulk inserts): single shared destination upsert + multi-row chunked `links`/`stage_sends` inserts. 1000-recipient kickoff ~178s → ~2-3s (measured).

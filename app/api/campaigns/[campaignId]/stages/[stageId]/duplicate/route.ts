@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import {
   generateCampaignTrackingId,
@@ -29,7 +30,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "stages.create")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -140,6 +141,7 @@ export async function POST(
         .where(eq(campaigns.id, cid));
     }
 
+    let finalRow = row;
     if (parentTrackingId != null && row.creative_id != null) {
       const stageTrackingId = generateStageTrackingId({
         campaignTrackingId: parentTrackingId,
@@ -151,10 +153,20 @@ export async function POST(
         .set({ tracking_id: stageTrackingId })
         .where(eq(campaign_stages.id, row.id))
         .returning();
-      return withTracking;
+      finalRow = withTracking;
     }
 
-    return row;
+    await logCampaignEvent(tx, {
+      orgId,
+      campaignId: cid,
+      stageId: finalRow.id,
+      actorUserId: user.id,
+      eventType: "stage_created",
+      summary: `Stage ${finalRow.stage_number} created (duplicated from stage ${sid})`,
+      metadata: { stage_number: finalRow.stage_number, duplicated_from_stage_id: sid },
+    });
+
+    return finalRow;
   });
 
   return NextResponse.json(created, { status: 201 });

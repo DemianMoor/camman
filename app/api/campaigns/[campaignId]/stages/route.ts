@@ -21,6 +21,7 @@ import {
   computeStageAudienceCount,
   computeStageAudienceCountForDraft,
 } from "@/lib/audience-snapshot";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
@@ -295,7 +296,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "stages.create")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -501,16 +502,27 @@ export async function POST(
         buildStageFullUrl({ salesPageUrl: urlCtx.salesPageUrl }) || null;
     }
 
+    let finalRow = row;
     if (Object.keys(setOnUpdate).length > 0) {
       const [withUpdates] = await tx
         .update(campaign_stages)
         .set(setOnUpdate)
         .where(eq(campaign_stages.id, row.id))
         .returning();
-      return withUpdates;
+      finalRow = withUpdates;
     }
 
-    return row;
+    await logCampaignEvent(tx, {
+      orgId,
+      campaignId: cid,
+      stageId: finalRow.id,
+      actorUserId: user.id,
+      eventType: "stage_created",
+      summary: `Stage ${finalRow.stage_number} created`,
+      metadata: { stage_number: finalRow.stage_number },
+    });
+
+    return finalRow;
   });
 
   return NextResponse.json(created, { status: 201 });

@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import { campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 
 function parseId(idParam: string) {
@@ -19,7 +20,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "campaigns.archive")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -50,7 +51,17 @@ export async function POST(
     )
     .returning();
 
-  if (updated[0]) return NextResponse.json(updated[0]);
+  if (updated[0]) {
+    await logCampaignEvent(db, {
+      orgId,
+      campaignId,
+      actorUserId: user.id,
+      eventType: "campaign_status_changed",
+      summary: `Campaign archived (was ${updated[0].previous_status ?? "active"})`,
+      metadata: { from: updated[0].previous_status, to: "archived" },
+    });
+    return NextResponse.json(updated[0]);
+  }
 
   const existing = await db
     .select({ status: campaigns.status })

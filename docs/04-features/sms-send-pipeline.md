@@ -89,6 +89,9 @@ Best-effort Telegram alerts on breaker trips / poller failures. If `TELEGRAM_BOT
 - A resend after a terminal batch mints fresh `stage_sends` rows/tokens (no `(stage_id, contact_id)` unique on terminal rows).
 - `kickoffStageSend` and `runStageDrain` operate **entirely on `stage_sends`** and never touch `campaign_stages.status`/`sent_at`. `sent_at` is stamped by the callers: the scheduler's phase A (after a successful materialize) and the manual drain backfill (`COALESCE`, when `processed > 0`). `sent_at` is the scheduler's "materialized & handed to the drain" marker + the stage's Scheduled-field lock — see [07-conventions.md](../07-conventions.md). `status` is reconciled separately via the `/status` action (results import / manual), which is **blocked** from setting `'sent'` on a tracked stage.
 
+## 6a. Activity audit
+- `send_kickoff` (recipient count) and `send_drain` (sent / failed / stop reason; actor NULL for cron runs) are written to `campaign_events` via `logCampaignEvent()` and surfaced in the campaign **Activity** tab. See [campaign-activity-log.md](campaign-activity-log.md). Per-recipient `stage_sends` rows are read live by the Activity drill-down — not duplicated into the event log.
+
 ## 7. Extension points / limitations
 - DLR polling, MMS, inbound conversations: out of scope.
 - Rate ceilings are org-wide until provider #2; per-provider accounting is a known follow-up.

@@ -19,6 +19,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { snapshotAudience } from "@/lib/audience-snapshot";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { generateCampaignSlug } from "@/lib/campaign-helpers";
 import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { can } from "@/lib/permissions";
@@ -286,9 +287,25 @@ export async function POST(req: NextRequest) {
             })
             .where(eq(campaigns.id, inserted.id))
             .returning();
+          await logCampaignEvent(tx, {
+            orgId,
+            campaignId: inserted.id,
+            actorUserId: user.id,
+            eventType: "campaign_created",
+            summary: `Created and activated campaign “${updated.name}”`,
+            metadata: { status: "active", audience_count: snap.count },
+          });
           return updated;
         }
 
+        await logCampaignEvent(tx, {
+          orgId,
+          campaignId: inserted.id,
+          actorUserId: user.id,
+          eventType: "campaign_created",
+          summary: `Created campaign “${inserted.name}” as draft`,
+          metadata: { status: "draft" },
+        });
         return { ...inserted, tracking_id: trackingId };
       });
       return NextResponse.json(result, { status: 201 });

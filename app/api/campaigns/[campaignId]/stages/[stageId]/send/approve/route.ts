@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import { campaign_stages } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 
 function parseId(idParam: string) {
@@ -22,16 +23,17 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "campaigns.activate")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
-  const { stageId: sParam } = await params;
+  const { campaignId: cParam, stageId: sParam } = await params;
+  const campaignId = parseId(cParam);
   const stageId = parseId(sParam);
-  if (stageId === null) {
-    return apiError(400, "Invalid stage id", API_ERROR_CODES.VALIDATION, { field: "id" });
+  if (campaignId === null || stageId === null) {
+    return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION, { field: "id" });
   }
 
   let json: unknown;
@@ -56,5 +58,14 @@ export async function POST(
   if (!updated[0]) {
     return apiError(404, "Stage not found", API_ERROR_CODES.NOT_FOUND, { entity: "stage" });
   }
+  await logCampaignEvent(db, {
+    orgId,
+    campaignId,
+    stageId,
+    actorUserId: user.id,
+    eventType: "send_approved",
+    summary: approved ? "Stage approved to send" : "Stage send approval revoked",
+    metadata: { send_approved: approved },
+  });
   return NextResponse.json({ ok: true, send_approved: updated[0].send_approved });
 }

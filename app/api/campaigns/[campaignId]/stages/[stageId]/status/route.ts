@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { stageStatusChangeSchema } from "@/lib/validators/campaign-stages";
 
@@ -30,7 +31,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "stages.send")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -119,5 +120,14 @@ export async function POST(
       ),
     )
     .returning();
+  await logCampaignEvent(db, {
+    orgId,
+    campaignId: cid,
+    stageId: sid,
+    actorUserId: user.id,
+    eventType: "stage_status_changed",
+    summary: `Stage ${updated.stage_number} status changed: ${from} → ${next}`,
+    metadata: { from, to: next, stage_number: updated.stage_number },
+  });
   return NextResponse.json(updated);
 }

@@ -1,8 +1,8 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-12_
 
-External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`.
+External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
 ## External services
 
@@ -14,7 +14,10 @@ External services CamMan talks to, their contracts, and every environment variab
 | **TextHub** | app ↔ provider | send + STOP inbox poll | per-provider `api_key` (DB, brand-scoped) | send: `GET https://api.texthub.com/v2/?api_key=&text=&number=&lead_id=`; inbox: `?inbox=true` |
 | **MaxMind GeoLite2** | app → download | click ASN/country enrichment | `MAXMIND_LICENSE_KEY` | downloads `.mmdb` at runtime |
 | **Telegram Bot API** | app → alerts | circuit-breaker / poller alerts | bot token | best-effort `sendMessage` |
-| **Vercel Cron** | scheduler → app | the 3 cron endpoints | `Authorization: Bearer CRON_SECRET` | `*/15 * * * *` |
+| **Keitaro** (tracker) | app → tracker | 5-min results poll | `Api-Key` header | `POST {KEITARO_API_URL}/admin_api/v1/report/build` `{range,grouping,metrics}` → `{rows[]}`; `GET …/campaigns` |
+| **Vercel Cron** | scheduler → app | the 4 cron endpoints | `Authorization: Bearer CRON_SECRET` | `*/15` (×3) + `*/5` (Keitaro poll) |
+
+> Keitaro gotchas (`lib/keitaro/`): point all calls at the single admin host `KEITARO_API_URL` (default `https://admin.gdkn.org`) — never a brand tracking domain. Group reports by `sub_id_3`, which in CamMan carries the **stage tracking id** (not a bare campaign id), so mapping back is `sub_id_3` → `campaign_stages.tracking_id`. Keep `admin.gdkn.org` DNS-only / WAF-excepted so the every-5-min calls aren't bot-challenged. The documented metric keys live in one const (`KEITARO_METRICS` in `lib/keitaro/client.ts`) — a wrong key silently returns nothing.
 
 > TextHub gotchas (`lib/sends/texthub.ts`): never pass `long_url` (their rewriter clobbers our tracked link) or `group` (share link — kills per-recipient uniqueness). Their push opt-out callback is broken on their side → intake uses inbox **polling**.
 
@@ -36,6 +39,8 @@ External services CamMan talks to, their contracts, and every environment variab
 | `SEND_ENABLED` | server | global kill-switch for the send **drain**; must be exactly `"true"` to send. Default OFF; re-checked between batches mid-drain |
 | `TELEGRAM_BOT_TOKEN` | server | Telegram alert bot token (best-effort; unset ⇒ silent no-op) |
 | `TELEGRAM_CHAT_ID` | server | numeric chat/group id for alerts |
+| `KEITARO_API_URL` | server | Keitaro admin/API host (default `https://admin.gdkn.org`). Never a brand tracking domain |
+| `KEITARO_API_KEY` | server | Keitaro Admin API key (`Api-Key` header). Unset ⇒ poll returns `degraded:true` and writes nothing. **Rotate** the key shared in plaintext during setup |
 | `TEST_USER_EMAIL` / `TEST_USER_PASSWORD` | **local only** | credentials for `scripts/test-*-api.ts`; remove after use |
 
 ### Secrets handling rules (CLAUDE.md §11)

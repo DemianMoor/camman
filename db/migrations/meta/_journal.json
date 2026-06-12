@@ -428,6 +428,13 @@
       "when": 1781568000000,
       "tag": "0060_campaign_events",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1781654400000,
+      "tag": "0061_keitaro_results",
+      "breakpoints": true
     }
   ]
 }

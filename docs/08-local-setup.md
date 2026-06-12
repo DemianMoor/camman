@@ -1,6 +1,6 @@
 # 08 — Local Setup
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-12_
 
 Clone-to-running on Windows (PowerShell). Adapt paths/shell as needed; the repo lives at `c:\AFF\camman`.
 
@@ -66,7 +66,13 @@ Cron jobs are plain route handlers. Call them with the Bearer secret:
 ```powershell
 curl.exe -H "Authorization: Bearer $env:CRON_SECRET" http://localhost:3000/api/clicks/score-pending
 ```
-(`/api/opt-outs/poll` and `/api/cron/send-scheduled` also accept an authenticated session POST for the caller's own org.)
+(`/api/opt-outs/poll`, `/api/cron/send-scheduled`, and `/api/keitaro/poll` also accept an authenticated session POST for the caller's own org.)
+
+The Keitaro poll (`*/5`) needs `KEITARO_API_KEY` set (and optionally `KEITARO_API_URL`, default `https://admin.gdkn.org`). With the key unset it returns `degraded:true` and writes nothing:
+```powershell
+curl.exe -H "Authorization: Bearer $env:CRON_SECRET" "http://localhost:3000/api/keitaro/poll?windowDays=3"
+```
+Read what landed: `GET /api/keitaro/results?campaign_id=<id>`.
 
 ## 8. Build & lint
 ```powershell
@@ -78,3 +84,4 @@ npm run build
 - **EMAXCONNSESSION / connection exhaustion** in dev — the `globalThis` pool cache in `db/client.ts` exists to prevent this under HMR. Don't remove it.
 - **CRLF false positives** in `verify-migration-integrity.ts` were resolved via `.gitattributes` (`db/migrations/** eol=lf`). If they recur, check `git ls-files --eol db/migrations` (see project memory).
 - **Click scoring returns 503** — `CRON_SECRET` isn't set. **Scoring `degraded`** — `MAXMIND_LICENSE_KEY` missing/rate-limited (UA-only scoring still runs).
+- **Keitaro poll `degraded:true`** — `KEITARO_API_KEY` unset or the report fetch failed (logged in `error`); retries next cycle. **`matched:0` with `unmatched_samples`** — the `sub_id_3` values Keitaro returns don't match any `campaign_stages.tracking_id` (inspect the samples to see what's actually coming through).

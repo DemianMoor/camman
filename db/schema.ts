@@ -1535,6 +1535,60 @@ export const stage_result_rows = pgTable(
 export type StageResultRow = typeof stage_result_rows.$inferSelect;
 export type NewStageResultRow = typeof stage_result_rows.$inferInsert;
 
+// ============ Keitaro poll results ============
+// Per-stage daily aggregate of clicks + conversions + revenue pulled from
+// Keitaro's Admin API every 5 minutes (see lib/keitaro/). sub_id_3 carries the
+// stage tracking id, so each row is one (stage, ET date); a campaign's totals
+// are the SUM across its stages. Idempotent UPSERT on (org_id, stage_id,
+// stat_date) — re-polling overwrites in place, never double-counts.
+export const keitaro_stage_results = pgTable(
+  "keitaro_stage_results",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    stage_tracking_id: text("stage_tracking_id").notNull(),
+    stat_date: date("stat_date").notNull(),
+    raw_clicks: integer("raw_clicks").notNull().default(0),
+    clean_clicks: integer("clean_clicks").notNull().default(0),
+    checkouts: integer("checkouts").notNull().default(0),
+    sales: integer("sales").notNull().default(0),
+    revenue: numeric("revenue", { precision: 12, scale: 4 })
+      .notNull()
+      .default("0"),
+    cost: numeric("cost", { precision: 12, scale: 4 }).notNull().default("0"),
+    epc: numeric("epc", { precision: 12, scale: 4 }).notNull().default("0"),
+    synced_at: timestamp("synced_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("keitaro_stage_results_stage_date_uniq").on(
+      table.org_id,
+      table.stage_id,
+      table.stat_date,
+    ),
+    index("keitaro_stage_results_campaign_date_idx").on(
+      table.campaign_id,
+      table.stat_date,
+    ),
+    index("keitaro_stage_results_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type KeitaroStageResult = typeof keitaro_stage_results.$inferSelect;
+export type NewKeitaroStageResult = typeof keitaro_stage_results.$inferInsert;
+
 // ============ Spam scoring cache ============
 // Append-only cache keyed by (org_id, text_hash, provider). Re-scoring the
 // same text is a cache hit unless force=true. Different providers can

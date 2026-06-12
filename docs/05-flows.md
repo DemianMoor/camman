@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-12_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -112,3 +112,25 @@ sequenceDiagram
 
 ## F. Segment rule audience resolution
 See [04-features/audience-segments.md](04-features/audience-segments.md) — `buildSegmentAudienceClause` compiles rules to UNION/INTERSECT/EXCEPT set arithmetic and UNIONs the result with manual membership.
+
+## G. Keitaro results poll (every 5 min)
+
+```mermaid
+sequenceDiagram
+  participant Cron as */5 keitaro/poll
+  participant Poll as pollKeitaro
+  participant K as Keitaro Admin API
+  participant DB
+  participant CRM as /api/keitaro/results
+  Cron->>Poll: GET /api/keitaro/poll (Bearer CRON_SECRET)
+  Poll->>K: POST /report/build (3-day ET window, group day+sub_id_3)
+  K-->>Poll: rows[{day, sub_id_3, clicks, leads, sales, revenue, epc…}]
+  Poll->>DB: resolve sub_id_3 → campaign_stages.tracking_id (stage/campaign/org)
+  loop each matched row
+    Poll->>DB: UPSERT keitaro_stage_results (org_id, stage_id, stat_date)
+  end
+  Note over Poll,DB: idempotent (last-write-wins) — re-poll overwrites, never double-counts;<br/>unmatched/blank sub_id_3 counted + sampled, not written
+  CRM->>DB: GET results?campaign_id → per-stage + campaign rollup (derived rates)
+```
+
+> `sub_id_3` carries the **stage** tracking id, so rows are per-stage; campaign totals = SUM across stages. Per-customer (`sub_id_5`) detail is deferred — no per-recipient id reaches Keitaro yet (see [04-features/keitaro-poll.md](04-features/keitaro-poll.md) §7).

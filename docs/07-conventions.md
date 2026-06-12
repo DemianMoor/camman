@@ -20,6 +20,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
   - Stage: `<campaign_tracking_id>_s<stage_number>_c<creative_id>`.
   - Date is campaign `created_at` in **ET**. **Not lexically sortable across year boundaries — always `ORDER BY created_at`.**
   - Immutable: PATCH rejects changes (`tracking_id_immutable`); changing brand/offer/creative later does not regenerate.
+  - **Keitaro `sub_id_3` = the STAGE tracking id** (the offer postfix param carries it into the tracked URL), not a bare campaign id. The Keitaro poll groups by `sub_id_3` and maps back via `campaign_stages.tracking_id`; campaign totals are the SUM across stages. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md).
 - API route naming: `[parentEntityId]` for nested API segments, `[id]` for page routes (avoids Next's sibling-dynamic-segment prohibition).
 
 ## Timezone (ET everywhere)

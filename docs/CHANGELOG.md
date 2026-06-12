@@ -2,6 +2,13 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-12 — Keitaro 5-minute results poll (aggregate layer)
+- New `*/5` Vercel cron `/api/keitaro/poll` pulls clicks + conversions + revenue from Keitaro's Admin API (`POST /admin_api/v1/report/build`, rolling 3-day ET window, grouped by `day` + `sub_id_3`) and idempotently UPSERTs a per-stage daily aggregate into the new `keitaro_stage_results` table (migration `0061_keitaro_results`). `sub_id_3` carries the **stage** tracking id → mapped via `campaign_stages.tracking_id`; campaign totals = SUM across stages. Code in [lib/keitaro/](../lib/keitaro/) (`client.ts` + `poll.ts`).
+- Read endpoint `GET /api/keitaro/results?campaign_id=<id>` (gated `campaigns.view`) returns per-stage + campaign rollups with derived rates (CTR, Checkout Rate, Sales CR, EPC). Poll manual trigger gated `result_imports.create` (operator+).
+- New env vars `KEITARO_API_URL` / `KEITARO_API_KEY`. **Per-customer (`sub_id_5`) detail layer deferred** — no per-recipient id reaches Keitaro yet (shared destination URL per stage). Metric keys centralized in `KEITARO_METRICS`; verify against live Swagger on first run. **Rotate the Admin API key** shared in plaintext.
+- ⚠️ Migration `0061` authored but **NOT yet applied** to the shared DB (`npm run db:migrate` + `verify-migration-integrity` pending — needs prod-DB authorization).
+- Docs updated: [03-data-model.md](03-data-model.md) (+ERD), new [04-features/keitaro-poll.md](04-features/keitaro-poll.md), [04-features/crons.md](04-features/crons.md), [05-flows.md](05-flows.md) (flow G), [06-integrations.md](06-integrations.md), [07-conventions.md](07-conventions.md), [08-local-setup.md](08-local-setup.md).
+
 ## 2026-06-12 — Campaign Activity log (audit trail + send drill-down)
 - New **Activity** section at the bottom of the campaign detail page: summary cards (sent / failed / in-flight / replies / last send) + a **Timeline ⇄ Messages** toggle. Timeline = the `campaign_events` audit log; Messages = a live, filterable per-recipient `stage_sends` drill-down joined to TextHub replies.
 - New append-only `campaign_events` table (migration `0060_campaign_events`) + index `stage_sends_campaign_created_idx`. Written by best-effort `logCampaignEvent()` ([lib/campaign-events.ts](../lib/campaign-events.ts)) instrumented at campaign create / status / archive / restore, stage create / duplicate / status / schedule, send approve / kickoff / drain, and result import / revert.

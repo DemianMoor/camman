@@ -100,6 +100,9 @@ erDiagram
 
   campaigns ||--o{ campaign_events : "activity log"
   campaign_stages ||--o{ campaign_events : "stage events"
+
+  campaigns ||--o{ keitaro_stage_results : "poll rollup"
+  campaign_stages ||--o{ keitaro_stage_results : "sub_id_3 = stage tracking id"
 ```
 
 ## Tables by domain
@@ -179,6 +182,7 @@ erDiagram
 | `send_circuit_events` | `provider_id`, `event` paused/resumed, `reason`, `actor_user_id` | append-only breaker audit |
 | `campaign_events` | `campaign_id`, `stage_id?`, `event_type` (free-text), `actor_user_id?` (NULL=system), `summary`, `metadata jsonb` | append-only campaign activity log (Activity tab timeline); migration 0060 |
 | `texthub_inbound_events` | `credential_id`, `provider_message_id`, `matched_contact_id`, `result` | raw inbound STOP capture |
+| `keitaro_stage_results` | UNIQUE(org_id, stage_id, stat_date), `stage_tracking_id`, `raw_clicks`/`clean_clicks`/`checkouts`/`sales`, `revenue`/`cost`/`epc`, `synced_at` | per-stage daily aggregate from the Keitaro 5-min poll; idempotent UPSERT (last-write-wins). `sub_id_3` = stage tracking id; campaign totals = SUM across stages. Migration 0061 |
 
 ## Triggers & DB-side logic (in migrations, not Drizzle)
 - **`handle_new_user()`** (`0001`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row.

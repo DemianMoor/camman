@@ -4,7 +4,37 @@ export { nullIfEmpty } from "./_helpers";
 
 // SMS Provider validators. Brands/Networks shape plus two short-link fields.
 
-export const providerCreateSchema = z.object({
+// A send window is only meaningful when start is earlier than end on the same
+// day — the runtime (lib/quiet-hours.ts) silently DISCARDS a window with
+// start >= end and falls back to the 08:00–21:00 default, which is a confusing
+// footgun (e.g. "09:30–06:30" looks set but does nothing). Reject it at save
+// time instead. Only validates a pair when BOTH bounds are present (a partial
+// update touching one side is left to the runtime fallback).
+function validateWindowOrder(
+  data: {
+    send_window_weekday_start?: number | null;
+    send_window_weekday_end?: number | null;
+    send_window_weekend_start?: number | null;
+    send_window_weekend_end?: number | null;
+  },
+  ctx: z.RefinementCtx,
+) {
+  const pairs = [
+    ["weekday", data.send_window_weekday_start, data.send_window_weekday_end],
+    ["weekend", data.send_window_weekend_start, data.send_window_weekend_end],
+  ] as const;
+  for (const [label, start, end] of pairs) {
+    if (start != null && end != null && start >= end) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [`send_window_${label}_end`],
+        message: `${label[0].toUpperCase()}${label.slice(1)} end time must be later than the start time.`,
+      });
+    }
+  }
+}
+
+const providerBaseSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(120),
   sms_provider_id: z
     .string()
@@ -48,11 +78,14 @@ export const providerCreateSchema = z.object({
     .optional(),
 });
 
-export const providerUpdateSchema = providerCreateSchema
+export const providerCreateSchema = providerBaseSchema.superRefine(validateWindowOrder);
+
+export const providerUpdateSchema = providerBaseSchema
   .partial()
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: "At least one field must be provided",
-  });
+  })
+  .superRefine(validateWindowOrder);
 
 export type ProviderCreateInput = z.infer<typeof providerCreateSchema>;
 export type ProviderUpdateInput = z.infer<typeof providerUpdateSchema>;

@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-12 — Provider send window: reject end ≤ start
+- The runtime silently discards a send window with `start >= end` and falls back to the 08:00–21:00 default (a footgun — a "09:30–06:30" window looks set but does nothing). Provider create/update now validate each day-type pair (`validateWindowOrder` in [lib/validators/providers.ts](../lib/validators/providers.ts)); the form surfaces the error on the offending end field. Only validates a pair when both bounds are present. — Docs updated: [04-features/sms-send-pipeline.md](04-features/sms-send-pipeline.md).
+
 ## 2026-06-12 — Fix: scheduled tracked sends timed out + got stranded (full pipeline fix)
 - **Root cause of "scheduled send never fired":** the cron materialized + sent a whole audience inside one 300s invocation, minting links **one-by-one** (~178s for 1000 recipients) AFTER committing the `sent_at` claim — so a timeout left the stage `sent_at`-locked with zero rows, and the scheduler never retried it. Three-part fix:
   1. **Batched minting** ([lib/links/mint-link.ts](../lib/links/mint-link.ts) `mintLinksBatch` + [lib/sends/kickoff.ts](../lib/sends/kickoff.ts) bulk inserts): single shared destination upsert + multi-row chunked `links`/`stage_sends` inserts. 1000-recipient kickoff ~178s → ~2-3s (measured).

@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-06-12_
+_Last updated: 2026-06-15_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Four endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -32,10 +32,10 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - **`SEND_ENABLED` is OFF** in production — the live send path has not fired.
 
 ### `/api/keitaro/poll` (Keitaro results poll)
-- Calls `pollKeitaro()` ([`lib/keitaro/poll.ts`](../../lib/keitaro/poll.ts)): `POST /admin_api/v1/report/build` over a rolling **3-day** ET window (`?windowDays=N` overrides, ≤30), grouped by `day` + `sub_id_3`.
-- Maps each row's `sub_id_3` (= stage tracking id) → `campaign_stages.tracking_id` → stage/campaign/org, then idempotently UPSERTs the per-(stage, date) aggregate into `keitaro_stage_results`. Re-polling overwrites in place (last-write-wins) so late conversions attach to earlier clicks without double-counting.
-- Fail-safe: a failed fetch returns `200 { degraded:true, error }` (logs + retries next cycle, never crashes); a single bad row is counted (`errored`) and skipped, never aborting the batch. Unmatched `sub_id_3` values are sampled in the response for debugging.
-- Returns `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, unmatched_samples, error }`. See [keitaro-poll.md](keitaro-poll.md). Read stored results via `GET /api/keitaro/results?campaign_id=<id>`.
+- Calls `pollKeitaro()` ([`lib/keitaro/poll.ts`](../../lib/keitaro/poll.ts)): `POST /admin_api/v1/report/build` over a rolling **3-day** ET window (`?windowDays=N` overrides, ≤30), grouped by `day` + `sub_id_3` + `campaign_id`.
+- Maps each row's `sub_id_3` (= stage tracking id) → `campaign_stages.tracking_id` → stage/campaign/org, **classifies** each row's Keitaro campaign by alias (`gk-lp-visits` = visits/Clickers, else offer redirect + sales), **folds** the per-campaign rows into one per-(stage, date) aggregate, then idempotently UPSERTs into `keitaro_stage_results`. Re-polling recomputes full-window totals and overwrites in place (last-write-wins) so late conversions attach to earlier clicks without double-counting.
+- Fail-safe: a failed fetch returns `200 { degraded:true, error }` (logs + retries next cycle, never crashes); a single bad aggregate is counted (`errored`) and skipped, never aborting the batch. If the campaigns list (alias classifier) fails, rows fall back to redirect and `classification_degraded:true` is set. Unmatched `sub_id_3` values are sampled in the response for debugging.
+- Returns `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, classification_degraded, unmatched_samples, error }`. See [keitaro-poll.md](keitaro-poll.md). Read stored results via `GET /api/keitaro/results?campaign_id=<id>` or the cross-campaign `GET /api/keitaro/reports` (the `/reports` page).
 
 ## 4. Data
 - Reads/writes `clicks`, `geoip_cache`; `opt_outs`, `texthub_inbound_events`; `stage_sends`, `links`, `campaign_stages`, `send_circuit_events`; `keitaro_stage_results` (reads `campaign_stages`/`campaigns` for sub_id_3 mapping).

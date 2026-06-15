@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-06-12_
+_Last updated: 2026-06-15_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -17,7 +17,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | **Keitaro** (tracker) | app → tracker | 5-min results poll | `Api-Key` header | `POST {KEITARO_API_URL}/admin_api/v1/report/build` `{range,grouping,metrics}` → `{rows[]}`; `GET …/campaigns` |
 | **Vercel Cron** | scheduler → app | the 4 cron endpoints | `Authorization: Bearer CRON_SECRET` | `*/15` (×3) + `*/5` (Keitaro poll) |
 
-> Keitaro gotchas (`lib/keitaro/`): point all calls at the single admin host `KEITARO_API_URL` (default `https://admin.gdkn.org`) — never a brand tracking domain. Group reports by `sub_id_3`, which in CamMan carries the **stage tracking id** (not a bare campaign id), so mapping back is `sub_id_3` → `campaign_stages.tracking_id`. Keep `admin.gdkn.org` DNS-only / WAF-excepted so the every-5-min calls aren't bot-challenged. The documented metric keys live in one const (`KEITARO_METRICS` in `lib/keitaro/client.ts`) — a wrong key silently returns nothing.
+> Keitaro gotchas (`lib/keitaro/`): point all calls at the single admin host `KEITARO_API_URL` (default `https://admin.gdkn.org`) — never a brand tracking domain. Group reports by `sub_id_3` + `campaign_id`, where `sub_id_3` carries the **stage tracking id** (not a bare campaign id), so mapping back is `sub_id_3` → `campaign_stages.tracking_id`. The `campaign_id` dimension separates landing-page **visits** (campaign alias `gk-lp-visits`) from **offer redirects** — classify by alias via `GET /admin_api/v1/campaigns`, never a numeric id (rebuild-safe). Keep `admin.gdkn.org` DNS-only / WAF-excepted so the every-5-min calls aren't bot-challenged. The documented grouping/metric keys live in one place (`KEITARO_GROUPING` / `KEITARO_METRICS` in `lib/keitaro/client.ts`) — a wrong key silently returns nothing.
 
 > TextHub gotchas (`lib/sends/texthub.ts`): never pass `long_url` (their rewriter clobbers our tracked link) or `group` (share link — kills per-recipient uniqueness). Their push opt-out callback is broken on their side → intake uses inbox **polling**.
 

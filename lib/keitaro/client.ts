@@ -14,8 +14,20 @@ const DEFAULT_TIMEOUT_MS = 20000;
 // The grouping/metric keys below are the single place to adjust if Keitaro's
 // report/build silently returns nothing for a key (the keys vary by version —
 // confirm against the live Swagger / DevTools payload). Grouping by `day` +
-// `sub_id_3` yields one row per (ET date, stage tracking id).
-export const KEITARO_GROUPING = ["day", "sub_id_3"] as const;
+// `sub_id_3` + `campaign_id` yields one row per (ET date, stage tracking id,
+// Keitaro campaign) — the campaign dimension lets the poll separate landing-page
+// VISITS from OFFER REDIRECTS (Step 5b), which share the same sub_id_3.
+//
+// `campaign_id` is the documented grouping key; the row carries it back under the
+// same name. If a Keitaro version instead returns the campaign under `campaign`
+// (the name), the poll resolves either against the campaigns list — see
+// resolveCampaignClass in lib/keitaro/poll.ts.
+export const KEITARO_GROUPING = ["day", "sub_id_3", "campaign_id"] as const;
+
+// The Keitaro campaign alias whose clicks are landing-page VISITS ("Clickers").
+// Any other campaign's clicks are OFFER REDIRECTS and its conversions are SALES.
+// Classify by ALIAS (rebuild-safe), never a hardcoded numeric id.
+export const KEITARO_VISIT_CAMPAIGN_ALIAS = "gk-lp-visits";
 export const KEITARO_METRICS = [
   "clicks", // Raw Clicks
   "campaign_unique_clicks", // Clean Clicks (bot/dup-filtered)

@@ -8,6 +8,8 @@ import {
 } from "@/lib/campaign-timezone";
 import {
   buildKeitaroReport,
+  fetchKeitaroCampaigns,
+  KEITARO_VISIT_CAMPAIGN_ALIAS,
   type KeitaroReportRow,
 } from "@/lib/keitaro/client";
 
@@ -26,9 +28,14 @@ export interface KeitaroPollResult {
   range: { from: string; to: string; timezone: string };
   fetched: number; // report rows returned by Keitaro
   matched: number; // rows whose sub_id_3 mapped to a CamMan stage
-  upserted: number; // rows written
+  upserted: number; // (stage, date) aggregates written
   unmatched: number; // rows skipped (no/blank/unknown sub_id_3)
-  errored: number; // rows that threw during upsert
+  errored: number; // (stage, date) aggregates that threw during upsert
+  // Step 5b: rows we couldn't classify as visit vs redirect because the Keitaro
+  // campaigns list failed to load — those clicks fall back to the redirect side
+  // (the brief's default for "any non-visit campaign"). >0 ⇒ visit counts may be
+  // undercounted this cycle; the next cycle self-heals once the list loads.
+  classification_degraded: boolean;
   // A few unmatched sub_id_3 values, for debugging what Keitaro actually sends.
   unmatched_samples: string[];
   error: string | null;
@@ -39,9 +46,13 @@ function toInt(v: unknown): number {
   return Number.isFinite(n) ? Math.round(n) : 0;
 }
 
-// Keep money/EPC as a decimal string for the NUMERIC column (no float drift).
-function toNumericString(v: unknown): string {
+function toNum(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Keep money/EPC as a decimal string for the NUMERIC column (no float drift).
+function toNumericString(n: number): string {
   return Number.isFinite(n) ? n.toFixed(4) : "0.0000";
 }
 
@@ -95,10 +106,69 @@ async function resolveStages(
   return map;
 }
 
-// Pull the rolling window from Keitaro, map each report row's sub_id_3 back to a
-// CamMan stage, and idempotently UPSERT the per-stage daily aggregate. Never
-// throws: a fetch failure returns degraded; a single bad row is counted and
-// skipped so it can't abort the batch.
+// Build a classifier: given a report row, is its Keitaro campaign the visit
+// campaign? Classification is by ALIAS (`gk-lp-visits`), resolved from the
+// campaigns list (id→alias and name→alias) so it works whether the report
+// returns the campaign as `campaign_id` (numeric) or `campaign` (the name).
+// If the campaigns list fails to load, every row is treated as non-visit
+// (redirect) — the brief's safe default — and `degraded` is set.
+async function buildVisitClassifier(): Promise<{
+  isVisitRow: (row: KeitaroReportRow) => boolean;
+  degraded: boolean;
+}> {
+  const result = await fetchKeitaroCampaigns();
+  if (!result.ok) {
+    return { isVisitRow: () => false, degraded: true };
+  }
+
+  const visitIds = new Set<number>();
+  const visitNames = new Set<string>();
+  for (const c of result.campaigns) {
+    if (c.alias === KEITARO_VISIT_CAMPAIGN_ALIAS) {
+      if (Number.isFinite(c.id)) visitIds.add(c.id);
+      if (c.name) visitNames.add(c.name.trim().toLowerCase());
+    }
+  }
+
+  const isVisitRow = (row: KeitaroReportRow): boolean => {
+    const idRaw = row.campaign_id;
+    if (idRaw !== undefined && idRaw !== null && idRaw !== "") {
+      const id = Number(idRaw);
+      if (Number.isFinite(id) && visitIds.has(id)) return true;
+    }
+    const name = row.campaign;
+    if (typeof name === "string" && visitNames.has(name.trim().toLowerCase())) {
+      return true;
+    }
+    return false;
+  };
+
+  return { isVisitRow, degraded: false };
+}
+
+// One per (stage, ET date) — the aggregate we UPSERT. Multiple Keitaro campaign
+// rows (the visit campaign + one or more offer campaigns) fold into one entry.
+interface StageDayAgg {
+  orgId: string;
+  campaignId: number;
+  stageId: number;
+  tid: string;
+  statDate: string;
+  visitRaw: number;
+  visitClean: number;
+  redirectRaw: number;
+  redirectClean: number;
+  checkouts: number;
+  sales: number;
+  revenue: number;
+  cost: number;
+}
+
+// Pull the rolling window from Keitaro (grouped by day + sub_id_3 + campaign),
+// classify each report row as a landing-page VISIT or an OFFER REDIRECT, fold
+// the campaign rows into one per-(stage, ET date) aggregate, and idempotently
+// UPSERT it. Never throws: a fetch failure returns degraded; a single bad
+// aggregate is counted and skipped so it can't abort the batch.
 export async function pollKeitaro(
   database: Database,
   opts?: { windowDays?: number },
@@ -112,7 +182,6 @@ export async function pollKeitaro(
   const to = formatInCampaignTimezone(now, "yyyy-MM-dd HH:mm:ss");
   const range = { from, to, timezone: CAMPAIGN_TIMEZONE };
 
-  const report = await buildKeitaroReport(range);
   const base: KeitaroPollResult = {
     ok: false,
     degraded: true,
@@ -122,16 +191,18 @@ export async function pollKeitaro(
     upserted: 0,
     unmatched: 0,
     errored: 0,
+    classification_degraded: false,
     unmatched_samples: [],
     error: null,
   };
 
+  const report = await buildKeitaroReport(range);
   if (!report.ok) {
     return { ...base, error: report.error };
   }
 
+  // Classifier (visit vs redirect) and stage resolution can run independently.
   const rows = report.rows;
-  // Distinct, non-empty sub_id_3 values to resolve in one round-trip.
   const trackingIds = [
     ...new Set(
       rows
@@ -139,17 +210,19 @@ export async function pollKeitaro(
         .filter((s) => s.length > 0),
     ),
   ];
-  const stageMap = await resolveStages(database, trackingIds);
+  const [classifier, stageMap] = await Promise.all([
+    buildVisitClassifier(),
+    resolveStages(database, trackingIds),
+  ]);
 
   let matched = 0;
-  let upserted = 0;
   let unmatched = 0;
-  let errored = 0;
   const unmatchedSamples = new Set<string>();
+  // Fold the per-campaign rows into one aggregate per (stage, date).
+  const aggregates = new Map<string, StageDayAgg>();
 
   for (const row of rows as KeitaroReportRow[]) {
-    const tid =
-      typeof row.sub_id_3 === "string" ? row.sub_id_3.trim() : "";
+    const tid = typeof row.sub_id_3 === "string" ? row.sub_id_3.trim() : "";
     const statDate = extractDate(row.day);
     const stage = tid ? stageMap.get(tid) : undefined;
 
@@ -160,22 +233,75 @@ export async function pollKeitaro(
     }
     matched++;
 
+    const key = `${stage.stageId}|${statDate}`;
+    let agg = aggregates.get(key);
+    if (!agg) {
+      agg = {
+        orgId: stage.orgId,
+        campaignId: stage.campaignId,
+        stageId: stage.stageId,
+        tid,
+        statDate,
+        visitRaw: 0,
+        visitClean: 0,
+        redirectRaw: 0,
+        redirectClean: 0,
+        checkouts: 0,
+        sales: 0,
+        revenue: 0,
+        cost: 0,
+      };
+      aggregates.set(key, agg);
+    }
+
+    const rawClicks = toInt(row.clicks);
+    const cleanClicks = toInt(row.campaign_unique_clicks);
+
+    if (classifier.isVisitRow(row)) {
+      // Visit campaign: clicks are "Clickers". Conversions never attach here.
+      agg.visitRaw += rawClicks;
+      agg.visitClean += cleanClicks;
+    } else {
+      // Offer campaign: clicks are "Offer Redirect"; conversions are sales.
+      agg.redirectRaw += rawClicks;
+      agg.redirectClean += cleanClicks;
+      agg.checkouts += toInt(row.leads);
+      agg.sales += toInt(row.sales);
+      agg.revenue += toNum(row.revenue);
+      agg.cost += toNum(row.cost);
+    }
+  }
+
+  let upserted = 0;
+  let errored = 0;
+  for (const agg of aggregates.values()) {
+    // EPC is revenue per offer-redirect raw click (derived from the fold).
+    const epc = agg.redirectRaw > 0 ? agg.revenue / agg.redirectRaw : 0;
+    const values = {
+      visit_clicks_raw: agg.visitRaw,
+      visit_clicks_clean: agg.visitClean,
+      redirect_clicks_raw: agg.redirectRaw,
+      redirect_clicks_clean: agg.redirectClean,
+      // Mirror redirect totals into the legacy columns so the pre-5b column
+      // meaning (offer clicks) stays consistent for any back-compat reader.
+      raw_clicks: agg.redirectRaw,
+      clean_clicks: agg.redirectClean,
+      checkouts: agg.checkouts,
+      sales: agg.sales,
+      revenue: toNumericString(agg.revenue),
+      cost: toNumericString(agg.cost),
+      epc: toNumericString(epc),
+    };
     try {
       await database
         .insert(keitaro_stage_results)
         .values({
-          org_id: stage.orgId,
-          campaign_id: stage.campaignId,
-          stage_id: stage.stageId,
-          stage_tracking_id: tid,
-          stat_date: statDate,
-          raw_clicks: toInt(row.clicks),
-          clean_clicks: toInt(row.campaign_unique_clicks),
-          checkouts: toInt(row.leads),
-          sales: toInt(row.sales),
-          revenue: toNumericString(row.revenue),
-          cost: toNumericString(row.cost),
-          epc: toNumericString(row.epc),
+          org_id: agg.orgId,
+          campaign_id: agg.campaignId,
+          stage_id: agg.stageId,
+          stage_tracking_id: agg.tid,
+          stat_date: agg.statDate,
+          ...values,
         })
         .onConflictDoUpdate({
           target: [
@@ -184,14 +310,8 @@ export async function pollKeitaro(
             keitaro_stage_results.stat_date,
           ],
           set: {
-            stage_tracking_id: tid,
-            raw_clicks: toInt(row.clicks),
-            clean_clicks: toInt(row.campaign_unique_clicks),
-            checkouts: toInt(row.leads),
-            sales: toInt(row.sales),
-            revenue: toNumericString(row.revenue),
-            cost: toNumericString(row.cost),
-            epc: toNumericString(row.epc),
+            stage_tracking_id: agg.tid,
+            ...values,
             synced_at: sql`now()`,
           },
         });
@@ -210,6 +330,7 @@ export async function pollKeitaro(
     upserted,
     unmatched,
     errored,
+    classification_degraded: classifier.degraded,
     unmatched_samples: [...unmatchedSamples],
     error: null,
   };

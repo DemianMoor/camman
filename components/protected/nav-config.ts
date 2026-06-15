@@ -1,5 +1,6 @@
 import {
   Activity,
+  BarChart3,
   FolderTree,
   Layers,
   LayoutDashboard,
@@ -58,6 +59,8 @@ export const navGroups: NavGroup[] = [
         icon: MessageSquare,
         disabled: !isEntityAvailable("creatives"),
       },
+      // Reports is a feature (Keitaro funnel), not an entity — always enabled.
+      { label: "Reports", href: "/reports", icon: BarChart3 },
     ],
   },
   {

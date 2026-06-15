@@ -435,6 +435,13 @@
       "when": 1781654400000,
       "tag": "0061_keitaro_results",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1781740800000,
+      "tag": "0062_keitaro_visit_redirect_split",
+      "breakpoints": true
     }
   ]
 }

@@ -1556,6 +1556,15 @@ export const keitaro_stage_results = pgTable(
       .references(() => campaign_stages.id, { onDelete: "cascade" }),
     stage_tracking_id: text("stage_tracking_id").notNull(),
     stat_date: date("stat_date").notNull(),
+    // Step 5b funnel split. Clicks are classified by the Keitaro campaign alias:
+    // `gk-lp-visits` ⇒ visits ("Clickers"); any other campaign ⇒ offer redirects.
+    // Visits ⊇ redirects (every redirect is also a visit) — never summed.
+    visit_clicks_raw: integer("visit_clicks_raw").notNull().default(0),
+    visit_clicks_clean: integer("visit_clicks_clean").notNull().default(0),
+    redirect_clicks_raw: integer("redirect_clicks_raw").notNull().default(0),
+    redirect_clicks_clean: integer("redirect_clicks_clean").notNull().default(0),
+    // Legacy combined columns. Pre-5b rows hold offer-redirect-only counts here;
+    // the new poll mirrors redirect totals into these for back-compat reads.
     raw_clicks: integer("raw_clicks").notNull().default(0),
     clean_clicks: integer("clean_clicks").notNull().default(0),
     checkouts: integer("checkouts").notNull().default(0),

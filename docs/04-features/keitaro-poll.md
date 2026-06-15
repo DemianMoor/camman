@@ -26,19 +26,23 @@ see CLAUDE.md §10g) into the offer's postfix URL param, which is configured as
 ## 2b. Visit vs Offer Redirect classification (Step 5b)
 Two kinds of Keitaro campaign fire clicks for the **same** `sub_id_3` (stage):
 
-- The **visit** campaign — alias **`gk-lp-visits`** — fires when a visitor LANDS
-  on the landing page. Its clean clicks are **Clickers**.
+- The **visit** campaign — Keitaro **name `gk-lp-visits`** — fires when a visitor
+  LANDS on the landing page. Its clean clicks are **Clickers**.
 - **Offer** campaigns (one per offer, e.g. `Kinzeno - 14508`) fire when a visitor
   clicks through to the offer. Their clean clicks are **Offer Redirect**, and
   their conversions are **Sales**.
 
-Classify by the campaign **alias** (`gk-lp-visits`), never a numeric id — the
-alias is rebuild-safe. The classifier (`buildVisitClassifier` in `poll.ts`)
-resolves each row's campaign via the campaigns list (id→alias and name→alias) so
-it works whether the report returns `campaign_id` or `campaign`. If the campaigns
-list fails to load, every row falls back to the redirect side (the safe default)
-and the poll response sets `classification_degraded: true` — the next cycle
-self-heals once the list loads.
+Classify by the campaign **name** (`gk-lp-visits`), never a numeric id — the name
+is the rebuild-safe human label. **Match on `name`, not `alias`:** in the live
+panel `gk-lp-visits` is the campaign's *name*; its *alias* is a random code (e.g.
+`ZttBSV`), so matching on alias finds nothing (this was a real bug — fixed
+2026-06-15). The classifier (`buildVisitClassifier` in `poll.ts`) resolves the
+visit name → its `campaign_id`(s) **once** from the campaigns list, then classifies
+each row by the reliable `campaign_id` the report returns (row `campaign` name as
+fallback). The poll response reports `visit_campaigns_matched` (expect 1). If the
+campaigns list fails to load, every row falls back to the redirect side (the safe
+default) and `classification_degraded: true` is set — the next cycle self-heals
+once the list loads.
 
 **Funnel semantics — visits ⊇ redirects, never summed:** every offer redirect is
 also a visit, so total arrivals = the visit (Clickers) count. The headline number
@@ -97,7 +101,7 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
 ## 5. Endpoints
 - `GET|POST /api/keitaro/poll` — cron (CRON_SECRET) or manual (operator+,
   `result_imports.create`). `?windowDays=N`. Returns
-  `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, classification_degraded, unmatched_samples, error }`.
+  `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, classification_degraded, visit_campaigns_matched, unmatched_samples, error }`.
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
   date) rows plus per-stage and campaign rollups with the Clickers → Offer
   Redirect → Sales funnel + derived rates. Requires `campaigns.view`.

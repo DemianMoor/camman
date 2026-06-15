@@ -24,10 +24,12 @@ const DEFAULT_TIMEOUT_MS = 20000;
 // resolveCampaignClass in lib/keitaro/poll.ts.
 export const KEITARO_GROUPING = ["day", "sub_id_3", "campaign_id"] as const;
 
-// The Keitaro campaign alias whose clicks are landing-page VISITS ("Clickers").
+// The Keitaro campaign NAME whose clicks are landing-page VISITS ("Clickers").
 // Any other campaign's clicks are OFFER REDIRECTS and its conversions are SALES.
-// Classify by ALIAS (rebuild-safe), never a hardcoded numeric id.
-export const KEITARO_VISIT_CAMPAIGN_ALIAS = "gk-lp-visits";
+// Classify by NAME (the rebuild-safe human label), never a hardcoded numeric id.
+// NOTE: in the live panel `gk-lp-visits` is the campaign's *name* — its *alias*
+// is a random code (e.g. `ZttBSV`), so matching on alias finds nothing.
+export const KEITARO_VISIT_CAMPAIGN_NAME = "gk-lp-visits";
 export const KEITARO_METRICS = [
   "clicks", // Raw Clicks
   "campaign_unique_clicks", // Clean Clicks (bot/dup-filtered)

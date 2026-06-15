@@ -9,7 +9,7 @@ import {
 import {
   buildKeitaroReport,
   fetchKeitaroCampaigns,
-  KEITARO_VISIT_CAMPAIGN_ALIAS,
+  KEITARO_VISIT_CAMPAIGN_NAME,
   type KeitaroReportRow,
 } from "@/lib/keitaro/client";
 
@@ -36,6 +36,9 @@ export interface KeitaroPollResult {
   // (the brief's default for "any non-visit campaign"). >0 ⇒ visit counts may be
   // undercounted this cycle; the next cycle self-heals once the list loads.
   classification_degraded: boolean;
+  // How many Keitaro campaigns matched the visit name (`gk-lp-visits`). Expect 1;
+  // 0 ⇒ visits can't be separated (every click counts as a redirect).
+  visit_campaigns_matched: number;
   // A few unmatched sub_id_3 values, for debugging what Keitaro actually sends.
   unmatched_samples: string[];
   error: string | null;
@@ -107,26 +110,30 @@ async function resolveStages(
 }
 
 // Build a classifier: given a report row, is its Keitaro campaign the visit
-// campaign? Classification is by ALIAS (`gk-lp-visits`), resolved from the
-// campaigns list (id→alias and name→alias) so it works whether the report
-// returns the campaign as `campaign_id` (numeric) or `campaign` (the name).
-// If the campaigns list fails to load, every row is treated as non-visit
-// (redirect) — the brief's safe default — and `degraded` is set.
+// campaign? The visit campaign is identified by NAME (`gk-lp-visits`, trimmed +
+// case-insensitive) — its alias is a random code, so matching on alias finds
+// nothing. We resolve the name → its campaign_id(s) ONCE here, then classify
+// each row by the reliable `campaign_id` dimension the report returns (with the
+// row's own `campaign` name as a fallback). If the campaigns list fails to load,
+// every row is treated as non-visit (redirect) — the safe default — and
+// `degraded` is set.
 async function buildVisitClassifier(): Promise<{
   isVisitRow: (row: KeitaroReportRow) => boolean;
   degraded: boolean;
+  visitCampaignCount: number;
 }> {
   const result = await fetchKeitaroCampaigns();
   if (!result.ok) {
-    return { isVisitRow: () => false, degraded: true };
+    return { isVisitRow: () => false, degraded: true, visitCampaignCount: 0 };
   }
 
+  const target = KEITARO_VISIT_CAMPAIGN_NAME.trim().toLowerCase();
   const visitIds = new Set<number>();
   const visitNames = new Set<string>();
   for (const c of result.campaigns) {
-    if (c.alias === KEITARO_VISIT_CAMPAIGN_ALIAS) {
+    if ((c.name ?? "").trim().toLowerCase() === target) {
       if (Number.isFinite(c.id)) visitIds.add(c.id);
-      if (c.name) visitNames.add(c.name.trim().toLowerCase());
+      visitNames.add(target);
     }
   }
 
@@ -143,7 +150,7 @@ async function buildVisitClassifier(): Promise<{
     return false;
   };
 
-  return { isVisitRow, degraded: false };
+  return { isVisitRow, degraded: false, visitCampaignCount: visitIds.size };
 }
 
 // One per (stage, ET date) — the aggregate we UPSERT. Multiple Keitaro campaign
@@ -192,6 +199,7 @@ export async function pollKeitaro(
     unmatched: 0,
     errored: 0,
     classification_degraded: false,
+    visit_campaigns_matched: 0,
     unmatched_samples: [],
     error: null,
   };
@@ -331,6 +339,7 @@ export async function pollKeitaro(
     unmatched,
     errored,
     classification_degraded: classifier.degraded,
+    visit_campaigns_matched: classifier.visitCampaignCount,
     unmatched_samples: [...unmatchedSamples],
     error: null,
   };

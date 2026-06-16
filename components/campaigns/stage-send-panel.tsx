@@ -5,6 +5,7 @@ import { AlertTriangle, Ban, CheckCircle2, CircleSlash, Download, SendHorizonal 
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
+import { LiveSendingBanner } from "@/components/sends/live-sending-banner";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import {
@@ -271,9 +272,12 @@ export function StageSendPanel({
 
   return (
     <div className="space-y-4">
-      {/* Gate states */}
+      {/* Global live-sending master state (Bug 2): the one switch that actually
+          gates sending, made unambiguous and actionable here. */}
+      <LiveSendingBanner variant="strip" />
+
+      {/* Per-stage gate state (distinct from the global master switch above). */}
       <div className="flex flex-wrap gap-2 text-xs">
-        <GateBadge on={status.send_enabled} onLabel="Live sending: on" offLabel="Live sending: off" />
         <GateBadge on={status.send_approved} onLabel="Approved to send" offLabel="Not approved" />
       </div>
 

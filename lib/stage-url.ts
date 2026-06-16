@@ -3,29 +3,35 @@
 // (authoritative rebuild on save) so the two can never diverge.
 //
 // Shape (see CLAUDE.md §10g and the stage form):
-//   <sales page URL>?<offer postfix>=<stage tracking ID>&<tag_id>=<value source>&…
+//   <sales page URL>?sub_id3=<stage tracking ID>&<tag_id>=<value source>&…
 //   e.g. https://www.guidekn.com/lp/orv?sub_id3=8_3_052726_1_s1_c101&subid5=facebook
 //
 // - Base is the SELECTED SALES PAGE's URL (the offer's affiliate/base_url is
 //   intentionally NOT used here). No sales page ⇒ empty URL.
-// - The offer's `postfix` is the query-param NAME that carries the stage
-//   tracking ID. Omitted when the offer has no postfix or the stage has no
-//   tracking ID yet.
+// - The stage tracking ID is ALWAYS carried by the fixed `sub_id3` param — this
+//   is the key Keitaro is configured to ingest for attribution, the same for
+//   every offer. (Bug 3: previously the per-offer `postfix` field drove the key,
+//   but operators set it to page slugs like `knd`/`orv`, breaking attribution;
+//   the param is now a system constant.) Omitted when there's no tracking ID yet.
 // - Each selected UTM tag appends `&<tag_id>=<value_source>` (the tag_id is
 //   the param name; value_source is the literal value).
 // - Keys and values are URL-encoded. If the base already contains "?", params
 //   are appended with "&".
 
+// The query-param name that carries the stage tracking ID. Fixed system-wide so
+// Keitaro attribution is consistent across offers. See lib/keitaro (sub_id_3).
+export const STAGE_TRACKING_PARAM = "sub_id3";
+
 export type UtmTagForUrl = { tag_id: string; value_source: string };
 
 export function buildStageFullUrl({
   salesPageUrl,
-  postfix,
   trackingId,
   utmTags,
 }: {
   salesPageUrl?: string | null;
-  postfix?: string | null;
+  // `postfix` is intentionally no longer accepted — the tracking-ID key is the
+  // STAGE_TRACKING_PARAM constant, not the per-offer postfix (Bug 3).
   trackingId?: string | null;
   utmTags?: UtmTagForUrl[] | null;
 }): string {
@@ -34,10 +40,9 @@ export function buildStageFullUrl({
 
   const params: Array<[string, string]> = [];
 
-  const pf = (postfix ?? "").trim();
   const tid = (trackingId ?? "").trim();
-  if (pf && tid) {
-    params.push([pf, tid]);
+  if (tid) {
+    params.push([STAGE_TRACKING_PARAM, tid]);
   }
 
   for (const tag of utmTags ?? []) {

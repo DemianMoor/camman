@@ -48,6 +48,7 @@ interface MainRow {
   creative_id: number | null;
   stage_tracking_id: string | null;
   short_url: string | null;
+  full_url: string | null;
   stop_text: string;
   sales_page_label: string | null;
   utm_tag_ids: number[];
@@ -74,6 +75,7 @@ export async function kickoffStageSend(
       s.creative_id              AS creative_id,
       s.tracking_id              AS stage_tracking_id,
       s.short_url                AS short_url,
+      s.full_url                 AS full_url,
       s.stop_text                AS stop_text,
       s.sales_page_label         AS sales_page_label,
       s.utm_tag_ids              AS utm_tag_ids,
@@ -184,21 +186,36 @@ export async function kickoffStageSend(
   if (!sd[0]) return { ok: false, reason: "no_short_domain" };
   const shortDomain = sd[0];
 
-  const ctxResult = await loadStageUrlContext({
-    orgId,
-    offerId: row.offer_id,
-    salesPageLabel: row.sales_page_label,
-    utmTagIds: row.utm_tag_ids ?? [],
-    dbc: tx,
-  });
-  // utm ownership was already verified at stage save; treat a failure as not-ready.
-  if (!ctxResult.ok) return { ok: false, reason: "stage_not_ready" };
-  const destinationUrl = buildStageFullUrl({
-    salesPageUrl: ctxResult.ctx.salesPageUrl,
-    postfix: ctxResult.ctx.postfix,
-    trackingId: row.stage_tracking_id,
-    utmTags: ctxResult.ctx.utmTags,
-  });
+  // Bug 3 fix: mint against the stage's stored Full URL — the exact value the
+  // operator sees and controls in the UI — NOT a server-side rebuild. The rebuild
+  // (loadStageUrlContext + buildStageFullUrl) diverged from the stored full_url
+  // (an offer postfix used as a page slug, plus a UTM tag), producing malformed
+  // tracking params (e.g. `?knd=<id>&subid3=sub_id3` instead of `?sub_id3=<id>`).
+  // The operator's full_url already has the correct params + tracking_id baked in.
+  //
+  // Use full_url only when it actually carries the stage tracking id; an auto-mode
+  // stage stores the BARE sales URL (no tracking params), so fall back to the
+  // rebuild there to attach tracking.
+  const storedFull = (row.full_url ?? "").trim();
+  const fullUrlHasTracking =
+    !!row.stage_tracking_id && storedFull.includes(row.stage_tracking_id);
+  let destinationUrl = fullUrlHasTracking ? storedFull : "";
+  if (!destinationUrl) {
+    const ctxResult = await loadStageUrlContext({
+      orgId,
+      offerId: row.offer_id,
+      salesPageLabel: row.sales_page_label,
+      utmTagIds: row.utm_tag_ids ?? [],
+      dbc: tx,
+    });
+    // utm ownership was already verified at stage save; treat a failure as not-ready.
+    if (!ctxResult.ok) return { ok: false, reason: "stage_not_ready" };
+    destinationUrl = buildStageFullUrl({
+      salesPageUrl: ctxResult.ctx.salesPageUrl,
+      trackingId: row.stage_tracking_id,
+      utmTags: ctxResult.ctx.utmTags,
+    });
+  }
   if (!destinationUrl) return { ok: false, reason: "no_destination" };
 
   // One send_token (= the stage_sends row id) per recipient, minted in bulk.

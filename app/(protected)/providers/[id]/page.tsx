@@ -18,6 +18,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
+import { LiveSendingBanner } from "@/components/sends/live-sending-banner";
 import {
   PhoneForm,
   type PhoneFormValues,
@@ -700,8 +701,16 @@ export default function ProviderDetailPage() {
         </div>
       </header>
 
+      {/* Global live-sending master state (Bug 2). The provider badges below are
+          CAPABILITIES + breakers, NOT the global on/off — surface the real
+          send-gate here so "Active" capability badges can't be misread as "live". */}
+      <LiveSendingBanner variant="strip" />
+
       <Card>
         <CardContent className="grid gap-3 pt-6 text-sm md:grid-cols-3">
+          <div className="md:col-span-3 -mb-1 text-xs text-muted-foreground">
+            Provider capabilities &amp; status (not the global send switch above):
+          </div>
           <div className="grid gap-1">
             <span className="text-xs text-muted-foreground">
               Short links supported

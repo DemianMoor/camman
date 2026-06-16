@@ -15,19 +15,22 @@ import { kickoffStageSend, type KickoffRefusal } from "@/lib/sends/kickoff";
 //
 //   Phase A — MATERIALIZE: for each DUE, not-yet-materialized scheduled stage,
 //     consult the provider's ET window (hold / missed / fire), then kickoff
-//     (mint links + stage_sends rows). `sent_at` is stamped only AFTER kickoff
-//     succeeds, so a tick killed mid-materialize can't strand the stage with a
-//     committed claim and zero rows — the next tick simply retries. Concurrency
-//     is guarded structurally by the `stage_sends_active_contact_uniq` dedup
-//     index (two ticks materializing the same stage → one wins, the other's
+//     (mint links + stage_sends rows). Phase A does NOT stamp `sent_at` — the
+//     materialized rows themselves prevent re-materialization (the due-selection
+//     requires NOT EXISTS stage_sends), and stamping before the drain would mark
+//     a stage "Sent" even when the drain is later gate-refused (Bug 1). A tick
+//     killed mid-materialize rolls the kickoff tx back (no rows) and retries.
+//     Concurrency is guarded structurally by the `stage_sends_active_contact_uniq`
+//     dedup index (two ticks materializing the same stage → one wins, the other's
 //     INSERT raises 23505 and is caught), so no pre-claim is needed.
 //
-//   Phase B — DRAIN: any tracked stage that still has `pending` stage_sends is
-//     drained in a bounded batch (the provider's remaining per-tick budget).
-//     This is what makes large audiences safe: sending is RESUMABLE across
-//     ticks instead of trying to push the whole audience inside one 300s
-//     invocation. Just-materialized stages are picked up here in the same tick,
-//     so first-send still happens promptly.
+//   Phase B — DRAIN: any released-or-due tracked stage with `pending` stage_sends
+//     is drained in a bounded batch (the provider's remaining per-tick budget).
+//     `sent_at` is stamped here ONLY after a drain pass actually attempts ≥1 send
+//     (processed > 0) — so a gate-refused stage stays armed and re-selectable,
+//     never a false "Sent". This is what makes large audiences safe: sending is
+//     RESUMABLE across ticks instead of pushing the whole audience inside one 300s
+//     invocation. Just-materialized stages are picked up here in the same tick.
 
 export interface DueRow {
   stage_id: number;
@@ -294,12 +297,12 @@ export async function runScheduledSends(
     }
 
     if (kickoff.ok || kickoff.reason === "already_pending") {
-      // Stamp sent_at = "materialized & handed to the drain" (also locks the
-      // stage's Scheduled field). Guarded so a concurrent claim isn't clobbered.
-      await dbc.execute(sql`
-        UPDATE campaign_stages SET sent_at = ${nowIso}
-        WHERE id = ${row.stage_id} AND sent_at IS NULL
-      `);
+      // Materialized only — do NOT stamp sent_at here (Bug 1 fix). sent_at now
+      // means "a drain actually sent ≥1 message"; Phase B stamps it after a
+      // successful drain. Re-materialization is already prevented by the rows
+      // existing (selectDueScheduledStages requires NOT EXISTS stage_sends), so no
+      // marker is needed here — and stamping before the drain would mark a stage
+      // "Sent" even when the drain is gate-refused (sends_enabled off).
       result.materialized++;
     } else if (PERMANENT_REFUSALS.has(kickoff.reason)) {
       await dbc.execute(sql`
@@ -341,7 +344,7 @@ export async function runScheduledSends(
     // Window gate (WS2 decoupling). Two cases:
     //   • FIRST FIRE (sent_at NULL, due): apply the day-anchored decision so a send
     //     never rolls to a later calendar day — hold before the window, mark missed
-    //     after it closes, fire inside it. Firing stamps sent_at = "released".
+    //     after it closes, fire inside it.
     //   • CONTINUATION (sent_at set): leftovers of an already-released send (incl.
     //     send-now). Drain only while NOW is inside the window; outside it, hold for
     //     the next window (resumable across days — never stranded, never out-of-hours).
@@ -351,8 +354,10 @@ export async function runScheduledSends(
       send_window_weekend_start: row.send_window_weekend_start,
       send_window_weekend_end: row.send_window_weekend_end,
     };
-    if (row.sent_at == null) {
-      // First release of a due scheduled stage.
+    const firstFire = row.sent_at == null;
+    if (firstFire) {
+      // First release of a due scheduled stage. Do NOT stamp sent_at yet — that
+      // happens only AFTER a drain pass actually sends (Bug 1 fix below).
       const decision = row.scheduled_at
         ? decideScheduledSend(cfg, new Date(row.scheduled_at), now)
         : "fire";
@@ -368,11 +373,7 @@ export async function runScheduledSends(
         result.missed++;
         continue;
       }
-      // decision === "fire": stamp the release marker before draining.
-      await dbc.execute(sql`
-        UPDATE campaign_stages SET sent_at = ${nowIso}
-        WHERE id = ${row.stage_id} AND sent_at IS NULL
-      `);
+      // decision === "fire": fall through to the drain.
     } else if (isOutsideSendWindow(cfg, now)) {
       // Released stage, but the window is currently closed — hold the leftovers.
       result.drain_held++;
@@ -389,6 +390,19 @@ export async function runScheduledSends(
         providerId,
         (spentByProvider.get(providerId) ?? 0) + drain.processed,
       );
+    }
+
+    // Bug 1 fix — INTEGRITY: stamp the release marker (sent_at) IF AND ONLY IF the
+    // drain actually attempted ≥1 send (processed > 0 ⇒ rows transitioned to
+    // 'sending'). A gate-refused drain (env SEND_ENABLED off, DB sends_enabled
+    // off, send_paused, or any other refusal) returns processed 0 and leaves
+    // sent_at NULL, so the stage looks identical to "armed, not yet fired" and is
+    // re-selected on the next tick once the gate opens — never a false "Sent".
+    if (firstFire && drain.processed > 0) {
+      await dbc.execute(sql`
+        UPDATE campaign_stages SET sent_at = ${nowIso}
+        WHERE id = ${row.stage_id} AND sent_at IS NULL
+      `);
     }
   }
 

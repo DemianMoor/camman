@@ -442,6 +442,20 @@
       "when": 1781740800000,
       "tag": "0062_keitaro_visit_redirect_split",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1781827200000,
+      "tag": "0063_org_send_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1781913600000,
+      "tag": "0064_send_attempts",
+      "breakpoints": true
     }
   ]
 }

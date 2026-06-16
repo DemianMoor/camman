@@ -21,7 +21,7 @@ async function main() {
   let sentCount = 0;
   const fakeSender = async (): Promise<SendSmsResult> => {
     sentCount++;
-    return { ok: true, messageId: `fake-${sentCount}`, response: "ok", error: null, status: 200 };
+    return { ok: true, messageId: `fake-${sentCount}`, response: "ok", rawBody: `{"id":"fake-${sentCount}"}`, error: null, status: 200, timedOut: false };
   };
   try {
     await db.transaction(async (tx) => {
@@ -37,7 +37,7 @@ async function main() {
       // Tick 1: phase A materializes 1000, phase B drains until the per-minute
       // soft ceiling (default 100) stops it — the rest stay pending.
       const result = await runScheduledSends(tx as unknown as typeof db, {
-        now: NOW, orgId, isEnabled: () => true, sendSms: fakeSender, maxStages: 50,
+        now: NOW, orgId, isEnabled: () => true, isOrgEnabled: async () => true, sendSms: fakeSender, maxStages: 50,
       });
       console.log("tick1:", JSON.stringify(result));
       check("tick1 materialized 1 (phase A fired stage 146)", result.materialized === 1, `got ${result.materialized}`);
@@ -63,7 +63,7 @@ async function main() {
         WHERE stage_id = 146 AND status = 'sent'
       `);
       const tick2 = await runScheduledSends(tx as unknown as typeof db, {
-        now: NOW, orgId, isEnabled: () => true, sendSms: fakeSender, maxStages: 50,
+        now: NOW, orgId, isEnabled: () => true, isOrgEnabled: async () => true, sendSms: fakeSender, maxStages: 50,
       });
       console.log("tick2:", JSON.stringify(tick2));
       check("tick2 materialized 0 (phase A skips materialized stage)", tick2.materialized === 0, `got ${tick2.materialized}`);

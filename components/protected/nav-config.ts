@@ -155,6 +155,11 @@ export const navGroups: NavGroup[] = [
     label: "Settings",
     items: [
       {
+        label: "Sending",
+        href: "/settings/sending",
+        icon: Send,
+      },
+      {
         label: "User Management",
         href: "/settings/users",
         icon: UserCog,

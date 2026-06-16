@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, CircleSlash } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, CircleSlash, Download, SendHorizonal } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
@@ -23,7 +23,10 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 
 type SendStatus = {
   send_approved: boolean;
+  // Effective gate = env backstop AND the DB master switch (Settings → Sending).
   send_enabled: boolean;
+  env_send_enabled: boolean;
+  org_sends_enabled: boolean;
   // Scheduled-send state (see lib/quiet-hours.ts). sent_at set ⇒ fired/locked;
   // schedule_missed_at set ⇒ the ET-day window closed before it fired.
   scheduled_at: string | null;
@@ -32,6 +35,43 @@ type SendStatus = {
   counts: { total: number; pending: number; sending: number; sent: number; failed: number };
   // The real frozen message of one materialized row (null before kickoff).
   sample_rendered_text: string | null;
+  // Reconciliation (WS3 G1): pool partitions into attempted + excluded; gap>0 is our bug.
+  reconciliation: {
+    pool_total: number;
+    qualified: number;
+    attempted: number;
+    excluded_optout: number;
+    excluded_filter: number;
+    excluded_split: number;
+    excluded_total: number;
+    gap: number;
+    closed: boolean;
+  };
+  // Attempt-evidence breakdown (WS3 G3): latest-attempt classification rollup.
+  attempts: {
+    accepted: number;
+    mine_transport: number;
+    theirs_rejected: number;
+    indeterminate: number;
+    owners: { us: number; texthub: number; manual: number };
+    groups: { classification: string; error: string | null; count: number }[];
+    total_failed: number;
+  };
+};
+
+const CLASSIFICATION_LABEL: Record<string, string> = {
+  accepted: "accepted",
+  mine_transport: "transport (ours)",
+  theirs_rejected: "TextHub-rejected",
+  indeterminate: "indeterminate",
+};
+
+type PreflightResult = {
+  ok: boolean;
+  mode: string;
+  recipient_count: number;
+  blockers: string[];
+  checks: { key: string; ok: boolean; label: string }[];
 };
 
 // Operating surface for the riskiest action in the system: approve → kick off
@@ -47,8 +87,17 @@ export function StageSendPanel({
 }) {
   const { can } = useAuth();
   const statusApi = useApiCall<SendStatus>();
-  const approveApi = useApiCall<{ ok: boolean; send_approved: boolean }>();
-  const kickoffApi = useApiCall<{ ok: boolean; materialized: number; mode: string }>();
+  const preflightApi = useApiCall<PreflightResult>();
+  const approveSendApi = useApiCall<{
+    ok: boolean;
+    mode: string;
+    armed: boolean;
+    sent_now: boolean;
+    materialized: number;
+    scheduled_at?: string | null;
+    drain?: { sent: number; failed: number; halted: boolean; stuck: number };
+  }>();
+  const abortApi = useApiCall<{ ok: boolean; discarded: number }>();
   const drainApi = useApiCall<{
     ok: boolean;
     sent: number;
@@ -64,6 +113,10 @@ export function StageSendPanel({
   const [status, setStatus] = useState<SendStatus | null>(null);
   const [tick, setTick] = useState(0);
   const [confirmDrain, setConfirmDrain] = useState(false);
+  // Approve-Send flow: preflight result drives the dialog (blockers vs confirm).
+  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const [approveDialogOpen, setApproveDialogOpen] = useState(false);
+  const [confirmAbort, setConfirmAbort] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -81,34 +134,56 @@ export function StageSendPanel({
   const canActivate = can("campaigns.activate");
   const canSend = can("campaigns.drain"); // manager+ (the money-spending action)
 
-  async function toggleApprove() {
-    if (!status) return;
-    const r = await approveApi.execute(
-      `/api/campaigns/${campaignId}/stages/${stageId}/send/approve`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approved: !status.send_approved }),
-      },
-    );
-    if (!r.ok) {
-      toastApiError(r, "Couldn't update approval");
-      return;
-    }
-    toast.success(r.data.send_approved ? "Stage approved to send" : "Approval revoked");
-    refresh();
-  }
-
-  async function kickoff() {
-    const r = await kickoffApi.execute(
-      `/api/campaigns/${campaignId}/stages/${stageId}/send/kickoff`,
+  // Step 1 of Approve Send: run read-only pre-flight, then open the dialog
+  // (showing blockers if any, otherwise the "submit N messages" confirm).
+  async function startApproveSend() {
+    const r = await preflightApi.execute(
+      `/api/campaigns/${campaignId}/stages/${stageId}/send/preflight`,
       { method: "POST" },
     );
     if (!r.ok) {
-      toastApiError(r, "Kickoff failed");
+      toastApiError(r, "Couldn't run pre-flight checks");
       return;
     }
-    toast.success(`Materialized ${r.data.materialized} send${r.data.materialized === 1 ? "" : "s"} (${r.data.mode})`);
+    setPreflight(r.data);
+    setApproveDialogOpen(true);
+  }
+
+  // Step 2: commit. Materializes + arms (future) or drains inline (send now).
+  async function confirmApproveSend() {
+    const r = await approveSendApi.execute(
+      `/api/campaigns/${campaignId}/stages/${stageId}/send/approve-send`,
+      { method: "POST" },
+    );
+    setApproveDialogOpen(false);
+    if (!r.ok) {
+      toastApiError(r, "Approve Send failed");
+      return;
+    }
+    if (r.data.armed) {
+      toast.success(`Armed — ${r.data.materialized.toLocaleString()} message${r.data.materialized === 1 ? "" : "s"} will send automatically at the scheduled time.`);
+    } else {
+      const d = r.data.drain;
+      toast.success(
+        d
+          ? `Submitted ${d.sent} (accepted by TextHub), failed ${d.failed}${d.halted ? " (halted)" : ""}${d.stuck ? `, ${d.stuck} stuck` : ""}`
+          : "Send committed",
+      );
+    }
+    refresh();
+  }
+
+  async function abortArmed() {
+    const r = await abortApi.execute(
+      `/api/campaigns/${campaignId}/stages/${stageId}/send/abort`,
+      { method: "POST" },
+    );
+    setConfirmAbort(false);
+    if (!r.ok) {
+      toastApiError(r, "Couldn't cancel the armed send");
+      return;
+    }
+    toast.success(`Armed send cancelled — ${r.data.discarded.toLocaleString()} pending message${r.data.discarded === 1 ? "" : "s"} discarded.`);
     refresh();
   }
 
@@ -124,7 +199,7 @@ export function StageSendPanel({
     }
     const d = r.data;
     toast.success(
-      `Sent ${d.sent}, failed ${d.failed}${d.halted ? " (halted)" : ""}${d.stuck ? `, ${d.stuck} stuck` : ""}`,
+      `Submitted ${d.sent} (accepted by TextHub), failed ${d.failed}${d.halted ? " (halted)" : ""}${d.stuck ? `, ${d.stuck} stuck` : ""}`,
     );
     refresh();
   }
@@ -147,21 +222,58 @@ export function StageSendPanel({
   }
 
   const pending = status.counts.pending;
+  // Send-flow state derivation (WS2 collapsed Approve Send). Kept pure (no
+  // render-time clock): a stage with a schedule that hasn't fired or been marked
+  // missed is treated as scheduled/armed; the server decides arm-vs-send-now from
+  // the real clock at commit time.
+  const hasBatch = status.counts.total > 0; // already materialized
+  const willArm = status.scheduled_at != null && status.schedule_missed_at == null;
+  // Armed = materialized for a schedule, nothing released/sent yet.
+  const armed =
+    pending > 0 && willArm && status.sent_at == null && status.counts.sent === 0;
+  // Name the exact gate that's blocking. The DB master switch (Settings) is the
+  // day-to-day control; the env backstop is the deploy-level one.
+  const sendOffReason = !status.org_sends_enabled
+    ? "Live SMS sending is off — turn it on in Settings → Sending"
+    : !status.env_send_enabled
+      ? "Sending is blocked at the deploy level (SEND_ENABLED is off)"
+      : null;
   const drainBlockedReason = !canSend
     ? "Requires manager+ to send"
-    : !status.send_enabled
-      ? "Sending is globally off (set SEND_ENABLED)"
+    : sendOffReason
+      ? sendOffReason
       : !status.send_approved
         ? "Approve the stage first"
         : pending === 0
           ? "Nothing pending to send"
           : null;
 
+  const rec = status.reconciliation;
+  const excludedBreakdown = [
+    rec.excluded_optout ? `${rec.excluded_optout} opt-out` : null,
+    rec.excluded_filter ? `${rec.excluded_filter} filtered` : null,
+    rec.excluded_split ? `${rec.excluded_split} other split` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const ownerParts = [
+    status.attempts.owners.us ? `${status.attempts.owners.us} transport (ours)` : null,
+    status.attempts.owners.texthub
+      ? `${status.attempts.owners.texthub} TextHub-rejected (escalate)`
+      : null,
+    status.attempts.owners.manual
+      ? `${status.attempts.owners.manual} indeterminate (reconcile)`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
   return (
     <div className="space-y-4">
       {/* Gate states */}
       <div className="flex flex-wrap gap-2 text-xs">
-        <GateBadge on={status.send_enabled} onLabel="SEND_ENABLED: on" offLabel="SEND_ENABLED: off" />
+        <GateBadge on={status.send_enabled} onLabel="Live sending: on" offLabel="Live sending: off" />
         <GateBadge on={status.send_approved} onLabel="Approved to send" offLabel="Not approved" />
       </div>
 
@@ -189,7 +301,7 @@ export function StageSendPanel({
           ["Total", status.counts.total],
           ["Pending", status.counts.pending],
           ["Sending", status.counts.sending],
-          ["Sent", status.counts.sent],
+          ["Submitted", status.counts.sent],
           ["Failed", status.counts.failed],
         ] as const).map(([label, n]) => (
           <div key={label} className="rounded-md border p-2">
@@ -204,6 +316,56 @@ export function StageSendPanel({
           <AlertTriangle className="size-3.5" aria-hidden />
           {status.counts.sending} stuck in “sending” (a send was interrupted) — never auto-retried; review manually.
         </p>
+      ) : null}
+
+      {/* Reconciliation (WS3 G1): no silent drops. */}
+      {rec.pool_total > 0 ? (
+        rec.closed ? (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
+            Pool {rec.pool_total.toLocaleString()} = {rec.attempted.toLocaleString()} attempted +{" "}
+            {rec.excluded_total.toLocaleString()} excluded
+            {excludedBreakdown ? ` (${excludedBreakdown})` : ""}. Closed ✓
+          </p>
+        ) : (
+          <p className="flex items-start gap-1.5 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
+            <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
+            {Math.abs(rec.gap).toLocaleString()} recipient
+            {Math.abs(rec.gap) === 1 ? "" : "s"} unaccounted — pool{" "}
+            {rec.pool_total.toLocaleString()} ≠ {rec.attempted.toLocaleString()} attempted +{" "}
+            {rec.excluded_total.toLocaleString()} excluded. This is a materialization bug; don&apos;t
+            rely on this send until it&apos;s resolved.
+          </p>
+        )
+      ) : null}
+
+      {/* Failure banner (WS3 G3): persistent mine/theirs/indeterminate split. */}
+      {status.attempts.total_failed > 0 ? (
+        <div className="space-y-1.5 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+          <p className="font-medium">
+            {status.attempts.total_failed.toLocaleString()} failed
+            {ownerParts ? ` — ${ownerParts}` : ""}.
+          </p>
+          {status.attempts.groups.length > 0 ? (
+            <ul className="space-y-0.5">
+              {status.attempts.groups.map((g, i) => (
+                <li key={i} className="font-mono">
+                  {g.count.toLocaleString()}× {CLASSIFICATION_LABEL[g.classification] ?? g.classification}
+                  {g.error ? `: ${g.error}` : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {status.attempts.owners.texthub > 0 || status.attempts.owners.manual > 0 ? (
+            <a
+              href={`/api/campaigns/${campaignId}/stages/${stageId}/send/escalation`}
+              className="inline-flex items-center gap-1.5 rounded-md border border-amber-400 bg-white/60 px-2 py-1 font-medium text-amber-900 hover:bg-white dark:bg-black/20 dark:text-amber-100"
+            >
+              <Download className="size-3.5" aria-hidden /> Export escalation packet (
+              {(status.attempts.owners.texthub + status.attempts.owners.manual).toLocaleString()})
+            </a>
+          ) : null}
+        </div>
       ) : null}
 
       {/* The real frozen message that will send (post-kickoff) — the truth, with
@@ -226,48 +388,184 @@ export function StageSendPanel({
         </div>
       ) : null}
 
-      {/* Actions */}
-      <div className="flex flex-wrap items-center gap-2">
-        {canActivate ? (
-          <Button variant="outline" onClick={() => void toggleApprove()} disabled={approveApi.isLoading}>
-            {status.send_approved ? "Revoke approval" : "Approve to send"}
-          </Button>
-        ) : null}
-        {canActivate ? (
-          <Button variant="outline" onClick={() => void kickoff()} disabled={kickoffApi.isLoading}>
-            Kick off (materialize + mint)
-          </Button>
-        ) : null}
-        <Button
-          onClick={() => setConfirmDrain(true)}
-          disabled={drainBlockedReason !== null || drainApi.isLoading}
-          title={drainBlockedReason ?? undefined}
-        >
-          {drainApi.isLoading ? "Sending…" : `Send now${pending > 0 ? ` (${pending})` : ""}`}
-        </Button>
-        {canSend && status.counts.failed > 0 ? (
+      {/* Actions (WS2 collapsed Approve Send) */}
+      {armed ? (
+        <div className="space-y-2">
+          <p className="flex items-center gap-1.5 rounded-md border border-sky-300 bg-sky-50 p-2 text-xs text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-100">
+            <CheckCircle2 className="size-3.5 shrink-0" aria-hidden />
+            Armed — {pending.toLocaleString()} message{pending === 1 ? "" : "s"} will send automatically
+            {status.scheduled_at ? ` at ${formatCampaignDateTime(status.scheduled_at)}` : ""} once the
+            send window is open. The schedule is locked until you cancel.
+          </p>
+          {canActivate ? (
+            <Button variant="outline" onClick={() => setConfirmAbort(true)} disabled={abortApi.isLoading}>
+              <Ban className="size-4" aria-hidden /> Cancel armed send
+            </Button>
+          ) : null}
+        </div>
+      ) : !hasBatch ? (
+        <div className="space-y-2">
           <Button
-            variant="outline"
-            onClick={() => void retryFailed()}
-            disabled={retryApi.isLoading || !status.send_enabled}
-            title={!status.send_enabled ? "Sending is globally off (set SEND_ENABLED)" : undefined}
+            onClick={() => void startApproveSend()}
+            disabled={!canActivate || preflightApi.isLoading || (!willArm && !canSend)}
+            title={
+              !canActivate
+                ? "Requires operator+ to commit a send"
+                : !willArm && !canSend
+                  ? "Sending now requires manager+. Set a Scheduled time to arm it instead."
+                  : undefined
+            }
           >
-            {retryApi.isLoading ? "Retrying…" : `Retry failed (${status.counts.failed})`}
+            <SendHorizonal className="size-4" aria-hidden />
+            {preflightApi.isLoading
+              ? "Checking…"
+              : willArm
+                ? "Approve Send (arm for schedule)"
+                : "Approve Send (now)"}
           </Button>
-        ) : null}
-      </div>
-      {drainBlockedReason ? (
-        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <CircleSlash className="size-3.5" aria-hidden /> {drainBlockedReason}
-        </p>
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            {willArm ? (
+              <>
+                <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
+                Materializes now and sends automatically at{" "}
+                {status.scheduled_at ? formatCampaignDateTime(status.scheduled_at) : "the scheduled time"}.
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
+                No schedule set — this sends immediately on confirm. Set a Scheduled time on the stage
+                to arm it instead.
+              </>
+            )}
+          </p>
+        </div>
       ) : (
-        <p className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400">
-          <CheckCircle2 className="size-3.5" aria-hidden /> Ready to send {pending} message
-          {pending === 1 ? "" : "s"}.
-        </p>
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              onClick={() => setConfirmDrain(true)}
+              disabled={drainBlockedReason !== null || drainApi.isLoading}
+              title={drainBlockedReason ?? undefined}
+            >
+              {drainApi.isLoading ? "Sending…" : `Send now${pending > 0 ? ` (${pending})` : ""}`}
+            </Button>
+            {canSend && status.counts.failed > 0 ? (
+              <Button
+                variant="outline"
+                onClick={() => void retryFailed()}
+                disabled={retryApi.isLoading || !status.send_enabled}
+                title={sendOffReason ?? undefined}
+              >
+                {retryApi.isLoading ? "Retrying…" : `Retry failed (${status.counts.failed})`}
+              </Button>
+            ) : null}
+          </div>
+          {drainBlockedReason ? (
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <CircleSlash className="size-3.5" aria-hidden /> {drainBlockedReason}
+            </p>
+          ) : pending > 0 ? (
+            <p className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400">
+              <CheckCircle2 className="size-3.5" aria-hidden /> Ready to send {pending} message
+              {pending === 1 ? "" : "s"}.
+            </p>
+          ) : null}
+        </>
       )}
 
-      {/* Irreversible-send confirmation */}
+      {/* Approve Send dialog — pre-flight blockers OR submit-N confirm. */}
+      <AlertDialog open={approveDialogOpen} onOpenChange={setApproveDialogOpen}>
+        <AlertDialogContent>
+          {preflight && !preflight.ok ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Not ready to send</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Resolve these before sending — nothing was materialized:
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <ul className="space-y-1 text-sm">
+                {preflight.checks
+                  .filter((c) => !c.ok)
+                  .map((c) => (
+                    <li key={c.key} className="flex items-center gap-1.5 text-destructive">
+                      <CircleSlash className="size-3.5 shrink-0" aria-hidden /> {c.label}
+                    </li>
+                  ))}
+              </ul>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Close</AlertDialogCancel>
+              </AlertDialogFooter>
+            </>
+          ) : preflight ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  {willArm
+                    ? `Arm ${preflight.recipient_count.toLocaleString()} message${preflight.recipient_count === 1 ? "" : "s"}?`
+                    : `Submit ${preflight.recipient_count.toLocaleString()} message${preflight.recipient_count === 1 ? "" : "s"} now?`}
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  {willArm
+                    ? `Materialized now and sent automatically at ${status.scheduled_at ? formatCampaignDateTime(status.scheduled_at) : "the scheduled time"}, once the send window is open. You can cancel before then.`
+                    : `Real SMS will go out to ${preflight.recipient_count.toLocaleString()} recipient${preflight.recipient_count === 1 ? "" : "s"} via TextHub. This can't be undone.`}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <ul className="space-y-1 text-xs text-muted-foreground">
+                {preflight.checks.map((c) => (
+                  <li key={c.key} className="flex items-center gap-1.5">
+                    <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" aria-hidden /> {c.label}
+                  </li>
+                ))}
+              </ul>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={approveSendApi.isLoading}>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void confirmApproveSend();
+                  }}
+                  disabled={approveSendApi.isLoading}
+                >
+                  {approveSendApi.isLoading
+                    ? "Working…"
+                    : willArm
+                      ? "Approve & arm"
+                      : "Approve & send now"}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          ) : null}
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Cancel armed send confirmation. */}
+      <AlertDialog open={confirmAbort} onOpenChange={setConfirmAbort}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel the armed send?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Discards the {pending.toLocaleString()} pending message{pending === 1 ? "" : "s"}{" "}
+              materialized for this stage and un-approves it, so you can edit or reschedule. Nothing
+              has been sent yet.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={abortApi.isLoading}>Keep armed</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void abortArmed();
+              }}
+              disabled={abortApi.isLoading}
+            >
+              Cancel armed send
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Send-now (leftovers / manual drain) confirmation. */}
       <AlertDialog open={confirmDrain} onOpenChange={setConfirmDrain}>
         <AlertDialogContent>
           <AlertDialogHeader>

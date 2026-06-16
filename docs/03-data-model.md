@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-06-15_
+_Last updated: 2026-06-16_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0059`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the `is_in_contact_group` note below).
 
@@ -96,10 +96,14 @@ erDiagram
   stage_sends }o--|| links : "link_id (tracked mode)"
 
   sms_providers ||--o{ send_circuit_events : "pause/resume audit"
+  stage_sends ||--o{ send_attempts : "per-attempt evidence"
   provider_credentials ||--o{ texthub_inbound_events : "STOP intake"
 
   campaigns ||--o{ campaign_events : "activity log"
   campaign_stages ||--o{ campaign_events : "stage events"
+
+  organizations ||--o| org_settings : "send master switch"
+  organizations ||--o{ org_setting_events : "settings audit"
 
   campaigns ||--o{ keitaro_stage_results : "poll rollup"
   campaign_stages ||--o{ keitaro_stage_results : "sub_id_3 = stage tracking id"
@@ -113,6 +117,8 @@ erDiagram
 | `organizations` | `id uuid` | the tenant root |
 | `org_members` | `user_id→auth.users`, `org_id`, `role` | UNIQUE(user_id, org_id); role CHECK in {owner,admin,manager,operator,viewer} |
 | `invites` | `org_id`, `email`, `role`, `token` UNIQUE, `expires_at`, `accepted_at` | pending member invitations |
+| `org_settings` | `org_id` PK, `sends_enabled` (default false), `sends_enabled_updated_by/_at` | per-org singleton; DB master switch for live SMS sending (migration 0063). Distinct from the `SEND_ENABLED` env backstop |
+| `org_setting_events` | `org_id`, `setting_key`, `old_value`, `new_value`, `actor_user_id` | append-only audit of settings flips (migration 0063) |
 
 ### Registry
 | Table | Key columns | Notes |
@@ -180,6 +186,7 @@ erDiagram
 | `clicks` | `id bigserial`, `link_id`, `classification`, `asn`/`country`/`is_datacenter`, `bot_score`/`bot_reasons`, `scored_at` (NULL=pending) | append-only click log |
 | `stage_sends` | `id uuid` (= send_token), `stage_id`, `contact_id`, `phone`, `link_id`, `rendered_text`, `status`, `texthub_message_id`, `attempts` | partial UNIQUE(stage_id, contact_id) WHERE status in (pending,sending) |
 | `send_circuit_events` | `provider_id`, `event` paused/resumed, `reason`, `actor_user_id` | append-only breaker audit |
+| `send_attempts` | `stage_send_id`, `attempt_number`, `request_redacted`, `http_status`, `raw_body`, `ok`, `message_id`, `classification` | append-only per-attempt evidence (migration 0064). Verbatim TextHub body + classification (`accepted`/`mine_transport`/`theirs_rejected`/`indeterminate`); api_key never stored. `stage_sends` is current state, this is immutable history |
 | `campaign_events` | `campaign_id`, `stage_id?`, `event_type` (free-text), `actor_user_id?` (NULL=system), `summary`, `metadata jsonb` | append-only campaign activity log (Activity tab timeline); migration 0060 |
 | `texthub_inbound_events` | `credential_id`, `provider_message_id`, `matched_contact_id`, `result` | raw inbound STOP capture |
 | `keitaro_stage_results` | UNIQUE(org_id, stage_id, stat_date), `stage_tracking_id`, `visit_clicks_raw`/`visit_clicks_clean` (Clickers), `redirect_clicks_raw`/`redirect_clicks_clean` (Offer Redirect), legacy `raw_clicks`/`clean_clicks` (= redirect, back-compat), `checkouts`/`sales`, `revenue`/`cost`/`epc`, `synced_at` | per-stage daily aggregate from the Keitaro 5-min poll; idempotent UPSERT (last-write-wins). `sub_id_3` = stage tracking id; campaign totals = SUM across stages. Clicks split by Keitaro campaign **name** `gk-lp-visits` (visits) vs offer campaigns (redirects); visits ⊇ redirects, never summed. Migrations 0061 + 0062 |

@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-06-15_
+_Last updated: 2026-06-16_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -36,7 +36,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | `CLASSIFIER_TIMEOUT_MS` | server | classifier fetch timeout (default 10000) |
 | `MAXMIND_LICENSE_KEY` | server | GeoLite2 download key; unset ⇒ scoring runs on UA only (asn/country/datacenter NULL) |
 | `CRON_SECRET` | server | shared secret for cron endpoints (Bearer). Also gates the send drain. Unset ⇒ click-scoring endpoint returns 503 |
-| `SEND_ENABLED` | server | global kill-switch for the send **drain**; must be exactly `"true"` to send. Default OFF; re-checked between batches mid-drain |
+| `SEND_ENABLED` | server | deploy-level **backstop** for the send **drain**; must be exactly `"true"` to send. Left permanently on in Vercel — the day-to-day on/off is the DB flag `org_settings.sends_enabled` (Settings → Sending). The drain requires BOTH. Re-checked between batches mid-drain |
 | `TELEGRAM_BOT_TOKEN` | server | Telegram alert bot token (best-effort; unset ⇒ silent no-op) |
 | `TELEGRAM_CHAT_ID` | server | numeric chat/group id for alerts |
 | `KEITARO_API_URL` | server | Keitaro admin/API host (default `https://admin.gdkn.org`). Never a brand tracking domain |

@@ -159,6 +159,8 @@ type Stage = {
   include_no_status: boolean;
   scheduled_at: string | null;
   sent_at: string | null;
+  schedule_missed_at: string | null;
+  send_approved: boolean;
   status: StageStatus;
   sms_count: number;
   total_cost: string;

@@ -56,6 +56,11 @@ export interface EditableStage {
   // When set on a tracked campaign, the send has fired → the form locks the
   // Scheduled field. NULL keeps it editable (incl. after a missed attempt).
   sent_at: string | null;
+  // Set when a scheduled attempt's window closed before it fired (reschedulable).
+  schedule_missed_at?: string | null;
+  // Approve-Send gate. With a schedule set, sent_at NULL and not missed it means
+  // the stage is ARMED (pre-materialized) → the Scheduled field locks until aborted.
+  send_approved?: boolean;
   notes: string | null;
   sms_count: number;
   delivered_count: number;
@@ -209,6 +214,13 @@ export function StageInlineEditor({
           splitIndex={isEdit ? stage!.split_index : null}
           splitTotal={isEdit ? stage!.split_total : null}
           sentAt={isEdit ? stage!.sent_at : null}
+          armed={
+            isEdit &&
+            !!stage!.send_approved &&
+            stage!.sent_at == null &&
+            stage!.scheduled_at != null &&
+            stage!.schedule_missed_at == null
+          }
           onSplit={() => {
             onOpenChange(false);
             onSaved();

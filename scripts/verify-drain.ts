@@ -38,15 +38,19 @@ const okSender: Sender = async () => ({
   ok: true,
   messageId: "TH-msg-1",
   response: "queued",
+  rawBody: '{"response":"queued","id":"TH-msg-1"}',
   error: null,
   status: 200,
+  timedOut: false,
 });
 const failSender: Sender = async () => ({
   ok: false,
   messageId: null,
   response: null,
+  rawBody: '{"error":"boom"}',
   error: "boom",
   status: 500,
+  timedOut: false,
 });
 
 async function main() {
@@ -101,6 +105,14 @@ async function main() {
       const org = await one<{ id: string }>(sql`SELECT id FROM organizations LIMIT 1`);
       if (!org) { console.log("SKIP: no organizations."); throw new Rollback(); }
       const orgId = org.id;
+
+      // Workstream-1 two-switch gate: the drain now also requires the DB master
+      // switch (org_settings.sends_enabled). Seed it on inside this rolled-back tx
+      // so the default per-org read returns true for every drain call below.
+      await tx.execute(sql`
+        INSERT INTO org_settings (org_id, sends_enabled) VALUES (${orgId}, true)
+        ON CONFLICT (org_id) DO UPDATE SET sends_enabled = true
+      `);
       const brand = await one<{ id: number }>(sql`SELECT id FROM brands WHERE org_id = ${orgId} LIMIT 1`);
       if (!brand) { console.log("SKIP: need a brand."); throw new Rollback(); }
 
@@ -171,6 +183,13 @@ async function main() {
       assert(!g2.ok && g2.reason === "send_disabled", "kill-switch off refuses");
       assert((await statusOf(stageId, "pending")) === 1, "nothing claimed while disabled");
 
+      console.log("Gate: DB master switch (org_settings.sends_enabled) off");
+      const g3 = await runStageDrain(tx, {
+        stageId, sendSms: okSender, isEnabled: () => true, isOrgEnabled: async () => false,
+      });
+      assert(!g3.ok && g3.reason === "send_disabled_org", "DB switch off refuses with distinct reason");
+      assert((await statusOf(stageId, "pending")) === 1, "nothing claimed while DB switch off");
+
       console.log("Happy path (sent + message id):");
       const h = await runStageDrain(tx, { stageId, sendSms: okSender, isEnabled: () => true });
       assert(h.ok && h.sent === 1 && h.failed === 0, "1 sent");
@@ -179,6 +198,18 @@ async function main() {
       );
       assert(sentRow.texthub_message_id === "TH-msg-1", "texthub_message_id captured");
       assert(sentRow.sent_at !== null && sentRow.attempts === 1, "sent_at set, attempts=1");
+
+      console.log("Evidence: send_attempts row written + classified (WS3):");
+      const att = await one<{ classification: string; ok: boolean; raw_body: string | null; request_redacted: string | null; http_status: number }>(
+        sql`SELECT sa.classification, sa.ok, sa.raw_body, sa.request_redacted, sa.http_status
+            FROM send_attempts sa
+            JOIN stage_sends ss ON ss.id = sa.stage_send_id
+            WHERE ss.stage_id = ${stageId} ORDER BY sa.id DESC LIMIT 1`,
+      );
+      assert(att.ok === true && att.classification === "accepted", "accepted attempt classified 'accepted'");
+      assert(att.raw_body === '{"response":"queued","id":"TH-msg-1"}', "verbatim raw body persisted");
+      assert(att.http_status === 200, "http status persisted");
+      assert(att.request_redacted != null && att.request_redacted.includes("api_key=redacted_"), "request stored with the api_key redacted");
 
       console.log("Failure path:");
       await addPending(stageId, contact, "m2");
@@ -279,7 +310,7 @@ async function main() {
         if (sendCalls === 2) {
           await tx.execute(sql`UPDATE sms_providers SET send_paused = true WHERE id = ${midProv}`);
         }
-        return { ok: true, messageId: "TH-mid", response: "queued", error: null, status: 200 };
+        return { ok: true, messageId: "TH-mid", response: "queued", rawBody: '{"id":"TH-mid"}', error: null, status: 200, timedOut: false };
       };
       const mid = await runStageDrain(tx, { stageId: midStage, sendSms: pausingSender, isEnabled: () => true, batchSize: 1 });
       assert(mid.ok && mid.sent === 2, "sent 2 before the concurrent pause took effect");

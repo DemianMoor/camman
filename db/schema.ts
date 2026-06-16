@@ -1908,6 +1908,46 @@ export const stage_sends = pgTable(
 export type StageSend = typeof stage_sends.$inferSelect;
 export type NewStageSend = typeof stage_sends.$inferInsert;
 
+// Append-only per-attempt send evidence (migration 0064, Workstream 3). One row
+// per TextHub send attempt: the redacted request (api_key NEVER stored), the
+// VERBATIM response body, the normalized result, and the assigned classification.
+// stage_sends holds current state; this holds immutable history (last_error is
+// overwritten on retry, so the first attempt's evidence would otherwise be lost).
+export const send_attempts = pgTable(
+  "send_attempts",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    stage_send_id: uuid("stage_send_id")
+      .notNull()
+      .references(() => stage_sends.id, { onDelete: "cascade" }),
+    attempt_number: integer("attempt_number").notNull(),
+    request_redacted: text("request_redacted"),
+    http_status: integer("http_status").notNull(),
+    raw_body: text("raw_body"),
+    ok: boolean("ok").notNull(),
+    message_id: text("message_id"),
+    error: text("error"),
+    classification: text("classification").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("send_attempts_stage_send_idx").on(table.stage_send_id, table.created_at),
+    index("send_attempts_org_id_idx").on(table.org_id, table.created_at),
+    check(
+      "send_attempts_classification_check",
+      sql`${table.classification} IN ('accepted', 'mine_transport', 'theirs_rejected', 'indeterminate')`,
+    ),
+  ],
+);
+
+export type SendAttempt = typeof send_attempts.$inferSelect;
+export type NewSendAttempt = typeof send_attempts.$inferInsert;
+
 // Append-only circuit-breaker audit log (migration 0058): every pause (auto-trip
 // = actor_user_id NULL + system reason; manual panic = actor set) and resume
 // (actor = the session user who cleared it). The permanent who/when record for a
@@ -1942,6 +1982,59 @@ export const send_circuit_events = pgTable(
 
 export type SendCircuitEvent = typeof send_circuit_events.$inferSelect;
 export type NewSendCircuitEvent = typeof send_circuit_events.$inferInsert;
+
+// Per-org operational settings singleton (migration 0063). `sends_enabled` is
+// the DB-backed master on/off for live SMS sending — the daily switch operators
+// flip from Settings, distinct from the SEND_ENABLED env var (a permanent
+// deploy-level backstop) and from sms_providers.send_paused (a per-provider
+// breaker). Default FALSE: a fresh org cannot send until someone turns it on.
+// The denormalized updated_by/_at mirror send_paused_reason/_at; full history is
+// in org_setting_events.
+export const org_settings = pgTable("org_settings", {
+  org_id: uuid("org_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  sends_enabled: boolean("sends_enabled").notNull().default(false),
+  sends_enabled_updated_by: uuid("sends_enabled_updated_by"),
+  sends_enabled_updated_at: timestamp("sends_enabled_updated_at", {
+    withTimezone: true,
+  }),
+  created_at: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updated_at: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export type OrgSettings = typeof org_settings.$inferSelect;
+export type NewOrgSettings = typeof org_settings.$inferInsert;
+
+// Append-only audit of org-settings flips (migration 0063, mirrors
+// send_circuit_events). actor_user_id has no cross-schema FK so the record
+// survives the actor being deleted; NULL ⇒ system action.
+export const org_setting_events = pgTable(
+  "org_setting_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    setting_key: text("setting_key").notNull(),
+    old_value: text("old_value"),
+    new_value: text("new_value"),
+    actor_user_id: uuid("actor_user_id"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("org_setting_events_org_id_idx").on(table.org_id, table.created_at),
+  ],
+);
+
+export type OrgSettingEvent = typeof org_setting_events.$inferSelect;
+export type NewOrgSettingEvent = typeof org_setting_events.$inferInsert;
 
 // Append-only campaign activity log (migration 0060). One row per meaningful
 // action on a campaign or its stages — lifecycle (status changes), authoring

@@ -14,8 +14,10 @@ import {
   resolvePacingCap,
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
+import { classifyAttempt } from "@/lib/sends/classify-attempt";
+import { getOrgSendsEnabled } from "@/lib/sends/org-send-flag";
 import { resolveProviderApiKey } from "@/lib/sends/provider-credential";
-import { sendSms as realSendSms, type SendSmsResult } from "@/lib/sends/texthub";
+import { buildSendUrl, sendSms as realSendSms, type SendSmsResult } from "@/lib/sends/texthub";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -51,7 +53,8 @@ export type Sender = (opts: {
 export type DrainRefusal =
   | "not_found"
   | "not_approved"
-  | "send_disabled"
+  | "send_disabled" // env SEND_ENABLED off (deploy-level backstop)
+  | "send_disabled_org" // DB org_settings.sends_enabled off (daily operational switch)
   | "provider_paused" // the latching circuit breaker is engaged for this provider
   | "no_provider"
   | "no_credentials";
@@ -113,12 +116,18 @@ export async function runStageDrain(
     stageId: number;
     sendSms?: Sender;
     isEnabled?: () => boolean;
+    // DB master switch (org_settings.sends_enabled). Injectable for tests, same
+    // as isEnabled; defaults to the real per-org read. Re-checked between batches
+    // so flipping it off in Settings stops an in-flight drain at the next batch.
+    isOrgEnabled?: (orgId: string) => Promise<boolean>;
     batchSize?: number;
     maxRows?: number;
   },
 ): Promise<DrainResult> {
   const sendSms = opts.sendSms ?? realSendSms;
   const isEnabled = opts.isEnabled ?? envSendEnabled;
+  const isOrgEnabled =
+    opts.isOrgEnabled ?? ((orgId: string) => getOrgSendsEnabled(dbc, orgId));
   const batchSize = opts.batchSize ?? 50;
 
   const ctx = (await dbc.execute(sql`
@@ -149,7 +158,12 @@ export async function runStageDrain(
   const stage = ctx[0];
   if (!stage) return { ok: false, reason: "not_found", ...EMPTY };
   if (!stage.send_approved) return { ok: false, reason: "not_approved", ...EMPTY };
+  // Two-switch gate (Workstream 1): the env SEND_ENABLED backstop AND the
+  // DB-backed daily on/off must BOTH be on. Distinct refusal reasons so the UI
+  // can tell the operator which one to flip.
   if (!isEnabled()) return { ok: false, reason: "send_disabled", ...EMPTY };
+  if (!(await isOrgEnabled(stage.org_id)))
+    return { ok: false, reason: "send_disabled_org", ...EMPTY };
   // Latching circuit breaker: refuse before claiming anything. A human must
   // resume via the provider UI; nothing here clears it.
   if (stage.send_paused) return { ok: false, reason: "provider_paused", ...EMPTY };
@@ -188,6 +202,15 @@ export async function runStageDrain(
       break;
     }
 
+    // DB master switch is runtime-mutable (unlike the env var): a fresh read each
+    // batch gives a TRUE mid-run kill — flipping "Live SMS sending" off in
+    // Settings halts the in-flight drain at the next batch boundary.
+    if (!(await isOrgEnabled(orgId))) {
+      halted = true;
+      stopReason = "org_disabled";
+      break;
+    }
+
     // True mid-run kill: a concurrent pause (auto-trip or manual panic) halts
     // the in-flight drain at the next batch boundary, before any new claim.
     if (await isProviderPaused(dbc, providerId)) {
@@ -222,6 +245,11 @@ export async function runStageDrain(
 
     if (claimed.length === 0) break;
 
+    // Build the redacted request shape once per batch — same URL TextHub gets,
+    // but with a placeholder key so the api_key is NEVER persisted (the real key
+    // is only ever passed to sendSms below).
+    const keyLast4 = apiKey.slice(-4);
+
     for (const c of claimed) {
       const res = await sendSms({
         apiKey,
@@ -229,24 +257,52 @@ export async function runStageDrain(
         number: c.phone,
         leadId: c.lead_id,
       });
+      // One immutable evidence row per attempt (Workstream 3): verbatim body +
+      // normalized result + classification. The attempt number is the freshly
+      // incremented stage_sends.attempts (RETURNING), so retries stack cleanly.
+      const classification = classifyAttempt({
+        ok: res.ok,
+        status: res.status,
+        messageId: res.messageId,
+        timedOut: res.timedOut,
+      });
+      let attemptNumber = 1;
       if (res.ok) {
-        await dbc.execute(sql`
+        const upd = (await dbc.execute(sql`
           UPDATE stage_sends
           SET status = 'sent', texthub_message_id = ${res.messageId},
               sent_at = now(), attempts = attempts + 1
           WHERE id = ${c.id}
-        `);
+          RETURNING attempts
+        `)) as unknown as { attempts: number }[];
+        attemptNumber = Number(upd[0]?.attempts ?? 1);
         sent++;
         consecutiveFailures = 0;
       } else {
-        await dbc.execute(sql`
+        const upd = (await dbc.execute(sql`
           UPDATE stage_sends
           SET status = 'failed', last_error = ${res.error}, attempts = attempts + 1
           WHERE id = ${c.id}
-        `);
+          RETURNING attempts
+        `)) as unknown as { attempts: number }[];
+        attemptNumber = Number(upd[0]?.attempts ?? 1);
         failed++;
         consecutiveFailures++;
       }
+      const requestRedacted = buildSendUrl({
+        apiKey: `redacted_${keyLast4}`,
+        text: c.rendered_text,
+        number: c.phone,
+        leadId: c.lead_id,
+      });
+      await dbc.execute(sql`
+        INSERT INTO send_attempts
+          (org_id, stage_send_id, attempt_number, request_redacted, http_status,
+           raw_body, ok, message_id, error, classification)
+        VALUES
+          (${orgId}, ${c.id}, ${attemptNumber}, ${requestRedacted}, ${res.status},
+           ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification})
+      `);
       processed++;
 
       // Failure spike → latch the pause (creds/provider likely broken; stop

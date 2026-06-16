@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-06-15_
+_Last updated: 2026-06-16_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -48,9 +48,13 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Campaign audience is **frozen at activation**; locked afterward (`audience_locked_after_draft`). Both `exclude_in_use_contacts` flags (segment + campaign) only consider `status='active'` campaigns.
 
 ## Sending safety
-- Drain requires all of: `send_approved` (per stage) + `SEND_ENABLED="true"` (env) + `CRON_SECRET`/`campaigns.drain` + provider not `send_paused`.
+- Drain requires all of: `send_approved` (per stage) + the **two-switch send gate** + `CRON_SECRET`/`campaigns.drain` + provider not `send_paused`.
+- **Two-switch send gate (migration 0063):** the drain needs BOTH `SEND_ENABLED="true"` (env — the deploy-level **backstop**, left permanently on in Vercel; refuses `send_disabled`) AND `org_settings.sends_enabled=true` (DB — the **daily on/off** in Settings → Sending, manager+, audited in `org_setting_events`; refuses `send_disabled_org`). Don't collapse them: the env var is the basement breaker (there only if a UI bug or compromised session flips the DB flag), the DB flag is the operational switch, `send_paused` is the per-provider "something broke" breaker. The DB flag is re-read each batch ⇒ a true mid-run kill; the env var is immutable per invocation.
 - `send_paused` is a latching kill-switch — requires a conscious human resume; trips/resumes audited in `send_circuit_events`.
-- `SEND_ENABLED` is OFF in production; live sending has not fired.
+- **Submission evidence + classification (migration 0064):** every send attempt writes an append-only `send_attempts` row (verbatim TextHub body + redacted request — api_key NEVER persisted). Classification rules (`lib/sends/classify-attempt.ts`): an outcome not confidently a success ⇒ `indeterminate`, **never** counted as sent; `indeterminate`/`sending` rows are **never auto-retried** (preserves at-most-once). Buckets map to owners: `mine_transport`=us, `theirs_rejected`=escalate, `indeterminate`=reconcile.
+- **Reconciliation:** `pool = attempted + excluded(opt_out|filter|split) + gap`; a non-zero `gap` is OUR bug (a materialized recipient went missing) and is surfaced, never hidden in count math.
+- **Copy rule:** the system says **"Submitted" / "Accepted by TextHub", never "Delivered."** There is no DLR — the strongest claim is that TextHub accepted the message.
+- `SEND_ENABLED` stays ON in production as the backstop; `org_settings.sends_enabled` defaults OFF and gates day-to-day. Live sending has not fired.
 - **`campaign_stages.sent_at` is the scheduler fire-lock** — the `send-scheduled` cron only considers stages with `sent_at IS NULL`. Only the pipeline (scheduler / manual drain backfill) may write it on a tracked campaign. Marking a **tracked** stage `'sent'` via the manual status action is blocked (409) so bookkeeping can't silently cancel a scheduled send. The scheduler stamps `sent_at` **after** materializing (not before), so a timed-out tick can't strand a stage.
 - **Scheduled sends are batched + resumable.** Kickoff mints links in bulk (never per-recipient — that blew the 300s cron limit at ~178s/1000), and the drain resumes across `*/15` ticks (phase B drains `pending` rows in budget-bounded batches). Large audiences send over multiple ticks, paced by the provider's `max_sends_per_run` / `max_sends_per_minute`.
 

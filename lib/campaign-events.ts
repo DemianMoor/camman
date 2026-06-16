@@ -17,6 +17,7 @@ export type CampaignEventType =
   | "send_approved"
   | "send_kickoff"
   | "send_drain"
+  | "send_aborted"
   | "results_imported"
   | "results_reverted";
 

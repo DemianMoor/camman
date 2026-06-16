@@ -23,9 +23,11 @@ export interface SendSmsParams {
 export interface SendSmsResult {
   ok: boolean;
   messageId: string | null; // TextHub's returned id (handle for later DLR)
-  response: string | null; // their response message
+  response: string | null; // their response message (parsed `response` field)
+  rawBody: string | null; // verbatim response body (evidence; Workstream 3)
   error: string | null;
   status: number; // HTTP status (0 = network/timeout)
+  timedOut: boolean; // true ⇒ aborted (may have landed) vs a connection failure
 }
 
 // Pure URL builder — exported so the URL contract (text + number + api_key, and
@@ -53,11 +55,22 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
       signal: controller.signal,
     });
 
-    let body: { response?: unknown; id?: unknown } = {};
+    // Read the body ONCE as text (verbatim evidence), then try to parse it as
+    // JSON. TextHub's response shape is `{response, id}`; a non-JSON body leaves
+    // the parsed fields null but the raw text is still captured for the audit.
+    let rawBody: string | null = null;
     try {
-      body = (await res.json()) as typeof body;
+      rawBody = await res.text();
     } catch {
-      // Non-JSON body — leave body empty.
+      rawBody = null;
+    }
+    let body: { response?: unknown; id?: unknown } = {};
+    if (rawBody) {
+      try {
+        body = JSON.parse(rawBody) as typeof body;
+      } catch {
+        // Non-JSON body — leave parsed fields empty; rawBody is still kept.
+      }
     }
     const response = typeof body.response === "string" ? body.response : null;
 
@@ -66,16 +79,20 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
         ok: false,
         messageId: null,
         response,
+        rawBody,
         error: response ?? `TextHub HTTP ${res.status}`,
         status: res.status,
+        timedOut: false,
       };
     }
     return {
       ok: true,
       messageId: body.id != null ? String(body.id) : null,
       response,
+      rawBody,
       error: null,
       status: res.status,
+      timedOut: false,
     };
   } catch (err) {
     const aborted = err instanceof Error && err.name === "AbortError";
@@ -83,8 +100,10 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
       ok: false,
       messageId: null,
       response: null,
+      rawBody: null,
       error: aborted ? "TextHub request timed out" : "TextHub network error",
       status: 0,
+      timedOut: aborted,
     };
   } finally {
     clearTimeout(timer);

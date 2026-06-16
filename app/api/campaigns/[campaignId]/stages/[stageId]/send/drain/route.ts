@@ -1,10 +1,9 @@
-import { sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
-import { logCampaignEvent } from "@/lib/campaign-events";
-import { decideDrainAuth, runStageDrain, type DrainRefusal } from "@/lib/sends/drain";
+import { decideDrainAuth, type DrainRefusal } from "@/lib/sends/drain";
+import { runStageDrainAndRecord } from "@/lib/sends/drain-and-record";
 
 // Real-send drain for one stage. Owner-triggered, explicit (NOT an always-on
 // cron). Three gates inside runStageDrain: SEND_ENABLED env kill-switch
@@ -29,6 +28,10 @@ const REFUSAL: Record<DrainRefusal, { status: number; message: string }> = {
   not_found: { status: 404, message: "Stage not found" },
   not_approved: { status: 409, message: "Stage isn't approved to send" },
   send_disabled: { status: 403, message: "Sending is disabled (SEND_ENABLED is off)" },
+  send_disabled_org: {
+    status: 403,
+    message: "Live SMS sending is off — turn it on in Settings → Sending",
+  },
   provider_paused: {
     status: 409,
     message: "Sending is paused for this provider (circuit breaker engaged)",
@@ -69,52 +72,11 @@ export async function POST(
     return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   }
 
-  const result = await runStageDrain(db, { stageId });
+  const result = await runStageDrainAndRecord(db, { campaignId, stageId, actorUserId });
 
   if (!result.ok && result.reason) {
     const r = REFUSAL[result.reason];
     return NextResponse.json({ error: r.message, reason: result.reason }, { status: r.status });
-  }
-
-  // Manual "Send now" backfill: once rows were actually attempted, stamp
-  // scheduled_at (if it was empty — immediate send) AND sent_at in ONE
-  // statement, so there's never a window where scheduled_at is set but sent_at
-  // is null for the send-scheduled cron to grab. sent_at also locks the stage's
-  // Scheduled field (see CLAUDE.md §10g / lib/quiet-hours.ts). COALESCE keeps a
-  // pre-existing scheduled_at and is idempotent across re-drains.
-  if (result.ok && result.processed > 0) {
-    // RETURNING org_id + stage_number so the activity log below has its tenant
-    // and a human label — the drain (cron-capable) carries no auth orgId.
-    const stamp = (await db.execute(sql`
-      UPDATE campaign_stages
-      SET scheduled_at = COALESCE(scheduled_at, now()),
-          sent_at = COALESCE(sent_at, now())
-      WHERE id = ${stageId}
-      RETURNING org_id, stage_number
-    `)) as unknown as { org_id: string; stage_number: number }[];
-
-    // Audit only runs that actually attempted sends — the */15 cron ticks past
-    // idle stages constantly, and a "0 processed" event every tick is noise.
-    const orgId = stamp[0]?.org_id;
-    if (orgId) {
-      const stopped = result.stopReason ? ` · stopped: ${result.stopReason}` : "";
-      await logCampaignEvent(db, {
-        orgId,
-        campaignId,
-        stageId,
-        actorUserId,
-        eventType: "send_drain",
-        summary: `Stage ${stamp[0].stage_number} send run: ${result.sent.toLocaleString()} sent, ${result.failed} failed${stopped}`,
-        metadata: {
-          sent: result.sent,
-          failed: result.failed,
-          processed: result.processed,
-          remaining: result.remaining,
-          stopReason: result.stopReason,
-          pausedNow: result.pausedNow,
-        },
-      });
-    }
   }
 
   return NextResponse.json(result);

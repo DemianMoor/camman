@@ -1,7 +1,11 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
-import { decideScheduledSend, type ProviderSendWindow } from "@/lib/quiet-hours";
+import {
+  decideScheduledSend,
+  isOutsideSendWindow,
+  type ProviderSendWindow,
+} from "@/lib/quiet-hours";
 import { isProviderPaused, resolvePacingCap } from "@/lib/sends/circuit-breakers";
 import { runStageDrain, type DrainResult, type Sender } from "@/lib/sends/drain";
 import { kickoffStageSend, type KickoffRefusal } from "@/lib/sends/kickoff";
@@ -89,22 +93,41 @@ export interface DrainableRow {
   org_id: string;
   provider_id: number | null;
   max_sends_per_run: number | null;
+  scheduled_at: string | null;
+  sent_at: string | null;
+  send_window_weekday_start: number | null;
+  send_window_weekday_end: number | null;
+  send_window_weekend_start: number | null;
+  send_window_weekend_end: number | null;
 }
 
-// Read-only selection of tracked stages that still have `pending` sends to
-// drain (approved, active campaign, provider not paused). Independent of
-// sent_at — this is the resumable-drain feed, so a stage keeps being drained
-// across ticks until its pending rows are exhausted.
+// Read-only selection of tracked stages with `pending` sends that are eligible to
+// drain THIS tick. Decoupled from materialization (WS2): a stage that was
+// pre-materialized at approve-time for a FUTURE schedule must NOT drain until its
+// time arrives. A stage is a candidate when it is either:
+//   • already RELEASED (`sent_at` set) — first send happened, so keep draining
+//     leftovers across ticks (the resumable-send feed), OR
+//   • DUE for its first release (`scheduled_at <= now`) — Phase B then applies the
+//     window decision per-stage (first-fire stamps sent_at).
+// Future-armed stages (sent_at NULL, scheduled_at in the future) are excluded.
+// The in-window gate is applied in JS in runScheduledSends (sender-zone, ET).
 export async function selectDrainableStages(
   dbc: typeof db,
-  opts: { orgId?: string; maxStages: number },
+  opts: { now: Date; orgId?: string; maxStages: number },
 ): Promise<DrainableRow[]> {
-  const { orgId, maxStages } = opts;
+  const { now, orgId, maxStages } = opts;
+  const nowIso = now.toISOString();
   return (await dbc.execute(sql`
     SELECT s.id              AS stage_id,
            c.org_id          AS org_id,
            s.sms_provider_id AS provider_id,
-           p.max_sends_per_run AS max_sends_per_run
+           p.max_sends_per_run AS max_sends_per_run,
+           s.scheduled_at    AS scheduled_at,
+           s.sent_at         AS sent_at,
+           p.send_window_weekday_start AS send_window_weekday_start,
+           p.send_window_weekday_end   AS send_window_weekday_end,
+           p.send_window_weekend_start AS send_window_weekend_start,
+           p.send_window_weekend_end   AS send_window_weekend_end
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
@@ -113,6 +136,9 @@ export async function selectDrainableStages(
       AND s.send_approved = true
       AND s.archived_at IS NULL
       AND (p.send_paused IS NOT TRUE)
+      -- Released already, OR due for first release. Future-armed stages
+      -- (sent_at NULL and scheduled_at in the future) are held until due.
+      AND (s.sent_at IS NOT NULL OR (s.scheduled_at IS NOT NULL AND s.scheduled_at <= ${nowIso}))
       AND EXISTS (
         SELECT 1 FROM stage_sends ss
         WHERE ss.stage_id = s.id AND ss.status = 'pending'
@@ -130,6 +156,7 @@ export interface ScheduledRunResult {
   missed: number; // window closed OR a permanent kickoff refusal -> marked missed
   refused: number; // transient kickoff failure / lost a materialize race -> retry
   drained: number; // stages whose drain ran this tick (phase B)
+  drain_held: number; // due/released but outside the send window -> hold for next window
   budget_held: number; // provider's per-tick send budget exhausted -> not drained
   paused_skipped: number; // provider paused -> skipped
   send_disabled: boolean; // global kill-switch off -> whole run no-op'd
@@ -145,6 +172,7 @@ const BASE: ScheduledRunResult = {
   missed: 0,
   refused: 0,
   drained: 0,
+  drain_held: 0,
   budget_held: 0,
   paused_skipped: 0,
   send_disabled: false,
@@ -179,6 +207,9 @@ export async function runScheduledSends(
     now?: Date;
     orgId?: string; // manual trigger: scope to one org. Omit for the cron (all orgs).
     isEnabled?: () => boolean;
+    // DB master switch (org_settings.sends_enabled); forwarded to the per-stage
+    // drain. Injectable for tests, same as isEnabled; defaults to the real read.
+    isOrgEnabled?: (orgId: string) => Promise<boolean>;
     sendSms?: Sender;
     maxStages?: number;
     // Injectable for tests; defaults to the real per-stage drain. maxRows is the
@@ -188,13 +219,14 @@ export async function runScheduledSends(
 ): Promise<ScheduledRunResult> {
   const now = opts?.now ?? new Date();
   const isEnabled = opts?.isEnabled ?? envSendEnabled;
+  const isOrgEnabled = opts?.isOrgEnabled;
   const sendSms = opts?.sendSms;
   const maxStages = opts?.maxStages ?? 50;
   const orgId = opts?.orgId;
   const runDrain =
     opts?.runDrain ??
     ((stageId: number, maxRows: number) =>
-      runStageDrain(dbc, { stageId, sendSms, isEnabled, maxRows }));
+      runStageDrain(dbc, { stageId, sendSms, isEnabled, isOrgEnabled, maxRows }));
 
   // Master kill-switch: with global sending off, no-op entirely — don't
   // materialize, don't drain, don't mark missed. Everything waits for the next
@@ -283,7 +315,7 @@ export async function runScheduledSends(
   }
 
   // ─── Phase B: drain stages with pending rows (incl. just-materialized) ──────
-  const drainable = await selectDrainableStages(dbc, { orgId, maxStages });
+  const drainable = await selectDrainableStages(dbc, { now, orgId, maxStages });
 
   for (const row of drainable) {
     if (row.provider_id != null && (await isProviderPaused(dbc, row.provider_id))) {
@@ -291,8 +323,9 @@ export async function runScheduledSends(
       continue;
     }
 
-    // Per-provider per-tick budget gate. Null-provider stages have no cap here;
-    // their drain refuses (no_provider) anyway.
+    // Per-provider per-tick budget gate FIRST — a budget-held stage must stay
+    // fully untouched (no release stamp) so the next tick re-drains it cleanly.
+    // Null-provider stages have no cap here; their drain refuses (no_provider).
     let budget = Number.POSITIVE_INFINITY;
     const providerId = row.provider_id;
     if (providerId != null) {
@@ -303,6 +336,47 @@ export async function runScheduledSends(
         continue;
       }
       budget = remaining;
+    }
+
+    // Window gate (WS2 decoupling). Two cases:
+    //   • FIRST FIRE (sent_at NULL, due): apply the day-anchored decision so a send
+    //     never rolls to a later calendar day — hold before the window, mark missed
+    //     after it closes, fire inside it. Firing stamps sent_at = "released".
+    //   • CONTINUATION (sent_at set): leftovers of an already-released send (incl.
+    //     send-now). Drain only while NOW is inside the window; outside it, hold for
+    //     the next window (resumable across days — never stranded, never out-of-hours).
+    const cfg: ProviderSendWindow = {
+      send_window_weekday_start: row.send_window_weekday_start,
+      send_window_weekday_end: row.send_window_weekday_end,
+      send_window_weekend_start: row.send_window_weekend_start,
+      send_window_weekend_end: row.send_window_weekend_end,
+    };
+    if (row.sent_at == null) {
+      // First release of a due scheduled stage.
+      const decision = row.scheduled_at
+        ? decideScheduledSend(cfg, new Date(row.scheduled_at), now)
+        : "fire";
+      if (decision === "hold") {
+        result.drain_held++;
+        continue;
+      }
+      if (decision === "missed") {
+        await dbc.execute(sql`
+          UPDATE campaign_stages SET schedule_missed_at = ${nowIso}
+          WHERE id = ${row.stage_id} AND sent_at IS NULL AND schedule_missed_at IS NULL
+        `);
+        result.missed++;
+        continue;
+      }
+      // decision === "fire": stamp the release marker before draining.
+      await dbc.execute(sql`
+        UPDATE campaign_stages SET sent_at = ${nowIso}
+        WHERE id = ${row.stage_id} AND sent_at IS NULL
+      `);
+    } else if (isOutsideSendWindow(cfg, now)) {
+      // Released stage, but the window is currently closed — hold the leftovers.
+      result.drain_held++;
+      continue;
     }
 
     const drain = await runDrain(row.stage_id, budget);

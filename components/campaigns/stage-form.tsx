@@ -196,6 +196,11 @@ export interface StageFormProps {
   // send-scheduled flow). NULL = not yet sent (editable / reschedulable, even
   // if a prior scheduled attempt was missed).
   sentAt?: string | null;
+  // Edit-mode only: the stage is ARMED — pre-materialized for a future schedule
+  // (Approve-Send flow) but not yet released. The Scheduled field locks just like
+  // a fired send; the operator must "Cancel armed send" to reschedule. NULL/false
+  // when not armed.
+  armed?: boolean;
   // Edit-mode only: invoked after the split endpoint succeeds. Parent
   // should refetch its stages list and close the editor (the source
   // stage's label/audience change in place plus N-1 new siblings appear).
@@ -302,6 +307,7 @@ export function StageForm({
   splitIndex,
   splitTotal,
   sentAt,
+  armed,
   onSplit,
   campaign,
   resultsCounters,
@@ -562,7 +568,7 @@ export function StageForm({
   //   A missed scheduled attempt leaves sentAt NULL, so it stays editable.
   // • Quiet-hours warning (non-blocking) when the chosen time falls outside the
   //   selected provider's auto-send window — the message just won't auto-send then.
-  const scheduledLocked = isTracked && !!sentAt;
+  const scheduledLocked = isTracked && (!!sentAt || !!armed);
   const selectedProvider = providers.find((p) => p.id === watchedProviderId);
   const scheduledOutsideWindow = (() => {
     if (!isTracked || !watchedScheduledAt || !selectedProvider) return false;
@@ -968,8 +974,9 @@ export function StageForm({
                     ) : null}
                     {scheduledLocked ? (
                       <FormDescription>
-                        Locked — this stage has been sent. The scheduled time
-                        can&apos;t be changed.
+                        {armed
+                          ? "Locked — this stage is armed (messages materialized for this schedule). Cancel the armed send to reschedule."
+                          : "Locked — this stage has been sent. The scheduled time can't be changed."}
                       </FormDescription>
                     ) : scheduledOutsideWindow ? (
                       <p className="text-xs text-amber-700 dark:text-amber-400">

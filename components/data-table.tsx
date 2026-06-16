@@ -43,6 +43,8 @@ export interface DataTableProps<T> {
   sortDir: "asc" | "desc";
   onSortChange: (sortBy: string | null, sortDir: "asc" | "desc") => void;
   onRowClick?: (row: T) => void;
+  /** Optional per-row className (e.g. an operational-status accent). */
+  rowClassName?: (row: T) => string | undefined;
 }
 
 export function DataTable<T>({
@@ -60,6 +62,7 @@ export function DataTable<T>({
   sortDir,
   onSortChange,
   onRowClick,
+  rowClassName,
 }: DataTableProps<T>) {
   const table = useReactTable({
     data,
@@ -155,6 +158,7 @@ export function DataTable<T>({
                   }
                   className={cn(
                     onRowClick && "cursor-pointer hover:bg-muted/40",
+                    rowClassName?.(row.original),
                   )}
                 >
                   {row.getVisibleCells().map((cell) => (

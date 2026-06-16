@@ -67,7 +67,14 @@ export async function GET(
 
   const stageId = parseId(url.searchParams.get("stageId") ?? "");
   const statusRaw = url.searchParams.get("status") ?? "";
-  const status = SEND_STATUSES.has(statusRaw) ? statusRaw : null;
+  // "attention" is a WS4 §B7 quick filter: every row that needs a human —
+  // failed, provider-rejected, or stuck mid-send (never auto-retried).
+  const status =
+    statusRaw === "attention"
+      ? "attention"
+      : SEND_STATUSES.has(statusRaw)
+        ? statusRaw
+        : null;
   const search = (url.searchParams.get("search") ?? "").trim();
 
   // Shared filter predicate (drizzle sql fragments compose cleanly).
@@ -76,7 +83,11 @@ export async function GET(
     drizzleSql`ss.campaign_id = ${campaignId}`,
   ];
   if (stageId !== null) filters.push(drizzleSql`ss.stage_id = ${stageId}`);
-  if (status !== null) filters.push(drizzleSql`ss.status = ${status}`);
+  if (status === "attention") {
+    filters.push(drizzleSql`ss.status IN ('failed', 'rejected', 'sending')`);
+  } else if (status !== null) {
+    filters.push(drizzleSql`ss.status = ${status}`);
+  }
   if (search) filters.push(drizzleSql`ss.phone ILIKE ${"%" + search + "%"}`);
   const whereClause = drizzleSql.join(filters, drizzleSql` AND `);
 

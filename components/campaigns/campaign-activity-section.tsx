@@ -392,6 +392,8 @@ function MessagesPanel({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ALL}>All statuses</SelectItem>
+            {/* §B7 — one filter for everything that needs a human. */}
+            <SelectItem value="attention">Needs attention</SelectItem>
             <SelectItem value="sent">Sent</SelectItem>
             <SelectItem value="failed">Failed</SelectItem>
             <SelectItem value="rejected">Rejected</SelectItem>

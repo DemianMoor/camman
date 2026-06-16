@@ -31,6 +31,15 @@ import { CampaignActivitySection } from "@/components/campaigns/campaign-activit
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
 import { ExportClickersDialog } from "@/components/campaigns/export-clickers-dialog";
 import { StageSendPanel } from "@/components/campaigns/stage-send-panel";
+import {
+  StagePrepareDialog,
+  type PrepareTarget,
+} from "@/components/campaigns/stage-prepare-dialog";
+import { StageStatusLegend } from "@/components/campaigns/stage-status-legend";
+import {
+  deriveStageOperationalStatus,
+  STAGE_STATUS_META,
+} from "@/lib/stages/stage-status";
 import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
 import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
 import { PhoneUploadForm } from "@/components/phone-upload-form";
@@ -184,6 +193,16 @@ type Stage = {
   archived_at: string | null;
   created_at: string;
   audience_count: number;
+  // WS4 §0: campaign link mode (propagated from the parent) + stage_sends
+  // materialization counts. Drive the derived operational status / row color.
+  link_mode: "manual" | "tracked";
+  send_counts: {
+    total: number;
+    pending: number;
+    sending: number;
+    sent: number;
+    failed: number;
+  };
   creative: { id: number; slug: string; text: string } | null;
   provider: Info | null;
   provider_phone: { id: number; phone_number: string } | null;
@@ -416,6 +435,8 @@ export default function CampaignDetailPage() {
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
   const [sendStage, setSendStage] = useState<Stage | null>(null);
+  // WS4 §A4: one-click Prepare target from the stages-list row (Orange rows).
+  const [prepareTarget, setPrepareTarget] = useState<PrepareTarget | null>(null);
   const [uploadContactsOpen, setUploadContactsOpen] = useState(false);
 
   const canUpdateCampaign = can("campaigns.update");
@@ -531,6 +552,19 @@ export default function CampaignDetailPage() {
     if (s.include_clickers) return "Clickers only";
     if (s.exclude_clickers) return "Excluding clickers";
     return "All";
+  }
+
+  // WS4 §0: derived operational status for a stage (null = off the model:
+  // manual campaign or archived stage → falls back to the manual-status color).
+  function stageOpStatus(s: Stage) {
+    return deriveStageOperationalStatus({
+      linkMode: s.link_mode,
+      status: s.status,
+      scheduledAt: s.scheduled_at,
+      sentAt: s.sent_at,
+      scheduleMissedAt: s.schedule_missed_at,
+      counts: s.send_counts,
+    });
   }
 
   const stageColumns = useMemo<ColumnDef<Stage>[]>(
@@ -708,6 +742,52 @@ export default function CampaignDetailPage() {
           ) : (
             <span className="text-muted-foreground">—</span>
           ),
+      },
+      {
+        id: "send_state",
+        header: "Send",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const s = row.original;
+          const op = stageOpStatus(s);
+          if (!op) return <span className="text-muted-foreground">—</span>;
+          const meta = STAGE_STATUS_META[op];
+          return (
+            <div className="flex flex-col items-start gap-1">
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                  meta.badgeClass,
+                )}
+                title={meta.meaning}
+              >
+                <span className={cn("size-1.5 rounded-full", meta.dotClass)} />
+                {meta.label}
+              </span>
+              {/* §A4: one-click Prepare on Orange rows — opens the shared popup
+                  (full readiness checklist) in place, no editor. */}
+              {op === "scheduled_unprepared" && canActivate ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 px-2 text-[11px]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPrepareTarget({
+                      campaignId,
+                      stageId: s.id,
+                      stageLabel: s.label,
+                      scheduledAt: s.scheduled_at,
+                      scheduleMissedAt: s.schedule_missed_at,
+                    });
+                  }}
+                >
+                  <Send className="size-3" aria-hidden /> Prepare
+                </Button>
+              ) : null}
+            </div>
+          );
+        },
       },
       {
         id: "status",
@@ -954,6 +1034,8 @@ export default function CampaignDetailPage() {
       selectedStageIds,
       stageStatusApi.isLoading,
     ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stageOpStatus and
+    // setPrepareTarget are stable; STAGE_STATUS_META is a module constant.
   );
 
   // Aggregate results across non-archived stages. Shown above the stage
@@ -1230,9 +1312,12 @@ export default function CampaignDetailPage() {
 
       {/* ============ Stages section ============ */}
       <section className="space-y-4">
-        <div>
-          <h2 className="text-lg font-medium">Stages</h2>
-          <p className="text-sm text-muted-foreground">{rollupSubtitle}</p>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-medium">Stages</h2>
+            <p className="text-sm text-muted-foreground">{rollupSubtitle}</p>
+          </div>
+          {campaign.link_mode === "tracked" ? <StageStatusLegend /> : null}
         </div>
 
         {hasResults ? (
@@ -1489,6 +1574,12 @@ export default function CampaignDetailPage() {
                         }
                       : undefined
                   }
+                  rowClassName={(s) => {
+                    const op = stageOpStatus(s);
+                    return op
+                      ? cn("border-l-4", STAGE_STATUS_META[op].rowClass)
+                      : undefined;
+                  }}
                 />
               </>
             )}
@@ -1561,6 +1652,16 @@ export default function CampaignDetailPage() {
       </section>
 
       {/* ============ Dialogs ============ */}
+      {/* §A4: shared Prepare popup, opened from a stages-list Orange row. */}
+      <StagePrepareDialog
+        target={prepareTarget}
+        onClose={() => setPrepareTarget(null)}
+        onPrepared={() => {
+          refetchStages();
+          refetchCampaign();
+        }}
+      />
+
       <FormDialog
         open={sendStage !== null}
         onOpenChange={(open) => {

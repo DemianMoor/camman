@@ -32,6 +32,10 @@ export interface PreflightResult {
   recipient_count: number;
   blockers: PreflightBlocker[];
   checks: PreflightCheck[];
+  // Creative body (link added per recipient at mint). Lets the shared Prepare
+  // popup show a message preview + segment count BEFORE materialization, when no
+  // per-recipient frozen text exists yet. Null when no creative is attached.
+  preview_text: string | null;
 }
 
 interface MainRow {
@@ -86,6 +90,7 @@ export async function preflightStageSend(
       recipient_count: 0,
       blockers: ["no_creative"],
       checks: [{ key: "stage", ok: false, label: "Stage not found" }],
+      preview_text: null,
     };
   }
 
@@ -156,5 +161,6 @@ export async function preflightStageSend(
     recipient_count: recipientCount,
     blockers,
     checks,
+    preview_text: row.creative_text ?? null,
   };
 }

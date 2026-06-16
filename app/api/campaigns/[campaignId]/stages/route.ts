@@ -76,6 +76,7 @@ export async function GET(
     .select({
       id: campaigns.id,
       status: campaigns.status,
+      link_mode: campaigns.link_mode,
       audience_segment_ids: campaigns.audience_segment_ids,
       audience_contact_group_ids: campaigns.audience_contact_group_ids,
       audience_filters: campaigns.audience_filters,
@@ -91,6 +92,7 @@ export async function GET(
     });
   }
   const isDraft = campaignRow[0].status === "draft";
+  const linkMode = campaignRow[0].link_mode;
   const draftAudienceInput = {
     id: cid,
     orgId,
@@ -268,8 +270,44 @@ export async function GET(
     inboundStopRows.map((r) => [Number(r.stage_id), Number(r.n)]),
   );
 
+  // WS4 §0 materialization signal: stage_sends counts by status, batched into a
+  // single grouped query (indexed on stage_id) — no N+1. Drives the Orange↔Blue
+  // operational-status split on the client via deriveStageOperationalStatus.
+  const sendCountRows = (await db.execute(drizzleSql`
+    SELECT
+      stage_id,
+      count(*)::int AS total,
+      count(*) FILTER (WHERE status = 'pending')::int AS pending,
+      count(*) FILTER (WHERE status = 'sending')::int AS sending,
+      count(*) FILTER (WHERE status = 'sent')::int AS sent,
+      count(*) FILTER (WHERE status IN ('failed', 'rejected'))::int AS failed
+    FROM stage_sends
+    WHERE org_id = ${orgId} AND campaign_id = ${cid}
+    GROUP BY stage_id
+  `)) as unknown as {
+    stage_id: number;
+    total: number;
+    pending: number;
+    sending: number;
+    sent: number;
+    failed: number;
+  }[];
+  const sendCountsByStage = new Map(
+    sendCountRows.map((r) => [
+      Number(r.stage_id),
+      {
+        total: Number(r.total),
+        pending: Number(r.pending),
+        sending: Number(r.sending),
+        sent: Number(r.sent),
+        failed: Number(r.failed),
+      },
+    ]),
+  );
+
   let data = rows.map((r, i) => ({
     ...r,
+    link_mode: linkMode,
     creative: r.creative?.id ? r.creative : null,
     provider: r.provider?.id ? r.provider : null,
     provider_phone: r.provider_phone?.id ? r.provider_phone : null,
@@ -277,6 +315,13 @@ export async function GET(
     offer: r.offer?.id ? r.offer : null,
     audience_count: audienceCounts[i],
     inbound_stop_count: inboundStopByStage.get(r.id) ?? 0,
+    send_counts: sendCountsByStage.get(r.id) ?? {
+      total: 0,
+      pending: 0,
+      sending: 0,
+      sent: 0,
+      failed: 0,
+    },
   }));
 
   // audience_count is derived in JS post-query; sort it here when the

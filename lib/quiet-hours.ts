@@ -86,6 +86,16 @@ function windowInstants(
   return { open, close };
 }
 
+// Public accessor for the allowed-window open/close instants on `instant`'s ET
+// day. Used by the WS4 send-window indicator (B5) to render "opens 08:00 ET" /
+// "open, closes in 3h 12m".
+export function sendWindowForDay(
+  cfg: ProviderSendWindow,
+  instant: Date,
+): { open: Date; close: Date } {
+  return windowInstants(cfg, instant);
+}
+
 export type ScheduleDecision = "hold" | "fire" | "missed";
 
 // Decide what the cron should do with a DUE scheduled stage (caller guarantees

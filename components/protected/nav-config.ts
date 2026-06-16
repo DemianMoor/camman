@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  CalendarClock,
   FolderTree,
   Layers,
   LayoutDashboard,
@@ -51,6 +52,13 @@ export const navGroups: NavGroup[] = [
         label: "Campaigns",
         href: "/campaigns",
         icon: Send,
+        disabled: !isEntityAvailable("campaigns"),
+      },
+      // WS4 §B1 — cross-campaign fleet view of today's tracked stages.
+      {
+        label: "Today's sends",
+        href: "/sends/today",
+        icon: CalendarClock,
         disabled: !isEntityAvailable("campaigns"),
       },
       {

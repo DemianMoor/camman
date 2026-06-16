@@ -6,6 +6,11 @@ import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
 import { LiveSendingBanner } from "@/components/sends/live-sending-banner";
+import {
+  StagePrepareDialog,
+  type PrepareTarget,
+} from "@/components/campaigns/stage-prepare-dialog";
+import { StageReadinessChecklist } from "@/components/sends/stage-readiness-checklist";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import {
@@ -67,14 +72,6 @@ const CLASSIFICATION_LABEL: Record<string, string> = {
   indeterminate: "indeterminate",
 };
 
-type PreflightResult = {
-  ok: boolean;
-  mode: string;
-  recipient_count: number;
-  blockers: string[];
-  checks: { key: string; ok: boolean; label: string }[];
-};
-
 // Operating surface for the riskiest action in the system: approve → kick off
 // (materialize + mint) → drain (real SMS). Guardrails: visible gate states,
 // live counts, drain disabled unless approved + globally enabled + something
@@ -88,16 +85,6 @@ export function StageSendPanel({
 }) {
   const { can } = useAuth();
   const statusApi = useApiCall<SendStatus>();
-  const preflightApi = useApiCall<PreflightResult>();
-  const approveSendApi = useApiCall<{
-    ok: boolean;
-    mode: string;
-    armed: boolean;
-    sent_now: boolean;
-    materialized: number;
-    scheduled_at?: string | null;
-    drain?: { sent: number; failed: number; halted: boolean; stuck: number };
-  }>();
   const abortApi = useApiCall<{ ok: boolean; discarded: number }>();
   const drainApi = useApiCall<{
     ok: boolean;
@@ -114,9 +101,9 @@ export function StageSendPanel({
   const [status, setStatus] = useState<SendStatus | null>(null);
   const [tick, setTick] = useState(0);
   const [confirmDrain, setConfirmDrain] = useState(false);
-  // Approve-Send flow: preflight result drives the dialog (blockers vs confirm).
-  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
-  const [approveDialogOpen, setApproveDialogOpen] = useState(false);
+  // Prepare flow now lives in the shared StagePrepareDialog (§A2) — one popup,
+  // one handler, identical to the stages-list-row entry point.
+  const [prepareOpen, setPrepareOpen] = useState(false);
   const [confirmAbort, setConfirmAbort] = useState(false);
 
   useEffect(() => {
@@ -135,45 +122,6 @@ export function StageSendPanel({
   const canActivate = can("campaigns.activate");
   const canSend = can("campaigns.drain"); // manager+ (the money-spending action)
 
-  // Step 1 of Approve Send: run read-only pre-flight, then open the dialog
-  // (showing blockers if any, otherwise the "submit N messages" confirm).
-  async function startApproveSend() {
-    const r = await preflightApi.execute(
-      `/api/campaigns/${campaignId}/stages/${stageId}/send/preflight`,
-      { method: "POST" },
-    );
-    if (!r.ok) {
-      toastApiError(r, "Couldn't run pre-flight checks");
-      return;
-    }
-    setPreflight(r.data);
-    setApproveDialogOpen(true);
-  }
-
-  // Step 2: commit. Materializes + arms (future) or drains inline (send now).
-  async function confirmApproveSend() {
-    const r = await approveSendApi.execute(
-      `/api/campaigns/${campaignId}/stages/${stageId}/send/approve-send`,
-      { method: "POST" },
-    );
-    setApproveDialogOpen(false);
-    if (!r.ok) {
-      toastApiError(r, "Approve Send failed");
-      return;
-    }
-    if (r.data.armed) {
-      toast.success(`Armed — ${r.data.materialized.toLocaleString()} message${r.data.materialized === 1 ? "" : "s"} will send automatically at the scheduled time.`);
-    } else {
-      const d = r.data.drain;
-      toast.success(
-        d
-          ? `Submitted ${d.sent} (accepted by TextHub), failed ${d.failed}${d.halted ? " (halted)" : ""}${d.stuck ? `, ${d.stuck} stuck` : ""}`
-          : "Send committed",
-      );
-    }
-    refresh();
-  }
-
   async function abortArmed() {
     const r = await abortApi.execute(
       `/api/campaigns/${campaignId}/stages/${stageId}/send/abort`,
@@ -181,10 +129,10 @@ export function StageSendPanel({
     );
     setConfirmAbort(false);
     if (!r.ok) {
-      toastApiError(r, "Couldn't cancel the armed send");
+      toastApiError(r, "Couldn't cancel the prepared send");
       return;
     }
-    toast.success(`Armed send cancelled — ${r.data.discarded.toLocaleString()} pending message${r.data.discarded === 1 ? "" : "s"} discarded.`);
+    toast.success(`Prepared send cancelled — ${r.data.discarded.toLocaleString()} pending message${r.data.discarded === 1 ? "" : "s"} discarded.`);
     refresh();
   }
 
@@ -228,10 +176,21 @@ export function StageSendPanel({
   // missed is treated as scheduled/armed; the server decides arm-vs-send-now from
   // the real clock at commit time.
   const hasBatch = status.counts.total > 0; // already materialized
-  const willArm = status.scheduled_at != null && status.schedule_missed_at == null;
-  // Armed = materialized for a schedule, nothing released/sent yet.
-  const armed =
-    pending > 0 && willArm && status.sent_at == null && status.counts.sent === 0;
+  const willSchedule =
+    status.scheduled_at != null && status.schedule_missed_at == null;
+  // Prepared = materialized for a schedule, nothing released/sent yet.
+  const prepared =
+    pending > 0 && willSchedule && status.sent_at == null && status.counts.sent === 0;
+  // Shared Prepare popup target (§A2). Built from live status so arm-vs-now copy
+  // matches; the server still makes the authoritative call at commit.
+  const prepareTarget: PrepareTarget | null = prepareOpen
+    ? {
+        campaignId,
+        stageId,
+        scheduledAt: status.scheduled_at,
+        scheduleMissedAt: status.schedule_missed_at,
+      }
+    : null;
   // Name the exact gate that's blocking. The DB master switch (Settings) is the
   // day-to-day control; the env backstop is the deploy-level one.
   const sendOffReason = !status.org_sends_enabled
@@ -286,7 +245,7 @@ export function StageSendPanel({
         <p className="flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
           <AlertTriangle className="size-3.5" aria-hidden />
           Missed scheduled send — the sending window closed before it fired.
-          Reschedule the stage to re-arm it, or send now.
+          Reschedule the stage to prepare it again, or send now.
         </p>
       ) : status.sent_at ? (
         <p className="text-xs text-muted-foreground">
@@ -392,43 +351,45 @@ export function StageSendPanel({
         </div>
       ) : null}
 
-      {/* Actions (WS2 collapsed Approve Send) */}
-      {armed ? (
+      {/* Actions (§A2 — Prepare via the shared popup) */}
+      {prepared ? (
         <div className="space-y-2">
-          <p className="flex items-center gap-1.5 rounded-md border border-sky-300 bg-sky-50 p-2 text-xs text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-100">
+          <p className="flex items-center gap-1.5 rounded-md border border-blue-300 bg-blue-50 p-2 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
             <CheckCircle2 className="size-3.5 shrink-0" aria-hidden />
-            Armed — {pending.toLocaleString()} message{pending === 1 ? "" : "s"} will send automatically
+            Prepared — {pending.toLocaleString()} message{pending === 1 ? "" : "s"} will send automatically
             {status.scheduled_at ? ` at ${formatCampaignDateTime(status.scheduled_at)}` : ""} once the
             send window is open. The schedule is locked until you cancel.
           </p>
           {canActivate ? (
             <Button variant="outline" onClick={() => setConfirmAbort(true)} disabled={abortApi.isLoading}>
-              <Ban className="size-4" aria-hidden /> Cancel armed send
+              <Ban className="size-4" aria-hidden /> Cancel prepared send
             </Button>
           ) : null}
         </div>
       ) : !hasBatch ? (
         <div className="space-y-2">
+          {/* §B2: live readiness checklist, visible before opening the popup. */}
+          <StageReadinessChecklist
+            campaignId={campaignId}
+            stageId={stageId}
+            refreshKey={tick}
+          />
           <Button
-            onClick={() => void startApproveSend()}
-            disabled={!canActivate || preflightApi.isLoading || (!willArm && !canSend)}
+            onClick={() => setPrepareOpen(true)}
+            disabled={!canActivate || (!willSchedule && !canSend)}
             title={
               !canActivate
                 ? "Requires operator+ to commit a send"
-                : !willArm && !canSend
-                  ? "Sending now requires manager+. Set a Scheduled time to arm it instead."
+                : !willSchedule && !canSend
+                  ? "Sending now requires manager+. Set a Scheduled time to prepare it instead."
                   : undefined
             }
           >
             <SendHorizonal className="size-4" aria-hidden />
-            {preflightApi.isLoading
-              ? "Checking…"
-              : willArm
-                ? "Approve Send (arm for schedule)"
-                : "Approve Send (now)"}
+            {willSchedule ? "Prepare (for schedule)" : "Prepare & send now"}
           </Button>
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            {willArm ? (
+            {willSchedule ? (
               <>
                 <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
                 Materializes now and sends automatically at{" "}
@@ -438,7 +399,7 @@ export function StageSendPanel({
               <>
                 <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
                 No schedule set — this sends immediately on confirm. Set a Scheduled time on the stage
-                to arm it instead.
+                to prepare it instead.
               </>
             )}
           </p>
@@ -477,77 +438,18 @@ export function StageSendPanel({
         </>
       )}
 
-      {/* Approve Send dialog — pre-flight blockers OR submit-N confirm. */}
-      <AlertDialog open={approveDialogOpen} onOpenChange={setApproveDialogOpen}>
-        <AlertDialogContent>
-          {preflight && !preflight.ok ? (
-            <>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Not ready to send</AlertDialogTitle>
-                <AlertDialogDescription>
-                  Resolve these before sending — nothing was materialized:
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <ul className="space-y-1 text-sm">
-                {preflight.checks
-                  .filter((c) => !c.ok)
-                  .map((c) => (
-                    <li key={c.key} className="flex items-center gap-1.5 text-destructive">
-                      <CircleSlash className="size-3.5 shrink-0" aria-hidden /> {c.label}
-                    </li>
-                  ))}
-              </ul>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Close</AlertDialogCancel>
-              </AlertDialogFooter>
-            </>
-          ) : preflight ? (
-            <>
-              <AlertDialogHeader>
-                <AlertDialogTitle>
-                  {willArm
-                    ? `Arm ${preflight.recipient_count.toLocaleString()} message${preflight.recipient_count === 1 ? "" : "s"}?`
-                    : `Submit ${preflight.recipient_count.toLocaleString()} message${preflight.recipient_count === 1 ? "" : "s"} now?`}
-                </AlertDialogTitle>
-                <AlertDialogDescription>
-                  {willArm
-                    ? `Materialized now and sent automatically at ${status.scheduled_at ? formatCampaignDateTime(status.scheduled_at) : "the scheduled time"}, once the send window is open. You can cancel before then.`
-                    : `Real SMS will go out to ${preflight.recipient_count.toLocaleString()} recipient${preflight.recipient_count === 1 ? "" : "s"} via TextHub. This can't be undone.`}
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <ul className="space-y-1 text-xs text-muted-foreground">
-                {preflight.checks.map((c) => (
-                  <li key={c.key} className="flex items-center gap-1.5">
-                    <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" aria-hidden /> {c.label}
-                  </li>
-                ))}
-              </ul>
-              <AlertDialogFooter>
-                <AlertDialogCancel disabled={approveSendApi.isLoading}>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={(e) => {
-                    e.preventDefault();
-                    void confirmApproveSend();
-                  }}
-                  disabled={approveSendApi.isLoading}
-                >
-                  {approveSendApi.isLoading
-                    ? "Working…"
-                    : willArm
-                      ? "Approve & arm"
-                      : "Approve & send now"}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </>
-          ) : null}
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* Prepare popup — the SAME shared component the stages-list row uses. */}
+      <StagePrepareDialog
+        target={prepareTarget}
+        onClose={() => setPrepareOpen(false)}
+        onPrepared={refresh}
+      />
 
-      {/* Cancel armed send confirmation. */}
+      {/* Cancel prepared send confirmation. */}
       <AlertDialog open={confirmAbort} onOpenChange={setConfirmAbort}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Cancel the armed send?</AlertDialogTitle>
+            <AlertDialogTitle>Cancel the prepared send?</AlertDialogTitle>
             <AlertDialogDescription>
               Discards the {pending.toLocaleString()} pending message{pending === 1 ? "" : "s"}{" "}
               materialized for this stage and un-approves it, so you can edit or reschedule. Nothing
@@ -555,7 +457,7 @@ export function StageSendPanel({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={abortApi.isLoading}>Keep armed</AlertDialogCancel>
+            <AlertDialogCancel disabled={abortApi.isLoading}>Keep prepared</AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();
@@ -563,7 +465,7 @@ export function StageSendPanel({
               }}
               disabled={abortApi.isLoading}
             >
-              Cancel armed send
+              Cancel prepared send
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

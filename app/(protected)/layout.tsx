@@ -2,6 +2,7 @@ import { requireOrgMembership } from "@/lib/auth/helpers";
 import { AuthProvider } from "@/components/protected/auth-context";
 import { MobileSidebar } from "@/components/protected/mobile-sidebar";
 import { Sidebar } from "@/components/protected/sidebar";
+import { SendStateStrip } from "@/components/sends/send-state-strip";
 
 export default async function ProtectedLayout({
   children,
@@ -21,8 +22,11 @@ export default async function ProtectedLayout({
             <MobileSidebar>
               <Sidebar userEmail={user.email} />
             </MobileSidebar>
-            {/* breadcrumb / page-title placeholder — wired in a later step */}
-            <div className="flex-1" />
+            {/* WS4 §B3: app-level send-state strip — the global master switch and
+                any latched provider breaker are never off-screen. */}
+            <div className="flex flex-1 items-center justify-end">
+              <SendStateStrip />
+            </div>
           </header>
           <main className="flex-1 px-4 py-6 md:px-8 md:py-8">{children}</main>
         </div>

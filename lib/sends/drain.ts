@@ -64,6 +64,11 @@ export interface DrainResult {
   reason?: DrainRefusal;
   sent: number;
   failed: number;
+  // TextHub rejected the send with its structured {"status":"Suppressed"} token
+  // (a number it blocks on its side). Counted separately from `failed` so the
+  // operator can see provider-suppression vs genuine failures. LABEL ONLY — these
+  // are NOT opted out and NOT skipped in future campaigns.
+  filtered: number;
   processed: number;
   halted: boolean; // stopped early (kill-switch off, pause, or a breaker trip)
   stuck: number; // rows left in 'sending' (crashed mid-send — manual review)
@@ -88,6 +93,7 @@ function envSendEnabled(): boolean {
 const EMPTY = {
   sent: 0,
   failed: 0,
+  filtered: 0,
   processed: 0,
   halted: false,
   stuck: 0,
@@ -188,6 +194,7 @@ export async function runStageDrain(
 
   let sent = 0;
   let failed = 0;
+  let filtered = 0;
   let processed = 0;
   let halted = false;
   let stopReason: DrainStopReason | null = null;
@@ -279,14 +286,23 @@ export async function runStageDrain(
         sent++;
         consecutiveFailures = 0;
       } else {
+        // A structured {"status":"Suppressed"} rejection is recorded as
+        // 'filtered' — a distinct, operator-visible bucket — instead of 'failed'.
+        // Visibility only: the row is NOT opted out and NOT skipped next time.
+        const newStatus = res.suppressed ? "filtered" : "failed";
         const upd = (await dbc.execute(sql`
           UPDATE stage_sends
-          SET status = 'failed', last_error = ${res.error}, attempts = attempts + 1
+          SET status = ${newStatus}, last_error = ${res.error}, attempts = attempts + 1
           WHERE id = ${c.id}
           RETURNING attempts
         `)) as unknown as { attempts: number }[];
         attemptNumber = Number(upd[0]?.attempts ?? 1);
-        failed++;
+        if (res.suppressed) filtered++;
+        else failed++;
+        // A non-OK send still feeds the failure-spike breaker regardless of the
+        // suppression flag — unchanged from prior behavior (suppressions used to
+        // be 'failed'). Whether a wall of suppressions SHOULD trip the breaker is
+        // a separate sending-behavior question, intentionally not changed here.
         consecutiveFailures++;
       }
       const requestRedacted = buildSendUrl({
@@ -353,7 +369,7 @@ export async function runStageDrain(
       `🛑 Send circuit breaker TRIPPED\n` +
         `reason: ${stopReason}\n` +
         `provider: ${providerId} (org ${orgId})\n` +
-        `stage: ${opts.stageId} · sent ${sent}, failed ${failed}, stuck ${stuck}, remaining ${remaining}\n` +
+        `stage: ${opts.stageId} · sent ${sent}, failed ${failed}, filtered ${filtered}, stuck ${stuck}, remaining ${remaining}\n` +
         `Sending is now PAUSED for this provider — resume manually after fixing the cause.`,
     );
   }
@@ -362,6 +378,7 @@ export async function runStageDrain(
     ok: true,
     sent,
     failed,
+    filtered,
     processed,
     halted,
     stuck,

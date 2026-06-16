@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-06-12_
+_Last updated: 2026-06-16_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -86,8 +86,8 @@ sequenceDiagram
   Op->>Drain: drain (SEND_ENABLED + approved + !paused + breakers)
   loop batch
     Drain->>TH: GET send(api_key,text,number)
-    TH-->>Drain: {ok,messageId}
-    Drain->>Drain: mark sent / failed; ceilings + spike checks
+    TH-->>Drain: {ok,messageId,status}
+    Drain->>Drain: mark sent / filtered (status="Suppressed") / failed; ceilings + spike checks
   end
   Rec->>R: GET /r/<code>
   R->>R: first-pass classify (UA/headers)

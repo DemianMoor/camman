@@ -21,7 +21,7 @@ async function main() {
   let sentCount = 0;
   const fakeSender = async (): Promise<SendSmsResult> => {
     sentCount++;
-    return { ok: true, messageId: `fake-${sentCount}`, response: "ok", rawBody: `{"id":"fake-${sentCount}"}`, error: null, status: 200, timedOut: false };
+    return { ok: true, messageId: `fake-${sentCount}`, response: "ok", providerStatus: null, suppressed: false, rawBody: `{"id":"fake-${sentCount}"}`, error: null, status: 200, timedOut: false };
   };
   try {
     await db.transaction(async (tx) => {

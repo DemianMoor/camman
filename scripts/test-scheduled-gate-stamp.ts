@@ -26,7 +26,7 @@ async function main() {
   let sendCalls = 0;
   const fakeSender = async (): Promise<SendSmsResult> => {
     sendCalls++;
-    return { ok: true, messageId: `m-${sendCalls}`, response: "ok", rawBody: `{"id":"m-${sendCalls}"}`, error: null, status: 200, timedOut: false };
+    return { ok: true, messageId: `m-${sendCalls}`, response: "ok", providerStatus: null, suppressed: false, rawBody: `{"id":"m-${sendCalls}"}`, error: null, status: 200, timedOut: false };
   };
 
   try {

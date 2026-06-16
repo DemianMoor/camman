@@ -15,6 +15,7 @@ import {
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
 import { decideDrainAuth, runStageDrain, type Sender } from "@/lib/sends/drain";
+import { isSuppressedStatus } from "@/lib/sends/texthub";
 
 // Verifies the real-send drain WITHOUT a real TextHub call (injected sender)
 // and WITHOUT persisting (rolled-back tx): both gates (send_approved +
@@ -38,6 +39,8 @@ const okSender: Sender = async () => ({
   ok: true,
   messageId: "TH-msg-1",
   response: "queued",
+  providerStatus: null,
+  suppressed: false,
   rawBody: '{"response":"queued","id":"TH-msg-1"}',
   error: null,
   status: 200,
@@ -47,9 +50,24 @@ const failSender: Sender = async () => ({
   ok: false,
   messageId: null,
   response: null,
+  providerStatus: null,
+  suppressed: false,
   rawBody: '{"error":"boom"}',
   error: "boom",
   status: 500,
+  timedOut: false,
+});
+// TextHub's verbatim suppression envelope (confirmed live 2026-06-16).
+const suppressedSender: Sender = async () => ({
+  ok: false,
+  messageId: null,
+  response: "Error occured, unsubscribed the phone number",
+  providerStatus: "Suppressed",
+  suppressed: true,
+  rawBody:
+    '{"response":"Error occured, unsubscribed the phone number","status":"Suppressed"}',
+  error: "Error occured, unsubscribed the phone number",
+  status: 404,
   timedOut: false,
 });
 
@@ -89,6 +107,18 @@ async function main() {
   assert(
     ceilingBreached(100, 100) && !ceilingBreached(99, 100),
     "ceiling breached at >= cap",
+  );
+  // Strict suppression gate: only the structured `status` token "suppressed"
+  // (any case) — never the HTTP code, never the free-text response string.
+  assert(
+    isSuppressedStatus("Suppressed") &&
+      isSuppressedStatus("suppressed") &&
+      isSuppressedStatus("  SUPPRESSED  ") &&
+      !isSuppressedStatus("queued") &&
+      !isSuppressedStatus("Error occured, unsubscribed the phone number") &&
+      !isSuppressedStatus(null) &&
+      !isSuppressedStatus(undefined),
+    "isSuppressedStatus matches the status token strictly (not the response text)",
   );
 
   const dbUrl = process.env.DATABASE_URL;
@@ -220,6 +250,29 @@ async function main() {
       );
       assert(failRow.last_error === "boom" && failRow.attempts === 1, "last_error set, attempts=1");
 
+      console.log("Filtered path (TextHub 'Suppressed' → status='filtered', NOT 'failed'):");
+      await addPending(stageId, await mkContact(), "m-supp");
+      const fl = await runStageDrain(tx, { stageId, sendSms: suppressedSender, isEnabled: () => true });
+      assert(fl.ok && fl.filtered === 1 && fl.failed === 0, "1 filtered, 0 failed (suppression split out of failed)");
+      assert((await statusOf(stageId, "filtered")) === 1, "row marked status='filtered'");
+      const flRow = await one<{ last_error: string | null; status: string }>(
+        sql`SELECT last_error, status FROM stage_sends WHERE stage_id = ${stageId} AND status = 'filtered' LIMIT 1`,
+      );
+      assert(
+        flRow.last_error === "Error occured, unsubscribed the phone number",
+        "filtered row keeps the verbatim provider message in last_error",
+      );
+      const flAtt = await one<{ classification: string; raw_body: string | null }>(
+        sql`SELECT sa.classification, sa.raw_body FROM send_attempts sa
+            JOIN stage_sends ss ON ss.id = sa.stage_send_id
+            WHERE ss.stage_id = ${stageId} AND ss.status = 'filtered' ORDER BY sa.id DESC LIMIT 1`,
+      );
+      assert(
+        flAtt.classification === "theirs_rejected" &&
+          (flAtt.raw_body ?? "").includes('"status":"Suppressed"'),
+        "evidence row still classified theirs_rejected with the verbatim Suppressed envelope",
+      );
+
       console.log("Stuck in 'sending' is never auto-retried:");
       await tx.execute(sql`
         INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
@@ -310,7 +363,7 @@ async function main() {
         if (sendCalls === 2) {
           await tx.execute(sql`UPDATE sms_providers SET send_paused = true WHERE id = ${midProv}`);
         }
-        return { ok: true, messageId: "TH-mid", response: "queued", rawBody: '{"id":"TH-mid"}', error: null, status: 200, timedOut: false };
+        return { ok: true, messageId: "TH-mid", response: "queued", providerStatus: null, suppressed: false, rawBody: '{"id":"TH-mid"}', error: null, status: 200, timedOut: false };
       };
       const mid = await runStageDrain(tx, { stageId: midStage, sendSms: pausingSender, isEnabled: () => true, batchSize: 1 });
       assert(mid.ok && mid.sent === 2, "sent 2 before the concurrent pause took effect");

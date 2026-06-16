@@ -1888,7 +1888,7 @@ export const stage_sends = pgTable(
     index("stage_sends_link_id_idx").on(table.link_id),
     check(
       "stage_sends_status_check",
-      sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected')`,
+      sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected', 'filtered')`,
     ),
     // Migration 0058. Partial unique: at most one LIVE send per (stage, contact)
     // — structurally blocks double-materialization while leaving terminal rows

@@ -23,6 +23,7 @@ interface StageRollup {
   stage_number: number;
   sent: number;
   failed: number;
+  filtered: number;
   pending: number;
   total: number;
   last_sent_at: string | null;
@@ -31,6 +32,7 @@ interface ActivitySummary {
   sent: number;
   failed: number;
   rejected: number;
+  filtered: number;
   pending: number;
   sending: number;
   total: number;
@@ -85,11 +87,14 @@ const EVENTS_PAGE_SIZE = 30;
 const MESSAGES_PAGE_SIZE = 50;
 
 // Status → badge color. Terminal-good = emerald, terminal-bad = red, in-flight
-// = amber/blue. Mirrors the stage_sends status check constraint.
+// = amber/blue. Mirrors the stage_sends status check constraint. `filtered`
+// (TextHub-suppressed) gets its own violet — visually distinct from red
+// (genuine failure): "blocked on TextHub's side," not a delivery failure.
 const STATUS_STYLES: Record<string, string> = {
   sent: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
   failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
   rejected: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
+  filtered: "bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300",
   pending: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   sending: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
 };
@@ -157,9 +162,15 @@ export function CampaignActivitySection({
       <h2 className="text-lg font-semibold">Activity</h2>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <SummaryCard label="Messages sent" value={s.sent} accent="text-emerald-700 dark:text-emerald-400" />
         <SummaryCard label="Failed" value={s.failed} accent={s.failed > 0 ? "text-red-700 dark:text-red-400" : undefined} />
+        <SummaryCard
+          label="Filtered"
+          value={s.filtered}
+          accent={s.filtered > 0 ? "text-violet-700 dark:text-violet-400" : undefined}
+          hint="Rejected by TextHub as suppressed/unsubscribed on their side. Not opted out here and not skipped in future campaigns — label only."
+        />
         <SummaryCard label="In flight" value={s.pending + s.sending} />
         <SummaryCard label="Replies" value={s.replies} />
         <SummaryCard
@@ -197,16 +208,21 @@ function SummaryCard({
   value,
   valueText,
   accent,
+  hint,
 }: {
   label: string;
   value?: number;
   valueText?: string;
   accent?: string;
+  hint?: string;
 }) {
   return (
     <Card>
       <CardContent className="p-3">
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+        <div
+          className="text-xs uppercase tracking-wide text-muted-foreground"
+          title={hint}
+        >
           {label}
         </div>
         <div
@@ -397,6 +413,7 @@ function MessagesPanel({
             <SelectItem value="sent">Sent</SelectItem>
             <SelectItem value="failed">Failed</SelectItem>
             <SelectItem value="rejected">Rejected</SelectItem>
+            <SelectItem value="filtered">Filtered</SelectItem>
             <SelectItem value="pending">Pending</SelectItem>
             <SelectItem value="sending">Sending</SelectItem>
           </SelectContent>

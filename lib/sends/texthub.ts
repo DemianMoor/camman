@@ -24,10 +24,23 @@ export interface SendSmsResult {
   ok: boolean;
   messageId: string | null; // TextHub's returned id (handle for later DLR)
   response: string | null; // their response message (parsed `response` field)
+  providerStatus: string | null; // verbatim `status` envelope field (e.g. "Suppressed")
+  suppressed: boolean; // providerStatus === "suppressed" — TextHub-side block (see below)
   rawBody: string | null; // verbatim response body (evidence; Workstream 3)
   error: string | null;
   status: number; // HTTP status (0 = network/timeout)
   timedOut: boolean; // true ⇒ aborted (may have landed) vs a connection failure
+}
+
+// Strict suppression gate. TextHub rejects a number it considers
+// unsubscribed/suppressed on ITS side with a dedicated structured field —
+// `{"response":"Error occured, unsubscribed the phone number","status":"Suppressed"}`
+// (HTTP 404). We key off the structured `status` token ONLY — never the HTTP
+// code or a substring of the free-text `response` — so a transient/other
+// rejection can never be mis-read as a suppression. This is a CLASSIFICATION
+// signal only: it does not opt the number out and does not skip it next time.
+export function isSuppressedStatus(status: unknown): boolean {
+  return typeof status === "string" && status.trim().toLowerCase() === "suppressed";
 }
 
 // Pure URL builder — exported so the URL contract (text + number + api_key, and
@@ -64,7 +77,7 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
     } catch {
       rawBody = null;
     }
-    let body: { response?: unknown; id?: unknown } = {};
+    let body: { response?: unknown; id?: unknown; status?: unknown } = {};
     if (rawBody) {
       try {
         body = JSON.parse(rawBody) as typeof body;
@@ -73,12 +86,16 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
       }
     }
     const response = typeof body.response === "string" ? body.response : null;
+    const providerStatus = typeof body.status === "string" ? body.status : null;
+    const suppressed = isSuppressedStatus(body.status);
 
     if (!res.ok) {
       return {
         ok: false,
         messageId: null,
         response,
+        providerStatus,
+        suppressed,
         rawBody,
         error: response ?? `TextHub HTTP ${res.status}`,
         status: res.status,
@@ -89,6 +106,8 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
       ok: true,
       messageId: body.id != null ? String(body.id) : null,
       response,
+      providerStatus,
+      suppressed,
       rawBody,
       error: null,
       status: res.status,
@@ -100,6 +119,8 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
       ok: false,
       messageId: null,
       response: null,
+      providerStatus: null,
+      suppressed: false,
       rawBody: null,
       error: aborted ? "TextHub request timed out" : "TextHub network error",
       status: 0,

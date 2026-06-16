@@ -82,6 +82,7 @@ export async function POST(
 const EMPTY_DRAIN = {
   sent: 0,
   failed: 0,
+  filtered: 0,
   processed: 0,
   halted: false,
   stuck: 0,

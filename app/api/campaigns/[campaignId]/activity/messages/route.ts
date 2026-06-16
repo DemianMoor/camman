@@ -15,6 +15,9 @@ const SEND_STATUSES = new Set([
   "sent",
   "failed",
   "rejected",
+  // TextHub-suppressed. Filterable on its own, but deliberately NOT part of the
+  // "attention" quick-filter below — a suppression isn't a row a human must fix.
+  "filtered",
 ]);
 
 function parseId(idParam: string) {

@@ -8,7 +8,7 @@ For **tracked** campaigns, send SMS directly via the TextHub API instead of expo
 > **Status:** Kickoff/materialize is built. The real-send drain is owner-gated and has effectively **never fired in production** — `SEND_ENABLED` is OFF. Treat live sending as not-yet-launched.
 
 ## 2. Key concepts / entities
-- `stage_sends` — one row per recipient-message. Its `id uuid` **is** the link idempotency `send_token`. `rendered_text` frozen at materialization. Status `pending → sending → sent | failed | rejected`.
+- `stage_sends` — one row per recipient-message. Its `id uuid` **is** the link idempotency `send_token`. `rendered_text` frozen at materialization. Status `pending → sending → sent | failed | rejected | filtered` (`filtered` = TextHub-suppressed; migration 0065 — see §"Filtered (TextHub-suppressed)" below).
 - `provider_credentials` — brand-scoped TextHub `api_key` (plaintext; see [security-notes.md](../security-notes.md)).
 - `sms_providers` circuit-breaker columns + `send_circuit_events` audit log.
 - Code: [`lib/sends/`](../../lib/sends/) (`kickoff.ts`, `drain.ts`, `texthub.ts`, `circuit-breakers.ts`, `provider-credential.ts`, `scheduled.ts`, `stage-sms.ts`), [`lib/alerts/`](../../lib/alerts/), [`lib/quiet-hours.ts`](../../lib/quiet-hours.ts).
@@ -49,8 +49,8 @@ sequenceDiagram
   loop until cap / halt
     Drain->>DB: claim batch FOR UPDATE SKIP LOCKED → status=sending
     Drain->>TH: GET send (api_key,text,number,lead_id)
-    TH-->>Drain: {ok, messageId, error, status}
-    Drain->>DB: sent (+texthub_message_id,sent_at) | failed (+last_error); attempts++
+    TH-->>Drain: {ok, messageId, error, status, providerStatus}
+    Drain->>DB: sent (+texthub_message_id,sent_at) | filtered if status="Suppressed" else failed (+last_error); attempts++
     Drain->>Drain: failure-spike? rolling ceilings? → halt/latch
   end
 ```
@@ -67,7 +67,7 @@ sequenceDiagram
 ### TextHub contract (`texthub.ts`)
 - `GET https://api.texthub.com/v2/?api_key=…&text=…&number=…&lead_id=…` (timeout default 15s).
 - **Never** set `long_url` (TextHub's own rewriter — would clobber our tracked link) or `group` (share link — destroys per-recipient uniqueness).
-- Response normalized to `{ ok, messageId, error, status }`. Stores `messageId` for possible future DLR (not polled).
+- Response normalized to `{ ok, messageId, error, status, providerStatus, suppressed }`. Stores `messageId` for possible future DLR (not polled). `providerStatus` = TextHub's structured `status` envelope field (verbatim); `suppressed` = `isSuppressedStatus(status)`, true only when that field equals `"suppressed"` (case-insensitive).
 
 ### Circuit breakers (`circuit-breakers.ts`, migration 0058)
 | Breaker | Type | Default (NULL ⇒) | Behavior |
@@ -89,6 +89,17 @@ The responsibility boundary: everything up to and including TextHub's response e
 - **Failure classification** — `classifyAttempt` ([lib/sends/classify-attempt.ts](../../lib/sends/classify-attempt.ts)) buckets each attempt: `accepted` (2xx **with** a message id), `mine_transport` (status 0 connection failure — ours), `theirs_rejected` (any HTTP rejection envelope — escalate), `indeterminate` (timeout after send, 2xx **without** id, unparseable — reconcile). **Two structural rules:** anything not confidently a success ⇒ `indeterminate`, **never** counted as sent; and `indeterminate`/`sending` rows are **never auto-retried** (at-most-once preserved). `summarizeStageAttempts` ([lib/sends/attempt-summary.ts](../../lib/sends/attempt-summary.ts)) rolls the latest attempt per recipient into the panel's failure banner (mine/theirs/indeterminate) + grouped errors.
 - **Escalation export** — `GET …/send/escalation` streams a CSV of every `theirs_rejected` / `indeterminate` row (number, `texthub_message_id`, timestamp, classification, HTTP status, redacted request, verbatim response) — the packet handed to TextHub, keyed by their own message id. One-click from the failure banner.
 - **Honest limit:** the indeterminate bucket can't be eliminated (a process dying between request and recorded response is genuinely unknown) — it's never hidden, always surfaced as "reconcile with TextHub."
+
+### Filtered (TextHub-suppressed) — migration 0065
+TextHub rejects a number it blocks on **its** side with a dedicated structured envelope: `{"response":"Error occured, unsubscribed the phone number","status":"Suppressed"}` (HTTP 404, no message id). The drain reads the structured `status` field (now surfaced on `SendSmsResult` as `providerStatus` + the derived `suppressed` flag) and records these as **`stage_sends.status = 'filtered'`** instead of `'failed'` — a distinct, operator-visible bucket so provider-suppression volume is separable from genuine failures (bad number, transport).
+
+- **Strict gate:** `isSuppressedStatus()` ([lib/sends/texthub.ts](../../lib/sends/texthub.ts)) matches the `status` **token** only (`"suppressed"`, case-insensitive) — never the HTTP code, never a substring of the free-text `response`. A transient/other rejection can't be mis-classified as a suppression.
+- **LABEL ONLY — no blocking.** A `filtered` row is **not** added to `opt_outs` and is **not** excluded from future campaigns; the number can be re-attempted next send. This is purely an outcome classification. (Auto opt-out capture / pre-send skipping is a separate, deferred decision — TextHub's definition of "Suppressed" is still under discussion.)
+- **Surfaced:** the drain returns a `filtered` count (separate from `failed`); the `send_drain` activity event reports it; the **Activity** tab shows a violet **Filtered** summary tile and a `filtered` status filter + badge in the Messages drill-down (NOT part of the "Needs attention" quick-filter — a suppression isn't a row a human must fix).
+- **Classification unchanged:** the `send_attempts` evidence row is still `theirs_rejected` with the verbatim `"status":"Suppressed"` body — `filtered` is the `stage_sends` lifecycle bucket, not a new `send_attempts` classification.
+- **Operational status:** because `filtered` leaves the `failed` bucket, a fully-drained stage whose only non-sent rows are suppressions reads **green "Sending / Sent"**, not red "Missed / Failed" — suppressions don't flag a stage as needing attention.
+- **Breaker note (unchanged behavior):** a `filtered` outcome still increments the per-run consecutive-failure counter exactly as before (suppressions were previously `'failed'`), so a wall of suppressions can still trip the failure-spike pause. Whether suppression *should* feed that breaker is a separate sending-behavior question, intentionally left unchanged here.
+- **Historical rows:** the ~262 pre-0065 suppressions stay `status='failed'` (not backfilled) — out of scope for this visibility change.
 
 ### Scheduling & quiet hours (`scheduled.ts` + `lib/quiet-hours.ts`)
 - `scheduled_at` on a stage drives the `*/15` `send-scheduled` cron ([crons.md](crons.md)).

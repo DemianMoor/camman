@@ -51,6 +51,7 @@ async function main() {
       ok: true,
       sent: processed,
       failed: 0,
+      filtered: 0,
       processed,
       halted: false,
       stuck: 0,

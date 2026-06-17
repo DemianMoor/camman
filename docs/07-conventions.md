@@ -79,7 +79,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 | # | Claim | Reality (code) | Where |
 |---|-------|----------------|-------|
 | 1 | CLAUDE.md §10b: `draft → active` gates on "name + brand + offer + **≥1 segment**" | Code gates on name + brand + offer + **≥1 contact group**; **segments are optional** | `app/api/campaigns/[campaignId]/status/route.ts` ~L118–135 |
-| 2 | `db/schema.ts` `segment_rules_rule_type_check` CHECK list omits `is_in_contact_group` | The eval and migration `0031` support `is_in_contact_group`; the DB constraint (post-0031) is authoritative | `lib/segment-rules-eval.ts`, `db/migrations/0031`, `db/schema.ts` L905–917 |
+| 2 | ~~`db/schema.ts` `segment_rules_rule_type_check` CHECK list omits `is_in_contact_group`~~ **RESOLVED (migration `0069`)** | `0069` restated the full IN-list (adding the `made_purchase_*` types) and updated `db/schema.ts` + the snapshot to match the live constraint, including `is_in_contact_group` | `lib/segment-rules-eval.ts`, `db/migrations/0069`, `db/schema.ts` |
 | 3 | `.env.example` shows `DATABASE_URL` port `5432` / "Session Pooler" | CLAUDE.md §6 mandates **transaction pooler 6543** for serverless; `.env.example` comment is stale on this point | `.env.example`, CLAUDE.md §6 |
 | 4 | Original wishlist mentions a command palette | **No command palette / cmdk exists** in the codebase (confirmed absent 2026-06-05) | grep across `components/`, `app/` |
 | 5 | `proxy.ts` protected-prefix list (`/dashboard`,`/brands`,`/settings`) | Narrower than the full protected route set; the real gate is `requireOrgMembership()` in the protected layout | `proxy.ts`, `app/(protected)/layout.tsx` |

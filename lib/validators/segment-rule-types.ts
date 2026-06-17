@@ -65,6 +65,25 @@ export const RULE_TYPES = {
     operators: ["is", "is_not"],
     value_shape: "offer_id",
   },
+  // Purchase (sale) rules — mirror the clicker scoping (any / brand / offer).
+  // A contact "made a purchase" when they have ≥1 stage_sends row with
+  // sale_status='sale' (NOT 'lead' or 'rejected'). Empty org-wide until real
+  // sales accumulate. See lib/segment-rules-eval.ts.
+  made_purchase: {
+    label: "Made a purchase (any)",
+    operators: ["is", "is_not"],
+    value_shape: "none",
+  },
+  made_purchase_for_brand: {
+    label: "Made a purchase for specific brand",
+    operators: ["is", "is_not"],
+    value_shape: "brand_id",
+  },
+  made_purchase_for_offer: {
+    label: "Made a purchase for specific offer",
+    operators: ["is", "is_not"],
+    value_shape: "offer_id",
+  },
   is_optin_any_brand: {
     label: "Has opted in (any brand)",
     operators: ["is", "is_not"],

@@ -189,13 +189,18 @@ async function main() {
     check("manual upload returns 201", upR.status === 201);
 
     // Also create the external contacts in the org (without segment membership).
-    // We use the contacts/upload endpoint with no assign_to_segment_id; this
-    // upserts contacts in the org but doesn't add them to the segment.
-    const extUpR = await apiFetch("/api/contacts/upload", {
-      method: "POST",
-      body: JSON.stringify({ phones: externalPhones.join("\n") }),
-    });
-    check("external upload returns 201", extUpR.status === 201);
+    // Inserted directly: the /api/contacts/upload endpoint now requires a
+    // contact group (assign_to_group_ids), and tagging these into a group
+    // would skew the group-membership fixture math below. A bare insert keeps
+    // them org-members-only — same approach as the backdated R5 fixtures.
+    for (const p of externalPhones) {
+      await db.execute(drizzleSql`
+        INSERT INTO contacts (org_id, phone_number, created_at, updated_at)
+        VALUES (${orgId}::uuid, ${p}, now(), now())
+        ON CONFLICT DO NOTHING
+      `);
+    }
+    check("external contacts inserted", true);
 
     // Resolve contact_ids for both sets so we can seed engagement directly.
     const allRows = await db

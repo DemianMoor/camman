@@ -906,6 +906,9 @@ export const segment_rules = pgTable(
         'is_clicker_any_brand',
         'is_clicker_for_brand',
         'is_clicker_for_offer',
+        'made_purchase',
+        'made_purchase_for_brand',
+        'made_purchase_for_offer',
         'is_optin_any_brand',
         'is_optin_for_brand',
         'is_optout_for_brand',
@@ -914,7 +917,8 @@ export const segment_rules = pgTable(
         'joined_segment_in_last_n_days',
         'joined_segment_more_than_n_days_ago',
         'in_use_in_campaign_last_period',
-        'member_of_segment'
+        'member_of_segment',
+        'is_in_contact_group'
       )`,
     ),
     check(

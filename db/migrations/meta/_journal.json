@@ -484,6 +484,13 @@
       "when": 1782259200000,
       "tag": "0068_creatives_sequence_4th_5th_6th",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1782345600000,
+      "tag": "0069_segment_rules_purchase_types",
+      "breakpoints": true
     }
   ]
 }

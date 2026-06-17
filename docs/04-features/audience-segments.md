@@ -42,6 +42,9 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 | `is_clicker_any_brand` | none | clicked any brand |
 | `is_clicker_for_brand` | brand id | clicked a brand |
 | `is_clicker_for_offer` | offer id | clicked an offer |
+| `made_purchase` | none | made a purchase (any brand/offer) |
+| `made_purchase_for_brand` | brand id | made a purchase for a brand |
+| `made_purchase_for_offer` | offer id | made a purchase for an offer |
 | `is_optin_any_brand` | none | opted in to any brand |
 | `is_optin_for_brand` | brand id | opted in to a brand |
 | `is_optout_for_brand` | brand id | opted out of a brand |
@@ -54,13 +57,14 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 | `is_in_contact_group` | contact_group id | carry a contact-group tag |
 
 - **Clicker rules read the `clickers` table** (not the raw `clicks` click-log). `clickers` is populated two ways: (1) manual CSV upload via `/api/clickers/upload`, and (2) **automatic propagation of clean tracked clicks** — [`lib/links/propagate-clickers.ts`](../../lib/links/propagate-clickers.ts) materializes one `clickers` row (`source = 'tracked_click'`) per `(contact, brand, offer)` for every click scored `classification='human'` (the same "clean" definition the default clicker export uses; suspect/prefetch/bot excluded). It runs after scoring in the `score-pending` cron and is idempotent. Without this bridge, contacts who clicked real tracked SMS links never matched a clicker rule (the table was CSV-only). Brand/offer/provider attribution is derived from the link's campaign + stage. Backfill: [`scripts/backfill-tracked-clickers.ts`](../../scripts/backfill-tracked-clickers.ts).
+- **Purchase rules read `stage_sends.sale_status`** — a contact matches when they have ≥1 `stage_sends` row with `sale_status = 'sale'` (`'lead'` and `'rejected'` do **not** count). `sale_status` is stamped per-recipient by the Keitaro conversions poll ([`lib/keitaro/poll-conversions.ts`](../../lib/keitaro/poll-conversions.ts)) via `sub_id_1` → `stage_sends.id`. Brand/offer scoping joins `stage_sends → campaigns` (brand/offer live on the campaign, not the send). Both operators supported: `is` (bought) / `is_not` (didn't buy). **Empty until real sales accumulate** — with no sales, the rule resolves to manual membership only (an empty preview means "no buyers yet", not a bug). This is engagement Level 3; Level 1 is the clicker rules above. Level 2 (reached the offer page) is intentionally **not** built — that distinction only exists in Keitaro's per-stage aggregates (`keitaro_stage_results`), not at the per-contact grain.
 - Time-based types accept `is` only (direction encoded in the name; the UI hides the operator select).
 - **`in_use_in_campaign_last_period`** accepts `is` (include) / `is_not` (exclude). A contact counts as "in use" when it sits in a `campaign_audience_pool` for a campaign whose `created_at` falls inside the window AND whose `status` is `active`/`paused`/`completed` ("any that ran" — draft has no pool, archived excluded) AND which still has ≥1 **live stage** (`draft`/`pending`/`sent`/`success`). A campaign whose stages are all `cancelled`/`failed` (or has none) releases its contacts. The 8 period codes map to SQL `make_interval` units in [`lib/segment-rules-eval.ts`](../../lib/segment-rules-eval.ts); only the opaque code is persisted in `value`. Differs from the `exclude_in_use_contacts` flag (above), which is time-less and `active`-only.
 - **Validation source of truth:** [`lib/validators/segment-rule-types.ts`](../../lib/validators/segment-rule-types.ts) maps each type → allowed operators + value shape. Both server (Zod in `lib/validators/segment-rules.ts`) and client (`RulesPanel`) read from it — **don't fork.**
 - **FK ownership:** brand/offer/segment/contact_group ids in rule values are re-verified against the user's org before insert/update (`verifyValueOwnership` in `app/api/segments/[id]/rules/route.ts`).
 
 ## 4. Data it reads/writes
-- Reads `segment_rules`, `segment_contacts`, `segments`, and target tables (`clickers`, `opt_ins`, `opt_outs`+junction, `contacts`, `contact_contact_groups`, `campaign_audience_pool`).
+- Reads `segment_rules`, `segment_contacts`, `segments`, and target tables (`clickers`, `stage_sends`, `opt_ins`, `opt_outs`+junction, `contacts`, `contact_contact_groups`, `campaign_audience_pool`).
 - Writes `segment_rules`, `segment_stats.rule_filtered_count` (via refresh-stats).
 
 ## 5. UI surface

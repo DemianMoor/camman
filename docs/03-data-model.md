@@ -2,7 +2,7 @@
 
 _Last updated: 2026-06-17_
 
-Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0066`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the `is_in_contact_group` note below).
+Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0069`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
 ## Multi-tenant boundary
 
@@ -159,9 +159,9 @@ erDiagram
 | `segment_stats` | PK segment_id; `total_count` (trigger), `rule_filtered_count` (on-demand) | cached counts |
 | `segment_rules` | `rule_type`, `operator` is/is_not, `value` jsonb, `position`, `is_active`, `combinator` and/or | see [audience-segments.md](04-features/audience-segments.md) |
 
-> **`is_in_contact_group` rule type:** the eval (`lib/segment-rules-eval.ts`) and migration `0031` support an `is_in_contact_group` rule type, but the `segment_rules_rule_type_check` CHECK list inlined in `db/schema.ts` omits it. The DB constraint (post-0031) is authoritative; treat `db/schema.ts`'s inline list as stale. `> [VERIFY]` the exact CHECK in the live DB if you touch rule types.
+> **`made_purchase` / `made_purchase_for_brand` / `made_purchase_for_offer` rule types (migration `0069`):** engagement Level 3 — match contacts with ≥1 `stage_sends` row where `sale_status = 'sale'` (`'lead'`/`'rejected'` excluded). Brand/offer scoping joins `stage_sends → campaigns`. `0069` restates the full `segment_rules_rule_type_check` IN-list (Postgres can't append to a CHECK) and, this time, **`db/schema.ts`'s inline list was updated to match** — including the previously-stale `is_in_contact_group` — so as of `0069` the schema text and the live constraint agree. Empty until real sales accumulate.
 >
-> **`in_use_in_campaign_last_period` rule type (migration `0059`):** widens `segment_rules_rule_type_check` to add this type. Because Postgres can't append a value to a CHECK, `0059` restates the full IN-list — including `is_in_contact_group` (which the generated snapshots never picked up). The generated `0059_snapshot.json` still mirrors `db/schema.ts`'s inline list (no `is_in_contact_group`); the **migration SQL** is authoritative for the live constraint.
+> **`in_use_in_campaign_last_period` rule type (migration `0059`):** widened `segment_rules_rule_type_check` to add this type. Historical note: through `0068` the generated snapshots and `db/schema.ts`'s inline list omitted `is_in_contact_group` (added live by `0031`); the migration SQL was authoritative. `0069` reconciled the schema text + snapshot with the live constraint.
 
 ### Creatives
 | Table | Key columns | Notes |

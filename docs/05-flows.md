@@ -156,3 +156,24 @@ sequenceDiagram
 ```
 
 > `sub_id_1` = the recipient's `stage_sends.id` (injected at redirect time, flow D). One sale per recipient, **latest wins** (not cumulative). The **Sale** badge on the Activity → Messages list reads `sale_status`/`sale_revenue`. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md) §8.
+
+## I. Keitaro offer-reach poll → per-recipient offer-page reach (every 15 min, engagement Level 2)
+
+```mermaid
+sequenceDiagram
+  participant Cron as */15 keitaro/poll-offer-reaches
+  participant Poll as pollKeitaroOfferReaches
+  participant K as Keitaro Admin API
+  participant DB
+  Cron->>Poll: GET /api/keitaro/poll-offer-reaches (Bearer CRON_SECRET)
+  Poll->>K: POST /clicks/log (7-day ET window, sub_id_1 NOT_EQUAL "", columns incl. event_id, campaign)
+  K-->>Poll: rows[{event_id, sub_id_1, campaign, campaign_id, datetime}]
+  Poll->>Poll: drop campaign="gk-lp-visits" (landing/L1); fold earliest offer click per sub_id_1
+  Poll->>DB: SELECT stage_sends WHERE id IN (sub_id_1…) — resolve matched + current offer_reach_event_id
+  loop each matched recipient (not yet reached)
+    Poll->>DB: UPDATE stage_sends SET offer_reached_at, offer_reach_event_id WHERE offer_reached_at IS NULL
+  end
+  Note over Poll,DB: reach is monotonic — already-stamped rows skipped (dedup on event_id);<br/>landing (gk-lp-visits) clicks are Level 1, never stamped here
+```
+
+> Same id chain as sales (`sub_id_1` = `stage_sends.id`), but the SOURCE is clicks, classified by campaign name: `gk-lp-visits` ⇒ landing (Level 1, dropped); any other ⇒ offer (Level 2). The `reached_offer*` segment rules read `offer_reached_at`. "Reached but didn't buy" = `reached_offer` is + `made_purchase` is_not. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md) §8b.

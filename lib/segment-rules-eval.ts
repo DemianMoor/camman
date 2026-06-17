@@ -104,6 +104,29 @@ function ruleInnerQuery(
           AND ss.sale_status = 'sale'
           AND ca.offer_id = ${Number(v)}::int
       `;
+    case "reached_offer":
+      // Reached the offer page: ≥1 send row stamped offer_reached_at. DISTINCT
+      // because a contact can have many send rows. Empty until real sends
+      // accumulate. Partial index stage_sends_offer_reached_at_idx.
+      return drizzleSql`SELECT DISTINCT contact_id FROM stage_sends WHERE org_id = ${orgId}::uuid AND offer_reached_at IS NOT NULL`;
+    case "reached_offer_for_brand":
+      return drizzleSql`
+        SELECT DISTINCT ss.contact_id
+        FROM stage_sends ss
+        JOIN campaigns ca ON ca.id = ss.campaign_id
+        WHERE ss.org_id = ${orgId}::uuid
+          AND ss.offer_reached_at IS NOT NULL
+          AND ca.brand_id = ${Number(v)}::int
+      `;
+    case "reached_offer_for_offer":
+      return drizzleSql`
+        SELECT DISTINCT ss.contact_id
+        FROM stage_sends ss
+        JOIN campaigns ca ON ca.id = ss.campaign_id
+        WHERE ss.org_id = ${orgId}::uuid
+          AND ss.offer_reached_at IS NOT NULL
+          AND ca.offer_id = ${Number(v)}::int
+      `;
     case "is_optin_any_brand":
       return drizzleSql`SELECT contact_id FROM opt_ins WHERE org_id = ${orgId}::uuid`;
     case "is_optin_for_brand":

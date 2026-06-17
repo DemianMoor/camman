@@ -190,6 +190,46 @@ they never carry `sub_id1`; their sale columns stay NULL (expected).
 ([`components/campaigns/campaign-activity-section.tsx`](../../components/campaigns/campaign-activity-section.tsx)):
 `sale` = green (+revenue), `lead` = amber, `rejected` = muted red, none = `—`.
 
+## 8b. Per-recipient OFFER-PAGE REACH (offer-reach poll — engagement Level 2)
+A third independent poll maps individual Keitaro **offer-page clicks** back to the
+recipient, so segments can express "reached the offer page" (Level 2). Code:
+[`lib/keitaro/poll-offer-reaches.ts`](../../lib/keitaro/poll-offer-reaches.ts),
+client `fetchKeitaroClicks` in [`lib/keitaro/client.ts`](../../lib/keitaro/client.ts).
+
+**The id chain is identical to sales** — the same `sub_id1`/`sub_id_1` recipient id
+(`stage_sends.id`) injected at redirect time. The difference is the SOURCE: clicks
+(`clicks/log`), not conversions. **Confirmed live:** an offer-campaign click (e.g.
+`Kinzeno - 14508 - Default`) carries the same `sub_id_1` as the recipient's
+landing-page (`gk-lp-visits`) click — so the offer reach is per-recipient.
+
+**The poll** (`*/15` cron, `GET|POST /api/keitaro/poll-offer-reaches`):
+1. `POST {KEITARO_API_URL}/admin_api/v1/clicks/log` with columns `event_id,
+   sub_id_1, campaign, campaign_id, datetime`, **rolling 7-day** ET window, filtered
+   server-side to `sub_id_1 NOT_EQUAL ""`. One row per click.
+2. **Drop landing clicks** (`campaign` name = `gk-lp-visits`, case-insensitive) —
+   those are Level 1. Keep OFFER-campaign clicks (Level 2). Same campaign-name
+   classifier the aggregate poll uses; `clicks/log` returns the name directly, so
+   no campaigns-list join is needed.
+3. Fold to the **earliest** offer click per `sub_id_1`, resolve which exist as
+   `stage_sends.id`, then `UPDATE` `offer_reached_at` + `offer_reach_event_id`.
+   - **Reach is monotonic:** a row already carrying an `offer_reach_event_id` is
+     skipped (no status progression, unlike sales). `WHERE offer_reached_at IS NULL`
+     guards the write.
+   - **Timezone:** the **same** ET-wall-clock → UTC zoned-literal cast reused from
+     the sale poll (`(${dt} || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz`).
+   - Returns `{ ok, degraded, range, fetched, landing_skipped, recipients, matched,
+     updated, deduped, unmatched, errored, unmatched_samples, sample }`.
+
+**Tracked sends only** (same as sales): manual-mode rows never carry `sub_id1`, so
+`offer_reached_at` stays NULL. **Reliability caveat:** attribution depends on the
+landing page forwarding `sub_id1` into its outbound offer link; a click that loses
+it is simply not attributed (silent under-count, never wrong attribution) — validate
+the propagation rate once real send volume exists.
+
+**Segment rule:** `reached_offer` / `_for_brand` / `_for_offer` read
+`offer_reached_at IS NOT NULL` (see [audience-segments.md](audience-segments.md)).
+"Reached but didn't buy" = `reached_offer` is + `made_purchase` is_not.
+
 ## 9. Verification (with the live `kinzeno` test data)
 1. Set `KEITARO_API_KEY`, hit `POST /api/keitaro/poll` manually (operator+).
 2. `GET /api/keitaro/results?campaign_id=<kinzeno campaign>` shows Raw/Clean Clicks ≥

@@ -84,6 +84,26 @@ export const RULE_TYPES = {
     operators: ["is", "is_not"],
     value_shape: "offer_id",
   },
+  // Offer-page reach (Level 2) — mirror the clicker/purchase scoping. A contact
+  // "reached the offer page" when they have ≥1 stage_sends row with
+  // offer_reached_at IS NOT NULL (an OFFER-campaign click, not the landing
+  // gk-lp-visits campaign). Empty org-wide until real sends accumulate. See
+  // lib/segment-rules-eval.ts.
+  reached_offer: {
+    label: "Reached the offer page (any)",
+    operators: ["is", "is_not"],
+    value_shape: "none",
+  },
+  reached_offer_for_brand: {
+    label: "Reached the offer page for specific brand",
+    operators: ["is", "is_not"],
+    value_shape: "brand_id",
+  },
+  reached_offer_for_offer: {
+    label: "Reached the offer page for specific offer",
+    operators: ["is", "is_not"],
+    value_shape: "offer_id",
+  },
   is_optin_any_brand: {
     label: "Has opted in (any brand)",
     operators: ["is", "is_not"],

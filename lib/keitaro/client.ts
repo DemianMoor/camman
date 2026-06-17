@@ -227,6 +227,93 @@ export async function fetchKeitaroConversions(
   }
 }
 
+// ── Clicks log (per-recipient OFFER-PAGE REACH attribution) ──────────────────
+// POST /admin_api/v1/clicks/log (the 'events' report) returns ONE row per click,
+// each carrying the click's sub_id slots + the Keitaro `campaign` NAME. An
+// OFFER-campaign click (campaign name != KEITARO_VISIT_CAMPAIGN_NAME) that
+// carries sub_id_1 means that recipient reached the offer page — the Level-2
+// signal. The landing-page (gk-lp-visits) clicks are Level 1 and are dropped by
+// the poll. Columns confirmed live against the 'events' report definition;
+// the endpoint 400s on any unknown column, so every entry MUST be valid.
+// `event_id` is the unique per-click id (dedup key). sub_id_1 = stage_sends.id.
+export const KEITARO_CLICK_COLUMNS = [
+  "event_id", // unique click id (dedup key)
+  "sub_id_1", // = stage_sends.id (the recipient/customer id)
+  "campaign", // campaign NAME — gk-lp-visits ⇒ landing (drop); else ⇒ offer
+  "campaign_id", // numeric id (robustness fallback)
+  "datetime", // click datetime (ET)
+] as const;
+
+export interface KeitaroClicksResult {
+  ok: boolean;
+  status: number; // 0 = network/timeout, never reached the server
+  rows: KeitaroReportRow[];
+  error: string | null;
+}
+
+// POST /admin_api/v1/clicks/log — body { range, columns, filters }. Same
+// never-throw contract as fetchKeitaroConversions. Filters server-side to clicks
+// carrying a recipient id (sub_id_1 != ""), so empty-sub_id rows (organic / test
+// / pre-rollout traffic) never cross the wire. The poll drops gk-lp-visits rows
+// by campaign name afterward.
+export async function fetchKeitaroClicks(
+  range: KeitaroReportRange,
+  opts?: { timeoutMs?: number },
+): Promise<KeitaroClicksResult> {
+  const key = apiKey();
+  if (!key) {
+    return { ok: false, status: 0, rows: [], error: "KEITARO_API_KEY is not set" };
+  }
+
+  try {
+    const res = await fetch(`${baseUrl()}/admin_api/v1/clicks/log`, {
+      method: "POST",
+      headers: {
+        "Api-Key": key,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        range,
+        columns: KEITARO_CLICK_COLUMNS,
+        // Only clicks that carry a recipient id are attributable. NOT_EQUAL ""
+        // is the confirmed working operator for this Keitaro version.
+        filters: [{ name: "sub_id_1", operator: "NOT_EQUAL", expression: "" }],
+      }),
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return {
+        ok: false,
+        status: res.status,
+        rows: [],
+        error: `Keitaro clicks/log HTTP ${res.status}: ${body.slice(0, 300)}`,
+      };
+    }
+
+    const body = (await res.json().catch(() => null)) as
+      | { rows?: unknown }
+      | null;
+    const rows = Array.isArray(body?.rows)
+      ? (body.rows as KeitaroReportRow[])
+      : [];
+    return { ok: true, status: res.status, rows, error: null };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "TimeoutError";
+    return {
+      ok: false,
+      status: 0,
+      rows: [],
+      error: aborted
+        ? "Keitaro clicks/log timed out"
+        : `Keitaro clicks/log network error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+    };
+  }
+}
+
 export interface KeitaroCampaign {
   id: number;
   alias: string | null;

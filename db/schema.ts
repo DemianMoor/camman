@@ -909,6 +909,9 @@ export const segment_rules = pgTable(
         'made_purchase',
         'made_purchase_for_brand',
         'made_purchase_for_offer',
+        'reached_offer',
+        'reached_offer_for_brand',
+        'reached_offer_for_offer',
         'is_optin_any_brand',
         'is_optin_for_brand',
         'is_optout_for_brand',
@@ -1892,6 +1895,15 @@ export const stage_sends = pgTable(
     sale_revenue: numeric("sale_revenue", { precision: 12, scale: 4 }),
     converted_at: timestamp("converted_at", { withTimezone: true }),
     keitaro_conversion_id: text("keitaro_conversion_id"),
+    // Per-recipient offer-page reach (migration 0070). Stamped by the offer-reach
+    // poll (lib/keitaro/poll-offer-reaches.ts) when an OFFER-campaign click (NOT
+    // the gk-lp-visits landing campaign) carries this row's id as sub_id_1.
+    // offer_reached_at = the EARLIEST such click (once reached, always reached);
+    // offer_reach_event_id is the Keitaro click event_id used to dedup across
+    // overlapping rolling poll windows. NULL for recipients who never reached the
+    // offer page (and for manual-mode rows that mint no tracked link).
+    offer_reached_at: timestamp("offer_reached_at", { withTimezone: true }),
+    offer_reach_event_id: text("offer_reach_event_id"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1913,6 +1925,11 @@ export const stage_sends = pgTable(
     index("stage_sends_sale_status_idx")
       .on(table.sale_status)
       .where(sql`sale_status IS NOT NULL`),
+    // Migration 0070: per-recipient offer-page reach. Partial index — reads only
+    // ever want the reached rows (mirrors stage_sends_sale_status_idx).
+    index("stage_sends_offer_reached_at_idx")
+      .on(table.offer_reached_at)
+      .where(sql`offer_reached_at IS NOT NULL`),
     // Migration 0058. Partial unique: at most one LIVE send per (stage, contact)
     // — structurally blocks double-materialization while leaving terminal rows
     // ('sent'/'failed') free so a genuine resend mints fresh rows. Also a partial

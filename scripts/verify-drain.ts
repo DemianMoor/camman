@@ -132,8 +132,15 @@ async function main() {
       const one = async <T>(q: ReturnType<typeof sql>) =>
         ((await tx.execute(q)) as unknown as T[])[0];
 
-      const org = await one<{ id: string }>(sql`SELECT id FROM organizations LIMIT 1`);
-      if (!org) { console.log("SKIP: no organizations."); throw new Rollback(); }
+      // Throwaway org created INSIDE the rolled-back tx (never committed, so no
+      // teardown). CRITICAL: the rate-ceiling breakers count `stage_sends`
+      // org-wide, so the drain MUST run under an org with no other traffic. A
+      // shared live org whose campaigns send continuously would push
+      // countSentSince() over the test caps and make the happy-path + ceiling
+      // assertions flap. A dedicated org isolates the counts deterministically.
+      const org = await one<{ id: string }>(sql`
+        INSERT INTO organizations (name) VALUES ('verify-drain throwaway') RETURNING id
+      `);
       const orgId = org.id;
 
       // Workstream-1 two-switch gate: the drain now also requires the DB master
@@ -143,8 +150,10 @@ async function main() {
         INSERT INTO org_settings (org_id, sends_enabled) VALUES (${orgId}, true)
         ON CONFLICT (org_id) DO UPDATE SET sends_enabled = true
       `);
-      const brand = await one<{ id: number }>(sql`SELECT id FROM brands WHERE org_id = ${orgId} LIMIT 1`);
-      if (!brand) { console.log("SKIP: need a brand."); throw new Rollback(); }
+      const brand = await one<{ id: number }>(sql`
+        INSERT INTO brands (org_id, brand_id, name)
+        VALUES (${orgId}, ${"vd-brand"}, ${"VD Brand"}) RETURNING id
+      `);
 
       // Mint disposable contacts so multiple SIMULTANEOUS pending rows don't
       // collide on the new (stage_id, contact_id) dedup index.

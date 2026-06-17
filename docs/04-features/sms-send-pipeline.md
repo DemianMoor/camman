@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-06-18_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -53,13 +53,18 @@ sequenceDiagram
         Drain->>TH: GET send (api_key,text,number,lead_id)
         TH-->>Drain: {ok, messageId, error, status, providerStatus}
       end
-      Drain->>DB: then SERIALLY per result, in order: sent (+message_id,sent_at) | filtered if "Suppressed" else failed (+last_error); attempts++; failure-spike? → halt/latch
+      Drain->>DB: BULK-persist slice: ≤2 UPDATEs (sent / failed-or-filtered) + 1 multi-row send_attempts INSERT; attempts++
+      Drain->>Drain: fold results IN ORDER (JS): count + failure-spike? → halt/latch
     end
     Drain->>Drain: rolling ceilings checked between batches → stop
   end
 ```
 
-**Concurrency (throughput).** Within each claimed batch, the drain fires **`concurrency` TextHub sends at a time** (`DEFAULT_SEND_CONCURRENCY = 10` in [circuit-breakers.ts](../../lib/sends/circuit-breakers.ts); injectable via `opts.concurrency`, `1` = strictly serial). **Only the network call is parallelized** (a `Promise.all` over the slice's `sendSms`) — the bottleneck was the ~400ms per-recipient round-trip. The DB writes (`stage_sends` status update + the `send_attempts` evidence row) and the failure-spike breaker then run **strictly serially, in claimed order**, so consecutive-failure semantics are byte-identical to before, and the drain never issues concurrent statements on one connection (correct whether `dbc` is the pool or a single-connection tx — the latter is what the test harness uses; concurrent `execute()` on a postgres-js transaction connection desyncs its pipeline). The breaker is evaluated per-row, but a slice's sends have all already fired by the time it trips, so it can run up to `concurrency−1` extra sends past the threshold. This replaced the original strictly-serial `await`-per-recipient loop, which capped throughput at ~2 sends/sec and made a run hit the 300s function timeout at ~600 sends regardless of `max_sends_per_run`. With concurrency 10 and serial-ms DB writes the drain reaches ~20 sends/sec; the per-minute / 24h ceilings (below) are the policy-rate backstops above it.
+**Concurrency (throughput).** Within each claimed batch the drain processes **slices of `concurrency`** (`DEFAULT_SEND_CONCURRENCY = 10` in [circuit-breakers.ts](../../lib/sends/circuit-breakers.ts); injectable via `opts.concurrency`, `1` = effectively serial). Two layers, both required:
+1. **Parallel network sends** — the slice's `sendSms` calls fire together (`Promise.all`); the ~400ms per-recipient TextHub round-trip was the original ~2 sends/sec ceiling.
+2. **Bulk persistence** — the slice's results are then written in **≤2 `UPDATE … FROM (VALUES …)`** (one for `sent`, one for `failed`/`filtered`) **+ one multi-row `send_attempts` INSERT**, instead of 2 round-trips per recipient. This matters independently: parallel sends *alone* left ~20 serial writes per slice dominating at **~2.5 sends/sec measured live** — bulk writes cut that to ~3 statements per slice.
+
+Every statement is a **single query** (never concurrent on one connection), so the drain is correct whether `dbc` is the pool (cron/drain) or a single-connection tx (the test harness — concurrent `execute()` on a postgres-js transaction connection desyncs its pipeline). Counting and the failure-spike breaker then **fold the results in claimed order (JS only)**, so consecutive-failure semantics are unchanged; a slice's sends have all already fired+persisted by the time the breaker trips (≤ `concurrency−1` past the threshold). This replaced the original strictly-serial `await`-per-recipient loop, which capped throughput at ~2 sends/sec and made a run hit the 300s function timeout at ~600 sends regardless of `max_sends_per_run`. The per-minute / 24h ceilings (below) remain the policy-rate backstops above this.
 
 **Gates + breakers, all must pass:**
 1. `campaign_stages.send_approved = true` (deliberate per-stage opt-in; default false).

@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
@@ -263,16 +263,19 @@ export async function runStageDrain(
     // is only ever passed to sendSms below).
     const keyLast4 = apiKey.slice(-4);
 
-    // Fire the claimed batch's network sends in slices of `concurrency` (was
-    // strictly serial — the throughput bottleneck was the per-recipient TextHub
-    // round-trip, ~2 sends/sec). ONLY the HTTP call is parallelized; the DB writes
-    // (status update + evidence row) and the failure-spike breaker stay STRICTLY
-    // SERIAL, in claimed order. That keeps consecutive-failure semantics identical
-    // to before AND avoids issuing concurrent statements on a single connection —
-    // safe whether `dbc` is the pool (cron/drain) or a single-connection tx
-    // (tests). With ~400ms TextHub latency, 10 parallel sends + ~serial-ms DB
-    // writes ≈ 20 sends/sec; the per-minute / 24h ceilings remain the policy
-    // backstops above this.
+    // Fire each slice of `concurrency` TextHub sends in parallel (the ~400ms
+    // per-recipient round-trip was the original ~2 sends/sec bottleneck), then
+    // PERSIST the whole slice in BULK: at most two UPDATEs (sent / failed-or-
+    // filtered) + one multi-row send_attempts INSERT — instead of 2 round-trips
+    // per recipient. BOTH layers matter: parallel sends ALONE left ~20 serial
+    // writes per slice dominating (measured ~2.5 sends/sec live); bulk writes cut
+    // that to ~3 statements per slice. Every statement is a SINGLE query (never
+    // concurrent on one connection), so this is correct whether `dbc` is the pool
+    // (cron/drain) or a single-connection tx (tests). Counting + the failure-spike
+    // breaker fold the results IN CLAIMED ORDER afterward (JS only), so
+    // consecutive-failure semantics are unchanged; a slice's sends have all
+    // already fired/persisted by the time the breaker trips (≤ `concurrency`-1
+    // sends past the threshold — an acceptable widening of a heuristic stop).
     for (let off = 0; off < claimed.length && !stopReason; off += concurrency) {
       const slice = claimed.slice(off, off + concurrency);
       const results = await Promise.all(
@@ -281,73 +284,95 @@ export async function runStageDrain(
         ),
       );
 
+      // Partition by outcome (claimed order preserved by index).
+      const sentVals: SQL[] = [];
+      const failVals: SQL[] = [];
       for (let k = 0; k < slice.length; k++) {
         const c = slice[k];
         const res = results[k];
-        // One immutable evidence row per attempt (Workstream 3): verbatim body +
-        // normalized result + classification. The attempt number is the freshly
-        // incremented stage_sends.attempts (RETURNING), so retries stack cleanly.
+        if (res.ok) {
+          sentVals.push(sql`(${c.id}::uuid, ${res.messageId}::text)`);
+        } else {
+          // A structured {"status":"Suppressed"} rejection is recorded as
+          // 'filtered' — a distinct, operator-visible bucket — instead of 'failed'
+          // (label only: the row is NOT opted out and NOT skipped next time).
+          const st = res.suppressed ? "filtered" : "failed";
+          failVals.push(sql`(${c.id}::uuid, ${st}::text, ${res.error}::text)`);
+        }
+      }
+
+      // attempts is incremented per row; the RETURNING value is the freshly
+      // incremented number used as send_attempts.attempt_number (retries stack).
+      const attemptsById = new Map<string, number>();
+      if (sentVals.length > 0) {
+        const upd = (await dbc.execute(sql`
+          UPDATE stage_sends AS s
+          SET status = 'sent', texthub_message_id = v.mid,
+              sent_at = now(), attempts = s.attempts + 1
+          FROM (VALUES ${sql.join(sentVals, sql`, `)}) AS v(id, mid)
+          WHERE s.id = v.id
+          RETURNING s.id, s.attempts
+        `)) as unknown as { id: string; attempts: number }[];
+        for (const r of upd) attemptsById.set(r.id, Number(r.attempts));
+      }
+      if (failVals.length > 0) {
+        const upd = (await dbc.execute(sql`
+          UPDATE stage_sends AS s
+          SET status = v.st, last_error = v.err, attempts = s.attempts + 1
+          FROM (VALUES ${sql.join(failVals, sql`, `)}) AS v(id, st, err)
+          WHERE s.id = v.id
+          RETURNING s.id, s.attempts
+        `)) as unknown as { id: string; attempts: number }[];
+        for (const r of upd) attemptsById.set(r.id, Number(r.attempts));
+      }
+
+      // One immutable evidence row per attempt (Workstream 3): verbatim body +
+      // normalized result + classification, in claimed order. Bulk-inserted.
+      const attVals = slice.map((c, k) => {
+        const res = results[k];
         const classification = classifyAttempt({
           ok: res.ok,
           status: res.status,
           messageId: res.messageId,
           timedOut: res.timedOut,
         });
-        let attemptNumber = 1;
-        if (res.ok) {
-          const upd = (await dbc.execute(sql`
-            UPDATE stage_sends
-            SET status = 'sent', texthub_message_id = ${res.messageId},
-                sent_at = now(), attempts = attempts + 1
-            WHERE id = ${c.id}
-            RETURNING attempts
-          `)) as unknown as { attempts: number }[];
-          attemptNumber = Number(upd[0]?.attempts ?? 1);
-          sent++;
-          consecutiveFailures = 0;
-        } else {
-          // A structured {"status":"Suppressed"} rejection is recorded as
-          // 'filtered' — a distinct, operator-visible bucket — instead of 'failed'.
-          // Visibility only: the row is NOT opted out and NOT skipped next time.
-          const newStatus = res.suppressed ? "filtered" : "failed";
-          const upd = (await dbc.execute(sql`
-            UPDATE stage_sends
-            SET status = ${newStatus}, last_error = ${res.error}, attempts = attempts + 1
-            WHERE id = ${c.id}
-            RETURNING attempts
-          `)) as unknown as { attempts: number }[];
-          attemptNumber = Number(upd[0]?.attempts ?? 1);
-          if (res.suppressed) filtered++;
-          else failed++;
-          // A non-OK send still feeds the failure-spike breaker regardless of the
-          // suppression flag — unchanged from prior behavior (suppressions used to
-          // be 'failed'). Whether a wall of suppressions SHOULD trip the breaker is
-          // a separate sending-behavior question, intentionally not changed here.
-          consecutiveFailures++;
-        }
         const requestRedacted = buildSendUrl({
           apiKey: `redacted_${keyLast4}`,
           text: c.rendered_text,
           number: c.phone,
           leadId: c.lead_id,
         });
-        await dbc.execute(sql`
-          INSERT INTO send_attempts
-            (org_id, stage_send_id, attempt_number, request_redacted, http_status,
-             raw_body, ok, message_id, error, classification)
-          VALUES
-            (${orgId}, ${c.id}, ${attemptNumber}, ${requestRedacted}, ${res.status},
-             ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification})
-        `);
-        processed++;
+        const attemptNumber = attemptsById.get(c.id) ?? 1;
+        return sql`(${orgId}, ${c.id}, ${attemptNumber}, ${requestRedacted}, ${res.status},
+                    ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification})`;
+      });
+      await dbc.execute(sql`
+        INSERT INTO send_attempts
+          (org_id, stage_send_id, attempt_number, request_redacted, http_status,
+           raw_body, ok, message_id, error, classification)
+        VALUES ${sql.join(attVals, sql`, `)}
+      `);
 
-        // Failure spike → latch the pause (creds/provider likely broken; stop
-        // wasting calls). Already-processed rows stand; the rest of THIS slice's
-        // sends already fired (their rows persisted in this same serial pass), and
-        // any remaining claimed rows are abandoned to 'sending' (surfaced as
-        // stuck). The breaker may run up to `concurrency`-1 extra sends past the
-        // threshold (one slice's worth) before tripping — an acceptable widening.
-        if (shouldTripFailureSpike(consecutiveFailures)) {
+      // Count + failure-spike breaker, folded IN CLAIMED ORDER (JS only). The
+      // whole slice's rows are already persisted above, so we count every fired
+      // send even when the breaker trips mid-slice; the `!stopReason` guard just
+      // stops claiming/sending FURTHER slices (latch once).
+      for (let k = 0; k < slice.length; k++) {
+        const res = results[k];
+        processed++;
+        if (res.ok) {
+          sent++;
+          consecutiveFailures = 0;
+        } else {
+          if (res.suppressed) filtered++;
+          else failed++;
+          // A non-OK send still feeds the failure-spike breaker regardless of the
+          // suppression flag — unchanged from prior behavior.
+          consecutiveFailures++;
+        }
+        if (!stopReason && shouldTripFailureSpike(consecutiveFailures)) {
+          // Failure spike → latch the pause (creds/provider likely broken; stop
+          // wasting calls). Remaining unclaimed rows stay pending for review.
           pausedNow = await latchPause(dbc, {
             providerId,
             orgId,
@@ -355,7 +380,6 @@ export async function runStageDrain(
           });
           halted = true;
           stopReason = "failure_spike";
-          break;
         }
       }
     }

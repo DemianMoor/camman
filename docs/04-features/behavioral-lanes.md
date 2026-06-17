@@ -64,10 +64,13 @@ three lanes are mutually exclusive by construction.
 
 ## Operator UI (campaign detail page)
 
-- **Entry point:** the stage row's actions menu → **"Behavioral split…"**, shown
-  only on an ordinary stage (not a lane, and not one that already has lanes). It
-  opens a confirm dialog (mirroring the A/B split confirm), then calls the
-  endpoint and the three lanes appear in the stages table.
+- **Entry points (two, mirroring A/B):** the stage row's actions menu →
+  **"Behavioral split…"**, and a **"Behavioral split…"** button inside the stage
+  editor's audience block next to "Split for A/B test…". Both are shown only on
+  an ordinary stage (not a lane, and not one that already has lanes), and both
+  run the same shared confirm dialog → endpoint → refetch (the editor button
+  closes the editor and hands off to the row-action's confirm flow). The three
+  lanes then appear in the stages table.
 - **Lane display:** each lane row shows a tier chip (`↳ Ignored` / `Clicked` /
   `Reached offer`) with `· from #N` pointing at the parent position; the parent
   row shows an `N behavioral lanes` badge.

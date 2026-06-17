@@ -75,6 +75,9 @@ export interface EditableStage {
   tracking_id: string | null;
   split_index: number | null;
   split_total: number | null;
+  // Behavioral lane identity. NULL ⇒ ordinary stage (can be behaviorally split);
+  // 0/1/2 ⇒ this stage IS a lane (the split action is hidden in the editor).
+  behavioral_tier: number | null;
 }
 
 export interface StageInlineEditorProps {
@@ -96,6 +99,9 @@ export interface StageInlineEditorProps {
   onImportResults?: () => void;
   onManualResults?: () => void;
   onViewImportHistory?: () => void;
+  // Edit-only: trigger a behavioral split from the editor. The parent runs the
+  // confirm + POST (shared with the stages-row action).
+  onBehavioralSplit?: () => void;
 }
 
 // =============== Component ===============
@@ -112,6 +118,7 @@ export function StageInlineEditor({
   onImportResults,
   onManualResults,
   onViewImportHistory,
+  onBehavioralSplit,
 }: StageInlineEditorProps) {
   const createApi = useApiCall<{ id: number; stage_number: number }>();
   const updateApi = useApiCall<{ id: number }>();
@@ -213,6 +220,7 @@ export function StageInlineEditor({
           nextStageNumber={nextStageNumber}
           splitIndex={isEdit ? stage!.split_index : null}
           splitTotal={isEdit ? stage!.split_total : null}
+          behavioralTier={isEdit ? stage!.behavioral_tier : null}
           sentAt={isEdit ? stage!.sent_at : null}
           armed={
             isEdit &&
@@ -225,6 +233,7 @@ export function StageInlineEditor({
             onOpenChange(false);
             onSaved();
           }}
+          onBehavioralSplit={isEdit ? onBehavioralSplit : undefined}
           campaign={campaign}
           resultsCounters={
             isEdit

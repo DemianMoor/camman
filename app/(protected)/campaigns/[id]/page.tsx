@@ -1798,6 +1798,21 @@ export default function CampaignDetailPage() {
                   }
                 : undefined
             }
+            onBehavioralSplit={
+              canCreateStage &&
+              editingStage &&
+              editingStage.behavioral_tier == null &&
+              (lanesByParent.get(editingStage.id)?.length ?? 0) === 0
+                ? () => {
+                    // Close the editor, then open the shared confirm dialog with
+                    // this stage — same flow as the stages-row action.
+                    const s = editingStage;
+                    setAddStageOpen(false);
+                    setEditingStage(null);
+                    setBehavioralSplitStage(s);
+                  }
+                : undefined
+            }
           />
         ) : null}
       </section>

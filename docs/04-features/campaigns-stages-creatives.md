@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-06-10_
+_Last updated: 2026-06-17_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -35,8 +35,8 @@ The campaign core: a **campaign** is a long-running container with a frozen audi
 ### Creatives
 - M:N with offers; `applies_to_all_offers=true` ⇒ valid for any offer (junction rows still allowed as a fallback list; toggling the flag does NOT auto-clear them).
 - No provider/brand on the creative (those live at the stage level). No status state machine — `active`/`archived` only.
-- `quality` (high/average/poor/unknown) and `sequence_placement` (warmup/1st/2nd/3rd/any/unknown) are user metadata for filtering.
-- **Stage creative picker** ([`components/campaigns/creative-picker-dialog.tsx`](../../components/campaigns/creative-picker-dialog.tsx)): a button on the stage form opens a dialog (replacing the old `<Select>`) — text search, a sequence filter (1st/2nd/3rd/WarmUp), spam-dot + EPC + CTR columns (full creative text shown on row hover via `title`), and a live SMS preview (chars · segments · warnings for spam / multi-segment / Unicode). One creative per stage (`creative_id`). The dialog is mounted only while open so its filter/selection state resets fresh each time. Default sort `epc desc`.
+- `quality` (high/average/poor/unknown) and `sequence_placement` (warmup/1st/2nd/3rd/4th/5th/6th/any/unknown — up to 6 messages per sequence) are user metadata for filtering.
+- **Stage creative picker** ([`components/campaigns/creative-picker-dialog.tsx`](../../components/campaigns/creative-picker-dialog.tsx)): a button on the stage form opens a dialog (replacing the old `<Select>`) — text search, a sequence filter dropdown (WarmUp/1st–6th, multi-select via `MultiSelectPicker`), spam-dot + EPC + CTR columns (full creative text shown on row hover via `title`), and a live SMS preview (chars · segments · warnings for spam / multi-segment / Unicode). One creative per stage (`creative_id`). The dialog is mounted only while open so its filter/selection state resets fresh each time. Default sort `epc desc`.
   - **Fetch strategy (perf):** the picker fetches creatives from the server (with the EPC/CTR aggregates) only when the **offer set or the ALL toggle** changes; **search and sequence are filtered client-side** over the fetched rows — instant, no round-trip per keystroke/toggle. During an offer/ALL refetch the current rows stay visible (no flash-to-spinner; spinner shows only on the first load). Client search matches creative text + slug.
   - **Offer widening:** the campaign's offer is pre-checked and locked on; other active org offers are checkboxes that broaden the list. This drives the multi-offer `offer_ids` (CSV) param on `/api/creatives/list` ([`lib/creatives/list-filters.ts`](../../lib/creatives/list-filters.ts)): eligible = a junction row to ANY selected offer, plus (when `include_all_offers` ≠ `false`) any `applies_to_all_offers=true` creative.
   - **ALL toggle:** an "ALL" checkbox in the Offers panel, **off by default**, sends `include_all_offers=false` so `applies_to_all_offers` creatives are hidden until the operator opts in; checking it adds them. The single `offer_id` param still works (and is what `/creatives` uses; it always includes all-offers creatives). Spam dot/score + metrics come from the list endpoint's cache/aggregate joins (read-only — listing does NOT trigger scoring). See [spam-classifier.md](spam-classifier.md).

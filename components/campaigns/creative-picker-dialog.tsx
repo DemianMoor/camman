@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { buildStageSms } from "@/lib/sends/stage-sms";
@@ -41,13 +42,19 @@ type OfferOption = { id: number; name: string; color: string | null };
 type ListResponse = { data: PickerCreative[] };
 type OffersResponse = { data: OfferOption[] };
 
-// The sequence positions the operator actually filters on (mockup pills).
-// "any"/"unknown" creatives are surfaced only when no pill is active.
-const SEQUENCE_PILLS: { value: CreativeSequencePlacement; label: string }[] = [
+// The sequence positions the operator actually filters on.
+// "any"/"unknown" creatives are surfaced only when no position is selected.
+const SEQUENCE_FILTER_OPTIONS: {
+  value: CreativeSequencePlacement;
+  label: string;
+}[] = [
+  { value: "warmup", label: "WarmUp" },
   { value: "1st", label: "1st" },
   { value: "2nd", label: "2nd" },
   { value: "3rd", label: "3rd" },
-  { value: "warmup", label: "WarmUp" },
+  { value: "4th", label: "4th" },
+  { value: "5th", label: "5th" },
+  { value: "6th", label: "6th" },
 ];
 
 const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
@@ -55,6 +62,9 @@ const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   "1st": "1st",
   "2nd": "2nd",
   "3rd": "3rd",
+  "4th": "4th",
+  "5th": "5th",
+  "6th": "6th",
   any: "Any",
   unknown: "Unknown",
 };
@@ -235,11 +245,6 @@ export function CreativePickerDialog({
     return w;
   }, [activeCreative, segments]);
 
-  function toggleSequence(value: CreativeSequencePlacement) {
-    setSequences((prev) =>
-      prev.includes(value) ? prev.filter((s) => s !== value) : [...prev, value],
-    );
-  }
   function toggleOffer(id: number) {
     setExtraOfferIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
@@ -353,26 +358,19 @@ export function CreativePickerDialog({
               <div className="mb-1.5 text-xs font-medium text-muted-foreground">
                 Sequence
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {SEQUENCE_PILLS.map((p) => {
-                  const on = sequences.includes(p.value);
-                  return (
-                    <button
-                      key={p.value}
-                      type="button"
-                      onClick={() => toggleSequence(p.value)}
-                      className={cn(
-                        "rounded-full border px-3 py-1 text-xs transition-colors",
-                        on
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : "bg-background hover:bg-muted",
-                      )}
-                    >
-                      {p.label}
-                    </button>
-                  );
-                })}
-              </div>
+              <MultiSelectPicker
+                options={SEQUENCE_FILTER_OPTIONS.map((o) => ({
+                  id: o.value,
+                  label: o.label,
+                }))}
+                value={sequences}
+                onChange={(next) =>
+                  setSequences(next as CreativeSequencePlacement[])
+                }
+                placeholder="Any sequence position"
+                selectedLabel={(n) => `${n} position${n === 1 ? "" : "s"}`}
+                searchPlaceholder="Filter positions…"
+              />
             </div>
           </div>
 

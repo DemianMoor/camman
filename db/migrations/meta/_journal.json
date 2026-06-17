@@ -477,6 +477,13 @@
       "when": 1782172800000,
       "tag": "0067_stage_send_sale_status",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1782259200000,
+      "tag": "0068_creatives_sequence_4th_5th_6th",
+      "breakpoints": true
     }
   ]
 }

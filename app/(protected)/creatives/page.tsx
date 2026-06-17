@@ -58,6 +58,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import {
   Select,
   SelectContent,
@@ -173,6 +174,9 @@ const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   "1st": "1st",
   "2nd": "2nd",
   "3rd": "3rd",
+  "4th": "4th",
+  "5th": "5th",
+  "6th": "6th",
   any: "Any",
   unknown: "Unknown",
 };
@@ -959,16 +963,6 @@ export default function CreativesPage() {
     });
   }
 
-  function toggleSequence(s: CreativeSequencePlacement) {
-    const set = new Set(filters.sequences);
-    if (set.has(s)) set.delete(s);
-    else set.add(s);
-    updateFilters({
-      sequences: Array.from(set) as CreativeSequencePlacement[],
-      page: 0,
-    });
-  }
-
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
@@ -1034,26 +1028,23 @@ export default function CreativesPage() {
             );
           })}
         </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {SEQUENCE_PLACEMENT_VALUES.map((s) => {
-            const active = filters.sequences.includes(s);
-            return (
-              <button
-                key={s}
-                type="button"
-                onClick={() => toggleSequence(s)}
-                className={cn(
-                  "rounded-full border px-2 py-0.5 text-xs transition-colors",
-                  active
-                    ? "border-foreground bg-foreground text-background"
-                    : "border-border bg-background text-muted-foreground hover:bg-muted",
-                )}
-              >
-                {SEQUENCE_LABEL[s]}
-              </button>
-            );
-          })}
-        </div>
+        <MultiSelectPicker
+          className="w-[200px]"
+          options={SEQUENCE_PLACEMENT_VALUES.map((s) => ({
+            id: s,
+            label: SEQUENCE_LABEL[s],
+          }))}
+          value={filters.sequences}
+          onChange={(next) =>
+            updateFilters({
+              sequences: next as CreativeSequencePlacement[],
+              page: 0,
+            })
+          }
+          placeholder="Any sequence"
+          selectedLabel={(n) => `${n} sequence${n === 1 ? "" : "s"}`}
+          searchPlaceholder="Filter sequence…"
+        />
         <div className="flex items-center gap-2">
           <Switch
             id="show-archived"

@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-06-16_
+_Last updated: 2026-06-17_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -14,10 +14,10 @@ External services CamMan talks to, their contracts, and every environment variab
 | **TextHub** | app ↔ provider | send + STOP inbox poll | per-provider `api_key` (DB, brand-scoped) | send: `GET https://api.texthub.com/v2/?api_key=&text=&number=&lead_id=`; inbox: `?inbox=true` |
 | **MaxMind GeoLite2** | app → download | click ASN/country enrichment | `MAXMIND_LICENSE_KEY` | downloads `.mmdb` at runtime |
 | **Telegram Bot API** | app → alerts | circuit-breaker / poller alerts | bot token | best-effort `sendMessage` |
-| **Keitaro** (tracker) | app → tracker | 5-min results poll | `Api-Key` header | `POST {KEITARO_API_URL}/admin_api/v1/report/build` `{range,grouping,metrics}` → `{rows[]}`; `GET …/campaigns` |
-| **Vercel Cron** | scheduler → app | the 4 cron endpoints | `Authorization: Bearer CRON_SECRET` | `*/15` (×3) + `*/5` (Keitaro poll) |
+| **Keitaro** (tracker) | app → tracker | 5-min results poll + 15-min conversions poll | `Api-Key` header | `POST {KEITARO_API_URL}/admin_api/v1/report/build` `{range,grouping,metrics}` → `{rows[]}`; `POST …/conversions/log` `{range,columns,filters}` → `{rows[]}` (per-recipient sales by `sub_id_1`); `GET …/campaigns` |
+| **Vercel Cron** | scheduler → app | the 5 cron endpoints | `Authorization: Bearer CRON_SECRET` | `*/15` (×4) + `*/5` (Keitaro results poll) |
 
-> Keitaro gotchas (`lib/keitaro/`): point all calls at the single admin host `KEITARO_API_URL` (default `https://admin.gdkn.org`) — never a brand tracking domain. Group reports by `sub_id_3` + `campaign_id`, where `sub_id_3` carries the **stage tracking id** (not a bare campaign id), so mapping back is `sub_id_3` → `campaign_stages.tracking_id`. The `campaign_id` dimension separates landing-page **visits** (campaign **name** `gk-lp-visits` — its alias is a random code, so match on name not alias) from **offer redirects** — resolve the name → `campaign_id`(s) via `GET /admin_api/v1/campaigns`, never a hardcoded id (rebuild-safe). Keep `admin.gdkn.org` DNS-only / WAF-excepted so the every-5-min calls aren't bot-challenged. The documented grouping/metric keys live in one place (`KEITARO_GROUPING` / `KEITARO_METRICS` in `lib/keitaro/client.ts`) — a wrong key silently returns nothing.
+> Keitaro gotchas (`lib/keitaro/`): point all calls at the single admin host `KEITARO_API_URL` (default `https://admin.gdkn.org`) — never a brand tracking domain. Group reports by `sub_id_3` + `campaign_id`, where `sub_id_3` carries the **stage tracking id** (not a bare campaign id), so mapping back is `sub_id_3` → `campaign_stages.tracking_id`. The `campaign_id` dimension separates landing-page **visits** (campaign **name** `gk-lp-visits` — its alias is a random code, so match on name not alias) from **offer redirects** — resolve the name → `campaign_id`(s) via `GET /admin_api/v1/campaigns`, never a hardcoded id (rebuild-safe). Keep `admin.gdkn.org` DNS-only / WAF-excepted so the every-5-min calls aren't bot-challenged. The documented grouping/metric keys live in one place (`KEITARO_GROUPING` / `KEITARO_METRICS` in `lib/keitaro/client.ts`) — a wrong key silently returns nothing. **Conversions log** (`conversions/log`, per-recipient sales): returns **only** the `columns` you request and **400s on any unknown column name** (unlike report/build, which silently drops); it also rejects an `order` key (sort in memory). Confirmed columns: `event_id` (unique conversion id, UUIDv7 — the dedup key), `sub_id_1` (= recipient `stage_sends.id`), `status` (`lead`/`sale`/`rejected`, lowercase), `revenue` (NOT `payout` — doesn't exist), `datetime` (ET wall-clock). Pinned in `KEITARO_CONVERSION_COLUMNS`.
 
 > TextHub gotchas (`lib/sends/texthub.ts`): never pass `long_url` (their rewriter clobbers our tracked link) or `group` (share link — kills per-recipient uniqueness). Their push opt-out callback is broken on their side → intake uses inbox **polling**.
 

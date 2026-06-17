@@ -70,6 +70,8 @@ interface MessageRow {
   texthub_message_id: string | null;
   attempts: number;
   last_error: string | null;
+  sale_status: string | null;
+  sale_revenue: string | null;
   reply_result: string | null;
   reply_received_at: string | null;
 }
@@ -97,6 +99,15 @@ const STATUS_STYLES: Record<string, string> = {
   filtered: "bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300",
   pending: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   sending: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
+};
+
+// Keitaro conversion status → badge color. Stamped per recipient by the
+// conversions poll (sub_id_1 = stage_sends.id). sale = green (the win), lead =
+// amber (checkout, payout unconfirmed), rejected = muted red (payout cancelled).
+const SALE_STATUS_STYLES: Record<string, string> = {
+  sale: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
+  lead: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
+  rejected: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400",
 };
 
 // Event type → a short human label + an accent dot color for the timeline.
@@ -443,6 +454,7 @@ function MessagesPanel({
                     <th className="px-3 py-2 font-medium">Stage</th>
                     <th className="px-3 py-2 font-medium">Phone</th>
                     <th className="px-3 py-2 font-medium">Status</th>
+                    <th className="px-3 py-2 font-medium">Sale</th>
                     <th className="px-3 py-2 font-medium">Sent</th>
                     <th className="px-3 py-2 font-medium">Reply</th>
                     <th className="px-3 py-2 font-medium">Message ID</th>
@@ -466,6 +478,26 @@ function MessagesPanel({
                         >
                           {r.status}
                         </Badge>
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {r.sale_status ? (
+                          <Badge
+                            variant="secondary"
+                            className={SALE_STATUS_STYLES[r.sale_status] ?? ""}
+                            title={
+                              r.sale_revenue
+                                ? `Revenue $${Number(r.sale_revenue).toFixed(2)}`
+                                : undefined
+                            }
+                          >
+                            {r.sale_status}
+                            {r.sale_status === "sale" && r.sale_revenue
+                              ? ` · $${Number(r.sale_revenue).toFixed(2)}`
+                              : ""}
+                          </Badge>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-xs text-muted-foreground">
                         {r.sent_at ? formatCampaignDateTime(r.sent_at) : "—"}

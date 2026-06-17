@@ -126,6 +126,107 @@ export async function buildKeitaroReport(
   }
 }
 
+// ── Conversions log (per-recipient SALE attribution) ─────────────────────────
+// POST /admin_api/v1/conversions/log returns ONE row per conversion (not an
+// aggregate), each carrying the click's sub_id slots — so a sale's `sub_id_1`
+// maps 1:1 back to the CamMan recipient (stage_sends.id, injected at redirect
+// time as the `sub_id1` URL param). NOTE the spelling split, mirroring sub_id3:
+// the inbound URL param is `sub_id1` (no underscore); the Keitaro token / report
+// column is `sub_id_1` (underscore) — request and read it WITH the underscore.
+//
+// Columns confirmed against the live conversions/log schema (the 'events' report
+// definition). NOTE: this endpoint returns ONLY the columns you request, and
+// 400s on any name it doesn't recognize — so every entry here MUST be valid.
+// Verified live: `revenue` is the revenue column (NOT `payout`, which doesn't
+// exist); `event_id` is the unique per-conversion id (UUIDv7) used for dedup;
+// `datetime` is the conversion time. sub_id_1 carries the recipient id (=
+// stage_sends.id) once a tracked link has been clicked post-deploy.
+export const KEITARO_CONVERSION_COLUMNS = [
+  "event_id", // unique conversion id (dedup key)
+  "sub_id_1", // = stage_sends.id (the recipient/customer id)
+  "status", // lead | sale | rejected | …
+  "revenue", // conversion revenue
+  "datetime", // conversion datetime (ET)
+  "click_datetime", // originating click datetime (fallback for converted_at)
+] as const;
+
+// Conversion statuses we care about. `sale` is the headline; `lead`/`rejected`
+// let a recipient's row advance/correct over time. (Keitaro v11 also emits
+// registration/deposit/trash, which we ignore for sale attribution.)
+export const KEITARO_CONVERSION_STATUSES = ["lead", "sale", "rejected"] as const;
+
+export interface KeitaroConversionsResult {
+  ok: boolean;
+  status: number; // 0 = network/timeout, never reached the server
+  rows: KeitaroReportRow[];
+  error: string | null;
+}
+
+// POST /admin_api/v1/conversions/log — body { range, columns, filters, order }.
+// Same never-throw contract as buildKeitaroReport: a failure returns a normalized
+// result so the poll logs and retries next cycle instead of crashing.
+export async function fetchKeitaroConversions(
+  range: KeitaroReportRange,
+  opts?: { timeoutMs?: number; statuses?: readonly string[] },
+): Promise<KeitaroConversionsResult> {
+  const key = apiKey();
+  if (!key) {
+    return { ok: false, status: 0, rows: [], error: "KEITARO_API_KEY is not set" };
+  }
+
+  const statuses = opts?.statuses ?? KEITARO_CONVERSION_STATUSES;
+
+  try {
+    const res = await fetch(`${baseUrl()}/admin_api/v1/conversions/log`, {
+      method: "POST",
+      headers: {
+        "Api-Key": key,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        range,
+        columns: KEITARO_CONVERSION_COLUMNS,
+        // IN_LIST is the confirmed working operator for this Keitaro version.
+        // (The endpoint rejects an `order` key — we sort latest-wins in memory.)
+        filters: [
+          { name: "status", operator: "IN_LIST", expression: statuses },
+        ],
+      }),
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return {
+        ok: false,
+        status: res.status,
+        rows: [],
+        error: `Keitaro conversions/log HTTP ${res.status}: ${body.slice(0, 300)}`,
+      };
+    }
+
+    const body = (await res.json().catch(() => null)) as
+      | { rows?: unknown }
+      | null;
+    const rows = Array.isArray(body?.rows)
+      ? (body.rows as KeitaroReportRow[])
+      : [];
+    return { ok: true, status: res.status, rows, error: null };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "TimeoutError";
+    return {
+      ok: false,
+      status: 0,
+      rows: [],
+      error: aborted
+        ? "Keitaro conversions/log timed out"
+        : `Keitaro conversions/log network error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+    };
+  }
+}
+
 export interface KeitaroCampaign {
   id: number;
   alias: string | null;

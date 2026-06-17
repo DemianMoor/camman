@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-17_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -35,6 +35,7 @@ sequenceDiagram
 - IP precedence: `CF-Connecting-IP` → `x-real-ip` → first `X-Forwarded-For`. **⚠️ `CF-Connecting-IP` is only spoof-proof if the Vercel origin is locked to Cloudflare** (IP allowlist / tunnel); otherwise it can be forged. This gates the trustworthiness of the Phase-3 ASN bot filter.
 - First-pass classification (`classify-click.ts`): prefetch headers (`Purpose`/`X-Purpose`/`X-Moz`/`Sec-Purpose`) → `prefetch`; bot/crawler/headless UA → `bot`; missing UA → `unknown`; else `human`.
 - Click logging is best-effort — the redirect never blocks on a logging failure.
+- **Per-recipient `sub_id1` append (sale attribution):** `resolveAndLogClick` appends `&sub_id1=<send_token>` to the destination before the 302 (`RECIPIENT_SUB_ID_PARAM`). The `send_token` is the link's per-recipient id (= `stage_sends.id`), so a Keitaro conversion's `sub_id_1` maps back to the exact recipient/phone. The **shared per-stage destination is untouched** (the param is added only here, at redirect time) and the operator's stage Full URL never carries it. Spelling mirrors `sub_id3`: URL param `sub_id1` (no underscore) → Keitaro token `sub_id_1` (underscore). Consumed by the conversions poll — see [keitaro-poll.md §8](keitaro-poll.md).
 
 ### Deferred scoring (`/api/clicks/score-pending`, cron `*/15`)
 - Modes: `pending` (rows where `scored_at IS NULL`, default) or `rescore` (all rows, idempotent — after retuning weights). `maxRows` default 2000 (≤20000).

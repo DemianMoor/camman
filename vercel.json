@@ -15,6 +15,10 @@
     {
       "path": "/api/keitaro/poll",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/keitaro/poll-conversions",
+      "schedule": "*/15 * * * *"
     }
   ]
 }

@@ -106,6 +106,8 @@ export async function GET(
       ss.texthub_message_id   AS texthub_message_id,
       ss.attempts             AS attempts,
       ss.last_error           AS last_error,
+      ss.sale_status          AS sale_status,
+      ss.sale_revenue         AS sale_revenue,
       reply.result            AS reply_result,
       reply.received_at       AS reply_received_at
     FROM stage_sends ss
@@ -133,6 +135,8 @@ export async function GET(
     texthub_message_id: string | null;
     attempts: number;
     last_error: string | null;
+    sale_status: string | null;
+    sale_revenue: string | null;
     reply_result: string | null;
     reply_received_at: string | null;
   }[];

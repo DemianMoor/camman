@@ -107,7 +107,15 @@ erDiagram
 
   campaigns ||--o{ keitaro_stage_results : "poll rollup"
   campaign_stages ||--o{ keitaro_stage_results : "sub_id_3 = stage tracking id"
+  stage_sends ||--o| stage_sends : "sale stamped by sub_id_1 = id"
 ```
+
+> **Per-recipient sale attribution** (migration 0067): the Keitaro conversions poll
+> stamps `stage_sends.sale_status` / `sale_revenue` / `converted_at` /
+> `keitaro_conversion_id` by matching a conversion's `sub_id_1` (= the recipient's
+> `stage_sends.id`, injected into the tracked link as the `sub_id1` URL param at
+> redirect time) back to the row. `sub_id_1` is the per-recipient counterpart of
+> `sub_id_3` (the per-stage join key for `keitaro_stage_results`).
 
 ## Tables by domain
 
@@ -184,7 +192,7 @@ erDiagram
 | `link_destinations` | UNIQUE(org_id, url_hash) | deduped destination URLs |
 | `links` | `id bigserial`, `code` **globally** uniq, UNIQUE(stage_id, contact_id, send_token), tracking-id columns NOT NULL | one minted link per recipient-message |
 | `clicks` | `id bigserial`, `link_id`, `classification`, `asn`/`country`/`is_datacenter`, `bot_score`/`bot_reasons`, `scored_at` (NULL=pending) | append-only click log |
-| `stage_sends` | `id uuid` (= send_token), `stage_id`, `contact_id`, `phone`, `link_id`, `rendered_text`, `status`, `texthub_message_id`, `attempts` | partial UNIQUE(stage_id, contact_id) WHERE status in (pending,sending). `status ∈ (pending,sending,sent,failed,rejected,filtered)`; `filtered` = TextHub-suppressed rejection (migration 0065, label-only — not opted out, not skipped) |
+| `stage_sends` | `id uuid` (= send_token), `stage_id`, `contact_id`, `phone`, `link_id`, `rendered_text`, `status`, `texthub_message_id`, `attempts`, `sale_status`/`sale_revenue`/`converted_at`/`keitaro_conversion_id` | partial UNIQUE(stage_id, contact_id) WHERE status in (pending,sending). `status ∈ (pending,sending,sent,failed,rejected,filtered)`; `filtered` = TextHub-suppressed rejection (migration 0065, label-only — not opted out, not skipped). **Sale attribution (migration 0067):** `sale_status ∈ (lead,sale,rejected)` stamped per recipient by the Keitaro conversions poll when a conversion's `sub_id_1` matches `id`; `keitaro_conversion_id` (Keitaro `event_id`) is the dedup key. One sale per recipient, latest wins (NOT cumulative). NULL for manual-mode rows and recipients with no conversion |
 | `send_circuit_events` | `provider_id`, `event` paused/resumed, `reason`, `actor_user_id` | append-only breaker audit |
 | `send_attempts` | `stage_send_id`, `attempt_number`, `request_redacted`, `http_status`, `raw_body`, `ok`, `message_id`, `classification` | append-only per-attempt evidence (migration 0064). Verbatim TextHub body + classification (`accepted`/`mine_transport`/`theirs_rejected`/`indeterminate`); api_key never stored. `stage_sends` is current state, this is immutable history |
 | `campaign_events` | `campaign_id`, `stage_id?`, `event_type` (free-text), `actor_user_id?` (NULL=system), `summary`, `metadata jsonb` | append-only campaign activity log (Activity tab timeline); migration 0060 |

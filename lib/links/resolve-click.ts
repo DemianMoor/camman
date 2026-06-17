@@ -6,6 +6,14 @@ import {
   type ClickClassification,
   type PrefetchSignals,
 } from "@/lib/links/classify-click";
+import { appendUrlParam } from "@/lib/stage-url";
+
+// The query-param name that carries the per-recipient customer id into Keitaro.
+// Mirrors the STAGE_TRACKING_PARAM ("sub_id3") spelling convention: NO underscore
+// in the URL param; Keitaro's campaign Parameters tab maps it onto the `sub_id_1`
+// token (underscore) on the read/report side. The value is the link's send_token
+// (= stage_sends.id), so a Keitaro sale's sub_id_1 maps 1:1 back to the recipient.
+export const RECIPIENT_SUB_ID_PARAM = "sub_id1";
 
 // Accept either the top-level `db` or a transaction handle (the latter lets
 // the verify script roll everything back).
@@ -36,7 +44,8 @@ export async function resolveAndLogClick(
   input: ResolveClickInput,
 ): Promise<ResolveClickResult | null> {
   const lookup = (await dbc.execute(sql`
-    SELECT l.id AS link_id, l.org_id AS org_id, d.url AS destination_url
+    SELECT l.id AS link_id, l.org_id AS org_id, d.url AS destination_url,
+           l.send_token AS send_token
     FROM links l
     JOIN link_destinations d ON d.id = l.destination_id
     WHERE l.code = ${input.code}
@@ -45,10 +54,23 @@ export async function resolveAndLogClick(
     link_id: number;
     org_id: string;
     destination_url: string;
+    send_token: string;
   }[];
 
   const row = lookup[0];
   if (!row) return null;
+
+  // Append the per-recipient customer id (= send_token = stage_sends.id) as the
+  // sub_id1 param so Keitaro can attribute a sale back to this exact recipient.
+  // The shared per-stage destination is left untouched in link_destinations; the
+  // recipient-specific param is added only here, at redirect time. appendUrlParam
+  // is a no-op if the key is somehow already present. send_token is NOT NULL on
+  // links, so every tracked link carries it.
+  const destinationUrl = appendUrlParam(
+    row.destination_url,
+    RECIPIENT_SUB_ID_PARAM,
+    row.send_token,
+  );
 
   const classification = classifyClick(input.userAgent, input.prefetch);
 
@@ -65,5 +87,5 @@ export async function resolveAndLogClick(
     console.error(`resolveAndLogClick: failed to log click for code ${input.code}`, err);
   }
 
-  return { destinationUrl: row.destination_url, classification };
+  return { destinationUrl, classification };
 }

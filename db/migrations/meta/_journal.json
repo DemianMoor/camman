@@ -470,6 +470,13 @@
       "when": 1782086400000,
       "tag": "0066_geoip_cache_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1782172800000,
+      "tag": "0067_stage_send_sale_status",
+      "breakpoints": true
     }
   ]
 }

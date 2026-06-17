@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-06-16_
+_Last updated: 2026-06-17_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -91,9 +91,10 @@ sequenceDiagram
   end
   Rec->>R: GET /r/<code>
   R->>R: first-pass classify (UA/headers)
-  R->>R: INSERT clicks; 302 → destination
+  R->>R: INSERT clicks; append &sub_id1=<send_token>; 302 → destination
   Score->>Score: */15 enrich (MaxMind ASN) + bot_score + classification
 ```
+> The redirect appends `&sub_id1=<send_token>` (= `stage_sends.id`) to the shared destination so a later Keitaro sale attributes back to this recipient (flow H). The operator's stage Full URL is never touched.
 
 ## E. Opt-out (STOP) intake
 
@@ -133,4 +134,25 @@ sequenceDiagram
   CRM->>DB: GET results?campaign_id → per-stage + campaign rollup (derived rates)
 ```
 
-> `sub_id_3` carries the **stage** tracking id, so rows are per-stage; campaign totals = SUM across stages. Per-customer (`sub_id_5`) detail is deferred — no per-recipient id reaches Keitaro yet (see [04-features/keitaro-poll.md](04-features/keitaro-poll.md) §7).
+> `sub_id_3` carries the **stage** tracking id, so rows are per-stage; campaign totals = SUM across stages. Per-recipient SALE detail is a **separate** poll keyed on `sub_id_1` (flow H).
+
+## H. Keitaro conversions poll → per-recipient sale (every 15 min)
+
+```mermaid
+sequenceDiagram
+  participant Cron as */15 keitaro/poll-conversions
+  participant Poll as pollKeitaroConversions
+  participant K as Keitaro Admin API
+  participant DB
+  Cron->>Poll: GET /api/keitaro/poll-conversions (Bearer CRON_SECRET)
+  Poll->>K: POST /conversions/log (7-day ET window, columns incl. sub_id_1, event_id, revenue)
+  K-->>Poll: rows[{event_id, sub_id_1, status, revenue, datetime…}]
+  Poll->>Poll: fold latest conversion per sub_id_1 (in-memory, by datetime)
+  Poll->>DB: SELECT stage_sends WHERE id IN (sub_id_1…) — resolve matched + current event_id
+  loop each matched recipient (event_id changed)
+    Poll->>DB: UPDATE stage_sends SET sale_status, sale_revenue, converted_at, keitaro_conversion_id
+  end
+  Note over Poll,DB: dedup on event_id (skip unchanged) + latest-wins ⇒ idempotent;<br/>blank/non-UUID sub_id_1 counted unmatched (clicks predating the sub_id1 rollout)
+```
+
+> `sub_id_1` = the recipient's `stage_sends.id` (injected at redirect time, flow D). One sale per recipient, **latest wins** (not cumulative). The **Sale** badge on the Activity → Messages list reads `sale_status`/`sale_revenue`. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md) §8.

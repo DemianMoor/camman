@@ -1877,6 +1877,17 @@ export const stage_sends = pgTable(
     attempts: integer("attempts").notNull().default(0),
     last_error: text("last_error"),
     lead_id: text("lead_id"),
+    // Per-recipient sale attribution (migration 0067). Stamped by the Keitaro
+    // conversions poll (lib/keitaro/poll-conversions.ts) when a conversion's
+    // sub_id_1 matches this row's id. ONE sale per recipient — latest sale wins;
+    // sale_revenue is that conversion's revenue, NOT a cumulative sum (the
+    // upgrade path for repeat sales is a separate append-only ledger keyed on
+    // keitaro_conversion_id). keitaro_conversion_id is the dedup key. NULL for
+    // manual-mode rows (no link, no sub_id1) and any recipient with no conversion.
+    sale_status: text("sale_status"),
+    sale_revenue: numeric("sale_revenue", { precision: 12, scale: 4 }),
+    converted_at: timestamp("converted_at", { withTimezone: true }),
+    keitaro_conversion_id: text("keitaro_conversion_id"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1890,6 +1901,14 @@ export const stage_sends = pgTable(
       "stage_sends_status_check",
       sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected', 'filtered')`,
     ),
+    // Migration 0067: per-recipient sale attribution from Keitaro.
+    check(
+      "stage_sends_sale_status_check",
+      sql`${table.sale_status} IS NULL OR ${table.sale_status} IN ('lead', 'sale', 'rejected')`,
+    ),
+    index("stage_sends_sale_status_idx")
+      .on(table.sale_status)
+      .where(sql`sale_status IS NOT NULL`),
     // Migration 0058. Partial unique: at most one LIVE send per (stage, contact)
     // — structurally blocks double-materialization while leaving terminal rows
     // ('sent'/'failed') free so a genuine resend mints fresh rows. Also a partial

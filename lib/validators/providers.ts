@@ -29,12 +29,15 @@ export const providerCreateSchema = z.object({
   send_window_weekend_start: z.number().int().min(0).max(1439).nullable().optional(),
   send_window_weekend_end: z.number().int().min(0).max(1439).nullable().optional(),
   // Circuit-breaker caps. Null = the built-in default (1000 / 100 / 10000). The
-  // per-run pacing cap maxes at 2000 (ABSOLUTE_MAX_SENDS_PER_RUN — larger values
+  // per-run pacing cap maxes at 20000 (ABSOLUTE_MAX_SENDS_PER_RUN — larger values
   // are clamped in code anyway). send_paused is NOT settable here — it's managed
   // via the dedicated pause/resume endpoint (audited).
-  max_sends_per_run: z.number().int().min(1).max(2000).nullable().optional(),
+  max_sends_per_run: z.number().int().min(1).max(20_000).nullable().optional(),
   max_sends_per_minute: z.number().int().min(1).max(100_000).nullable().optional(),
   max_sends_per_24h: z.number().int().min(1).max(10_000_000).nullable().optional(),
+  // HARD per-second send rate. Null = built-in default. The drain paces parallel
+  // sends to never exceed it (e.g. TextHub: 60/s short code, 3/s toll free).
+  max_sends_per_second: z.number().int().min(1).max(1000).nullable().optional(),
   avatar_url: z
     .union([z.string().url("avatar_url must be a valid URL"), z.literal("")])
     .optional(),

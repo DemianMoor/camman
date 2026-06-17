@@ -49,6 +49,7 @@ export async function POST(req: NextRequest) {
         send_window_weekday_end: parsed.data.send_window_weekday_end ?? null,
         send_window_weekend_start: parsed.data.send_window_weekend_start ?? null,
         send_window_weekend_end: parsed.data.send_window_weekend_end ?? null,
+        max_sends_per_second: parsed.data.max_sends_per_second ?? null,
         max_sends_per_run: parsed.data.max_sends_per_run ?? null,
         max_sends_per_minute: parsed.data.max_sends_per_minute ?? null,
         max_sends_per_24h: parsed.data.max_sends_per_24h ?? null,

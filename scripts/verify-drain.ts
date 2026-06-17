@@ -12,6 +12,7 @@ import {
   resolve24hCap,
   resolveMinuteCap,
   resolvePacingCap,
+  resolveSendsPerSecond,
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
 import { decideDrainAuth, runStageDrain, type Sender } from "@/lib/sends/drain";
@@ -95,8 +96,12 @@ async function main() {
   console.log("Circuit-breaker pure helpers:");
   assert(resolvePacingCap(null) === 1000, "null pacing cap → default 1000");
   assert(resolvePacingCap(50) === 50, "pacing cap honors a smaller value");
-  assert(resolvePacingCap(9_999_999) === 2000, "pacing cap clamped to ABSOLUTE_MAX 2000");
+  assert(resolvePacingCap(9_999_999) === 20000, "pacing cap clamped to ABSOLUTE_MAX 20000");
   assert(resolvePacingCap(0) === 1, "pacing cap floors at 1 (never 0)");
+  assert(resolveSendsPerSecond(null) === 10, "null per-second rate → default 10");
+  assert(resolveSendsPerSecond(60) === 60, "per-second rate honors a set value (60)");
+  assert(resolveSendsPerSecond(0) === 1, "per-second rate floors at 1 (never 0/stall)");
+  assert(resolveSendsPerSecond(9_999) === 1000, "per-second rate clamped to ABSOLUTE_MAX 1000");
   assert(resolveMinuteCap(null) === 100, "null minute cap → default 100");
   assert(resolve24hCap(null) === 10000, "null 24h cap → default 10000");
   assert(resolve24hCap(5) === 5, "24h cap honors a set value");
@@ -419,6 +424,18 @@ async function main() {
       assert(cc.ok && cc.sent === 6, "all 6 sent");
       assert(maxInFlight > 1, `sends overlapped — max in-flight ${maxInFlight} > 1 (not the old serial path)`);
       assert(maxInFlight <= 5, `concurrency bound respected — max in-flight ${maxInFlight} <= 5`);
+
+      console.log("Per-second pacing: rate=3 throttles a 6-send drain to ≥ ~1.6s:");
+      const paceProv = await mkProvider();
+      await addCred(paceProv);
+      const paceStage = await mkStage(paceProv);
+      for (let i = 0; i < 6; i++) await addPending(paceStage, await mkContact(), `pp${i}`);
+      const t0 = Date.now();
+      // rate=3 ⇒ two slices of 3, each paced to ~1s with the instant sender.
+      const pc = await runStageDrain(tx, { stageId: paceStage, sendSms: okSender, isEnabled: () => true, concurrency: 3 });
+      const elapsed = Date.now() - t0;
+      assert(pc.ok && pc.sent === 6, "all 6 sent under pacing");
+      assert(elapsed >= 1600, `paced to ~3/sec — 6 sends took ${elapsed}ms (≥1600ms = ≤3/sec)`);
 
       console.log("\nAll assertions passed. Rolling back (no data persisted).");
       throw new Rollback();

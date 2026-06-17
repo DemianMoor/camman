@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-06-18_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -135,7 +135,7 @@ erDiagram
 | `brands` | `brand_id` (text uniq), `website`, `short_link_base` (legacy) | brand↔short-domain mapping is in `short_domains` |
 | `affiliate_networks` | `network_id` (text uniq) | |
 | `offers` | `offer_id` (text uniq), `network_id` (NOT NULL, **restrict**), `payout_model` cpa/revshare, `payout_cpa`, `payout_revshare`, `sales_pages` jsonb | |
-| `sms_providers` | `sms_provider_id` (text uniq), `supports_api_send`, send-window cols, circuit-breaker cols (`send_paused*`, `max_sends_per_*`) | |
+| `sms_providers` | `sms_provider_id` (text uniq), `supports_api_send`, send-window cols, circuit-breaker cols (`send_paused*`, `max_sends_per_second` (0072 — hard per-second rate the drain paces to), `max_sends_per_run` / `_minute` / `_24h` volume caps) | |
 | `provider_credentials` | `provider_id`, `brand_id` (NULL=default), `api_key` **plaintext**, `inbound_webhook_token` | UNIQUE(provider_id, brand_id); see [security-notes.md](security-notes.md) |
 | `provider_phones` | `provider_id`, `brand_id` (set null), `phone_number`, `number_type` 10dlc/toll_free/short_code, `cost_per_sms` | UNIQUE(org_id, phone_number) |
 | `routing_types`, `traffic_types` | `*_id` (text uniq), `name` | campaign metadata dimensions |

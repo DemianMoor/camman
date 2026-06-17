@@ -6,13 +6,13 @@ import { can, type Role } from "@/lib/permissions";
 import {
   ceilingBreached,
   countSentSince,
-  DEFAULT_SEND_CONCURRENCY,
   type DrainStopReason,
   isProviderPaused,
   latchPause,
   resolve24hCap,
   resolveMinuteCap,
   resolvePacingCap,
+  resolveSendsPerSecond,
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
@@ -91,6 +91,13 @@ function envSendEnabled(): boolean {
   return process.env.SEND_ENABLED === "true";
 }
 
+// Pacing sleep for the per-second rate limiter (see runStageDrain). Plain
+// setTimeout — the drain runs in a serverless invocation, so a sub-second sleep
+// just yields wall-clock against the 300s budget.
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const EMPTY = {
   sent: 0,
   failed: 0,
@@ -129,9 +136,9 @@ export async function runStageDrain(
     isOrgEnabled?: (orgId: string) => Promise<boolean>;
     batchSize?: number;
     maxRows?: number;
-    // How many recipient sends to fire concurrently within a claimed batch.
-    // Defaults to DEFAULT_SEND_CONCURRENCY; injectable for tests (1 = the old
-    // strictly-serial behavior).
+    // Overrides the provider's per-second send `rate` (parallel slice size +
+    // pacing target). Production resolves it from max_sends_per_second; this is
+    // the test injection point (1 = effectively serial).
     concurrency?: number;
   },
 ): Promise<DrainResult> {
@@ -140,17 +147,17 @@ export async function runStageDrain(
   const isOrgEnabled =
     opts.isOrgEnabled ?? ((orgId: string) => getOrgSendsEnabled(dbc, orgId));
   const batchSize = opts.batchSize ?? 50;
-  const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_SEND_CONCURRENCY);
 
   const ctx = (await dbc.execute(sql`
     SELECT s.sms_provider_id AS provider_id,
            s.send_approved    AS send_approved,
            c.org_id           AS org_id,
            c.brand_id         AS brand_id,
-           p.send_paused          AS send_paused,
-           p.max_sends_per_run    AS max_sends_per_run,
-           p.max_sends_per_minute AS max_sends_per_minute,
-           p.max_sends_per_24h    AS max_sends_per_24h
+           p.send_paused           AS send_paused,
+           p.max_sends_per_run     AS max_sends_per_run,
+           p.max_sends_per_minute  AS max_sends_per_minute,
+           p.max_sends_per_24h     AS max_sends_per_24h,
+           p.max_sends_per_second  AS max_sends_per_second
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
@@ -165,6 +172,7 @@ export async function runStageDrain(
     max_sends_per_run: number | null;
     max_sends_per_minute: number | null;
     max_sends_per_24h: number | null;
+    max_sends_per_second: number | null;
   }[];
 
   const stage = ctx[0];
@@ -197,6 +205,10 @@ export async function runStageDrain(
   const effectiveMaxRows = opts.maxRows ?? pacingCap;
   const minuteCap = resolveMinuteCap(stage.max_sends_per_minute);
   const cap24h = resolve24hCap(stage.max_sends_per_24h);
+  // HARD per-second rate: the drain fires up to `rate` sends in parallel, then
+  // paces so a slice of N occupies N/rate seconds — never bursting above the
+  // provider's instantaneous limit. opts.concurrency overrides for tests.
+  const rate = Math.max(1, opts.concurrency ?? resolveSendsPerSecond(stage.max_sends_per_second));
 
   let sent = 0;
   let failed = 0;
@@ -263,7 +275,7 @@ export async function runStageDrain(
     // is only ever passed to sendSms below).
     const keyLast4 = apiKey.slice(-4);
 
-    // Fire each slice of `concurrency` TextHub sends in parallel (the ~400ms
+    // Fire each slice of `rate` TextHub sends in parallel (the ~400ms
     // per-recipient round-trip was the original ~2 sends/sec bottleneck), then
     // PERSIST the whole slice in BULK: at most two UPDATEs (sent / failed-or-
     // filtered) + one multi-row send_attempts INSERT — instead of 2 round-trips
@@ -274,10 +286,12 @@ export async function runStageDrain(
     // (cron/drain) or a single-connection tx (tests). Counting + the failure-spike
     // breaker fold the results IN CLAIMED ORDER afterward (JS only), so
     // consecutive-failure semantics are unchanged; a slice's sends have all
-    // already fired/persisted by the time the breaker trips (≤ `concurrency`-1
-    // sends past the threshold — an acceptable widening of a heuristic stop).
-    for (let off = 0; off < claimed.length && !stopReason; off += concurrency) {
-      const slice = claimed.slice(off, off + concurrency);
+    // already fired/persisted by the time the breaker trips (≤ `rate`-1 sends
+    // past the threshold — an acceptable widening of a heuristic stop). After each
+    // slice we PACE to the provider's per-second `rate` (see below the fold).
+    for (let off = 0; off < claimed.length && !stopReason; off += rate) {
+      const sliceStart = Date.now();
+      const slice = claimed.slice(off, off + rate);
       const results = await Promise.all(
         slice.map((c) =>
           sendSms({ apiKey, text: c.rendered_text, number: c.phone, leadId: c.lead_id }),
@@ -381,6 +395,19 @@ export async function runStageDrain(
           halted = true;
           stopReason = "failure_spike";
         }
+      }
+
+      // PACE to the per-second rate: a slice of N sends must occupy ≥ N/rate
+      // seconds, so sustained throughput never bursts above `rate`/sec (the
+      // provider's hard limit). Sleep only the shortfall — when real send latency
+      // already filled the window, no sleep. Skipped once we're stopping
+      // (stopReason) since no further slices follow. Proportional to slice size,
+      // so a partial tail slice (or a batchSize-1 test) waits a tiny fraction,
+      // not a full second.
+      if (!stopReason) {
+        const targetMs = (slice.length / rate) * 1000;
+        const elapsed = Date.now() - sliceStart;
+        if (elapsed < targetMs) await sleep(targetMs - elapsed);
       }
     }
     if (stopReason) break;

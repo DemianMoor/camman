@@ -11,27 +11,33 @@ type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // SOFT per-invocation pacing cap default (rows sent per drain invocation). A
 // 100k+ legit audience drains this many per */5 tick across many ticks — never
-// pausing. Throughput within a tick comes from DEFAULT_SEND_CONCURRENCY (sends
-// fire N-at-a-time), not from a bigger cap — the cap is a pacing bound, not the
-// limiter it once was when the drain sent serially.
+// pausing. Throughput within a tick comes from the per-second send rate (sends
+// fire in paced parallel slices), not from a bigger cap.
 export const DEFAULT_MAX_SENDS_PER_RUN = 1000;
 // Hard ceiling applied in code regardless of the provider column — so a
 // misconfigured huge max_sends_per_run can never DEFEAT pacing. Also the
 // structural tripwire bound: processing past this is impossible under correct
-// code and latches a pause if it ever happens.
-export const ABSOLUTE_MAX_SENDS_PER_RUN = 2000;
+// code and latches a pause if it ever happens. Raised 2000→20000 once the drain
+// gained parallel+batched sends: at 60/s a single 300s invocation can complete
+// ~18k, so 2000 had become an artificial per-tick throttle. The per-second rate
+// and the 300s function budget are the real anti-runaway guards now.
+export const ABSOLUTE_MAX_SENDS_PER_RUN = 20000;
 export const DEFAULT_MAX_SENDS_PER_MINUTE = 100;
 export const DEFAULT_MAX_SENDS_PER_24H = 10000;
 // Consecutive send failures in ONE invocation that latch the provider pause
 // (broken creds/provider — stop wasting calls + flag for a human).
 export const FAILURE_SPIKE_THRESHOLD = 10;
-// How many recipient sends the drain fires CONCURRENTLY within a claimed batch.
-// The drain used to await each TextHub round-trip serially (~2 sends/sec), so a
-// run hit the 300s function timeout at ~600 sends regardless of the pacing cap.
-// Sending N at a time lifts throughput ~N×. Kept conservative (TextHub's
-// documented per-key rate limit is not yet confirmed); raise once it is. The
-// per-minute / 24h ceilings remain the policy-rate backstops above this.
-export const DEFAULT_SEND_CONCURRENCY = 10;
+// HARD per-second send rate the drain paces to: it fires up to this many sends
+// in parallel, then waits out the rest of the second before the next slice. This
+// is the INSTANTANEOUS ceiling that respects the provider's documented limit —
+// e.g. TextHub allows 60/s on a short code, 3/s on a toll-free number. NULL on
+// the provider ⇒ this conservative default. The per-minute / 24h ceilings remain
+// the rolling VOLUME backstops above it (60/s = 3600/min, so a low
+// max_sends_per_minute will still throttle sustained volume).
+export const DEFAULT_SENDS_PER_SECOND = 10;
+// Sanity bound on the per-second rate so a typo can't make the drain open
+// thousands of simultaneous connections. Above any real provider limit.
+export const ABSOLUTE_MAX_SENDS_PER_SECOND = 1000;
 
 // Why a drain invocation stopped before draining the stage. Hard stops latch a
 // pause (human must resume); soft stops just leave rows pending for next tick.
@@ -64,6 +70,15 @@ export function resolveMinuteCap(configured: number | null | undefined): number 
 export function resolve24hCap(configured: number | null | undefined): number {
   const v = configured == null ? DEFAULT_MAX_SENDS_PER_24H : configured;
   return Number.isFinite(v) && v >= 1 ? Math.floor(v) : DEFAULT_MAX_SENDS_PER_24H;
+}
+
+// Resolve + CLAMP the per-second send rate. NULL ⇒ default; clamped to
+// [1, ABSOLUTE_MAX] so it can never be 0 (which would stall the drain) nor open
+// an unbounded number of simultaneous connections.
+export function resolveSendsPerSecond(configured: number | null | undefined): number {
+  const v = configured == null ? DEFAULT_SENDS_PER_SECOND : configured;
+  if (!Number.isFinite(v) || v < 1) return 1;
+  return Math.min(Math.floor(v), ABSOLUTE_MAX_SENDS_PER_SECOND);
 }
 
 export function shouldTripFailureSpike(consecutiveFailures: number): boolean {

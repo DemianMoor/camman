@@ -256,6 +256,12 @@ export const sms_providers = pgTable(
     max_sends_per_run: integer("max_sends_per_run"),
     max_sends_per_minute: integer("max_sends_per_minute"),
     max_sends_per_24h: integer("max_sends_per_24h"),
+    // HARD per-second send rate (migration 0072). The provider's instantaneous
+    // ceiling — e.g. TextHub allows 60/s on a short code, 3/s on a toll-free
+    // number. The drain paces its parallel sends to never burst above this
+    // (resolveSendsPerSecond + the pacing loop in lib/sends/drain.ts). NULL ⇒
+    // DEFAULT_SENDS_PER_SECOND. Distinct from the per-run/minute/24h volume caps.
+    max_sends_per_second: integer("max_sends_per_second"),
     send_paused: boolean("send_paused").notNull().default(false),
     send_paused_reason: text("send_paused_reason"),
     send_paused_at: timestamp("send_paused_at", { withTimezone: true }),

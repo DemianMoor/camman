@@ -59,6 +59,7 @@ export function ProviderForm({
       send_window_weekday_end: initialValues?.send_window_weekday_end ?? null,
       send_window_weekend_start: initialValues?.send_window_weekend_start ?? null,
       send_window_weekend_end: initialValues?.send_window_weekend_end ?? null,
+      max_sends_per_second: initialValues?.max_sends_per_second ?? null,
       max_sends_per_run: initialValues?.max_sends_per_run ?? null,
       max_sends_per_minute: initialValues?.max_sends_per_minute ?? null,
       max_sends_per_24h: initialValues?.max_sends_per_24h ?? null,
@@ -232,12 +233,21 @@ export function ProviderForm({
               <FormLabel>Circuit-breaker caps</FormLabel>
               <FormDescription>
                 Safety limits for automated sending. Leave blank for the
-                defaults (1000 per run, 100 per minute, 10,000 per 24h). The
-                per-run cap only paces a single drain — large audiences still
-                complete across ticks without tripping.
+                defaults (10 per second, 1000 per run, 100 per minute, 10,000 per
+                24h). <strong>Max per second</strong> is the provider&apos;s hard
+                rate limit — e.g. TextHub allows 60/s on a short code and 3/s on a
+                toll-free number; the drain paces sends to never exceed it. The
+                other caps bound volume per drain / minute / day.
               </FormDescription>
             </div>
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <NumberField
+                control={form.control}
+                name="max_sends_per_second"
+                label="Max per second"
+                placeholder="10"
+                disabled={isSubmitting}
+              />
               <NumberField
                 control={form.control}
                 name="max_sends_per_run"
@@ -331,7 +341,11 @@ function NumberField({
   disabled,
 }: {
   control: Control<ProviderFormValues>;
-  name: "max_sends_per_run" | "max_sends_per_minute" | "max_sends_per_24h";
+  name:
+    | "max_sends_per_second"
+    | "max_sends_per_run"
+    | "max_sends_per_minute"
+    | "max_sends_per_24h";
   label: string;
   placeholder?: string;
   disabled?: boolean;

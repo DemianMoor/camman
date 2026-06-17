@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-06-16_
+_Last updated: 2026-06-17_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -8,6 +8,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Every domain table has `org_id`; **every query filters by it** in app code. A missing filter is a data-leak bug.
 - One org-resolution helper per surface (`requireOrgMembership` for pages, `requireApiMembership` for API). Don't invent alternates.
 - RLS is defense-in-depth; app-level filtering is primary.
+- **Every `public` table must have RLS enabled** (Supabase advisor `rls_disabled_in_public`) — without it the anon key (shipped in the frontend bundle) can read/write it directly via PostgREST. Server-only infra tables with no client caller (e.g. `geoip_cache`, migration `0066`) enable RLS **with no policies**: the direct postgres-js connection (`DATABASE_URL`) and `service_role` bypass RLS, so server code keeps working while anon/authenticated access is default-denied. Tenant tables read by the browser need an `org_id`-scoped policy instead.
 
 ## IDs & naming
 - **DB id vs business id vs human_id vs tracking_id** are four distinct things:

@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-17 — Enable RLS on geoip_cache (Supabase advisor rls_disabled_in_public) — migration 0066 — docs: 03, 07
+- The only `public` table with RLS disabled. It's server-only infra cache (MaxMind `.mmdb` blob, no `org_id`) accessed exclusively via the Drizzle/postgres-js direct connection in [lib/links/geoip-cache.ts](../lib/links/geoip-cache.ts) — no anon/SSR/browser client touches it. Migration `0066_geoip_cache_rls.sql` runs `ALTER TABLE public.geoip_cache ENABLE ROW LEVEL SECURITY` with **no policies** (Case A): the DB role and `service_role` bypass RLS so server code is unchanged, while anon/authenticated PostgREST access is default-denied. Verified: 0 public tables RLS-disabled, `verify-geoip-cache` (read+write path) green, migration-integrity green.
+
 ## 2026-06-16 — Filtered (TextHub-suppressed) send status — migration 0065 — docs: 03, 04/sms-send-pipeline, 05, 07
 - **Visibility only (no blocking).** TextHub rejections carrying the structured `{"status":"Suppressed"}` envelope are now recorded as `stage_sends.status='filtered'` (new value, migration 0065) instead of `'failed'`. `SendSmsResult` surfaces the previously-discarded `status` field as `providerStatus` + a derived `suppressed` flag; `isSuppressedStatus()` is the strict token gate (never the HTTP code or free-text response). Drain returns a separate `filtered` count; the `send_drain` event + Activity tab show a violet **Filtered** tile and a `filtered` Messages filter/badge (excluded from "Needs attention"). LABEL ONLY — not added to `opt_outs`, not skipped in future campaigns; the ~262 pre-existing suppressions are not backfilled. Deferred: auto opt-out capture / pre-send skipping (TextHub's "Suppressed" semantics still under discussion).
 

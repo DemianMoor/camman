@@ -35,9 +35,6 @@ export const providerCreateSchema = z.object({
   max_sends_per_run: z.number().int().min(1).max(20_000).nullable().optional(),
   max_sends_per_minute: z.number().int().min(1).max(100_000).nullable().optional(),
   max_sends_per_24h: z.number().int().min(1).max(10_000_000).nullable().optional(),
-  // HARD per-second send rate. Null = built-in default. The drain paces parallel
-  // sends to never exceed it (e.g. TextHub: 60/s short code, 3/s toll free).
-  max_sends_per_second: z.number().int().min(1).max(1000).nullable().optional(),
   avatar_url: z
     .union([z.string().url("avatar_url must be a valid URL"), z.literal("")])
     .optional(),

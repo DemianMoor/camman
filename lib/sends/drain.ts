@@ -157,10 +157,13 @@ export async function runStageDrain(
            p.max_sends_per_run     AS max_sends_per_run,
            p.max_sends_per_minute  AS max_sends_per_minute,
            p.max_sends_per_24h     AS max_sends_per_24h,
-           p.max_sends_per_second  AS max_sends_per_second
+           -- Per-second rate lives on the PHONE (carrier limit, differs by number
+           -- type within one provider). Resolved from the stage's chosen phone.
+           pp.max_sends_per_second AS max_sends_per_second
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
+    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
     WHERE s.id = ${opts.stageId}
     LIMIT 1
   `)) as unknown as {
@@ -205,9 +208,11 @@ export async function runStageDrain(
   const effectiveMaxRows = opts.maxRows ?? pacingCap;
   const minuteCap = resolveMinuteCap(stage.max_sends_per_minute);
   const cap24h = resolve24hCap(stage.max_sends_per_24h);
-  // HARD per-second rate: the drain fires up to `rate` sends in parallel, then
+  // HARD per-second rate (from the stage's PHONE NUMBER — a carrier limit that
+  // differs by number type): the drain fires up to `rate` sends in parallel, then
   // paces so a slice of N occupies N/rate seconds — never bursting above the
-  // provider's instantaneous limit. opts.concurrency overrides for tests.
+  // number's instantaneous limit. NULL phone/rate ⇒ default. opts.concurrency
+  // overrides for tests.
   const rate = Math.max(1, opts.concurrency ?? resolveSendsPerSecond(stage.max_sends_per_second));
 
   let sent = 0;

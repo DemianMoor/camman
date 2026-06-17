@@ -34,6 +34,10 @@ export const providerPhoneCreateSchema = z
       .min(0, "Cost per SMS must be 0 or greater")
       .max(999999, "Cost per SMS is too large"),
     brand_id: z.number().int().positive().nullable().optional(),
+    // HARD per-second send rate for this number (carrier limit; differs by
+    // number type — e.g. 60/s short code, 3/s toll free). Null = built-in
+    // default. The drain paces parallel sends to never exceed it.
+    max_sends_per_second: z.number().int().min(1).max(1000).nullable().optional(),
   })
   .superRefine((data, ctx) => {
     // Short codes have a fixed numeric shape; phone numbers are validated
@@ -58,6 +62,7 @@ export const providerPhoneUpdateSchema = z
       .max(999999, "Cost per SMS is too large")
       .optional(),
     brand_id: z.number().int().positive().nullable().optional(),
+    max_sends_per_second: z.number().int().min(1).max(1000).nullable().optional(),
   })
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: "At least one field must be provided",

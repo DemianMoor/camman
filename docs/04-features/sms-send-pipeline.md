@@ -61,7 +61,7 @@ sequenceDiagram
   end
 ```
 
-**Throughput & per-second pacing.** Within each claimed batch the drain processes **slices of `rate`** — the provider's `max_sends_per_second` (`resolveSendsPerSecond`, default 10, clamped ≤1000; injectable via `opts.concurrency`, `1` = effectively serial). Three layers:
+**Throughput & per-second pacing.** Within each claimed batch the drain processes **slices of `rate`** — the stage phone's `max_sends_per_second` (`resolveSendsPerSecond`, default 10, clamped ≤1000; injectable via `opts.concurrency`, `1` = effectively serial). Three layers:
 1. **Parallel network sends** — the slice's `sendSms` calls fire together (`Promise.all`); the ~400ms per-recipient TextHub round-trip was the original ~2 sends/sec ceiling.
 2. **Bulk persistence** — the slice's results are then written in **≤2 `UPDATE … FROM (VALUES …)`** (one for `sent`, one for `failed`/`filtered`) **+ one multi-row `send_attempts` INSERT**, instead of 2 round-trips per recipient. This matters independently: parallel sends *alone* left ~20 serial writes per slice dominating at **~2.5 sends/sec measured live** — bulk writes cut that to ~3 statements per slice (~11.5/sec measured).
 3. **Pacing** — after persisting, the drain sleeps so a slice of N occupies ≥ N/`rate` seconds, so sustained throughput **never bursts above `rate`/sec** (the provider's hard limit — TextHub 60/s short code, 3/s toll free). The sleep is only the shortfall (when real latency already filled the window, none), and is skipped when stopping. Proportional to slice size, so a partial tail slice waits a fraction, not a full second.
@@ -82,16 +82,17 @@ Every statement is a **single query** (never concurrent on one connection), so t
 - **Never** set `long_url` (TextHub's own rewriter — would clobber our tracked link) or `group` (share link — destroys per-recipient uniqueness).
 - Response normalized to `{ ok, messageId, error, status, providerStatus, suppressed }`. Stores `messageId` for possible future DLR (not polled). `providerStatus` = TextHub's structured `status` envelope field (verbatim); `suppressed` = `isSuppressedStatus(status)`, true only when that field equals `"suppressed"` (case-insensitive).
 
-### Circuit breakers (`circuit-breakers.ts`, migration 0058; `max_sends_per_second` migration 0072)
-| Breaker | Type | Default (NULL ⇒) | Behavior |
-|---------|------|------------------|----------|
-| `max_sends_per_second` | HARD pacing | 10 (clamped ≤1000) | the provider's instantaneous rate limit; drain fires ≤ this many in parallel then waits out the second (TextHub: 60/s short code, 3/s toll free) |
-| `max_sends_per_run` | SOFT pacing | 1000 (clamped ≤20000) | rows claimed per invocation; never pauses |
-| `max_sends_per_minute` | SOFT rolling | 100 | org-wide sent count; self-throttles within a run |
-| `max_sends_per_24h` | SOFT rolling | 10000 | org-wide sent count (last 86400s) |
-| `send_paused` | HARD latching | false | manual panic + auto-trip; requires a **conscious human resume** |
+### Circuit breakers (`circuit-breakers.ts`, migration 0058; `max_sends_per_second` migration 0073)
+| Breaker | Scope | Type | Default (NULL ⇒) | Behavior |
+|---------|-------|------|------------------|----------|
+| `max_sends_per_second` | **phone** (`provider_phones`) | HARD pacing | 10 (clamped ≤1000) | the number's instantaneous rate limit; drain fires ≤ this many in parallel then waits out the second (TextHub: 60/s short code, 3/s toll free) |
+| `max_sends_per_run` | provider | SOFT pacing | 1000 (clamped ≤20000) | rows claimed per invocation; never pauses |
+| `max_sends_per_minute` | provider | SOFT rolling | 100 | org-wide sent count; self-throttles within a run |
+| `max_sends_per_24h` | provider | SOFT rolling | 10000 | org-wide sent count (last 86400s) |
+| `send_paused` | provider | HARD latching | false | manual panic + auto-trip; requires a **conscious human resume** |
 
-- **`max_sends_per_second` vs the volume caps:** the per-second rate bounds the *burst* (so we never exceed what TextHub accepts), while `max_sends_per_minute` / `_24h` bound *sustained volume*. They compose — a rate of 60/s is 3600/min, so a lower `max_sends_per_minute` will still throttle total throughput. Set per provider in Settings → the provider edit dialog.
+- **`max_sends_per_second` is per PHONE NUMBER, not per provider** — the per-second ceiling is a carrier limit that depends on the number type, and one provider can own numbers of different types (e.g. TextHub has a short code at 60/s and a toll-free number at 3/s). The drain resolves it from the stage's `provider_phone_id` (`campaign_stages.provider_phone_id` → `provider_phones.max_sends_per_second`). Set per number in Settings → the provider's phone dialog. A stage with no phone (or a phone with no rate) ⇒ the default.
+- **Per-second rate vs the volume caps:** the per-second rate bounds the *burst* (never exceed what the carrier accepts), while the provider-level `max_sends_per_minute` / `_24h` bound *sustained volume*. They compose — a rate of 60/s is 3600/min, so a lower `max_sends_per_minute` will still throttle total throughput.
 
 - Soft stops leave rows `pending` for the next tick. Hard stops latch `send_paused=true` (+ reason/at) and fire a Telegram alert.
 - **Auto-trips:** failure spike (≥10 consecutive failures) and a pacing tripwire (processed > expected — structural-bug guard). Counts are org-wide as a proxy for "this provider" until a second provider exists.

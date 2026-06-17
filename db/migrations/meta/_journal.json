@@ -512,6 +512,20 @@
       "when": 1782604800000,
       "tag": "0072_provider_max_sends_per_second",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1782691200000,
+      "tag": "0073_provider_phone_max_sends_per_second",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1782777600000,
+      "tag": "0074_drop_provider_max_sends_per_second",
+      "breakpoints": true
     }
   ]
 }

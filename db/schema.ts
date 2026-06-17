@@ -256,12 +256,6 @@ export const sms_providers = pgTable(
     max_sends_per_run: integer("max_sends_per_run"),
     max_sends_per_minute: integer("max_sends_per_minute"),
     max_sends_per_24h: integer("max_sends_per_24h"),
-    // HARD per-second send rate (migration 0072). The provider's instantaneous
-    // ceiling — e.g. TextHub allows 60/s on a short code, 3/s on a toll-free
-    // number. The drain paces its parallel sends to never burst above this
-    // (resolveSendsPerSecond + the pacing loop in lib/sends/drain.ts). NULL ⇒
-    // DEFAULT_SENDS_PER_SECOND. Distinct from the per-run/minute/24h volume caps.
-    max_sends_per_second: integer("max_sends_per_second"),
     send_paused: boolean("send_paused").notNull().default(false),
     send_paused_reason: text("send_paused_reason"),
     send_paused_at: timestamp("send_paused_at", { withTimezone: true }),
@@ -400,6 +394,14 @@ export const provider_phones = pgTable(
     // Number category. '10dlc' and 'toll_free' are E.164 phone numbers;
     // 'short_code' is a 5–6 digit numeric code (geo columns stay NULL).
     number_type: text("number_type").notNull().default("10dlc"),
+    // HARD per-second send rate for THIS number (migration 0073). The carrier
+    // ceiling depends on the number type and differs within one provider — e.g.
+    // TextHub allows 60/s on a short code, 3/s on a toll-free number. The drain
+    // resolves it from the stage's provider_phone_id and paces parallel sends to
+    // never burst above it (resolveSendsPerSecond + the pacing loop in
+    // lib/sends/drain.ts). NULL ⇒ DEFAULT_SENDS_PER_SECOND. Distinct from the
+    // provider-level per-run/minute/24h VOLUME caps.
+    max_sends_per_second: integer("max_sends_per_second"),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })

@@ -205,6 +205,7 @@ export async function POST(
         local_number: localNumber,
         cost_per_sms: String(parsed.data.cost_per_sms),
         number_type: parsed.data.number_type,
+        max_sends_per_second: parsed.data.max_sends_per_second ?? null,
         status: "active",
       })
       .returning();

@@ -85,6 +85,7 @@ export function PhoneForm({
       number_type: initialValues?.number_type ?? "10dlc",
       cost_per_sms: initialValues?.cost_per_sms ?? 0,
       brand_id: initialValues?.brand_id ?? null,
+      max_sends_per_second: initialValues?.max_sends_per_second ?? null,
     },
   });
 
@@ -266,6 +267,37 @@ export function PhoneForm({
                   />
                 </div>
               </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="max_sends_per_second"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Max sends per second</FormLabel>
+              <FormControl>
+                <Input
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  step="1"
+                  placeholder="default 10"
+                  disabled={isSubmitting}
+                  value={field.value ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    field.onChange(v === "" ? null : Number(v));
+                  }}
+                />
+              </FormControl>
+              <FormDescription>
+                Carrier rate limit for this number — e.g. TextHub allows 60/s on a
+                short code and 3/s on a toll-free number. The drain paces sends to
+                never exceed it. Leave blank for the default (10/s).
+              </FormDescription>
               <FormMessage />
             </FormItem>
           )}

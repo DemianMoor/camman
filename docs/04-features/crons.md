@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-06-15_
+_Last updated: 2026-06-17_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Four endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -8,7 +8,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 ## 2. The jobs (`vercel.json`)
 | Path | Schedule | Job | Auth |
 |------|----------|-----|------|
-| `/api/clicks/score-pending` | `*/15 * * * *` | enrich + score click rows | CRON_SECRET only (503 if unset) |
+| `/api/clicks/score-pending` | `*/15 * * * *` | enrich + score click rows, then propagate clean clicks → `clickers` | CRON_SECRET only (503 if unset) |
 | `/api/opt-outs/poll` | `*/15 * * * *` | poll TextHub inbox for STOP intake | CRON_SECRET (GET, all orgs) **or** session operator+ (POST, own org) |
 | `/api/cron/send-scheduled` | `*/15 * * * *` | fire scheduled tracked sends | CRON_SECRET (GET, all orgs) **or** session `campaigns.drain` (POST, own org) |
 | `/api/keitaro/poll` | `*/5 * * * *` | pull Keitaro clicks/conversions → `keitaro_stage_results` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
@@ -19,7 +19,8 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - CRON_SECRET Bearer only; returns 401 on bad/missing secret, **503 if `CRON_SECRET` is unconfigured**.
 - Params: `?mode=pending|rescore` (default pending), `?maxRows=N` (default 2000, ≤20000).
 - Calls `scoreClicks()` ([`lib/links/score-clicks.ts`](../../lib/links/score-clicks.ts)); Node runtime (filesystem for the MaxMind `.mmdb`).
-- Returns `{ mode, scored, byClassification, capped, degraded, enrichment }`. `degraded:true` ⇒ no rows scored (enrichment failed) — rows stay pending. See [tracking-attribution.md](tracking-attribution.md).
+- After scoring, calls `propagateTrackedClickers()` ([`lib/links/propagate-clickers.ts`](../../lib/links/propagate-clickers.ts)) to materialize freshly-scored clean (`human`) clicks into the `clickers` engagement table so segment clicker rules see them. Best-effort (a failure here is logged but does not fail the scoring run) and idempotent.
+- Returns `{ mode, scored, byClassification, capped, degraded, enrichment, clickersInserted }`. `degraded:true` ⇒ no rows scored (enrichment failed) — rows stay pending. See [tracking-attribution.md](tracking-attribution.md).
 
 ### `/api/opt-outs/poll` (STOP intake)
 - Polls each provider credential's TextHub `?inbox=true` endpoint and inserts new opt-outs (`opt_outs`, source `sms_inbound`, org-wide). The TextHub *push* callback is broken on their side, so intake pivoted to **polling**; the Stage-A inbound webhook is a dormant fallback. Manual "Poll now" button uses the POST path (operator+).

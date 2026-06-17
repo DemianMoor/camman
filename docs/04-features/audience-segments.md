@@ -1,6 +1,6 @@
 # Feature — Segments & Segment Rules
 
-_Last updated: 2026-06-10_
+_Last updated: 2026-06-17_
 
 ## 1. Purpose
 A **segment** is a named audience. Its effective membership is the **UNION** of manually-added contacts and contacts matching a chain of declarative **rules**. Segments feed campaign audiences. The rules engine compiles to SQL **set arithmetic** (not boolean predicates) so each branch can pick its own index plan against a >100K-row contacts table.
@@ -53,6 +53,7 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 | `member_of_segment` | segment id | are members of another segment |
 | `is_in_contact_group` | contact_group id | carry a contact-group tag |
 
+- **Clicker rules read the `clickers` table** (not the raw `clicks` click-log). `clickers` is populated two ways: (1) manual CSV upload via `/api/clickers/upload`, and (2) **automatic propagation of clean tracked clicks** — [`lib/links/propagate-clickers.ts`](../../lib/links/propagate-clickers.ts) materializes one `clickers` row (`source = 'tracked_click'`) per `(contact, brand, offer)` for every click scored `classification='human'` (the same "clean" definition the default clicker export uses; suspect/prefetch/bot excluded). It runs after scoring in the `score-pending` cron and is idempotent. Without this bridge, contacts who clicked real tracked SMS links never matched a clicker rule (the table was CSV-only). Brand/offer/provider attribution is derived from the link's campaign + stage. Backfill: [`scripts/backfill-tracked-clickers.ts`](../../scripts/backfill-tracked-clickers.ts).
 - Time-based types accept `is` only (direction encoded in the name; the UI hides the operator select).
 - **`in_use_in_campaign_last_period`** accepts `is` (include) / `is_not` (exclude). A contact counts as "in use" when it sits in a `campaign_audience_pool` for a campaign whose `created_at` falls inside the window AND whose `status` is `active`/`paused`/`completed` ("any that ran" — draft has no pool, archived excluded) AND which still has ≥1 **live stage** (`draft`/`pending`/`sent`/`success`). A campaign whose stages are all `cancelled`/`failed` (or has none) releases its contacts. The 8 period codes map to SQL `make_interval` units in [`lib/segment-rules-eval.ts`](../../lib/segment-rules-eval.ts); only the opaque code is persisted in `value`. Differs from the `exclude_in_use_contacts` flag (above), which is time-less and `active`-only.
 - **Validation source of truth:** [`lib/validators/segment-rule-types.ts`](../../lib/validators/segment-rule-types.ts) maps each type → allowed operators + value shape. Both server (Zod in `lib/validators/segment-rules.ts`) and client (`RulesPanel`) read from it — **don't fork.**

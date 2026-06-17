@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import {
   bigint,
   bigserial,
@@ -1255,6 +1256,25 @@ export const campaign_stages = pgTable(
     // immutable via PATCH like tracking_id. See db/migrations/0039_stage_splits.sql.
     split_index: integer("split_index"),
     split_total: integer("split_total"),
+    // Behavioral-branching lane (migration 0071). Both NULL ⇒ an ordinary
+    // stage that draws from the whole frozen campaign pool (today's behavior).
+    // When set, the stage is a behavioral "lane":
+    //   * behavioral_tier — the high-water tier this lane targets:
+    //       0 = ignored, 1 = clicked, 2 = reached offer. Tier 3 "converted"
+    //     EXITS the sequence and is never a lane (allowed set {0,1,2}).
+    //   * parent_stage_id — the stage at the PRIOR position, used ONLY for the
+    //     aliveness check ("received the prior position"); NOT a
+    //     "was-in-this-lane-before" link. The recipient list is resolved live
+    //     at send time off the campaign-wide cumulative tier, not off ancestry.
+    // The two are set/cleared together (CHECK below). Same-campaign parentage,
+    // "parent is not itself a lane", and the no-chaining rule are enforced in
+    // the API (a CHECK can't reference another row). Self-FK CASCADEs so a lane
+    // can't outlive the position it follows.
+    behavioral_tier: integer("behavioral_tier"),
+    parent_stage_id: integer("parent_stage_id").references(
+      (): AnyPgColumn => campaign_stages.id,
+      { onDelete: "cascade" },
+    ),
     // Auto-generated, immutable tracking ID. Format:
     // `<campaign_tracking_id>_s<stage_number>_c<creative_id>`. NULL until
     // the parent campaign has a tracking_id AND the stage has a
@@ -1290,6 +1310,18 @@ export const campaign_stages = pgTable(
           OR (${table.split_index} BETWEEN 1 AND ${table.split_total}
               AND ${table.split_total} BETWEEN 2 AND 1000)`,
     ),
+    // Behavioral lane coherence: either fully ordinary (both NULL) or fully a
+    // lane (tier in {0,1,2} AND a parent). Rejects half-configured rows and
+    // tier 3 (converted exits, never a lane).
+    check(
+      "campaign_stages_behavioral_lane_check",
+      sql`(${table.behavioral_tier} IS NULL AND ${table.parent_stage_id} IS NULL)
+          OR (${table.behavioral_tier} IN (0, 1, 2) AND ${table.parent_stage_id} IS NOT NULL)`,
+    ),
+    // Sparse — only behavioral lanes carry a parent. Backs the aliveness join.
+    index("campaign_stages_parent_stage_id_idx")
+      .on(table.parent_stage_id)
+      .where(sql`parent_stage_id IS NOT NULL`),
   ],
 );
 

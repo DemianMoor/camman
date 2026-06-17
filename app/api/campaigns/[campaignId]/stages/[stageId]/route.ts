@@ -66,6 +66,12 @@ const NON_UPDATABLE = new Set([
   // silently drops them rather than mutating in place.
   "split_index",
   "split_total",
+  // Behavioral-lane identity is owned by the /behavioral-split endpoint and is
+  // immutable. The validator (stageUpdateSchema) doesn't include these, so Zod
+  // already strips them; listed here as an explicit backstop. The DB CHECK
+  // would reject an incoherent change anyway.
+  "behavioral_tier",
+  "parent_stage_id",
   // Transient request-only flag (see validator); never a column.
   "full_url_auto",
 ]);

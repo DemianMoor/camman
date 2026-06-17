@@ -18,6 +18,7 @@ import {
   Play,
   Plus,
   Send,
+  Split,
   Upload,
 } from "lucide-react";
 import Link from "next/link";
@@ -190,6 +191,11 @@ type Stage = {
   tracking_id: string | null;
   split_index: number | null;
   split_total: number | null;
+  // Behavioral lane (step 5). behavioral_tier NULL ⇒ ordinary stage; 0/1/2 ⇒ a
+  // lane hanging off parent_stage_id (the prior position). audience_count is the
+  // LIVE lane preview for lanes (alive + exact tier − opt-outs, converted out).
+  behavioral_tier: number | null;
+  parent_stage_id: number | null;
   archived_at: string | null;
   created_at: string;
   audience_count: number;
@@ -256,6 +262,29 @@ const ALL_STAGE_STATUSES: StageStatus[] = [
   "failed",
 ];
 
+// Behavioral-lane tier → human label + chip color. Tier 3 (converted) is never
+// a lane — those contacts exit the sequence — so it's intentionally absent.
+const BEHAVIORAL_TIER_META: Record<
+  number,
+  { label: string; className: string }
+> = {
+  0: {
+    label: "Ignored",
+    className:
+      "border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300",
+  },
+  1: {
+    label: "Clicked",
+    className:
+      "border-sky-200 bg-sky-100 text-sky-800 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200",
+  },
+  2: {
+    label: "Reached offer",
+    className:
+      "border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200",
+  },
+};
+
 // Stage status is freely assignable among the non-archived states via an
 // inline dropdown, so an operator can record the resulting status directly.
 // (archived is reached through the Archive action, not this list.)
@@ -295,6 +324,11 @@ export default function CampaignDetailPage() {
   const stageArchiveApi = useApiCall<Stage>();
   const stageRestoreApi = useApiCall<Stage>();
   const stageDuplicateApi = useApiCall<Stage>();
+  const behavioralSplitApi = useApiCall<{
+    parent_stage_id: number;
+    lane_stage_ids: number[];
+    tiers: (number | null)[];
+  }>();
 
   const [campaign, setCampaign] = useState<CampaignDetail | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
@@ -431,6 +465,8 @@ export default function CampaignDetailPage() {
     kind: "archive" | "restore";
     stage: Stage;
   } | null>(null);
+  const [behavioralSplitStage, setBehavioralSplitStage] =
+    useState<Stage | null>(null);
   const [importStage, setImportStage] = useState<Stage | null>(null);
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
@@ -546,6 +582,44 @@ export default function CampaignDetailPage() {
     refetchCampaign();
   }
 
+  async function handleBehavioralSplit() {
+    if (!behavioralSplitStage) return;
+    const result = await behavioralSplitApi.execute(
+      `/api/campaigns/${campaignId}/stages/${behavioralSplitStage.id}/behavioral-split`,
+      { method: "POST" },
+    );
+    if (!result.ok) {
+      toastApiError(result, "Couldn't create behavioral lanes");
+      return;
+    }
+    toast.success("Behavioral split — 3 lanes created (Ignored / Clicked / Reached offer)");
+    setBehavioralSplitStage(null);
+    refetchStages();
+    refetchCampaign();
+  }
+
+  // ============ Behavioral-lane derivations ============
+  // parent_stage_id → its lane stages, and id → stage_number, so lane rows can
+  // show "from #N" and parent rows can show a "N lanes" badge. Derived from the
+  // already-loaded stages list — no extra fetch.
+  const lanesByParent = useMemo(() => {
+    const m = new Map<number, Stage[]>();
+    for (const s of stages) {
+      if (s.parent_stage_id != null) {
+        const arr = m.get(s.parent_stage_id) ?? [];
+        arr.push(s);
+        m.set(s.parent_stage_id, arr);
+      }
+    }
+    return m;
+  }, [stages]);
+  const stageNumberById = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const s of stages) m.set(s.id, s.stage_number);
+    return m;
+  }, [stages]);
+  const hasBehavioralLanes = lanesByParent.size > 0;
+
   // ============ Stage columns ============
 
   function activityFilterLabel(s: Stage): string {
@@ -605,9 +679,38 @@ export default function CampaignDetailPage() {
         id: "label",
         header: "Label",
         enableSorting: false,
-        cell: ({ row }) => (
+        cell: ({ row }) => {
+          const s = row.original;
+          const tierMeta =
+            s.behavioral_tier != null
+              ? BEHAVIORAL_TIER_META[s.behavioral_tier]
+              : null;
+          const parentNumber =
+            s.parent_stage_id != null
+              ? stageNumberById.get(s.parent_stage_id)
+              : undefined;
+          const laneCount = lanesByParent.get(s.id)?.length ?? 0;
+          return (
           <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* Lane chip: a lane belongs to a parent position. The ↳ + "from #N"
+                  makes the parent→lanes relationship obvious in the flat table. */}
+              {tierMeta ? (
+                <Badge
+                  variant="outline"
+                  className={cn("text-[10px]", tierMeta.className)}
+                  title={
+                    parentNumber != null
+                      ? `Behavioral lane (tier ${s.behavioral_tier}) from stage #${parentNumber}`
+                      : `Behavioral lane (tier ${s.behavioral_tier})`
+                  }
+                >
+                  ↳ {tierMeta.label}
+                  {parentNumber != null ? (
+                    <span className="ml-1 opacity-70">· from #{parentNumber}</span>
+                  ) : null}
+                </Badge>
+              ) : null}
               {row.original.label ? (
                 <span className="text-sm">{row.original.label}</span>
               ) : (
@@ -616,6 +719,12 @@ export default function CampaignDetailPage() {
               {row.original.split_total && row.original.split_index ? (
                 <Badge variant="secondary" className="text-[10px]">
                   Split {row.original.split_index}/{row.original.split_total}
+                </Badge>
+              ) : null}
+              {/* Parent position: announce that this stage spawned lanes. */}
+              {laneCount > 0 ? (
+                <Badge variant="secondary" className="text-[10px]">
+                  {laneCount} behavioral lane{laneCount === 1 ? "" : "s"}
                 </Badge>
               ) : null}
             </div>
@@ -636,7 +745,8 @@ export default function CampaignDetailPage() {
               </button>
             ) : null}
           </div>
-        ),
+          );
+        },
       },
       {
         id: "creative",
@@ -703,7 +813,24 @@ export default function CampaignDetailPage() {
         accessorKey: "audience_count",
         enableSorting: true,
         cell: ({ row }) => {
-          const n = row.original.audience_count;
+          const s = row.original;
+          const n = s.audience_count;
+          // Lane rows: the LIVE behavioral preview. Always show the number
+          // (even 0 — honest "no one alive at this tier yet", not "no data")
+          // with a "live" hint, so it reads as a moving target, not a snapshot.
+          if (s.behavioral_tier != null) {
+            return (
+              <span
+                className="font-mono text-sm tabular-nums"
+                title="Live preview — alive + at this exact tier, minus opt-outs (converted exit). Changes until send."
+              >
+                {n.toLocaleString()}
+                <span className="ml-1 align-middle text-[9px] uppercase tracking-wide text-muted-foreground">
+                  live
+                </span>
+              </span>
+            );
+          }
           if (n === 0) return <span className="text-muted-foreground">—</span>;
           return (
             <span className="font-mono text-sm tabular-nums">
@@ -969,6 +1096,18 @@ export default function CampaignDetailPage() {
                       <Copy className="size-4" aria-hidden /> Duplicate
                     </DropdownMenuItem>
                   ) : null}
+                  {/* Behavioral split — only on an ORDINARY stage (not a lane,
+                      and not one that already has lanes). Mirrors the A/B split
+                      flow: one action stamps out the three tier lanes. */}
+                  {canCreateStage &&
+                  s.behavioral_tier == null &&
+                  (lanesByParent.get(s.id)?.length ?? 0) === 0 ? (
+                    <DropdownMenuItem
+                      onSelect={() => setBehavioralSplitStage(s)}
+                    >
+                      <Split className="size-4" aria-hidden /> Behavioral split…
+                    </DropdownMenuItem>
+                  ) : null}
                   {canActivate ? (
                     <DropdownMenuItem onSelect={() => setSendStage(s)}>
                       <Send className="size-4" aria-hidden /> Send…
@@ -1031,8 +1170,11 @@ export default function CampaignDetailPage() {
       canActivate,
       canImportResults,
       canViewImports,
+      canCreateStage,
       selectedStageIds,
       stageStatusApi.isLoading,
+      lanesByParent,
+      stageNumberById,
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stageOpStatus and
     // setPrepareTarget are stable; STAGE_STATUS_META is a module constant.
@@ -1319,6 +1461,31 @@ export default function CampaignDetailPage() {
           </div>
           {campaign.link_mode === "tracked" ? <StageStatusLegend /> : null}
         </div>
+
+        {/* Behavioral-lane explainer — shown once any lanes exist so the
+            operator understands why lane counts don't add up to the pool. */}
+        {hasBehavioralLanes ? (
+          <div className="flex items-start gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <Split className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            <p>
+              <span className="font-medium text-foreground">
+                Behavioral lanes
+              </span>{" "}
+              route each recipient by their{" "}
+              <span className="font-medium">current</span> tier in this campaign
+              — <span className="font-medium">Ignored</span> /{" "}
+              <span className="font-medium">Clicked</span> /{" "}
+              <span className="font-medium">Reached offer</span>. A contact lands
+              in exactly one lane (their highest tier reached).{" "}
+              <span className="font-medium">Converted</span> contacts exit the
+              sequence (no lane) and opted-out contacts are suppressed, so lane
+              counts won&apos;t sum to the full audience. The{" "}
+              <span className="font-mono">live</span> audience numbers are a
+              preview computed from current behavior — they change until the
+              stage is sent.
+            </p>
+          </div>
+        ) : null}
 
         {hasResults ? (
           <Card>
@@ -1652,6 +1819,55 @@ export default function CampaignDetailPage() {
       </section>
 
       {/* ============ Dialogs ============ */}
+      {/* Behavioral split confirm — mirrors the A/B split confirm flow. No
+          input: it always stamps the three tier lanes off the chosen stage. */}
+      <AlertDialog
+        open={behavioralSplitStage !== null}
+        onOpenChange={(open) => {
+          if (!open) setBehavioralSplitStage(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Behavioral split — Stage {behavioralSplitStage?.stage_number}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  This stamps out <span className="font-medium">three</span> lane
+                  stages off this position — one each for{" "}
+                  <span className="font-medium">Ignored</span>,{" "}
+                  <span className="font-medium">Clicked</span>, and{" "}
+                  <span className="font-medium">Reached offer</span>. Each lane
+                  starts as a copy of this stage; edit its message afterward.
+                </p>
+                <p>
+                  At send time each recipient who received this position falls
+                  into exactly one lane by their current tier. Converted contacts
+                  exit; opted-out are suppressed. This stage stays as the parent
+                  position. Nothing is sent now.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={behavioralSplitApi.isLoading}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleBehavioralSplit();
+              }}
+              disabled={behavioralSplitApi.isLoading}
+            >
+              Create 3 lanes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* §A4: shared Prepare popup, opened from a stages-list Orange row. */}
       <StagePrepareDialog
         target={prepareTarget}

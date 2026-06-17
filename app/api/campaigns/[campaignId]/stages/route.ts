@@ -23,6 +23,7 @@ import {
 } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
+import { countStageRecipients } from "@/lib/sends/recipients";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
@@ -175,6 +176,8 @@ export async function GET(
       tracking_id: campaign_stages.tracking_id,
       split_index: campaign_stages.split_index,
       split_total: campaign_stages.split_total,
+      behavioral_tier: campaign_stages.behavioral_tier,
+      parent_stage_id: campaign_stages.parent_stage_id,
       archived_at: campaign_stages.archived_at,
       created_at: campaign_stages.created_at,
       creative: {
@@ -220,8 +223,26 @@ export async function GET(
   // with many stages — consider materializing on stage-status-change in a
   // later step, or batching all stages into a single query with FILTERs.
   const audienceCounts = await Promise.all(
-    rows.map((r) =>
-      (isDraft
+    rows.map((r) => {
+      // Behavioral lane → the LIVE lane preview (alive + exact tier − opt-outs,
+      // converted excluded), via the shared recipient query (step 3). Reads the
+      // frozen pool like every other stage; no second recipient SQL.
+      if (r.behavioral_tier != null) {
+        return countStageRecipients(db, {
+          campaignId: cid,
+          orgId,
+          filters: {
+            includeNoStatus: r.include_no_status,
+            includeClickers: r.include_clickers,
+            excludeClickers: r.exclude_clickers,
+            splitIndex: r.split_index,
+            splitTotal: r.split_total,
+            behavioralTier: r.behavioral_tier,
+            parentStageId: r.parent_stage_id,
+          },
+        });
+      }
+      return (isDraft
         ? computeStageAudienceCountForDraft(draftAudienceInput, {
             include_no_status: r.include_no_status,
             include_clickers: r.include_clickers,
@@ -236,8 +257,8 @@ export async function GET(
             split_index: r.split_index,
             split_total: r.split_total,
           })
-      ).then((res) => res.count),
-    ),
+      ).then((res) => res.count);
+    }),
   );
 
   // Live "inbound STOP" count per stage: opt_outs that arrived via the inbox

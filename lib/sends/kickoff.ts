@@ -58,6 +58,8 @@ interface MainRow {
   exclude_clickers: boolean;
   split_index: number | null;
   split_total: number | null;
+  behavioral_tier: number | null;
+  parent_stage_id: number | null;
   creative_text: string | null;
 }
 
@@ -85,6 +87,8 @@ export async function kickoffStageSend(
       s.exclude_clickers         AS exclude_clickers,
       s.split_index              AS split_index,
       s.split_total              AS split_total,
+      s.behavioral_tier          AS behavioral_tier,
+      s.parent_stage_id          AS parent_stage_id,
       cr.text                    AS creative_text
     FROM campaigns c
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
@@ -110,6 +114,11 @@ export async function kickoffStageSend(
   `)) as unknown as { n: number }[];
   if (Number(existing[0]?.n ?? 0) > 0) return { ok: false, reason: "already_pending" };
 
+  // Behavioral-lane fields flow into the SAME stageRecipientsSql the preview
+  // count uses (lib/sends/recipients.ts), so the people SENT are byte-identical
+  // to the people PREVIEWED. NULL for ordinary stages ⇒ no overlay, unchanged.
+  // Opt-out suppression + converted exclusion happen inside that query, so they
+  // apply at send resolution, not just preview.
   const recipients = await enumerateStageRecipients(tx, {
     campaignId,
     orgId,
@@ -119,6 +128,8 @@ export async function kickoffStageSend(
       excludeClickers: row.exclude_clickers,
       splitIndex: row.split_index ?? null,
       splitTotal: row.split_total ?? null,
+      behavioralTier: row.behavioral_tier ?? null,
+      parentStageId: row.parent_stage_id ?? null,
     },
   });
   if (recipients.length === 0) return { ok: false, reason: "no_recipients" };

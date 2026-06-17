@@ -51,6 +51,8 @@ interface MainRow {
   exclude_clickers: boolean;
   split_index: number | null;
   split_total: number | null;
+  behavioral_tier: number | null;
+  parent_stage_id: number | null;
 }
 
 export async function preflightStageSend(
@@ -70,7 +72,9 @@ export async function preflightStageSend(
       s.include_clickers  AS include_clickers,
       s.exclude_clickers  AS exclude_clickers,
       s.split_index       AS split_index,
-      s.split_total       AS split_total
+      s.split_total       AS split_total,
+      s.behavioral_tier   AS behavioral_tier,
+      s.parent_stage_id   AS parent_stage_id
     FROM campaigns c
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
     LEFT JOIN creatives cr ON cr.id = s.creative_id
@@ -106,6 +110,10 @@ export async function preflightStageSend(
           excludeClickers: row.exclude_clickers,
           splitIndex: row.split_index ?? null,
           splitTotal: row.split_total ?? null,
+          // Lane overlay → preflight's recipient count matches the lane the
+          // kickoff will materialize (and the stages-list live preview).
+          behavioralTier: row.behavioral_tier ?? null,
+          parentStageId: row.parent_stage_id ?? null,
         },
       })}
     ) q

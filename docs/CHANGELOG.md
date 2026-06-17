@@ -2,6 +2,11 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-17 — Behavioral-branching: lanes send through the existing pipeline (build step 6) — no schema change — docs: 04-features/behavioral-lanes, CHANGELOG
+- `kickoffStageSend` ([lib/sends/kickoff.ts](../lib/sends/kickoff.ts)) and `preflightStageSend` ([lib/sends/preflight.ts](../lib/sends/preflight.ts)) now select `behavioral_tier` + `parent_stage_id` and pass them into the SAME `stageRecipientsSql` the stages-list live preview uses — so for a lane, the people SENT (materialized into `stage_sends`) are byte-identical to the people PREVIEWED. No parallel send path; a lane is a stage with a narrower recipient set. **Sending remains fully gated** — `SEND_ENABLED` env default unchanged, no live fire.
+- Every safety layer still gates lane sends (all in `runStageDrain`, untouched): `send_approved`, `SEND_ENABLED`, per-org `sends_enabled`, provider `send_paused`, credentials, pacing/minute/24h breakers, opt-out suppression (inside the recipient query), and `stage_sends` at-most-once (kickoff `already_pending` guard + the partial unique index). Lane `stage_sends`/links rows are written identically, so downstream tier/aliveness reads feed the next position.
+- Tests: [scripts/test-lane-send.ts](../scripts/test-lane-send.ts) — 24/24 under a throwaway org (SEND_ENABLED off, kickoff dry-materialize, drain exercised with gate OFF + a mock dispatcher that throws if invoked): preview==send per lane, opt-out/converted excluded at send resolution, gate-off dispatches nothing (mock never called), at-most-once on re-kickoff, lane rows shaped like an ordinary stage's, and a lane send feeds a next-position aliveness read; real-data counts unchanged.
+
 ## 2026-06-17 — Behavioral-branching: consolidate the split action into the stage editor — docs: 04-features/behavioral-lanes, CHANGELOG
 - Removed the stage-row `⋯` menu "Behavioral split…" item; the action now lives only in the stage editor's audience block beside "Split for A/B test…" (both split actions in one place). Same confirm → endpoint → refetch flow and the same gating (hidden on lanes and already-split parents). Lane table rendering + explainer callout unchanged.
 

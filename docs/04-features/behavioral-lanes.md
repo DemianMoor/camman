@@ -8,9 +8,11 @@ depending on how that contact has behaved **so far in this campaign**. A stage
 send time each still-in-sequence recipient is routed into exactly one lane by
 their current high-water tier.
 
-> **Status:** preview + composition are built and operator-facing. **Sending is
-> unchanged** — the global send switch (`SEND_ENABLED`) is untouched and no live
-> send has fired, so lane preview counts are 0 until real sends accumulate.
+> **Status:** preview, composition, AND send-resolution are built. A lane now
+> resolves and materializes its recipients through the **existing** kickoff +
+> drain pipeline (no parallel send path), but sending stays **fully behind the
+> `SEND_ENABLED` gate** (and the per-org `sends_enabled` switch) — no live send
+> has fired, so lane preview counts are 0 until real sends accumulate.
 
 ## The tier model
 
@@ -53,6 +55,19 @@ three lanes are mutually exclusive by construction.
   `coalesce(tier,0) = behavioral_tier`, plus a global `<> 3` converted guard).
   For ordinary stages the emitted SQL is byte-identical to before. The frozen
   `campaign_audience_pool` stays the universe; tier + aliveness are live overlays.
+- **Sending (through the existing pipeline):** `kickoffStageSend()` and
+  `preflightStageSend()` in [lib/sends/](../../lib/sends/) pass the stage's
+  `behavioral_tier` + `parent_stage_id` into the same `stageRecipientsSql` the
+  preview count uses, so the people SENT (materialized into `stage_sends`) are
+  byte-identical to the people PREVIEWED. There is **no parallel send path** — a
+  lane is just a stage with a narrower recipient set. Every gate lives downstream
+  in `runStageDrain()` and still applies unchanged: `send_approved`, the
+  `SEND_ENABLED` env backstop, the per-org `sends_enabled` switch, provider
+  `send_paused`, credentials, the pacing/minute/24h circuit breakers, opt-out
+  suppression (inside `stageRecipientsSql`), and `stage_sends` at-most-once (the
+  kickoff `already_pending` guard + the `stage_sends_active_contact_uniq` partial
+  unique index). A lane's `stage_sends`/links rows are written identically, so the
+  campaign-wide tier + aliveness reads feed the next position automatically.
 - **Lane creation:** `performBehavioralSplit()` in
   [lib/stages/behavioral-split.ts](../../lib/stages/behavioral-split.ts), exposed
   at `POST /api/campaigns/[campaignId]/stages/[stageId]/behavioral-split`. Stamps

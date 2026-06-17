@@ -6,6 +6,7 @@ import { can, type Role } from "@/lib/permissions";
 import {
   ceilingBreached,
   countSentSince,
+  DEFAULT_SEND_CONCURRENCY,
   type DrainStopReason,
   isProviderPaused,
   latchPause,
@@ -128,6 +129,10 @@ export async function runStageDrain(
     isOrgEnabled?: (orgId: string) => Promise<boolean>;
     batchSize?: number;
     maxRows?: number;
+    // How many recipient sends to fire concurrently within a claimed batch.
+    // Defaults to DEFAULT_SEND_CONCURRENCY; injectable for tests (1 = the old
+    // strictly-serial behavior).
+    concurrency?: number;
   },
 ): Promise<DrainResult> {
   const sendSms = opts.sendSms ?? realSendSms;
@@ -135,6 +140,7 @@ export async function runStageDrain(
   const isOrgEnabled =
     opts.isOrgEnabled ?? ((orgId: string) => getOrgSendsEnabled(dbc, orgId));
   const batchSize = opts.batchSize ?? 50;
+  const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_SEND_CONCURRENCY);
 
   const ctx = (await dbc.execute(sql`
     SELECT s.sms_provider_id AS provider_id,
@@ -257,82 +263,100 @@ export async function runStageDrain(
     // is only ever passed to sendSms below).
     const keyLast4 = apiKey.slice(-4);
 
-    for (const c of claimed) {
-      const res = await sendSms({
-        apiKey,
-        text: c.rendered_text,
-        number: c.phone,
-        leadId: c.lead_id,
-      });
-      // One immutable evidence row per attempt (Workstream 3): verbatim body +
-      // normalized result + classification. The attempt number is the freshly
-      // incremented stage_sends.attempts (RETURNING), so retries stack cleanly.
-      const classification = classifyAttempt({
-        ok: res.ok,
-        status: res.status,
-        messageId: res.messageId,
-        timedOut: res.timedOut,
-      });
-      let attemptNumber = 1;
-      if (res.ok) {
-        const upd = (await dbc.execute(sql`
-          UPDATE stage_sends
-          SET status = 'sent', texthub_message_id = ${res.messageId},
-              sent_at = now(), attempts = attempts + 1
-          WHERE id = ${c.id}
-          RETURNING attempts
-        `)) as unknown as { attempts: number }[];
-        attemptNumber = Number(upd[0]?.attempts ?? 1);
-        sent++;
-        consecutiveFailures = 0;
-      } else {
-        // A structured {"status":"Suppressed"} rejection is recorded as
-        // 'filtered' — a distinct, operator-visible bucket — instead of 'failed'.
-        // Visibility only: the row is NOT opted out and NOT skipped next time.
-        const newStatus = res.suppressed ? "filtered" : "failed";
-        const upd = (await dbc.execute(sql`
-          UPDATE stage_sends
-          SET status = ${newStatus}, last_error = ${res.error}, attempts = attempts + 1
-          WHERE id = ${c.id}
-          RETURNING attempts
-        `)) as unknown as { attempts: number }[];
-        attemptNumber = Number(upd[0]?.attempts ?? 1);
-        if (res.suppressed) filtered++;
-        else failed++;
-        // A non-OK send still feeds the failure-spike breaker regardless of the
-        // suppression flag — unchanged from prior behavior (suppressions used to
-        // be 'failed'). Whether a wall of suppressions SHOULD trip the breaker is
-        // a separate sending-behavior question, intentionally not changed here.
-        consecutiveFailures++;
-      }
-      const requestRedacted = buildSendUrl({
-        apiKey: `redacted_${keyLast4}`,
-        text: c.rendered_text,
-        number: c.phone,
-        leadId: c.lead_id,
-      });
-      await dbc.execute(sql`
-        INSERT INTO send_attempts
-          (org_id, stage_send_id, attempt_number, request_redacted, http_status,
-           raw_body, ok, message_id, error, classification)
-        VALUES
-          (${orgId}, ${c.id}, ${attemptNumber}, ${requestRedacted}, ${res.status},
-           ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification})
-      `);
-      processed++;
+    // Fire the claimed batch's network sends in slices of `concurrency` (was
+    // strictly serial — the throughput bottleneck was the per-recipient TextHub
+    // round-trip, ~2 sends/sec). ONLY the HTTP call is parallelized; the DB writes
+    // (status update + evidence row) and the failure-spike breaker stay STRICTLY
+    // SERIAL, in claimed order. That keeps consecutive-failure semantics identical
+    // to before AND avoids issuing concurrent statements on a single connection —
+    // safe whether `dbc` is the pool (cron/drain) or a single-connection tx
+    // (tests). With ~400ms TextHub latency, 10 parallel sends + ~serial-ms DB
+    // writes ≈ 20 sends/sec; the per-minute / 24h ceilings remain the policy
+    // backstops above this.
+    for (let off = 0; off < claimed.length && !stopReason; off += concurrency) {
+      const slice = claimed.slice(off, off + concurrency);
+      const results = await Promise.all(
+        slice.map((c) =>
+          sendSms({ apiKey, text: c.rendered_text, number: c.phone, leadId: c.lead_id }),
+        ),
+      );
 
-      // Failure spike → latch the pause (creds/provider likely broken; stop
-      // wasting calls). Already-sent rows in this batch stand; the rest of the
-      // claimed batch is abandoned to 'sending' (surfaced as stuck for review).
-      if (shouldTripFailureSpike(consecutiveFailures)) {
-        pausedNow = await latchPause(dbc, {
-          providerId,
-          orgId,
-          reason: `failure_spike: ${consecutiveFailures} consecutive send failures`,
+      for (let k = 0; k < slice.length; k++) {
+        const c = slice[k];
+        const res = results[k];
+        // One immutable evidence row per attempt (Workstream 3): verbatim body +
+        // normalized result + classification. The attempt number is the freshly
+        // incremented stage_sends.attempts (RETURNING), so retries stack cleanly.
+        const classification = classifyAttempt({
+          ok: res.ok,
+          status: res.status,
+          messageId: res.messageId,
+          timedOut: res.timedOut,
         });
-        halted = true;
-        stopReason = "failure_spike";
-        break;
+        let attemptNumber = 1;
+        if (res.ok) {
+          const upd = (await dbc.execute(sql`
+            UPDATE stage_sends
+            SET status = 'sent', texthub_message_id = ${res.messageId},
+                sent_at = now(), attempts = attempts + 1
+            WHERE id = ${c.id}
+            RETURNING attempts
+          `)) as unknown as { attempts: number }[];
+          attemptNumber = Number(upd[0]?.attempts ?? 1);
+          sent++;
+          consecutiveFailures = 0;
+        } else {
+          // A structured {"status":"Suppressed"} rejection is recorded as
+          // 'filtered' — a distinct, operator-visible bucket — instead of 'failed'.
+          // Visibility only: the row is NOT opted out and NOT skipped next time.
+          const newStatus = res.suppressed ? "filtered" : "failed";
+          const upd = (await dbc.execute(sql`
+            UPDATE stage_sends
+            SET status = ${newStatus}, last_error = ${res.error}, attempts = attempts + 1
+            WHERE id = ${c.id}
+            RETURNING attempts
+          `)) as unknown as { attempts: number }[];
+          attemptNumber = Number(upd[0]?.attempts ?? 1);
+          if (res.suppressed) filtered++;
+          else failed++;
+          // A non-OK send still feeds the failure-spike breaker regardless of the
+          // suppression flag — unchanged from prior behavior (suppressions used to
+          // be 'failed'). Whether a wall of suppressions SHOULD trip the breaker is
+          // a separate sending-behavior question, intentionally not changed here.
+          consecutiveFailures++;
+        }
+        const requestRedacted = buildSendUrl({
+          apiKey: `redacted_${keyLast4}`,
+          text: c.rendered_text,
+          number: c.phone,
+          leadId: c.lead_id,
+        });
+        await dbc.execute(sql`
+          INSERT INTO send_attempts
+            (org_id, stage_send_id, attempt_number, request_redacted, http_status,
+             raw_body, ok, message_id, error, classification)
+          VALUES
+            (${orgId}, ${c.id}, ${attemptNumber}, ${requestRedacted}, ${res.status},
+             ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification})
+        `);
+        processed++;
+
+        // Failure spike → latch the pause (creds/provider likely broken; stop
+        // wasting calls). Already-processed rows stand; the rest of THIS slice's
+        // sends already fired (their rows persisted in this same serial pass), and
+        // any remaining claimed rows are abandoned to 'sending' (surfaced as
+        // stuck). The breaker may run up to `concurrency`-1 extra sends past the
+        // threshold (one slice's worth) before tripping — an acceptable widening.
+        if (shouldTripFailureSpike(consecutiveFailures)) {
+          pausedNow = await latchPause(dbc, {
+            providerId,
+            orgId,
+            reason: `failure_spike: ${consecutiveFailures} consecutive send failures`,
+          });
+          halted = true;
+          stopReason = "failure_spike";
+          break;
+        }
       }
     }
     if (stopReason) break;

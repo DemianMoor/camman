@@ -10,7 +10,7 @@
     },
     {
       "path": "/api/cron/send-scheduled",
-      "schedule": "*/15 * * * *"
+      "schedule": "*/5 * * * *"
     },
     {
       "path": "/api/keitaro/poll",

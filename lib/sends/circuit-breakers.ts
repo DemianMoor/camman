@@ -10,9 +10,10 @@ import type { db } from "@/db/client";
 type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // SOFT per-invocation pacing cap default (rows sent per drain invocation). A
-// 100k+ legit audience drains this many per */15 tick across many ticks — never
-// pausing. THROUGHPUT FOLLOW-UP: at 1000/tick ≈ 96k/day per stage, very large
-// stages need parallel/batch sends (a separate phase), not a bigger cap.
+// 100k+ legit audience drains this many per */5 tick across many ticks — never
+// pausing. Throughput within a tick comes from DEFAULT_SEND_CONCURRENCY (sends
+// fire N-at-a-time), not from a bigger cap — the cap is a pacing bound, not the
+// limiter it once was when the drain sent serially.
 export const DEFAULT_MAX_SENDS_PER_RUN = 1000;
 // Hard ceiling applied in code regardless of the provider column — so a
 // misconfigured huge max_sends_per_run can never DEFEAT pacing. Also the
@@ -24,6 +25,13 @@ export const DEFAULT_MAX_SENDS_PER_24H = 10000;
 // Consecutive send failures in ONE invocation that latch the provider pause
 // (broken creds/provider — stop wasting calls + flag for a human).
 export const FAILURE_SPIKE_THRESHOLD = 10;
+// How many recipient sends the drain fires CONCURRENTLY within a claimed batch.
+// The drain used to await each TextHub round-trip serially (~2 sends/sec), so a
+// run hit the 300s function timeout at ~600 sends regardless of the pacing cap.
+// Sending N at a time lifts throughput ~N×. Kept conservative (TextHub's
+// documented per-key rate limit is not yet confirmed); raise once it is. The
+// per-minute / 24h ceilings remain the policy-rate backstops above this.
+export const DEFAULT_SEND_CONCURRENCY = 10;
 
 // Why a drain invocation stopped before draining the stage. Hard stops latch a
 // pause (human must resume); soft stops just leave rows pending for next tick.

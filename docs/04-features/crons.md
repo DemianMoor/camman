@@ -10,7 +10,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 |------|----------|-----|------|
 | `/api/clicks/score-pending` | `*/15 * * * *` | enrich + score click rows, then propagate clean clicks → `clickers` | CRON_SECRET only (503 if unset) |
 | `/api/opt-outs/poll` | `*/15 * * * *` | poll TextHub inbox for STOP intake | CRON_SECRET (GET, all orgs) **or** session operator+ (POST, own org) |
-| `/api/cron/send-scheduled` | `*/15 * * * *` | fire scheduled tracked sends | CRON_SECRET (GET, all orgs) **or** session `campaigns.drain` (POST, own org) |
+| `/api/cron/send-scheduled` | `*/5 * * * *` | fire scheduled tracked sends | CRON_SECRET (GET, all orgs) **or** session `campaigns.drain` (POST, own org) |
 | `/api/keitaro/poll` | `*/5 * * * *` | pull Keitaro clicks/conversions → `keitaro_stage_results` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/keitaro/poll-conversions` | `*/15 * * * *` | per-recipient SALE attribution → `stage_sends.sale_status` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/keitaro/poll-offer-reaches` | `*/15 * * * *` | per-recipient OFFER-PAGE REACH (Level 2) → `stage_sends.offer_reached_at` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
@@ -32,6 +32,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - Calls `runScheduledSends()` ([`lib/sends/scheduled.ts`](../../lib/sends/scheduled.ts)) for stages with a due `scheduled_at` on a tracked campaign.
 - Respects: `SEND_ENABLED` kill-switch, per-stage `send_approved`, the provider's **ET send window** (`decideScheduledSend`), resolvable credentials, and circuit breakers.
 - Atomic claim via `sent_at`; a missed window sets `schedule_missed_at` (not locked, reschedulable). Cross-stage per-run budget accumulator caps total sends across N stages. See [sms-send-pipeline.md](sms-send-pipeline.md).
+- Runs **every 5 min** (was `*/15`) — paired with the drain's concurrent sends (~20/sec), this lets a large scheduled audience drain materially faster across ticks. The drain is resumable, so leftover `pending` rows roll to the next tick.
 - **`SEND_ENABLED` is OFF** in production — the live send path has not fired.
 
 ### `/api/keitaro/poll` (Keitaro results poll)

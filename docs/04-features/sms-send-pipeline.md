@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-06-16_
+_Last updated: 2026-06-17_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -48,12 +48,18 @@ sequenceDiagram
   Drain->>Drain: resolve api_key (brand key → default)
   loop until cap / halt
     Drain->>DB: claim batch FOR UPDATE SKIP LOCKED → status=sending
-    Drain->>TH: GET send (api_key,text,number,lead_id)
-    TH-->>Drain: {ok, messageId, error, status, providerStatus}
-    Drain->>DB: sent (+texthub_message_id,sent_at) | filtered if status="Suppressed" else failed (+last_error); attempts++
-    Drain->>Drain: failure-spike? rolling ceilings? → halt/latch
+    loop slice of `concurrency` (default 10)
+      par parallel network sends
+        Drain->>TH: GET send (api_key,text,number,lead_id)
+        TH-->>Drain: {ok, messageId, error, status, providerStatus}
+      end
+      Drain->>DB: then SERIALLY per result, in order: sent (+message_id,sent_at) | filtered if "Suppressed" else failed (+last_error); attempts++; failure-spike? → halt/latch
+    end
+    Drain->>Drain: rolling ceilings checked between batches → stop
   end
 ```
+
+**Concurrency (throughput).** Within each claimed batch, the drain fires **`concurrency` TextHub sends at a time** (`DEFAULT_SEND_CONCURRENCY = 10` in [circuit-breakers.ts](../../lib/sends/circuit-breakers.ts); injectable via `opts.concurrency`, `1` = strictly serial). **Only the network call is parallelized** (a `Promise.all` over the slice's `sendSms`) — the bottleneck was the ~400ms per-recipient round-trip. The DB writes (`stage_sends` status update + the `send_attempts` evidence row) and the failure-spike breaker then run **strictly serially, in claimed order**, so consecutive-failure semantics are byte-identical to before, and the drain never issues concurrent statements on one connection (correct whether `dbc` is the pool or a single-connection tx — the latter is what the test harness uses; concurrent `execute()` on a postgres-js transaction connection desyncs its pipeline). The breaker is evaluated per-row, but a slice's sends have all already fired by the time it trips, so it can run up to `concurrency−1` extra sends past the threshold. This replaced the original strictly-serial `await`-per-recipient loop, which capped throughput at ~2 sends/sec and made a run hit the 300s function timeout at ~600 sends regardless of `max_sends_per_run`. With concurrency 10 and serial-ms DB writes the drain reaches ~20 sends/sec; the per-minute / 24h ceilings (below) are the policy-rate backstops above it.
 
 **Gates + breakers, all must pass:**
 1. `campaign_stages.send_approved = true` (deliberate per-stage opt-in; default false).
@@ -102,7 +108,7 @@ TextHub rejects a number it blocks on **its** side with a dedicated structured e
 - **Historical rows:** the ~262 pre-0065 suppressions stay `status='failed'` (not backfilled) — out of scope for this visibility change.
 
 ### Scheduling & quiet hours (`scheduled.ts` + `lib/quiet-hours.ts`)
-- `scheduled_at` on a stage drives the `*/15` `send-scheduled` cron ([crons.md](crons.md)).
+- `scheduled_at` on a stage drives the `*/5` `send-scheduled` cron ([crons.md](crons.md)).
 - **Two phases per tick, sharing one per-provider per-tick send budget:**
   - **Phase A — materialize:** for each DUE, *not-yet-materialized* stage (`selectDueScheduledStages`: `sent_at IS NULL` **and** no `stage_sends` rows yet), apply the window decision, then kickoff. Phase A **does NOT stamp `sent_at`** (Bug 1 fix) — the materialized rows themselves prevent re-materialization, and stamping before the drain would mark a stage "Sent" even when the drain is later gate-refused. A permanent refusal (`no_recipients`, `no_credentials`, …) marks `schedule_missed_at` so it stops retrying.
   - **Phase B — resumable drain (decoupled, WS2):** `selectDrainableStages` now drains a stage only when it is **released** (`sent_at` set — first send already happened, so keep draining leftovers) **or DUE for first release** (`scheduled_at <= now`). A stage **pre-materialized for a future schedule** (Approve-Send flow: rows exist, `sent_at` NULL, `scheduled_at` in the future) is **held** until its time — fixing the landmine where Phase B drained any pending stage regardless of `scheduled_at`. The in-window gate is applied per-stage in JS: **first fire** uses the day-anchored `decideScheduledSend` (never rolls to a later day — `hold`/`fire`/`missed`); **continuation** of a released stage drains only while `isOutsideSendWindow(now)` is false, else holds the leftovers for the next window (resumable across days, never out-of-hours, never stranded). Budget is checked **before** the window gate. **`sent_at` is stamped IF AND ONLY IF the drain actually attempted ≥1 send (`processed > 0`)** (Bug 1 fix): a gate-refused drain (env/DB switch off, `send_paused`, etc.) returns `processed 0`, leaves `sent_at` NULL, and the stage stays armed + re-selectable — never a false "Sent". New result counter `drain_held`.

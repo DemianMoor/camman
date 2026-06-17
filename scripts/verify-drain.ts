@@ -390,6 +390,27 @@ async function main() {
       const reSpike = await runStageDrain(tx, { stageId: spikeStage, sendSms: okSender, isEnabled: () => true });
       assert(!reSpike.ok && reSpike.reason === "provider_paused", "subsequent drains refuse until a human resumes");
 
+      console.log("Throughput: sends within a batch fire concurrently, bounded by `concurrency`:");
+      const concProv = await mkProvider();
+      await addCred(concProv);
+      const concStage = await mkStage(concProv);
+      for (let i = 0; i < 6; i++) await addPending(concStage, await mkContact(), `cc${i}`);
+      let inFlight = 0;
+      let maxInFlight = 0;
+      // Track simultaneous in-flight sends: each call holds across a macrotask so
+      // a parallelized slice overlaps (serial code would never exceed 1).
+      const concSender: Sender = async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setImmediate(r));
+        inFlight--;
+        return { ok: true, messageId: "TH-c", response: "queued", providerStatus: null, suppressed: false, rawBody: '{"id":"TH-c"}', error: null, status: 200, timedOut: false };
+      };
+      const cc = await runStageDrain(tx, { stageId: concStage, sendSms: concSender, isEnabled: () => true, concurrency: 5 });
+      assert(cc.ok && cc.sent === 6, "all 6 sent");
+      assert(maxInFlight > 1, `sends overlapped — max in-flight ${maxInFlight} > 1 (not the old serial path)`);
+      assert(maxInFlight <= 5, `concurrency bound respected — max in-flight ${maxInFlight} <= 5`);
+
       console.log("\nAll assertions passed. Rolling back (no data persisted).");
       throw new Rollback();
     });

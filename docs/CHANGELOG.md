@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-17 — Behavioral-branching: consolidate the split action into the stage editor — docs: 04-features/behavioral-lanes, CHANGELOG
+- Removed the stage-row `⋯` menu "Behavioral split…" item; the action now lives only in the stage editor's audience block beside "Split for A/B test…" (both split actions in one place). Same confirm → endpoint → refetch flow and the same gating (hidden on lanes and already-split parents). Lane table rendering + explainer callout unchanged.
+
 ## 2026-06-17 — Behavioral-branching: second entry point in the stage editor — docs: 04-features/behavioral-lanes, CHANGELOG
 - Added a **"Behavioral split…"** button inside the stage editor's audience block, beside "Split for A/B test…" ([components/campaigns/stage-form.tsx](../components/campaigns/stage-form.tsx)), in addition to the existing stage-row action. Shown only when editing an ordinary stage (hidden on lanes, with a "this is a behavioral lane" note instead). It hands off to the parent, which runs the same confirm dialog + endpoint as the row action — one shared implementation, two entry points. Plumbed `behavioralTier`/`onBehavioralSplit` through `StageInlineEditor` ([stage-inline-creator.tsx](../components/campaigns/stage-inline-creator.tsx)); `EditableStage` gains `behavioral_tier`. No new endpoint or query.
 

@@ -1096,18 +1096,9 @@ export default function CampaignDetailPage() {
                       <Copy className="size-4" aria-hidden /> Duplicate
                     </DropdownMenuItem>
                   ) : null}
-                  {/* Behavioral split — only on an ORDINARY stage (not a lane,
-                      and not one that already has lanes). Mirrors the A/B split
-                      flow: one action stamps out the three tier lanes. */}
-                  {canCreateStage &&
-                  s.behavioral_tier == null &&
-                  (lanesByParent.get(s.id)?.length ?? 0) === 0 ? (
-                    <DropdownMenuItem
-                      onSelect={() => setBehavioralSplitStage(s)}
-                    >
-                      <Split className="size-4" aria-hidden /> Behavioral split…
-                    </DropdownMenuItem>
-                  ) : null}
+                  {/* Behavioral split lives in the stage editor's audience block
+                      (beside the A/B "Split for A/B test…" button), not here —
+                      both split actions sit in the same place. */}
                   {canActivate ? (
                     <DropdownMenuItem onSelect={() => setSendStage(s)}>
                       <Send className="size-4" aria-hidden /> Send…

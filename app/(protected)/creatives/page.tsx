@@ -504,6 +504,7 @@ export default function CreativesPage() {
     filters.offer_id,
     filters.qualities,
     filters.sequences,
+    filters.funnelStages,
     filters.showArchived,
     refreshTick,
     listApi.execute,

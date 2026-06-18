@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-06-18_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -106,10 +106,15 @@ sequenceDiagram
   participant DB
   Cron->>App: GET /api/opt-outs/poll (Bearer CRON_SECRET)
   App->>TH: GET ?inbox=true per credential
-  TH-->>App: inbound messages (STOP, etc.)
-  App->>DB: INSERT opt_outs (source sms_inbound) + texthub_inbound_events
-  Note over App,DB: opt-outs exclude the contact from all future audience snapshots
+  TH-->>App: inbound messages (STOP, etc.) — phone + body + received_at only
+  App->>DB: INSERT opt_outs (source sms_inbound, org-wide) + texthub_inbound_events
+  App->>DB: match stage_sends by phone, sent within 72h of received_at
+  DB-->>App: every stage that sent to the number in the window
+  App->>DB: INSERT opt_out_attributions (1/stage) + bump campaign_stages.inbound_opt_out_count
+  Note over App,DB: org-wide opt-out excludes the contact from all future snapshots;<br/>attribution is additive analytics (Reports + campaign "Inbound STOPs"), never a gate
 ```
+
+Attribution rule (migration 0075): TextHub's inbox has no campaign reference, so a STOP is credited to **every** stage that sent to the number within a 72h trailing window (`OPT_OUT_ATTRIBUTION_WINDOW_HOURS`). One `opt_out_attributions` row per (opt_out, stage); the per-stage `inbound_opt_out_count` counter drives the Reports "Opt-outs" column, and the campaign page shows DISTINCT attributed contacts. No match ⇒ org-wide opt-out only. See [lib/sends/poll-opt-outs.ts](../lib/sends/poll-opt-outs.ts).
 
 ## F. Segment rule audience resolution
 See [04-features/audience-segments.md](04-features/audience-segments.md) — `buildSegmentAudienceClause` compiles rules to UNION/INTERSECT/EXCEPT set arithmetic and UNIONs the result with manual membership.

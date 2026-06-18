@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-06-18_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Four endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -26,6 +26,8 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 
 ### `/api/opt-outs/poll` (STOP intake)
 - Polls each provider credential's TextHub `?inbox=true` endpoint and inserts new opt-outs (`opt_outs`, source `sms_inbound`, org-wide). The TextHub *push* callback is broken on their side, so intake pivoted to **polling**; the Stage-A inbound webhook is a dormant fallback. Manual "Poll now" button uses the POST path (operator+).
+- **Campaign/stage attribution (migration 0075).** TextHub's inbox carries no campaign reference, so each STOP is reverse-matched to sends by phone + recency: the poller credits **every stage that sent to that number within a 72h trailing window** (`OPT_OUT_ATTRIBUTION_WINDOW_HOURS`, anchored on the parsed `provider_received_at`), one `opt_out_attributions` row per stage + a `campaign_stages.inbound_opt_out_count` bump. All inside the existing per-message transaction (idempotent via the `texthub_inbound_events` claim). The org-wide `opt_outs` row is unchanged — attribution is additive, never a suppression gate. No window match (CSV-only numbers, non-API providers, pre-pipeline sends) ⇒ org-wide opt-out only, counted `unattributed`. Backfill: [`scripts/backfill-optout-attributions.ts`](../../scripts/backfill-optout-attributions.ts). See [poll-opt-outs.ts](../../lib/sends/poll-opt-outs.ts).
+- Response adds `attributed` (stage credits written) and `unattributed` (suppressed STOPs that matched no send).
 - Best-effort Telegram alert on failures.
 
 ### `/api/cron/send-scheduled` (scheduled sends)

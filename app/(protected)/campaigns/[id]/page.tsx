@@ -176,9 +176,9 @@ type Stage = {
   total_cost: string;
   delivered_count: number;
   opt_out_count: number;
-  // Live, read-only: inbound STOP opt-outs (source sms_inbound) attributed to
-  // this stage (the most recent stage that sent to the contact). Distinct from
-  // the import-fed opt_out_count.
+  // Inbound STOP opt-outs attributed to this stage via the poller's 72h-window
+  // match (migration 0075) — campaign_stages.inbound_opt_out_count, the same
+  // source the Reports page reads. Distinct from the import-fed opt_out_count.
   inbound_stop_count: number;
   click_count: number;
   late_click_count: number;
@@ -215,7 +215,12 @@ type Stage = {
   offer: { id: number; name: string; color: string | null; payout_cpa: string | null } | null;
 };
 
-type StagesListResponse = { data: Stage[]; totalCount: number };
+type StagesListResponse = {
+  data: Stage[];
+  totalCount: number;
+  // Campaign-level DISTINCT contacts attributed an inbound STOP (migration 0075).
+  inbound_stop_contacts: number;
+};
 
 type Member = {
   id: string;
@@ -339,6 +344,9 @@ export default function CampaignDetailPage() {
   );
 
   const [stages, setStages] = useState<Stage[]>([]);
+  // Campaign-level distinct contacts who STOPped (server-computed; see the
+  // stages list endpoint). Drives the "Inbound STOPs" rollup metric.
+  const [inboundStopContacts, setInboundStopContacts] = useState(0);
   const [stagesError, setStagesError] = useState<string | null>(null);
   const [stagesTick, setStagesTick] = useState(0);
   const refetchStages = useCallback(() => setStagesTick((n) => n + 1), []);
@@ -431,8 +439,10 @@ export default function CampaignDetailPage() {
         `/api/campaigns/${campaignId}/stages${qs ? `?${qs}` : ""}`,
       );
       if (cancelled) return;
-      if (r.ok) setStages(r.data.data);
-      else setStagesError(r.error);
+      if (r.ok) {
+        setStages(r.data.data);
+        setInboundStopContacts(r.data.inbound_stop_contacts ?? 0);
+      } else setStagesError(r.error);
     })();
     return () => {
       cancelled = true;
@@ -1198,7 +1208,6 @@ export default function CampaignDetailPage() {
     let sms = 0;
     let delivered = 0;
     let optOuts = 0;
-    let inboundStops = 0;
     let clickers = 0;
     let lateClickers = 0;
     let scrubbed = 0;
@@ -1216,7 +1225,6 @@ export default function CampaignDetailPage() {
       sms += s.sms_count;
       delivered += s.delivered_count;
       optOuts += s.opt_out_count;
-      inboundStops += s.inbound_stop_count;
       clickers += s.click_count;
       lateClickers += s.late_click_count;
       scrubbed += s.scrubbed_count;
@@ -1237,7 +1245,9 @@ export default function CampaignDetailPage() {
       sms,
       delivered,
       optOuts,
-      inboundStops,
+      // Campaign-level DISTINCT contacts who STOPped (server-computed) — not a
+      // sum of per-stage credits, which window-attribution would over-count.
+      inboundStops: inboundStopContacts,
       clickers,
       lateClickers,
       scrubbed,
@@ -1247,7 +1257,7 @@ export default function CampaignDetailPage() {
       cost,
       revenue: revenueKnown ? revenue : null,
     };
-  }, [stages]);
+  }, [stages, inboundStopContacts]);
   const hasResults =
     campaignTotals.sms > 0 || campaignTotals.inboundStops > 0;
 

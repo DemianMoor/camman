@@ -202,6 +202,8 @@ export default function OptOutsPage() {
     fetched: number;
     new: number;
     suppressed: number;
+    attributed: number;
+    unattributed: number;
   }>();
 
   const [data, setData] = useState<OptOut[]>([]);
@@ -304,7 +306,7 @@ export default function OptOutsPage() {
       toastApiError(result, "Couldn't poll for opt-outs");
       return;
     }
-    const { suppressed, fetched, credentials_polled } = result.data;
+    const { suppressed, attributed, fetched, credentials_polled } = result.data;
     if (credentials_polled === 0) {
       toast.message("No TextHub API keys to poll", {
         description: "Add an API-capable provider credential first.",
@@ -312,7 +314,11 @@ export default function OptOutsPage() {
     } else if (suppressed > 0) {
       toast.success(
         `Suppressed ${suppressed.toLocaleString()} from STOP repl${suppressed === 1 ? "y" : "ies"}`,
-        { description: `Polled ${fetched} inbound message${fetched === 1 ? "" : "s"}.` },
+        {
+          description:
+            `Polled ${fetched} inbound message${fetched === 1 ? "" : "s"}. ` +
+            `Attributed ${attributed.toLocaleString()} stage credit${attributed === 1 ? "" : "s"}.`,
+        },
       );
       refetch();
     } else {

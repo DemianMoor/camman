@@ -165,6 +165,7 @@ export async function GET(
       total_cost: campaign_stages.total_cost,
       delivered_count: campaign_stages.delivered_count,
       opt_out_count: campaign_stages.opt_out_count,
+      inbound_opt_out_count: campaign_stages.inbound_opt_out_count,
       click_count: campaign_stages.click_count,
       late_click_count: campaign_stages.late_click_count,
       scrubbed_count: campaign_stages.scrubbed_count,
@@ -261,35 +262,20 @@ export async function GET(
     }),
   );
 
-  // Live "inbound STOP" count per stage: opt_outs that arrived via the inbox
-  // poll (source 'sms_inbound'), attributed to the most recent stage that
-  // actually SENT to that contact (via stage_sends) at/before the opt-out.
-  // Read-only — separate from the import-fed opt_out_count. Only campaigns sent
-  // through the API pipeline (which writes stage_sends) can attribute here.
-  const inboundStopRows = (await db.execute(drizzleSql`
-    SELECT a.stage_id AS stage_id, count(*)::int AS n
-    FROM (
-      SELECT (
-        SELECT ss.stage_id FROM stage_sends ss
-        WHERE ss.contact_id = oo.contact_id AND ss.org_id = ${orgId}
-          AND ss.status = 'sent' AND ss.sent_at <= oo.created_at
-        ORDER BY ss.sent_at DESC, ss.id DESC
-        LIMIT 1
-      ) AS stage_id
-      FROM opt_outs oo
-      WHERE oo.org_id = ${orgId} AND oo.source = 'sms_inbound'
-        AND EXISTS (
-          SELECT 1 FROM stage_sends s2
-          WHERE s2.contact_id = oo.contact_id AND s2.org_id = ${orgId}
-            AND s2.campaign_id = ${cid}
-        )
-    ) a
-    JOIN campaign_stages cs ON cs.id = a.stage_id AND cs.campaign_id = ${cid}
-    GROUP BY a.stage_id
-  `)) as unknown as { stage_id: number; n: number }[];
-  const inboundStopByStage = new Map(
-    inboundStopRows.map((r) => [Number(r.stage_id), Number(r.n)]),
-  );
+  // Inbound STOPs attributed to this campaign (migration 0075). Per-stage counts
+  // come from the persistent campaign_stages.inbound_opt_out_count counter (in
+  // the select above), maintained by the opt-out poller's 72h-window attribution
+  // — the SAME source the Reports page reads, so the two never disagree. Here we
+  // additionally fetch the campaign-level DISTINCT-contact total: summing the
+  // per-stage counters would over-count anyone hit by multiple stages of this
+  // campaign (window semantics credit every stage that sent to them).
+  const inboundStopContactsRow = (await db.execute(drizzleSql`
+    SELECT count(DISTINCT oo.contact_id)::int AS n
+    FROM opt_out_attributions oa
+    JOIN opt_outs oo ON oo.id = oa.opt_out_id
+    WHERE oa.org_id = ${orgId} AND oa.campaign_id = ${cid}
+  `)) as unknown as { n: number }[];
+  const inboundStopContacts = Number(inboundStopContactsRow[0]?.n ?? 0);
 
   // WS4 §0 materialization signal: stage_sends counts by status, batched into a
   // single grouped query (indexed on stage_id) — no N+1. Drives the Orange↔Blue
@@ -335,7 +321,7 @@ export async function GET(
     brand: r.brand?.id ? r.brand : null,
     offer: r.offer?.id ? r.offer : null,
     audience_count: audienceCounts[i],
-    inbound_stop_count: inboundStopByStage.get(r.id) ?? 0,
+    inbound_stop_count: r.inbound_opt_out_count,
     send_counts: sendCountsByStage.get(r.id) ?? {
       total: 0,
       pending: 0,
@@ -355,7 +341,11 @@ export async function GET(
     );
   }
 
-  return NextResponse.json({ data, totalCount: data.length });
+  return NextResponse.json({
+    data,
+    totalCount: data.length,
+    inbound_stop_contacts: inboundStopContacts,
+  });
 }
 
 export async function POST(

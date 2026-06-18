@@ -95,7 +95,9 @@ export async function GET(req: NextRequest) {
       campaign_name: campaigns.name,
       stage_number: campaign_stages.stage_number,
       stage_label: campaign_stages.label,
-      opt_out_count: campaign_stages.opt_out_count,
+      // Live STOPs attributed to this stage (phone + 72h window), NOT the
+      // CSV-imported opt_out_count — see lib/sends/poll-opt-outs.ts.
+      opt_out_count: campaign_stages.inbound_opt_out_count,
       visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
       visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
       redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,

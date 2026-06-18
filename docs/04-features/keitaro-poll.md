@@ -109,13 +109,15 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   read-only; org-scoped. Cross-campaign per-stage funnel aggregated over an ET date
   range (≤92 days, default last 7), with resolved campaign + stage names, grand
   totals, and pagination/sort. Powers the **Reports** page (`/reports`). Requires
-  `campaigns.view`. Never triggers a poll. Each row also carries `opt_outs` (the
-  per-stage `campaign_stages.opt_out_count`, captured once — not summed across the
-  per-day Keitaro rows), included in the grand totals and sortable.
+  `campaigns.view`. Never triggers a poll. Each row also carries `opt_outs` —
+  sourced from `campaign_stages.inbound_opt_out_count` (live STOPs attributed to
+  the stage via the poller's 72h window, migration 0075; **not** the CSV-imported
+  `opt_out_count`), captured once per stage, in the grand totals and sortable.
 
 ## 5b. Reports UI (`/reports`)
 A dedicated cross-campaign page ([`app/(protected)/reports/page.tsx`](../../app/(protected)/reports/page.tsx))
-showing the funnel per stage: Campaign · Stage · **Opt-outs** · **Clickers** ·
+showing the funnel per stage: Campaign · Stage · **Opt-outs** (live inbound STOPs
+attributed to the stage) · **Clickers** ·
 **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
 with a date-range filter, search, sortable columns, grand-total stat cards, and a
 manual **Refresh from Keitaro** button (operator+, runs the poll). Nav entry under

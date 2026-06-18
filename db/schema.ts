@@ -356,6 +356,19 @@ export const texthub_inbound_events = pgTable(
       () => contacts.id,
       { onDelete: "set null" },
     ),
+    // Set when the STOP was attributed to a send (migration 0075). Points at the
+    // most-recent send per stage in the window; one event can credit multiple
+    // stages (see opt_out_attributions) — this holds the latest for debugging.
+    matched_stage_send_id: uuid("matched_stage_send_id").references(
+      () => stage_sends.id,
+      { onDelete: "set null" },
+    ),
+    // TextHub's own reported receipt time (parsed from the inbox payload). The
+    // `received_at` column above defaults to poll time (now()); this is the
+    // value used to anchor the attribution window. Nullable when unparseable.
+    provider_received_at: timestamp("provider_received_at", {
+      withTimezone: true,
+    }),
     result: text("result"),
     processed_at: timestamp("processed_at", { withTimezone: true }),
   },
@@ -668,6 +681,54 @@ export const opt_out_providers = pgTable(
     index("opt_out_providers_provider_id_idx").on(table.provider_id),
   ],
 );
+
+// Inbound-STOP → campaign/stage attribution (migration 0075). When a STOP is
+// ingested from TextHub's inbox, the poller credits every stage that sent to
+// that number in the trailing OPT_OUT_ATTRIBUTION_WINDOW (default 72h) — one
+// row per (opt_out, stage). The org-wide opt_outs row is unchanged; this is
+// additive analytics, never a suppression gate. stage_id / campaign_id are
+// denormalized so the attribution survives stage_send pruning (FK SET NULL).
+// See lib/sends/poll-opt-outs.ts.
+export const opt_out_attributions = pgTable(
+  "opt_out_attributions",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    opt_out_id: integer("opt_out_id")
+      .notNull()
+      .references(() => opt_outs.id, { onDelete: "cascade" }),
+    // Lineage to the exact send that triggered the credit. Nullable so a pruned
+    // send doesn't drop the attribution (stage_id/campaign_id carry it).
+    stage_send_id: uuid("stage_send_id").references(() => stage_sends.id, {
+      onDelete: "set null",
+    }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // One credit per stage per STOP — idempotent re-runs / repeat sends in the
+    // window never double-count a stage.
+    unique("opt_out_attributions_optout_stage_uniq").on(
+      table.opt_out_id,
+      table.stage_id,
+    ),
+    index("opt_out_attributions_stage_id_idx").on(table.stage_id),
+    index("opt_out_attributions_campaign_id_idx").on(table.campaign_id),
+    index("opt_out_attributions_org_id_idx").on(table.org_id),
+  ],
+);
+
+export type OptOutAttribution = typeof opt_out_attributions.$inferSelect;
+export type NewOptOutAttribution = typeof opt_out_attributions.$inferInsert;
 
 // Opt-Ins: single brand/provider per row (no junctions; simpler than opt_outs).
 export const opt_ins = pgTable(
@@ -1231,7 +1292,16 @@ export const campaign_stages = pgTable(
       .notNull()
       .default("0"),
     delivered_count: integer("delivered_count").notNull().default(0),
+    // Opt-outs reported in provider results CSV imports (manual). Kept distinct
+    // from inbound_opt_out_count so the two sources are never double-summed.
     opt_out_count: integer("opt_out_count").notNull().default(0),
+    // Live STOPs received via TextHub's inbox and attributed to this stage by
+    // phone + 72h trailing window (migration 0075). Maintained by the opt-out
+    // poller; recomputable from opt_out_attributions. This is the source for the
+    // Reports "Opt-outs" column. See lib/sends/poll-opt-outs.ts.
+    inbound_opt_out_count: integer("inbound_opt_out_count")
+      .notNull()
+      .default(0),
     // click_count is the "Clicker 1st Day" bucket (clicks recorded from the
     // initial / day-1 results report). late_click_count holds clicks recorded
     // from follow-up ("late") clicker reports uploaded on subsequent days,
@@ -1982,6 +2052,11 @@ export const stage_sends = pgTable(
       .where(sql`sent_at IS NOT NULL`),
     // Migration 0060: campaign-level activity drill-down lists sends newest-first.
     index("stage_sends_campaign_created_idx").on(table.campaign_id, table.created_at),
+    // Migration 0075: inbound-STOP attribution looks up sent rows by number,
+    // newest-first within the trailing window. Partial — only 'sent' rows match.
+    index("stage_sends_org_phone_sent_idx")
+      .on(table.org_id, table.phone, table.sent_at)
+      .where(sql`status = 'sent'`),
   ],
 );
 

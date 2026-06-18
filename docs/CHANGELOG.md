@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-18 — Inbound STOP → campaign/stage attribution (migration 0075) — docs: 03-data-model (+ERD), 04/crons, 04/keitaro-poll, 05-flows, CHANGELOG
+- TextHub's inbox carries no campaign reference, so each inbound STOP is reverse-matched to sends by phone + recency: the opt-out poller now credits **every stage that sent to the number within a 72h trailing window** (`OPT_OUT_ATTRIBUTION_WINDOW_HOURS`), writing one `opt_out_attributions` row per stage and bumping `campaign_stages.inbound_opt_out_count`, all inside the existing per-message transaction. Org-wide `opt_outs` suppression unchanged — attribution is additive. The Reports "Opt-outs" column now reads `inbound_opt_out_count` (live STOPs), and the campaign page "Inbound STOPs" rollup shows DISTINCT attributed contacts (window semantics over-count a naive per-stage sum). New table + 2 columns on `texthub_inbound_events` + 1 counter on `campaign_stages` + lookup index (migration 0075, **must be applied before deploy**). Backfill: `scripts/backfill-optout-attributions.ts`. Replaces the prior single-most-recent live attribution on the campaign page.
+
 ## 2026-06-18 — Reports: per-stage Opt-outs column + clickable Campaign/Stage cells — docs: 04/keitaro-poll, CHANGELOG
 - `/api/keitaro/reports` now returns `opt_outs` per row (the existing `campaign_stages.opt_out_count`, captured once per stage — never summed across the per-day rows) plus in grand totals, and `opt_outs` is sortable. The Reports page adds an **Opt-outs** column. Campaign cell → `/campaigns/[id]`; Stage cell → `/campaigns/[id]?stage=[stageId]`, which the campaign detail page reads on load to auto-open that stage's editor (no standalone stage route exists). No schema change.
 

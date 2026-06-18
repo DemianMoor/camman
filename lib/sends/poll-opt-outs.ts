@@ -11,14 +11,45 @@ import { validatePhone } from "@/lib/phone-validation";
 // texthub_inbound_events (unique on provider_id+provider_message_id, migration
 // 0056), so a STOP is suppressed at most once across repeated polls.
 //
-// Per-message atomicity: claiming the message (the dedupe INSERT) and the
-// suppression run in ONE transaction. If suppression throws, the claim rolls
-// back too, so the message is retried on the next poll — a STOP is never
-// silently dropped by marking it processed without acting on it.
+// Per-message atomicity: claiming the message (the dedupe INSERT), the
+// suppression, AND the campaign/stage attribution run in ONE transaction. If
+// any step throws, the claim rolls back too, so the message is retried on the
+// next poll — a STOP is never silently dropped by marking it processed without
+// acting on it.
+//
+// Attribution (migration 0075): TextHub's inbox carries no campaign reference,
+// but every API send wrote a stage_sends row (phone, stage_id, campaign_id,
+// sent_at). So we reverse-match by phone + recency and credit EVERY stage that
+// sent to that number within OPT_OUT_ATTRIBUTION_WINDOW_HOURS (72h) of the
+// reply — one opt_out_attributions row per stage, plus a per-stage
+// inbound_opt_out_count bump. The org-wide opt_out is unchanged; attribution is
+// additive and never gates suppression. No match (CSV-only numbers, non-API
+// providers, pre-pipeline sends) ⇒ org-wide opt-out only, counted `unattributed`.
 //
 // Trusted background context (CLAUDE.md §3): the cron path processes ALL orgs,
 // each with its credential's explicit org_id; the on-demand path passes the
 // caller's orgId to scope to one org.
+
+// Trailing window: a STOP credits any stage that sent to the number in the last
+// 72h. Wide enough that TextHub's undocumented received_at timezone (we parse it
+// as UTC) is immaterial to the lower bound. Tunable — the single knob for how
+// aggressively one STOP spreads across recently-used campaigns.
+export const OPT_OUT_ATTRIBUTION_WINDOW_HOURS = 72;
+
+// TextHub stamps inbound messages "YYYY-MM-DD HH:MM:SS" with no timezone. Parse
+// as UTC for a stable, deterministic window anchor. NULL when unparseable (the
+// caller falls back to the poll time).
+export function parseProviderReceivedAt(raw: string | null): Date | null {
+  if (!raw) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(raw.trim());
+  if (m) {
+    const [, Y, Mo, D, H, Mi, S] = m;
+    const d = new Date(Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +S));
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 export type Database = typeof db;
 
@@ -37,6 +68,8 @@ export interface CredentialPollSummary {
   fetched: number; // messages returned by the inbox
   new: number; // not-seen-before messages claimed this run
   suppressed: number; // STOP messages that produced an opt_out
+  attributed: number; // stage credits written (one STOP can credit several)
+  unattributed: number; // suppressed STOPs that matched no send in the window
   ignored: number; // new messages that weren't opt-out keywords
   invalid_phone: number; // STOP messages whose phone wouldn't parse
   errored: number; // messages whose transaction failed (will retry next poll)
@@ -48,12 +81,27 @@ export interface PollOptOutsResult {
   fetched: number;
   new: number;
   suppressed: number;
+  attributed: number;
+  unattributed: number;
   perCredential: CredentialPollSummary[];
 }
 
-const EMPTY = { fetched: 0, new: 0, suppressed: 0, ignored: 0, invalid_phone: 0, errored: 0 };
+const EMPTY = {
+  fetched: 0,
+  new: 0,
+  suppressed: 0,
+  attributed: 0,
+  unattributed: 0,
+  ignored: 0,
+  invalid_phone: 0,
+  errored: 0,
+};
 
-type Outcome = "dupe" | "ignored" | "invalid" | "suppressed";
+// "suppressed" now carries how many stage credits the STOP produced so the
+// caller can tally attributed / unattributed without re-querying.
+type Outcome =
+  | { kind: "dupe" | "ignored" | "invalid" }
+  | { kind: "suppressed"; attributed: number };
 
 async function pollCredential(
   database: Database,
@@ -77,6 +125,8 @@ async function pollCredential(
 
   let neu = 0;
   let suppressed = 0;
+  let attributed = 0;
+  let unattributed = 0;
   let ignored = 0;
   let invalid = 0;
   let errored = 0;
@@ -100,24 +150,31 @@ async function pollCredential(
             WHERE provider_message_id IS NOT NULL DO NOTHING
           RETURNING id
         `)) as unknown as { id: string }[];
-        if (claimed.length === 0) return "dupe";
+        if (claimed.length === 0) return { kind: "dupe" } as const;
         const eventId = claimed[0].id;
+
+        // TextHub's own receipt time anchors the attribution window; fall back
+        // to the poll time when the payload's timestamp won't parse.
+        const receivedAt = parseProviderReceivedAt(m.received_at);
+        const anchorIso = (receivedAt ?? new Date()).toISOString();
 
         if (!isStop) {
           await tx.execute(sql`
             UPDATE texthub_inbound_events
-            SET result = 'ignored', processed_at = now()
+            SET result = 'ignored', processed_at = now(),
+                provider_received_at = ${receivedAt?.toISOString() ?? null}
             WHERE id = ${eventId}
           `);
-          return "ignored";
+          return { kind: "ignored" } as const;
         }
         if (!phone) {
           await tx.execute(sql`
             UPDATE texthub_inbound_events
-            SET result = 'invalid_phone', processed_at = now()
+            SET result = 'invalid_phone', processed_at = now(),
+                provider_received_at = ${receivedAt?.toISOString() ?? null}
             WHERE id = ${eventId}
           `);
-          return "invalid";
+          return { kind: "invalid" } as const;
         }
 
         // Upsert the contact (create if unknown — a STOP must suppress the
@@ -132,17 +189,72 @@ async function pollCredential(
         `)) as unknown as { id: string }[];
         const contactId = c[0]?.id;
 
-        await tx.execute(sql`
+        const oo = (await tx.execute(sql`
           INSERT INTO opt_outs (org_id, contact_id, phone_number, source)
           VALUES (${cred.org_id}, ${contactId}, ${phone}, 'sms_inbound')
-        `);
+          RETURNING id
+        `)) as unknown as { id: number }[];
+        const optOutId = oo[0]?.id;
+
+        // Attribution: every stage that sent to this number within the trailing
+        // window, one (latest) send per stage. sent_at <= anchor + grace so a
+        // send that fired AFTER the reply isn't credited; >= anchor - window is
+        // the 72h trailing bound.
+        const matches = (await tx.execute(sql`
+          SELECT DISTINCT ON (stage_id)
+                 id AS stage_send_id, stage_id, campaign_id, sent_at
+          FROM stage_sends
+          WHERE org_id = ${cred.org_id}
+            AND phone = ${phone}
+            AND status = 'sent'
+            AND sent_at IS NOT NULL
+            AND sent_at >= ${anchorIso}::timestamptz
+                            - (${OPT_OUT_ATTRIBUTION_WINDOW_HOURS} * interval '1 hour')
+            AND sent_at <= ${anchorIso}::timestamptz + interval '5 minutes'
+          ORDER BY stage_id, sent_at DESC
+        `)) as unknown as {
+          stage_send_id: string;
+          stage_id: number;
+          campaign_id: number;
+          sent_at: string;
+        }[];
+
+        let attributed = 0;
+        let latestSendId: string | null = null;
+        let latestSentAt = "";
+        for (const mt of matches) {
+          // ON CONFLICT guards the idempotent re-run case; the per-message claim
+          // already makes this run once, so RETURNING is the increment gate.
+          const ins = (await tx.execute(sql`
+            INSERT INTO opt_out_attributions
+              (org_id, opt_out_id, stage_send_id, stage_id, campaign_id)
+            VALUES (${cred.org_id}, ${optOutId}, ${mt.stage_send_id},
+                    ${mt.stage_id}, ${mt.campaign_id})
+            ON CONFLICT (opt_out_id, stage_id) DO NOTHING
+            RETURNING id
+          `)) as unknown as { id: number }[];
+          if (ins.length === 0) continue;
+          attributed++;
+          await tx.execute(sql`
+            UPDATE campaign_stages
+            SET inbound_opt_out_count = inbound_opt_out_count + 1
+            WHERE id = ${mt.stage_id}
+          `);
+          if (mt.sent_at > latestSentAt) {
+            latestSentAt = mt.sent_at;
+            latestSendId = mt.stage_send_id;
+          }
+        }
+
         await tx.execute(sql`
           UPDATE texthub_inbound_events
           SET result = 'suppressed', matched_contact_id = ${contactId},
+              matched_stage_send_id = ${latestSendId},
+              provider_received_at = ${receivedAt?.toISOString() ?? null},
               processed_at = now()
           WHERE id = ${eventId}
         `);
-        return "suppressed";
+        return { kind: "suppressed", attributed } as const;
       });
     } catch {
       // Transaction rolled back (claim + suppression both undone) — the message
@@ -151,11 +263,14 @@ async function pollCredential(
       continue;
     }
 
-    if (outcome === "dupe") continue;
+    if (outcome.kind === "dupe") continue;
     neu++;
-    if (outcome === "suppressed") suppressed++;
-    else if (outcome === "ignored") ignored++;
-    else if (outcome === "invalid") invalid++;
+    if (outcome.kind === "suppressed") {
+      suppressed++;
+      attributed += outcome.attributed;
+      if (outcome.attributed === 0) unattributed++;
+    } else if (outcome.kind === "ignored") ignored++;
+    else if (outcome.kind === "invalid") invalid++;
   }
 
   return {
@@ -163,6 +278,8 @@ async function pollCredential(
     fetched: inbox.messages.length,
     new: neu,
     suppressed,
+    attributed,
+    unattributed,
     ignored,
     invalid_phone: invalid,
     errored,
@@ -193,6 +310,8 @@ export async function pollOptOuts(
   let fetched = 0;
   let neu = 0;
   let suppressed = 0;
+  let attributed = 0;
+  let unattributed = 0;
 
   for (const cred of creds) {
     const summary = await pollCredential(database, cred, fetchInbox);
@@ -200,7 +319,17 @@ export async function pollOptOuts(
     fetched += summary.fetched;
     neu += summary.new;
     suppressed += summary.suppressed;
+    attributed += summary.attributed;
+    unattributed += summary.unattributed;
   }
 
-  return { credentials_polled: creds.length, fetched, new: neu, suppressed, perCredential };
+  return {
+    credentials_polled: creds.length,
+    fetched,
+    new: neu,
+    suppressed,
+    attributed,
+    unattributed,
+    perCredential,
+  };
 }

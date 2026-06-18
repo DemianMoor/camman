@@ -1,13 +1,13 @@
 # Feature — CSV Result Imports & Phone Uploads
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-19_
 
 ## 1. Purpose
 After a manual send, the provider exports a results CSV. This module imports it, derives a per-row **outcome**, propagates opt-outs and clickers into the suppression/engagement tables, and updates the stage's result counters — all transactionally and **revertibly**. A separate, simpler path handles bulk phone uploads.
 
 ## 2. Key concepts / entities
 - `result_import_mappings` — per-provider column-mapping templates (`mapping` jsonb + `status_value_map` jsonb, `is_default`).
-- `stage_results_imports` — one row per import event (permanent audit; `clicker_phase` day1/late; `reverted_at`).
+- `stage_results_imports` — one row per import event (permanent audit; `reverted_at`).
 - `stage_result_rows` — per-row record; **UNIQUE(stage_id, phone_number)** is the dedup key; `created_opt_out_id`/`created_clicker_id` enable cross-import preservation on revert.
 - Code: [`lib/imports/`](../../lib/imports/) (`parse-csv.ts`, `outcome.ts`, `canonical-fields.ts`, `contact-status.ts`), [`lib/upload/audience-upload.ts`](../../lib/upload/audience-upload.ts).
 
@@ -55,9 +55,9 @@ Within one CSV, per-phone duplicates collapse to the highest-priority outcome. P
 - `delivered`/`failed`/`noop` → `stage_result_rows` only, no propagation.
 - Each created opt-out/clicker id is recorded on its `stage_result_rows` row.
 
-### Late-clicker phase
-- `clicker_phase='day1'` (default): full import; clicks feed `campaign_stages.click_count`.
-- `clicker_phase='late'`: clicker outcomes only, deduped against every clicker already recorded for the stage; feed `late_click_count`, touch **no other counters**. Revert branches on this column.
+### Auto-owned counters (Keitaro / TextHub)
+- `click_count` ("Clickers"), `checkout_click_count`, and `sales_count` are **auto-overwritten** for tracked stages by the Keitaro `*/5` poll (from `keitaro_stage_results`: landing-page visits → Clickers, checkouts, sales); `opt_out_count` is auto-mirrored from `inbound_opt_out_count` by the opt-out poller. A CSV import still writes these, but for a stage with upstream data the next poll wins — CSV/manual entry is the fallback for **untracked** stages only. See [keitaro-poll.md](keitaro-poll.md).
+- The former clicker-only "late" import phase (`clicker_phase`, `late_click_count`) was removed in migration `0077`; imports are now always a single full pass.
 
 ### Revert (`POST …/imports/[importId]/revert`)
 - Marks `reverted_at` + `reverted_by_user_id`, deletes this import's `stage_result_rows`, subtracts its `*_added` counters from the stage.

@@ -533,6 +533,20 @@
       "when": 1782864000000,
       "tag": "0075_optout_attribution",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1782950400000,
+      "tag": "0076_creatives_funnel_stage",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1783036800000,
+      "tag": "0077_drop_late_clickers",
+      "breakpoints": true
     }
   ]
 }

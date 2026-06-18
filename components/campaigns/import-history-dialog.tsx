@@ -30,11 +30,9 @@ type ImportRow = {
   failed_added: number;
   optouts_added: number;
   clickers_added: number;
-  late_clickers_added: number;
   scrubbed_added: number;
   bounced_added: number;
   total_cost_added: string;
-  clicker_phase: "day1" | "late" | null;
   mapping_id: number | null;
   imported_by_user_id: string | null;
   reverted_at: string | null;
@@ -150,15 +148,9 @@ export function ImportHistoryDialog({
                           </Badge>
                         ) : (
                           <span className="font-mono text-muted-foreground">
-                            {row.clicker_phase === "late" ? (
-                              <>↗late {row.late_clickers_added}</>
-                            ) : (
-                              <>
-                                ✓{row.delivered_added} ✗{row.failed_added} ⊘
-                                {row.optouts_added} ↗{row.clickers_added} ⊗
-                                {row.scrubbed_added} ⤬{row.bounced_added}
-                              </>
-                            )}
+                            ✓{row.delivered_added} ✗{row.failed_added} ⊘
+                            {row.optouts_added} ↗{row.clickers_added} ⊗
+                            {row.scrubbed_added} ⤬{row.bounced_added}
                           </span>
                         )}
                       </td>

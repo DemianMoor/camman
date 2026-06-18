@@ -110,9 +110,8 @@ export const stageManualResultsSchema = z.object({
   sms_count: z.number().int().nonnegative(),
   delivered_count: z.number().int().nonnegative(),
   opt_out_count: z.number().int().nonnegative(),
-  // click_count = "Clicker 1st Day"; late_click_count = "Late Clickers".
+  // click_count = "Clickers". Auto-overwritten from Keitaro for tracked stages.
   click_count: z.number().int().nonnegative(),
-  late_click_count: z.number().int().nonnegative(),
   scrubbed_count: z.number().int().nonnegative(),
   bounced_count: z.number().int().nonnegative(),
   checkout_click_count: z.number().int().nonnegative(),

@@ -19,7 +19,6 @@ export const stageHasResults = drizzleSql`(
   or ${campaign_stages.delivered_count} > 0
   or ${campaign_stages.opt_out_count} > 0
   or ${campaign_stages.click_count} > 0
-  or ${campaign_stages.late_click_count} > 0
   or ${campaign_stages.scrubbed_count} > 0
   or ${campaign_stages.bounced_count} > 0
   or ${campaign_stages.sales_count} > 0

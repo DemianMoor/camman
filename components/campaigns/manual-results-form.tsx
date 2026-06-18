@@ -23,7 +23,6 @@ export interface ManualResultsValues {
   delivered_count: number;
   opt_out_count: number;
   click_count: number;
-  late_click_count: number;
   scrubbed_count: number;
   bounced_count: number;
   checkout_click_count: number;
@@ -52,8 +51,7 @@ const COUNT_FIELDS: {
   { key: "sms_count", label: "SMS sent" },
   { key: "delivered_count", label: "Delivered" },
   { key: "opt_out_count", label: "Opt-outs" },
-  { key: "click_count", label: "Clicker 1st Day" },
-  { key: "late_click_count", label: "Late Clickers" },
+  { key: "click_count", label: "Clickers" },
   { key: "scrubbed_count", label: "Scrubbed" },
   { key: "bounced_count", label: "Bounced" },
   { key: "checkout_click_count", label: "Checkout Clicks" },
@@ -90,7 +88,6 @@ export function ManualResultsForm({
     delivered_count: String(initial.delivered_count),
     opt_out_count: String(initial.opt_out_count),
     click_count: String(initial.click_count),
-    late_click_count: String(initial.late_click_count),
     scrubbed_count: String(initial.scrubbed_count),
     bounced_count: String(initial.bounced_count),
     checkout_click_count: String(initial.checkout_click_count),
@@ -109,7 +106,6 @@ export function ManualResultsForm({
       delivered_count: toInt(counts.delivered_count),
       opt_out_count: toInt(counts.opt_out_count),
       click_count: toInt(counts.click_count),
-      late_click_count: toInt(counts.late_click_count),
       scrubbed_count: toInt(counts.scrubbed_count),
       bounced_count: toInt(counts.bounced_count),
       checkout_click_count: toInt(counts.checkout_click_count),

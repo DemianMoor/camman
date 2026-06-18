@@ -233,7 +233,6 @@ export interface StageFormProps {
     delivered_count: number;
     opt_out_count: number;
     click_count: number;
-    late_click_count: number;
     scrubbed_count: number;
     bounced_count: number;
     checkout_click_count: number;
@@ -1674,12 +1673,8 @@ export function StageForm({
                       value={resultsCounters.opt_out_count}
                     />
                     <ResultMetric
-                      label="Clicker 1st Day"
+                      label="Clickers"
                       value={resultsCounters.click_count}
-                    />
-                    <ResultMetric
-                      label="Late Clickers"
-                      value={resultsCounters.late_click_count}
                     />
                     <ResultMetric
                       label="Scrubbed"

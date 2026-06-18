@@ -235,9 +235,14 @@ async function pollCredential(
           `)) as unknown as { id: number }[];
           if (ins.length === 0) continue;
           attributed++;
+          // Bump the attribution counter AND mirror it into opt_out_count so the
+          // per-stage Results panel (which reads opt_out_count) reflects live
+          // TextHub STOPs automatically. Both RHS references read the pre-UPDATE
+          // value, so the two columns stay in lock-step.
           await tx.execute(sql`
             UPDATE campaign_stages
-            SET inbound_opt_out_count = inbound_opt_out_count + 1
+            SET inbound_opt_out_count = inbound_opt_out_count + 1,
+                opt_out_count = inbound_opt_out_count + 1
             WHERE id = ${mt.stage_id}
           `);
           if (mt.sent_at > latestSentAt) {

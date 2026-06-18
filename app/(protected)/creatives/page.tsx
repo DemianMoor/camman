@@ -73,8 +73,10 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
 import {
+  FUNNEL_STAGE_VALUES,
   QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
+  type CreativeFunnelStage,
   type CreativeQuality,
   type CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
@@ -95,6 +97,7 @@ type Creative = {
   text: string;
   quality: CreativeQuality;
   sequence_placement: CreativeSequencePlacement;
+  funnel_stage: CreativeFunnelStage;
   applies_to_all_offers: boolean;
   status: Status;
   archived_at: string | null;
@@ -140,6 +143,7 @@ type Filters = {
   offer_id: number | null;
   qualities: CreativeQuality[];
   sequences: CreativeSequencePlacement[];
+  funnelStages: CreativeFunnelStage[];
   showArchived: boolean;
   page: number;
   pageSize: number;
@@ -152,6 +156,7 @@ const DEFAULT_FILTERS: Filters = {
   offer_id: null,
   qualities: [],
   sequences: [],
+  funnelStages: [],
   showArchived: false,
   page: 0,
   pageSize: 20,
@@ -178,6 +183,14 @@ const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   "5th": "5th",
   "6th": "6th",
   any: "Any",
+  unknown: "Unknown",
+};
+
+const FUNNEL_STAGE_LABEL: Record<CreativeFunnelStage, string> = {
+  start: "Start",
+  clicked: "Clicked",
+  checkout: "Checkout",
+  ignored: "Ignored",
   unknown: "Unknown",
 };
 
@@ -404,6 +417,7 @@ export default function CreativesPage() {
     filters.offer_id === DEFAULT_FILTERS.offer_id &&
     filters.qualities.length === 0 &&
     filters.sequences.length === 0 &&
+    filters.funnelStages.length === 0 &&
     filters.showArchived === DEFAULT_FILTERS.showArchived;
 
   const [searchInput, setSearchInput] = useState(filters.search);
@@ -462,6 +476,8 @@ export default function CreativesPage() {
       sp.set("quality", filters.qualities.join(","));
     if (filters.sequences.length > 0)
       sp.set("sequence_placement", filters.sequences.join(","));
+    if (filters.funnelStages.length > 0)
+      sp.set("funnel_stage", filters.funnelStages.join(","));
     if (filters.showArchived) sp.set("showArchived", "true");
 
     (async () => {
@@ -553,6 +569,8 @@ export default function CreativesPage() {
       sp.set("quality", filters.qualities.join(","));
     if (filters.sequences.length > 0)
       sp.set("sequence_placement", filters.sequences.join(","));
+    if (filters.funnelStages.length > 0)
+      sp.set("funnel_stage", filters.funnelStages.join(","));
     if (filters.showArchived) sp.set("showArchived", "true");
     return sp;
   }, [
@@ -560,6 +578,7 @@ export default function CreativesPage() {
     filters.offer_id,
     filters.qualities,
     filters.sequences,
+    filters.funnelStages,
     filters.showArchived,
   ]);
 
@@ -657,6 +676,7 @@ export default function CreativesPage() {
       creative_id: values.creative_id || undefined,
       quality: values.quality,
       sequence_placement: values.sequence_placement,
+      funnel_stage: values.funnel_stage,
       applies_to_all_offers: values.applies_to_all_offers,
       offer_ids: values.offer_ids,
     };
@@ -788,6 +808,16 @@ export default function CreativesPage() {
         cell: ({ row }) => (
           <Badge variant="outline" className="font-mono text-xs">
             {SEQUENCE_LABEL[row.original.sequence_placement]}
+          </Badge>
+        ),
+      },
+      {
+        id: "funnel_stage",
+        header: "Funnel Stage",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <Badge variant="outline" className="text-xs">
+            {FUNNEL_STAGE_LABEL[row.original.funnel_stage]}
           </Badge>
         ),
       },
@@ -1045,6 +1075,23 @@ export default function CreativesPage() {
           selectedLabel={(n) => `${n} sequence${n === 1 ? "" : "s"}`}
           searchPlaceholder="Filter sequence…"
         />
+        <MultiSelectPicker
+          className="w-[200px]"
+          options={FUNNEL_STAGE_VALUES.map((s) => ({
+            id: s,
+            label: FUNNEL_STAGE_LABEL[s],
+          }))}
+          value={filters.funnelStages}
+          onChange={(next) =>
+            updateFilters({
+              funnelStages: next as CreativeFunnelStage[],
+              page: 0,
+            })
+          }
+          placeholder="Any funnel stage"
+          selectedLabel={(n) => `${n} funnel stage${n === 1 ? "" : "s"}`}
+          searchPlaceholder="Filter funnel stage…"
+        />
         <div className="flex items-center gap-2">
           <Switch
             id="show-archived"
@@ -1239,6 +1286,7 @@ export default function CreativesPage() {
               creative_id: editing.creative_id ?? "",
               quality: editing.quality,
               sequence_placement: editing.sequence_placement,
+              funnel_stage: editing.funnel_stage,
               applies_to_all_offers: editing.applies_to_all_offers,
               offer_ids: editing.offers.map((o) => o.id),
             }}

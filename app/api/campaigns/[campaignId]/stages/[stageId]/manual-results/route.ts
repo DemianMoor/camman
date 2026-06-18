@@ -105,7 +105,6 @@ export async function POST(
       delivered_count: input.delivered_count,
       opt_out_count: input.opt_out_count,
       click_count: input.click_count,
-      late_click_count: input.late_click_count,
       scrubbed_count: input.scrubbed_count,
       bounced_count: input.bounced_count,
       checkout_click_count: input.checkout_click_count,

@@ -23,7 +23,6 @@ interface ManualStageRow {
   stage_id: number;
   stage_number: number;
   click_count: number;
-  late_click_count: number;
 }
 type ClickReport =
   | { source: "tracked"; stages: TrackedStageRow[] }
@@ -180,8 +179,7 @@ function CsvTable({ stages }: { stages: ManualStageRow[] }) {
       <thead className="border-b text-left text-xs uppercase text-muted-foreground">
         <tr>
           <th className="px-4 py-2 font-medium">Stage</th>
-          <th className="px-4 py-2 text-right font-medium">Day-1 clicks</th>
-          <th className="px-4 py-2 text-right font-medium">Late clicks</th>
+          <th className="px-4 py-2 text-right font-medium">Clicks</th>
         </tr>
       </thead>
       <tbody>
@@ -189,7 +187,6 @@ function CsvTable({ stages }: { stages: ManualStageRow[] }) {
           <tr key={s.stage_id} className="border-b last:border-0">
             <td className="px-4 py-2">Stage {s.stage_number}</td>
             <td className="px-4 py-2 text-right">{s.click_count}</td>
-            <td className="px-4 py-2 text-right">{s.late_click_count}</td>
           </tr>
         ))}
       </tbody>
@@ -197,9 +194,6 @@ function CsvTable({ stages }: { stages: ManualStageRow[] }) {
         <tr>
           <td className="px-4 py-2">Total</td>
           <td className="px-4 py-2 text-right">{sum(stages, (s) => s.click_count)}</td>
-          <td className="px-4 py-2 text-right">
-            {sum(stages, (s) => s.late_click_count)}
-          </td>
         </tr>
       </tfoot>
     </table>

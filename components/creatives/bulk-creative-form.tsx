@@ -22,8 +22,10 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
 import {
   BULK_CREATE_MAX,
+  FUNNEL_STAGE_VALUES,
   QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
+  type CreativeFunnelStage,
   type CreativeQuality,
   type CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
@@ -42,6 +44,7 @@ export interface BulkCreativeFormSubmit {
   offer_ids: number[];
   quality: CreativeQuality;
   sequence_placement: CreativeSequencePlacement;
+  funnel_stage: CreativeFunnelStage;
   creatives: Array<{ text: string }>;
 }
 
@@ -68,6 +71,13 @@ const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   any: "Any",
   unknown: "Unknown",
 };
+const FUNNEL_STAGE_LABEL: Record<CreativeFunnelStage, string> = {
+  start: "Start",
+  clicked: "Clicked",
+  checkout: "Checkout",
+  ignored: "Ignored",
+  unknown: "Unknown",
+};
 
 let nextRowId = 1;
 function newRow(): Row {
@@ -91,6 +101,8 @@ export function BulkCreativeForm({
   const [quality, setQuality] = useState<CreativeQuality>("unknown");
   const [sequence, setSequence] =
     useState<CreativeSequencePlacement>("unknown");
+  const [funnelStage, setFunnelStage] =
+    useState<CreativeFunnelStage>("unknown");
   const [rows, setRows] = useState<Row[]>(() => [newRow()]);
   const [sharedError, setSharedError] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
@@ -165,6 +177,7 @@ export function BulkCreativeForm({
       offer_ids: appliesToAll ? offerIds : offerIds,
       quality,
       sequence_placement: sequence,
+      funnel_stage: funnelStage,
       creatives: rows.map((r) => ({ text: r.text })),
     });
   }
@@ -268,6 +281,25 @@ export function BulkCreativeForm({
                   {SEQUENCE_PLACEMENT_VALUES.map((s) => (
                     <SelectItem key={s} value={s}>
                       {SEQUENCE_LABEL[s]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Funnel Stage</Label>
+              <Select
+                value={funnelStage}
+                onValueChange={(v) => setFunnelStage(v as CreativeFunnelStage)}
+                disabled={isSubmitting}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {FUNNEL_STAGE_VALUES.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {FUNNEL_STAGE_LABEL[s]}
                     </SelectItem>
                   ))}
                 </SelectContent>

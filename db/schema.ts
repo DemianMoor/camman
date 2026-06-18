@@ -1028,6 +1028,7 @@ export const creatives = pgTable(
     text: text("text").notNull(),
     quality: text("quality").notNull().default("unknown"),
     sequence_placement: text("sequence_placement").notNull().default("unknown"),
+    funnel_stage: text("funnel_stage").notNull().default("unknown"),
     applies_to_all_offers: boolean("applies_to_all_offers")
       .notNull()
       .default(false),
@@ -1064,6 +1065,10 @@ export const creatives = pgTable(
     check(
       "creatives_sequence_placement_check",
       sql`${table.sequence_placement} IN ('warmup', '1st', '2nd', '3rd', '4th', '5th', '6th', 'any', 'unknown')`,
+    ),
+    check(
+      "creatives_funnel_stage_check",
+      sql`${table.funnel_stage} IN ('start', 'clicked', 'checkout', 'ignored', 'unknown')`,
     ),
     check(
       "creatives_spam_score_check",
@@ -1292,26 +1297,27 @@ export const campaign_stages = pgTable(
       .notNull()
       .default("0"),
     delivered_count: integer("delivered_count").notNull().default(0),
-    // Opt-outs reported in provider results CSV imports (manual). Kept distinct
-    // from inbound_opt_out_count so the two sources are never double-summed.
+    // The "Opt-outs" report field. Auto-mirrored from inbound_opt_out_count by
+    // the opt-out poller so the per-stage panel reflects live TextHub STOPs;
+    // CSV/manual entry is the fallback for stages with no inbound attribution.
     opt_out_count: integer("opt_out_count").notNull().default(0),
     // Live STOPs received via TextHub's inbox and attributed to this stage by
     // phone + 72h trailing window (migration 0075). Maintained by the opt-out
     // poller; recomputable from opt_out_attributions. This is the source for the
-    // Reports "Opt-outs" column. See lib/sends/poll-opt-outs.ts.
+    // Reports "Opt-outs" column and is mirrored into opt_out_count (above). See
+    // lib/sends/poll-opt-outs.ts.
     inbound_opt_out_count: integer("inbound_opt_out_count")
       .notNull()
       .default(0),
-    // click_count is the "Clicker 1st Day" bucket (clicks recorded from the
-    // initial / day-1 results report). late_click_count holds clicks recorded
-    // from follow-up ("late") clicker reports uploaded on subsequent days,
-    // deduped against every clicker already recorded for the stage so the
-    // same number never counts twice. See the import route's clicker_phase.
+    // click_count is the "Clickers" bucket. Auto-filled from Keitaro
+    // landing-page visits (visit_clicks_clean) by the */5 poll for stages with
+    // a tracking_id; falls back to manual/CSV entry for untracked stages. See
+    // lib/keitaro/poll.ts.
     click_count: integer("click_count").notNull().default(0),
-    late_click_count: integer("late_click_count").notNull().default(0),
     scrubbed_count: integer("scrubbed_count").notNull().default(0),
     bounced_count: integer("bounced_count").notNull().default(0),
-    // Checkout clicks and sales are manual-only for now (no CSV path yet).
+    // Checkout clicks and sales auto-fill from Keitaro (checkouts / sales) by
+    // the */5 poll for tracked stages; manual/CSV for untracked stages.
     checkout_click_count: integer("checkout_click_count")
       .notNull()
       .default(0),
@@ -1554,19 +1560,11 @@ export const stage_results_imports = pgTable(
     failed_added: integer("failed_added").notNull().default(0),
     optouts_added: integer("optouts_added").notNull().default(0),
     clickers_added: integer("clickers_added").notNull().default(0),
-    // Clicks added by a "late" clicker report (clicker_phase = 'late'). Kept
-    // separate from clickers_added (day-1) so revert can undo the right
-    // stage counter. Always 0 for day-1 imports.
-    late_clickers_added: integer("late_clickers_added").notNull().default(0),
     scrubbed_added: integer("scrubbed_added").notNull().default(0),
     bounced_added: integer("bounced_added").notNull().default(0),
     total_cost_added: numeric("total_cost_added", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
-    // Which clicker bucket this import fed. 'day1' (or NULL for legacy rows)
-    // = a normal full-results import; 'late' = a clicker-only follow-up that
-    // only touched late_click_count. Revert branches on this.
-    clicker_phase: text("clicker_phase"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1581,10 +1579,6 @@ export const stage_results_imports = pgTable(
       table.org_id,
       table.stage_id,
       table.created_at,
-    ),
-    check(
-      "stage_results_imports_clicker_phase_check",
-      sql`${table.clicker_phase} IS NULL OR ${table.clicker_phase} IN ('day1', 'late')`,
     ),
   ],
 );

@@ -167,7 +167,6 @@ export async function GET(
       opt_out_count: campaign_stages.opt_out_count,
       inbound_opt_out_count: campaign_stages.inbound_opt_out_count,
       click_count: campaign_stages.click_count,
-      late_click_count: campaign_stages.late_click_count,
       scrubbed_count: campaign_stages.scrubbed_count,
       bounced_count: campaign_stages.bounced_count,
       checkout_click_count: campaign_stages.checkout_click_count,

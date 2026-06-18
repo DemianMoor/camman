@@ -30,6 +30,18 @@ export const SEQUENCE_PLACEMENT_VALUES = [
 export type CreativeSequencePlacement =
   (typeof SEQUENCE_PLACEMENT_VALUES)[number];
 
+// Manual funnel-stage metadata. Like `quality`, this is user-managed and
+// not enforced anywhere else in the system. Ordered funnel-first with
+// 'unknown' last (the default).
+export const FUNNEL_STAGE_VALUES = [
+  "start",
+  "clicked",
+  "checkout",
+  "ignored",
+  "unknown",
+] as const;
+export type CreativeFunnelStage = (typeof FUNNEL_STAGE_VALUES)[number];
+
 const creativeIdField = z
   .union([
     z
@@ -60,6 +72,7 @@ export const creativeCreateSchema = z
     sequence_placement: z
       .enum(SEQUENCE_PLACEMENT_VALUES)
       .default("unknown"),
+    funnel_stage: z.enum(FUNNEL_STAGE_VALUES).default("unknown"),
     applies_to_all_offers: z.boolean().default(false),
     offer_ids: z.array(z.number().int().positive()).default([]),
   })
@@ -78,6 +91,7 @@ export const creativeUpdateSchema = z
     creative_id: creativeIdField,
     quality: z.enum(QUALITY_VALUES).optional(),
     sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES).optional(),
+    funnel_stage: z.enum(FUNNEL_STAGE_VALUES).optional(),
     applies_to_all_offers: z.boolean().optional(),
     offer_ids: z.array(z.number().int().positive()).optional(),
   })
@@ -96,6 +110,7 @@ export const creativeBulkCreateSchema = z
     sequence_placement: z
       .enum(SEQUENCE_PLACEMENT_VALUES)
       .default("unknown"),
+    funnel_stage: z.enum(FUNNEL_STAGE_VALUES).default("unknown"),
     creatives: z
       .array(
         z.object({
@@ -127,6 +142,7 @@ export const creativeBulkUpdateSchema = z
       .max(BULK_EDIT_MAX_IDS, `At most ${BULK_EDIT_MAX_IDS} creatives per request`),
     quality: z.enum(QUALITY_VALUES).optional(),
     sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES).optional(),
+    funnel_stage: z.enum(FUNNEL_STAGE_VALUES).optional(),
     status: z.enum(CREATIVE_STATUSES).optional(),
     add_offer_ids: z
       .array(z.number().int().positive())
@@ -137,6 +153,7 @@ export const creativeBulkUpdateSchema = z
     (d) =>
       d.quality !== undefined ||
       d.sequence_placement !== undefined ||
+      d.funnel_stage !== undefined ||
       d.status !== undefined ||
       (d.add_offer_ids !== undefined && d.add_offer_ids.length > 0),
     { message: "At least one change must be provided" },

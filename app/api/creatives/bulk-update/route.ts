@@ -49,6 +49,7 @@ export async function POST(req: NextRequest) {
   const needsUpdate =
     input.quality !== undefined ||
     input.sequence_placement !== undefined ||
+    input.funnel_stage !== undefined ||
     addOffers.length > 0;
 
   // Permission gating, per field group.
@@ -101,6 +102,8 @@ export async function POST(req: NextRequest) {
       if (input.quality !== undefined) scalar.quality = input.quality;
       if (input.sequence_placement !== undefined)
         scalar.sequence_placement = input.sequence_placement;
+      if (input.funnel_stage !== undefined)
+        scalar.funnel_stage = input.funnel_stage;
       if (input.status !== undefined) {
         scalar.status = input.status;
         scalar.archived_at =

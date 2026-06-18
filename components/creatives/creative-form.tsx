@@ -40,8 +40,10 @@ import { calculateSmsSegments, containsEmDash } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
 import {
+  FUNNEL_STAGE_VALUES,
   QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
+  type CreativeFunnelStage,
   type CreativeQuality,
   type CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
@@ -68,6 +70,7 @@ const formSchema = z.object({
     .optional(),
   quality: z.enum(QUALITY_VALUES),
   sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES),
+  funnel_stage: z.enum(FUNNEL_STAGE_VALUES),
   applies_to_all_offers: z.boolean(),
   offer_ids: z.array(z.number().int().positive()),
 });
@@ -96,6 +99,14 @@ const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   "5th": "5th",
   "6th": "6th",
   any: "Any",
+  unknown: "Unknown",
+};
+
+const FUNNEL_STAGE_LABEL: Record<CreativeFunnelStage, string> = {
+  start: "Start",
+  clicked: "Clicked",
+  checkout: "Checkout",
+  ignored: "Ignored",
   unknown: "Unknown",
 };
 
@@ -148,6 +159,7 @@ export function CreativeForm({
       creative_id: initialValues?.creative_id ?? "",
       quality: initialValues?.quality ?? "unknown",
       sequence_placement: initialValues?.sequence_placement ?? "unknown",
+      funnel_stage: initialValues?.funnel_stage ?? "unknown",
       applies_to_all_offers: initialValues?.applies_to_all_offers ?? false,
       offer_ids: initialValues?.offer_ids ?? [],
     },
@@ -414,6 +426,34 @@ export function CreativeForm({
                     {SEQUENCE_PLACEMENT_VALUES.map((s) => (
                       <SelectItem key={s} value={s}>
                         {SEQUENCE_LABEL[s]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="funnel_stage"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel required>Funnel Stage</FormLabel>
+                <Select
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  disabled={isSubmitting}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    {FUNNEL_STAGE_VALUES.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {FUNNEL_STAGE_LABEL[s]}
                       </SelectItem>
                     ))}
                   </SelectContent>

@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-06-18_
+_Last updated: 2026-06-19_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -172,7 +172,7 @@ erDiagram
 ### Creatives
 | Table | Key columns | Notes |
 |-------|------------|-------|
-| `creatives` | `slug` (uniq), `creative_id` (uniq, optional), `text`, `quality`, `sequence_placement`, `applies_to_all_offers`, `spam_score`/`spam_label`/`spam_score_error` | spam columns mirrored from `spam_scores` on save |
+| `creatives` | `slug` (uniq), `creative_id` (uniq, optional), `text`, `quality`, `sequence_placement`, `funnel_stage`, `applies_to_all_offers`, `spam_score`/`spam_label`/`spam_score_error` | spam columns mirrored from `spam_scores` on save. `funnel_stage` (migration `0076`) is manual metadata — `start`/`clicked`/`checkout`/`ignored`/`unknown` (default `unknown`), like `quality` |
 | `creative_offers` | PK(creative_id, offer_id) | M:N |
 
 ### Campaigns & stages
@@ -187,7 +187,7 @@ erDiagram
 | Table | Key columns | Notes |
 |-------|------------|-------|
 | `result_import_mappings` | `sms_provider_id`, `mapping` jsonb, `status_value_map` jsonb, `is_default` | per-provider CSV templates |
-| `stage_results_imports` | `campaign_id`, `stage_id`, `*_added` counters, `clicker_phase` day1/late, `reverted_at` | permanent audit (no hard delete) |
+| `stage_results_imports` | `campaign_id`, `stage_id`, `*_added` counters, `reverted_at` | permanent audit (no hard delete) |
 | `stage_result_rows` | UNIQUE(stage_id, phone_number), `outcome`, `created_opt_out_id`, `created_clicker_id` | per-row; dedup + cross-import preservation |
 
 ### Spam, links, sends

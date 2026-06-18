@@ -13,6 +13,7 @@ import { db } from "@/db/client";
 import { creative_offers, creatives } from "@/db/schema";
 import {
   CREATIVE_STATUSES,
+  FUNNEL_STAGE_VALUES,
   QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
 } from "@/lib/validators/creatives";
@@ -20,6 +21,7 @@ import {
 const VALID_STATUSES = new Set<string>(CREATIVE_STATUSES);
 const VALID_QUALITIES = new Set<string>(QUALITY_VALUES);
 const VALID_SEQUENCES = new Set<string>(SEQUENCE_PLACEMENT_VALUES);
+const VALID_FUNNEL_STAGES = new Set<string>(FUNNEL_STAGE_VALUES);
 
 function splitFilter(raw: string | null, valid: Set<string>): string[] {
   if (!raw) return [];
@@ -47,6 +49,10 @@ export function buildCreativeListWhere(opts: {
   const sequenceFilter = splitFilter(
     sp.get("sequence_placement"),
     VALID_SEQUENCES,
+  );
+  const funnelStageFilter = splitFilter(
+    sp.get("funnel_stage"),
+    VALID_FUNNEL_STAGES,
   );
   const statusFilter = splitFilter(sp.get("status"), VALID_STATUSES);
   const offerFilter = sp.get("offer_id");
@@ -85,6 +91,9 @@ export function buildCreativeListWhere(opts: {
   }
   if (sequenceFilter.length > 0) {
     conditions.push(inArray(creatives.sequence_placement, sequenceFilter));
+  }
+  if (funnelStageFilter.length > 0) {
+    conditions.push(inArray(creatives.funnel_stage, funnelStageFilter));
   }
 
   // offer_ids filter (multi): eligible if a junction row to ANY of the selected

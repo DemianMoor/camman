@@ -329,6 +329,50 @@ export async function pollKeitaro(
     }
   }
 
+  // Mirror the auto-owned stage counters from the freshly-upserted Keitaro rows:
+  //   Clickers       = landing-page visits (visit_clicks_clean)
+  //   Checkout Clicks = checkouts
+  //   Sales          = sales
+  // summed across ALL stat_dates for each stage touched this run. Only stages
+  // that appear in Keitaro this cycle are overwritten — an untracked stage keeps
+  // whatever was entered manually or via CSV. sales_payout_each is snapshotted
+  // from the campaign's offer CPA the first time sales appear (COALESCE keeps an
+  // existing snapshot) so revenue/ROI stay rateable, mirroring the manual-results
+  // route. Best-effort: a failure here never invalidates the committed upserts;
+  // the counters re-sync on the next poll.
+  const syncStageIds = [
+    ...new Set([...aggregates.values()].map((a) => a.stageId)),
+  ];
+  if (syncStageIds.length > 0) {
+    try {
+      await database.execute(sql`
+        UPDATE campaign_stages cs SET
+          click_count = k.clickers,
+          checkout_click_count = k.checkouts,
+          sales_count = k.sales,
+          sales_payout_each = CASE
+            WHEN k.sales > 0 THEN COALESCE(cs.sales_payout_each, o.payout_cpa)
+            ELSE cs.sales_payout_each
+          END
+        FROM (
+          SELECT stage_id,
+                 max(campaign_id) AS campaign_id,
+                 coalesce(sum(visit_clicks_clean), 0)::int AS clickers,
+                 coalesce(sum(checkouts), 0)::int          AS checkouts,
+                 coalesce(sum(sales), 0)::int              AS sales
+          FROM keitaro_stage_results
+          WHERE stage_id IN (${sql.join(syncStageIds, sql`, `)})
+          GROUP BY stage_id
+        ) k
+        LEFT JOIN campaigns c ON c.id = k.campaign_id
+        LEFT JOIN offers o    ON o.id = c.offer_id
+        WHERE cs.id = k.stage_id
+      `);
+    } catch {
+      // Non-fatal — the counters re-sync on the next poll.
+    }
+  }
+
   return {
     ok: true,
     degraded: false,

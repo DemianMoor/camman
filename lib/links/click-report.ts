@@ -10,8 +10,8 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 //     clean = bot/prefetch/suspect EXCLUDED. Full per-class breakdown + how many
 //     are still unscored. Classify-don't-delete: nothing is filtered out of the
 //     table, only out of the clean count.
-//   * manual  → the existing campaign_stages.click_count / late_click_count
-//     (CSV/manual import), which stay authoritative for manual campaigns.
+//   * manual  → the existing campaign_stages.click_count (CSV/manual import or
+//     the Keitaro auto-sync), which stays authoritative for manual campaigns.
 //
 // The `source` field is what the UI keys its (loud, unmissable) source badge
 // off — CSV vs tracked must be obvious at a glance, never a footnote.
@@ -36,7 +36,6 @@ export interface ManualStageRow {
   stage_id: number;
   stage_number: number;
   click_count: number;
-  late_click_count: number;
 }
 
 export type ClickReport =
@@ -109,7 +108,7 @@ export async function getCampaignClickReport(
   }
 
   const rows = (await dbc.execute(sql`
-    SELECT id AS stage_id, stage_number, click_count, late_click_count
+    SELECT id AS stage_id, stage_number, click_count
     FROM campaign_stages
     WHERE campaign_id = ${campaignId} AND org_id = ${orgId}
     ORDER BY stage_number
@@ -117,7 +116,6 @@ export async function getCampaignClickReport(
     stage_id: number;
     stage_number: number;
     click_count: number;
-    late_click_count: number;
   }>;
 
   return {
@@ -126,7 +124,6 @@ export async function getCampaignClickReport(
       stage_id: Number(r.stage_id),
       stage_number: Number(r.stage_number),
       click_count: Number(r.click_count),
-      late_click_count: Number(r.late_click_count),
     })),
   };
 }

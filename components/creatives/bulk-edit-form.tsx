@@ -13,8 +13,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  FUNNEL_STAGE_VALUES,
   QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
+  type CreativeFunnelStage,
   type CreativeQuality,
   type CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
@@ -22,6 +24,7 @@ import {
 export interface BulkEditPayload {
   quality?: CreativeQuality;
   sequence_placement?: CreativeSequencePlacement;
+  funnel_stage?: CreativeFunnelStage;
   status?: "active" | "archived";
   add_offer_ids?: number[];
 }
@@ -67,6 +70,14 @@ const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   unknown: "Unknown",
 };
 
+const FUNNEL_STAGE_LABEL: Record<CreativeFunnelStage, string> = {
+  start: "Start",
+  clicked: "Clicked",
+  checkout: "Checkout",
+  ignored: "Ignored",
+  unknown: "Unknown",
+};
+
 export function BulkEditForm({
   selectedCount,
   offers,
@@ -79,6 +90,7 @@ export function BulkEditForm({
 }: BulkEditFormProps) {
   const [quality, setQuality] = useState<string>(UNCHANGED);
   const [sequence, setSequence] = useState<string>(UNCHANGED);
+  const [funnelStage, setFunnelStage] = useState<string>(UNCHANGED);
   const [status, setStatus] = useState<string>(UNCHANGED);
   const [addOfferIds, setAddOfferIds] = useState<number[]>([]);
 
@@ -91,6 +103,8 @@ export function BulkEditForm({
     payload.quality = quality as CreativeQuality;
   if (canEditMeta && sequence !== UNCHANGED)
     payload.sequence_placement = sequence as CreativeSequencePlacement;
+  if (canEditMeta && funnelStage !== UNCHANGED)
+    payload.funnel_stage = funnelStage as CreativeFunnelStage;
   if (canChangeStatus && status !== UNCHANGED)
     payload.status = status as "active" | "archived";
   if (canEditMeta && addOfferIds.length > 0) payload.add_offer_ids = addOfferIds;
@@ -149,6 +163,25 @@ export function BulkEditForm({
               {SEQUENCE_PLACEMENT_VALUES.map((s) => (
                 <SelectItem key={s} value={s}>
                   {SEQUENCE_LABEL[s]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
+
+      {canEditMeta ? (
+        <div className="grid gap-2">
+          <Label htmlFor="bulk-funnel-stage">Funnel Stage</Label>
+          <Select value={funnelStage} onValueChange={setFunnelStage}>
+            <SelectTrigger id="bulk-funnel-stage">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={UNCHANGED}>No change</SelectItem>
+              {FUNNEL_STAGE_VALUES.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {FUNNEL_STAGE_LABEL[s]}
                 </SelectItem>
               ))}
             </SelectContent>

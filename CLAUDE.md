@@ -210,7 +210,7 @@ Auto-generated, **immutable**, structured identifiers separate from the internal
 - `applies_to_all_offers=true` makes a creative valid for any offer in the org. Junction rows are still allowed when this flag is on (used as a fallback list); toggling the flag does NOT auto-clear junction rows.
 - No provider or brand association on the creative itself — those concepts live at the stage level (provider on the stage, brand on the parent campaign).
 - No status state machine. Creatives are `active` or `archived` only.
-- `quality` (`high | average | poor | unknown`) and `sequence_placement` (`1st | 2nd | 3rd | any | unknown`) are user-managed metadata used for filtering/organizing. Defaults are `unknown`. Not enforced anywhere else in the system.
+- `quality` (`high | average | poor | unknown`), `sequence_placement` (`1st | 2nd | 3rd | any | unknown`), and `funnel_stage` (`start | clicked | checkout | ignored | unknown`, migration 0076) are user-managed metadata used for filtering/organizing. Defaults are `unknown`. Not enforced anywhere else in the system.
 - The stage form's creative picker queries `/api/creatives/list?offer_id=<X>&status=active` — the list endpoint's `offer_id` filter returns creatives that either have a junction row to X OR have `applies_to_all_offers=true`.
 - Bulk-create accepts up to 50 rows per request; shared offer/quality/sequence apply to every row in the batch. The whole batch runs in one transaction.
 

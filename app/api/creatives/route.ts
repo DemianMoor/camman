@@ -107,6 +107,7 @@ async function handleSingle(json: unknown, orgId: string) {
             slug,
             quality: input.quality,
             sequence_placement: input.sequence_placement,
+            funnel_stage: input.funnel_stage,
             applies_to_all_offers: input.applies_to_all_offers,
             status: "active",
           })
@@ -198,6 +199,7 @@ async function handleBulk(json: unknown, orgId: string) {
                 slug,
                 quality: input.quality,
                 sequence_placement: input.sequence_placement,
+                funnel_stage: input.funnel_stage,
                 applies_to_all_offers: input.applies_to_all_offers,
                 status: "active",
               })
@@ -274,6 +276,7 @@ async function loadCreativeWithOffers(id: number) {
       text: creatives.text,
       quality: creatives.quality,
       sequence_placement: creatives.sequence_placement,
+      funnel_stage: creatives.funnel_stage,
       applies_to_all_offers: creatives.applies_to_all_offers,
       spam_score: creatives.spam_score,
       spam_label: creatives.spam_label,

@@ -72,6 +72,7 @@ export async function GET(
       text: creatives.text,
       quality: creatives.quality,
       sequence_placement: creatives.sequence_placement,
+      funnel_stage: creatives.funnel_stage,
       applies_to_all_offers: creatives.applies_to_all_offers,
       spam_score: creatives.spam_score,
       spam_label: creatives.spam_label,

@@ -39,6 +39,7 @@ const SORT_COLUMNS = {
   text: creatives.text,
   quality: creatives.quality,
   sequence_placement: creatives.sequence_placement,
+  funnel_stage: creatives.funnel_stage,
   // Sorts by the per-row column directly. Unscored rows (NULL) bubble to
   // the end of the asc/desc range courtesy of Postgres's NULLS LAST
   // default. We append a stable tiebreaker on id so ordering is
@@ -70,9 +71,9 @@ export async function GET(req: NextRequest) {
   // sortable server-side across the whole filtered set, not just one page.
   // Stage counters are anchored on the stage's created_at; tracked clean
   // clicks are anchored on the click's clicked_at (two distinct time bases,
-  // by design). Clean clicks = manual-mode stage clicks (click_count +
-  // late_click_count) + tracked-mode clean clicks (human + unknown, i.e.
-  // bot/prefetch/suspect excluded — same definition as the click report).
+  // by design). Clean clicks = manual-mode stage clicks (click_count) +
+  // tracked-mode clean clicks (human + unknown, i.e. bot/prefetch/suspect
+  // excluded — same definition as the click report).
   const WINDOW = drizzleSql`now() - interval '30 days'`;
 
   const stageAgg = db
@@ -95,7 +96,7 @@ export async function GET(req: NextRequest) {
           "payout",
         ),
       manual_clean:
-        drizzleSql<number>`coalesce(sum(${campaign_stages.click_count} + ${campaign_stages.late_click_count}) filter (where ${campaigns.link_mode} = 'manual'), 0)::int`.as(
+        drizzleSql<number>`coalesce(sum(${campaign_stages.click_count}) filter (where ${campaigns.link_mode} = 'manual'), 0)::int`.as(
           "manual_clean",
         ),
     })
@@ -175,6 +176,7 @@ export async function GET(req: NextRequest) {
         text: creatives.text,
         quality: creatives.quality,
         sequence_placement: creatives.sequence_placement,
+        funnel_stage: creatives.funnel_stage,
         applies_to_all_offers: creatives.applies_to_all_offers,
         // Direct columns: filled in by the scoring step on save. The
         // cache lookup below is the legacy path; we still consult it so
@@ -313,6 +315,7 @@ export async function GET(req: NextRequest) {
       text: r.text,
       quality: r.quality,
       sequence_placement: r.sequence_placement,
+      funnel_stage: r.funnel_stage,
       applies_to_all_offers: r.applies_to_all_offers,
       status: r.status,
       archived_at: r.archived_at,

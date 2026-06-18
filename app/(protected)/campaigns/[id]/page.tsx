@@ -181,7 +181,6 @@ type Stage = {
   // source the Reports page reads. Distinct from the import-fed opt_out_count.
   inbound_stop_count: number;
   click_count: number;
-  late_click_count: number;
   scrubbed_count: number;
   bounced_count: number;
   checkout_click_count: number;
@@ -1016,17 +1015,14 @@ export default function CampaignDetailPage() {
             delivered_count: delivered,
             opt_out_count: oo,
             click_count: cl,
-            late_click_count: lc,
           } = row.original;
           // Results are considered entered (manually or imported) once any
           // send/outcome counter is non-zero.
           const hasResults =
-            sms > 0 || delivered > 0 || oo > 0 || cl > 0 || lc > 0;
+            sms > 0 || delivered > 0 || oo > 0 || cl > 0;
           if (!hasResults)
             return <span className="text-muted-foreground">—</span>;
-          // Late clickers supersede 1st-day clickers once a follow-up report
-          // arrives; otherwise use the 1st-day count.
-          const clicks = lc > 0 ? lc : cl;
+          const clicks = cl;
           // Rate denominator: delivered, falling back to SMS sent.
           const denom = delivered > 0 ? delivered : sms;
           const pct = (n: number) =>
@@ -1209,7 +1205,6 @@ export default function CampaignDetailPage() {
     let delivered = 0;
     let optOuts = 0;
     let clickers = 0;
-    let lateClickers = 0;
     let scrubbed = 0;
     let bounced = 0;
     let checkoutClicks = 0;
@@ -1226,7 +1221,6 @@ export default function CampaignDetailPage() {
       delivered += s.delivered_count;
       optOuts += s.opt_out_count;
       clickers += s.click_count;
-      lateClickers += s.late_click_count;
       scrubbed += s.scrubbed_count;
       bounced += s.bounced_count;
       checkoutClicks += s.checkout_click_count;
@@ -1249,7 +1243,6 @@ export default function CampaignDetailPage() {
       // sum of per-stage credits, which window-attribution would over-count.
       inboundStops: inboundStopContacts,
       clickers,
-      lateClickers,
       scrubbed,
       bounced,
       checkoutClicks,
@@ -1525,12 +1518,8 @@ export default function CampaignDetailPage() {
                 value={campaignTotals.inboundStops}
               />
               <TotalsMetric
-                label="Clicker 1st Day"
+                label="Clickers"
                 value={campaignTotals.clickers}
-              />
-              <TotalsMetric
-                label="Late Clickers"
-                value={campaignTotals.lateClickers}
               />
               <TotalsMetric
                 label="Scrubbed"
@@ -2115,7 +2104,6 @@ export default function CampaignDetailPage() {
               delivered_count: manualStage.delivered_count,
               opt_out_count: manualStage.opt_out_count,
               click_count: manualStage.click_count,
-              late_click_count: manualStage.late_click_count,
               scrubbed_count: manualStage.scrubbed_count,
               bounced_count: manualStage.bounced_count,
               checkout_click_count: manualStage.checkout_click_count,

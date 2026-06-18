@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-06-18_
+_Last updated: 2026-06-19_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -22,6 +22,21 @@ see CLAUDE.md §10g) into the offer's postfix URL param, which is configured as
 > The `GET /admin_api/v1/campaigns` call (id/alias/name) maps each report row's
 > Keitaro campaign → its **alias** for the visit/redirect classification (§2b). It
 > is still **not** the join key — that remains `sub_id_3`.
+
+## 2a. Auto-fill of the stage Results panel (migration 0077)
+After each poll upserts `keitaro_stage_results`, it **overwrites the stage's
+headline result counters** for every stage touched this run (summed across all
+`stat_date`s): `campaign_stages.click_count` ← `visit_clicks_clean` ("Clickers"),
+`checkout_click_count` ← `checkouts`, `sales_count` ← `sales`. `sales_payout_each`
+is snapshotted from the campaign's offer CPA the first time sales appear (COALESCE
+keeps an existing snapshot) so revenue/ROI stay rateable. Stages with no Keitaro
+rows are left untouched (manual/CSV entry stands). Combined with the opt-out
+poller mirroring `inbound_opt_out_count` → `opt_out_count`, the per-stage Results
+panel (SMS sent · Delivered · **Opt-outs** · **Clickers** · Scrubbed · Bounced ·
+**Checkout Clicks** · **Sales** · Total Cost) reflects Keitaro + TextHub
+automatically; only SMS/Delivered/Scrubbed/Bounced/Total Cost remain
+manual/CSV-owned. Best-effort: a sync failure never invalidates the committed
+upserts — it re-syncs next poll.
 
 ## 2b. Visit vs Offer Redirect classification (Step 5b)
 Two kinds of Keitaro campaign fire clicks for the **same** `sub_id_3` (stage):

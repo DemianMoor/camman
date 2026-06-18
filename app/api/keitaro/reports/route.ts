@@ -36,6 +36,7 @@ const SORTABLE = new Set([
   "cost",
   "epc",
   "profit",
+  "opt_outs",
 ]);
 
 export async function GET(req: NextRequest) {
@@ -94,6 +95,7 @@ export async function GET(req: NextRequest) {
       campaign_name: campaigns.name,
       stage_number: campaign_stages.stage_number,
       stage_label: campaign_stages.label,
+      opt_out_count: campaign_stages.opt_out_count,
       visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
       visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
       redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
@@ -129,10 +131,13 @@ export async function GET(req: NextRequest) {
     stage_number: number | null;
     stage_label: string | null;
     stage_tracking_id: string;
+    // Per-stage denormalized counter (not per-day) — captured once, never summed.
+    opt_outs: number;
     tally: FunnelTally;
   }
   const byStage = new Map<number, StageAcc>();
   const grand = emptyFunnel();
+  let grandOptOuts = 0;
 
   for (const r of rows) {
     addRowToFunnel(grand, r);
@@ -145,9 +150,11 @@ export async function GET(req: NextRequest) {
         stage_number: r.stage_number,
         stage_label: r.stage_label,
         stage_tracking_id: r.stage_tracking_id,
+        opt_outs: r.opt_out_count ?? 0,
         tally: emptyFunnel(),
       };
       byStage.set(r.stage_id, acc);
+      grandOptOuts += acc.opt_outs;
     }
     addRowToFunnel(acc.tally, r);
   }
@@ -163,6 +170,7 @@ export async function GET(req: NextRequest) {
       stage_number: acc.stage_number,
       stage_name,
       stage_tracking_id: acc.stage_tracking_id,
+      opt_outs: acc.opt_outs,
       ...withFunnelDerived(acc.tally),
     };
   });
@@ -197,7 +205,7 @@ export async function GET(req: NextRequest) {
     totalCount,
     page,
     pageSize,
-    totals: withFunnelDerived(grand),
+    totals: { ...withFunnelDerived(grand), opt_outs: grandOptOuts },
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });
 }

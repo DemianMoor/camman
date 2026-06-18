@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { BarChart3, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
@@ -23,6 +24,7 @@ type ReportRow = {
   stage_number: number | null;
   stage_name: string;
   stage_tracking_id: string;
+  opt_outs: number;
   clickers: number;
   offer_redirect: number;
   redirect_rate: number;
@@ -218,7 +220,12 @@ export default function ReportsPage() {
         header: "Campaign",
         enableSorting: true,
         cell: ({ row }) => (
-          <span className="font-medium">{row.original.campaign_name}</span>
+          <Link
+            href={`/campaigns/${row.original.campaign_id}`}
+            className="font-medium text-primary hover:underline"
+          >
+            {row.original.campaign_name}
+          </Link>
         ),
       },
       {
@@ -226,12 +233,25 @@ export default function ReportsPage() {
         header: "Stage",
         enableSorting: false,
         cell: ({ row }) => (
-          <div className="flex flex-col gap-0.5">
-            <span>{row.original.stage_name}</span>
+          <Link
+            href={`/campaigns/${row.original.campaign_id}?stage=${row.original.stage_id}`}
+            className="flex flex-col gap-0.5 hover:underline"
+          >
+            <span className="text-primary">{row.original.stage_name}</span>
             <span className="font-mono text-[11px] text-muted-foreground">
               {row.original.stage_tracking_id}
             </span>
-          </div>
+          </Link>
+        ),
+      },
+      {
+        id: "opt_outs",
+        header: "Opt-outs",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span className="tabular-nums text-muted-foreground">
+            {fmtInt(row.original.opt_outs)}
+          </span>
         ),
       },
       {

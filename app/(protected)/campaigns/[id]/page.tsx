@@ -461,6 +461,26 @@ export default function CampaignDetailPage() {
 
   const [addStageOpen, setAddStageOpen] = useState(false);
   const [editingStage, setEditingStage] = useState<Stage | null>(null);
+
+  // Deep-link from the Reports page: `?stage=<id>` opens that stage's editor
+  // once the stages list has loaded. Captured at first render, consumed once.
+  const [pendingStageFocus, setPendingStageFocus] = useState<number | null>(
+    () => {
+      if (typeof window === "undefined") return null;
+      const raw = new URLSearchParams(window.location.search).get("stage");
+      const id = raw ? Number(raw) : NaN;
+      return Number.isInteger(id) && id > 0 ? id : null;
+    },
+  );
+  useEffect(() => {
+    if (pendingStageFocus == null || stages.length === 0) return;
+    const target = stages.find((s) => s.id === pendingStageFocus);
+    if (target) {
+      setEditingStage(target);
+      setAddStageOpen(true);
+    }
+    setPendingStageFocus(null);
+  }, [pendingStageFocus, stages]);
   const [stageArchiveConfirm, setStageArchiveConfirm] = useState<{
     kind: "archive" | "restore";
     stage: Stage;

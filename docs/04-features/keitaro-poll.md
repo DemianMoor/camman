@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-06-18_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -109,15 +109,20 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   read-only; org-scoped. Cross-campaign per-stage funnel aggregated over an ET date
   range (≤92 days, default last 7), with resolved campaign + stage names, grand
   totals, and pagination/sort. Powers the **Reports** page (`/reports`). Requires
-  `campaigns.view`. Never triggers a poll.
+  `campaigns.view`. Never triggers a poll. Each row also carries `opt_outs` (the
+  per-stage `campaign_stages.opt_out_count`, captured once — not summed across the
+  per-day Keitaro rows), included in the grand totals and sortable.
 
 ## 5b. Reports UI (`/reports`)
 A dedicated cross-campaign page ([`app/(protected)/reports/page.tsx`](../../app/(protected)/reports/page.tsx))
-showing the funnel per stage: Campaign · Stage · **Clickers** · **Offer Redirect**
-· Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit, with a date-range
-filter, search, sortable columns, grand-total stat cards, and a manual
-**Refresh from Keitaro** button (operator+, runs the poll). Nav entry under
+showing the funnel per stage: Campaign · Stage · **Opt-outs** · **Clickers** ·
+**Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
+with a date-range filter, search, sortable columns, grand-total stat cards, and a
+manual **Refresh from Keitaro** button (operator+, runs the poll). Nav entry under
 **Campaigns** (always enabled — Reports is a feature, not a flagged entity).
+The **Campaign** cell links to `/campaigns/[id]`; the **Stage** cell links to
+`/campaigns/[id]?stage=[stageId]`, which the campaign detail page consumes on load
+to auto-open that stage's editor (there is no standalone stage route).
 
 ## 6. Fail-safe behavior
 - A failed report fetch returns `200 { degraded:true, error }` — the cron logs and

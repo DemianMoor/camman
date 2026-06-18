@@ -345,11 +345,16 @@ export async function pollKeitaro(
   ];
   if (syncStageIds.length > 0) {
     try {
+      // Per-field guard: only let Keitaro OVERWRITE a counter when it reports a
+      // POSITIVE value for that field. A Keitaro 0 (no tracked clicks/checkouts/
+      // sales for the stage) leaves the manual/CSV value intact — Keitaro never
+      // zeroes a stage's existing numbers. Keitaro sums are monotonic (they only
+      // grow as more days are polled), so this never drops a legitimate update.
       await database.execute(sql`
         UPDATE campaign_stages cs SET
-          click_count = k.clickers,
-          checkout_click_count = k.checkouts,
-          sales_count = k.sales,
+          click_count = CASE WHEN k.clickers > 0 THEN k.clickers ELSE cs.click_count END,
+          checkout_click_count = CASE WHEN k.checkouts > 0 THEN k.checkouts ELSE cs.checkout_click_count END,
+          sales_count = CASE WHEN k.sales > 0 THEN k.sales ELSE cs.sales_count END,
           sales_payout_each = CASE
             WHEN k.sales > 0 THEN COALESCE(cs.sales_payout_each, o.payout_cpa)
             ELSE cs.sales_payout_each

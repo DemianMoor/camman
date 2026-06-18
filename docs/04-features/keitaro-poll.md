@@ -30,7 +30,12 @@ headline result counters** for every stage touched this run (summed across all
 `checkout_click_count` ← `checkouts`, `sales_count` ← `sales`. `sales_payout_each`
 is snapshotted from the campaign's offer CPA the first time sales appear (COALESCE
 keeps an existing snapshot) so revenue/ROI stay rateable. Stages with no Keitaro
-rows are left untouched (manual/CSV entry stands). Combined with the opt-out
+rows are left untouched (manual/CSV entry stands). **Per-field positive-only
+guard:** each counter is overwritten ONLY when Keitaro reports a value `> 0` for
+it — a Keitaro 0 never zeroes an existing manual/CSV number (e.g. a stage with
+tracked clicks but no Keitaro-reported sales keeps its manually-entered sales).
+Keitaro sums are monotonic, so this never drops a legitimate update. One-time
+backfill of existing stages: [`scripts/backfill-stage-results.ts`](../../scripts/backfill-stage-results.ts). Combined with the opt-out
 poller mirroring `inbound_opt_out_count` → `opt_out_count`, the per-stage Results
 panel (SMS sent · Delivered · **Opt-outs** · **Clickers** · Scrubbed · Bounced ·
 **Checkout Clicks** · **Sales** · Total Cost) reflects Keitaro + TextHub

@@ -7,6 +7,11 @@ import { consume } from "@/lib/api/rate-limit";
 import { can } from "@/lib/permissions";
 import { scoreMessage } from "@/lib/spam";
 
+// A cold classifier can need up to MAX_ATTEMPTS × per-attempt timeout
+// (~50s) to warm + answer. Give the function room so the platform doesn't
+// kill it mid-retry at the default (~10–15s) ceiling.
+export const maxDuration = 60;
+
 const TEXT_MAX = 1600;
 
 const bodySchema = z.object({

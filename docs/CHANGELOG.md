@@ -2,6 +2,13 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-19 — Spam check: stop failing on new creatives (cold-start hardening) — docs: 04/spam-classifier, CHANGELOG
+- **Bug:** scoring a *new* creative (cache miss → real classifier call) often failed because the Cloud Run classifier scales to zero and the first request's cold start blew the 10s timeout. The fallback (score 50) was then **cached permanently**, pinning the text to a bogus "50 / NOT SPAM" even after the service recovered.
+- Per-attempt timeout 10s → **25s** (`CLASSIFIER_TIMEOUT_MS`); provider **retries once** on timeout/network errors only (not on HTTP non-2xx); `/api/spam/score` gains `maxDuration = 60` ([lib/spam/providers/classifier.ts](../lib/spam/providers/classifier.ts), [app/api/spam/score/route.ts](../app/api/spam/score/route.ts)).
+- **Failures are no longer cached** ([lib/spam/score.ts](../lib/spam/score.ts)) — a transient failure no longer poisons the cache; the next check re-scores.
+- Strip shows **"Couldn't score — try Re-check"** instead of a fake verdict on failure ([components/spam/spam-check-strip.tsx](../components/spam/spam-check-strip.tsx)).
+- Recommended permanent fix (ops, outside repo): run the classifier always-on (self-hosted / `min-instances=1`) — one-env-var change app-side (`CLASSIFIER_URL`).
+
 ## 2026-06-20 — Reports: every metric scoped to the selected date range + dated manual-sales ledger — migration 0079 — docs: 03-data-model, 04/keitaro-poll, CHANGELOG
 - **Bug:** `/reports` mixed lifetime counters into a date-ranged view — Sales showed the operator's lifetime manual `sales_count` (e.g. a stage showed 5 sales in a 2-day window with no sales), and opt-outs read the lifetime `campaign_stages.inbound_opt_out_count`. Fixed so **all** metrics reflect only the selected ET period ([app/api/keitaro/reports/route.ts](../app/api/keitaro/reports/route.ts)):
   - **Sales** = Keitaro conversions in range (`keitaro_stage_results.sales`, bounded by `stat_date`) **+ manual sales entered in range**. Since `campaign_stages.sales_count` is an overwrite-on-save integer with no date, a new per-entry ledger **`stage_manual_sales`** (migration 0079) records the signed delta on each manual-results save, dated to the save; the report sums in-range deltas and adds them on top. `SUM(delta)` per stage == `sales_count`. Manual revenue is not added (report Revenue stays Keitaro-only).

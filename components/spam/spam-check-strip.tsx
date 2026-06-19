@@ -168,6 +168,25 @@ function ResultDisplay({
   result: SpamCheckResult;
   stale: boolean;
 }) {
+  // A scoring failure (timeout / classifier unreachable) comes back as a
+  // fallback score of 50 with `error` set. Don't dress it up as a real
+  // verdict — show it as a failure the operator should re-check, not as
+  // "50 / NOT SPAM".
+  if (result.error) {
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300",
+          stale && "opacity-50",
+        )}
+        title={result.error}
+      >
+        <XCircle className="size-3.5" aria-hidden />
+        Couldn&apos;t score — try Re-check
+      </span>
+    );
+  }
+
   const isSpam = result.verdict === "spam";
   return (
     <div
@@ -208,11 +227,7 @@ function ResultDisplay({
       <Badge className={cn("text-xs", LABEL_BADGE[result.label])}>
         {LABEL_TEXT[result.label]}
       </Badge>
-      {result.error ? (
-        <span className="text-xs text-amber-700 dark:text-amber-300">
-          (fallback)
-        </span>
-      ) : result.cached ? (
+      {result.cached ? (
         <span className="text-xs text-muted-foreground">cached</span>
       ) : null}
       {stale ? (

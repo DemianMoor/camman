@@ -2,7 +2,12 @@ import "server-only";
 
 import { deriveLabel, type SpamProvider, type SpamScoreResult } from "../types";
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+// Per-attempt timeout. Raised from 10s to give a cold classifier (e.g. a
+// Cloud Run instance that scaled to zero) room to boot + load the model
+// before we abort. We retry once on network/timeout failures, so the
+// worst case is ~2× this — kept under the route's maxDuration=60.
+const DEFAULT_TIMEOUT_MS = 25_000;
+const MAX_ATTEMPTS = 2;
 const FALLBACK_SCORE = 50; // "I don't know" — borderline; verdict will be not_spam (> 50 rule)
 
 // Self-hosted classifier provider. Calls the Cloud Run service over HTTP.
@@ -32,6 +37,28 @@ export class SelfHostedClassifierProvider implements SpamProvider {
   async score(
     text: string,
   ): Promise<Omit<SpamScoreResult, "verdict">> {
+    // Retry once on network/timeout failures only. The common failure mode
+    // is a cold instance: the first attempt warms it (and may abort on the
+    // timeout), the second lands on a now-warm instance and succeeds. We do
+    // NOT retry an HTTP non-2xx — the service is up and deliberately
+    // erroring, so a retry just doubles latency for the same answer.
+    let last: Omit<SpamScoreResult, "verdict"> | null = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const r = await this.attemptScore(text);
+      if (!r.error || !r.retryable) return r.result;
+      last = r.result;
+    }
+    return last!;
+  }
+
+  // One HTTP attempt. `retryable` is true for transport failures
+  // (timeout/abort/network), false for a real classifier response we
+  // shouldn't second-guess (non-2xx, bad payload).
+  private async attemptScore(text: string): Promise<{
+    result: Omit<SpamScoreResult, "verdict">;
+    error: boolean;
+    retryable: boolean;
+  }> {
     const start = Date.now();
     try {
       const res = await fetch(`${this.url}/score`, {
@@ -47,10 +74,14 @@ export class SelfHostedClassifierProvider implements SpamProvider {
 
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        return this.failure(
-          `classifier returned ${res.status}: ${body.slice(0, 200)}`,
-          latencyMs,
-        );
+        return {
+          result: this.failure(
+            `classifier returned ${res.status}: ${body.slice(0, 200)}`,
+            latencyMs,
+          ),
+          error: true,
+          retryable: false,
+        };
       }
 
       // Expected shape: { score, label, confidence, model_version, model_id }
@@ -64,10 +95,14 @@ export class SelfHostedClassifierProvider implements SpamProvider {
       const score =
         typeof raw.score === "number" ? Math.round(raw.score) : null;
       if (score === null || !Number.isFinite(score)) {
-        return this.failure(
-          `classifier returned non-numeric score: ${String(raw.score)}`,
-          latencyMs,
-        );
+        return {
+          result: this.failure(
+            `classifier returned non-numeric score: ${String(raw.score)}`,
+            latencyMs,
+          ),
+          error: true,
+          retryable: false,
+        };
       }
       const clamped = Math.max(0, Math.min(100, score));
       const confidence =
@@ -78,21 +113,26 @@ export class SelfHostedClassifierProvider implements SpamProvider {
         typeof raw.model_version === "string" ? raw.model_version : null;
 
       return {
-        score: clamped,
-        // Derive our own label rather than trusting the remote — keeps the
-        // thresholds in one place if we adjust them later.
-        label: deriveLabel(clamped),
-        confidence,
-        provider: this.name,
-        modelVersion,
-        rawResponse: raw,
-        latencyMs,
-        error: null,
+        result: {
+          score: clamped,
+          // Derive our own label rather than trusting the remote — keeps the
+          // thresholds in one place if we adjust them later.
+          label: deriveLabel(clamped),
+          confidence,
+          provider: this.name,
+          modelVersion,
+          rawResponse: raw,
+          latencyMs,
+          error: null,
+        },
+        error: false,
+        retryable: false,
       };
     } catch (err) {
       const latencyMs = Date.now() - start;
       const msg = err instanceof Error ? err.message : String(err);
-      return this.failure(msg, latencyMs);
+      // Transport-level failure (timeout/abort/network) — worth one retry.
+      return { result: this.failure(msg, latencyMs), error: true, retryable: true };
     }
   }
 

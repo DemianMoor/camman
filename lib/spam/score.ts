@@ -112,6 +112,23 @@ export async function scoreMessage(
   const label = deriveLabel(result.score);
   const verdict = deriveVerdict(result.score);
 
+  // Do NOT cache failures. A failed score is a fallback (score 50, error
+  // set) from a transient problem — usually a cold/unreachable classifier.
+  // Caching it would pin the text to "50 (fallback)" forever, since the
+  // cache is append-only and the unique constraint blocks a later real
+  // score from overwriting it. Skipping the insert means the next check
+  // (after the classifier warms up) actually re-scores. Successful scores
+  // are cached normally.
+  if (result.error) {
+    return {
+      ...result,
+      label,
+      verdict,
+      cached: false,
+      textHash,
+    };
+  }
+
   // Cache the result. ON CONFLICT DO NOTHING handles the rare race where
   // two concurrent requests for the same (org, text, provider) both miss
   // and both try to insert — the first wins, the second skips silently.

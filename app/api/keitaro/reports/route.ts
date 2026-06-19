@@ -9,7 +9,6 @@ import {
   campaigns,
   keitaro_stage_results,
   opt_out_attributions,
-  stage_manual_sales,
   stage_sends,
 } from "@/db/schema";
 import { requireApiMembership } from "@/lib/api/helpers";
@@ -118,8 +117,15 @@ export async function GET(req: NextRequest) {
       campaign_id: keitaro_stage_results.campaign_id,
       stage_tracking_id: keitaro_stage_results.stage_tracking_id,
       campaign_name: campaigns.name,
+      link_mode: campaigns.link_mode,
       stage_number: campaign_stages.stage_number,
       stage_label: campaign_stages.label,
+      // Per-stage send anchor + lifetime manual counters. In the activity-date
+      // model a manual send/sale has no per-event timeline, so we attribute the
+      // whole lifetime counter to the stage's single send moment (`sent_at`).
+      stage_sent_at: campaign_stages.sent_at,
+      stage_sms_count: campaign_stages.sms_count,
+      stage_sales_count: campaign_stages.sales_count,
       visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
       visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
       redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
@@ -152,9 +158,15 @@ export async function GET(req: NextRequest) {
     stage_id: number;
     campaign_id: number;
     campaign_name: string;
+    link_mode: string;
     stage_number: number | null;
     stage_label: string | null;
     stage_tracking_id: string;
+    // Send anchor + lifetime manual counters, copied off the stage row. Used to
+    // attribute manual sends/sales to the send moment under activity scoping.
+    stage_sent_at: Date | null;
+    stage_sms_count: number;
+    stage_sales_count: number;
     // Opt-outs (STOPs credited to this stage) and successful sends WITHIN the
     // report's date range — both filled in from grouped queries after the fold.
     opt_outs: number;
@@ -166,8 +178,9 @@ export async function GET(req: NextRequest) {
 
   // Keitaro funnel (clickers/redirect/sales/revenue/cost) is already date-bounded
   // by stat_date. Sales here starts as the Keitaro conversion count IN RANGE; the
-  // operator's MANUAL sales are added below from the dated ledger (in-range deltas
-  // only) — never the lifetime campaign_stages.sales_count, which carries no date.
+  // operator's MANUAL sales (campaign_stages.sales_count) are added below, counted
+  // only when the stage's send moment (sent_at) lands in the window — manual sales
+  // have no per-event timeline, so they ride the send activity's date.
   for (const r of rows) {
     addRowToFunnel(grand, r);
     let acc = byStage.get(r.stage_id);
@@ -176,9 +189,13 @@ export async function GET(req: NextRequest) {
         stage_id: r.stage_id,
         campaign_id: r.campaign_id,
         campaign_name: r.campaign_name ?? "(unnamed)",
+        link_mode: r.link_mode ?? "manual",
         stage_number: r.stage_number,
         stage_label: r.stage_label,
         stage_tracking_id: r.stage_tracking_id,
+        stage_sent_at: r.stage_sent_at,
+        stage_sms_count: r.stage_sms_count ?? 0,
+        stage_sales_count: r.stage_sales_count ?? 0,
         opt_outs: 0,
         total_sent: 0,
         tally: emptyFunnel(),
@@ -223,8 +240,10 @@ export async function GET(req: NextRequest) {
       .groupBy(opt_out_attributions.stage_id);
     const optOutsByStage = new Map(optOutRows.map((o) => [o.stage_id, Number(o.n)]));
 
-    // Total Sent = successful sends (status='sent'; failed/rejected/pending/
-    // filtered excluded) with sent_at in range.
+    // API (tracked) Total Sent = successful per-recipient sends (status='sent';
+    // failed/rejected/pending/filtered excluded) with sent_at in range. Used only
+    // for tracked campaigns — manual-send campaigns have NO stage_sends rows and
+    // fall back to the stage's lifetime sms_count below (anchored to sent_at).
     const sentRows = await db
       .select({
         stage_id: stage_sends.stage_id,
@@ -243,30 +262,26 @@ export async function GET(req: NextRequest) {
       .groupBy(stage_sends.stage_id);
     const sentByStage = new Map(sentRows.map((s) => [s.stage_id, Number(s.sent)]));
 
-    // Manual sales = net of the operator's dated ledger entries (deltas) in range.
-    // Added on top of Keitaro conversions, matching the stage Results panel's
-    // manual+Keitaro Sales — but here scoped to the period via created_at.
-    const manualRows = await db
-      .select({
-        stage_id: stage_manual_sales.stage_id,
-        n: sql<number>`coalesce(sum(${stage_manual_sales.delta}), 0)::int`,
-      })
-      .from(stage_manual_sales)
-      .where(
-        and(
-          eq(stage_manual_sales.org_id, auth.orgId),
-          inArray(stage_manual_sales.stage_id, stageIds),
-          gte(stage_manual_sales.created_at, fromUtc),
-          lt(stage_manual_sales.created_at, toExclusiveUtc),
-        ),
-      )
-      .groupBy(stage_manual_sales.stage_id);
-    const manualByStage = new Map(manualRows.map((m) => [m.stage_id, Number(m.n)]));
+    // Whether a stage's single send moment falls inside the report window. Manual
+    // sends and manual sales carry no per-event timeline, so under activity-date
+    // scoping the whole lifetime counter is attributed to `sent_at` (the activity).
+    const sentInRange = (sentAt: Date | null): boolean =>
+      sentAt != null && sentAt >= fromUtc && sentAt < toExclusiveUtc;
 
     for (const acc of byStage.values()) {
       acc.opt_outs = optOutsByStage.get(acc.stage_id) ?? 0;
-      acc.total_sent = sentByStage.get(acc.stage_id) ?? 0;
-      const manual = manualByStage.get(acc.stage_id) ?? 0;
+      const inRange = sentInRange(acc.stage_sent_at);
+      // Total Sent: tracked campaigns have real per-recipient send rows; manual
+      // campaigns store the count on the stage and are attributed to sent_at.
+      acc.total_sent =
+        acc.link_mode === "tracked"
+          ? sentByStage.get(acc.stage_id) ?? 0
+          : inRange
+            ? acc.stage_sms_count
+            : 0;
+      // Manual sales (added on top of the date-scoped Keitaro conversions): the
+      // stage's lifetime manual tally, counted only when the send landed in range.
+      const manual = inRange ? acc.stage_sales_count : 0;
       acc.tally.sales += manual;
       grandOptOuts += acc.opt_outs;
       grandTotalSent += acc.total_sent;

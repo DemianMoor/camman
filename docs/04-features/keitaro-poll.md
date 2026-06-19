@@ -45,15 +45,20 @@ a correlated `sum(keitaro_stage_results.sales)`) added to the manual `sales_coun
 Revenue/ROI rate the **combined** count × `sales_payout_each`. (Earlier the poll
 OVERWROTE `sales_count` ← Keitaro `sales`; that clobbered manual entries and is gone.)
 
-> **`/reports` dates the manual baseline via a ledger (changed 2026-06-20).**
-> Reports is a **date-ranged** view, but the manual `sales_count` is a single
-> overwrite-on-save integer with no event date. So a per-entry ledger
-> (`stage_manual_sales`, migration 0079) records the signed **delta** on every
-> manual-results save, dated to the save; `SUM(delta)` per stage == its
-> `sales_count`. `/api/keitaro/reports` adds the **in-range delta sum** on top of
-> Keitaro conversions, so Sales = Keitaro-in-range + manual-entered-in-range.
-> Existing pre-ledger totals were backfilled as one delta dated to the migration
-> (`now()`). The stage Results panel and campaign-detail column are NOT
+> **`/reports` anchors the manual baseline to the stage's send date (changed 2026-06-20).**
+> Reports is a **date-ranged** view, but manual sends/sales carry no per-event
+> timeline — `sales_count` and `sms_count` are single overwrite-on-save integers.
+> So under activity-date scoping they ride the stage's one send moment: a stage's
+> full lifetime manual `sales_count` is added to the in-range Keitaro conversions
+> **only when `campaign_stages.sent_at` falls in the window**, and **Total Sent**
+> for a manual-send campaign (`link_mode='manual'`) is `sms_count` gated the same
+> way. Tracked campaigns (`link_mode='tracked'`) keep the per-recipient
+> `stage_sends` count for Total Sent. (Earlier the report dated manual sales by a
+> `stage_manual_sales` ledger entry time; the migration-0079 backfill stamped every
+> pre-existing total at `now()`, so any window covering the backfill date showed
+> the full lifetime — that's why it looked like the date filter was ignored. The
+> ledger table still records deltas for audit/current-total but no longer drives
+> the report.) The stage Results panel and campaign-detail column are NOT
 > date-ranged and show the full lifetime manual+Keitaro. See §5/§5b.
 
 Combined with the opt-out poller mirroring `inbound_opt_out_count` → `opt_out_count`,
@@ -63,8 +68,8 @@ Scrubbed · Bounced · **Checkout Clicks** · **Sales** · Total Cost) reflects 
 sales baseline remain operator-owned. The campaigns detail page's compact per-stage
 **Results** column surfaces `Clicks · Checkout · Sales · CTR · OptOut` (Sales =
 full lifetime manual+Keitaro). `/reports` shows Sales per stage and per campaign
-too, but date-ranged it counts **Keitaro conversions + manual sales entered in
-the period** (manual via the dated `stage_manual_sales` ledger — see the note above).
+too, but date-ranged it counts **Keitaro conversions in range + the stage's manual
+sales when its `sent_at` lands in the period** (see the note above).
 
 > **Operational reality (2026-06-19): the network fires only `lead` postbacks.**
 > A direct Keitaro probe over Jun 1–19 returned 11 conversions, **all status
@@ -170,15 +175,19 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
     `created_at` falls in `[from 00:00 ET, day-after-`to` 00:00 ET)` (the credit
     time ≈ STOP receipt; poller lag ≤15min). **Not** the lifetime
     `campaign_stages.inbound_opt_out_count`.
-  - `total_sent` = count of `stage_sends` with `status='sent'`
-    (failed/rejected/pending/filtered excluded) and `sent_at` in the same range.
+  - `total_sent` — **tracked** campaigns (`link_mode='tracked'`): count of
+    `stage_sends` with `status='sent'` (failed/rejected/pending/filtered excluded)
+    and `sent_at` in range. **Manual** campaigns (`link_mode='manual'`, the common
+    case): the stage's lifetime `sms_count`, counted only when `campaign_stages.sent_at`
+    lands in range. The two sources are mutually exclusive (manual sends have no
+    `stage_sends` rows), so no double-counting.
   - `opt_out_rate` = `opt_outs / total_sent` (a fraction, 0 when nothing was
     sent), rendered as a %.
   - Clickers/Offer Redirect/Revenue/Cost are the Keitaro funnel, bounded by
-    `stat_date`. **Sales** = Keitaro conversions in range **+ manual sales entered
-    in range** (the in-range `SUM(delta)` from the `stage_manual_sales` ledger,
-    migration 0079 — see §2a). Manual revenue is not added (report Revenue stays
-    Keitaro-only, as before).
+    `stat_date`. **Sales** = Keitaro conversions in range **+ the stage's manual
+    `sales_count`, counted only when its `sent_at` lands in range** (manual sends/
+    sales have no per-event timeline, so they ride the send activity's date — see
+    §2a). Manual revenue is not added (report Revenue stays Keitaro-only, as before).
 
   Opt-outs/total-sent are computed by two grouped queries over the stages in view.
   All are in the grand totals and sortable. The exclusive upper bound is built off
@@ -191,8 +200,9 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
 
 ## 5b. Reports UI (`/reports`)
 A dedicated cross-campaign page ([`app/(protected)/reports/page.tsx`](../../app/(protected)/reports/page.tsx))
-showing the funnel: Campaign · Stage · **Total Sent** (successful `stage_sends`
-in range) · **Opt-outs** (STOPs credited to the stage in range) ·
+showing the funnel: Campaign · Stage · **Total Sent** (per-recipient `stage_sends`
+in range for tracked campaigns; the stage's `sms_count` for manual campaigns when
+`sent_at` is in range) · **Opt-outs** (STOPs credited to the stage in range) ·
 **OptOut, %** (opt-outs ÷ total sent) · **Clickers** ·
 **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
 with a date-range filter, search, sortable columns, grand-total stat cards, and a

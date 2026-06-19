@@ -6,6 +6,20 @@
 // sales count was entered (campaign_stages.sales_payout_each). ROI uses the
 // stage's send cost (total_cost) as the cost basis: (revenue − cost) / cost.
 
+// Effective Sales for a stage = max(manual tally, Keitaro conversions) — NOT the
+// sum. A sale that Keitaro tracks AND the operator tallied manually is the SAME
+// sale, so summing double-counted it (Keitaro 1 + manual 1 = 2 for one real
+// sale). We take the larger of the two: it dedupes the overlap (assuming the
+// smaller set ⊆ the larger) while preserving whichever source saw more — Keitaro
+// when it's ahead, and the manual baseline on stages where Keitaro under-counts
+// (incomplete sub_id capture). Mirrors the /reports route rule.
+export function combineSales(
+  manualSales: number,
+  keitaroSales: number,
+): number {
+  return Math.max(manualSales, keitaroSales);
+}
+
 // Returns null when the per-sale payout is unknown (no offer CPA snapshotted),
 // so callers can render "—" instead of a misleading $0.
 export function stageRevenue(

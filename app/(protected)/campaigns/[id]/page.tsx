@@ -45,6 +45,7 @@ import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialo
 import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
 import { PhoneUploadForm } from "@/components/phone-upload-form";
 import {
+  combineSales,
   formatRevenue,
   formatRoi,
   stageRevenue,
@@ -1021,8 +1022,8 @@ export default function CampaignDetailPage() {
             sales_count: manualSales,
             keitaro_sales_count: keitaroSales,
           } = row.original;
-          // Sales is additive: the operator's manual tally + Keitaro conversions.
-          const sales = manualSales + keitaroSales;
+          // Keitaro wins when it reports the conversion; manual tally fills gaps.
+          const sales = combineSales(manualSales, keitaroSales);
           // Results are considered entered (manually or imported) once any
           // send/outcome counter is non-zero. Clicks/checkout/sales auto-fill
           // from the Keitaro */5 poll; opt-out from the inbound-STOP poll.
@@ -1048,8 +1049,8 @@ export default function CampaignDetailPage() {
         enableSorting: false,
         cell: ({ row }) => {
           const s = row.original;
-          // Additive: manual sales + Keitaro conversions.
-          const totalSales = s.sales_count + s.keitaro_sales_count;
+          // Keitaro wins when it reports the conversion; manual tally fills gaps.
+          const totalSales = combineSales(s.sales_count, s.keitaro_sales_count);
           if (totalSales === 0)
             return <span className="text-muted-foreground">—</span>;
           const revenue = stageRevenue(
@@ -1234,8 +1235,8 @@ export default function CampaignDetailPage() {
       scrubbed += s.scrubbed_count;
       bounced += s.bounced_count;
       checkoutClicks += s.checkout_click_count;
-      // Sales is additive: manual tally + Keitaro conversions.
-      const stageSales = s.sales_count + s.keitaro_sales_count;
+      // Keitaro wins when it reports the conversion; manual tally fills gaps.
+      const stageSales = combineSales(s.sales_count, s.keitaro_sales_count);
       sales += stageSales;
       cost += Number(s.total_cost);
       const r = stageRevenue(

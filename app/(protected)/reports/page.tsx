@@ -478,7 +478,7 @@ export default function ReportsPage() {
       </div>
 
       {totals ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
           <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
           <StatCard
             label="Offer Redirect"
@@ -488,6 +488,11 @@ export default function ReportsPage() {
           <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
           <StatCard label="Cost" value={fmtUsd(totals.cost)} />
           <StatCard label="Profit" value={fmtUsd(totals.profit)} />
+          {/* Aggregate opt-out rate over the period (grand opt-outs / grand sent). */}
+          <StatCard
+            label="Avg Opt-out"
+            value={fmtPct(totals.opt_out_rate)}
+          />
         </div>
       ) : null}
 

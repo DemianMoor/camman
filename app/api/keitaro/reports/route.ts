@@ -218,7 +218,7 @@ export async function GET(req: NextRequest) {
   const stageIds = [...byStage.keys()];
   let grandOptOuts = 0;
   let grandTotalSent = 0;
-  let grandManualSales = 0;
+  let grandSalesTopup = 0;
   if (stageIds.length > 0) {
     // Opt-outs = STOPs credited to the stage (opt_out_attributions) whose credit
     // landed in range. created_at ≈ STOP receipt (poller lag ≤15min); it's the
@@ -279,17 +279,26 @@ export async function GET(req: NextRequest) {
           : inRange
             ? acc.stage_sms_count
             : 0;
-      // Manual sales (added on top of the date-scoped Keitaro conversions): the
-      // stage's lifetime manual tally, counted only when the send landed in range.
-      const manual = inRange ? acc.stage_sales_count : 0;
+      // Sales = max(manual tally, Keitaro conversions), NOT the sum: a sale that's
+      // both Keitaro-tracked and manually tallied is the SAME sale, so summing
+      // double-counted it (Keitaro 1 + manual 1 = 2 for one real sale). acc.tally
+      // .sales currently holds the in-range Keitaro sum; we top it up to the manual
+      // tally only when the latter is larger (and the send landed in range — manual
+      // sales carry no per-event time, so they ride the stage's one send moment).
+      // This dedupes the overlap while preserving a manual baseline that exceeds
+      // Keitaro's (under-counted) view. Mirrors combineSales() in lib/stage-results.
+      const manual = inRange
+        ? Math.max(0, acc.stage_sales_count - acc.tally.sales)
+        : 0;
       acc.tally.sales += manual;
       grandOptOuts += acc.opt_outs;
       grandTotalSent += acc.total_sent;
-      grandManualSales += manual;
+      grandSalesTopup += manual;
     }
   }
-  // Fold the in-range manual sales into the grand total once (Keitaro-only above).
-  grand.sales += grandManualSales;
+  // Fold the per-stage manual top-ups into the grand total once: grand.sales held
+  // the Keitaro-only sum, so this lifts it to Σ max(manual, Keitaro) per stage.
+  grand.sales += grandSalesTopup;
 
   // Group-by: per-stage rows (default) or campaign rollups. Campaign rows fold
   // every stage of a campaign into one funnel (opt-outs summed across stages).

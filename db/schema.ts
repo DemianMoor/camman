@@ -817,8 +817,9 @@ export const clickers = pgTable(
 export type Clicker = typeof clickers.$inferSelect;
 export type NewClicker = typeof clickers.$inferInsert;
 
-// Segments: named lists of contacts. Membership lives in segment_contacts;
-// group membership lives in segment_segment_groups (many-to-many).
+// Segments: named lists of contacts. Membership lives in segment_contacts.
+// (The old segment_segment_groups "folder" junction was dropped in migration
+// 0031; group membership is now contact-direct via contact_contact_groups.)
 // `original_name` preserves the import-time name if the user renames the
 // segment later (useful when reconciling external systems).
 export const segments = pgTable(

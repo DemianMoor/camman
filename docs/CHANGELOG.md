@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-19 — Backfill: sync `opt_out_count` display figure to inbound STOPs — docs: CHANGELOG
+- The earlier attribution backfill corrected `inbound_opt_out_count` but left `opt_out_count` (the figure the per-stage Results column shows) stale on tz-bug-affected stages. The live opt-out poller mirrors `opt_out_count = inbound_opt_out_count`, so most stages self-healed on their next STOP; [`scripts/backfill-optout-attributions.ts`](../scripts/backfill-optout-attributions.ts) now also mirrors **upward only** (`WHERE inbound_opt_out_count > opt_out_count`) to catch stages that won't get another STOP — never reduces a stage whose `opt_out_count` is higher (CSV/manual results share the column). Ran on prod: 9 stages synced; stage `8_62_061826_1_s2_c122` Results opt-out 0 → 122. No drift remains.
+
 ## 2026-06-19 — Refine: TextHub `received_at` uses `America/Denver` (DST-aware), not a fixed −6 — docs: 04/crons, 07-conventions, CHANGELOG
 - Operator confirmed TextHub's inbox clock is US Mountain Time. Mountain observes DST, and the −6 offset was measured in June (MDT); a hardcoded −6 would be 1h wrong every winter (MST/−7). Switched `parseProviderReceivedAt` from a fixed `TEXTHUB_RECEIVED_AT_UTC_OFFSET_HOURS = -6` to interpreting the wall-clock in `TEXTHUB_RECEIVED_AT_TIMEZONE = "America/Denver"` via `date-fns-tz` `fromZonedTime` — the IANA zone resolves the offset per-date automatically. No live behavior change right now (June = MDT = −6); only winter correctness. Test now asserts both a summer (−6) and winter (−7) case. Resolves the DST caveat from the prior entry.
 

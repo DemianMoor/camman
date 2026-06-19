@@ -75,9 +75,23 @@ async function main() {
       RETURNING cs.id
     `)) as unknown as { id: number }[];
 
+    // 3) Mirror into opt_out_count (the displayed "Opt-outs" Results figure)
+    // the same way the live poller does — but only UPWARD, never reducing a
+    // stage whose opt_out_count is already higher (CSV/manual-imported results
+    // live in this same column; only inbound-STOP under-counts get corrected).
+    // The live mirror sets opt_out_count = inbound_opt_out_count, so one new
+    // STOP self-heals a stage; this catches stages that won't get another STOP.
+    const mirrored = (await db.execute(drizzleSql`
+      UPDATE campaign_stages cs
+      SET opt_out_count = cs.inbound_opt_out_count
+      WHERE cs.inbound_opt_out_count > cs.opt_out_count
+      RETURNING cs.id
+    `)) as unknown as { id: number }[];
+
     console.log(
       `Backfill complete: ${inserted.length} new attribution row(s), ` +
-        `${updated.length} stage counter(s) corrected ` +
+        `${updated.length} inbound counter(s) corrected, ` +
+        `${mirrored.length} opt_out_count display figure(s) synced ` +
         `(window ${OPT_OUT_ATTRIBUTION_WINDOW_HOURS}h).`,
     );
   } finally {

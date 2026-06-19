@@ -737,6 +737,47 @@ export const opt_out_attributions = pgTable(
 export type OptOutAttribution = typeof opt_out_attributions.$inferSelect;
 export type NewOptOutAttribution = typeof opt_out_attributions.$inferInsert;
 
+// Per-entry ledger of the operator's MANUAL sales tally. campaign_stages.sales_count
+// is a single overwrite-on-save integer with no entry time; each manual-results save
+// also writes the signed CHANGE (delta) here, dated to the save. SUM(delta) for a
+// stage == its current sales_count. The date-ranged /reports tab sums deltas whose
+// created_at falls in the selected period to attribute manual sales to when they
+// were entered (migration 0079). See app/api/.../manual-results/route.ts.
+export const stage_manual_sales = pgTable(
+  "stage_manual_sales",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    // Signed change to the stage's manual sales_count at this entry (can be
+    // negative when the operator corrects a count downward).
+    delta: integer("delta").notNull(),
+    // Actor who saved the entry; NULL for the migration backfill / system writes.
+    entered_by: uuid("entered_by"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Report aggregation: deltas for a stage within a date range.
+    index("stage_manual_sales_org_stage_created_idx").on(
+      table.org_id,
+      table.stage_id,
+      table.created_at,
+    ),
+  ],
+);
+
+export type StageManualSale = typeof stage_manual_sales.$inferSelect;
+export type NewStageManualSale = typeof stage_manual_sales.$inferInsert;
+
 // Opt-Ins: single brand/provider per row (no junctions; simpler than opt_outs).
 export const opt_ins = pgTable(
   "opt_ins",

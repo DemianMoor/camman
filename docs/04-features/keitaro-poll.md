@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-06-19_
+_Last updated: 2026-06-20_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -39,13 +39,22 @@ holds the operator's **manual** sale tally; the poll does **not** touch it. The
 Keitaro conversion count (`keitaro_stage_results.sales`, summed per stage) is added
 **on top** at read time, so the displayed Sales = **manual + Keitaro**. Only stages
 that have Keitaro conversions get anything added; the rest show the manual value
-unchanged. This is computed in two places — the stages API returns
-`keitaro_sales_count` per stage ([app/api/campaigns/[campaignId]/stages/route.ts](../../app/api/campaigns/[campaignId]/stages/route.ts),
-a correlated `sum(keitaro_stage_results.sales)`), and `/api/keitaro/reports` seeds
-each stage's funnel tally with the manual `sales_count` so stage rows, campaign
-rollups, and grand totals all read manual+Keitaro. Revenue/ROI rate the **combined**
-count × `sales_payout_each`. (Earlier the poll OVERWROTE `sales_count` ← Keitaro
-`sales`; that clobbered manual entries and is gone.)
+unchanged. This is how the **stages API** reports it — `keitaro_sales_count` per
+stage ([app/api/campaigns/[campaignId]/stages/route.ts](../../app/api/campaigns/[campaignId]/stages/route.ts),
+a correlated `sum(keitaro_stage_results.sales)`) added to the manual `sales_count`;
+Revenue/ROI rate the **combined** count × `sales_payout_each`. (Earlier the poll
+OVERWROTE `sales_count` ← Keitaro `sales`; that clobbered manual entries and is gone.)
+
+> **`/reports` dates the manual baseline via a ledger (changed 2026-06-20).**
+> Reports is a **date-ranged** view, but the manual `sales_count` is a single
+> overwrite-on-save integer with no event date. So a per-entry ledger
+> (`stage_manual_sales`, migration 0079) records the signed **delta** on every
+> manual-results save, dated to the save; `SUM(delta)` per stage == its
+> `sales_count`. `/api/keitaro/reports` adds the **in-range delta sum** on top of
+> Keitaro conversions, so Sales = Keitaro-in-range + manual-entered-in-range.
+> Existing pre-ledger totals were backfilled as one delta dated to the migration
+> (`now()`). The stage Results panel and campaign-detail column are NOT
+> date-ranged and show the full lifetime manual+Keitaro. See §5/§5b.
 
 Combined with the opt-out poller mirroring `inbound_opt_out_count` → `opt_out_count`,
 the per-stage Results panel (SMS sent · Delivered · **Opt-outs** · **Clickers** ·
@@ -53,7 +62,9 @@ Scrubbed · Bounced · **Checkout Clicks** · **Sales** · Total Cost) reflects 
 + TextHub automatically; SMS/Delivered/Scrubbed/Bounced/Total Cost + the manual
 sales baseline remain operator-owned. The campaigns detail page's compact per-stage
 **Results** column surfaces `Clicks · Checkout · Sales · CTR · OptOut` (Sales =
-manual+Keitaro), and `/reports` shows the same Sales per stage and per campaign.
+full lifetime manual+Keitaro). `/reports` shows Sales per stage and per campaign
+too, but date-ranged it counts **Keitaro conversions + manual sales entered in
+the period** (manual via the dated `stage_manual_sales` ledger — see the note above).
 
 > **Operational reality (2026-06-19): the network fires only `lead` postbacks.**
 > A direct Keitaro probe over Jun 1–19 returned 11 conversions, **all status
@@ -152,20 +163,37 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   read-only; org-scoped. Cross-campaign funnel aggregated over an ET date
   range (≤92 days, default last 7), with resolved campaign + stage names, grand
   totals, and pagination/sort. Powers the **Reports** page (`/reports`). Requires
-  `campaigns.view`. Never triggers a poll. Each row also carries `opt_outs` —
-  sourced from `campaign_stages.inbound_opt_out_count` (live STOPs attributed to
-  the stage via the poller's 72h window, migration 0075; **not** the CSV-imported
-  `opt_out_count`), captured once per stage, in the grand totals and sortable.
+  `campaigns.view`. Never triggers a poll. **Every metric is scoped to the
+  selected ET date range** — there are no lifetime counters leaking into a
+  date-ranged view (fixed 2026-06-20). Concretely:
+  - `opt_outs` = count of `opt_out_attributions` credited to the stage whose
+    `created_at` falls in `[from 00:00 ET, day-after-`to` 00:00 ET)` (the credit
+    time ≈ STOP receipt; poller lag ≤15min). **Not** the lifetime
+    `campaign_stages.inbound_opt_out_count`.
+  - `total_sent` = count of `stage_sends` with `status='sent'`
+    (failed/rejected/pending/filtered excluded) and `sent_at` in the same range.
+  - `opt_out_rate` = `opt_outs / total_sent` (a fraction, 0 when nothing was
+    sent), rendered as a %.
+  - Clickers/Offer Redirect/Revenue/Cost are the Keitaro funnel, bounded by
+    `stat_date`. **Sales** = Keitaro conversions in range **+ manual sales entered
+    in range** (the in-range `SUM(delta)` from the `stage_manual_sales` ledger,
+    migration 0079 — see §2a). Manual revenue is not added (report Revenue stays
+    Keitaro-only, as before).
+
+  Opt-outs/total-sent are computed by two grouped queries over the stages in view.
+  All are in the grand totals and sortable. The exclusive upper bound is built off
+  the next calendar day (not +24h) so it stays correct across DST.
   **`groupBy=stage` (default) or `campaign`:** campaign rollups fold every stage of
-  a campaign into one funnel row (clickers/redirect/**sales**/revenue/cost summed,
-  opt-outs summed across the campaign's stages, rates re-derived), and carry
-  `stage_count` instead of stage fields. Lets you read **sales per campaign** as
-  well as per stage. Grand totals are unchanged by grouping.
+  a campaign into one funnel row (clickers/redirect/**sales**/revenue/cost/**total_sent**/
+  opt-outs summed across the campaign's stages, rates — including `opt_out_rate` —
+  re-derived), and carry `stage_count` instead of stage fields. Lets you read
+  **sales per campaign** as well as per stage. Grand totals are unchanged by grouping.
 
 ## 5b. Reports UI (`/reports`)
 A dedicated cross-campaign page ([`app/(protected)/reports/page.tsx`](../../app/(protected)/reports/page.tsx))
-showing the funnel: Campaign · Stage · **Opt-outs** (live inbound STOPs
-attributed to the stage) · **Clickers** ·
+showing the funnel: Campaign · Stage · **Total Sent** (successful `stage_sends`
+in range) · **Opt-outs** (STOPs credited to the stage in range) ·
+**OptOut, %** (opt-outs ÷ total sent) · **Clickers** ·
 **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
 with a date-range filter, search, sortable columns, grand-total stat cards, and a
 manual **Refresh from Keitaro** button (operator+, runs the poll). A **Group by**

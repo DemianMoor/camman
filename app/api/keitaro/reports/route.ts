@@ -1,9 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { and, eq, gte, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
+import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
-import { campaign_stages, campaigns, keitaro_stage_results } from "@/db/schema";
+import {
+  campaign_stages,
+  campaigns,
+  keitaro_stage_results,
+  opt_out_attributions,
+  stage_manual_sales,
+  stage_sends,
+} from "@/db/schema";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import {
@@ -38,7 +46,23 @@ const SORTABLE = new Set([
   "epc",
   "profit",
   "opt_outs",
+  "total_sent",
+  "opt_out_rate",
 ]);
+
+// Opt-out rate as a fraction (rendered as a % client-side, like redirect_rate).
+// 0 when nothing was sent — avoids divide-by-zero.
+function optOutRate(optOuts: number, totalSent: number): number {
+  return totalSent > 0 ? optOuts / totalSent : 0;
+}
+
+// Next calendar day for a YYYY-MM-DD string (date-only UTC arithmetic — no time
+// component, so DST never enters into it). Used to build an exclusive upper bound.
+function addOneDay(d: string): string {
+  return new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+}
 
 export async function GET(req: NextRequest) {
   const auth = await requireApiMembership();
@@ -96,12 +120,6 @@ export async function GET(req: NextRequest) {
       campaign_name: campaigns.name,
       stage_number: campaign_stages.stage_number,
       stage_label: campaign_stages.label,
-      // Live STOPs attributed to this stage (phone + 72h window), NOT the
-      // CSV-imported opt_out_count — see lib/sends/poll-opt-outs.ts.
-      opt_out_count: campaign_stages.inbound_opt_out_count,
-      // Operator's MANUAL sale tally — added on top of Keitaro conversions
-      // (keitaro_stage_results.sales) at output. Per-stage, captured once.
-      manual_sales: campaign_stages.sales_count,
       visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
       visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
       redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
@@ -137,16 +155,19 @@ export async function GET(req: NextRequest) {
     stage_number: number | null;
     stage_label: string | null;
     stage_tracking_id: string;
-    // Per-stage denormalized counters (not per-day) — captured once, never summed.
+    // Opt-outs (STOPs credited to this stage) and successful sends WITHIN the
+    // report's date range — both filled in from grouped queries after the fold.
     opt_outs: number;
-    manual_sales: number;
+    total_sent: number;
     tally: FunnelTally;
   }
   const byStage = new Map<number, StageAcc>();
   const grand = emptyFunnel();
-  let grandOptOuts = 0;
-  let grandManualSales = 0;
 
+  // Keitaro funnel (clickers/redirect/sales/revenue/cost) is already date-bounded
+  // by stat_date. Sales here starts as the Keitaro conversion count IN RANGE; the
+  // operator's MANUAL sales are added below from the dated ledger (in-range deltas
+  // only) — never the lifetime campaign_stages.sales_count, which carries no date.
   for (const r of rows) {
     addRowToFunnel(grand, r);
     let acc = byStage.get(r.stage_id);
@@ -158,21 +179,101 @@ export async function GET(req: NextRequest) {
         stage_number: r.stage_number,
         stage_label: r.stage_label,
         stage_tracking_id: r.stage_tracking_id,
-        opt_outs: r.opt_out_count ?? 0,
-        manual_sales: r.manual_sales ?? 0,
+        opt_outs: 0,
+        total_sent: 0,
         tally: emptyFunnel(),
       };
       byStage.set(r.stage_id, acc);
-      grandOptOuts += acc.opt_outs;
-      grandManualSales += acc.manual_sales;
-      // Seed the stage tally with the manual baseline (once) so every derived
-      // view — stage row, campaign rollup, grand total — reports manual+Keitaro
-      // sales without any per-output special-casing.
-      acc.tally.sales += acc.manual_sales;
     }
     addRowToFunnel(acc.tally, r);
   }
-  // Grand is folded per-row (Keitaro only), so add the manual baseline once.
+
+  // Per-stage counters that DO carry an event time get scoped to the same ET
+  // date range as the Keitaro funnel: [from 00:00 ET, day-after-`to` 00:00 ET).
+  // Computing the exclusive upper bound off the next calendar day (not +24h)
+  // keeps it correct across DST transitions (23h/25h days).
+  const fromUtc = fromZonedTime(`${from}T00:00:00`, CAMPAIGN_TIMEZONE);
+  const toExclusiveUtc = fromZonedTime(
+    `${addOneDay(to)}T00:00:00`,
+    CAMPAIGN_TIMEZONE,
+  );
+
+  const stageIds = [...byStage.keys()];
+  let grandOptOuts = 0;
+  let grandTotalSent = 0;
+  let grandManualSales = 0;
+  if (stageIds.length > 0) {
+    // Opt-outs = STOPs credited to the stage (opt_out_attributions) whose credit
+    // landed in range. created_at ≈ STOP receipt (poller lag ≤15min); it's the
+    // per-stage event time, unlike the lifetime campaign_stages.inbound_opt_out_count.
+    const optOutRows = await db
+      .select({
+        stage_id: opt_out_attributions.stage_id,
+        n: sql<number>`count(*)::int`,
+      })
+      .from(opt_out_attributions)
+      .where(
+        and(
+          eq(opt_out_attributions.org_id, auth.orgId),
+          inArray(opt_out_attributions.stage_id, stageIds),
+          gte(opt_out_attributions.created_at, fromUtc),
+          lt(opt_out_attributions.created_at, toExclusiveUtc),
+        ),
+      )
+      .groupBy(opt_out_attributions.stage_id);
+    const optOutsByStage = new Map(optOutRows.map((o) => [o.stage_id, Number(o.n)]));
+
+    // Total Sent = successful sends (status='sent'; failed/rejected/pending/
+    // filtered excluded) with sent_at in range.
+    const sentRows = await db
+      .select({
+        stage_id: stage_sends.stage_id,
+        sent: sql<number>`count(*)::int`,
+      })
+      .from(stage_sends)
+      .where(
+        and(
+          eq(stage_sends.org_id, auth.orgId),
+          eq(stage_sends.status, "sent"),
+          inArray(stage_sends.stage_id, stageIds),
+          gte(stage_sends.sent_at, fromUtc),
+          lt(stage_sends.sent_at, toExclusiveUtc),
+        ),
+      )
+      .groupBy(stage_sends.stage_id);
+    const sentByStage = new Map(sentRows.map((s) => [s.stage_id, Number(s.sent)]));
+
+    // Manual sales = net of the operator's dated ledger entries (deltas) in range.
+    // Added on top of Keitaro conversions, matching the stage Results panel's
+    // manual+Keitaro Sales — but here scoped to the period via created_at.
+    const manualRows = await db
+      .select({
+        stage_id: stage_manual_sales.stage_id,
+        n: sql<number>`coalesce(sum(${stage_manual_sales.delta}), 0)::int`,
+      })
+      .from(stage_manual_sales)
+      .where(
+        and(
+          eq(stage_manual_sales.org_id, auth.orgId),
+          inArray(stage_manual_sales.stage_id, stageIds),
+          gte(stage_manual_sales.created_at, fromUtc),
+          lt(stage_manual_sales.created_at, toExclusiveUtc),
+        ),
+      )
+      .groupBy(stage_manual_sales.stage_id);
+    const manualByStage = new Map(manualRows.map((m) => [m.stage_id, Number(m.n)]));
+
+    for (const acc of byStage.values()) {
+      acc.opt_outs = optOutsByStage.get(acc.stage_id) ?? 0;
+      acc.total_sent = sentByStage.get(acc.stage_id) ?? 0;
+      const manual = manualByStage.get(acc.stage_id) ?? 0;
+      acc.tally.sales += manual;
+      grandOptOuts += acc.opt_outs;
+      grandTotalSent += acc.total_sent;
+      grandManualSales += manual;
+    }
+  }
+  // Fold the in-range manual sales into the grand total once (Keitaro-only above).
   grand.sales += grandManualSales;
 
   // Group-by: per-stage rows (default) or campaign rollups. Campaign rows fold
@@ -188,6 +289,8 @@ export async function GET(req: NextRequest) {
     stage_tracking_id: string | null;
     stage_count: number | null; // # stages folded (campaign rows only)
     opt_outs: number;
+    total_sent: number;
+    opt_out_rate: number; // opt_outs / total_sent (fraction)
   } & ReturnType<typeof withFunnelDerived>;
 
   let data: OutRow[];
@@ -197,6 +300,7 @@ export async function GET(req: NextRequest) {
       campaign_name: string;
       stage_count: number;
       opt_outs: number;
+      total_sent: number;
       tally: FunnelTally;
     }
     const byCampaign = new Map<number, CampAcc>();
@@ -208,12 +312,14 @@ export async function GET(req: NextRequest) {
           campaign_name: acc.campaign_name,
           stage_count: 0,
           opt_outs: 0,
+          total_sent: 0,
           tally: emptyFunnel(),
         };
         byCampaign.set(acc.campaign_id, c);
       }
       c.stage_count += 1;
       c.opt_outs += acc.opt_outs;
+      c.total_sent += acc.total_sent;
       mergeFunnel(c.tally, acc.tally);
     }
     data = [...byCampaign.values()].map((c) => ({
@@ -225,6 +331,8 @@ export async function GET(req: NextRequest) {
       stage_tracking_id: null,
       stage_count: c.stage_count,
       opt_outs: c.opt_outs,
+      total_sent: c.total_sent,
+      opt_out_rate: optOutRate(c.opt_outs, c.total_sent),
       ...withFunnelDerived(c.tally),
     }));
   } else {
@@ -241,6 +349,8 @@ export async function GET(req: NextRequest) {
         stage_tracking_id: acc.stage_tracking_id,
         stage_count: null,
         opt_outs: acc.opt_outs,
+        total_sent: acc.total_sent,
+        opt_out_rate: optOutRate(acc.opt_outs, acc.total_sent),
         ...withFunnelDerived(acc.tally),
       };
     });
@@ -278,7 +388,12 @@ export async function GET(req: NextRequest) {
     totalCount,
     page,
     pageSize,
-    totals: { ...withFunnelDerived(grand), opt_outs: grandOptOuts },
+    totals: {
+      ...withFunnelDerived(grand),
+      opt_outs: grandOptOuts,
+      total_sent: grandTotalSent,
+      opt_out_rate: optOutRate(grandOptOuts, grandTotalSent),
+    },
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });
 }

@@ -27,6 +27,8 @@ type ReportRow = {
   stage_tracking_id: string | null;
   stage_count: number | null;
   opt_outs: number;
+  total_sent: number;
+  opt_out_rate: number;
   clickers: number;
   offer_redirect: number;
   redirect_rate: number;
@@ -267,12 +269,30 @@ export default function ReportsPage() {
           };
     const rest: ColumnDef<ReportRow>[] = [
       {
+        id: "total_sent",
+        header: "Total Sent",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span className="tabular-nums">{fmtInt(row.original.total_sent)}</span>
+        ),
+      },
+      {
         id: "opt_outs",
         header: "Opt-outs",
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">
             {fmtInt(row.original.opt_outs)}
+          </span>
+        ),
+      },
+      {
+        id: "opt_out_rate",
+        header: "OptOut, %",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span className="tabular-nums text-muted-foreground">
+            {fmtPct(row.original.opt_out_rate)}
           </span>
         ),
       },

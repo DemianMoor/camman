@@ -1,6 +1,6 @@
 # Feature — CSV Result Imports & Phone Uploads
 
-_Last updated: 2026-06-19_
+_Last updated: 2026-06-20_
 
 ## 1. Purpose
 After a manual send, the provider exports a results CSV. This module imports it, derives a per-row **outcome**, propagates opt-outs and clickers into the suppression/engagement tables, and updates the stage's result counters — all transactionally and **revertibly**. A separate, simpler path handles bulk phone uploads.
@@ -80,5 +80,9 @@ Four entry points — contacts / opt-outs / opt-ins / clickers — share `proces
 - Permissions: `result_imports.create` (operator+), `result_imports.revert` (manager+), `import_mappings.*`.
 
 ## 7. Extension points / limitations
-- Checkout clicks / sales have no CSV path (manual only).
+- Checkout clicks / sales have no CSV path (manual only). Saving the manual-results
+  form also records the signed **change** in `sales_count` to the dated
+  `stage_manual_sales` ledger (migration 0079, same transaction) so the date-ranged
+  `/reports` tab can attribute manual sales to when they were entered. See
+  [keitaro-poll.md](keitaro-poll.md) §2a.
 - Outcome heuristics are tuned for known providers; new providers should ship a `status_value_map` rather than relying on heuristics.

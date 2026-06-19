@@ -2,7 +2,12 @@ import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { campaign_stages, campaigns, offers } from "@/db/schema";
+import {
+  campaign_stages,
+  campaigns,
+  offers,
+  stage_manual_sales,
+} from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
@@ -98,28 +103,46 @@ export async function POST(
     salesPayoutEach = owns[0].sales_payout_each;
   }
 
-  const [updated] = await db
-    .update(campaign_stages)
-    .set({
-      sms_count: input.sms_count,
-      delivered_count: input.delivered_count,
-      opt_out_count: input.opt_out_count,
-      click_count: input.click_count,
-      scrubbed_count: input.scrubbed_count,
-      bounced_count: input.bounced_count,
-      checkout_click_count: input.checkout_click_count,
-      sales_count: input.sales_count,
-      sales_payout_each: salesPayoutEach,
-      total_cost: String(input.total_cost),
-    })
-    .where(
-      and(
-        eq(campaign_stages.id, sid),
-        eq(campaign_stages.campaign_id, cid),
-        eq(campaign_stages.org_id, orgId),
-      ),
-    )
-    .returning();
+  // The sales tally is a single overwrite-on-save total, so record the signed
+  // CHANGE in the manual-sales ledger (dated now) — that's what lets the
+  // date-ranged Reports tab attribute manual sales to when they were entered.
+  // SUM(delta) per stage stays equal to sales_count. Both writes in one tx.
+  const salesDelta = input.sales_count - owns[0].sales_count;
+
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(campaign_stages)
+      .set({
+        sms_count: input.sms_count,
+        delivered_count: input.delivered_count,
+        opt_out_count: input.opt_out_count,
+        click_count: input.click_count,
+        scrubbed_count: input.scrubbed_count,
+        bounced_count: input.bounced_count,
+        checkout_click_count: input.checkout_click_count,
+        sales_count: input.sales_count,
+        sales_payout_each: salesPayoutEach,
+        total_cost: String(input.total_cost),
+      })
+      .where(
+        and(
+          eq(campaign_stages.id, sid),
+          eq(campaign_stages.campaign_id, cid),
+          eq(campaign_stages.org_id, orgId),
+        ),
+      )
+      .returning();
+    if (row && salesDelta !== 0) {
+      await tx.insert(stage_manual_sales).values({
+        org_id: orgId,
+        campaign_id: cid,
+        stage_id: sid,
+        delta: salesDelta,
+        entered_by: auth.user.id,
+      });
+    }
+    return row;
+  });
   if (!updated) {
     return apiError(404, "Stage not found", API_ERROR_CODES.NOT_FOUND, {
       entity: "stage",

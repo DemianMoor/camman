@@ -7,6 +7,7 @@ import {
   campaign_stages,
   campaigns,
   creatives,
+  keitaro_stage_results,
   offers,
   provider_phones,
   sms_providers,
@@ -177,6 +178,9 @@ export async function GET(
       bounced_count: campaign_stages.bounced_count,
       checkout_click_count: campaign_stages.checkout_click_count,
       sales_count: campaign_stages.sales_count,
+      // Keitaro conversions for this stage, summed across stat_dates. Added ON TOP
+      // of the manual sales_count at display (sales is additive, not overwritten).
+      keitaro_sales_count: drizzleSql<number>`COALESCE((SELECT sum(ksr.sales) FROM ${keitaro_stage_results} ksr WHERE ksr.stage_id = ${campaign_stages.id}), 0)::int`,
       sales_payout_each: campaign_stages.sales_payout_each,
       notes: campaign_stages.notes,
       tracking_id: campaign_stages.tracking_id,

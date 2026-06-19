@@ -1703,6 +1703,9 @@ export const keitaro_stage_results = pgTable(
     raw_clicks: integer("raw_clicks").notNull().default(0),
     clean_clicks: integer("clean_clicks").notNull().default(0),
     checkouts: integer("checkouts").notNull().default(0),
+    // Stores Keitaro's `conversions` metric (= leads + sales), NOT the bare
+    // `sales` metric — this account's network fires only `lead`-status postbacks,
+    // so the payable results live in `conversions`. See lib/keitaro/poll.ts.
     sales: integer("sales").notNull().default(0),
     revenue: numeric("revenue", { precision: 12, scale: 4 })
       .notNull()

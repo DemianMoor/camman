@@ -99,6 +99,9 @@ export async function GET(req: NextRequest) {
       // Live STOPs attributed to this stage (phone + 72h window), NOT the
       // CSV-imported opt_out_count — see lib/sends/poll-opt-outs.ts.
       opt_out_count: campaign_stages.inbound_opt_out_count,
+      // Operator's MANUAL sale tally — added on top of Keitaro conversions
+      // (keitaro_stage_results.sales) at output. Per-stage, captured once.
+      manual_sales: campaign_stages.sales_count,
       visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
       visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
       redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
@@ -134,13 +137,15 @@ export async function GET(req: NextRequest) {
     stage_number: number | null;
     stage_label: string | null;
     stage_tracking_id: string;
-    // Per-stage denormalized counter (not per-day) — captured once, never summed.
+    // Per-stage denormalized counters (not per-day) — captured once, never summed.
     opt_outs: number;
+    manual_sales: number;
     tally: FunnelTally;
   }
   const byStage = new Map<number, StageAcc>();
   const grand = emptyFunnel();
   let grandOptOuts = 0;
+  let grandManualSales = 0;
 
   for (const r of rows) {
     addRowToFunnel(grand, r);
@@ -154,13 +159,21 @@ export async function GET(req: NextRequest) {
         stage_label: r.stage_label,
         stage_tracking_id: r.stage_tracking_id,
         opt_outs: r.opt_out_count ?? 0,
+        manual_sales: r.manual_sales ?? 0,
         tally: emptyFunnel(),
       };
       byStage.set(r.stage_id, acc);
       grandOptOuts += acc.opt_outs;
+      grandManualSales += acc.manual_sales;
+      // Seed the stage tally with the manual baseline (once) so every derived
+      // view — stage row, campaign rollup, grand total — reports manual+Keitaro
+      // sales without any per-output special-casing.
+      acc.tally.sales += acc.manual_sales;
     }
     addRowToFunnel(acc.tally, r);
   }
+  // Grand is folded per-row (Keitaro only), so add the manual baseline once.
+  grand.sales += grandManualSales;
 
   // Group-by: per-stage rows (default) or campaign rollups. Campaign rows fold
   // every stage of a campaign into one funnel (opt-outs summed across stages).

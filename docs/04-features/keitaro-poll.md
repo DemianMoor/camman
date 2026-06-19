@@ -24,38 +24,47 @@ see CLAUDE.md §10g) into the offer's postfix URL param, which is configured as
 > is still **not** the join key — that remains `sub_id_3`.
 
 ## 2a. Auto-fill of the stage Results panel (migration 0077)
-After each poll upserts `keitaro_stage_results`, it **overwrites the stage's
-headline result counters** for every stage touched this run (summed across all
-`stat_date`s): `campaign_stages.click_count` ← `visit_clicks_clean` ("Clickers"),
-`checkout_click_count` ← `checkouts`, `sales_count` ← `sales`. `sales_payout_each`
-is snapshotted from the campaign's offer CPA the first time sales appear (COALESCE
-keeps an existing snapshot) so revenue/ROI stay rateable. Stages with no Keitaro
-rows are left untouched (manual/CSV entry stands). **Per-field positive-only
-guard:** each counter is overwritten ONLY when Keitaro reports a value `> 0` for
-it — a Keitaro 0 never zeroes an existing manual/CSV number (e.g. a stage with
-tracked clicks but no Keitaro-reported sales keeps its manually-entered sales).
-Keitaro sums are monotonic, so this never drops a legitimate update. One-time
-backfill of existing stages: [`scripts/backfill-stage-results.ts`](../../scripts/backfill-stage-results.ts). Combined with the opt-out
-poller mirroring `inbound_opt_out_count` → `opt_out_count`, the per-stage Results
-panel (SMS sent · Delivered · **Opt-outs** · **Clickers** · Scrubbed · Bounced ·
-**Checkout Clicks** · **Sales** · Total Cost) reflects Keitaro + TextHub
-automatically; only SMS/Delivered/Scrubbed/Bounced/Total Cost remain
-manual/CSV-owned. Best-effort: a sync failure never invalidates the committed
-upserts — it re-syncs next poll. The campaigns detail page's compact per-stage
-**Results** column also surfaces these: `Clicks · Checkout · Sales · CTR · OptOut`
-([app/(protected)/campaigns/[id]/page.tsx](../../app/(protected)/campaigns/[id]/page.tsx)).
+After each poll upserts `keitaro_stage_results`, it syncs the stage's auto-owned
+counters for every stage touched this run (summed across all `stat_date`s):
+`campaign_stages.click_count` ← `visit_clicks_clean` ("Clickers"),
+`checkout_click_count` ← `checkouts`. `sales_payout_each` is snapshotted from the
+campaign's offer CPA when Keitaro reports conversions (COALESCE keeps an existing
+snapshot) so revenue/ROI stay rateable. **Per-field positive-only guard:** each
+counter is overwritten ONLY when Keitaro reports a value `> 0` — a Keitaro 0 never
+zeroes an existing number. Keitaro sums are monotonic, so this never drops an
+update. Stages with no Keitaro rows are left untouched.
+
+**Sales is ADDITIVE, not overwritten (changed 2026-06-19).** `campaign_stages.sales_count`
+holds the operator's **manual** sale tally; the poll does **not** touch it. The
+Keitaro conversion count (`keitaro_stage_results.sales`, summed per stage) is added
+**on top** at read time, so the displayed Sales = **manual + Keitaro**. Only stages
+that have Keitaro conversions get anything added; the rest show the manual value
+unchanged. This is computed in two places — the stages API returns
+`keitaro_sales_count` per stage ([app/api/campaigns/[campaignId]/stages/route.ts](../../app/api/campaigns/[campaignId]/stages/route.ts),
+a correlated `sum(keitaro_stage_results.sales)`), and `/api/keitaro/reports` seeds
+each stage's funnel tally with the manual `sales_count` so stage rows, campaign
+rollups, and grand totals all read manual+Keitaro. Revenue/ROI rate the **combined**
+count × `sales_payout_each`. (Earlier the poll OVERWROTE `sales_count` ← Keitaro
+`sales`; that clobbered manual entries and is gone.)
+
+Combined with the opt-out poller mirroring `inbound_opt_out_count` → `opt_out_count`,
+the per-stage Results panel (SMS sent · Delivered · **Opt-outs** · **Clickers** ·
+Scrubbed · Bounced · **Checkout Clicks** · **Sales** · Total Cost) reflects Keitaro
++ TextHub automatically; SMS/Delivered/Scrubbed/Bounced/Total Cost + the manual
+sales baseline remain operator-owned. The campaigns detail page's compact per-stage
+**Results** column surfaces `Clicks · Checkout · Sales · CTR · OptOut` (Sales =
+manual+Keitaro), and `/reports` shows the same Sales per stage and per campaign.
 
 > **Operational reality (2026-06-19): the network fires only `lead` postbacks.**
 > A direct Keitaro probe over Jun 1–19 returned 11 conversions, **all status
 > `lead`** ($668 revenue), and **zero `sale`** of any kind (checked with no status
-> filter — there are no hidden `deposit`/`approved` rows). So `sales_count` reads
-> 0 not from a bug but because Keitaro has no sale-status conversions; the payable
-> conversions arrive as `lead` and land in **Checkout Clicks** (`leads → checkouts
-> → checkout_click_count`). To make "Sales" populate, the affiliate network's
-> postback must fire `status=sale` (a Keitaro/network-side config change), or the
-> business can treat the `lead`/Checkout number as the conversion. Our mapping
-> (`leads`→checkout, `sales`→sales, conversions/log statuses `lead|sale|rejected`)
-> is correct and unchanged.
+> filter — no hidden `deposit`/`approved` rows). So Keitaro's bare `sales` metric is
+> always 0; the payable events are the **`conversions`** (= leads + sales), which we
+> map into Sales. Keitaro's conversion tracking is also **incomplete** — only ~1–4
+> of the 11 even carried `sub_id_1` — so it captures far fewer than the operator's
+> manual tally (~104). That is exactly why Sales is additive (manual baseline +
+> whatever Keitaro independently sees) rather than Keitaro-authoritative. Mapping:
+> `leads`→checkout, **`conversions`→sales**, `revenue`→revenue (real per-conversion).
 
 ## 2b. Visit vs Offer Redirect classification (Step 5b)
 Two kinds of Keitaro campaign fire clicks for the **same** `sub_id_3` (stage):

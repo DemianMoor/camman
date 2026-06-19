@@ -270,11 +270,20 @@ export async function pollKeitaro(
       agg.visitRaw += rawClicks;
       agg.visitClean += cleanClicks;
     } else {
-      // Offer campaign: clicks are "Offer Redirect"; conversions are sales.
+      // Offer campaign: clicks are "Offer Redirect"; the conversions are the
+      // sale results. This account's network fires only `lead`-status postbacks
+      // (no `sale` status — confirmed via a direct Keitaro probe 2026-06-19), so
+      // Keitaro's `sales` metric is always 0 while the actual paid events live in
+      // `conversions` (= leads + sales). We therefore map Keitaro `conversions` →
+      // our **Sales** so the count + revenue reflect real results; `leads` still
+      // feeds **Checkout**. The two are equal while every conversion is a lead;
+      // they diverge if a true post-checkout `sale` status ever appears (then
+      // conversions/Sales > leads/Checkout). `revenue` is Keitaro's real summed
+      // conversion revenue.
       agg.redirectRaw += rawClicks;
       agg.redirectClean += cleanClicks;
       agg.checkouts += toInt(row.leads);
-      agg.sales += toInt(row.sales);
+      agg.sales += toInt(row.conversions);
       agg.revenue += toNum(row.revenue);
       agg.cost += toNum(row.cost);
     }
@@ -331,30 +340,30 @@ export async function pollKeitaro(
 
   // Mirror the auto-owned stage counters from the freshly-upserted Keitaro rows:
   //   Clickers       = landing-page visits (visit_clicks_clean)
-  //   Checkout Clicks = checkouts
-  //   Sales          = sales
+  //   Checkout Clicks = checkouts (Keitaro `leads`)
   // summed across ALL stat_dates for each stage touched this run. Only stages
   // that appear in Keitaro this cycle are overwritten — an untracked stage keeps
-  // whatever was entered manually or via CSV. sales_payout_each is snapshotted
-  // from the campaign's offer CPA the first time sales appear (COALESCE keeps an
-  // existing snapshot) so revenue/ROI stay rateable, mirroring the manual-results
-  // route. Best-effort: a failure here never invalidates the committed upserts;
-  // the counters re-sync on the next poll.
+  // whatever was entered manually or via CSV.
+  //
+  // SALES IS ADDITIVE, NOT OVERWRITTEN. `sales_count` holds the operator's MANUAL
+  // sale tally; the Keitaro conversion count (`keitaro_stage_results.sales`, =
+  // Keitaro `conversions`) is added ON TOP at read time (the stages API + Reports
+  // sum the two), so the poll must NOT touch `sales_count` or it would clobber the
+  // manual baseline. We still snapshot `sales_payout_each` from the offer CPA when
+  // Keitaro reports conversions, so Revenue/ROI can rate the combined count.
   const syncStageIds = [
     ...new Set([...aggregates.values()].map((a) => a.stageId)),
   ];
   if (syncStageIds.length > 0) {
     try {
       // Per-field guard: only let Keitaro OVERWRITE a counter when it reports a
-      // POSITIVE value for that field. A Keitaro 0 (no tracked clicks/checkouts/
-      // sales for the stage) leaves the manual/CSV value intact — Keitaro never
-      // zeroes a stage's existing numbers. Keitaro sums are monotonic (they only
+      // POSITIVE value for that field. A Keitaro 0 (no tracked clicks/checkouts)
+      // leaves the manual/CSV value intact. Keitaro sums are monotonic (they only
       // grow as more days are polled), so this never drops a legitimate update.
       await database.execute(sql`
         UPDATE campaign_stages cs SET
           click_count = CASE WHEN k.clickers > 0 THEN k.clickers ELSE cs.click_count END,
           checkout_click_count = CASE WHEN k.checkouts > 0 THEN k.checkouts ELSE cs.checkout_click_count END,
-          sales_count = CASE WHEN k.sales > 0 THEN k.sales ELSE cs.sales_count END,
           sales_payout_each = CASE
             WHEN k.sales > 0 THEN COALESCE(cs.sales_payout_each, o.payout_cpa)
             ELSE cs.sales_payout_each

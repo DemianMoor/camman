@@ -57,3 +57,6 @@ next-env.d.ts
 
 # Playwright MCP local artifacts
 .playwright-mcp/
+
+# Local recovery / backup scratch (never commit)
+/_restore/

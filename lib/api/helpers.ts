@@ -1,5 +1,6 @@
 import "server-only";
 
+import { cache } from "react";
 import { eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import type { User } from "@supabase/supabase-js";
@@ -46,11 +47,31 @@ export function apiError(
   return NextResponse.json(body, { status });
 }
 
-export async function requireApiUser(): Promise<ApiUser | ApiAuthFailure> {
+// Per-request-memoized primitives. React.cache bounds the Supabase Auth
+// round-trip and the org_members lookup to one call each per request, so a
+// handler that resolves auth more than once (or calls both helpers) pays the
+// network/DB cost only once. Scope is a single request — never cross-request.
+const getApiUser = cache(async (): Promise<User | null> => {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
+  return user;
+});
+
+const getApiMembershipRow = cache(
+  async (userId: string): Promise<{ org_id: string; role: string } | null> => {
+    const rows = await db
+      .select({ org_id: org_members.org_id, role: org_members.role })
+      .from(org_members)
+      .where(eq(org_members.user_id, userId))
+      .limit(1);
+    return rows[0] ?? null;
+  },
+);
+
+export async function requireApiUser(): Promise<ApiUser | ApiAuthFailure> {
+  const user = await getApiUser();
   if (!user) {
     return {
       error: apiError(401, "Not signed in", API_ERROR_CODES.UNAUTHORIZED),
@@ -65,13 +86,7 @@ export async function requireApiMembership(): Promise<
   const userResult = await requireApiUser();
   if ("error" in userResult) return userResult;
 
-  const rows = await db
-    .select({ org_id: org_members.org_id, role: org_members.role })
-    .from(org_members)
-    .where(eq(org_members.user_id, userResult.user.id))
-    .limit(1);
-
-  const row = rows[0];
+  const row = await getApiMembershipRow(userResult.user.id);
   if (!row) {
     return {
       error: apiError(

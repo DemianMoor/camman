@@ -599,6 +599,9 @@ export const contacts = pgTable(
       table.org_id,
       table.is_archived,
     ),
+    // Migration 0078: default list view sorts/paginates by created_at within an
+    // org; at millions of rows this avoids sorting the whole org partition.
+    index("contacts_org_id_created_at_idx").on(table.org_id, table.created_at),
   ],
 );
 
@@ -639,6 +642,10 @@ export const opt_outs = pgTable(
   (table) => [
     index("opt_outs_org_id_idx").on(table.org_id),
     index("opt_outs_contact_id_idx").on(table.contact_id),
+    // Migration 0078: the suppression EXISTS probes filter (contact_id AND
+    // org_id) together; this composite lets them index-only match. Additive —
+    // no suppression-logic change.
+    index("opt_outs_org_id_contact_id_idx").on(table.org_id, table.contact_id),
     index("opt_outs_phone_number_idx").on(table.phone_number),
     check(
       "opt_outs_reason_check",
@@ -1215,6 +1222,9 @@ export const campaigns = pgTable(
     index("campaigns_offer_id_idx").on(table.offer_id),
     index("campaigns_assigned_to_user_id_idx").on(table.assigned_to_user_id),
     index("campaigns_status_idx").on(table.status),
+    // Migration 0078: "active campaigns for this org" is the dominant filter
+    // (audience in-use exclusion, scheduler); the single status index is weak.
+    index("campaigns_org_id_status_idx").on(table.org_id, table.status),
     check(
       "campaigns_status_check",
       sql`${table.status} IN ('draft', 'active', 'paused', 'completed', 'archived')`,
@@ -1380,6 +1390,13 @@ export const campaign_stages = pgTable(
     index("campaign_stages_creative_id_idx").on(table.creative_id),
     index("campaign_stages_sms_provider_id_idx").on(table.sms_provider_id),
     index("campaign_stages_status_idx").on(table.status),
+    // Migration 0078: the */15 scheduled-send cron scans due-and-unfired stages
+    // (scheduled_at <= now AND sent_at IS NULL AND schedule_missed_at IS NULL,
+    // ORDER BY scheduled_at). Partial index on exactly that predicate. See
+    // lib/sends/scheduled.ts.
+    index("campaign_stages_scheduled_due_idx")
+      .on(table.scheduled_at)
+      .where(sql`sent_at IS NULL AND schedule_missed_at IS NULL`),
     check(
       "campaign_stages_status_check",
       sql`${table.status} IN ('draft', 'pending', 'sent', 'success', 'cancelled', 'failed', 'archived')`,
@@ -1635,6 +1652,12 @@ export const stage_result_rows = pgTable(
     index("stage_result_rows_stage_outcome_idx").on(
       table.stage_id,
       table.outcome,
+    ),
+    // Migration 0078: the only large domain table that lacked an org_id index.
+    // Backs org-wide results/audit queries + the default created_at ordering.
+    index("stage_result_rows_org_id_created_at_idx").on(
+      table.org_id,
+      table.created_at,
     ),
     check(
       "stage_result_rows_outcome_check",
@@ -2051,6 +2074,12 @@ export const stage_sends = pgTable(
     index("stage_sends_org_phone_sent_idx")
       .on(table.org_id, table.phone, table.sent_at)
       .where(sql`status = 'sent'`),
+    // Migration 0078: the /api/sends/state stuck-row count (count(*) WHERE
+    // org_id AND status = 'sending') runs on every protected page. Partial —
+    // 'sending' is transient, so this stays tiny.
+    index("stage_sends_org_sending_idx")
+      .on(table.org_id)
+      .where(sql`status = 'sending'`),
   ],
 );
 

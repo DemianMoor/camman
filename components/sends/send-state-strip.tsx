@@ -23,12 +23,17 @@ type SendState = {
   stuck_count: number;
 };
 
-export function SendStateStrip() {
+export function SendStateStrip({ initial }: { initial?: SendState }) {
   const api = useApiCall<SendState>();
   const { execute } = api;
-  const [state, setState] = useState<SendState | null>(null);
+  const [state, setState] = useState<SendState | null>(initial ?? null);
 
   useEffect(() => {
+    // When the strip is server-hydrated (the protected layout passes `initial`),
+    // skip the client fetch entirely — the data is already on screen and we'd
+    // only be re-running a full auth round-trip for the same snapshot. The
+    // standalone fetch path stays for any caller that mounts it without initial.
+    if (initial) return;
     let active = true;
     void (async () => {
       const r = await execute("/api/sends/state");
@@ -37,7 +42,7 @@ export function SendStateStrip() {
     return () => {
       active = false;
     };
-  }, [execute]);
+  }, [execute, initial]);
 
   if (!state) return null;
 

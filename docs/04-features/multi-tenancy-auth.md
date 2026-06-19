@@ -1,6 +1,6 @@
 # Feature — Multi-tenancy, Auth & Permissions
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-19_
 
 ## 1. Purpose
 Isolate every org's data behind an `org_id`, authenticate users via Supabase Auth, and enforce a five-role permission model on both server and client. A missing `org_id` filter is a data-leak bug — this is the most safety-critical convention in the codebase.
@@ -18,6 +18,8 @@ Isolate every org's data behind an `org_id`, authenticate users via Supabase Aut
 - **API routes:** `requireApiMembership()` in `lib/api/helpers.ts` — gets the authenticated Supabase user (anon-key SSR client), resolves `{ user, orgId, role }`, or returns an error response. **Every route calls this first.**
 
 > There is exactly **one** such helper per surface. Do not invent alternates (CLAUDE.md §3). Future background/webhook contexts use a separate trusted helper that takes `org_id` as an explicit argument.
+
+> **Per-request memoization (perf, no behavior change).** `getUser()` / `getOrgMembership()` ([`lib/auth/helpers.ts`](../../lib/auth/helpers.ts)) and the API-side user/membership primitives ([`lib/api/helpers.ts`](../../lib/api/helpers.ts)) are wrapped in `React.cache()`, so the Supabase Auth round-trip (`supabase.auth.getUser()` — a network call, not a cookie read) and the `org_members` lookup each run **at most once per server request**, no matter how many components/helpers resolve auth during one render. Cache scope is a single request; it never bleeds across requests/users. Return values are unchanged.
 
 ### Canonical API-route shape
 ```ts
@@ -71,9 +73,9 @@ sequenceDiagram
 
 ## 5. UI surface
 - `app/(auth)/` — sign-in, sign-up, reset pages.
-- `app/(protected)/layout.tsx` — the server-side gate + sidebar shell.
+- `app/(protected)/layout.tsx` — the server-side gate + sidebar shell. It **server-hydrates** the client auth context (`<AuthProvider initial={…}>`, [`components/protected/auth-context.tsx`](../../components/protected/auth-context.tsx)) and the send-state strip (`<SendStateStripLoader>` in a `<Suspense>`, [`components/sends/send-state-strip-loader.tsx`](../../components/sends/send-state-strip-loader.tsx)) from data already resolved on the server, so neither re-fetches `/api/me` or `/api/sends/state` (each a full auth round-trip) on mount. Both client components keep their fetch path for callers that mount them without `initial`.
 - Settings / member management pages under `app/(protected)/` (members).
-- `proxy.ts` — edge session refresh + coarse route guard.
+- `proxy.ts` — edge session refresh + coarse route guard. **Excludes all of `api/`** (and `r/`): every API route self-authenticates in its own handler (audited 2026-06-19, 172/172 routes), and route handlers refresh their own auth cookies, so the middleware `getUser()` round-trip is redundant there. The middleware still runs for page navigations (session refresh + the protected-prefix redirect).
 
 ## 6. Rules & edge cases
 - Role values are constrained by both the `Permission` model and the `org_members_role_check` DB CHECK — keep them in sync (CLAUDE.md / `lib/permissions.ts` header).

@@ -547,6 +547,13 @@
       "when": 1783036800000,
       "tag": "0077_drop_late_clickers",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1783123200000,
+      "tag": "0078_perf_indexes",
+      "breakpoints": true
     }
   ]
 }

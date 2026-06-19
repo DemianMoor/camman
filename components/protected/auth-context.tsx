@@ -30,9 +30,15 @@ export type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [auth, setAuth] = useState<AuthMe | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+export function AuthProvider({
+  children,
+  initial,
+}: {
+  children: React.ReactNode;
+  initial?: AuthMe;
+}) {
+  const [auth, setAuth] = useState<AuthMe | null>(initial ?? null);
+  const [isLoading, setIsLoading] = useState(!initial);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -54,8 +60,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    // Server-hydrated via `initial` from the protected layout (which already
+    // resolved the user + org on the server) — skip the duplicate /api/me fetch
+    // on mount. `refetch()` still hits /api/me on demand (e.g. after a role
+    // change). Without `initial`, behavior is unchanged: fetch on mount.
+    if (initial) return;
     void load();
-  }, [load]);
+  }, [load, initial]);
 
   const value: AuthContextValue = {
     auth,

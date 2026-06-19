@@ -149,27 +149,15 @@ export interface AudienceSnapshotResult {
   total_matching: number;
 }
 
-// Build the SQL that yields one row per qualifying contact_id, with the
-// per-contact snapshot booleans materialized. Both preview and snapshot
-// reuse this — preview counts the rows, snapshot inserts them into the
-// pool. The qualifier WHERE clause OR-combines the filter toggles: a
-// contact is in if ANY enabled category includes them, and they're never
-// in if they have any opt-out record for this org.
-//
-// Audience source (see buildAudienceSourceClause):
-//   * per-segment rule-filtered membership (via buildSegmentAudienceClause)
-//   * contacts directly tagged in any of the selected contact_groups
-// Segments OR together, groups OR together, the two dimensions INTERSECT
-// when both are present. Either dimension can be empty; the function
-// returns the empty set if both are empty (caller short-circuits before
-// invoking).
-async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
-  const { orgId, segmentIds, contactGroupIds = [], filters } = input;
-  const includeNoStatus = filters.include_no_status === true;
-  const includeOptIn = filters.include_opt_in === true;
-  const includeClickers = filters.include_clickers === true;
-  const includeNotClicked = filters.include_not_clicked === true;
-  const excludeInUse = input.excludeInUse === true;
+// Compose the raw audience-source set (contact_ids only, before any status
+// filter / opt-out / in-use exclusion) from the segment + contact-group
+// dimensions. See buildAudienceSourceClause for the intersection semantics.
+// Pulled out of the qualifier so the snapshot path can materialize it into a
+// temp table (see snapshotAudience).
+async function buildAudienceSourceSql(
+  input: AudiencePreviewInput,
+): Promise<SQL> {
+  const { orgId, segmentIds, contactGroupIds = [] } = input;
 
   // Contact-group clause: every contact tagged with any of the selected
   // groups. Built first so it can double as the universe restriction for the
@@ -191,22 +179,37 @@ async function buildQualifyingContactsSql(input: AudiencePreviewInput) {
     (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
   );
 
-  const source = buildAudienceSourceClause(segmentBranches, groupClause);
+  return buildAudienceSourceClause(segmentBranches, groupClause);
+}
+
+// Build the SQL that yields one row per qualifying contact_id, with the
+// per-contact snapshot booleans materialized, reading candidates from
+// `candidateRelation` (a relation exposing a `contact_id` column, e.g. a
+// materialized temp table). The qualifier WHERE clause OR-combines the
+// filter toggles: a contact is in if ANY enabled category includes them,
+// and they're never in if they have any opt-out record for this org.
+function buildQualifierFromRelation(
+  input: AudiencePreviewInput,
+  candidateRelation: SQL,
+): SQL {
+  const { orgId, filters } = input;
+  const includeNoStatus = filters.include_no_status === true;
+  const includeOptIn = filters.include_opt_in === true;
+  const includeClickers = filters.include_clickers === true;
+  const includeNotClicked = filters.include_not_clicked === true;
+  const excludeInUse = input.excludeInUse === true;
 
   return drizzleSql`
-    with segment_members as (
-      select distinct contact_id from (${source}) sm_union
-    ),
-    ${flagSetCtes(orgId)},
+    with ${flagSetCtes(orgId)},
     flagged as (
       select
-        sm.contact_id,
+        cand.contact_id,
         (oo_set.contact_id is not null) as has_opt_out,
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
         (iu_set.contact_id is not null) as is_in_use_elsewhere
-      from segment_members sm
-      ${flagJoins("sm")}
+      from ${candidateRelation} cand
+      ${flagJoins("cand")}
     )
     select
       contact_id,
@@ -488,10 +491,10 @@ export async function computeStageAudienceCountForDraft(
 // vs contact groups vs overlap contribute. One SQL round-trip; the
 // breakdown reuses the same CTE chain as the count.
 //
-// The snapshot path (snapshotAudience) keeps using
-// buildQualifyingContactsSql for the actual insert — its row-level
-// projection is required by the pool insert. The preview takes a
-// different shape because it aggregates instead.
+// The snapshot path (snapshotAudience) builds its own row-level projection
+// via buildQualifierFromRelation (against a materialized temp table) for the
+// actual insert. The preview takes a different shape because it aggregates
+// instead.
 export async function previewAudience(
   input: AudiencePreviewInput,
 ): Promise<AudiencePreviewResult> {
@@ -656,20 +659,48 @@ export async function previewAudience(
 // frozen in the pool — there's no reseeding.
 export async function snapshotAudience(
   input: AudienceSnapshotInput,
-  // Allow passing a transaction handle so this call participates in the
-  // caller's transaction. Falls back to the top-level db.
+  // MUST be a transaction handle: this materializes a `ON COMMIT DROP` temp
+  // table, so it only works inside a transaction. Both callers (campaign
+  // create + draft→active) pass their tx. Falls back to the top-level db
+  // only for the no-source short-circuit, which never reaches the temp table.
   tx?: Pick<typeof db, "execute">,
 ): Promise<AudienceSnapshotResult> {
   if (!hasAnySource(input)) return { count: 0, total_matching: 0 };
   const runner = tx ?? db;
-  const qualifying = await buildQualifyingContactsSql(input);
   const cap = input.cap ?? null;
 
-  // We count first so the caller knows total_matching even when capped.
-  // One extra query, runs inside the same transaction so the pool sees
-  // a consistent snapshot.
+  // Materialize the candidate set (segment ∩ group composition) into a temp
+  // table and ANALYZE it before joining the status flags. This is the crux
+  // of the perf fix: the source is built from UNION/INTERSECT/EXCEPT set ops,
+  // whose output cardinality Postgres can't estimate — it defaults to ~200
+  // rows. At real scale (100K+ candidates) that misestimate makes the planner
+  // pick nested-loop anti-joins for the opt-out / in-use exclusions, which
+  // never finish (statement timeout on activation). A materialized + analyzed
+  // temp table gives the planner true row counts, so the exclusions hash-join
+  // and the whole snapshot runs in ~2s instead of timing out. The temp table
+  // also lets count + insert share one evaluation of the source set ops.
+  const source = await buildAudienceSourceSql(input);
+  await runner.execute(drizzleSql`
+    create temp table audience_candidates on commit drop as
+    select distinct contact_id from (${source}) src
+  `);
+  await runner.execute(drizzleSql`analyze audience_candidates`);
+
+  // Resolve the qualified set (status filters + opt-out / in-use exclusions,
+  // with the snapshot booleans) into a second temp table. Doing this once —
+  // rather than re-running the qualifier for both the count and the insert —
+  // means the (now correctly-planned) flag hash-joins evaluate a single time;
+  // the count is then a trivial read and the insert just samples this set.
+  const qualifying = buildQualifierFromRelation(
+    input,
+    drizzleSql`audience_candidates`,
+  );
+  await runner.execute(drizzleSql`
+    create temp table audience_qualified on commit drop as ${qualifying}
+  `);
+
   const totalRows = (await runner.execute(drizzleSql`
-    select count(*)::int as count from (${qualifying}) q
+    select count(*)::int as count from audience_qualified
   `)) as unknown as { count: number }[];
   const total = Array.isArray(totalRows) ? totalRows[0]?.count ?? 0 : 0;
 
@@ -688,7 +719,7 @@ export async function snapshotAudience(
       was_clicker,
       was_opt_in,
       was_no_status
-    from (${qualifying}) q
+    from audience_qualified
     ${limitClause}
     on conflict (campaign_id, contact_id) do nothing
     returning contact_id

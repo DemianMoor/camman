@@ -1,6 +1,6 @@
 # Feature — Audience Snapshot (freeze-at-activation)
 
-_Last updated: 2026-06-10_
+_Last updated: 2026-06-19_
 
 ## 1. Purpose
 A campaign's audience is **computed and frozen** the moment it transitions `draft → active`, into `campaign_audience_pool`. The whole point: adding a contact to a referenced segment later does **not** retroactively expand a live campaign's reach. Drafts carry only the *recipe* (segment ids, group ids, filters, cap); the *contacts* are materialized once.
@@ -23,8 +23,9 @@ A campaign's audience is **computed and frozen** the moment it transitions `draf
 | Function | Role |
 |----------|------|
 | `previewAudience(input)` | SELECT-only; returns counts: `count` (post-cap), `total_matching` (the **intersected** audience when both dimensions are selected), `from_segments` / `from_groups` (each side's eligible pool — see the perf note: when both dimensions are selected `from_segments` is evaluated **within** the group set, so it equals `overlap`/`total_matching`), `overlap`, `excluded_for_optout`, `in_use_in_other_campaigns`. Powers the editor preview & "N excluded" UI. |
-| `buildQualifyingContactsSql(input)` | builds the candidate-with-flags CTE shared by preview + snapshot. |
-| `snapshotAudience(input, tx?)` | INSERTs the frozen rows into `campaign_audience_pool`; returns `{ count, total_matching }`. Runs inside the activation transaction. |
+| `buildAudienceSourceSql(input)` | composes the raw candidate set (segment ∩ group, before status filters). |
+| `buildQualifierFromRelation(input, rel)` | wraps a candidate relation with the status-flag joins + filter WHERE, projecting the snapshot booleans. |
+| `snapshotAudience(input, tx?)` | materializes the candidate set into a temp table, ANALYZEs it, then INSERTs the frozen rows into `campaign_audience_pool`; returns `{ count, total_matching }`. **Must** run inside a transaction (uses `ON COMMIT DROP` temp tables). |
 | `computeStageAudienceCount(campaignId, orgId, filters)` | reads the **frozen** pool for an active campaign + applies stage-level filters + live opt-out exclusion. |
 | `computeStageAudienceCountForDraft(campaign, filters)` | recomputes live from the recipe for draft-stage previews (no frozen pool yet). |
 
@@ -55,9 +56,10 @@ sequenceDiagram
 The snapshot runs in the **same transaction** as the status flip — a stale draft can't slip through, and an empty snapshot rolls the whole thing back.
 
 ### Performance (preview + snapshot)
-Two optimizations keep the live preview fast even at ~750K contacts (the same SQL shape is shared by preview, snapshot, and the draft stage count):
+Three optimizations keep this fast even at ~750K contacts:
 1. **Group-restricted `is_not` universe.** A near-universal `is_not` rule (e.g. "in use in the last month" negated) would otherwise compute `all_contacts EXCEPT inner` — a full seqscan + disk-spilling set-ops over ~all contacts — *before* the segment∩group intersection narrows it down. When both dimensions are selected, the contact-group set is handed to `buildSegmentAudienceClause(…, restrictUniverse)` as the `is_not` universe, so the negation only spans the (small) group. Provably equivalent: the outer INTERSECT against the same group already constrains the result. Measured ~9s → ~0.4s on a 750K-contact org with a 35K group.
 2. **Hash-joined status flags.** Opt-out / opt-in / clicker / in-use membership is computed by LEFT JOINing four deduped CTEs (`flagSetCtes` + `flagJoins`) instead of four correlated `EXISTS (…)` per candidate row, so each set is hashed once rather than probed per row.
+3. **Materialize + ANALYZE the candidate set (snapshot path).** The candidate set is built from `UNION`/`INTERSECT`/`EXCEPT` set ops whose output cardinality Postgres cannot estimate — it defaults to **~200 rows**. At real scale (a campaign over a 150K-member contact group) that misestimate makes the planner pick **nested-loop anti-joins** for the opt-out / in-use exclusions (≈ candidates × active-pool comparisons), which never finish → `statement timeout (57014)` and a failed activation. `snapshotAudience` therefore writes the candidate set into a `ON COMMIT DROP` temp table and `ANALYZE`s it before the flag joins, giving the planner true row counts so the exclusions hash-join. The qualified rows go into a second temp table so the count + the `ORDER BY random()` cap sample share one evaluation. Measured: **>180s (timeout) → ~8.5s** for a 150K-candidate / 5K-cap activation. Because temp tables need a transaction, `snapshotAudience` must be called with the activation `tx` (both callers do), and the routes that snapshot set `maxDuration = 60`. *Not yet applied to `previewAudience` / `computeStageAudienceCountForDraft`, which run outside a transaction and can still hit this trap for very large audiences.*
 
 ## 4. Data it reads/writes
 - Reads: `segments`/`segment_rules`/`segment_contacts`, `contact_contact_groups`, `opt_ins`, `clickers`, `opt_outs`, other campaigns' `campaign_audience_pool`.

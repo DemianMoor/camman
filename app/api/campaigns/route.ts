@@ -31,6 +31,11 @@ import {
 
 const SLUG_RETRY_LIMIT = 5;
 
+// Launch-on-create snapshots the audience pool, which at scale (100K+
+// candidate contacts) legitimately takes several seconds. Raise the limit
+// above Vercel's default so a large snapshot isn't cut off mid-transaction.
+export const maxDuration = 60;
+
 export async function POST(req: NextRequest) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;

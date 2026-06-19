@@ -10,6 +10,11 @@ import { logCampaignEvent } from "@/lib/campaign-events";
 import { can, type Permission } from "@/lib/permissions";
 import { campaignStatusChangeSchema } from "@/lib/validators/campaigns";
 
+// draft → active freezes the audience pool via snapshotAudience, which at
+// scale (100K+ candidate contacts) legitimately takes several seconds. Raise
+// the limit above Vercel's default so a large snapshot isn't cut off.
+export const maxDuration = 60;
+
 function parseId(idParam: string) {
   const n = Number(idParam);
   if (!Number.isInteger(n) || n <= 0) return null;

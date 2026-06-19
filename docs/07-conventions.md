@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-06-19_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -34,6 +34,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Forms: `<input type="datetime-local">` ↔ `campaignLocalInputToUtcIso()` / `utcToCampaignLocalInput()`.
 - Send windows evaluated in ET via `lib/quiet-hours.ts` — sender-zone, not recipient-zone (known TCPA limitation).
 - **postgres-js timestamptz-inference gotcha:** binding a bare ET wall-clock string and casting `${s}::timestamp` (or `::timestamptz`) lets postgres-js infer a `timestamptz` parameter and **pre-shifts the instant** (a silent multi-hour error). To convert an external ET wall-clock (e.g. Keitaro's `datetime`) to the correct UTC instant, build a zoned literal instead: `(${s} || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz` — concatenation forces text binding; NULL concat → NULL. (Seen in `lib/keitaro/poll-conversions.ts`.)
+- **TextHub inbox `received_at` is UTC−6, not UTC.** TextHub stamps inbound STOP messages "YYYY-MM-DD HH:MM:SS" with no zone in a fixed UTC−6 wall clock. `parseProviderReceivedAt` ([`lib/sends/poll-opt-outs.ts`](../lib/sends/poll-opt-outs.ts)) shifts +6h (`TEXTHUB_RECEIVED_AT_UTC_OFFSET_HOURS = -6`); ISO strings that carry their own offset are honored as-is. Parsing it as UTC (the original bug, fixed 2026-06-19) put the attribution anchor 6h early, so a campaign's own STOP replies failed the `sent_at <= anchor + 5min` upper bound and the stage's opt-out counter read 0 despite ~100 real replies. Empirically: our ingest clock ran a constant ~6h ahead of the stamped value (132 msgs). DST behavior (fixed −6 vs a DST zone) is unconfirmed — measured in June.
 
 ## Money
 - `NUMERIC(12,4)`, displayed `$`. `sales_payout_each` snapshots the offer CPA at the moment sales were entered so ROI doesn't drift if the offer is later edited.

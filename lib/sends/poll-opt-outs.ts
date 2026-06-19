@@ -31,20 +31,32 @@ import { validatePhone } from "@/lib/phone-validation";
 // caller's orgId to scope to one org.
 
 // Trailing window: a STOP credits any stage that sent to the number in the last
-// 72h. Wide enough that TextHub's undocumented received_at timezone (we parse it
-// as UTC) is immaterial to the lower bound. Tunable — the single knob for how
-// aggressively one STOP spreads across recently-used campaigns.
+// 72h. Tunable — the single knob for how aggressively one STOP spreads across
+// recently-used campaigns.
 export const OPT_OUT_ATTRIBUTION_WINDOW_HOURS = 72;
 
-// TextHub stamps inbound messages "YYYY-MM-DD HH:MM:SS" with no timezone. Parse
-// as UTC for a stable, deterministic window anchor. NULL when unparseable (the
-// caller falls back to the poll time).
+// TextHub stamps inbound `received_at` in a fixed UTC−6 wall clock with no zone
+// suffix (empirically confirmed 2026-06-19: our own ingest clock ran a rock-
+// solid ~6h ahead of the stamped value across 132 messages). Earlier this was
+// (mis)parsed as UTC, which put the anchor 6h in the past and tripped the
+// attribution upper bound (`sent_at <= anchor + 5min`) — a campaign's own STOP
+// replies looked like they arrived *before* the send, so they were dropped and
+// the stage's opt-out counter read 0. Apply the offset to recover true UTC.
+export const TEXTHUB_RECEIVED_AT_UTC_OFFSET_HOURS = -6;
+
+// TextHub stamps inbound messages "YYYY-MM-DD HH:MM:SS" in UTC−6 (see above).
+// Shift to true UTC for a stable, deterministic window anchor. NULL when
+// unparseable (the caller falls back to the poll time). Inputs that already
+// carry a zone (ISO 8601 with offset) are honored as-is.
 export function parseProviderReceivedAt(raw: string | null): Date | null {
   if (!raw) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(raw.trim());
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(raw.trim());
   if (m) {
     const [, Y, Mo, D, H, Mi, S] = m;
-    const d = new Date(Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +S));
+    // UTC = local − offset; offset is −6, so add 6h. Date.UTC carries overflow.
+    const d = new Date(
+      Date.UTC(+Y, +Mo - 1, +D, +H - TEXTHUB_RECEIVED_AT_UTC_OFFSET_HOURS, +Mi, +S),
+    );
     return Number.isNaN(d.getTime()) ? null : d;
   }
   const d = new Date(raw);

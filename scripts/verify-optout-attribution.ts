@@ -21,14 +21,14 @@ function check(name: string, cond: boolean) {
 
 async function main() {
   console.log("--- provider received_at parsing ---");
-  // TextHub's documented shape "YYYY-MM-DD HH:MM:SS", parsed as UTC.
+  // TextHub's shape "YYYY-MM-DD HH:MM:SS" is UTC−6; parser shifts +6h to UTC.
   const d = parseProviderReceivedAt("2026-06-04 03:54:10");
   check("parses TextHub timestamp", d !== null);
   check(
-    "parses as UTC (no local-zone shift)",
-    d?.toISOString() === "2026-06-04T03:54:10.000Z",
+    "shifts UTC−6 wall clock to true UTC (+6h)",
+    d?.toISOString() === "2026-06-04T09:54:10.000Z",
   );
-  check("ISO 8601 with offset also parses", parseProviderReceivedAt("2026-06-04T03:54:10Z") !== null);
+  check("ISO 8601 with offset honored as-is (no shift)", parseProviderReceivedAt("2026-06-04T03:54:10Z")?.toISOString() === "2026-06-04T03:54:10.000Z");
   check("null input ⇒ null", parseProviderReceivedAt(null) === null);
   check("garbage ⇒ null", parseProviderReceivedAt("not a date") === null);
   check("empty ⇒ null", parseProviderReceivedAt("") === null);

@@ -18,8 +18,8 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import {
-  computeStageAudienceCount,
-  computeStageAudienceCountForDraft,
+  computeStageAudienceCountsBatch,
+  computeStageAudienceCountsBatchForDraft,
 } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
@@ -35,6 +35,12 @@ import {
   stageCreateSchema,
   STAGE_STATUSES,
 } from "@/lib/validators/campaign-stages";
+
+// The GET batches all non-lane stage audience counts into one query (plus one
+// per behavioral lane). That's well under 10s even for large campaigns, but the
+// query does scan the frozen pool — give it headroom above Vercel's 10s default
+// so it degrades to "slow" rather than a hard timeout under load.
+export const maxDuration = 30;
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -218,17 +224,33 @@ export async function GET(
     .where(where)
     .orderBy(orderFn(sortColumn));
 
-  // TODO: audience_count is computed per-stage via one query each. Fine for
-  // typical campaigns (≤12 stages); may need optimization for campaigns
-  // with many stages — consider materializing on stage-status-change in a
-  // later step, or batching all stages into a single query with FILTERs.
-  const audienceCounts = await Promise.all(
-    rows.map((r) => {
-      // Behavioral lane → the LIVE lane preview (alive + exact tier − opt-outs,
-      // converted excluded), via the shared recipient query (step 3). Reads the
-      // frozen pool like every other stage; no second recipient SQL.
-      if (r.behavioral_tier != null) {
-        return countStageRecipients(db, {
+  // Per-stage audience_count. Two kinds of stage:
+  //   • Behavioral lanes (behavioral_tier set) → the LIVE lane preview (alive +
+  //     exact tier − opt-outs, converted excluded) via countStageRecipients.
+  //     Lanes are few; this stays a per-lane query (unchanged).
+  //   • Every other stage → counted in ONE batched pass (active frozen-pool or
+  //     draft projection), replacing the former one-query-per-stage N+1. The
+  //     batched functions are numerically identical to the per-stage ones
+  //     (proven by scripts/tmp-verify-batch.ts before ship).
+  const laneStages = rows.filter((r) => r.behavioral_tier != null);
+  const plainStages = rows.filter((r) => r.behavioral_tier == null);
+
+  const plainBatchItems = plainStages.map((r) => ({
+    stageId: r.id,
+    include_no_status: r.include_no_status,
+    include_clickers: r.include_clickers,
+    exclude_clickers: r.exclude_clickers,
+    split_index: r.split_index,
+    split_total: r.split_total,
+  }));
+
+  const [plainCounts, laneCountEntries] = await Promise.all([
+    isDraft
+      ? computeStageAudienceCountsBatchForDraft(draftAudienceInput, plainBatchItems)
+      : computeStageAudienceCountsBatch(cid, orgId, plainBatchItems),
+    Promise.all(
+      laneStages.map((r) =>
+        countStageRecipients(db, {
           campaignId: cid,
           orgId,
           filters: {
@@ -240,25 +262,17 @@ export async function GET(
             behavioralTier: r.behavioral_tier,
             parentStageId: r.parent_stage_id,
           },
-        });
-      }
-      return (isDraft
-        ? computeStageAudienceCountForDraft(draftAudienceInput, {
-            include_no_status: r.include_no_status,
-            include_clickers: r.include_clickers,
-            exclude_clickers: r.exclude_clickers,
-            split_index: r.split_index,
-            split_total: r.split_total,
-          })
-        : computeStageAudienceCount(cid, orgId, {
-            include_no_status: r.include_no_status,
-            include_clickers: r.include_clickers,
-            exclude_clickers: r.exclude_clickers,
-            split_index: r.split_index,
-            split_total: r.split_total,
-          })
-      ).then((res) => res.count);
-    }),
+        }).then((count) => [r.id, count] as [number, number]),
+      ),
+    ),
+  ]);
+  const laneCounts = new Map<number, number>(laneCountEntries);
+
+  // Reassemble in the original row order.
+  const audienceCounts = rows.map((r) =>
+    r.behavioral_tier != null
+      ? laneCounts.get(r.id) ?? 0
+      : plainCounts.get(r.id) ?? 0,
   );
 
   // Inbound STOPs attributed to this campaign (migration 0075). Per-stage counts

@@ -483,6 +483,215 @@ export async function computeStageAudienceCountForDraft(
   };
 }
 
+// ── Batched per-stage audience counts ────────────────────────────────────────
+// The stages-list endpoint needs the audience_count for EVERY stage of a
+// campaign. Doing that as one query per stage (computeStageAudienceCount* per
+// row) is an N+1 that dominates the page's latency. These two functions compute
+// the count for MANY non-lane stages in a SINGLE pass and are numerically
+// identical to calling the per-stage function for each stage — proven by
+// scripts/tmp-verify-batch.ts across real campaigns before this shipped.
+//
+// Identity argument (must hold for both):
+//   • the candidate set (frozen pool, or segment∩group source) is scanned ONCE
+//     and is the same set the per-stage query reads;
+//   • the live opt-out exclusion is the same membership test — an `oo_set` hash
+//     anti-join is logically identical to the per-row `EXISTS (opt_outs …)`
+//     (one opt_out row ⇒ excluded; the pool has a unique row per contact so the
+//     join can't fan out);
+//   • per-stage filters/split come from a per-stage relation, and the split
+//     bucket uses ROW_NUMBER() PARTITIONed BY stage_id ORDERed BY contact_id —
+//     within each partition that is byte-identical to the per-stage
+//     ROW_NUMBER() OVER (ORDER BY contact_id).
+// Lane stages (behavioral_tier set) are NOT handled here — they keep using
+// countStageRecipients (live tier + aliveness), which is left untouched.
+
+export interface StageCountBatchItem {
+  stageId: number;
+  include_no_status: boolean;
+  include_clickers: boolean;
+  exclude_clickers: boolean;
+  split_index: number | null;
+  split_total: number | null;
+}
+
+// One row per stage, as a typed UNION ALL of SELECTs (robust against VALUES
+// type inference): stage_id + the three filter booleans + the split bounds.
+// The split filter `split_total is null or split_index is null or
+// rn % split_total = split_index - 1` reproduces the per-stage
+// `not splitActive or rn % splitTotal = splitIndex - 1` exactly.
+function buildStagesCte(stages: StageCountBatchItem[]): SQL {
+  const rows = stages.map(
+    (s) => drizzleSql`select
+      ${s.stageId}::int as stage_id,
+      ${s.include_no_status}::boolean as inc_ns,
+      ${s.include_clickers}::boolean as inc_cl,
+      ${s.exclude_clickers}::boolean as exc_cl,
+      ${s.split_index}::int as split_index,
+      ${s.split_total}::int as split_total`,
+  );
+  return rows.reduce((acc, r, i) =>
+    i === 0 ? r : drizzleSql`${acc} union all ${r}`,
+  );
+}
+
+const BATCH_SPLIT_FILTER = drizzleSql`count(*) filter (
+        where split_total is null or split_index is null
+          or rn % split_total = split_index - 1
+      )::int as count`;
+
+// Batched equivalent of computeStageAudienceCount(...).count for the ACTIVE
+// (frozen-pool) path. Returns stage_id → count; a stage with zero qualifying
+// contacts is absent from the map (the caller defaults it to 0, matching the
+// per-stage function which returns count 0).
+export async function computeStageAudienceCountsBatch(
+  campaignId: number,
+  orgId: string,
+  stages: StageCountBatchItem[],
+): Promise<Map<number, number>> {
+  if (stages.length === 0) return new Map();
+  const stagesCte = buildStagesCte(stages);
+  const rows = (await db.execute(drizzleSql`
+    with oo_set as (
+      select distinct contact_id from opt_outs where org_id = ${orgId}::uuid
+    ),
+    -- MATERIALIZED: compute the pool ∩ opt-out base ONCE, then the per-stage
+    -- relation cross-joins it. Without this the planner can re-scan the base per
+    -- stage in a nested loop (one statement doing N× the work) instead of N
+    -- cheap statements.
+    base as materialized (
+      select
+        p.contact_id,
+        p.was_clicker_at_snapshot,
+        p.was_no_status_at_snapshot,
+        (oo_set.contact_id is not null) as is_opt_out_now
+      from campaign_audience_pool p
+      left join oo_set on oo_set.contact_id = p.contact_id
+      where p.campaign_id = ${campaignId}::int and p.org_id = ${orgId}::uuid
+    ),
+    st as (${stagesCte}),
+    qualified as (
+      select
+        st.stage_id,
+        st.split_index,
+        st.split_total,
+        row_number() over (partition by st.stage_id order by base.contact_id) - 1 as rn
+      from st
+      join base on
+        not base.is_opt_out_now
+        and (
+          (st.inc_ns and base.was_no_status_at_snapshot)
+          or (st.inc_cl and base.was_clicker_at_snapshot)
+        )
+        and not (st.exc_cl and base.was_clicker_at_snapshot)
+    )
+    select stage_id, ${BATCH_SPLIT_FILTER}
+    from qualified
+    group by stage_id
+  `)) as unknown as { stage_id: number; count: number }[];
+  return new Map(rows.map((r) => [Number(r.stage_id), Number(r.count)]));
+}
+
+// Batched equivalent of computeStageAudienceCountForDraft(...).count for the
+// DRAFT (projected) path. Source set is built ONCE (it depends only on the
+// campaign, not the stage) — the per-stage function rebuilt it for every stage.
+export async function computeStageAudienceCountsBatchForDraft(
+  campaign: {
+    id: number;
+    orgId: string;
+    segmentIds: number[];
+    contactGroupIds: number[];
+    filters: AudienceFilters;
+    cap: number | null;
+    excludeInUse?: boolean;
+  },
+  stages: StageCountBatchItem[],
+): Promise<Map<number, number>> {
+  if (stages.length === 0) return new Map();
+  const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
+  const excludeInUse = campaign.excludeInUse === true;
+  // No audience source on the parent campaign → every stage is trivially zero
+  // (mirrors computeStageAudienceCountForDraft's short-circuit).
+  if (segmentIds.length === 0 && contactGroupIds.length === 0) {
+    return new Map(stages.map((s) => [s.stageId, 0]));
+  }
+
+  const includeNoStatus = filters.include_no_status === true;
+  const includeOptIn = filters.include_opt_in === true;
+  const includeClickers = filters.include_clickers === true;
+  const includeNotClicked = filters.include_not_clicked === true;
+
+  // Identical source composition to computeStageAudienceCountForDraft (it uses
+  // the same buildAudienceSourceSql logic inline).
+  const source = await buildAudienceSourceSql({
+    orgId,
+    segmentIds,
+    contactGroupIds,
+    filters,
+    excludeInUse,
+  });
+  const stagesCte = buildStagesCte(stages);
+
+  const rows = (await db.execute(drizzleSql`
+    with sources as (
+      select distinct contact_id from (${source}) u
+    ),
+    ${flagSetCtes(orgId)},
+    -- MATERIALIZED is load-bearing: the source set-ops (segment-rule SQL) are
+    -- expensive. Computing the flagged set once and reusing it across the
+    -- per-stage cross-join keeps the batch at one source evaluation. Without it
+    -- the planner can re-evaluate the source per stage inside this single
+    -- statement, blowing statement_timeout where the old per-stage path (N
+    -- separate statements) did not. MATERIALIZED changes execution, not results.
+    flagged as materialized (
+      select
+        s.contact_id,
+        (oo_set.contact_id is not null) as has_opt_out,
+        (oi_set.contact_id is not null) as has_opt_in,
+        (cl_set.contact_id is not null) as has_clicker,
+        (iu_set.contact_id is not null) as is_in_use_elsewhere
+      from sources s
+      ${flagJoins("s")}
+    ),
+    st as (${stagesCte}),
+    qualified as (
+      select
+        st.stage_id,
+        st.split_index,
+        st.split_total,
+        row_number() over (partition by st.stage_id order by flagged.contact_id) - 1 as rn
+      from st
+      join flagged on
+        flagged.has_opt_out = false
+        and (
+          (${includeNoStatus}::boolean and not flagged.has_opt_in and not flagged.has_clicker)
+          or (${includeOptIn}::boolean and flagged.has_opt_in)
+          or (${includeClickers}::boolean and flagged.has_clicker)
+          or (${includeNotClicked}::boolean and not flagged.has_clicker)
+        )
+        and (not ${excludeInUse}::boolean or not flagged.is_in_use_elsewhere)
+        and (
+          (st.inc_ns and not flagged.has_opt_in and not flagged.has_clicker)
+          or (st.inc_cl and flagged.has_clicker)
+        )
+        and not (st.exc_cl and flagged.has_clicker)
+    )
+    select stage_id, ${BATCH_SPLIT_FILTER}
+    from qualified
+    group by stage_id
+  `)) as unknown as { stage_id: number; count: number }[];
+
+  const counts = new Map<number, number>(
+    rows.map((r) => [Number(r.stage_id), Number(r.count)]),
+  );
+  // Per-stage cap clamp, exactly as computeStageAudienceCountForDraft (min(cap, count)).
+  const result = new Map<number, number>();
+  for (const s of stages) {
+    const c = counts.get(s.stageId) ?? 0;
+    result.set(s.stageId, cap !== null && cap < c ? cap : c);
+  }
+  return result;
+}
+
 // Compute the count + composition breakdown for the UI's audience
 // preview. No DB write.
 //

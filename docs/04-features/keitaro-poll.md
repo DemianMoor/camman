@@ -139,22 +139,30 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
   date) rows plus per-stage and campaign rollups with the Clickers → Offer
   Redirect → Sales funnel + derived rates. Requires `campaigns.view`.
-- `GET /api/keitaro/reports?from&to&search&page&pageSize&sortBy&sortDir` —
-  read-only; org-scoped. Cross-campaign per-stage funnel aggregated over an ET date
+- `GET /api/keitaro/reports?from&to&search&groupBy&page&pageSize&sortBy&sortDir` —
+  read-only; org-scoped. Cross-campaign funnel aggregated over an ET date
   range (≤92 days, default last 7), with resolved campaign + stage names, grand
   totals, and pagination/sort. Powers the **Reports** page (`/reports`). Requires
   `campaigns.view`. Never triggers a poll. Each row also carries `opt_outs` —
   sourced from `campaign_stages.inbound_opt_out_count` (live STOPs attributed to
   the stage via the poller's 72h window, migration 0075; **not** the CSV-imported
   `opt_out_count`), captured once per stage, in the grand totals and sortable.
+  **`groupBy=stage` (default) or `campaign`:** campaign rollups fold every stage of
+  a campaign into one funnel row (clickers/redirect/**sales**/revenue/cost summed,
+  opt-outs summed across the campaign's stages, rates re-derived), and carry
+  `stage_count` instead of stage fields. Lets you read **sales per campaign** as
+  well as per stage. Grand totals are unchanged by grouping.
 
 ## 5b. Reports UI (`/reports`)
 A dedicated cross-campaign page ([`app/(protected)/reports/page.tsx`](../../app/(protected)/reports/page.tsx))
-showing the funnel per stage: Campaign · Stage · **Opt-outs** (live inbound STOPs
+showing the funnel: Campaign · Stage · **Opt-outs** (live inbound STOPs
 attributed to the stage) · **Clickers** ·
 **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
 with a date-range filter, search, sortable columns, grand-total stat cards, and a
-manual **Refresh from Keitaro** button (operator+, runs the poll). Nav entry under
+manual **Refresh from Keitaro** button (operator+, runs the poll). A **Group by**
+toggle (Stage / Campaign) switches between per-stage rows and per-campaign rollups
+(the Stage column becomes a `Stages` count) so **sales (and the whole funnel) can
+be read per campaign**. Nav entry under
 **Campaigns** (always enabled — Reports is a feature, not a flagged entity).
 The **Campaign** cell links to `/campaigns/[id]`; the **Stage** cell links to
 `/campaigns/[id]?stage=[stageId]`, which the campaign detail page consumes on load

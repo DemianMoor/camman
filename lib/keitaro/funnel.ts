@@ -78,6 +78,20 @@ export function addRowToFunnel(
   return t;
 }
 
+// Sum one tally into another (e.g. rolling per-stage tallies up to a campaign).
+// Mirrors addRowToFunnel but for already-folded FunnelTally values. Returns the
+// target for chaining.
+export function mergeFunnel(into: FunnelTally, from: FunnelTally): FunnelTally {
+  into.visit_clicks_raw += from.visit_clicks_raw;
+  into.visit_clicks_clean += from.visit_clicks_clean;
+  into.redirect_clicks_raw += from.redirect_clicks_raw;
+  into.redirect_clicks_clean += from.redirect_clicks_clean;
+  into.sales += from.sales;
+  into.revenue += from.revenue;
+  into.cost += from.cost;
+  return into;
+}
+
 function rate(numerator: number, denominator: number): number {
   return denominator > 0 ? numerator / denominator : 0;
 }

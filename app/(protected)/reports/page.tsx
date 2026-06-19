@@ -16,14 +16,16 @@ import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 
-// One per-stage row of the funnel report (matches /api/keitaro/reports `data`).
+// One row of the funnel report (matches /api/keitaro/reports `data`). Stage
+// fields are null when grouped by campaign; `stage_count` is set instead.
 type ReportRow = {
-  stage_id: number;
+  stage_id: number | null;
   campaign_id: number;
   campaign_name: string;
   stage_number: number | null;
-  stage_name: string;
-  stage_tracking_id: string;
+  stage_name: string | null;
+  stage_tracking_id: string | null;
+  stage_count: number | null;
   opt_outs: number;
   clickers: number;
   offer_redirect: number;
@@ -44,7 +46,10 @@ type Totals = Omit<
   | "stage_number"
   | "stage_name"
   | "stage_tracking_id"
+  | "stage_count"
 >;
+
+type GroupBy = "stage" | "campaign";
 
 type ReportResponse = {
   data: ReportRow[];
@@ -67,6 +72,7 @@ type Filters = {
   from: string;
   to: string;
   search: string;
+  groupBy: GroupBy;
   page: number;
   pageSize: number;
   sortBy: string;
@@ -88,6 +94,7 @@ const DEFAULT_FILTERS: Filters = {
   from: etDate(-6),
   to: etDate(0),
   search: "",
+  groupBy: "stage",
   page: 0,
   pageSize: 20,
   sortBy: "revenue",
@@ -156,6 +163,7 @@ export default function ReportsPage() {
     const params = new URLSearchParams({
       from: filters.from,
       to: filters.to,
+      groupBy: filters.groupBy,
       page: String(filters.page),
       pageSize: String(filters.pageSize),
       sortBy: filters.sortBy,
@@ -183,6 +191,7 @@ export default function ReportsPage() {
     filters.from,
     filters.to,
     filters.search,
+    filters.groupBy,
     filters.page,
     filters.pageSize,
     filters.sortBy,
@@ -213,37 +222,50 @@ export default function ReportsPage() {
     refetch();
   }
 
-  const columns = useMemo<ColumnDef<ReportRow>[]>(
-    () => [
-      {
-        id: "campaign_name",
-        header: "Campaign",
-        enableSorting: true,
-        cell: ({ row }) => (
-          <Link
-            href={`/campaigns/${row.original.campaign_id}`}
-            className="font-medium text-primary hover:underline"
-          >
-            {row.original.campaign_name}
-          </Link>
-        ),
-      },
-      {
-        id: "stage",
-        header: "Stage",
-        enableSorting: false,
-        cell: ({ row }) => (
-          <Link
-            href={`/campaigns/${row.original.campaign_id}?stage=${row.original.stage_id}`}
-            className="flex flex-col gap-0.5 hover:underline"
-          >
-            <span className="text-primary">{row.original.stage_name}</span>
-            <span className="font-mono text-[11px] text-muted-foreground">
-              {row.original.stage_tracking_id}
-            </span>
-          </Link>
-        ),
-      },
+  const columns = useMemo<ColumnDef<ReportRow>[]>(() => {
+    const campaignCol: ColumnDef<ReportRow> = {
+      id: "campaign_name",
+      header: "Campaign",
+      enableSorting: true,
+      cell: ({ row }) => (
+        <Link
+          href={`/campaigns/${row.original.campaign_id}`}
+          className="font-medium text-primary hover:underline"
+        >
+          {row.original.campaign_name}
+        </Link>
+      ),
+    };
+    // Stage column only makes sense per-stage; campaign rollups show a count.
+    const stageCol: ColumnDef<ReportRow> =
+      filters.groupBy === "campaign"
+        ? {
+            id: "stages",
+            header: "Stages",
+            enableSorting: false,
+            cell: ({ row }) => (
+              <span className="tabular-nums text-muted-foreground">
+                {fmtInt(row.original.stage_count ?? 0)}
+              </span>
+            ),
+          }
+        : {
+            id: "stage",
+            header: "Stage",
+            enableSorting: false,
+            cell: ({ row }) => (
+              <Link
+                href={`/campaigns/${row.original.campaign_id}?stage=${row.original.stage_id}`}
+                className="flex flex-col gap-0.5 hover:underline"
+              >
+                <span className="text-primary">{row.original.stage_name}</span>
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  {row.original.stage_tracking_id}
+                </span>
+              </Link>
+            ),
+          };
+    const rest: ColumnDef<ReportRow>[] = [
       {
         id: "opt_outs",
         header: "Opt-outs",
@@ -342,9 +364,9 @@ export default function ReportsPage() {
           </span>
         ),
       },
-    ],
-    [],
-  );
+    ];
+    return [campaignCol, stageCol, ...rest];
+  }, [filters.groupBy]);
 
   const isAuthLoading = !auth;
 
@@ -355,7 +377,8 @@ export default function ReportsPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Reports</h1>
           <p className="text-sm text-muted-foreground">
             Live campaign performance from Keitaro: the Clickers → Offer Redirect
-            → Sales funnel, per stage. Times in {CAMPAIGN_TIMEZONE_LABEL}.
+            → Sales funnel, per stage or rolled up per campaign. Times in{" "}
+            {CAMPAIGN_TIMEZONE_LABEL}.
           </p>
         </div>
         {canRefresh ? (
@@ -395,6 +418,26 @@ export default function ReportsPage() {
             onChange={(e) => updateFilters({ to: e.target.value, page: 0 })}
             className="h-9 w-[160px]"
           />
+        </div>
+        <div className="grid gap-1.5">
+          <Label>Group by</Label>
+          <div className="flex h-9 items-center rounded-md border p-0.5">
+            {(["stage", "campaign"] as const).map((g) => (
+              <button
+                key={g}
+                type="button"
+                onClick={() => updateFilters({ groupBy: g, page: 0 })}
+                className={
+                  "h-8 rounded px-3 text-sm capitalize transition-colors " +
+                  (filters.groupBy === g
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground")
+                }
+              >
+                {g}
+              </button>
+            ))}
+          </div>
         </div>
         <Input
           value={searchInput}

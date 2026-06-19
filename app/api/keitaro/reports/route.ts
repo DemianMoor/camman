@@ -9,6 +9,7 @@ import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-time
 import {
   addRowToFunnel,
   emptyFunnel,
+  mergeFunnel,
   withFunnelDerived,
   type FunnelTally,
 } from "@/lib/keitaro/funnel";
@@ -161,28 +162,83 @@ export async function GET(req: NextRequest) {
     addRowToFunnel(acc.tally, r);
   }
 
-  let data = [...byStage.values()].map((acc) => {
-    const stage_name =
-      acc.stage_label?.trim() ||
-      (acc.stage_number != null ? `Stage ${acc.stage_number}` : "Stage");
-    return {
-      stage_id: acc.stage_id,
-      campaign_id: acc.campaign_id,
-      campaign_name: acc.campaign_name,
-      stage_number: acc.stage_number,
-      stage_name,
-      stage_tracking_id: acc.stage_tracking_id,
-      opt_outs: acc.opt_outs,
-      ...withFunnelDerived(acc.tally),
-    };
-  });
+  // Group-by: per-stage rows (default) or campaign rollups. Campaign rows fold
+  // every stage of a campaign into one funnel (opt-outs summed across stages).
+  const groupByCampaign = (sp.get("groupBy") ?? "stage") === "campaign";
+
+  type OutRow = {
+    stage_id: number | null;
+    campaign_id: number;
+    campaign_name: string;
+    stage_number: number | null;
+    stage_name: string | null;
+    stage_tracking_id: string | null;
+    stage_count: number | null; // # stages folded (campaign rows only)
+    opt_outs: number;
+  } & ReturnType<typeof withFunnelDerived>;
+
+  let data: OutRow[];
+  if (groupByCampaign) {
+    interface CampAcc {
+      campaign_id: number;
+      campaign_name: string;
+      stage_count: number;
+      opt_outs: number;
+      tally: FunnelTally;
+    }
+    const byCampaign = new Map<number, CampAcc>();
+    for (const acc of byStage.values()) {
+      let c = byCampaign.get(acc.campaign_id);
+      if (!c) {
+        c = {
+          campaign_id: acc.campaign_id,
+          campaign_name: acc.campaign_name,
+          stage_count: 0,
+          opt_outs: 0,
+          tally: emptyFunnel(),
+        };
+        byCampaign.set(acc.campaign_id, c);
+      }
+      c.stage_count += 1;
+      c.opt_outs += acc.opt_outs;
+      mergeFunnel(c.tally, acc.tally);
+    }
+    data = [...byCampaign.values()].map((c) => ({
+      stage_id: null,
+      campaign_id: c.campaign_id,
+      campaign_name: c.campaign_name,
+      stage_number: null,
+      stage_name: null,
+      stage_tracking_id: null,
+      stage_count: c.stage_count,
+      opt_outs: c.opt_outs,
+      ...withFunnelDerived(c.tally),
+    }));
+  } else {
+    data = [...byStage.values()].map((acc) => {
+      const stage_name =
+        acc.stage_label?.trim() ||
+        (acc.stage_number != null ? `Stage ${acc.stage_number}` : "Stage");
+      return {
+        stage_id: acc.stage_id,
+        campaign_id: acc.campaign_id,
+        campaign_name: acc.campaign_name,
+        stage_number: acc.stage_number,
+        stage_name,
+        stage_tracking_id: acc.stage_tracking_id,
+        stage_count: null,
+        opt_outs: acc.opt_outs,
+        ...withFunnelDerived(acc.tally),
+      };
+    });
+  }
 
   if (search) {
     data = data.filter(
       (d) =>
         d.campaign_name.toLowerCase().includes(search) ||
-        d.stage_name.toLowerCase().includes(search) ||
-        d.stage_tracking_id.toLowerCase().includes(search),
+        (d.stage_name?.toLowerCase().includes(search) ?? false) ||
+        (d.stage_tracking_id?.toLowerCase().includes(search) ?? false),
     );
   }
 
@@ -195,7 +251,9 @@ export async function GET(req: NextRequest) {
         (a[sortBy as keyof typeof a] as number) -
         (b[sortBy as keyof typeof b] as number);
     }
-    if (cmp === 0) cmp = a.stage_id - b.stage_id; // stable tiebreak
+    // Stable tiebreak: stage_id when present, else campaign_id (campaign rows).
+    if (cmp === 0)
+      cmp = (a.stage_id ?? a.campaign_id) - (b.stage_id ?? b.campaign_id);
     return sortDir === "asc" ? cmp : -cmp;
   });
 

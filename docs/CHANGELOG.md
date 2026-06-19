@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-19 — Reports: group by Stage or Campaign (sales per campaign) — docs: 04/keitaro-poll, CHANGELOG
+- `/reports` already showed per-stage Sales; added a **Group by: Stage / Campaign** toggle so the funnel (incl. **sales**) can be read per campaign. API gains a `groupBy` param ([app/api/keitaro/reports/route.ts](../app/api/keitaro/reports/route.ts)): campaign rollups fold every stage of a campaign into one row (clickers/redirect/sales/revenue/cost summed via new `mergeFunnel` in [lib/keitaro/funnel.ts](../lib/keitaro/funnel.ts), opt-outs summed across the campaign's stages — captured once per stage so no per-day double-count, rates re-derived), carrying `stage_count` instead of stage fields. Page shows a `Stages` count column in campaign mode. Verified rollup sums on live data; typecheck clean. (Sales still 0 — Keitaro reports none, see prior entry — but now visible at both granularities.)
+
 ## 2026-06-19 — Stage Results column shows Checkout + Sales; Keitaro 0-sales investigated — docs: 04/keitaro-poll, CHANGELOG
 - Per-stage **Results** column on the campaigns detail page now renders `Clicks · Checkout · Sales · CTR · OptOut` (was `Clicks · CTR · OptOut`) — surfacing the already-Keitaro-fed `checkout_click_count` and `sales_count` ([app/(protected)/campaigns/[id]/page.tsx](../app/(protected)/campaigns/[id]/page.tsx)). No new data source; display only.
 - Force-synced the Keitaro `*/5` aggregate poll (fetched 143, upserted 108, no errors) — data current.

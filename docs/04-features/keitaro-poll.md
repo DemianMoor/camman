@@ -41,7 +41,21 @@ panel (SMS sent · Delivered · **Opt-outs** · **Clickers** · Scrubbed · Boun
 **Checkout Clicks** · **Sales** · Total Cost) reflects Keitaro + TextHub
 automatically; only SMS/Delivered/Scrubbed/Bounced/Total Cost remain
 manual/CSV-owned. Best-effort: a sync failure never invalidates the committed
-upserts — it re-syncs next poll.
+upserts — it re-syncs next poll. The campaigns detail page's compact per-stage
+**Results** column also surfaces these: `Clicks · Checkout · Sales · CTR · OptOut`
+([app/(protected)/campaigns/[id]/page.tsx](../../app/(protected)/campaigns/[id]/page.tsx)).
+
+> **Operational reality (2026-06-19): the network fires only `lead` postbacks.**
+> A direct Keitaro probe over Jun 1–19 returned 11 conversions, **all status
+> `lead`** ($668 revenue), and **zero `sale`** of any kind (checked with no status
+> filter — there are no hidden `deposit`/`approved` rows). So `sales_count` reads
+> 0 not from a bug but because Keitaro has no sale-status conversions; the payable
+> conversions arrive as `lead` and land in **Checkout Clicks** (`leads → checkouts
+> → checkout_click_count`). To make "Sales" populate, the affiliate network's
+> postback must fire `status=sale` (a Keitaro/network-side config change), or the
+> business can treat the `lead`/Checkout number as the conversion. Our mapping
+> (`leads`→checkout, `sales`→sales, conversions/log statuses `lead|sale|rejected`)
+> is correct and unchanged.
 
 ## 2b. Visit vs Offer Redirect classification (Step 5b)
 Two kinds of Keitaro campaign fire clicks for the **same** `sub_id_3` (stage):

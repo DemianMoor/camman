@@ -2,6 +2,11 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-19 — Stage Results column shows Checkout + Sales; Keitaro 0-sales investigated — docs: 04/keitaro-poll, CHANGELOG
+- Per-stage **Results** column on the campaigns detail page now renders `Clicks · Checkout · Sales · CTR · OptOut` (was `Clicks · CTR · OptOut`) — surfacing the already-Keitaro-fed `checkout_click_count` and `sales_count` ([app/(protected)/campaigns/[id]/page.tsx](../app/(protected)/campaigns/[id]/page.tsx)). No new data source; display only.
+- Force-synced the Keitaro `*/5` aggregate poll (fetched 143, upserted 108, no errors) — data current.
+- **Investigated why `sales_count` is 0 everywhere:** probed Keitaro directly with no status filter (Jun 1–19) → 11 conversions, ALL status `lead` ($668), zero `sale`/`deposit`/`approved`. Not a mapping bug — the network fires only `lead` postbacks, so payable conversions land in **Checkout Clicks**, and Sales stays 0 until the network sends `status=sale` (Keitaro/network-side config). Documented as an operational note in [keitaro-poll.md](04-features/keitaro-poll.md).
+
 ## 2026-06-19 — Backfill: sync `opt_out_count` display figure to inbound STOPs — docs: CHANGELOG
 - The earlier attribution backfill corrected `inbound_opt_out_count` but left `opt_out_count` (the figure the per-stage Results column shows) stale on tz-bug-affected stages. The live opt-out poller mirrors `opt_out_count = inbound_opt_out_count`, so most stages self-healed on their next STOP; [`scripts/backfill-optout-attributions.ts`](../scripts/backfill-optout-attributions.ts) now also mirrors **upward only** (`WHERE inbound_opt_out_count > opt_out_count`) to catch stages that won't get another STOP — never reduces a stage whose `opt_out_count` is higher (CSV/manual results share the column). Ran on prod: 9 stages synced; stage `8_62_061826_1_s2_c122` Results opt-out 0 → 122. No drift remains.
 

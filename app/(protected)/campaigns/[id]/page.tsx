@@ -1015,21 +1015,24 @@ export default function CampaignDetailPage() {
             delivered_count: delivered,
             opt_out_count: oo,
             click_count: cl,
+            checkout_click_count: chk,
+            sales_count: sales,
           } = row.original;
           // Results are considered entered (manually or imported) once any
-          // send/outcome counter is non-zero.
+          // send/outcome counter is non-zero. Clicks/checkout/sales auto-fill
+          // from the Keitaro */5 poll; opt-out from the inbound-STOP poll.
           const hasResults =
-            sms > 0 || delivered > 0 || oo > 0 || cl > 0;
+            sms > 0 || delivered > 0 || oo > 0 || cl > 0 || chk > 0 || sales > 0;
           if (!hasResults)
             return <span className="text-muted-foreground">—</span>;
-          const clicks = cl;
           // Rate denominator: delivered, falling back to SMS sent.
           const denom = delivered > 0 ? delivered : sms;
           const pct = (n: number) =>
             denom > 0 ? `${((n / denom) * 100).toFixed(1)}%` : "—";
           return (
             <span className="font-mono text-xs tabular-nums">
-              Clicks: {clicks} · CTR: {pct(clicks)} · OptOut: {pct(oo)}
+              Clicks: {cl} · Checkout: {chk} · Sales: {sales} · CTR: {pct(cl)} ·
+              OptOut: {pct(oo)}
             </span>
           );
         },

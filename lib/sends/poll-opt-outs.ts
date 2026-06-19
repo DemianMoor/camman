@@ -1,3 +1,4 @@
+import { fromZonedTime } from "date-fns-tz";
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
@@ -35,27 +36,30 @@ import { validatePhone } from "@/lib/phone-validation";
 // recently-used campaigns.
 export const OPT_OUT_ATTRIBUTION_WINDOW_HOURS = 72;
 
-// TextHub stamps inbound `received_at` in a fixed UTC−6 wall clock with no zone
-// suffix (empirically confirmed 2026-06-19: our own ingest clock ran a rock-
-// solid ~6h ahead of the stamped value across 132 messages). Earlier this was
-// (mis)parsed as UTC, which put the anchor 6h in the past and tripped the
-// attribution upper bound (`sent_at <= anchor + 5min`) — a campaign's own STOP
-// replies looked like they arrived *before* the send, so they were dropped and
-// the stage's opt-out counter read 0. Apply the offset to recover true UTC.
-export const TEXTHUB_RECEIVED_AT_UTC_OFFSET_HOURS = -6;
+// TextHub stamps inbound `received_at` in US Mountain Time with no zone suffix
+// (operator-confirmed; empirically our own ingest clock ran ~6h ahead of the
+// stamped value across 132 messages on 2026-06-19 — i.e. MDT/UTC−6 during DST).
+// Mountain observes DST, so it's UTC−6 in summer and UTC−7 in winter; using the
+// IANA zone resolves the offset per-date automatically (a fixed offset would be
+// 1h wrong half the year). Earlier this was (mis)parsed as UTC, which put the
+// attribution anchor up to 7h in the past and tripped the upper bound
+// (`sent_at <= anchor + 5min`) — a campaign's own STOP replies looked like they
+// arrived *before* the send, so they were dropped and the stage counter read 0.
+export const TEXTHUB_RECEIVED_AT_TIMEZONE = "America/Denver";
 
-// TextHub stamps inbound messages "YYYY-MM-DD HH:MM:SS" in UTC−6 (see above).
-// Shift to true UTC for a stable, deterministic window anchor. NULL when
-// unparseable (the caller falls back to the poll time). Inputs that already
-// carry a zone (ISO 8601 with offset) are honored as-is.
+// TextHub stamps inbound messages "YYYY-MM-DD HH:MM:SS" as Mountain wall-clock
+// (see above). Interpret it in TEXTHUB_RECEIVED_AT_TIMEZONE → true UTC for a
+// stable, deterministic window anchor. NULL when unparseable (the caller falls
+// back to the poll time). Inputs that already carry a zone (ISO 8601 with
+// offset) are honored as-is.
 export function parseProviderReceivedAt(raw: string | null): Date | null {
   if (!raw) return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(raw.trim());
   if (m) {
     const [, Y, Mo, D, H, Mi, S] = m;
-    // UTC = local − offset; offset is −6, so add 6h. Date.UTC carries overflow.
-    const d = new Date(
-      Date.UTC(+Y, +Mo - 1, +D, +H - TEXTHUB_RECEIVED_AT_UTC_OFFSET_HOURS, +Mi, +S),
+    const d = fromZonedTime(
+      `${Y}-${Mo}-${D}T${H}:${Mi}:${S}`,
+      TEXTHUB_RECEIVED_AT_TIMEZONE,
     );
     return Number.isNaN(d.getTime()) ? null : d;
   }

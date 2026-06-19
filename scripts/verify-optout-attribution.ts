@@ -21,12 +21,17 @@ function check(name: string, cond: boolean) {
 
 async function main() {
   console.log("--- provider received_at parsing ---");
-  // TextHub's shape "YYYY-MM-DD HH:MM:SS" is UTC−6; parser shifts +6h to UTC.
+  // TextHub's shape "YYYY-MM-DD HH:MM:SS" is Mountain wall-clock (America/Denver,
+  // DST-aware): MDT/−6 in summer, MST/−7 in winter.
   const d = parseProviderReceivedAt("2026-06-04 03:54:10");
   check("parses TextHub timestamp", d !== null);
   check(
-    "shifts UTC−6 wall clock to true UTC (+6h)",
+    "summer (MDT, −6) → +6h to UTC",
     d?.toISOString() === "2026-06-04T09:54:10.000Z",
+  );
+  check(
+    "winter (MST, −7) → +7h to UTC (DST handled)",
+    parseProviderReceivedAt("2026-01-15 03:54:10")?.toISOString() === "2026-01-15T10:54:10.000Z",
   );
   check("ISO 8601 with offset honored as-is (no shift)", parseProviderReceivedAt("2026-06-04T03:54:10Z")?.toISOString() === "2026-06-04T03:54:10.000Z");
   check("null input ⇒ null", parseProviderReceivedAt(null) === null);

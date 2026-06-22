@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-22 — Stage Total Cost only calculates after the send — docs: 03-data-model, 04/campaigns-stages-creatives, 07-conventions, CHANGELOG
+- **Rule.** The auto Total Cost now stays `$0` until the stage has been sent — it no longer computes at creation time. "Sent" = `sent_at IS NOT NULL` (an API fire or a "Mark as sent" click) **OR** `sms_count > 0` (hand-entered results imply the send happened). The gate lives in the shared SQL recompute ([lib/stages/total-cost.ts](../lib/stages/total-cost.ts)) and is mirrored in the manual-results form preview ([components/campaigns/manual-results-form.tsx](../components/campaigns/manual-results-form.tsx), new `isSent` prop) and the backfill ([scripts/backfill-stage-total-cost.ts](../scripts/backfill-stage-total-cost.ts), re-run: 6 stages corrected, 0 mismatches). No schema change.
+
 ## 2026-06-22 — Fix: stage Total Cost counts real sends, not just sms_count — docs: 03-data-model, 04/campaigns-stages-creatives, 07-conventions, CHANGELOG
 - **Bug.** The auto Total Cost used `cost_per_sms × (sms_count + opt_out_count)`, but API/tracked stages leave `sms_count = 0` (the dispatched messages live in `stage_sends`), so a stage that sent 9.7k messages costed on its 84 opt-outs alone (`$0.84` instead of `$97.76`). Now `sends = GREATEST(sms_count, accepted stage_sends)` — the count of provider-accepted rows (`status='sent'`) for tracked stages, `sms_count` for manual/CSV stages ([lib/stages/total-cost.ts](../lib/stages/total-cost.ts)). The manual-results route now routes its auto path through the same SQL recompute (single source of truth); the form's live preview takes a `sentCount` so it matches. Re-ran [scripts/backfill-stage-total-cost.ts](../scripts/backfill-stage-total-cost.ts) (42 stages corrected, 0 mismatches remaining).
 

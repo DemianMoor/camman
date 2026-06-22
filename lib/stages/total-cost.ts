@@ -17,6 +17,11 @@ import type { db } from "@/db/client";
 // the operator-entered tally in `sms_count`. GREATEST(sms_count, sent_count)
 // resolves both without double-counting.
 //
+// Cost is only calculated once the stage has been SENT — not at creation time.
+// "Sent" means `sent_at IS NOT NULL` (an API fire or a "Mark as sent" click) OR
+// `sms_count > 0` (hand-entered results imply the send happened, even if the
+// stage was never marked sent). Before that, total_cost stays 0.
+//
 // This auto formula owns total_cost only while campaign_stages.total_cost_manual
 // is false. When true — an operator override or a CSV-imported provider cost —
 // the stored value is authoritative and the recompute below is a no-op.
@@ -46,7 +51,9 @@ export async function recomputeStageTotalCost(
 ): Promise<void> {
   await exec.execute(sql`
     UPDATE campaign_stages cs
-    SET total_cost = COALESCE(
+    SET total_cost = CASE
+      WHEN cs.sent_at IS NOT NULL OR cs.sms_count > 0 THEN
+        COALESCE(
           (SELECT pp.cost_per_sms FROM provider_phones pp
            WHERE pp.id = cs.provider_phone_id),
           0
@@ -57,6 +64,8 @@ export async function recomputeStageTotalCost(
              WHERE ss.stage_id = cs.id AND ss.status = 'sent')
           ) + cs.opt_out_count
         )
+      ELSE 0
+    END
     WHERE cs.id = ${stageId}
       AND cs.total_cost_manual = false
   `);

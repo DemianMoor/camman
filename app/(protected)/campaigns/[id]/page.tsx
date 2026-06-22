@@ -2140,6 +2140,9 @@ export default function CampaignDetailPage() {
             // their dispatched count here, not in sms_count). Drives the auto
             // cost preview so it matches what the server recomputes.
             sentCount={manualStage.send_counts?.sent ?? 0}
+            // Whether the stage has actually been sent — cost only calculates
+            // after the send (sent_at), or once results are hand-entered.
+            isSent={manualStage.sent_at != null}
             offerPayoutCpa={
               manualStage.offer?.payout_cpa != null
                 ? Number(manualStage.offer.payout_cpa)

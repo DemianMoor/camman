@@ -46,6 +46,9 @@ export interface ManualResultsFormProps {
   // API/tracked stages this — not the operator's sms_count — is the dispatched
   // count, so the auto cost preview uses GREATEST(sms_count, sentCount).
   sentCount?: number;
+  // Whether the stage has been sent (sent_at set). Cost only calculates after
+  // the send; a hand-entered sms_count > 0 also unlocks it (results = sent).
+  isSent?: boolean;
   // Current offer CPA payout, used for a live revenue/ROI preview. The saved
   // value is snapshotted server-side at save time. Null when the campaign has
   // no offer or the offer has no CPA payout.
@@ -91,6 +94,7 @@ export function ManualResultsForm({
   initial,
   costPerSms,
   sentCount = 0,
+  isSent = false,
   offerPayoutCpa,
   onClose,
   onComplete,
@@ -118,11 +122,15 @@ export function ManualResultsForm({
   const [autoCost, setAutoCost] = useState<boolean>(() => !initial.total_cost_manual);
 
   // Live auto value: cost_per_sms × (sends + opt-outs). Mirrors the server,
-  // including its GREATEST(sms_count, real accepted sends) sends source.
+  // including its GREATEST(sms_count, real accepted sends) sends source and the
+  // "only after the send" gate: $0 until the stage is sent (sent_at) or results
+  // are hand-entered (sms_count > 0).
   const perSms = costPerSms ?? 0;
   const effectiveSends = Math.max(toInt(counts.sms_count), sentCount);
-  const autoTotalCost =
-    perSms * (effectiveSends + toInt(counts.opt_out_count));
+  const costUnlocked = isSent || toInt(counts.sms_count) > 0;
+  const autoTotalCost = costUnlocked
+    ? perSms * (effectiveSends + toInt(counts.opt_out_count))
+    : 0;
   // The cost that drives the save + the revenue/ROI preview.
   const effectiveCost = autoCost ? autoTotalCost : toMoney(totalCost);
 
@@ -222,14 +230,16 @@ export function ManualResultsForm({
             Auto-calculate total cost
           </Label>
           <p className="text-xs text-muted-foreground">
-            {costPerSms != null ? (
+            {costPerSms == null ? (
+              "No phone assigned to this stage — assign one with a cost per SMS, or turn this off to type a cost."
+            ) : !costUnlocked ? (
+              "Cost calculates after the stage is sent — enter the SMS-sent count (or mark the stage sent) to compute it."
+            ) : (
               <>
                 ${perSms.toFixed(4)}/SMS × ({effectiveSends.toLocaleString()}{" "}
                 sent + {toInt(counts.opt_out_count)} opt-outs) ={" "}
                 <span className="font-mono">${autoTotalCost.toFixed(2)}</span>
               </>
-            ) : (
-              "No phone assigned to this stage — assign one with a cost per SMS, or turn this off to type a cost."
             )}
           </p>
         </div>

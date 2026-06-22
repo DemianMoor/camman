@@ -30,6 +30,7 @@ type ReportRow = {
   total_sent: number;
   opt_out_rate: number;
   clickers: number;
+  click_rate: number;
   offer_redirect: number;
   redirect_rate: number;
   sales: number;
@@ -302,6 +303,16 @@ export default function ReportsPage() {
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums">{fmtInt(row.original.clickers)}</span>
+        ),
+      },
+      {
+        id: "click_rate",
+        header: "CR, %",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span className="tabular-nums text-muted-foreground">
+            {fmtPct(row.original.click_rate)}
+          </span>
         ),
       },
       {

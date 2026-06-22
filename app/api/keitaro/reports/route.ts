@@ -47,12 +47,14 @@ const SORTABLE = new Set([
   "opt_outs",
   "total_sent",
   "opt_out_rate",
+  "click_rate",
 ]);
 
-// Opt-out rate as a fraction (rendered as a % client-side, like redirect_rate).
-// 0 when nothing was sent — avoids divide-by-zero.
-function optOutRate(optOuts: number, totalSent: number): number {
-  return totalSent > 0 ? optOuts / totalSent : 0;
+// A fraction of total sent (rendered as a % client-side, like redirect_rate).
+// 0 when nothing was sent — avoids divide-by-zero. Used for both the opt-out
+// rate and the click-through rate (CR = clickers / total_sent).
+function rateOfSent(numerator: number, totalSent: number): number {
+  return totalSent > 0 ? numerator / totalSent : 0;
 }
 
 // Next calendar day for a YYYY-MM-DD string (date-only UTC arithmetic — no time
@@ -315,6 +317,7 @@ export async function GET(req: NextRequest) {
     opt_outs: number;
     total_sent: number;
     opt_out_rate: number; // opt_outs / total_sent (fraction)
+    click_rate: number; // clickers / total_sent (fraction) — CR
   } & ReturnType<typeof withFunnelDerived>;
 
   let data: OutRow[];
@@ -356,7 +359,8 @@ export async function GET(req: NextRequest) {
       stage_count: c.stage_count,
       opt_outs: c.opt_outs,
       total_sent: c.total_sent,
-      opt_out_rate: optOutRate(c.opt_outs, c.total_sent),
+      opt_out_rate: rateOfSent(c.opt_outs, c.total_sent),
+      click_rate: rateOfSent(c.tally.visit_clicks_clean, c.total_sent),
       ...withFunnelDerived(c.tally),
     }));
   } else {
@@ -374,7 +378,8 @@ export async function GET(req: NextRequest) {
         stage_count: null,
         opt_outs: acc.opt_outs,
         total_sent: acc.total_sent,
-        opt_out_rate: optOutRate(acc.opt_outs, acc.total_sent),
+        opt_out_rate: rateOfSent(acc.opt_outs, acc.total_sent),
+        click_rate: rateOfSent(acc.tally.visit_clicks_clean, acc.total_sent),
         ...withFunnelDerived(acc.tally),
       };
     });
@@ -416,7 +421,8 @@ export async function GET(req: NextRequest) {
       ...withFunnelDerived(grand),
       opt_outs: grandOptOuts,
       total_sent: grandTotalSent,
-      opt_out_rate: optOutRate(grandOptOuts, grandTotalSent),
+      opt_out_rate: rateOfSent(grandOptOuts, grandTotalSent),
+      click_rate: rateOfSent(grand.visit_clicks_clean, grandTotalSent),
     },
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });

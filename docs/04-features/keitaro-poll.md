@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-06-21_
+_Last updated: 2026-06-22_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -193,6 +193,8 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
     `stage_sends` rows), so no double-counting.
   - `opt_out_rate` = `opt_outs / total_sent` (a fraction, 0 when nothing was
     sent), rendered as a %.
+  - `click_rate` (CR) = `clickers / total_sent` (a fraction, 0 when nothing was
+    sent), rendered as a %. Shares the `rateOfSent` helper with `opt_out_rate`.
   - Clickers/Offer Redirect/Revenue/Cost are the Keitaro funnel, bounded by
     `stat_date`. **Sales** = `max(Keitaro conversions in range, the stage's manual
     `sales_count`)`, with the manual side counted only when its `sent_at` lands in
@@ -215,8 +217,8 @@ A dedicated cross-campaign page ([`app/(protected)/reports/page.tsx`](../../app/
 showing the funnel: Campaign · Stage · **Total Sent** (per-recipient `stage_sends`
 in range for tracked campaigns; the stage's `sms_count` for manual campaigns when
 `sent_at` is in range) · **Opt-outs** (STOPs credited to the stage in range) ·
-**OptOut, %** (opt-outs ÷ total sent) · **Clickers** ·
-**Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
+**OptOut, %** (opt-outs ÷ total sent) · **Clickers** · **CR, %** (clickers ÷ total
+sent) · **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
 with a date-range filter, search, sortable columns, grand-total stat cards
 (Clickers · Offer Redirect · Sales · Revenue · Cost · Profit · **Avg Opt-out** —
 the period's aggregate opt-out rate, grand opt-outs ÷ grand total sent), and a

@@ -42,6 +42,10 @@ export interface ManualResultsFormProps {
   // Total Cost. Null when no phone is assigned ⇒ auto Total Cost is $0 and the
   // operator is nudged to type a value (or assign a phone).
   costPerSms?: number | null;
+  // Real messages accepted by the provider (stage_sends status='sent'). For
+  // API/tracked stages this — not the operator's sms_count — is the dispatched
+  // count, so the auto cost preview uses GREATEST(sms_count, sentCount).
+  sentCount?: number;
   // Current offer CPA payout, used for a live revenue/ROI preview. The saved
   // value is snapshotted server-side at save time. Null when the campaign has
   // no offer or the offer has no CPA payout.
@@ -86,6 +90,7 @@ export function ManualResultsForm({
   stageId,
   initial,
   costPerSms,
+  sentCount = 0,
   offerPayoutCpa,
   onClose,
   onComplete,
@@ -112,10 +117,12 @@ export function ManualResultsForm({
   // (e.g. a provider that bills differently from cost-per-SMS).
   const [autoCost, setAutoCost] = useState<boolean>(() => !initial.total_cost_manual);
 
-  // Live auto value: cost_per_sms × (sends + opt-outs). Mirrors the server.
+  // Live auto value: cost_per_sms × (sends + opt-outs). Mirrors the server,
+  // including its GREATEST(sms_count, real accepted sends) sends source.
   const perSms = costPerSms ?? 0;
+  const effectiveSends = Math.max(toInt(counts.sms_count), sentCount);
   const autoTotalCost =
-    perSms * (toInt(counts.sms_count) + toInt(counts.opt_out_count));
+    perSms * (effectiveSends + toInt(counts.opt_out_count));
   // The cost that drives the save + the revenue/ROI preview.
   const effectiveCost = autoCost ? autoTotalCost : toMoney(totalCost);
 
@@ -217,8 +224,8 @@ export function ManualResultsForm({
           <p className="text-xs text-muted-foreground">
             {costPerSms != null ? (
               <>
-                ${perSms.toFixed(4)}/SMS × ({toInt(counts.sms_count)} sent +{" "}
-                {toInt(counts.opt_out_count)} opt-outs) ={" "}
+                ${perSms.toFixed(4)}/SMS × ({effectiveSends.toLocaleString()}{" "}
+                sent + {toInt(counts.opt_out_count)} opt-outs) ={" "}
                 <span className="font-mono">${autoTotalCost.toFixed(2)}</span>
               </>
             ) : (

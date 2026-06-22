@@ -32,10 +32,19 @@ async function main() {
   const db = drizzle(pg);
 
   // The auto value expressed once, reused for the preview and the UPDATE.
+  // Mirrors lib/stages/total-cost.ts recomputeStageTotalCost: "sends" is
+  // GREATEST(sms_count, real provider-accepted stage_sends) so API/tracked
+  // stages (sms_count = 0) cost on their dispatched messages, not just opt-outs.
   const autoCost = drizzleSql`COALESCE(
     (SELECT pp.cost_per_sms FROM provider_phones pp WHERE pp.id = cs.provider_phone_id),
     0
-  ) * (cs.sms_count + cs.opt_out_count)`;
+  ) * (
+    GREATEST(
+      cs.sms_count,
+      (SELECT count(*) FROM stage_sends ss
+       WHERE ss.stage_id = cs.id AND ss.status = 'sent')
+    ) + cs.opt_out_count
+  )`;
 
   try {
     const preview = (await db.execute(drizzleSql`

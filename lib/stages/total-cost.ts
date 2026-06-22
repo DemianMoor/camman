@@ -4,23 +4,32 @@ import type { db } from "@/db/client";
 
 // Stage Total Cost model.
 //
-// total_cost = cost_per_sms × (sms_count + opt_out_count), where cost_per_sms
-// comes from the stage's assigned provider phone (provider_phones.cost_per_sms;
-// 0 when no phone is assigned). The opt-out replies are billed like sends, so
-// they count toward the multiplier alongside sms_count.
+// total_cost = cost_per_sms × (sends + opt_out_count), where cost_per_sms comes
+// from the stage's assigned provider phone (provider_phones.cost_per_sms; 0 when
+// no phone is assigned). Opt-out replies are billed like sends, so they count
+// toward the multiplier alongside the sends.
+//
+// "sends" is the number of messages actually dispatched, which differs by stage
+// type: API/tracked stages materialize one stage_sends row per recipient and
+// `sms_count` stays 0, so the real count is the stage_sends rows accepted by the
+// provider (status='sent' — the same number the UI's "Submitted / accepted by
+// TextHub" badge shows). Manual/CSV stages have no stage_sends rows and carry
+// the operator-entered tally in `sms_count`. GREATEST(sms_count, sent_count)
+// resolves both without double-counting.
 //
 // This auto formula owns total_cost only while campaign_stages.total_cost_manual
 // is false. When true — an operator override or a CSV-imported provider cost —
 // the stored value is authoritative and the recompute below is a no-op.
 
-// Pure formula, used where the inputs are already in hand (the manual-results
-// route). Cost is in dollars (matches numeric(12,4) precision after rounding).
+// Pure formula, used for the manual-results form's live preview where the
+// effective sends are already resolved client-side. Cost is in dollars
+// (matches numeric(12,4) precision after rounding).
 export function stageTotalCost(
   costPerSms: number,
-  smsCount: number,
+  sends: number,
   optOutCount: number,
 ): number {
-  return costPerSms * (smsCount + optOutCount);
+  return costPerSms * (sends + optOutCount);
 }
 
 // Any drizzle executor — the top-level client or a transaction handle.
@@ -41,7 +50,13 @@ export async function recomputeStageTotalCost(
           (SELECT pp.cost_per_sms FROM provider_phones pp
            WHERE pp.id = cs.provider_phone_id),
           0
-        ) * (cs.sms_count + cs.opt_out_count)
+        ) * (
+          GREATEST(
+            cs.sms_count,
+            (SELECT count(*) FROM stage_sends ss
+             WHERE ss.stage_id = cs.id AND ss.status = 'sent')
+          ) + cs.opt_out_count
+        )
     WHERE cs.id = ${stageId}
       AND cs.total_cost_manual = false
   `);

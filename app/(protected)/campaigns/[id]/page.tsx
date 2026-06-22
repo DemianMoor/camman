@@ -2136,6 +2136,10 @@ export default function CampaignDetailPage() {
                 ? Number(manualStage.provider_phone.cost_per_sms)
                 : null
             }
+            // Real messages accepted by the provider (API/tracked stages keep
+            // their dispatched count here, not in sms_count). Drives the auto
+            // cost preview so it matches what the server recomputes.
+            sentCount={manualStage.send_counts?.sent ?? 0}
             offerPayoutCpa={
               manualStage.offer?.payout_cpa != null
                 ? Number(manualStage.offer.payout_cpa)

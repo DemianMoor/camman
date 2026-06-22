@@ -1382,6 +1382,13 @@ export const campaign_stages = pgTable(
       precision: 12,
       scale: 4,
     }),
+    // When false (default), total_cost is auto-derived as
+    // cost_per_sms × (sms_count + opt_out_count) using the stage's provider
+    // phone, and recomputed on every write that changes those inputs (manual
+    // results save, opt-out poller, provider-phone change). When true, the
+    // value is an operator override or a CSV-imported provider cost and the
+    // auto formula leaves it untouched. See lib/stages/total-cost.ts.
+    total_cost_manual: boolean("total_cost_manual").notNull().default(false),
     notes: text("notes"),
     // A/B split partitioning. Both NULL ⇒ stage targets the entire
     // qualifying audience. When set, split_index is 1..split_total and

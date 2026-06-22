@@ -6,6 +6,7 @@ import { notifyTelegram } from "@/lib/alerts/telegram";
 import { isOptOutKeyword } from "@/lib/sends/opt-out-keywords";
 import { fetchInbox as realFetchInbox, type FetchInboxResult } from "@/lib/sends/texthub-inbox";
 import { validatePhone } from "@/lib/phone-validation";
+import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 
 // Polls TextHub's inbox per credential and turns inbound STOP messages into
 // org-wide opt_outs. Idempotent: each TextHub message id is recorded once in
@@ -261,6 +262,10 @@ async function pollCredential(
                 opt_out_count = inbound_opt_out_count + 1
             WHERE id = ${mt.stage_id}
           `);
+          // Opt-outs are billed like sends, so a new STOP changes the auto
+          // Total Cost. Recompute from the (now bumped) counters + phone cost;
+          // a no-op for manually-overridden / CSV-imported stages.
+          await recomputeStageTotalCost(tx, mt.stage_id);
           if (mt.sent_at > latestSentAt) {
             latestSentAt = mt.sent_at;
             latestSendId = mt.stage_send_id;

@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
@@ -28,12 +29,19 @@ export interface ManualResultsValues {
   checkout_click_count: number;
   sales_count: number;
   total_cost: string;
+  // false ⇒ total_cost is auto-derived (cost_per_sms × (sends + opt-outs));
+  // true ⇒ the operator typed an explicit figure.
+  total_cost_manual: boolean;
 }
 
 export interface ManualResultsFormProps {
   campaignId: number;
   stageId: number;
   initial: ManualResultsValues;
+  // The stage's assigned provider-phone cost-per-SMS, used to auto-calculate
+  // Total Cost. Null when no phone is assigned ⇒ auto Total Cost is $0 and the
+  // operator is nudged to type a value (or assign a phone).
+  costPerSms?: number | null;
   // Current offer CPA payout, used for a live revenue/ROI preview. The saved
   // value is snapshotted server-side at save time. Null when the campaign has
   // no offer or the offer has no CPA payout.
@@ -77,6 +85,7 @@ export function ManualResultsForm({
   campaignId,
   stageId,
   initial,
+  costPerSms,
   offerPayoutCpa,
   onClose,
   onComplete,
@@ -99,6 +108,16 @@ export function ManualResultsForm({
     const n = Number(initial.total_cost);
     return Number.isFinite(n) && n !== 0 ? String(n) : "";
   });
+  // Auto Total Cost is the default; flip to manual to type an explicit figure
+  // (e.g. a provider that bills differently from cost-per-SMS).
+  const [autoCost, setAutoCost] = useState<boolean>(() => !initial.total_cost_manual);
+
+  // Live auto value: cost_per_sms × (sends + opt-outs). Mirrors the server.
+  const perSms = costPerSms ?? 0;
+  const autoTotalCost =
+    perSms * (toInt(counts.sms_count) + toInt(counts.opt_out_count));
+  // The cost that drives the save + the revenue/ROI preview.
+  const effectiveCost = autoCost ? autoTotalCost : toMoney(totalCost);
 
   async function handleSave() {
     const body = {
@@ -110,7 +129,10 @@ export function ManualResultsForm({
       bounced_count: toInt(counts.bounced_count),
       checkout_click_count: toInt(counts.checkout_click_count),
       sales_count: toInt(counts.sales_count),
-      total_cost: toMoney(totalCost),
+      // When auto, the server recomputes from the phone cost and ignores this
+      // value; we still send the preview figure for clarity.
+      total_cost: effectiveCost,
+      total_cost_manual: !autoCost,
     };
     const r = await saveApi.execute(
       `/api/campaigns/${campaignId}/stages/${stageId}/manual-results`,
@@ -176,8 +198,9 @@ export function ManualResultsForm({
               min={0}
               step="0.01"
               placeholder="0.00"
-              value={totalCost}
-              disabled={saveApi.isLoading}
+              // Auto mode shows the live derived figure and locks the field.
+              value={autoCost ? autoTotalCost.toFixed(2) : totalCost}
+              disabled={saveApi.isLoading || autoCost}
               onChange={(e) => setTotalCost(e.target.value)}
               className="pl-6"
             />
@@ -185,11 +208,37 @@ export function ManualResultsForm({
         </div>
       </div>
 
+      {/* Auto-calculate toggle. cost_per_sms × (SMS sent + Opt-outs). */}
+      <div className="flex items-start justify-between gap-3 rounded-md border bg-muted/30 p-3">
+        <div className="grid gap-0.5">
+          <Label htmlFor="manual-auto-cost" className="text-sm">
+            Auto-calculate total cost
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            {costPerSms != null ? (
+              <>
+                ${perSms.toFixed(4)}/SMS × ({toInt(counts.sms_count)} sent +{" "}
+                {toInt(counts.opt_out_count)} opt-outs) ={" "}
+                <span className="font-mono">${autoTotalCost.toFixed(2)}</span>
+              </>
+            ) : (
+              "No phone assigned to this stage — assign one with a cost per SMS, or turn this off to type a cost."
+            )}
+          </p>
+        </div>
+        <Switch
+          id="manual-auto-cost"
+          checked={autoCost}
+          disabled={saveApi.isLoading}
+          onCheckedChange={setAutoCost}
+        />
+      </div>
+
       {toInt(counts.sales_count) > 0 ? (
         <RevenuePreview
           sales={toInt(counts.sales_count)}
           payoutEach={offerPayoutCpa ?? null}
-          cost={toMoney(totalCost)}
+          cost={effectiveCost}
         />
       ) : null}
 

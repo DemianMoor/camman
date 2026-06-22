@@ -24,6 +24,7 @@ import {
   type ParsedRow,
 } from "@/lib/imports/outcome";
 import { can } from "@/lib/permissions";
+import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 import {
   mappingColumnsSchema,
   statusValueMapSchema,
@@ -557,23 +558,41 @@ export async function POST(
     //    for tracked stages), so a CSV contribution here is authoritative only
     //    until the next poll for stages that have upstream data.
     if (processedRows > 0) {
+      const stageUpdate: Record<string, unknown> = {
+        sms_count: drizzleSql`${campaign_stages.sms_count} + ${processedRows}`,
+        delivered_count: drizzleSql`${campaign_stages.delivered_count} + ${deliveredAdded}`,
+        opt_out_count: drizzleSql`${campaign_stages.opt_out_count} + ${optoutsAdded}`,
+        click_count: drizzleSql`${campaign_stages.click_count} + ${clickersAdded}`,
+        scrubbed_count: drizzleSql`${campaign_stages.scrubbed_count} + ${scrubbedAdded}`,
+        bounced_count: drizzleSql`${campaign_stages.bounced_count} + ${bouncedAdded}`,
+      };
+      // Total Cost ownership: an import that carries a real cost is the
+      // provider's actual billed figure, so it takes the field manual.
+      // REPLACE a previously auto-derived (synthetic cost_per_sms) value on the
+      // first cost-bearing import; ACCUMULATE across repeated imports of an
+      // already-manual stage. A zero-cost import doesn't seize the field —
+      // the stage stays in auto mode and its derived cost is refreshed below
+      // against the just-updated sms_count / opt_out_count.
+      if (totalCostAdded > 0) {
+        stageUpdate.total_cost = drizzleSql`CASE WHEN ${campaign_stages.total_cost_manual}
+            THEN ${campaign_stages.total_cost} + ${String(totalCostAdded)}
+            ELSE ${String(totalCostAdded)} END`;
+        stageUpdate.total_cost_manual = true;
+      }
       await tx
         .update(campaign_stages)
-        .set({
-          sms_count: drizzleSql`${campaign_stages.sms_count} + ${processedRows}`,
-          delivered_count: drizzleSql`${campaign_stages.delivered_count} + ${deliveredAdded}`,
-          opt_out_count: drizzleSql`${campaign_stages.opt_out_count} + ${optoutsAdded}`,
-          click_count: drizzleSql`${campaign_stages.click_count} + ${clickersAdded}`,
-          scrubbed_count: drizzleSql`${campaign_stages.scrubbed_count} + ${scrubbedAdded}`,
-          bounced_count: drizzleSql`${campaign_stages.bounced_count} + ${bouncedAdded}`,
-          total_cost: drizzleSql`${campaign_stages.total_cost} + ${String(totalCostAdded)}`,
-        })
+        .set(stageUpdate)
         .where(
           and(
             eq(campaign_stages.id, sid),
             eq(campaign_stages.org_id, orgId),
           ),
         );
+      // Refresh the derived cost for stages still in auto mode (no-op once the
+      // stage is manual / just became manual above).
+      if (totalCostAdded <= 0) {
+        await recomputeStageTotalCost(tx, sid);
+      }
     }
 
     await logCampaignEvent(tx, {

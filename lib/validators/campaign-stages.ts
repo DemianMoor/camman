@@ -116,7 +116,11 @@ export const stageManualResultsSchema = z.object({
   bounced_count: z.number().int().nonnegative(),
   checkout_click_count: z.number().int().nonnegative(),
   sales_count: z.number().int().nonnegative(),
+  // total_cost is only honored when total_cost_manual is true (an explicit
+  // operator override). Otherwise the server derives it from the stage's
+  // provider-phone cost × (sms_count + opt_out_count) and ignores this value.
   total_cost: z.number().nonnegative().finite(),
+  total_cost_manual: z.boolean().default(false),
   // sales_payout_each is NOT accepted from the client — the server snapshots
   // it from the campaign's offer payout to keep revenue trustworthy.
 });

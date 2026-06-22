@@ -6,11 +6,13 @@ import {
   campaign_stages,
   campaigns,
   offers,
+  provider_phones,
   stage_manual_sales,
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { stageTotalCost } from "@/lib/stages/total-cost";
 import { stageManualResultsSchema } from "@/lib/validators/campaign-stages";
 
 function parseId(idParam: string) {
@@ -68,10 +70,17 @@ export async function POST(
       sales_count: campaign_stages.sales_count,
       sales_payout_each: campaign_stages.sales_payout_each,
       offer_payout_cpa: offers.payout_cpa,
+      // Provider-phone cost-per-SMS drives the auto Total Cost. NULL when no
+      // phone is assigned (or the FK dangles) ⇒ treated as 0 below.
+      cost_per_sms: provider_phones.cost_per_sms,
     })
     .from(campaign_stages)
     .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
     .leftJoin(offers, eq(offers.id, campaigns.offer_id))
+    .leftJoin(
+      provider_phones,
+      eq(provider_phones.id, campaign_stages.provider_phone_id),
+    )
     .where(
       and(
         eq(campaign_stages.id, sid),
@@ -109,6 +118,15 @@ export async function POST(
   // SUM(delta) per stage stays equal to sales_count. Both writes in one tx.
   const salesDelta = input.sales_count - owns[0].sales_count;
 
+  // Total Cost: an explicit override (total_cost_manual) stores the supplied
+  // figure verbatim; otherwise derive it from the provider-phone cost so the
+  // headline cost tracks cost_per_sms × (sends + opt-outs). The flag is
+  // persisted so the opt-out poller knows whether it may recompute later.
+  const costPerSms = Number(owns[0].cost_per_sms ?? 0);
+  const totalCost = input.total_cost_manual
+    ? input.total_cost
+    : stageTotalCost(costPerSms, input.sms_count, input.opt_out_count);
+
   const updated = await db.transaction(async (tx) => {
     const [row] = await tx
       .update(campaign_stages)
@@ -122,7 +140,8 @@ export async function POST(
         checkout_click_count: input.checkout_click_count,
         sales_count: input.sales_count,
         sales_payout_each: salesPayoutEach,
-        total_cost: String(input.total_cost),
+        total_cost: String(totalCost),
+        total_cost_manual: input.total_cost_manual,
       })
       .where(
         and(

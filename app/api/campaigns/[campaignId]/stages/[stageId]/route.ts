@@ -17,6 +17,7 @@ import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
+import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 import {
   generateCampaignTrackingId,
   generateStageTrackingId,
@@ -123,6 +124,7 @@ export async function GET(
       status: campaign_stages.status,
       sms_count: campaign_stages.sms_count,
       total_cost: campaign_stages.total_cost,
+      total_cost_manual: campaign_stages.total_cost_manual,
       delivered_count: campaign_stages.delivered_count,
       opt_out_count: campaign_stages.opt_out_count,
       click_count: campaign_stages.click_count,
@@ -147,6 +149,7 @@ export async function GET(
       provider_phone: {
         id: provider_phones.id,
         phone_number: provider_phones.phone_number,
+        cost_per_sms: provider_phones.cost_per_sms,
       },
     })
     .from(campaign_stages)
@@ -494,6 +497,17 @@ export async function PATCH(
         ),
       )
       .returning();
+    // Changing the assigned phone changes its cost-per-SMS, so the auto Total
+    // Cost must follow. No-op when the stage's cost is a manual/CSV override.
+    if ("provider_phone_id" in updates && row) {
+      await recomputeStageTotalCost(tx, sid);
+      const [refreshed] = await tx
+        .select({ total_cost: campaign_stages.total_cost })
+        .from(campaign_stages)
+        .where(eq(campaign_stages.id, sid))
+        .limit(1);
+      if (refreshed) row.total_cost = refreshed.total_cost;
+    }
     return row;
   });
 

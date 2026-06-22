@@ -171,6 +171,7 @@ export async function GET(
       status: campaign_stages.status,
       sms_count: campaign_stages.sms_count,
       total_cost: campaign_stages.total_cost,
+      total_cost_manual: campaign_stages.total_cost_manual,
       delivered_count: campaign_stages.delivered_count,
       opt_out_count: campaign_stages.opt_out_count,
       inbound_opt_out_count: campaign_stages.inbound_opt_out_count,
@@ -204,6 +205,7 @@ export async function GET(
       provider_phone: {
         id: provider_phones.id,
         phone_number: provider_phones.phone_number,
+        cost_per_sms: provider_phones.cost_per_sms,
       },
       brand: { id: brands.id, name: brands.name, color: brands.color },
       offer: {

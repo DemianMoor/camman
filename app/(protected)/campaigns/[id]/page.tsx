@@ -175,6 +175,9 @@ type Stage = {
   status: StageStatus;
   sms_count: number;
   total_cost: string;
+  // When false, total_cost is auto = cost_per_sms × (sms_count + opt_out_count).
+  // When true, it's an operator override / CSV-imported provider cost.
+  total_cost_manual: boolean;
   delivered_count: number;
   opt_out_count: number;
   // Inbound STOP opt-outs attributed to this stage via the poller's 72h-window
@@ -213,7 +216,11 @@ type Stage = {
   };
   creative: { id: number; slug: string; text: string } | null;
   provider: Info | null;
-  provider_phone: { id: number; phone_number: string } | null;
+  provider_phone: {
+    id: number;
+    phone_number: string;
+    cost_per_sms: string;
+  } | null;
   offer: { id: number; name: string; color: string | null; payout_cpa: string | null } | null;
 };
 
@@ -2122,7 +2129,13 @@ export default function CampaignDetailPage() {
               checkout_click_count: manualStage.checkout_click_count,
               sales_count: manualStage.sales_count,
               total_cost: manualStage.total_cost,
+              total_cost_manual: manualStage.total_cost_manual,
             }}
+            costPerSms={
+              manualStage.provider_phone
+                ? Number(manualStage.provider_phone.cost_per_sms)
+                : null
+            }
             offerPayoutCpa={
               manualStage.offer?.payout_cpa != null
                 ? Number(manualStage.offer.payout_cpa)

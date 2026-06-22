@@ -38,6 +38,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 
 ## Money
 - `NUMERIC(12,4)`, displayed `$`. `sales_payout_each` snapshots the offer CPA at the moment sales were entered so ROI doesn't drift if the offer is later edited.
+- **Stage `total_cost`** (migration `0081`, [`lib/stages/total-cost.ts`](../lib/stages/total-cost.ts)) auto-derives as `cost_per_sms × (sms_count + opt_out_count)` from the stage's assigned provider phone — opt-out replies count toward the multiplier because STOPs are billed like sends. Recomputed wherever those inputs change (manual-results save, opt-out poller, provider-phone PATCH). `total_cost_manual=true` (operator override via the manual-results **Auto-calculate** switch, or a cost-bearing CSV import) freezes the value — the auto formula then leaves it alone.
 
 ## Database & migrations
 - Drizzle schema in `db/schema.ts`; migrations **hand-authored** SQL in `db/migrations/` (db:generate blocks on a TTY rename prompt — see memory). Hand-write SQL + clone the snapshot forward + add the journal entry, then `db:migrate` + `verify-migration-integrity`.

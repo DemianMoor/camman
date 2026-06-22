@@ -16,9 +16,11 @@ import { countSentSince, resolve24hCap } from "@/lib/sends/circuit-breakers";
 export async function getSendState(orgId: string) {
   // Global master switch (org_settings.sends_enabled) + deploy backstop.
   const settingRows = (await db.execute(sql`
-    SELECT sends_enabled FROM org_settings WHERE org_id = ${orgId} LIMIT 1
-  `)) as unknown as { sends_enabled: boolean }[];
+    SELECT sends_enabled, sends_paused FROM org_settings WHERE org_id = ${orgId} LIMIT 1
+  `)) as unknown as { sends_enabled: boolean; sends_paused: boolean }[];
   const sendsEnabled = settingRows[0]?.sends_enabled === true;
+  // Emergency hard-stop (migration 0080) — overrides "on" while engaged.
+  const sendsPaused = settingRows[0]?.sends_paused === true;
   const envEnabled = process.env.SEND_ENABLED === "true";
 
   // Providers — capability + breaker state + caps + send window. API-capable,
@@ -66,8 +68,11 @@ export async function getSendState(orgId: string) {
 
   return {
     sends_enabled: sendsEnabled,
+    sends_paused: sendsPaused,
     env_enabled: envEnabled,
-    effective_on: sendsEnabled && envEnabled,
+    // Effectively sending only when the daily switch + env backstop are on AND
+    // the emergency hard-stop is NOT engaged.
+    effective_on: sendsEnabled && envEnabled && !sendsPaused,
     providers: providers.map((p) => ({
       ...p,
       max_sends_per_24h_effective: resolve24hCap(p.max_sends_per_24h),

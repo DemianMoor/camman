@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-06-18_
+_Last updated: 2026-06-22_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -74,6 +74,7 @@ Every statement is a **single query** (never concurrent on one connection), so t
    - `SEND_ENABLED === "true"` env — the deploy-level **backstop**, left permanently on in Vercel (re-checked **between batches** but env-immutable per invocation); refuses with `send_disabled`, and
    - `org_settings.sends_enabled = true` — the DB-backed **daily on/off** operators flip from Settings → Sending without a redeploy (re-checked between batches via a fresh DB read, giving a true mid-run kill); refuses with `send_disabled_org`.
    These are distinct from the per-provider `send_paused` breaker (#4): the env var is the basement breaker, the DB flag is the operational switch, `send_paused` is "something broke, pause this provider." See [`lib/sends/org-send-flag.ts`](../../lib/sends/org-send-flag.ts) (`getOrgSendsEnabled`) and the audit trail in `org_setting_events`.
+   - **Emergency hard-stop (migration 0080):** `org_settings.sends_paused` is a SECOND, dedicated org-wide kill-switch independent of `sends_enabled`. When `true`, the drain refuses to start (`send_paused_org`) and an in-flight drain halts at the next batch boundary (`stopReason = "org_paused"`) — no further message is submitted via the provider API until it's cleared. It's flipped one-click from the **Today's sends** screen ("Hard stop" / "Proceed"), re-read fresh each batch (true mid-run kill, same as `sends_enabled`), and audited in `org_setting_events` (`setting_key = 'sends_paused'`). Endpoint: `POST /api/sends/pause` (manager+); helper `getOrgSendsPaused` in [`lib/sends/org-send-flag.ts`](../../lib/sends/org-send-flag.ts). Resuming ("Proceed") just clears the flag — pending rows drain on the next tick.
 3. `CRON_SECRET` (cron path) / `campaigns.drain` permission, manager+ (manual path).
 4. Provider `send_paused = false` (latching breaker).
 

@@ -14,6 +14,7 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
+import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
@@ -336,6 +337,24 @@ export async function PATCH(
     });
   }
   const current = existing[0];
+
+  // Reject moving a stage's schedule into the past. Only when the value actually
+  // CHANGES — the form always echoes scheduled_at, so an unrelated edit to a
+  // stage whose (historical) scheduled time is already past must still save.
+  if (input.scheduled_at) {
+    const nextMs = new Date(input.scheduled_at).getTime();
+    const prevMs = current.current_scheduled_at
+      ? new Date(current.current_scheduled_at).getTime()
+      : null;
+    if (nextMs !== prevMs && isScheduledAtInPast(input.scheduled_at)) {
+      return apiError(
+        400,
+        "Scheduled time can't be in the past",
+        API_ERROR_CODES.VALIDATION,
+        { field: "scheduled_at" },
+      );
+    }
+  }
 
   // Scheduled-send edit lock (server-side enforcement; UI hiding is not enough).
   // Once a tracked (API) stage has fired (sent_at set), its scheduled time is

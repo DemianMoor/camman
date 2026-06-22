@@ -16,7 +16,7 @@ import {
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
-import { getOrgSendsEnabled } from "@/lib/sends/org-send-flag";
+import { getOrgSendsEnabled, getOrgSendsPaused } from "@/lib/sends/org-send-flag";
 import { resolveProviderApiKey } from "@/lib/sends/provider-credential";
 import { buildSendUrl, sendSms as realSendSms, type SendSmsResult } from "@/lib/sends/texthub";
 
@@ -56,6 +56,7 @@ export type DrainRefusal =
   | "not_approved"
   | "send_disabled" // env SEND_ENABLED off (deploy-level backstop)
   | "send_disabled_org" // DB org_settings.sends_enabled off (daily operational switch)
+  | "send_paused_org" // org_settings.sends_paused — the emergency hard-stop
   | "provider_paused" // the latching circuit breaker is engaged for this provider
   | "no_provider"
   | "no_credentials";
@@ -134,6 +135,10 @@ export async function runStageDrain(
     // as isEnabled; defaults to the real per-org read. Re-checked between batches
     // so flipping it off in Settings stops an in-flight drain at the next batch.
     isOrgEnabled?: (orgId: string) => Promise<boolean>;
+    // Emergency hard-stop (org_settings.sends_paused). Injectable like isOrgEnabled;
+    // defaults to the real per-org read. Re-checked between batches so engaging the
+    // "Today's sends" hard-stop kills an in-flight drain at the next batch.
+    isOrgPaused?: (orgId: string) => Promise<boolean>;
     batchSize?: number;
     maxRows?: number;
     // Overrides the provider's per-second send `rate` (parallel slice size +
@@ -146,6 +151,8 @@ export async function runStageDrain(
   const isEnabled = opts.isEnabled ?? envSendEnabled;
   const isOrgEnabled =
     opts.isOrgEnabled ?? ((orgId: string) => getOrgSendsEnabled(dbc, orgId));
+  const isOrgPaused =
+    opts.isOrgPaused ?? ((orgId: string) => getOrgSendsPaused(dbc, orgId));
   const batchSize = opts.batchSize ?? 50;
 
   const ctx = (await dbc.execute(sql`
@@ -187,6 +194,11 @@ export async function runStageDrain(
   if (!isEnabled()) return { ok: false, reason: "send_disabled", ...EMPTY };
   if (!(await isOrgEnabled(stage.org_id)))
     return { ok: false, reason: "send_disabled_org", ...EMPTY };
+  // Emergency hard-stop (org_settings.sends_paused): refuse before claiming
+  // anything. Independent of the daily on/off — one click on the "Today's sends"
+  // screen engages it; clearing it ("Proceed") lets sending resume.
+  if (await isOrgPaused(stage.org_id))
+    return { ok: false, reason: "send_paused_org", ...EMPTY };
   // Latching circuit breaker: refuse before claiming anything. A human must
   // resume via the provider UI; nothing here clears it.
   if (stage.send_paused) return { ok: false, reason: "provider_paused", ...EMPTY };
@@ -238,6 +250,15 @@ export async function runStageDrain(
     if (!(await isOrgEnabled(orgId))) {
       halted = true;
       stopReason = "org_disabled";
+      break;
+    }
+
+    // Emergency hard-stop is runtime-mutable too: clicking the "Today's sends"
+    // hard-stop flips sends_paused, and this fresh read halts the in-flight drain
+    // at the next batch boundary before any new claim.
+    if (await isOrgPaused(orgId)) {
+      halted = true;
+      stopReason = "org_paused";
       break;
     }
 

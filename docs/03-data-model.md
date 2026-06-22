@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-06-20_
+_Last updated: 2026-06-22_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -132,7 +132,7 @@ erDiagram
 | `organizations` | `id uuid` | the tenant root |
 | `org_members` | `user_id→auth.users`, `org_id`, `role` | UNIQUE(user_id, org_id); role CHECK in {owner,admin,manager,operator,viewer} |
 | `invites` | `org_id`, `email`, `role`, `token` UNIQUE, `expires_at`, `accepted_at` | pending member invitations |
-| `org_settings` | `org_id` PK, `sends_enabled` (default false), `sends_enabled_updated_by/_at` | per-org singleton; DB master switch for live SMS sending (migration 0063). Distinct from the `SEND_ENABLED` env backstop |
+| `org_settings` | `org_id` PK, `sends_enabled` (default false), `sends_enabled_updated_by/_at`, `sends_paused` (default false), `sends_paused_at/_by` | per-org singleton; DB master switch for live SMS sending (migration 0063). `sends_paused` (migration 0080) is the dedicated **emergency hard-stop** flipped one-click from the Today's sends screen — independent of `sends_enabled`, halts the drain mid-run. Distinct from the `SEND_ENABLED` env backstop |
 | `org_setting_events` | `org_id`, `setting_key`, `old_value`, `new_value`, `actor_user_id` | append-only audit of settings flips (migration 0063) |
 
 ### Registry

@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, RefreshCw, Send } from "lucide-react";
+import { AlertTriangle, Ban, Play, RefreshCw, Send } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   StagePrepareDialog,
@@ -14,6 +15,7 @@ import { SendWindowIndicator } from "@/components/sends/send-window-indicator";
 import { VolumeCapsMeter } from "@/components/sends/volume-caps-meter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
@@ -54,6 +56,7 @@ type FleetResponse = {
 };
 
 type SendState = {
+  sends_paused: boolean;
   today: { sent_24h: number; cap_24h: number | null };
   stuck_count: number;
 };
@@ -62,6 +65,7 @@ export default function FleetTodayPage() {
   const { can } = useAuth();
   const fleetApi = useApiCall<FleetResponse>();
   const stateApi = useApiCall<SendState>();
+  const pauseApi = useApiCall<{ ok: boolean; sends_paused: boolean }>();
   const { execute: fleetExec } = fleetApi;
   const { execute: stateExec } = stateApi;
 
@@ -70,6 +74,29 @@ export default function FleetTodayPage() {
   const [tick, setTick] = useState(0);
   const [prepareTarget, setPrepareTarget] = useState<PrepareTarget | null>(null);
   const refresh = useCallback(() => setTick((n) => n + 1), []);
+
+  // Emergency hard-stop toggle (org_settings.sends_paused). Engaging it halts any
+  // in-flight drain at the next batch and refuses new sends until cleared.
+  const canDrain = can("campaigns.drain");
+  const sendsPaused = sendState?.sends_paused === true;
+  async function setPaused(next: boolean) {
+    const r = await pauseApi.execute("/api/sends/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused: next }),
+    });
+    if (r.ok) {
+      setSendState((s) => (s ? { ...s, sends_paused: next } : s));
+      toast.success(
+        next
+          ? "Sending paused — no further messages will be submitted via API"
+          : "Sending resumed",
+      );
+      refresh();
+    } else {
+      toastApiError(r, "Couldn't change the send state");
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -102,11 +129,48 @@ export default function FleetTodayPage() {
         </div>
         <div className="flex items-center gap-3">
           <StageStatusLegend />
+          {/* Emergency hard-stop. Shown only when state has loaded so the label
+              reflects the real paused/live state. While paused the primary
+              "Proceed" control lives in the banner below; here we keep the
+              button as a secondary affordance. */}
+          {canDrain && sendState && !sendsPaused ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={pauseApi.isLoading}
+              onClick={() => void setPaused(true)}
+            >
+              <Ban className="size-3.5" aria-hidden /> Hard stop
+            </Button>
+          ) : null}
           <Button variant="outline" size="sm" onClick={refresh}>
             <RefreshCw className="size-3.5" aria-hidden /> Refresh
           </Button>
         </div>
       </div>
+
+      {/* Emergency hard-stop banner — sending is paused org-wide. */}
+      {sendsPaused ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100">
+          <Ban className="size-4 shrink-0" aria-hidden />
+          <span className="flex-1">
+            <span className="font-medium">Sending is paused.</span> No further
+            messages are being submitted via the provider API. Any in-flight send
+            stops at its next batch. Click Proceed to resume.
+          </span>
+          {canDrain ? (
+            <Button
+              variant="default"
+              size="sm"
+              className="bg-green-600 hover:bg-green-700"
+              disabled={pauseApi.isLoading}
+              onClick={() => void setPaused(false)}
+            >
+              <Play className="size-3.5" aria-hidden /> Proceed (resume sending)
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Status tiles + volume meter */}
       <div className="grid gap-4 md:grid-cols-3">

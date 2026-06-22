@@ -51,6 +51,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { isEntityAvailable } from "@/lib/feature-flags";
 import { isOutsideSendWindow } from "@/lib/quiet-hours";
+import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import { buildStageSms } from "@/lib/sends/stage-sms";
@@ -590,6 +591,18 @@ export function StageForm({
       return false;
     }
   })();
+  // A stage can't be scheduled in the past. Only flag (and block save) when the
+  // value CHANGED from what loaded — an unrelated edit to a stage with a
+  // historical schedule must still save (the server enforces the same rule).
+  const scheduledInPast = (() => {
+    if (scheduledLocked || !watchedScheduledAt) return false;
+    if (watchedScheduledAt === (initialValues?.scheduled_at ?? "")) return false;
+    try {
+      return isScheduledAtInPast(campaignLocalInputToUtcIso(watchedScheduledAt));
+    } catch {
+      return false;
+    }
+  })();
 
   const brandShortDomain = campaign.brand?.short_domain ?? null;
   const TRACKED_CODE_PLACEHOLDER = "XXXXXXX"; // 7 chars = mint CODE_LENGTH
@@ -789,6 +802,10 @@ export function StageForm({
 
   // Submit
   async function handleSave() {
+    if (scheduledInPast) {
+      toast.error("Scheduled time can't be in the past");
+      return;
+    }
     await onSubmit(form.getValues());
   }
 
@@ -988,6 +1005,11 @@ export function StageForm({
                           ? "Locked — this stage is armed (messages materialized for this schedule). Cancel the armed send to reschedule."
                           : "Locked — this stage has been sent. The scheduled time can't be changed."}
                       </FormDescription>
+                    ) : scheduledInPast ? (
+                      <p className="text-xs text-red-700 dark:text-red-400">
+                        This time is in the past. Pick a future time to schedule
+                        the send.
+                      </p>
                     ) : scheduledOutsideWindow ? (
                       <p className="text-xs text-amber-700 dark:text-amber-400">
                         This time is outside {selectedProvider?.name ?? "the provider"}&apos;s

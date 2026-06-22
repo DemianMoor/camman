@@ -47,7 +47,8 @@ export type DrainStopReason =
   | "pacing_tripwire" // processed exceeded the clamped cap (impossible) — HARD
   | "rate_minute" // per-minute ceiling — SOFT, retry next tick
   | "rate_24h" // 24h ceiling — SOFT, retry next tick
-  | "org_disabled"; // DB master switch flipped off mid-run — SOFT, retry next tick
+  | "org_disabled" // DB master switch flipped off mid-run — SOFT, retry next tick
+  | "org_paused"; // emergency hard-stop engaged mid-run — SOFT, resumes on Proceed
 
 export function isHardStop(reason: DrainStopReason): boolean {
   return reason === "paused" || reason === "failure_spike" || reason === "pacing_tripwire";

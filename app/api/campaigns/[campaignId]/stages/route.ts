@@ -25,6 +25,7 @@ import {
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { countStageRecipients } from "@/lib/sends/recipients";
+import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
@@ -419,6 +420,17 @@ export async function POST(
     );
   }
   const input = parsed.data;
+
+  // A new stage can't be scheduled in the past (would immediately miss its
+  // window). Server-side source of truth; the form mirrors this client-side.
+  if (input.scheduled_at && isScheduledAtInPast(input.scheduled_at)) {
+    return apiError(
+      400,
+      "Scheduled time can't be in the past",
+      API_ERROR_CODES.VALIDATION,
+      { field: "scheduled_at" },
+    );
+  }
 
   // FK ownership for the optional references.
   if (input.creative_id != null) {

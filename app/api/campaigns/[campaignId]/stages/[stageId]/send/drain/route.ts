@@ -32,6 +32,10 @@ const REFUSAL: Record<DrainRefusal, { status: number; message: string }> = {
     status: 403,
     message: "Live SMS sending is off — turn it on in Settings → Sending",
   },
+  send_paused_org: {
+    status: 409,
+    message: "Sending is paused (hard-stop engaged) — click Proceed on Today's sends to resume",
+  },
   provider_paused: {
     status: 409,
     message: "Sending is paused for this provider (circuit breaker engaged)",

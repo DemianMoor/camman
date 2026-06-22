@@ -2222,6 +2222,13 @@ export const org_settings = pgTable("org_settings", {
   sends_enabled_updated_at: timestamp("sends_enabled_updated_at", {
     withTimezone: true,
   }),
+  // Emergency hard-stop (migration 0080), distinct from sends_enabled. The
+  // "Today's sends" screen flips this for an instant org-wide pause: the drain
+  // re-reads it every batch, so engaging it halts any in-flight send and refuses
+  // new ones until someone clicks Proceed. Default FALSE (not paused).
+  sends_paused: boolean("sends_paused").notNull().default(false),
+  sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
+  sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

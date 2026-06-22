@@ -1,6 +1,6 @@
 # Daily-Volume UI (WS4)
 
-_Last updated: 2026-06-16_
+_Last updated: 2026-06-22_
 
 The operating layer that makes running many tracked SMS campaigns a day fast and
 legible. Purely additive UI + read endpoints over the existing send pipeline
@@ -69,6 +69,12 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
   `GET /api/sends/today`. Every tracked stage scheduled/sent/missed today (ET),
   status-derived server-side, Orange/Red sorted to the top, links into each
   campaign. Hosts the meter, window indicator, and stuck callout.
+  - **Emergency hard-stop.** A "Hard stop" button (manager+, `campaigns.drain`)
+    flips `org_settings.sends_paused` via `POST /api/sends/pause`. While engaged,
+    a red banner with a "Proceed (resume sending)" button replaces it. The pause
+    state rides on `GET /api/sends/state` (`sends_paused`); the drain halts any
+    in-flight send at its next batch and refuses new ones until cleared. See
+    [sms-send-pipeline.md](sms-send-pipeline.md).
 - **B2 — readiness checklist surface.** [components/sends/stage-readiness-checklist.tsx](../../components/sends/stage-readiness-checklist.tsx)
   shows the live green/red preflight checklist on the stage before Prepare. Spam
   score is advisory, never a gate (numeric score display deferred).
@@ -95,8 +101,10 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
 
 ## Endpoints added
 
-- `GET /api/sends/state` — global flags + paused providers + 24h volume/cap +
-  stuck count. Permission `campaigns.view`. Never emits credentials.
+- `GET /api/sends/state` — global flags (incl. `sends_paused`) + paused providers
+  + 24h volume/cap + stuck count. Permission `campaigns.view`. Never emits credentials.
+- `POST /api/sends/pause` — `{ paused: boolean }`, the emergency hard-stop toggle.
+  Permission `campaigns.drain` (manager+); audited in `org_setting_events`.
 - `GET /api/sends/today` — fleet dashboard data (tracked stages in play today).
   Permission `stages.view`.
 - `GET /api/campaigns/[campaignId]/stages` — now also returns `link_mode` and

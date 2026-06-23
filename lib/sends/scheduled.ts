@@ -191,6 +191,7 @@ const BASE: ScheduledRunResult = {
 const PERMANENT_REFUSALS: ReadonlySet<KickoffRefusal> = new Set([
   "not_found",
   "no_creative",
+  "no_schedule",
   "no_recipients",
   "stage_not_ready",
   "no_provider",

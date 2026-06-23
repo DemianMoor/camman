@@ -32,7 +32,7 @@ class Refusal extends Error {
 // gate here (a race can surface a blocker), and a refusal rolls everything back so
 // the stage is never left approved-but-empty.
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
   const auth = await requireApiMembership();
@@ -50,8 +50,18 @@ export async function POST(
     return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION);
   }
 
-  // Load the stage to decide send-now vs arm-future. scheduled_at strictly in the
-  // future ⇒ arm; otherwise (null or already due) ⇒ send now.
+  // Optional body: { send_now?: boolean }. The client sets it true for the
+  // explicit "Prepare & send now" action (no future schedule). An empty body is
+  // fine — defaults to false.
+  let sendNowRequested = false;
+  try {
+    const body = (await req.json()) as { send_now?: unknown } | null;
+    sendNowRequested = body?.send_now === true;
+  } catch {
+    // No/invalid body ⇒ not an explicit send-now request.
+  }
+
+  // Load the stage to decide send-now vs arm-future.
   const stageRows = (await db.execute(sql`
     SELECT s.scheduled_at AS scheduled_at, s.stage_number AS stage_number
     FROM campaign_stages s
@@ -64,7 +74,22 @@ export async function POST(
   }
   const scheduledAt = stageRows[0].scheduled_at;
   const isFuture = scheduledAt != null && new Date(scheduledAt) > new Date();
-  const sendNow = !isFuture;
+
+  // Decision:
+  //   • future schedule           → ARM (cron drains when the window opens)
+  //   • explicit send-now request  → SEND NOW (stamp scheduled_at = now() below)
+  //   • already-due non-null date  → SEND NOW (its time has arrived)
+  //   • null date, no send-now     → REJECT. A null date is never an implicit
+  //     "now"; the operator must set a date or use the explicit Send now action.
+  const sendNow = !isFuture && (sendNowRequested || scheduledAt != null);
+  if (!isFuture && !sendNow) {
+    return apiError(
+      400,
+      "Set a send date/time before sending (a copied stage starts with no date).",
+      API_ERROR_CODES.VALIDATION,
+      { reason: "no_schedule" },
+    );
+  }
 
   // Sending inline spends money → manager+ on top of the activate bar.
   if (sendNow && !can(role, "campaigns.drain")) {
@@ -86,6 +111,15 @@ export async function POST(
         UPDATE campaign_stages SET send_approved = true
         WHERE id = ${stageId} AND org_id = ${orgId}
       `);
+      // Explicit send-now on a not-yet-scheduled stage: stamp the send date to
+      // NOW before kickoff so the pipeline's no_schedule guard passes. Immediate
+      // sends are never routed through a null date.
+      if (sendNow && scheduledAt == null) {
+        await tx.execute(sql`
+          UPDATE campaign_stages SET scheduled_at = now()
+          WHERE id = ${stageId} AND org_id = ${orgId}
+        `);
+      }
       const k = await kickoffStageSend(tx, { orgId, campaignId, stageId });
       if (!k.ok && k.reason !== "already_pending") throw new Refusal(k.reason);
 

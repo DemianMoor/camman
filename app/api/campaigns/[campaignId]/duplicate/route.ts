@@ -15,6 +15,7 @@ import {
   generateCampaignTrackingId,
   generateStageTrackingId,
 } from "@/lib/tracking-id";
+import { STAGE_TRACKING_PARAM, setUrlParam } from "@/lib/stage-url";
 
 const SLUG_RETRY_LIMIT = 5;
 
@@ -163,7 +164,10 @@ export async function POST(
             include_clickers: s.include_clickers,
             exclude_clickers: s.exclude_clickers,
             include_no_status: s.include_no_status,
-            scheduled_at: s.scheduled_at,
+            // A cloned stage NEVER inherits the parent's send date — a stale
+            // (past) date would auto-fire on approval. Operator sets a fresh
+            // date; the send pipeline refuses a null-scheduled stage.
+            scheduled_at: null,
             notes: s.notes,
             status: "draft" as const,
             sms_count: 0,
@@ -179,6 +183,7 @@ export async function POST(
               id: campaign_stages.id,
               stage_number: campaign_stages.stage_number,
               creative_id: campaign_stages.creative_id,
+              full_url: campaign_stages.full_url,
             });
 
           // Generate per-stage tracking_ids using the freshly-allocated
@@ -192,9 +197,15 @@ export async function POST(
                 stageNumber: s.stage_number,
                 creativeId: s.creative_id,
               });
+              // Rewrite ONLY sub_id3 in the cloned URL to this stage's own
+              // tracking ID, preserving all other params (each clone keeps its
+              // own source URL). No URL ⇒ nothing to rewrite.
+              const rewrittenFullUrl = s.full_url
+                ? setUrlParam(s.full_url, STAGE_TRACKING_PARAM, stageTrackingId)
+                : s.full_url;
               await tx
                 .update(campaign_stages)
-                .set({ tracking_id: stageTrackingId })
+                .set({ tracking_id: stageTrackingId, full_url: rewrittenFullUrl })
                 .where(eq(campaign_stages.id, s.id));
             }
           }

@@ -112,7 +112,14 @@ export function StagePrepareDialog({
     if (!target) return;
     const r = await approveSendApi.execute(
       `/api/campaigns/${target.campaignId}/stages/${target.stageId}/send/approve-send`,
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Explicit send-now (no future schedule) → the server stamps
+        // scheduled_at = now() so the send passes the no-schedule guard. A
+        // future schedule arms instead (send_now: false).
+        body: JSON.stringify({ send_now: !willSchedule }),
+      },
     );
     if (!r.ok) {
       toastApiError(r, "Prepare failed");

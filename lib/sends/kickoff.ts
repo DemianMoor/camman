@@ -20,6 +20,7 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 export type KickoffRefusal =
   | "not_found"
   | "no_creative"
+  | "no_schedule"
   | "already_pending"
   | "no_recipients"
   // tracked-only:
@@ -41,6 +42,7 @@ export type KickoffResult =
 
 interface MainRow {
   link_mode: string;
+  scheduled_at: string | null;
   brand_id: number | null;
   offer_id: number | null;
   campaign_tracking_id: string | null;
@@ -70,6 +72,7 @@ export async function kickoffStageSend(
   const main = (await tx.execute(sql`
     SELECT
       c.link_mode                AS link_mode,
+      s.scheduled_at             AS scheduled_at,
       c.brand_id                 AS brand_id,
       c.offer_id                 AS offer_id,
       c.tracking_id              AS campaign_tracking_id,
@@ -104,6 +107,14 @@ export async function kickoffStageSend(
   const mode: "manual" | "tracked" = row.link_mode === "tracked" ? "tracked" : "manual";
   const brandName = row.brand_name ?? "";
   if (!row.creative_text) return { ok: false, reason: "no_creative" };
+
+  // HARD GUARD: a stage with no send date is NEVER sent. A null scheduled_at is
+  // not "send now" — it means the stage hasn't been scheduled. This is the
+  // shared chokepoint for every send/materialize entry point (cron Phase A, the
+  // manual kickoff route, Approve-Send), so a copied/duplicated stage (which now
+  // always starts with a null date) can't fire until an operator sets one. The
+  // explicit "Send now" action stamps scheduled_at = now() BEFORE calling here.
+  if (row.scheduled_at == null) return { ok: false, reason: "no_schedule" };
 
   // Guard against accidental double-materialization: refuse if this stage
   // already has un-sent (pending/sending) rows. A genuine resend clears/

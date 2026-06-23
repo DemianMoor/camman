@@ -11,6 +11,7 @@ import {
   generateCampaignTrackingId,
   generateStageTrackingId,
 } from "@/lib/tracking-id";
+import { STAGE_TRACKING_PARAM, setUrlParam } from "@/lib/stage-url";
 
 // Split a stage into N siblings for A/B testing. The source stage is
 // repurposed as split 1 of N; (N-1) new stages clone its configuration
@@ -201,7 +202,10 @@ export async function POST(
         include_clickers: source.include_clickers,
         exclude_clickers: source.exclude_clickers,
         include_no_status: source.include_no_status,
-        scheduled_at: source.scheduled_at,
+        // A split sibling NEVER inherits the parent's send date — a stale (past)
+        // date would auto-fire on approval. Each variant gets a fresh date; the
+        // send pipeline refuses a null-scheduled stage (no_schedule).
+        scheduled_at: null,
         notes: source.notes,
         status: "draft",
         sms_count: 0,
@@ -221,6 +225,7 @@ export async function POST(
         id: campaign_stages.id,
         stage_number: campaign_stages.stage_number,
         creative_id: campaign_stages.creative_id,
+        full_url: campaign_stages.full_url,
       });
 
     // Each new sibling gets its own tracking_id. Skip stages without a
@@ -233,9 +238,14 @@ export async function POST(
           stageNumber: s.stage_number,
           creativeId: s.creative_id,
         });
+        // Rewrite ONLY sub_id3 in the inherited URL to this sibling's own
+        // tracking ID, preserving all other params. No URL ⇒ nothing to rewrite.
+        const rewrittenFullUrl = s.full_url
+          ? setUrlParam(s.full_url, STAGE_TRACKING_PARAM, stageTrackingId)
+          : s.full_url;
         await tx
           .update(campaign_stages)
-          .set({ tracking_id: stageTrackingId })
+          .set({ tracking_id: stageTrackingId, full_url: rewrittenFullUrl })
           .where(eq(campaign_stages.id, s.id));
       }
     }

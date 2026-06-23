@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-06-22_
+_Last updated: 2026-06-23_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -21,7 +21,9 @@ The stage panel collapses the old approve → kickoff → drain buttons into a s
 2. **Pre-flight** runs first (`preflightStageSend`, [lib/sends/preflight.ts](../../lib/sends/preflight.ts)) — read-only, returns the recipient count (the "submit N") and the structural blockers (the kickoff refusals; **spam is NOT checked** — it's advisory). Blockers are shown in the dialog; nothing is materialized.
 3. On confirm, `POST …/send/approve-send` approves + materializes (kickoff) **atomically** (a refusal rolls back the approval), then:
    - **future schedule** → leave `sent_at` NULL = **armed**; the cron drains it when its window opens (requires `campaigns.activate`),
-   - **no/now schedule** → drain **inline** in the same request via `runStageDrainAndRecord` and return the real result (requires `campaigns.drain`, manager+).
+   - **explicit "Send now"** (body `send_now: true`) → stamp `scheduled_at = now()` **before** kickoff (so the no-schedule guard passes), then drain **inline** in the same request via `runStageDrainAndRecord` and return the real result (requires `campaigns.drain`, manager+),
+   - **already-due non-null date** → send now (its time has arrived),
+   - **null date, not an explicit send-now** → **rejected** (`reason: "no_schedule"`). A null `scheduled_at` is never an implicit "now" — the operator must set a date or use Send now. This is what stops a copied/duplicated stage (which always starts with a blank date — see [conventions](../07-conventions.md)) from firing the moment it's approved.
 - **Abort** (`POST …/send/abort`) recalls an **armed** stage: only while un-released (`sent_at` NULL, nothing sent/sending) it marks the pending rows `rejected`, un-approves, and clears `schedule_missed_at` — re-unlocking the Scheduled field. A stage that already started sending can't be recalled (pause the provider instead).
 - The Scheduled field locks while armed (the stage form's `armed` prop) so the time can't change under a materialized batch; aborting unlocks it.
 
@@ -34,7 +36,8 @@ The underlying primitives (Step 1 kickoff, Step 2 drain) are unchanged and still
 - **Destination = the stage's stored `full_url`** (Bug 3 fix). The mint uses the exact Full URL the operator sees/controls in the UI — NOT a server-side rebuild. The old rebuild (`loadStageUrlContext` + `buildStageFullUrl`) diverged from `full_url`: it used the offer `postfix` (set to a page slug like `knd`) and treated a selected UTM tag as `tag_id=value_source`, producing `?knd=<id>&subid3=sub_id3` instead of `?sub_id3=<id>`. `full_url` is used when it carries the stage tracking id; an auto-mode (bare) `full_url` falls back to the rebuild, which now emits the tracking id under the fixed `sub_id3` key (`STAGE_TRACKING_PARAM` in [lib/stage-url.ts](../../lib/stage-url.ts)) — never the per-offer postfix.
 - **Batched (perf-critical).** Minting + inserts are bulk, NOT per-recipient: the shared destination is upserted once, links are inserted in multi-row chunks (`mintLinksBatch` in [lib/links/mint-link.ts](../../lib/links/mint-link.ts), regenerating only the rare colliding `code`), then `stage_sends` is bulk-inserted. This took a 1000-recipient kickoff from ~178s (sequential, blew the 300s cron limit) to ~2-3s. The per-link `mintLink` is retained for single-message paths.
 - Partial UNIQUE `(stage_id, contact_id) WHERE status IN (pending,sending)` structurally blocks double-materialization; terminal rows stay free so a genuine resend mints fresh rows. It is also what makes the cron's concurrent-materialize safe (two ticks → one wins, the other's bulk INSERT raises 23505 and is caught).
-- Refuses with explicit reasons: `not_found`, `no_creative`, `already_pending`, `no_recipients`, `stage_not_ready`, `no_provider`, `provider_not_api_capable`, `no_credentials`, `no_short_domain`, `no_destination`.
+- Refuses with explicit reasons: `not_found`, `no_creative`, `no_schedule`, `already_pending`, `no_recipients`, `stage_not_ready`, `no_provider`, `provider_not_api_capable`, `no_credentials`, `no_short_domain`, `no_destination`.
+- **`no_schedule` is the hard null-date guard.** `kickoffStageSend` refuses any stage with a NULL `scheduled_at` before materializing — the shared chokepoint for every entry point (cron Phase A never selects NULLs anyway; the manual kickoff route; Approve-Send). A null date is **never** treated as "send now"; an explicit Send now stamps `scheduled_at = now()` upstream so it passes. This guards the copied-stage auto-fire bug at the pipeline level, not just the UI.
 
 ### Step 2 — Drain (`drain.ts`, `runStageDrain`)
 ```mermaid

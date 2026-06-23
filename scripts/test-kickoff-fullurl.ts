@@ -44,9 +44,9 @@ async function main() {
       const stage = await one<{ id: number }>(sql`
         INSERT INTO campaign_stages
           (org_id, campaign_id, stage_number, creative_id, sms_provider_id, send_approved,
-           tracking_id, full_url, include_no_status, stop_text)
+           tracking_id, full_url, include_no_status, stop_text, scheduled_at)
         VALUES (${orgId}, ${campaignId}, 1, ${cre.id}, ${prov.id}, true,
-           ${TRACKING}, ${FULL_URL}, true, ${"STOP"}) RETURNING id`);
+           ${TRACKING}, ${FULL_URL}, true, ${"STOP"}, now()) RETURNING id`);
       const stageId = stage.id;
 
       // One qualifying recipient in the frozen pool (no-status at snapshot).

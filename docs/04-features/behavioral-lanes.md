@@ -1,6 +1,6 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-06-23_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
@@ -72,7 +72,11 @@ three lanes are mutually exclusive by construction.
   [lib/stages/behavioral-split.ts](../../lib/stages/behavioral-split.ts), exposed
   at `POST /api/campaigns/[campaignId]/stages/[stageId]/behavioral-split`. Stamps
   three lane-stages cloning the parent's config, sets tier + parent, regenerates
-  each lane's stage `tracking_id`, leaves `split_index/split_total` NULL. Guards:
+  each lane's stage `tracking_id`, and rewrites only `sub_id3` in the cloned
+  `full_url` to that new tracking id (preserving `sub_id1`/other params). Like
+  every copy path, each lane starts with **`scheduled_at = null`** (never inherits
+  the parent's date — a stale date would auto-fire on approval; see
+  [conventions](../07-conventions.md)), leaves `split_index/split_total` NULL. Guards:
   rejects a source that is itself a lane (`already_lane`), archived, or already
   split (`already_behaviorally_split`). Transactional. **No draft/status gate** —
   lanes are created post-activation by design (the A/B split route has none either).

@@ -60,6 +60,49 @@ export function buildStageFullUrl({
   return `${base}${sep}${qs}`;
 }
 
+// Surgically set ONE query param's value: replace the value of an existing
+// `key=…` segment, or append `key=value` if the param is absent. Every other
+// segment is preserved byte-for-byte (more surgical than re-serializing via
+// URLSearchParams, which would normalize encoding of params we shouldn't touch).
+// No-op on an empty URL or empty key. Used to rewrite a copied stage's inherited
+// `sub_id3` to its OWN tracking ID without disturbing `sub_id1` (L2 attribution
+// forwarding) or any other param. Handles "?" vs "&" separators.
+export function setUrlParam(url: string, key: string, value: string): string {
+  const u = (url ?? "").trim();
+  const k = (key ?? "").trim();
+  if (!u || !k) return u;
+
+  const qIdx = u.indexOf("?");
+  const encoded = `${encodeURIComponent(k)}=${encodeURIComponent(value)}`;
+  if (qIdx < 0) {
+    // No query string yet — append as the first param.
+    return `${u}?${encoded}`;
+  }
+
+  const base = u.slice(0, qIdx);
+  const query = u.slice(qIdx + 1);
+  let replaced = false;
+  const segs = query
+    .split("&")
+    .filter((seg) => seg.length > 0)
+    .map((seg) => {
+      const rawKey = seg.split("=")[0];
+      let decoded = rawKey;
+      try {
+        decoded = decodeURIComponent(rawKey);
+      } catch {
+        // Malformed escape — compare against the raw key.
+      }
+      if (decoded === k) {
+        replaced = true;
+        return encoded;
+      }
+      return seg;
+    });
+  if (!replaced) segs.push(encoded);
+  return `${base}?${segs.join("&")}`;
+}
+
 // Append `key=value` to the end of a URL string (no-op if `key` is already
 // present, or if the URL is empty). Used when the operator clicks a UTM chip
 // while the Full URL is in hand-edited (custom) mode.

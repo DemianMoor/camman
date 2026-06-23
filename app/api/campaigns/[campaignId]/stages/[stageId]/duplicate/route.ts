@@ -11,6 +11,7 @@ import {
   generateCampaignTrackingId,
   generateStageTrackingId,
 } from "@/lib/tracking-id";
+import { STAGE_TRACKING_PARAM, setUrlParam } from "@/lib/stage-url";
 
 function parseId(idParam: string): number | null {
   const n = Number(idParam);
@@ -102,7 +103,10 @@ export async function POST(
     include_clickers: source.include_clickers,
     exclude_clickers: source.exclude_clickers,
     include_no_status: source.include_no_status,
-    scheduled_at: source.scheduled_at,
+    // A copy NEVER inherits the parent's send date — a stale (past) date would
+    // auto-fire the moment the stage is approved. Operator must set a fresh
+    // date; the send pipeline refuses a null-scheduled stage (no_schedule).
+    scheduled_at: null,
     notes: source.notes,
     status: "draft",
     sms_count: 0,
@@ -148,9 +152,15 @@ export async function POST(
         stageNumber: row.stage_number,
         creativeId: row.creative_id,
       });
+      // Rewrite ONLY sub_id3 in the inherited tracking URL to point at THIS
+      // stage's new tracking ID, preserving every other param (sub_id1 etc.).
+      // No URL ⇒ nothing to rewrite.
+      const rewrittenFullUrl = row.full_url
+        ? setUrlParam(row.full_url, STAGE_TRACKING_PARAM, stageTrackingId)
+        : row.full_url;
       const [withTracking] = await tx
         .update(campaign_stages)
-        .set({ tracking_id: stageTrackingId })
+        .set({ tracking_id: stageTrackingId, full_url: rewrittenFullUrl })
         .where(eq(campaign_stages.id, row.id))
         .returning();
       finalRow = withTracking;

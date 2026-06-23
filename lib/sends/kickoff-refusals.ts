@@ -5,6 +5,10 @@ import type { KickoffRefusal } from "@/lib/sends/kickoff";
 export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: string }> = {
   not_found: { status: 404, message: "Campaign or stage not found" },
   no_creative: { status: 400, message: "Add a creative to this stage before sending" },
+  no_schedule: {
+    status: 400,
+    message: "Set a send date/time before sending (a copied stage starts with no date)",
+  },
   already_pending: {
     status: 409,
     message: "This stage already has a pending send batch — resolve it before starting another",

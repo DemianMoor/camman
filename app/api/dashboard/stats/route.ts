@@ -16,6 +16,10 @@ import {
   stageNotArchived,
 } from "@/lib/dashboard-stages";
 import { can } from "@/lib/permissions";
+import {
+  salesRevenueTotals,
+  type AttributionRange,
+} from "@/lib/reporting/attribution";
 
 // Top-line counts for the dashboard's stat strip + activity context.
 // All counters scoped to the user's org.
@@ -84,17 +88,11 @@ async function aggregateStages(
       scrubbed_added: drizzleSql<number>`coalesce(sum(${campaign_stages.scrubbed_count}), 0)::int`,
       bounced_added: drizzleSql<number>`coalesce(sum(${campaign_stages.bounced_count}), 0)::int`,
       total_spend: drizzleSql<string>`coalesce(sum(${campaign_stages.total_cost}), 0)::numeric(12,4)::text`,
-      total_sales: drizzleSql<number>`coalesce(sum(${campaign_stages.sales_count}), 0)::int`,
-      // Revenue is the SUM of real per-conversion payout recorded by Keitaro
-      // (keitaro_stage_results.revenue), NOT sales × the offer's current CPA — a
-      // CPA that changes mid-flight would retro-misprice every prior sale. Each
-      // stage's full Keitaro revenue (all stat_dates) is attributed to that
-      // stage, then bucketed by its effective date via the outer aggregate.
-      total_revenue: drizzleSql<string>`coalesce(sum(
-        (SELECT coalesce(sum(ksr.revenue), 0)
-           FROM keitaro_stage_results ksr
-          WHERE ksr.stage_id = ${campaign_stages.id})
-      ), 0)::numeric(12,4)::text`,
+      // total_sales / total_revenue are NOT computed here. Unlike the counters
+      // above (inherently send-day events), sales & revenue are attributed by
+      // CONVERSION DATE — Keitaro stat_date, plus manual entry date — never the
+      // stage's send day. They are filled in from salesRevenueTotals() in GET.
+      // See lib/reporting/attribution.ts (ATTRIBUTION_BASIS).
     })
     .from(campaign_stages)
     .where(
@@ -105,7 +103,26 @@ async function aggregateStages(
         drizzleSql`${effective} >= ${from.toISOString()} and ${effective} < ${to.toISOString()}`,
       ),
     );
-  return rows[0] ?? EMPTY_TOTALS;
+  // Merge over EMPTY_TOTALS so total_sales / total_revenue (not selected above)
+  // default to 0 / "0" before GET overwrites them with the attribution figures.
+  return { ...EMPTY_TOTALS, ...(rows[0] ?? {}) };
+}
+
+// Map a resolved dashboard window to the attribution range. Sales/revenue split
+// their date dimension: the Keitaro side filters stat_date on the ET day strings
+// [startYmd, endExclYmd); the manual-ledger side filters created_at on the same
+// window's UTC instants [from, to).
+function toAttributionRange(
+  orgId: string,
+  w: { from: Date; to: Date; startYmd: string; endExclYmd: string },
+): AttributionRange {
+  return {
+    orgId,
+    statDateFrom: w.startYmd,
+    statDateToExclusive: w.endExclYmd,
+    manualFromUtc: w.from,
+    manualToExclusiveUtc: w.to,
+  };
 }
 
 // Count campaigns completed within [from, to).
@@ -133,6 +150,11 @@ function shapeTotals(t: StageTotals, completedInRange: number) {
   const totalRevenue = Number(t.total_revenue);
   // ROI as a signed percentage: ((income - spend) / spend) * 100. Null when
   // there's no spend to divide by (avoids divide-by-zero / misleading values).
+  // NOTE — mixed windows: revenue is conversion-dated (stat_date) while spend is
+  // send-dated (conversions lag the send), so a single day's ROI compares
+  // partially-different cohorts. This is acceptable: over any steady multi-day
+  // period the lag washes out, and conversion-dating revenue is the deliberate
+  // standard (lib/reporting/attribution.ts). Spend has no conversion date.
   const roi =
     totalSpend > 0 ? ((totalRevenue - totalSpend) / totalSpend) * 100 : null;
   return {
@@ -189,18 +211,28 @@ export async function GET(req: NextRequest) {
     .from(campaigns)
     .where(eq(campaigns.org_id, orgId));
 
-  const [statusCounts, currentTotals, currentCompleted, prev] =
+  const [statusCounts, currentTotals, currentCompleted, currentAttr, prev] =
     await Promise.all([
       statusCountsP,
       aggregateStages(orgId, range.current.from, range.current.to),
       countCompleted(orgId, range.current.from, range.current.to),
+      salesRevenueTotals(toAttributionRange(orgId, range.current)),
       compare
         ? Promise.all([
             aggregateStages(orgId, range.previous.from, range.previous.to),
             countCompleted(orgId, range.previous.from, range.previous.to),
+            salesRevenueTotals(toAttributionRange(orgId, range.previous)),
           ])
         : Promise.resolve(null),
     ]);
+
+  // Overlay conversion-dated sales & revenue onto the send-day counter totals.
+  currentTotals.total_sales = currentAttr.sales;
+  currentTotals.total_revenue = currentAttr.revenue;
+  if (prev) {
+    prev[0].total_sales = prev[2].sales;
+    prev[0].total_revenue = prev[2].revenue;
+  }
 
   const sc = statusCounts[0] ?? { active: 0, paused: 0, draft: 0 };
   const current = shapeTotals(currentTotals, currentCompleted);

@@ -21,6 +21,7 @@ import {
   type FunnelTally,
 } from "@/lib/keitaro/funnel";
 import { can } from "@/lib/permissions";
+import { manualSalesByStageInRange } from "@/lib/reporting/attribution";
 
 // Cross-campaign Keitaro reports: per-stage Clickers → Offer Redirect → Sales
 // funnel aggregated over a date range (ET), with resolved CamMan campaign + stage
@@ -127,7 +128,6 @@ export async function GET(req: NextRequest) {
       // whole lifetime counter to the stage's single send moment (`sent_at`).
       stage_sent_at: campaign_stages.sent_at,
       stage_sms_count: campaign_stages.sms_count,
-      stage_sales_count: campaign_stages.sales_count,
       // Auto-calculated SMS send cost (cost_per_sms × (sends + opt_outs)),
       // owned by lib/stages/total-cost.ts. This — NOT keitaro_stage_results.cost
       // (Keitaro ad-platform spend, always 0 here) — is the report's Cost source.
@@ -168,11 +168,11 @@ export async function GET(req: NextRequest) {
     stage_number: number | null;
     stage_label: string | null;
     stage_tracking_id: string;
-    // Send anchor + lifetime manual counters, copied off the stage row. Used to
-    // attribute manual sends/sales to the send moment under activity scoping.
+    // Send anchor + lifetime SMS count, copied off the stage row. Used to
+    // attribute manual SENDS/cost to the send moment under activity scoping.
+    // (Manual SALES are attributed by ledger entry date, not this anchor.)
     stage_sent_at: Date | null;
     stage_sms_count: number;
-    stage_sales_count: number;
     // Lifetime auto/override SMS cost off the stage row, attributed to sent_at.
     stage_total_cost: number;
     // Opt-outs (STOPs credited to this stage) and successful sends WITHIN the
@@ -186,9 +186,9 @@ export async function GET(req: NextRequest) {
 
   // Keitaro funnel (clickers/redirect/sales/revenue/cost) is already date-bounded
   // by stat_date. Sales here starts as the Keitaro conversion count IN RANGE; the
-  // operator's MANUAL sales (campaign_stages.sales_count) are added below, counted
-  // only when the stage's send moment (sent_at) lands in the window — manual sales
-  // have no per-event timeline, so they ride the send activity's date.
+  // operator's MANUAL sales are combined below by their LEDGER ENTRY DATE
+  // (stage_manual_sales.created_at in range) — the conversion-date basis shared
+  // with the dashboard (lib/reporting/attribution.ts, ATTRIBUTION_BASIS).
   for (const r of rows) {
     addRowToFunnel(grand, r);
     let acc = byStage.get(r.stage_id);
@@ -203,7 +203,6 @@ export async function GET(req: NextRequest) {
         stage_tracking_id: r.stage_tracking_id,
         stage_sent_at: r.stage_sent_at,
         stage_sms_count: r.stage_sms_count ?? 0,
-        stage_sales_count: r.stage_sales_count ?? 0,
         stage_total_cost: Number(r.stage_total_cost ?? 0),
         opt_outs: 0,
         total_sent: 0,
@@ -272,9 +271,18 @@ export async function GET(req: NextRequest) {
       .groupBy(stage_sends.stage_id);
     const sentByStage = new Map(sentRows.map((s) => [s.stage_id, Number(s.sent)]));
 
+    // Manual sales credited to each stage by LEDGER ENTRY DATE (created_at in the
+    // report window) — the conversion-date basis. Distinct from the send-moment
+    // gating below, which still governs manual SENDS and cost.
+    const manualSalesByStage = await manualSalesByStageInRange({
+      orgId: auth.orgId,
+      fromUtc,
+      toExclusiveUtc,
+    });
+
     // Whether a stage's single send moment falls inside the report window. Manual
-    // sends and manual sales carry no per-event timeline, so under activity-date
-    // scoping the whole lifetime counter is attributed to `sent_at` (the activity).
+    // SENDS/cost carry no per-event timeline, so under activity-date scoping the
+    // whole lifetime counter is attributed to `sent_at` (the send activity).
     const sentInRange = (sentAt: Date | null): boolean =>
       sentAt != null && sentAt >= fromUtc && sentAt < toExclusiveUtc;
 
@@ -289,17 +297,15 @@ export async function GET(req: NextRequest) {
           : inRange
             ? acc.stage_sms_count
             : 0;
-      // Sales = max(manual tally, Keitaro conversions), NOT the sum: a sale that's
-      // both Keitaro-tracked and manually tallied is the SAME sale, so summing
-      // double-counted it (Keitaro 1 + manual 1 = 2 for one real sale). acc.tally
-      // .sales currently holds the in-range Keitaro sum; we top it up to the manual
-      // tally only when the latter is larger (and the send landed in range — manual
-      // sales carry no per-event time, so they ride the stage's one send moment).
-      // This dedupes the overlap while preserving a manual baseline that exceeds
-      // Keitaro's (under-counted) view. Mirrors combineSales() in lib/stage-results.
-      const manual = inRange
-        ? Math.max(0, acc.stage_sales_count - acc.tally.sales)
-        : 0;
+      // Sales = max(manual-in-range, Keitaro conversions-in-range), NOT the sum: a
+      // sale that's both Keitaro-tracked and manually tallied is the SAME sale, so
+      // summing double-counts it. acc.tally.sales currently holds the in-range
+      // Keitaro sum; we top it up to the manual tally (manual sales whose ledger
+      // entry date lands in range) only when the latter is larger. This dedupes the
+      // overlap while preserving a manual baseline that exceeds Keitaro's (under-
+      // counted) view. Mirrors combineSales() in lib/stage-results.
+      const manualInRange = manualSalesByStage.get(acc.stage_id) ?? 0;
+      const manual = Math.max(0, manualInRange - acc.tally.sales);
       acc.tally.sales += manual;
       // Cost = the stage's auto-calculated SMS spend (campaign_stages.total_cost),
       // attributed to its single send moment under activity-date scoping — same

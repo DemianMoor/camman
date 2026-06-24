@@ -589,6 +589,13 @@
       "when": 1783555200000,
       "tag": "0083_offer_payouts_history",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1783641600000,
+      "tag": "0084_redate_manual_sales_backfill",
+      "breakpoints": true
     }
   ]
 }

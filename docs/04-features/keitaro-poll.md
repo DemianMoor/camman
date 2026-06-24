@@ -56,22 +56,24 @@ the two with `combineSales`, and Revenue/ROI rate the **combined** count ×
 — clobbered manual entries, gone; then it was made additive 2026-06-19 — double-counted
 overlapping sales, replaced by max 2026-06-21.)
 
-> **`/reports` anchors the manual baseline to the stage's send date (changed 2026-06-20).**
-> Reports is a **date-ranged** view, but manual sends/sales carry no per-event
-> timeline — `sales_count` and `sms_count` are single overwrite-on-save integers.
-> So under activity-date scoping they ride the stage's one send moment: a stage's
-> full lifetime manual `sales_count` is combined (via `max`, not sum) with the
-> in-range Keitaro conversions **only when `campaign_stages.sent_at` falls in the
-> window** — out of range the manual tally drops out and only Keitaro counts. **Total Sent**
-> for a manual-send campaign (`link_mode='manual'`) is `sms_count` gated the same
-> way. Tracked campaigns (`link_mode='tracked'`) keep the per-recipient
-> `stage_sends` count for Total Sent. (Earlier the report dated manual sales by a
-> `stage_manual_sales` ledger entry time; the migration-0079 backfill stamped every
-> pre-existing total at `now()`, so any window covering the backfill date showed
-> the full lifetime — that's why it looked like the date filter was ignored. The
-> ledger table still records deltas for audit/current-total but no longer drives
-> the report.) The stage Results panel and campaign-detail column are NOT
-> date-ranged and show the full lifetime `max(manual, Keitaro)`. See §5/§5b.
+> **Date-ranged views attribute sales/revenue by CONVERSION DATE (standardized 2026-06-24).**
+> `/reports` AND the dashboard (stats tiles + daily-activity charts) now share one
+> attribution basis — [`lib/reporting/attribution.ts`](../../lib/reporting/attribution.ts),
+> `ATTRIBUTION_BASIS = 'stat_date'`. **Revenue** + **Keitaro sales** are dated by
+> `keitaro_stage_results.stat_date` (the conversion day, already ET). **Manual sales**
+> are dated by their `stage_manual_sales` ledger **entry date** (`created_at`,
+> bucketed ET) and combined per stage with the in-range Keitaro count via `max`
+> (`combineSales`). **Total Sent** and **cost** for a manual-send campaign
+> (`link_mode='manual'`) still ride the stage's `sent_at` send moment; tracked
+> campaigns keep the per-recipient `stage_sends` count for Total Sent.
+> (History: the report briefly dated manual sales by ledger entry time, then —
+> because the migration-0079 backfill stamped every pre-existing total at `now()` —
+> switched 2026-06-20 to anchoring the full lifetime `sales_count` to `sent_at`.
+> Migration **0084** fixed the root cause by re-dating those backfill rows to each
+> stage's effective send day, so the ledger entry date is now a faithful
+> per-period signal and drives the report again.) The stage Results panel and
+> campaign-detail column are NOT date-ranged and show the full lifetime
+> `max(manual, Keitaro)`. See §5/§5b.
 
 Combined with the opt-out poller mirroring `inbound_opt_out_count` → `opt_out_count`,
 the per-stage Results panel (SMS sent · Delivered · **Opt-outs** · **Clickers** ·

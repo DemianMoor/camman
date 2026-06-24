@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-06-22_
+_Last updated: 2026-06-24_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -195,8 +195,15 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
     sent), rendered as a %.
   - `click_rate` (CR) = `clickers / total_sent` (a fraction, 0 when nothing was
     sent), rendered as a %. Shares the `rateOfSent` helper with `opt_out_rate`.
-  - Clickers/Offer Redirect/Revenue/Cost are the Keitaro funnel, bounded by
-    `stat_date`. **Sales** = `max(Keitaro conversions in range, the stage's manual
+  - Clickers/Offer Redirect/Revenue are the Keitaro funnel, bounded by
+    `stat_date`. **Cost** is the stage's auto-calculated SMS spend
+    (`campaign_stages.total_cost` = `cost_per_sms × (sends + opt_outs)`, see
+    [`lib/stages/total-cost.ts`](../../lib/stages/total-cost.ts)) — **not**
+    `keitaro_stage_results.cost` (Keitaro ad-platform spend, always 0 here). Like
+    manual sends/sales it has no per-day timeline, so the whole lifetime value is
+    attributed to the stage's `sent_at` and counted only when that lands in range
+    (0 otherwise, keeping it consistent with the row's 0 sends). `Profit` =
+    `Revenue − Cost` follows automatically. **Sales** = `max(Keitaro conversions in range, the stage's manual
     `sales_count`)`, with the manual side counted only when its `sent_at` lands in
     range (manual sends/sales have no per-event timeline, so they ride the send
     activity's date — see §2a). The `max` (not a sum) dedupes a sale present in both

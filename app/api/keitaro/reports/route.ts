@@ -128,6 +128,10 @@ export async function GET(req: NextRequest) {
       stage_sent_at: campaign_stages.sent_at,
       stage_sms_count: campaign_stages.sms_count,
       stage_sales_count: campaign_stages.sales_count,
+      // Auto-calculated SMS send cost (cost_per_sms × (sends + opt_outs)),
+      // owned by lib/stages/total-cost.ts. This — NOT keitaro_stage_results.cost
+      // (Keitaro ad-platform spend, always 0 here) — is the report's Cost source.
+      stage_total_cost: campaign_stages.total_cost,
       visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
       visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
       redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
@@ -169,6 +173,8 @@ export async function GET(req: NextRequest) {
     stage_sent_at: Date | null;
     stage_sms_count: number;
     stage_sales_count: number;
+    // Lifetime auto/override SMS cost off the stage row, attributed to sent_at.
+    stage_total_cost: number;
     // Opt-outs (STOPs credited to this stage) and successful sends WITHIN the
     // report's date range — both filled in from grouped queries after the fold.
     opt_outs: number;
@@ -198,6 +204,7 @@ export async function GET(req: NextRequest) {
         stage_sent_at: r.stage_sent_at,
         stage_sms_count: r.stage_sms_count ?? 0,
         stage_sales_count: r.stage_sales_count ?? 0,
+        stage_total_cost: Number(r.stage_total_cost ?? 0),
         opt_outs: 0,
         total_sent: 0,
         tally: emptyFunnel(),
@@ -221,6 +228,7 @@ export async function GET(req: NextRequest) {
   let grandOptOuts = 0;
   let grandTotalSent = 0;
   let grandSalesTopup = 0;
+  let grandTotalCost = 0;
   if (stageIds.length > 0) {
     // Opt-outs = STOPs credited to the stage (opt_out_attributions) whose credit
     // landed in range. created_at ≈ STOP receipt (poller lag ≤15min); it's the
@@ -293,14 +301,24 @@ export async function GET(req: NextRequest) {
         ? Math.max(0, acc.stage_sales_count - acc.tally.sales)
         : 0;
       acc.tally.sales += manual;
+      // Cost = the stage's auto-calculated SMS spend (campaign_stages.total_cost),
+      // attributed to its single send moment under activity-date scoping — same
+      // rule as total_sent / manual sales. Overwrites the per-row Keitaro cost
+      // (ad-platform spend, always 0 here) folded in above. When the send falls
+      // outside the window the cost is 0, keeping it consistent with the 0 sends.
+      acc.tally.cost = inRange ? acc.stage_total_cost : 0;
       grandOptOuts += acc.opt_outs;
       grandTotalSent += acc.total_sent;
       grandSalesTopup += manual;
+      grandTotalCost += acc.tally.cost;
     }
   }
   // Fold the per-stage manual top-ups into the grand total once: grand.sales held
   // the Keitaro-only sum, so this lifts it to Σ max(manual, Keitaro) per stage.
   grand.sales += grandSalesTopup;
+  // grand.cost held the per-row Keitaro sum (≈0); replace it with the summed
+  // per-stage attributed SMS cost so the totals card + profit use real spend.
+  grand.cost = grandTotalCost;
 
   // Group-by: per-stage rows (default) or campaign rollups. Campaign rows fold
   // every stage of a campaign into one funnel (opt-outs summed across stages).

@@ -1810,7 +1810,18 @@ export const keitaro_stage_results = pgTable(
       precision: 12,
       scale: 4,
     }),
+    // ALWAYS 0 — DO NOT USE for ROI/EPC/profit. This is Keitaro ad-platform
+    // spend, which is meaningless here: we don't buy traffic through Keitaro,
+    // so every synced row carries cost 0. The real cost of a stage is the SMS
+    // send spend in campaign_stages.total_cost (cost_per_sms × (sends + opt_outs),
+    // see lib/stages/total-cost.ts). Every cost-based metric MUST source that
+    // column: the /reports route (app/api/keitaro/reports) folds this in but
+    // OVERWRITES it with campaign_stages.total_cost before computing profit.
+    // Synced only to keep the row shape stable; safe to stop syncing if desired.
     cost: numeric("cost", { precision: 12, scale: 4 }).notNull().default("0"),
+    // Earnings-per-click, derived from revenue (revenue / redirect raw clicks)
+    // at sync time — NOT cost-derived. Reports/results recompute EPC live from
+    // revenue as well; this stored value is a convenience cache.
     epc: numeric("epc", { precision: 12, scale: 4 }).notNull().default("0"),
     synced_at: timestamp("synced_at", { withTimezone: true })
       .notNull()

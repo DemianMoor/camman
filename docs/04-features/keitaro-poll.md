@@ -106,6 +106,17 @@ Two kinds of Keitaro campaign fire clicks for the **same** `sub_id_3` (stage):
   clicks through to the offer. Their clean clicks are **Offer Redirect**, and
   their conversions are **Sales**.
 
+> **Classification splits CLICKS only — conversions are credited regardless of
+> campaign (changed 2026-06-24).** A conversion's `leads`/`conversions`/`revenue`
+> is folded into the stage **whichever campaign reports it**, including a
+> `gk-lp-visits` row. Normally conversions only attach to an offer row, but a
+> broken landing→offer redirect can strand them on the visit campaign (the click
+> never reached the offer, so the postback fired against the visit click). Crediting
+> them rescues that otherwise-dropped revenue. **Safe against double-counting:**
+> Keitaro attributes each conversion to exactly one `campaign_id`, so a given
+> conversion appears in exactly one report row (verified: 0 cross-campaign
+> conversion splits over 30 days). The split still governs `cost` (offer side only).
+
 Classify by the campaign **name** (`gk-lp-visits`), never a numeric id — the name
 is the rebuild-safe human label. **Match on `name`, not `alias`:** in the live
 panel `gk-lp-visits` is the campaign's *name*; its *alias* is a random code (e.g.
@@ -133,9 +144,10 @@ for each stage is the **clean** (bot/prefetch-filtered) count.
    from redirects (§2b).
 3. Resolve every distinct `sub_id_3` → stage/campaign/org in one query, and load
    the campaigns list for the alias classifier (in parallel).
-4. **Fold** the per-campaign rows into one aggregate per (stage, ET date),
-   routing each row's clicks to the visit or redirect side by alias; conversions
-   only ever attach to the redirect (offer) side.
+4. **Fold** the per-campaign rows into one aggregate per (stage, ET date) via
+   `applyRowToAggregate`, routing each row's **clicks** to the visit or redirect
+   side by campaign; **conversions (checkouts/sales/revenue) are credited from
+   every row** regardless of campaign (§2b), and `cost` rides the offer side.
 5. Idempotent **UPSERT** per (stage, date) into `keitaro_stage_results`
    (`onConflictDoUpdate` on `(org_id, stage_id, stat_date)`, `synced_at = now()`).
    Each poll recomputes the **full** window totals and overwrites in place —

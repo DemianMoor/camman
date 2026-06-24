@@ -155,7 +155,7 @@ async function buildVisitClassifier(): Promise<{
 
 // One per (stage, ET date) — the aggregate we UPSERT. Multiple Keitaro campaign
 // rows (the visit campaign + one or more offer campaigns) fold into one entry.
-interface StageDayAgg {
+export interface StageDayAgg {
   orgId: string;
   campaignId: number;
   stageId: number;
@@ -169,6 +169,48 @@ interface StageDayAgg {
   sales: number;
   revenue: number;
   cost: number;
+}
+
+// Fold one Keitaro report row's metrics into a (stage, date) aggregate.
+//
+// CLICKS are split by campaign: a gk-lp-visits row's clicks are landing-page
+// VISITS ("Clickers"); any other campaign's clicks are OFFER REDIRECTS. Cost is
+// ad-spend on the offer campaign, so it rides the redirect side too.
+//
+// CONVERSIONS (checkouts / sales / revenue) are credited to the stage REGARDLESS
+// of which Keitaro campaign reported them. Normally conversions only ever attach
+// to an offer-campaign row, but a broken landing→offer redirect can strand them on
+// the gk-lp-visits row (the click never reached the offer campaign, so the
+// postback fired against the visit click). Crediting them here rescues that
+// otherwise-dropped revenue. This is SAFE against double-counting: Keitaro
+// attributes each conversion to exactly one campaign_id, so a given conversion
+// appears in exactly one report row.
+//
+// Mapping note: this account's network fires only `lead`-status postbacks (no
+// `sale` status — confirmed via a direct Keitaro probe 2026-06-19), so Keitaro's
+// `sales` metric is usually 0 while the paid events live in `conversions` (= leads
+// + sales). We map Keitaro `conversions` → our **Sales** (count + revenue) and
+// `leads` → **Checkout**. `revenue` is Keitaro's real summed conversion revenue.
+export function applyRowToAggregate(
+  agg: StageDayAgg,
+  row: KeitaroReportRow,
+  isVisit: boolean,
+): void {
+  const rawClicks = toInt(row.clicks);
+  const cleanClicks = toInt(row.campaign_unique_clicks);
+
+  if (isVisit) {
+    agg.visitRaw += rawClicks;
+    agg.visitClean += cleanClicks;
+  } else {
+    agg.redirectRaw += rawClicks;
+    agg.redirectClean += cleanClicks;
+    agg.cost += toNum(row.cost);
+  }
+
+  agg.checkouts += toInt(row.leads);
+  agg.sales += toInt(row.conversions);
+  agg.revenue += toNum(row.revenue);
 }
 
 // Pull the rolling window from Keitaro (grouped by day + sub_id_3 + campaign),
@@ -262,31 +304,7 @@ export async function pollKeitaro(
       aggregates.set(key, agg);
     }
 
-    const rawClicks = toInt(row.clicks);
-    const cleanClicks = toInt(row.campaign_unique_clicks);
-
-    if (classifier.isVisitRow(row)) {
-      // Visit campaign: clicks are "Clickers". Conversions never attach here.
-      agg.visitRaw += rawClicks;
-      agg.visitClean += cleanClicks;
-    } else {
-      // Offer campaign: clicks are "Offer Redirect"; the conversions are the
-      // sale results. This account's network fires only `lead`-status postbacks
-      // (no `sale` status — confirmed via a direct Keitaro probe 2026-06-19), so
-      // Keitaro's `sales` metric is always 0 while the actual paid events live in
-      // `conversions` (= leads + sales). We therefore map Keitaro `conversions` →
-      // our **Sales** so the count + revenue reflect real results; `leads` still
-      // feeds **Checkout**. The two are equal while every conversion is a lead;
-      // they diverge if a true post-checkout `sale` status ever appears (then
-      // conversions/Sales > leads/Checkout). `revenue` is Keitaro's real summed
-      // conversion revenue.
-      agg.redirectRaw += rawClicks;
-      agg.redirectClean += cleanClicks;
-      agg.checkouts += toInt(row.leads);
-      agg.sales += toInt(row.conversions);
-      agg.revenue += toNum(row.revenue);
-      agg.cost += toNum(row.cost);
-    }
+    applyRowToAggregate(agg, row, classifier.isVisitRow(row));
   }
 
   let upserted = 0;

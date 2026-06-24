@@ -15,6 +15,10 @@ import {
   stageHasResults,
   stageNotArchived,
 } from "@/lib/dashboard-stages";
+import {
+  effectiveDeliveredCountSql,
+  effectiveSmsCountSql,
+} from "@/lib/stages/derived-counts";
 import { can } from "@/lib/permissions";
 import {
   salesRevenueTotals,
@@ -81,8 +85,10 @@ async function aggregateStages(
       success_in_range: drizzleSql<number>`count(*) filter (where ${campaign_stages.status} = 'success')::int`,
       failed_in_range: drizzleSql<number>`count(*) filter (where ${campaign_stages.status} = 'failed')::int`,
       cancelled_in_range: drizzleSql<number>`count(*) filter (where ${campaign_stages.status} = 'cancelled')::int`,
-      sms_sent: drizzleSql<number>`coalesce(sum(${campaign_stages.sms_count}), 0)::int`,
-      delivered: drizzleSql<number>`coalesce(sum(${campaign_stages.delivered_count}), 0)::int`,
+      // Manual tally OR real per-recipient stage_sends rows, whichever is larger,
+      // per stage then summed. See lib/stages/derived-counts.ts.
+      sms_sent: drizzleSql<number>`coalesce(sum(${effectiveSmsCountSql}), 0)::int`,
+      delivered: drizzleSql<number>`coalesce(sum(${effectiveDeliveredCountSql}), 0)::int`,
       opt_outs_added: drizzleSql<number>`coalesce(sum(${campaign_stages.opt_out_count}), 0)::int`,
       clickers_added: drizzleSql<number>`coalesce(sum(${campaign_stages.click_count}), 0)::int`,
       scrubbed_added: drizzleSql<number>`coalesce(sum(${campaign_stages.scrubbed_count}), 0)::int`,

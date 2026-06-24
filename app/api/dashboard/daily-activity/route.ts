@@ -15,6 +15,7 @@ import {
   stageHasResults,
   stageNotArchived,
 } from "@/lib/dashboard-stages";
+import { effectiveSmsCountSql } from "@/lib/stages/derived-counts";
 import { can } from "@/lib/permissions";
 import { salesRevenueByDay } from "@/lib/reporting/attribution";
 
@@ -59,7 +60,7 @@ export async function GET(req: NextRequest) {
     select
       to_char((${stageEffectiveDate} at time zone ${CAMPAIGN_TIMEZONE})::date, 'YYYY-MM-DD') as day,
       count(*)::int as stages_sent,
-      coalesce(sum(sms_count), 0)::int as sms_count,
+      coalesce(sum(${effectiveSmsCountSql}), 0)::int as sms_count,
       coalesce(sum(total_cost), 0)::numeric(12,4)::text as cost,
       coalesce(sum(opt_out_count), 0)::int as opt_outs,
       coalesce(sum(click_count), 0)::int as clickers

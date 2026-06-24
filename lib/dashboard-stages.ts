@@ -1,6 +1,10 @@
 import { sql as drizzleSql } from "drizzle-orm";
 
 import { campaign_stages } from "@/db/schema";
+import {
+  stageHasKeitaroResultsSql,
+  stageHasSentRowsSql,
+} from "@/lib/stages/derived-counts";
 
 // Shared dashboard rollup predicates for campaign_stages.
 //
@@ -13,7 +17,12 @@ import { campaign_stages } from "@/db/schema";
 // invisible on the dashboard. We now include any stage that carries recorded
 // results, regardless of how it got there. See the dashboard route files.
 
-// A stage "has results" when any result counter or cost has been recorded.
+// A stage "has results" when any result counter or cost has been recorded — OR
+// when the source tables carry data the manual counters don't mirror. The latter
+// two clauses are load-bearing for tracked/API stages: they send via stage_sends
+// and record sales in keitaro_stage_results while sms_count / sales_count stay 0,
+// so without them every tracked stage would be invisible on the dashboard. See
+// lib/stages/derived-counts.ts for the read-time combination these gate.
 export const stageHasResults = drizzleSql`(
   ${campaign_stages.sms_count} > 0
   or ${campaign_stages.delivered_count} > 0
@@ -23,6 +32,8 @@ export const stageHasResults = drizzleSql`(
   or ${campaign_stages.bounced_count} > 0
   or ${campaign_stages.sales_count} > 0
   or ${campaign_stages.total_cost} > 0
+  or ${stageHasSentRowsSql}
+  or ${stageHasKeitaroResultsSql}
 )`;
 
 // Effective report date used for range filtering + daily bucketing. Prefer the

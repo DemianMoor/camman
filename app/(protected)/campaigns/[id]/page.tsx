@@ -994,14 +994,21 @@ export default function CampaignDetailPage() {
         id: "sms_count",
         header: "SMS",
         enableSorting: false,
-        cell: ({ row }) =>
-          row.original.sms_count > 0 ? (
+        cell: ({ row }) => {
+          // Manual tally OR real dispatched rows (tracked stages keep their count
+          // in stage_sends, not sms_count). See lib/stages/derived-counts.ts.
+          const sms = Math.max(
+            row.original.sms_count,
+            row.original.send_counts.sent,
+          );
+          return sms > 0 ? (
             <span className="font-mono text-sm tabular-nums">
-              {row.original.sms_count.toLocaleString()}
+              {sms.toLocaleString()}
             </span>
           ) : (
             <span className="text-muted-foreground">—</span>
-          ),
+          );
+        },
       },
       {
         id: "cost",
@@ -1023,14 +1030,20 @@ export default function CampaignDetailPage() {
         enableSorting: false,
         cell: ({ row }) => {
           const {
-            sms_count: sms,
-            delivered_count: delivered,
             opt_out_count: oo,
             click_count: cl,
             checkout_click_count: chk,
             sales_count: manualSales,
             keitaro_sales_count: keitaroSales,
+            send_counts: sendCounts,
           } = row.original;
+          // sms/delivered = max(manual tally, real dispatched rows). No DLR, so
+          // delivered proxies to stage_sends 'sent'. See lib/stages/derived-counts.
+          const sms = Math.max(row.original.sms_count, sendCounts.sent);
+          const delivered = Math.max(
+            row.original.delivered_count,
+            sendCounts.sent,
+          );
           // Keitaro wins when it reports the conversion; manual tally fills gaps.
           const sales = combineSales(manualSales, keitaroSales);
           // Results are considered entered (manually or imported) once any
@@ -1236,8 +1249,9 @@ export default function CampaignDetailPage() {
     let revenueKnown = false;
     for (const s of stages) {
       if (s.archived_at) continue;
-      sms += s.sms_count;
-      delivered += s.delivered_count;
+      // max(manual tally, real dispatched rows) per stage. See derived-counts.ts.
+      sms += Math.max(s.sms_count, s.send_counts.sent);
+      delivered += Math.max(s.delivered_count, s.send_counts.sent);
       optOuts += s.opt_out_count;
       clickers += s.click_count;
       scrubbed += s.scrubbed_count;

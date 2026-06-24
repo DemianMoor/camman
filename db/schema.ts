@@ -1388,10 +1388,20 @@ export const campaign_stages = pgTable(
       .defaultNow(),
     previous_status: text("previous_status"),
     status: text("status").notNull().default("draft"),
+    // NOT AUTHORITATIVE ON ITS OWN. This is the MANUAL/CSV entry store only:
+    // the manual-results form writes it and CSV import adds to it. API/tracked
+    // stages send via stage_sends (one row/recipient, status='sent') and leave
+    // this at 0. The DISPLAYED sms-sent value everywhere is
+    // max(sms_count, count(stage_sends 'sent')) — see lib/stages/derived-counts.ts.
+    // Never read this column as the sole truth.
     sms_count: integer("sms_count").notNull().default(0),
     total_cost: numeric("total_cost", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
+    // NOT AUTHORITATIVE ON ITS OWN. Manual/CSV entry store only (see sms_count).
+    // There is no DLR feedback (CLAUDE.md §12), so the DISPLAYED delivered value
+    // is max(delivered_count, count(stage_sends 'sent')) — the same 'sent' proxy.
+    // See lib/stages/derived-counts.ts.
     delivered_count: integer("delivered_count").notNull().default(0),
     // The "Opt-outs" report field. Auto-mirrored from inbound_opt_out_count by
     // the opt-out poller so the per-stage panel reflects live TextHub STOPs;
@@ -1417,6 +1427,11 @@ export const campaign_stages = pgTable(
     checkout_click_count: integer("checkout_click_count")
       .notNull()
       .default(0),
+    // NOT AUTHORITATIVE ON ITS OWN. The operator's MANUAL sales tally only — the
+    // Keitaro poll deliberately never writes it (real conversions live in
+    // keitaro_stage_results). The DISPLAYED sales value is
+    // max(sales_count, keitaro conversions) via combineSales() — see
+    // lib/stage-results.ts and lib/stages/derived-counts.ts.
     sales_count: integer("sales_count").notNull().default(0),
     // Offer payout-per-sale (CPA) snapshotted at the moment the sales count
     // was last entered, so revenue/ROI reflect the offer's payout "on the

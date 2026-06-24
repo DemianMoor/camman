@@ -10,6 +10,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { stageSentCountSql } from "@/lib/stages/derived-counts";
 import { can } from "@/lib/permissions";
 
 const LIMIT = 10;
@@ -39,6 +40,9 @@ export async function GET() {
       updated_at: campaign_stages.status_changed_at,
       sms_count: campaign_stages.sms_count,
       delivered_count: campaign_stages.delivered_count,
+      // Real dispatched rows (stage_sends.status='sent'); combined with the
+      // manual columns below so tracked stages don't read as 0.
+      sent_count: stageSentCountSql,
       opt_out_count: campaign_stages.opt_out_count,
       click_count: campaign_stages.click_count,
       scrubbed_count: campaign_stages.scrubbed_count,
@@ -83,8 +87,10 @@ export async function GET() {
     label: r.label,
     status: r.status,
     updated_at: r.updated_at,
-    sms_count: r.sms_count,
-    delivered_count: r.delivered_count,
+    // Displayed sms/delivered = max(manual tally, real dispatched rows). No DLR,
+    // so "sent" is the delivered proxy. See lib/stages/derived-counts.ts.
+    sms_count: Math.max(r.sms_count, r.sent_count),
+    delivered_count: Math.max(r.delivered_count, r.sent_count),
     opt_out_count: r.opt_out_count,
     click_count: r.click_count,
     scrubbed_count: r.scrubbed_count,

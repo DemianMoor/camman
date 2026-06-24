@@ -32,6 +32,10 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { buildCreativeListWhere } from "@/lib/creatives/list-filters";
+import {
+  effectiveDeliveredCountSql,
+  effectiveSalesCountSql,
+} from "@/lib/stages/derived-counts";
 import { can } from "@/lib/permissions";
 
 const SORT_COLUMNS = {
@@ -80,16 +84,19 @@ export async function GET(req: NextRequest) {
   const stageAgg = db
     .select({
       creative_id: campaign_stages.creative_id,
+      // Manual tally OR real dispatched rows, per stage then summed (no DLR ⇒
+      // delivered proxies to stage_sends 'sent'). See lib/stages/derived-counts.
       delivered:
-        drizzleSql<number>`coalesce(sum(${campaign_stages.delivered_count}), 0)::int`.as(
+        drizzleSql<number>`coalesce(sum(${effectiveDeliveredCountSql}), 0)::int`.as(
           "delivered",
         ),
       checkouts:
         drizzleSql<number>`coalesce(sum(${campaign_stages.checkout_click_count}), 0)::int`.as(
           "checkouts",
         ),
+      // Manual tally OR Keitaro conversions, per stage then summed (combineSales).
       sales:
-        drizzleSql<number>`coalesce(sum(${campaign_stages.sales_count}), 0)::int`.as(
+        drizzleSql<number>`coalesce(sum(${effectiveSalesCountSql}), 0)::int`.as(
           "sales",
         ),
       // Revenue is the real per-conversion payout from Keitaro

@@ -18,6 +18,7 @@ import {
   clicks,
   creative_offers,
   creatives,
+  keitaro_stage_results,
   links,
   offers,
   spam_scores,
@@ -91,10 +92,15 @@ export async function GET(req: NextRequest) {
         drizzleSql<number>`coalesce(sum(${campaign_stages.sales_count}), 0)::int`.as(
           "sales",
         ),
+      // Revenue is the real per-conversion payout from Keitaro
+      // (keitaro_stage_results.revenue), NOT sales × the offer's current CPA —
+      // a mid-flight CPA change would retro-misprice prior sales. Powers EPC.
       payout:
-        drizzleSql<string>`coalesce(sum(${campaign_stages.sales_count} * ${campaign_stages.sales_payout_each}) filter (where ${campaign_stages.sales_payout_each} is not null), 0)`.as(
-          "payout",
-        ),
+        drizzleSql<string>`coalesce(sum(
+          (SELECT coalesce(sum(ksr.revenue), 0)
+             FROM ${keitaro_stage_results} ksr
+            WHERE ksr.stage_id = ${campaign_stages.id})
+        ), 0)`.as("payout"),
       manual_clean:
         drizzleSql<number>`coalesce(sum(${campaign_stages.click_count}) filter (where ${campaigns.link_mode} = 'manual'), 0)::int`.as(
           "manual_clean",

@@ -190,6 +190,10 @@ export const offers = pgTable(
         onDelete: "restrict",
       }),
     payout_model: text("payout_model").notNull().default("cpa"),
+    // current rate cache only — never use to compute historical revenue; source
+    // of truth is keitaro_stage_results.revenue (per-conversion payout at sync
+    // time). A CPA change is recorded as a new offer_payouts row (effective-dated
+    // history); this column just mirrors the current/latest rate for display.
     payout_cpa: numeric("payout_cpa", { precision: 12, scale: 4 }),
     payout_revshare: numeric("payout_revshare", { precision: 5, scale: 2 }),
     sales_pages: jsonb("sales_pages")
@@ -220,6 +224,46 @@ export const offers = pgTable(
 
 export type Offer = typeof offers.$inferSelect;
 export type NewOffer = typeof offers.$inferInsert;
+
+// Effective-dated CPA history for an offer. offers.payout_cpa is only the
+// current-rate cache; this table is the audit trail of what the CPA was over
+// time. The write path (app/api/offers) closes the current row (effective_to =
+// now()) and opens a new one on every CPA change instead of overwriting, so a
+// rate that changes mid-flight never rewrites the past. Revenue is still sourced
+// from keitaro_stage_results.revenue — this table is for display/audit of "the
+// rate that applied when", not for recomputing earnings.
+export const offer_payouts = pgTable(
+  "offer_payouts",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    payout_cpa: numeric("payout_cpa", { precision: 12, scale: 4 }).notNull(),
+    effective_from: timestamp("effective_from", {
+      withTimezone: true,
+    }).notNull(),
+    // NULL = the current rate. A partial unique index enforces at most one such
+    // open row per offer.
+    effective_to: timestamp("effective_to", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (table) => [
+    index("offer_payouts_offer_effective_idx").on(
+      table.offer_id,
+      table.effective_from,
+    ),
+    uniqueIndex("offer_payouts_one_current_per_offer_uniq")
+      .on(table.offer_id)
+      .where(sql`${table.effective_to} IS NULL`),
+  ],
+);
+
+export type OfferPayout = typeof offer_payouts.$inferSelect;
+export type NewOfferPayout = typeof offer_payouts.$inferInsert;
 
 export const sms_providers = pgTable(
   "sms_providers",
@@ -1758,6 +1802,14 @@ export const keitaro_stage_results = pgTable(
     revenue: numeric("revenue", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
+    // Per-conversion payout stamped at sync time (= revenue / sales for the row).
+    // Frozen against later CPA edits so historical revenue can never be retro-
+    // changed. NULL when the row has 0 sales (no conversion to price). Revenue
+    // itself remains the source-of-truth aggregate; this is the per-unit rate.
+    payout_at_conversion: numeric("payout_at_conversion", {
+      precision: 12,
+      scale: 4,
+    }),
     cost: numeric("cost", { precision: 12, scale: 4 }).notNull().default("0"),
     epc: numeric("epc", { precision: 12, scale: 4 }).notNull().default("0"),
     synced_at: timestamp("synced_at", { withTimezone: true })

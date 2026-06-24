@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-06-23_
+_Last updated: 2026-06-24_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -37,7 +37,9 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - **TextHub inbox `received_at` is US Mountain Time, not UTC.** TextHub stamps inbound STOP messages "YYYY-MM-DD HH:MM:SS" with no zone in Mountain wall-clock (operator-confirmed). `parseProviderReceivedAt` ([`lib/sends/poll-opt-outs.ts`](../lib/sends/poll-opt-outs.ts)) interprets it in `America/Denver` (`TEXTHUB_RECEIVED_AT_TIMEZONE`, via `date-fns-tz` `fromZonedTime`) → true UTC; DST-aware (MDT/−6 summer, MST/−7 winter). ISO strings that carry their own offset are honored as-is. Parsing it as UTC (the original bug, fixed 2026-06-19) put the attribution anchor up to 7h early, so a campaign's own STOP replies failed the `sent_at <= anchor + 5min` upper bound and the stage's opt-out counter read 0 despite ~100 real replies. Empirically: our ingest clock ran a constant ~6h ahead of the stamped value (132 msgs, June/MDT).
 
 ## Money
-- `NUMERIC(12,4)`, displayed `$`. `sales_payout_each` snapshots the offer CPA at the moment sales were entered so ROI doesn't drift if the offer is later edited.
+- `NUMERIC(12,4)`, displayed `$`.
+- **Revenue source of truth = `keitaro_stage_results.revenue`** (the real summed per-conversion payout pulled from Keitaro at sync time). Every reported/stored revenue & earnings figure — `/reports`, the dashboard stats + daily-activity charts, the campaign detail per-stage + rollup, the creatives EPC — SUMs this column for the relevant stages/date range. **Never compute revenue as `sales × offers.payout_cpa` (or `× sales_payout_each`).** A network that changes a CPA mid-flight (e.g. Kinzeno 14508 went $60→$66→$75 on 2026-06-23) would otherwise retro-misprice every prior sale. `offers.payout_cpa` is a **current-rate cache** only; `sales_payout_each` survives solely as the manual-results form's pre-save, clearly-labeled *estimate* while typing a sales count (never persisted or shown as actual revenue). `keitaro_stage_results.payout_at_conversion` (= `revenue/sales`, frozen at sync) records the per-unit rate that was actually paid.
+- **CPA history (`offer_payouts`):** the offers create/update path writes effective-dated rows — on a CPA change it closes the current row (`effective_to = now()`) and opens a new one rather than overwriting, so the rate timeline is auditable. A partial unique index allows at most one open (`effective_to IS NULL`) row per offer.
 - **Stage `total_cost`** (migration `0081`, [`lib/stages/total-cost.ts`](../lib/stages/total-cost.ts)) auto-derives as `cost_per_sms × (sends + opt_out_count)` from the stage's assigned provider phone — opt-out replies count toward the multiplier because STOPs are billed like sends. `sends = GREATEST(sms_count, accepted stage_sends)` so API/tracked stages (where `sms_count` stays 0 and the real dispatched count lives in `stage_sends` `status='sent'`) cost on their actual messages, not just opt-outs. The cost is **gated on the send**: `$0` until `sent_at` is set or `sms_count > 0` (hand-entered results), so a freshly-created/scheduled stage shows no cost. Recomputed wherever those inputs change (manual-results save, opt-out poller, provider-phone PATCH). `total_cost_manual=true` (operator override via the manual-results **Auto-calculate** switch, or a cost-bearing CSV import) freezes the value — the auto formula then leaves it alone.
 
 ## Database & migrations

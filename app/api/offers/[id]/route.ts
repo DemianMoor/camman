@@ -1,8 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { affiliate_networks, offers } from "@/db/schema";
+import { affiliate_networks, offer_payouts, offers } from "@/db/schema";
 import {
   apiError,
   isUniqueViolation,
@@ -168,19 +168,73 @@ export async function PATCH(
     }
   }
 
-  try {
-    const updated = await db
-      .update(offers)
-      .set(updates)
-      .where(and(eq(offers.id, offerId), eq(offers.org_id, orgId)))
-      .returning();
+  // Read the current CPA so we can tell whether this PATCH actually changes it.
+  // A real change is recorded as offer_payouts history (close current row, open a
+  // new one) rather than silently overwriting — offers.payout_cpa is only a cache.
+  const currentRows = await db
+    .select({ payout_cpa: offers.payout_cpa })
+    .from(offers)
+    .where(and(eq(offers.id, offerId), eq(offers.org_id, orgId)))
+    .limit(1);
+  if (!currentRows[0]) {
+    return apiError(404, "Offer not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "offer",
+    });
+  }
+  const oldCpa = currentRows[0].payout_cpa;
+  const cpaInUpdate = Object.prototype.hasOwnProperty.call(
+    updates,
+    "payout_cpa",
+  );
+  const newCpa = cpaInUpdate ? (updates.payout_cpa as string | null) : oldCpa;
+  // Compare numerically so "60" vs "60.0000" isn't seen as a change.
+  const cpaChanged =
+    cpaInUpdate &&
+    (oldCpa == null || newCpa == null
+      ? oldCpa !== newCpa
+      : Number(oldCpa) !== Number(newCpa));
 
-    if (!updated[0]) {
+  try {
+    const updated = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(offers)
+        .set(updates)
+        .where(and(eq(offers.id, offerId), eq(offers.org_id, orgId)))
+        .returning();
+      if (!row) return null;
+
+      if (cpaChanged) {
+        // Close the current open history row...
+        await tx
+          .update(offer_payouts)
+          .set({ effective_to: sql`now()` })
+          .where(
+            and(
+              eq(offer_payouts.offer_id, offerId),
+              isNull(offer_payouts.effective_to),
+            ),
+          );
+        // ...and open a new current row when there's still a CPA (a switch to
+        // revshare clears it — close the old row, open none).
+        if (newCpa != null) {
+          await tx.insert(offer_payouts).values({
+            org_id: orgId,
+            offer_id: offerId,
+            payout_cpa: newCpa,
+            effective_from: sql`now()`,
+            effective_to: null,
+          });
+        }
+      }
+      return row;
+    });
+
+    if (!updated) {
       return apiError(404, "Offer not found", API_ERROR_CODES.NOT_FOUND, {
         entity: "offer",
       });
     }
-    return NextResponse.json(updated[0]);
+    return NextResponse.json(updated);
   } catch (err) {
     if (isUniqueViolation(err)) {
       return apiError(

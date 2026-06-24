@@ -575,6 +575,20 @@
       "when": 1783382400000,
       "tag": "0081_stage_total_cost_manual",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1783468800000,
+      "tag": "0082_keitaro_payout_at_conversion",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1783555200000,
+      "tag": "0083_offer_payouts_history",
+      "breakpoints": true
     }
   ]
 }

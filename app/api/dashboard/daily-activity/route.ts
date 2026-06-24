@@ -55,9 +55,14 @@ export async function GET(req: NextRequest) {
       count(*)::int as stages_sent,
       coalesce(sum(sms_count), 0)::int as sms_count,
       coalesce(sum(total_cost), 0)::numeric(12,4)::text as cost,
+      -- Revenue = SUM of real per-conversion payout from Keitaro
+      -- (keitaro_stage_results.revenue), never sales × the offer's current CPA
+      -- (a mid-flight CPA change would retro-misprice prior sales). Each stage's
+      -- full Keitaro revenue is attributed to that stage's effective day.
       coalesce(sum(
-        case when sales_payout_each is not null
-          then sales_count * sales_payout_each else 0 end
+        (SELECT coalesce(sum(ksr.revenue), 0)
+           FROM keitaro_stage_results ksr
+          WHERE ksr.stage_id = campaign_stages.id)
       ), 0)::numeric(12,4)::text as revenue,
       coalesce(sum(sales_count), 0)::int as sales,
       coalesce(sum(opt_out_count), 0)::int as opt_outs,

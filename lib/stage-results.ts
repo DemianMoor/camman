@@ -1,10 +1,15 @@
-// Revenue / ROI math for stage results. Shared by the manual-results form
-// (live preview) and the campaign detail page (per-stage + rollup) so the
-// numbers can never diverge.
+// Revenue / ROI math for stage results.
 //
-// Revenue = sales × the offer CPA payout snapshotted on the stage when the
-// sales count was entered (campaign_stages.sales_payout_each). ROI uses the
-// stage's send cost (total_cost) as the cost basis: (revenue − cost) / cost.
+// IMPORTANT: the REVENUE SOURCE OF TRUTH is keitaro_stage_results.revenue (the
+// real per-conversion payout recorded by Keitaro at sync time). Reported and
+// stored revenue everywhere — dashboards, reports, the campaign detail page —
+// is summed from that column, NEVER from sales × the offer CPA. A CPA that
+// changes mid-flight (offers.payout_cpa) would retro-misprice every prior sale.
+//
+// `stageRevenue` (sales × payout) survives ONLY as the manual-results form's
+// live, pre-save ESTIMATE while an operator types a sales count for a stage
+// with no Keitaro tracking. It is never persisted or shown as actual revenue.
+// `stageRoi`/`formatRevenue`/`formatRoi` are the shared display helpers.
 
 // Effective Sales for a stage = max(manual tally, Keitaro conversions) — NOT the
 // sum. A sale that Keitaro tracks AND the operator tallied manually is the SAME

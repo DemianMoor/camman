@@ -27,9 +27,14 @@ see CLAUDE.md §10g) into the offer's postfix URL param, which is configured as
 After each poll upserts `keitaro_stage_results`, it syncs the stage's auto-owned
 counters for every stage touched this run (summed across all `stat_date`s):
 `campaign_stages.click_count` ← `visit_clicks_clean` ("Clickers"),
-`checkout_click_count` ← `checkouts`. `sales_payout_each` is snapshotted from the
-campaign's offer CPA when Keitaro reports conversions (COALESCE keeps an existing
-snapshot) so revenue/ROI stay rateable. **Per-field positive-only guard:** each
+`checkout_click_count` ← `checkouts`. The poll also stamps
+`keitaro_stage_results.payout_at_conversion` (= `revenue / NULLIF(sales,0)`,
+migration 0083) so each row freezes the per-conversion rate that was actually paid
+— immune to a later CPA edit on the offer. `sales_payout_each` is still snapshotted
+from the campaign's offer CPA when conversions appear (COALESCE keeps an existing
+snapshot), but it is now only the manual-results form's pre-save **estimate** — the
+revenue source of truth is `keitaro_stage_results.revenue`, never `sales × CPA`.
+**Per-field positive-only guard:** each
 counter is overwritten ONLY when Keitaro reports a value `> 0` — a Keitaro 0 never
 zeroes an existing number. Keitaro sums are monotonic, so this never drops an
 update. Stages with no Keitaro rows are left untouched.

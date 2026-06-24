@@ -294,6 +294,9 @@ export async function pollKeitaro(
   for (const agg of aggregates.values()) {
     // EPC is revenue per offer-redirect raw click (derived from the fold).
     const epc = agg.redirectRaw > 0 ? agg.revenue / agg.redirectRaw : 0;
+    // Per-conversion payout, frozen onto the row so a later CPA edit can't
+    // retro-change it. = revenue / conversions; NULL when there are no sales.
+    const payoutAtConversion = agg.sales > 0 ? agg.revenue / agg.sales : null;
     const values = {
       visit_clicks_raw: agg.visitRaw,
       visit_clicks_clean: agg.visitClean,
@@ -306,6 +309,8 @@ export async function pollKeitaro(
       checkouts: agg.checkouts,
       sales: agg.sales,
       revenue: toNumericString(agg.revenue),
+      payout_at_conversion:
+        payoutAtConversion == null ? null : toNumericString(payoutAtConversion),
       cost: toNumericString(agg.cost),
       epc: toNumericString(epc),
     };

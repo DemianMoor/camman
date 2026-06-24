@@ -48,7 +48,6 @@ import {
   combineSales,
   formatRevenue,
   formatRoi,
-  stageRevenue,
   stageRoi,
 } from "@/lib/stage-results";
 import { ResultsImportForm } from "@/components/campaigns/results-import-form";
@@ -191,6 +190,9 @@ type Stage = {
   sales_count: number;
   // Keitaro conversions for this stage (added on top of the manual sales_count).
   keitaro_sales_count: number;
+  // Real per-conversion revenue from Keitaro (summed across stat_dates). The
+  // revenue source of truth — never sales × the offer's current CPA.
+  keitaro_revenue: string;
   sales_payout_each: string | null;
   notes: string | null;
   tracking_id: string | null;
@@ -1056,14 +1058,12 @@ export default function CampaignDetailPage() {
         enableSorting: false,
         cell: ({ row }) => {
           const s = row.original;
-          // Keitaro wins when it reports the conversion; manual tally fills gaps.
-          const totalSales = combineSales(s.sales_count, s.keitaro_sales_count);
-          if (totalSales === 0)
+          // Revenue is the real per-conversion payout recorded by Keitaro, NOT
+          // sales × the offer's current CPA (a mid-flight CPA change would
+          // retro-misprice prior sales). "—" when no tracked revenue exists.
+          const revenue = Number(s.keitaro_revenue);
+          if (!(revenue > 0))
             return <span className="text-muted-foreground">—</span>;
-          const revenue = stageRevenue(
-            totalSales,
-            s.sales_payout_each === null ? null : Number(s.sales_payout_each),
-          );
           const roi = stageRoi(revenue, Number(s.total_cost));
           return (
             <span className="font-mono text-xs tabular-nums">
@@ -1228,9 +1228,10 @@ export default function CampaignDetailPage() {
     let checkoutClicks = 0;
     let sales = 0;
     let cost = 0;
-    // Sum revenue only over stages with a known per-sale payout so the rollup
-    // ROI stays trustworthy. revenueKnown stays false until at least one stage
-    // contributes, so we can render "—" rather than a misleading $0.
+    // Revenue is summed from real per-conversion Keitaro payout
+    // (keitaro_revenue), never sales × the offer's current CPA. revenueKnown
+    // stays false until at least one stage carries tracked revenue, so we can
+    // render "—" rather than a misleading $0 for purely-manual campaigns.
     let revenue = 0;
     let revenueKnown = false;
     for (const s of stages) {
@@ -1246,11 +1247,8 @@ export default function CampaignDetailPage() {
       const stageSales = combineSales(s.sales_count, s.keitaro_sales_count);
       sales += stageSales;
       cost += Number(s.total_cost);
-      const r = stageRevenue(
-        stageSales,
-        s.sales_payout_each === null ? null : Number(s.sales_payout_each),
-      );
-      if (r !== null) {
+      const r = Number(s.keitaro_revenue);
+      if (r > 0) {
         revenue += r;
         revenueKnown = true;
       }

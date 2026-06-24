@@ -299,23 +299,24 @@ function RevenuePreview({
   return (
     <div className="grid gap-1 rounded-md border bg-muted/30 p-3 text-sm">
       <div className="flex items-center justify-between">
-        <span className="text-muted-foreground">Revenue</span>
+        <span className="text-muted-foreground">Revenue (estimate)</span>
         <span className="font-mono tabular-nums">
           {formatRevenue(revenue)}
         </span>
       </div>
       <div className="flex items-center justify-between">
-        <span className="text-muted-foreground">ROI</span>
+        <span className="text-muted-foreground">ROI (estimate)</span>
         <span className="font-mono tabular-nums">{formatRoi(roi)}</span>
       </div>
       {payoutEach == null ? (
         <p className="text-xs text-muted-foreground">
-          Set this offer&apos;s CPA payout to compute revenue.
+          Set this offer&apos;s CPA payout to estimate revenue.
         </p>
       ) : (
         <p className="text-xs text-muted-foreground">
-          {sales.toLocaleString()} × ${payoutEach.toFixed(2)} payout. Saved at
-          today&apos;s offer payout.
+          Estimate only: {sales.toLocaleString()} × ${payoutEach.toFixed(2)}{" "}
+          current CPA. Reported revenue comes from Keitaro&apos;s real
+          per-conversion payout, not this figure.
         </p>
       )}
     </div>

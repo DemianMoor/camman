@@ -1,6 +1,6 @@
 # Feature — Registry (brands, offers, networks, providers, …)
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-24_
 
 ## 1. Purpose
 The registry is the set of lookup/reference entities a campaign is composed from: who the campaign is for (brand/offer/network), how it's sent (provider/phone), and how it's classified (routing type, traffic type, UTM tags). They share one CRUD pattern, cloned from the original **Brands** implementation (CLAUDE.md §11).
@@ -9,7 +9,7 @@ The registry is the set of lookup/reference entities a campaign is composed from
 | Entity | Table | Notable fields | Availability flag |
 |--------|-------|----------------|-------------------|
 | Brands | `brands` | `brand_id` (text uniq), `website`, `color`, `avatar_url` | `brands` |
-| Offers | `offers` | `offer_id`, `network_id` (NOT NULL, restrict), `payout_model` cpa/revshare, `payout_cpa`, `payout_revshare`, `sales_pages[]` | `offers` |
+| Offers | `offers` | `offer_id`, `network_id` (NOT NULL, restrict), `payout_model` cpa/revshare, `payout_cpa` (**current-rate cache only** — not used for historical revenue), `payout_revshare`, `sales_pages[]` | `offers` |
 | Affiliate networks | `affiliate_networks` | `network_id`, `url` | `networks` |
 | SMS providers | `sms_providers` | `supports_api_send`, send-window cols, circuit-breaker cols | `providers` |
 | Provider phones | `provider_phones` | `provider_id`, `brand_id`, `phone_number`, `number_type` (10dlc/toll_free/short_code), `cost_per_sms` | (under providers) |
@@ -26,6 +26,7 @@ The registry is the set of lookup/reference entities a campaign is composed from
 ## 4. Data it reads/writes
 - Each entity owns its table. Cross-references: `offers.network_id → affiliate_networks` (restrict), `provider_phones.provider_id → sms_providers`, `utm_tags.affiliate_network_id → affiliate_networks` (set null).
 - Deleting a referenced brand/offer is blocked by **`ON DELETE RESTRICT`** when a campaign points at it; archive instead.
+- **Offer CPA history (`offer_payouts`, migration 0083):** the offers create/update path writes an effective-dated CPA trail. Creating a CPA offer opens the first row (`effective_from = created_at`, `effective_to = NULL`); a later CPA change closes the open row (`effective_to = now()`) and opens a new one instead of overwriting. `offers.payout_cpa` is kept in sync as the current-rate cache. A partial unique index allows at most one open row per offer. This is for display/audit only — **revenue is always sourced from `keitaro_stage_results.revenue`** (see [conventions §Money](../07-conventions.md)), never recomputed from a CPA.
 
 ## 5. UI surface
 - One page per entity under [`app/(protected)/`](../../app/(protected)/) (e.g. `brands/`, `offers/`, `affiliate-networks/`, `providers/`, `routing-types/`, `traffic-types/`, `utm-tags/`).

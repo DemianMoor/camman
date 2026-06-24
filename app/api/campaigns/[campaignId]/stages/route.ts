@@ -183,6 +183,10 @@ export async function GET(
       // Keitaro conversions for this stage, summed across stat_dates. Added ON TOP
       // of the manual sales_count at display (sales is additive, not overwritten).
       keitaro_sales_count: drizzleSql<number>`COALESCE((SELECT sum(ksr.sales) FROM ${keitaro_stage_results} ksr WHERE ksr.stage_id = ${campaign_stages.id}), 0)::int`,
+      // Real per-conversion revenue recorded by Keitaro, summed across stat_dates.
+      // This — NOT sales_count × the offer's current CPA — is the revenue source
+      // of truth (a mid-flight CPA change would retro-misprice prior sales).
+      keitaro_revenue: drizzleSql<string>`COALESCE((SELECT sum(ksr.revenue) FROM ${keitaro_stage_results} ksr WHERE ksr.stage_id = ${campaign_stages.id}), 0)::numeric(12,4)::text`,
       sales_payout_each: campaign_stages.sales_payout_each,
       notes: campaign_stages.notes,
       tracking_id: campaign_stages.tracking_id,

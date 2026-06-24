@@ -3,7 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { and, eq } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { affiliate_networks, offers } from "@/db/schema";
+import { affiliate_networks, offer_payouts, offers } from "@/db/schema";
 import {
   apiError,
   isUniqueViolation,
@@ -60,30 +60,44 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const [created] = await db
-      .insert(offers)
-      .values({
-        org_id: orgId,
-        offer_id: data.offer_id,
-        name: data.name,
-        postfix: nullIfEmpty(data.postfix),
-        base_url: nullIfEmpty(data.base_url),
-        network_id: data.network_id,
-        payout_model: data.payout_model,
-        payout_cpa:
-          data.payout_model === "cpa" && data.payout_cpa != null
-            ? String(data.payout_cpa)
-            : null,
-        payout_revshare:
-          data.payout_model === "revshare" && data.payout_revshare != null
-            ? String(data.payout_revshare)
-            : null,
-        sales_pages: data.sales_pages,
-        avatar_url: nullIfEmpty(data.avatar_url),
-        color: nullIfEmpty(data.color),
-        status: "active",
-      })
-      .returning();
+    const created = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(offers)
+        .values({
+          org_id: orgId,
+          offer_id: data.offer_id,
+          name: data.name,
+          postfix: nullIfEmpty(data.postfix),
+          base_url: nullIfEmpty(data.base_url),
+          network_id: data.network_id,
+          payout_model: data.payout_model,
+          payout_cpa:
+            data.payout_model === "cpa" && data.payout_cpa != null
+              ? String(data.payout_cpa)
+              : null,
+          payout_revshare:
+            data.payout_model === "revshare" && data.payout_revshare != null
+              ? String(data.payout_revshare)
+              : null,
+          sales_pages: data.sales_pages,
+          avatar_url: nullIfEmpty(data.avatar_url),
+          color: nullIfEmpty(data.color),
+          status: "active",
+        })
+        .returning();
+      // Open the offer's first effective-dated CPA history row (§10g / offer_payouts).
+      // offers.payout_cpa is the current-rate cache; this is the audit trail.
+      if (row.payout_cpa != null) {
+        await tx.insert(offer_payouts).values({
+          org_id: orgId,
+          offer_id: row.id,
+          payout_cpa: row.payout_cpa,
+          effective_from: row.created_at,
+          effective_to: null,
+        });
+      }
+      return row;
+    });
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
     if (isUniqueViolation(err)) {

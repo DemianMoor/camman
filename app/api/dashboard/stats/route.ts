@@ -85,10 +85,15 @@ async function aggregateStages(
       bounced_added: drizzleSql<number>`coalesce(sum(${campaign_stages.bounced_count}), 0)::int`,
       total_spend: drizzleSql<string>`coalesce(sum(${campaign_stages.total_cost}), 0)::numeric(12,4)::text`,
       total_sales: drizzleSql<number>`coalesce(sum(${campaign_stages.sales_count}), 0)::int`,
+      // Revenue is the SUM of real per-conversion payout recorded by Keitaro
+      // (keitaro_stage_results.revenue), NOT sales × the offer's current CPA — a
+      // CPA that changes mid-flight would retro-misprice every prior sale. Each
+      // stage's full Keitaro revenue (all stat_dates) is attributed to that
+      // stage, then bucketed by its effective date via the outer aggregate.
       total_revenue: drizzleSql<string>`coalesce(sum(
-        case when ${campaign_stages.sales_payout_each} is not null
-          then ${campaign_stages.sales_count} * ${campaign_stages.sales_payout_each}
-          else 0 end
+        (SELECT coalesce(sum(ksr.revenue), 0)
+           FROM keitaro_stage_results ksr
+          WHERE ksr.stage_id = ${campaign_stages.id})
       ), 0)::numeric(12,4)::text`,
     })
     .from(campaign_stages)

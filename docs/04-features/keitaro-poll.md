@@ -188,7 +188,11 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   date-ranged view (fixed 2026-06-20). Concretely:
   - `opt_outs` = count of `opt_out_attributions` credited to the stage whose
     `created_at` falls in `[from 00:00 ET, day-after-`to` 00:00 ET)` (the credit
-    time ≈ STOP receipt; poller lag ≤15min). **Not** the lifetime
+    time ≈ STOP receipt; poller lag ≤15min). Since 2026-06-24 each STOP credits
+    **exactly one** stage (its latest send), so this count is the true per-message
+    opt-out tally — no double-counting across a multi-message sequence (the
+    earlier fan-out made "Avg Opt-out" read ~3.07% vs the true ~1.6% on 06-23).
+    **Not** the lifetime
     `campaign_stages.inbound_opt_out_count`.
   - `total_sent` — **tracked** campaigns (`link_mode='tracked'`): count of
     `stage_sends` with `status='sent'` (failed/rejected/pending/filtered excluded)

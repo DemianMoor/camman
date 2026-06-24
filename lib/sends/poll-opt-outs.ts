@@ -21,12 +21,16 @@ import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 //
 // Attribution (migration 0075): TextHub's inbox carries no campaign reference,
 // but every API send wrote a stage_sends row (phone, stage_id, campaign_id,
-// sent_at). So we reverse-match by phone + recency and credit EVERY stage that
-// sent to that number within OPT_OUT_ATTRIBUTION_WINDOW_HOURS (72h) of the
-// reply — one opt_out_attributions row per stage, plus a per-stage
-// inbound_opt_out_count bump. The org-wide opt_out is unchanged; attribution is
-// additive and never gates suppression. No match (CSV-only numbers, non-API
-// providers, pre-pipeline sends) ⇒ org-wide opt-out only, counted `unattributed`.
+// sent_at). So we reverse-match by phone + recency and credit the SINGLE most
+// recent stage that sent to that number within OPT_OUT_ATTRIBUTION_WINDOW_HOURS
+// (72h) of the reply — exactly one opt_out_attributions row, plus that one
+// stage's inbound_opt_out_count bump. One STOP ⇒ one stage. (Until 2026-06-24
+// this fanned out: one row per stage in the window, so a sequence that sent the
+// same lead 2–3 messages counted the opt-out 2–3× and inflated the per-stage
+// opt-out rate in /reports. See latestSendForAttribution below.) The org-wide
+// opt_out is unchanged; attribution is additive and never gates suppression. No
+// match (CSV-only numbers, non-API providers, pre-pipeline sends) ⇒ org-wide
+// opt-out only, counted `unattributed`.
 //
 // Trusted background context (CLAUDE.md §3): the cron path processes ALL orgs,
 // each with its credential's explicit org_id; the on-demand path passes the
@@ -70,6 +74,48 @@ export function parseProviderReceivedAt(raw: string | null): Date | null {
 
 export type Database = typeof db;
 
+// Any drizzle executor — the top-level client or a transaction handle.
+type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export interface AttributionMatch {
+  stage_send_id: string;
+  stage_id: number;
+  campaign_id: number;
+  sent_at: string;
+}
+
+// The ONE send a STOP is credited to: the most-recent `status='sent'` message to
+// this number across ALL stages inside the trailing window (NOT one-per-stage).
+// `sent_at <= anchor + 5min` so a send that fired AFTER the reply isn't credited;
+// `>= anchor - window` is the 72h trailing bound. Tie-break on identical max
+// `sent_at`: higher `stage_id`, then higher `stage_send_id` — fully deterministic
+// so a re-poll and the backfill script always pick the same row. Returns null
+// when no in-window send exists (the `unattributed` case). Reused by the test
+// harness so the credited-stage SQL can't drift from production. Backed by the
+// partial index stage_sends_org_phone_sent_idx (org_id, phone, sent_at) WHERE
+// status='sent' (migration 0075), which already serves this newest-first lookup.
+export async function latestSendForAttribution(
+  exec: Executor,
+  orgId: string,
+  phone: string,
+  anchorIso: string,
+): Promise<AttributionMatch | null> {
+  const rows = (await exec.execute(sql`
+    SELECT id AS stage_send_id, stage_id, campaign_id, sent_at
+    FROM stage_sends
+    WHERE org_id = ${orgId}
+      AND phone = ${phone}
+      AND status = 'sent'
+      AND sent_at IS NOT NULL
+      AND sent_at >= ${anchorIso}::timestamptz
+                      - (${OPT_OUT_ATTRIBUTION_WINDOW_HOURS} * interval '1 hour')
+      AND sent_at <= ${anchorIso}::timestamptz + interval '5 minutes'
+    ORDER BY sent_at DESC, stage_id DESC, id DESC
+    LIMIT 1
+  `)) as unknown as AttributionMatch[];
+  return rows[0] ?? null;
+}
+
 export type InboxFetcher = (opts: { apiKey: string }) => Promise<FetchInboxResult>;
 
 interface CredentialRow {
@@ -85,7 +131,7 @@ export interface CredentialPollSummary {
   fetched: number; // messages returned by the inbox
   new: number; // not-seen-before messages claimed this run
   suppressed: number; // STOP messages that produced an opt_out
-  attributed: number; // stage credits written (one STOP can credit several)
+  attributed: number; // STOPs credited to a stage (now 0 or 1 per STOP)
   unattributed: number; // suppressed STOPs that matched no send in the window
   ignored: number; // new messages that weren't opt-out keywords
   invalid_phone: number; // STOP messages whose phone wouldn't parse
@@ -114,11 +160,12 @@ const EMPTY = {
   errored: 0,
 };
 
-// "suppressed" now carries how many stage credits the STOP produced so the
-// caller can tally attributed / unattributed without re-querying.
+// "suppressed" carries whether the STOP was credited to a stage (1) or matched
+// no in-window send (0) so the caller can tally attributed / unattributed
+// without re-querying. One STOP credits at most one stage.
 type Outcome =
   | { kind: "dupe" | "ignored" | "invalid" }
-  | { kind: "suppressed"; attributed: number };
+  | { kind: "suppressed"; attributed: 0 | 1 };
 
 async function pollCredential(
   database: Database,
@@ -213,69 +260,46 @@ async function pollCredential(
         `)) as unknown as { id: number }[];
         const optOutId = oo[0]?.id;
 
-        // Attribution: every stage that sent to this number within the trailing
-        // window, one (latest) send per stage. sent_at <= anchor + grace so a
-        // send that fired AFTER the reply isn't credited; >= anchor - window is
-        // the 72h trailing bound.
-        const matches = (await tx.execute(sql`
-          SELECT DISTINCT ON (stage_id)
-                 id AS stage_send_id, stage_id, campaign_id, sent_at
-          FROM stage_sends
-          WHERE org_id = ${cred.org_id}
-            AND phone = ${phone}
-            AND status = 'sent'
-            AND sent_at IS NOT NULL
-            AND sent_at >= ${anchorIso}::timestamptz
-                            - (${OPT_OUT_ATTRIBUTION_WINDOW_HOURS} * interval '1 hour')
-            AND sent_at <= ${anchorIso}::timestamptz + interval '5 minutes'
-          ORDER BY stage_id, sent_at DESC
-        `)) as unknown as {
-          stage_send_id: string;
-          stage_id: number;
-          campaign_id: number;
-          sent_at: string;
-        }[];
+        // Attribution: the SINGLE most-recent send to this number across all
+        // stages in the trailing window (one STOP ⇒ one stage). null when no
+        // in-window send exists ⇒ org-wide opt-out only, counted `unattributed`.
+        const match = await latestSendForAttribution(tx, cred.org_id, phone, anchorIso);
 
-        let attributed = 0;
-        let latestSendId: string | null = null;
-        let latestSentAt = "";
-        for (const mt of matches) {
+        let attributed: 0 | 1 = 0;
+        if (match) {
           // ON CONFLICT guards the idempotent re-run case; the per-message claim
           // already makes this run once, so RETURNING is the increment gate.
           const ins = (await tx.execute(sql`
             INSERT INTO opt_out_attributions
               (org_id, opt_out_id, stage_send_id, stage_id, campaign_id)
-            VALUES (${cred.org_id}, ${optOutId}, ${mt.stage_send_id},
-                    ${mt.stage_id}, ${mt.campaign_id})
+            VALUES (${cred.org_id}, ${optOutId}, ${match.stage_send_id},
+                    ${match.stage_id}, ${match.campaign_id})
             ON CONFLICT (opt_out_id, stage_id) DO NOTHING
             RETURNING id
           `)) as unknown as { id: number }[];
-          if (ins.length === 0) continue;
-          attributed++;
-          // Bump the attribution counter AND mirror it into opt_out_count so the
-          // per-stage Results panel (which reads opt_out_count) reflects live
-          // TextHub STOPs automatically. Both RHS references read the pre-UPDATE
-          // value, so the two columns stay in lock-step.
-          await tx.execute(sql`
-            UPDATE campaign_stages
-            SET inbound_opt_out_count = inbound_opt_out_count + 1,
-                opt_out_count = inbound_opt_out_count + 1
-            WHERE id = ${mt.stage_id}
-          `);
-          // Opt-outs are billed like sends, so a new STOP changes the auto
-          // Total Cost. Recompute from the (now bumped) counters + phone cost;
-          // a no-op for manually-overridden / CSV-imported stages.
-          await recomputeStageTotalCost(tx, mt.stage_id);
-          if (mt.sent_at > latestSentAt) {
-            latestSentAt = mt.sent_at;
-            latestSendId = mt.stage_send_id;
+          if (ins.length > 0) {
+            attributed = 1;
+            // Bump the attribution counter AND mirror it into opt_out_count so the
+            // per-stage Results panel (which reads opt_out_count) reflects live
+            // TextHub STOPs automatically. Both RHS references read the pre-UPDATE
+            // value, so the two columns stay in lock-step.
+            await tx.execute(sql`
+              UPDATE campaign_stages
+              SET inbound_opt_out_count = inbound_opt_out_count + 1,
+                  opt_out_count = inbound_opt_out_count + 1
+              WHERE id = ${match.stage_id}
+            `);
+            // Opt-outs are billed like sends, so a new STOP changes the auto
+            // Total Cost. Recompute from the (now bumped) counters + phone cost;
+            // a no-op for manually-overridden / CSV-imported stages.
+            await recomputeStageTotalCost(tx, match.stage_id);
           }
         }
 
         await tx.execute(sql`
           UPDATE texthub_inbound_events
           SET result = 'suppressed', matched_contact_id = ${contactId},
-              matched_stage_send_id = ${latestSendId},
+              matched_stage_send_id = ${match?.stage_send_id ?? null},
               provider_received_at = ${receivedAt?.toISOString() ?? null},
               processed_at = now()
           WHERE id = ${eventId}

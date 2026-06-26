@@ -74,6 +74,7 @@ export function buildCreativeListWhere(opts: {
       or(
         ilike(creatives.text, pattern),
         ilike(creatives.creative_id, pattern),
+        ilike(creatives.slug, pattern),
       )!,
     );
   }

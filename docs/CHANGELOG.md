@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-06-26 — Creatives list search now matches slug — docs: 04-features/campaigns-stages-creatives, CHANGELOG
+- **What.** The `/creatives` list free-text search ([`lib/creatives/list-filters.ts`](../lib/creatives/list-filters.ts)) now `ILIKE`-matches `slug` in addition to `text` and `creative_id`, so creatives can be searched/filtered by their auto-generated slug. Because the clause is shared by `/api/creatives/list` and `/api/creatives/ids`, "select all matching" stays consistent. Search-box placeholder updated to "Search by text, creative ID, or slug…".
+
 ## 2026-06-24 — Document `keitaro_stage_results.cost` is always 0 (do-not-use guard) — docs: 03-data-model, CHANGELOG
 - **Why.** `keitaro_stage_results.cost` is Keitaro ad-platform spend, which is always 0 here (we don't buy traffic through Keitaro). Any ROI/EPC/profit built off it would be wrong (e.g. infinite ROI from cost 0). Real stage cost is the SMS send spend in `campaign_stages.total_cost`.
 - **Audit.** Confirmed no ROI or EPC anywhere derives cost from this column: the campaign-detail ROI tiles + per-stage ROI use `campaign_stages.total_cost`; the manual-results ROI estimate uses `total_cost`; the `/reports` route (`app/api/keitaro/reports`) folds this column in but **overwrites** it with `campaign_stages.total_cost` before computing profit; stored/derived `epc` everywhere is `revenue / clicks` (revenue-derived, not cost). The unused `/api/keitaro/results` endpoint exposes a Keitaro-cost-based `profit` but has no caller.

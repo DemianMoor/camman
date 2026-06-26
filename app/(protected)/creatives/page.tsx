@@ -1015,7 +1015,7 @@ export default function CreativesPage() {
         <Input
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
-          placeholder="Search by text or creative ID…"
+          placeholder="Search by text, creative ID, or slug…"
           className="h-9 w-full max-w-sm"
         />
         <Select

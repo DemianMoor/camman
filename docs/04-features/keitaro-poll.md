@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-06-24_
+_Last updated: 2026-06-29_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -22,6 +22,35 @@ see CLAUDE.md §10g) into the offer's postfix URL param, which is configured as
 > The `GET /admin_api/v1/campaigns` call (id/alias/name) maps each report row's
 > Keitaro campaign → its **alias** for the visit/redirect classification (§2b). It
 > is still **not** the join key — that remains `sub_id_3`.
+
+## 2c. Sales are dated by the CONVERSION day, not the click day (fixed 2026-06-29)
+The aggregate poll reads **two** Keitaro endpoints over the same window, because the
+two metric families belong to different days:
+
+- **Clicks** (visits / offer redirects / cost) come from `report/build` grouped by
+  `day` + `sub_id_3` + `campaign_id`. Keitaro's `day` here is the **click day** —
+  correct for clicks.
+- **Conversions** (sales count / checkouts / revenue) come from **`conversions/log`**
+  (one row per conversion, carrying `sub_id_3` + `datetime`), bucketed by the
+  conversion's **own `datetime`** ET day. So a sale lands on **the day it happened**.
+
+Both fold into the same `(stage, stat_date)` aggregate (`applyRowToAggregate` for
+clicks, `applyConversionRowToAggregate` for conversions). **Both fetches must succeed
+before any write** — a clicks-only upsert would set `sales = 0` and could zero a
+stored conversion; on either failure the poll degrades and leaves rows untouched.
+
+> **Why it changed.** `report/build` attributes a conversion to the **originating
+> click's day**, not the conversion day. So a sale that clicked Mon and converted
+> Wed showed under **Mon** (the campaign/click day) on `/reports`, even though the
+> Keitaro panel's conversion counter (and `conversions/log`) showed it Wed. The
+> whole reporting layer already *documented* `stat_date` as the conversion date
+> (`lib/reporting/attribution.ts`), so the poll contradicted its own contract.
+> Totals were always correct (`report/build` conversions ≡ `conversions/log` rows);
+> only the per-day bucket was wrong. The fix re-sources conversions from
+> `conversions/log`. **Counts are unchanged** — only the date a sale is filed under.
+> Backfill: re-run `pollKeitaro(db, { windowDays: 45 })` once after deploy to
+> re-date stored history ([`scripts/run-keitaro-redate-backfill.ts`](../../scripts/run-keitaro-redate-backfill.ts)).
+> The `*/5` cron's default 3-day window keeps recent days fresh thereafter.
 
 ## 2a. Auto-fill of the stage Results panel (migration 0077)
 After each poll upserts `keitaro_stage_results`, it syncs the stage's auto-owned
@@ -60,7 +89,8 @@ overlapping sales, replaced by max 2026-06-21.)
 > `/reports` AND the dashboard (stats tiles + daily-activity charts) now share one
 > attribution basis — [`lib/reporting/attribution.ts`](../../lib/reporting/attribution.ts),
 > `ATTRIBUTION_BASIS = 'stat_date'`. **Revenue** + **Keitaro sales** are dated by
-> `keitaro_stage_results.stat_date` (the conversion day, already ET). **Manual sales**
+> `keitaro_stage_results.stat_date` (the conversion day, already ET — see §2c).
+> **Manual sales**
 > are dated by their `stage_manual_sales` ledger **entry date** (`created_at`,
 > bucketed ET) and combined per stage with the in-range Keitaro count via `max`
 > (`combineSales`). **Total Sent** and **cost** for a manual-send campaign

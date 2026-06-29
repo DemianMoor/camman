@@ -1782,6 +1782,10 @@ export const keitaro_stage_results = pgTable(
       .notNull()
       .references(() => campaign_stages.id, { onDelete: "cascade" }),
     stage_tracking_id: text("stage_tracking_id").notNull(),
+    // ET calendar day. CLICK columns (visits/redirects) are dated by the click
+    // day; CONVERSION columns (sales/checkouts/revenue) are dated by the
+    // conversion's own day — sourced from conversions/log, not report/build's
+    // click-day grouping. See lib/keitaro/poll.ts + lib/reporting/attribution.ts.
     stat_date: date("stat_date").notNull(),
     // Step 5b funnel split. Clicks are classified by the Keitaro campaign alias:
     // `gk-lp-visits` ⇒ visits ("Clickers"); any other campaign ⇒ offer redirects.
@@ -1795,9 +1799,11 @@ export const keitaro_stage_results = pgTable(
     raw_clicks: integer("raw_clicks").notNull().default(0),
     clean_clicks: integer("clean_clicks").notNull().default(0),
     checkouts: integer("checkouts").notNull().default(0),
-    // Stores Keitaro's `conversions` metric (= leads + sales), NOT the bare
-    // `sales` metric — this account's network fires only `lead`-status postbacks,
-    // so the payable results live in `conversions`. See lib/keitaro/poll.ts.
+    // Count of Keitaro conversions (the lead/sale/rejected statuses that make up
+    // its `conversions` metric, = leads + sales) attributed to this stage on this
+    // conversion day — NOT the bare `sales` metric, since this account's network
+    // fires only `lead`-status postbacks. Sourced per-event from conversions/log so
+    // each sale lands on the day it happened. See lib/keitaro/poll.ts.
     sales: integer("sales").notNull().default(0),
     revenue: numeric("revenue", { precision: 12, scale: 4 })
       .notNull()

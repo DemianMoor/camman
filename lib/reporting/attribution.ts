@@ -21,6 +21,14 @@ import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 //                         at sync time) — there is no manual revenue, so revenue
 //                         is purely conversion-dated.
 //   • Keitaro sales     → keitaro_stage_results.sales, bucketed by stat_date.
+//
+// stat_date is genuinely the CONVERSION DAY for the sales/revenue/checkout columns:
+// lib/keitaro/poll.ts sources those from Keitaro's conversions/log (one row per
+// conversion, dated by the conversion's own `datetime`), NOT from report/build —
+// whose `day` grouping attributes a conversion to the originating CLICK's day. The
+// click/visit/redirect columns on the same row are still click-dated (a click
+// happens on the click day). Until 2026-06-29 sales were mistakenly click-dated
+// (report/build), so a sale showed on the campaign/click day, not the sale day.
 //   • Manual sales      → stage_manual_sales.delta, bucketed by the ledger entry
 //                         date (created_at). A manually-tallied sale has no
 //                         Keitaro conversion timestamp, so its ledger entry date

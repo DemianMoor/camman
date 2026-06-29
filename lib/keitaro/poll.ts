@@ -9,6 +9,7 @@ import {
 import {
   buildKeitaroReport,
   fetchKeitaroCampaigns,
+  fetchKeitaroConversions,
   KEITARO_VISIT_CAMPAIGN_NAME,
   type KeitaroReportRow,
 } from "@/lib/keitaro/client";
@@ -17,8 +18,12 @@ export type Database = typeof db;
 
 // Rolling window: re-read the last N days every poll. Conversions arrive late
 // (the affiliate fires the postback minutes-to-hours after the click), so a
-// multi-day window catches late sales attaching to earlier clicks. Re-reading
-// stable older days is cheap and the UPSERT is idempotent.
+// multi-day window catches late sales. Re-reading stable older days is cheap and
+// the UPSERT is idempotent. CLICKS come from report/build (dated by click day);
+// CONVERSIONS come from conversions/log (dated by the conversion's own datetime).
+// A conversion is always dated on its event day (≤ now), so the window only needs
+// to cover the recent days we want kept fresh — both fetches share this window so
+// a clicks-only upsert can never zero a stored conversion.
 const DEFAULT_WINDOW_DAYS = 3;
 
 export interface KeitaroPollResult {
@@ -26,11 +31,17 @@ export interface KeitaroPollResult {
   // false ⇒ the report fetch failed; rows were left untouched for next cycle.
   degraded: boolean;
   range: { from: string; to: string; timezone: string };
-  fetched: number; // report rows returned by Keitaro
-  matched: number; // rows whose sub_id_3 mapped to a CamMan stage
+  fetched: number; // report rows returned by Keitaro (clicks side)
+  matched: number; // report rows whose sub_id_3 mapped to a CamMan stage
   upserted: number; // (stage, date) aggregates written
-  unmatched: number; // rows skipped (no/blank/unknown sub_id_3)
+  unmatched: number; // report rows skipped (no/blank/unknown sub_id_3)
   errored: number; // (stage, date) aggregates that threw during upsert
+  // Conversion side (conversions/log): one row per conversion event, dated by the
+  // conversion's own datetime so a sale lands on the day it happened, not the click
+  // day. See the file header + lib/reporting/attribution.ts (ATTRIBUTION_BASIS).
+  conversions_fetched: number; // conversion rows returned by Keitaro
+  conversions_matched: number; // conversion rows whose sub_id_3 mapped to a stage
+  conversions_unmatched: number; // conversion rows skipped (no/unknown sub_id_3)
   // Step 5b: rows we couldn't classify as visit vs redirect because the Keitaro
   // campaigns list failed to load — those clicks fall back to the redirect side
   // (the brief's default for "any non-visit campaign"). >0 ⇒ visit counts may be
@@ -171,26 +182,17 @@ export interface StageDayAgg {
   cost: number;
 }
 
-// Fold one Keitaro report row's metrics into a (stage, date) aggregate.
+// Fold one Keitaro report/build row's CLICK metrics into a (stage, date) aggregate.
+// The row's `day` is the CLICK day, so only click-day quantities ride this path:
 //
 // CLICKS are split by campaign: a gk-lp-visits row's clicks are landing-page
 // VISITS ("Clickers"); any other campaign's clicks are OFFER REDIRECTS. Cost is
 // ad-spend on the offer campaign, so it rides the redirect side too.
 //
-// CONVERSIONS (checkouts / sales / revenue) are credited to the stage REGARDLESS
-// of which Keitaro campaign reported them. Normally conversions only ever attach
-// to an offer-campaign row, but a broken landing→offer redirect can strand them on
-// the gk-lp-visits row (the click never reached the offer campaign, so the
-// postback fired against the visit click). Crediting them here rescues that
-// otherwise-dropped revenue. This is SAFE against double-counting: Keitaro
-// attributes each conversion to exactly one campaign_id, so a given conversion
-// appears in exactly one report row.
-//
-// Mapping note: this account's network fires only `lead`-status postbacks (no
-// `sale` status — confirmed via a direct Keitaro probe 2026-06-19), so Keitaro's
-// `sales` metric is usually 0 while the paid events live in `conversions` (= leads
-// + sales). We map Keitaro `conversions` → our **Sales** (count + revenue) and
-// `leads` → **Checkout**. `revenue` is Keitaro's real summed conversion revenue.
+// CONVERSIONS (sales / checkouts / revenue) are NOT taken from report/build —
+// report/build attributes a conversion to the originating CLICK's day, but we need
+// it on the day the sale actually happened. Those metrics come from conversions/log
+// via applyConversionRowToAggregate (keyed by the conversion's own datetime).
 export function applyRowToAggregate(
   agg: StageDayAgg,
   row: KeitaroReportRow,
@@ -207,9 +209,27 @@ export function applyRowToAggregate(
     agg.redirectClean += cleanClicks;
     agg.cost += toNum(row.cost);
   }
+}
 
-  agg.checkouts += toInt(row.leads);
-  agg.sales += toInt(row.conversions);
+// Fold one conversions/log row into a (stage, date) aggregate, where `date` is the
+// conversion's OWN event day (extracted by the caller from `datetime`) — so a sale
+// lands on the day it happened, not the click/campaign day.
+//
+// Mapping (preserves the prior report/build semantics, only re-dated): every
+// returned conversion row counts as one **Sale** (the fetch already filters to the
+// lead/sale/rejected statuses Keitaro's `conversions` metric counts), a `lead`-
+// status row also counts as a **Checkout** (= Keitaro's `leads` metric), and the
+// row's `revenue` sums into the stage's revenue. This account's network fires only
+// `lead`-status postbacks (confirmed via a direct probe 2026-06-19), so Sales and
+// Checkout are equal today, but the split is preserved for correctness.
+export function applyConversionRowToAggregate(
+  agg: StageDayAgg,
+  row: KeitaroReportRow,
+): void {
+  const status =
+    typeof row.status === "string" ? row.status.trim().toLowerCase() : "";
+  agg.sales += 1;
+  if (status === "lead") agg.checkouts += 1;
   agg.revenue += toNum(row.revenue);
 }
 
@@ -240,24 +260,39 @@ export async function pollKeitaro(
     upserted: 0,
     unmatched: 0,
     errored: 0,
+    conversions_fetched: 0,
+    conversions_matched: 0,
+    conversions_unmatched: 0,
     classification_degraded: false,
     visit_campaigns_matched: 0,
     unmatched_samples: [],
     error: null,
   };
 
-  const report = await buildKeitaroReport(range);
+  // Two independent fetches over the SAME window: report/build for clicks (dated by
+  // click day) and conversions/log for sales (dated by the conversion's own day).
+  // BOTH must succeed before we write — a clicks-only upsert would set sales=0 and
+  // could zero a previously-stored conversion. On either failure we degrade and
+  // leave existing rows untouched for the next cycle.
+  const [report, conversions] = await Promise.all([
+    buildKeitaroReport(range),
+    fetchKeitaroConversions(range),
+  ]);
   if (!report.ok) {
     return { ...base, error: report.error };
   }
+  if (!conversions.ok) {
+    return { ...base, fetched: report.rows.length, error: conversions.error };
+  }
 
-  // Classifier (visit vs redirect) and stage resolution can run independently.
   const rows = report.rows;
+  const convRows = conversions.rows;
+  const tidOf = (r: KeitaroReportRow): string =>
+    typeof r.sub_id_3 === "string" ? r.sub_id_3.trim() : "";
+  // Resolve every tracking id seen on either side in one query.
   const trackingIds = [
     ...new Set(
-      rows
-        .map((r) => (typeof r.sub_id_3 === "string" ? r.sub_id_3.trim() : ""))
-        .filter((s) => s.length > 0),
+      [...rows, ...convRows].map(tidOf).filter((s) => s.length > 0),
     ),
   ];
   const [classifier, stageMap] = await Promise.all([
@@ -267,22 +302,16 @@ export async function pollKeitaro(
 
   let matched = 0;
   let unmatched = 0;
+  let conversionsMatched = 0;
+  let conversionsUnmatched = 0;
   const unmatchedSamples = new Set<string>();
-  // Fold the per-campaign rows into one aggregate per (stage, date).
+  // Fold both sides into one aggregate per (stage, date).
   const aggregates = new Map<string, StageDayAgg>();
-
-  for (const row of rows as KeitaroReportRow[]) {
-    const tid = typeof row.sub_id_3 === "string" ? row.sub_id_3.trim() : "";
-    const statDate = extractDate(row.day);
-    const stage = tid ? stageMap.get(tid) : undefined;
-
-    if (!stage || !statDate) {
-      unmatched++;
-      if (tid && unmatchedSamples.size < 10) unmatchedSamples.add(tid);
-      continue;
-    }
-    matched++;
-
+  const aggFor = (
+    stage: { stageId: number; campaignId: number; orgId: string },
+    tid: string,
+    statDate: string,
+  ): StageDayAgg => {
     const key = `${stage.stageId}|${statDate}`;
     let agg = aggregates.get(key);
     if (!agg) {
@@ -303,8 +332,35 @@ export async function pollKeitaro(
       };
       aggregates.set(key, agg);
     }
+    return agg;
+  };
 
-    applyRowToAggregate(agg, row, classifier.isVisitRow(row));
+  // CLICKS — report/build rows, dated by the report `day` (= click day).
+  for (const row of rows as KeitaroReportRow[]) {
+    const tid = tidOf(row);
+    const statDate = extractDate(row.day);
+    const stage = tid ? stageMap.get(tid) : undefined;
+    if (!stage || !statDate) {
+      unmatched++;
+      if (tid && unmatchedSamples.size < 10) unmatchedSamples.add(tid);
+      continue;
+    }
+    matched++;
+    applyRowToAggregate(aggFor(stage, tid, statDate), row, classifier.isVisitRow(row));
+  }
+
+  // CONVERSIONS — conversions/log rows, dated by the conversion's own `datetime`.
+  for (const row of convRows as KeitaroReportRow[]) {
+    const tid = tidOf(row);
+    const statDate = extractDate(row.datetime);
+    const stage = tid ? stageMap.get(tid) : undefined;
+    if (!stage || !statDate) {
+      conversionsUnmatched++;
+      if (tid && unmatchedSamples.size < 10) unmatchedSamples.add(tid);
+      continue;
+    }
+    conversionsMatched++;
+    applyConversionRowToAggregate(aggFor(stage, tid, statDate), row);
   }
 
   let upserted = 0;
@@ -419,6 +475,9 @@ export async function pollKeitaro(
     upserted,
     unmatched,
     errored,
+    conversions_fetched: convRows.length,
+    conversions_matched: conversionsMatched,
+    conversions_unmatched: conversionsUnmatched,
     classification_degraded: classifier.degraded,
     visit_campaigns_matched: classifier.visitCampaignCount,
     unmatched_samples: [...unmatchedSamples],

@@ -144,9 +144,10 @@ export async function buildKeitaroReport(
 export const KEITARO_CONVERSION_COLUMNS = [
   "event_id", // unique conversion id (dedup key)
   "sub_id_1", // = stage_sends.id (the recipient/customer id)
+  "sub_id_3", // = campaign_stages.tracking_id (the stage; used by the aggregate poll)
   "status", // lead | sale | rejected | …
   "revenue", // conversion revenue
-  "datetime", // conversion datetime (ET)
+  "datetime", // conversion datetime (ET) — the date a sale is attributed to
   "click_datetime", // originating click datetime (fallback for converted_at)
 ] as const;
 

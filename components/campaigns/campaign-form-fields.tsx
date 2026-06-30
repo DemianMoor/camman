@@ -64,6 +64,7 @@ export function CampaignFormFields({
     watchedContactGroups,
     watchedFilters,
     watchedExcludeInUse,
+    watchedExcludePriorOffer,
     watchedLinkMode,
     selectedBrandShortDomain,
     setLinkMode,
@@ -570,6 +571,21 @@ export function CampaignFormFields({
           checked={watchedExcludeInUse}
           onChange={(v) =>
             form.setValue("exclude_in_use_contacts", v, { shouldDirty: true })
+          }
+          disabled={audienceLocked || anySubmitting}
+        />
+
+        {/* Exclude leads who already received this offer in a previous campaign
+            (content dedup LAYER 3). The always-on hard creative rule applies
+            regardless of this toggle. */}
+        <FilterToggle
+          label="Exclude leads who already got this offer"
+          description="Drop contacts who already received this campaign's offer in a previous campaign. The same creative is never re-sent to a lead regardless of this setting."
+          checked={watchedExcludePriorOffer}
+          onChange={(v) =>
+            form.setValue("exclude_prior_offer_contacts", v, {
+              shouldDirty: true,
+            })
           }
           disabled={audienceLocked || anySubmitting}
         />

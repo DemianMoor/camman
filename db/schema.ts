@@ -1275,6 +1275,15 @@ export const campaigns = pgTable(
     exclude_in_use_contacts: boolean("exclude_in_use_contacts")
       .notNull()
       .default(true),
+    // Phase-2 content dedup (migration 0087). When true, a stage's recipients
+    // also exclude any contact already in offer_exposures for this campaign's
+    // offer (LAYER 3 — operator opt-in). The always-on hard creative rule
+    // applies regardless. Default false; frozen-ness does NOT apply — this is a
+    // live send-time overlay read by buildStageEligibilityExclusions, not part
+    // of the frozen audience snapshot. See lib/sends/eligibility.ts.
+    exclude_prior_offer_contacts: boolean("exclude_prior_offer_contacts")
+      .notNull()
+      .default(false),
     start_date: date("start_date"),
     end_date: date("end_date"),
     status: text("status").notNull().default("draft"),
@@ -2382,3 +2391,128 @@ export const campaign_events = pgTable(
 
 export type CampaignEvent = typeof campaign_events.$inferSelect;
 export type NewCampaignEvent = typeof campaign_events.$inferInsert;
+
+// ============ Content dedup & offer exposure (migration 0086) ============
+// Three layers, kept separate (see docs/04-features/content-dedup.md):
+//   1. creative_exposures — the hard-rule ledger: the same creative can never
+//      reach the same contact in a DIFFERENT campaign. One row per
+//      (contact, creative); records the FIRST campaign that successfully sent
+//      it (first write wins via ON CONFLICT DO NOTHING).
+//   2. offer_exposures — feeds the optional per-campaign include/exclude filter
+//      and the offer-page counter. One row per (contact, offer); first campaign.
+//   3. offer_exposure_counts — O(1) precomputed "N distinct leads used for this
+//      offer", maintained by a trigger on offer_exposures.
+// Both ledgers are populated WRITE-TIME by a trigger on stage_sends when a row
+// reaches status='sent' (the only per-recipient success marker). Dedup is
+// ORG-SCOPED and intentionally spans brands — contacts and creatives are
+// brand-agnostic. No brand_id on any of these tables, by design.
+
+// 0086-1: the hard-rule ledger. UNIQUE (org_id, contact_id, creative_id) is the
+// dedup guarantee; campaign_id permanently reflects the first sender (needed for
+// the in-campaign-reuse exception in the eligibility anti-join).
+export const creative_exposures = pgTable(
+  "creative_exposures",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    creative_id: integer("creative_id")
+      .notNull()
+      .references(() => creatives.id, { onDelete: "cascade" }),
+    // NULLABLE + onDelete SET NULL: campaign_id is the first sender, load-bearing
+    // for the in-campaign-reuse exception (campaign_id <> currentCampaignId), not
+    // metadata. If the campaign is hard-deleted the row must SURVIVE (cascade
+    // would re-expose those contacts). Phase 2 layer-1 clause:
+    // (campaign_id IS NULL OR campaign_id <> currentCampaignId).
+    campaign_id: integer("campaign_id").references(() => campaigns.id, {
+      onDelete: "set null",
+    }),
+    first_sent_at: timestamp("first_sent_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    unique("creative_exposures_org_contact_creative_uniq").on(
+      table.org_id,
+      table.contact_id,
+      table.creative_id,
+    ),
+    // Anti-join driver: suppression set for ONE creative, probed by contact.
+    // Bounded by segment size, not ledger size.
+    index("creative_exposures_org_creative_contact_idx").on(
+      table.org_id,
+      table.creative_id,
+      table.contact_id,
+    ),
+  ],
+);
+
+export type CreativeExposure = typeof creative_exposures.$inferSelect;
+export type NewCreativeExposure = typeof creative_exposures.$inferInsert;
+
+// 0086-2: offer-exposure ledger. Drives the "exclude prior-offer leads" branch
+// and feeds offer_exposure_counts. UNIQUE (org_id, contact_id, offer_id).
+export const offer_exposures = pgTable(
+  "offer_exposures",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    // NULLABLE + onDelete SET NULL — same rationale as creative_exposures.campaign_id.
+    campaign_id: integer("campaign_id").references(() => campaigns.id, {
+      onDelete: "set null",
+    }),
+    first_sent_at: timestamp("first_sent_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    unique("offer_exposures_org_contact_offer_uniq").on(
+      table.org_id,
+      table.contact_id,
+      table.offer_id,
+    ),
+    // Drives the "exclude" anti-join (suppression set for one offer).
+    index("offer_exposures_org_offer_contact_idx").on(
+      table.org_id,
+      table.offer_id,
+      table.contact_id,
+    ),
+  ],
+);
+
+export type OfferExposure = typeof offer_exposures.$inferSelect;
+export type NewOfferExposure = typeof offer_exposures.$inferInsert;
+
+// 0086-3: precomputed distinct-lead count per offer. Read by the offer page as a
+// single-row lookup — NEVER a COUNT(DISTINCT …) over history. Maintained by an
+// AFTER INSERT trigger on offer_exposures (whose inserts are ON CONFLICT DO
+// NOTHING, so each fire is a genuinely new (contact, offer) ⇒ distinct by
+// construction). Mirrors the segment_stats.total_count junction-trigger pattern.
+export const offer_exposure_counts = pgTable(
+  "offer_exposure_counts",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    distinct_contacts: bigint("distinct_contacts", { mode: "number" })
+      .notNull()
+      .default(0),
+  },
+  (table) => [
+    primaryKey({ columns: [table.org_id, table.offer_id] }),
+  ],
+);
+
+export type OfferExposureCount = typeof offer_exposure_counts.$inferSelect;
+export type NewOfferExposureCount = typeof offer_exposure_counts.$inferInsert;

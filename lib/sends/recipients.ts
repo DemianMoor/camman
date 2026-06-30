@@ -2,6 +2,22 @@ import { sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { campaignTierExpr } from "@/lib/campaign-tier";
+import {
+  applyEligibilityExcept,
+  buildStageEligibilityExclusions,
+} from "@/lib/sends/eligibility";
+
+// Content-dedup overlay (Phase 2). When provided, the stage's recipients also
+// subtract the eligibility exclusions (saw-this-creative-elsewhere [+ in-flight],
+// and — if the campaign opts in — got-this-offer-before). creativeId NULL ⇒ no
+// creative dedup (Edge A). Omitting `eligibility` entirely = no dedup (legacy
+// callers + tests keep exactly today's behavior). org/campaign come from the
+// outer opts so there's one source for them.
+export interface StageEligibilityOverlay {
+  creativeId: number | null;
+  offerId: number | null;
+  excludePriorOffer: boolean;
+}
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -39,6 +55,7 @@ export function stageRecipientsSql(opts: {
   filters: StageRecipientFilters;
   limit?: number;
   offset?: number;
+  eligibility?: StageEligibilityOverlay;
 }): SQL {
   const { campaignId, orgId, filters: f } = opts;
   const splitActive = f.splitIndex !== null && f.splitTotal !== null;
@@ -87,25 +104,51 @@ export function stageRecipientsSql(opts: {
         and coalesce(bt.tier, 0) <> 3`
     : sql``;
 
+  // Content-dedup exclusions (Phase 2). Built from the stage's creative + the
+  // campaign's offer + the opt-in toggle. When `eligibility` is omitted, all
+  // layers are null and `eligible` collapses to `base` (today's behavior).
+  const exclusions = opts.eligibility
+    ? buildStageEligibilityExclusions({
+        orgId,
+        currentCampaignId: campaignId,
+        currentCreativeId: opts.eligibility.creativeId,
+        currentOfferId: opts.eligibility.offerId,
+        excludePriorOffer: opts.eligibility.excludePriorOffer,
+      })
+    : { creative: null, inFlight: null, offer: null };
+
+  // base = frozen pool ∩ live opt-outs ∩ stage filter toggles ∩ lane overlays.
+  // The phone-number join + split row_number are deferred to `qualified` so the
+  // dedup EXCEPTs operate on a bare contact_id set, and the split partitions the
+  // POST-dedup audience (what actually sends).
+  const base = sql`
+    select p.contact_id
+    from campaign_audience_pool p${tierJoin}
+    where p.campaign_id = ${campaignId}::int
+      and p.org_id = ${orgId}::uuid
+      and not exists (
+        select 1 from opt_outs oo
+        where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
+      )
+      and (
+        (${f.includeNoStatus}::boolean and p.was_no_status_at_snapshot)
+        or (${f.includeClickers}::boolean and p.was_clicker_at_snapshot)
+      )
+      and not (${f.excludeClickers}::boolean and p.was_clicker_at_snapshot)${behavioralWhere}
+  `;
+
   return sql`
-    with qualified as (
+    with base as (${base}),
+    eligible as (
+      ${applyEligibilityExcept(sql`select contact_id from base`, exclusions)}
+    ),
+    qualified as (
       select
         c.phone_number,
-        p.contact_id,
-        row_number() over (order by p.contact_id) - 1 as rn
-      from campaign_audience_pool p
-      inner join contacts c on c.id = p.contact_id${tierJoin}
-      where p.campaign_id = ${campaignId}::int
-        and p.org_id = ${orgId}::uuid
-        and not exists (
-          select 1 from opt_outs oo
-          where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
-        )
-        and (
-          (${f.includeNoStatus}::boolean and p.was_no_status_at_snapshot)
-          or (${f.includeClickers}::boolean and p.was_clicker_at_snapshot)
-        )
-        and not (${f.excludeClickers}::boolean and p.was_clicker_at_snapshot)${behavioralWhere}
+        e.contact_id,
+        row_number() over (order by e.contact_id) - 1 as rn
+      from eligible e
+      inner join contacts c on c.id = e.contact_id
     )
     select contact_id, phone_number
     from qualified
@@ -125,7 +168,12 @@ export function stageRecipientsSql(opts: {
 // a snapshot-only estimate. Reuses the choke-point query — no second recipient SQL.
 export async function countStageRecipients(
   dbc: DbOrTx,
-  opts: { campaignId: number; orgId: string; filters: StageRecipientFilters },
+  opts: {
+    campaignId: number;
+    orgId: string;
+    filters: StageRecipientFilters;
+    eligibility?: StageEligibilityOverlay;
+  },
 ): Promise<number> {
   const inner = stageRecipientsSql(opts);
   const rows = (await dbc.execute(
@@ -139,7 +187,12 @@ export async function countStageRecipients(
 // memory; batching can be layered in later if needed.
 export async function enumerateStageRecipients(
   dbc: DbOrTx,
-  opts: { campaignId: number; orgId: string; filters: StageRecipientFilters },
+  opts: {
+    campaignId: number;
+    orgId: string;
+    filters: StageRecipientFilters;
+    eligibility?: StageEligibilityOverlay;
+  },
 ): Promise<StageRecipientRow[]> {
   const rows = (await dbc.execute(
     stageRecipientsSql(opts),

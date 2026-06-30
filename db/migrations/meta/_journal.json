@@ -603,6 +603,20 @@
       "when": 1783728000000,
       "tag": "0085_stage_manual_sales_optout_attributions_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1783814400000,
+      "tag": "0086_content_dedup_exposure_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1783900800000,
+      "tag": "0087_campaign_exclude_prior_offer",
+      "breakpoints": true
     }
   ]
 }

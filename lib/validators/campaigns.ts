@@ -71,6 +71,10 @@ const campaignCreateBaseSchema = z.object({
   // DB column is NOT NULL DEFAULT true, so a missing field means "no
   // change" (PATCH) / "use default" (create) — not "set to false".
   exclude_in_use_contacts: z.boolean().optional(),
+  // Campaign-level "exclude leads who already received this offer in a previous
+  // campaign" (Phase-2 content dedup, LAYER 3). DB column NOT NULL DEFAULT false;
+  // a missing field means "no change" (PATCH) / "use default false" (create).
+  exclude_prior_offer_contacts: z.boolean().optional(),
   // Send method. 'manual' (default) uses the pasted Short URL; 'tracked' mints
   // a per-recipient link. Accepted on create + update; the route guards that
   // 'tracked' requires the brand to have an active short domain.
@@ -174,6 +178,7 @@ export const audiencePreviewSchema = z
     audience_filters: audienceFiltersSchema.optional(),
     audience_cap: z.number().int().positive().nullable().optional(),
     exclude_in_use_contacts: z.boolean().optional(),
+    exclude_prior_offer_contacts: z.boolean().optional(),
   })
   .refine(
     (d) =>

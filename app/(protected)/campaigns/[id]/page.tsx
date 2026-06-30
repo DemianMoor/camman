@@ -872,9 +872,23 @@ export default function CampaignDetailPage() {
               </span>
             );
           }
-          if (n === 0) return <span className="text-muted-foreground">—</span>;
+          // Non-lane rows show the ADDRESSABLE pool (pool ∩ stage filters,
+          // before content dedup). The post-dedup count that will actually send
+          // — after removing leads who already got this creative/offer — is
+          // shown in the Prepare popup, so the two numbers can differ by design.
+          const addressableTitle =
+            "Addressable pool (before content dedup). The post-dedup number that will actually send is shown in Prepare.";
+          if (n === 0)
+            return (
+              <span className="text-muted-foreground" title={addressableTitle}>
+                —
+              </span>
+            );
           return (
-            <span className="font-mono text-sm tabular-nums">
+            <span
+              className="font-mono text-sm tabular-nums"
+              title={addressableTitle}
+            >
               {n.toLocaleString()}
             </span>
           );

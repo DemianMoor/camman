@@ -49,6 +49,7 @@ type SendStatus = {
     excluded_optout: number;
     excluded_filter: number;
     excluded_split: number;
+    excluded_dedup: number;
     excluded_total: number;
     gap: number;
     closed: boolean;
@@ -213,6 +214,7 @@ export function StageSendPanel({
     rec.excluded_optout ? `${rec.excluded_optout} opt-out` : null,
     rec.excluded_filter ? `${rec.excluded_filter} filtered` : null,
     rec.excluded_split ? `${rec.excluded_split} other split` : null,
+    rec.excluded_dedup ? `${rec.excluded_dedup} already received` : null,
   ]
     .filter(Boolean)
     .join(", ");

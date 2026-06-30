@@ -1,13 +1,17 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import {
+  buildStageEligibilityExclusions,
+  eligibilityUnion,
+} from "@/lib/sends/eligibility";
 import type { StageRecipientFilters } from "@/lib/sends/recipients";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Stage send reconciliation (Workstream 3, Guarantee 1): prove no recipient
 // silently vanished. The frozen campaign pool partitions exactly into
-//   pool = attempted + excluded(opt_out | filter | split) + gap
+//   pool = attempted + excluded(opt_out | filter | split | dedup) + gap
 // where `attempted` = materialized stage_sends rows and `gap` is the part that
 // is NEITHER an attempt NOR a logged exclusion — i.e. OUR bug, surfaced loudly
 // rather than hidden in count math.
@@ -15,13 +19,18 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 // The qualification predicate MUST mirror stageRecipientsSql in
 // [lib/sends/recipients.ts] — that is the single source the kickoff materializes
 // from. If the two diverge, the divergence itself shows up as a non-zero gap.
+// `dedup` is the Phase-2 content-dedup bucket (saw-this-creative-elsewhere /
+// in-flight / got-this-offer-before); without it, every deduped campaign would
+// show a FALSE gap, since `attempted` excludes those contacts but `qualified`
+// (pre-Phase-2) did not.
 export interface StageReconciliation {
   pool_total: number;
-  qualified: number; // pool members that pass suppression + filter + split
+  qualified: number; // pool members that pass suppression + filter + split + dedup
   attempted: number; // stage_sends rows actually materialized
   excluded_optout: number;
   excluded_filter: number;
   excluded_split: number;
+  excluded_dedup: number;
   excluded_total: number;
   gap: number; // qualified - attempted; 0 ⇒ closed. >0 ⇒ a materialization drop
   closed: boolean; // gap === 0
@@ -39,8 +48,41 @@ export async function computeStageReconciliation(
   const { campaignId, orgId, stageId, filters: f } = opts;
   const splitActive = f.splitIndex !== null && f.splitTotal !== null;
 
+  // Resolve the stage's content-dedup inputs (creative via stage, offer + toggle
+  // via campaign), once — not per row. Mirrors what the kickoff passes into
+  // stageRecipientsSql so the buckets reconcile exactly.
+  const elig = (await dbc.execute(sql`
+    SELECT s.creative_id AS creative_id,
+           c.offer_id AS offer_id,
+           c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts
+    FROM campaign_stages s
+    JOIN campaigns c ON c.id = s.campaign_id
+    WHERE s.id = ${stageId} AND s.org_id = ${orgId}::uuid
+    LIMIT 1
+  `)) as unknown as {
+    creative_id: number | null;
+    offer_id: number | null;
+    exclude_prior_offer_contacts: boolean;
+  }[];
+  const e = elig[0];
+  const exclusions = e
+    ? buildStageEligibilityExclusions({
+        orgId,
+        currentCampaignId: campaignId,
+        currentCreativeId: e.creative_id ?? null,
+        currentOfferId: e.offer_id ?? null,
+        excludePriorOffer: e.exclude_prior_offer_contacts,
+      })
+    : { creative: null, inFlight: null, offer: null };
+  const exclUnion = eligibilityUnion(exclusions);
+  // When no dedup layer applies, `deduped` is a constant false — no extra join.
+  const dedupJoin = exclUnion
+    ? sql`LEFT JOIN (${exclUnion}) elig ON elig.contact_id = p.contact_id`
+    : sql``;
+  const dedupExpr = exclUnion ? sql`(elig.contact_id IS NOT NULL)` : sql`false`;
+
   // Single pass over the frozen pool, attributing each member to exactly one
-  // bucket by priority: opted-out > fails-filter > out-of-split > qualified.
+  // bucket by priority: opted-out > fails-filter > out-of-split > deduped > qualified.
   const rows = (await dbc.execute(sql`
     WITH pool AS (
       SELECT
@@ -59,8 +101,10 @@ export async function computeStageReconciliation(
             THEN (row_number() OVER (ORDER BY p.contact_id) - 1)
                  % ${f.splitTotal ?? 1}::int = (${(f.splitIndex ?? 1) - 1})::int
           ELSE true
-        END AS in_split
+        END AS in_split,
+        ${dedupExpr} AS deduped
       FROM campaign_audience_pool p
+      ${dedupJoin}
       WHERE p.campaign_id = ${campaignId}::int AND p.org_id = ${orgId}::uuid
     )
     SELECT
@@ -68,13 +112,15 @@ export async function computeStageReconciliation(
       count(*) FILTER (WHERE opted_out)::int AS excluded_optout,
       count(*) FILTER (WHERE NOT opted_out AND NOT passes_filter)::int AS excluded_filter,
       count(*) FILTER (WHERE NOT opted_out AND passes_filter AND NOT in_split)::int AS excluded_split,
-      count(*) FILTER (WHERE NOT opted_out AND passes_filter AND in_split)::int AS qualified
+      count(*) FILTER (WHERE NOT opted_out AND passes_filter AND in_split AND deduped)::int AS excluded_dedup,
+      count(*) FILTER (WHERE NOT opted_out AND passes_filter AND in_split AND NOT deduped)::int AS qualified
     FROM pool
   `)) as unknown as {
     pool_total: number;
     excluded_optout: number;
     excluded_filter: number;
     excluded_split: number;
+    excluded_dedup: number;
     qualified: number;
   }[];
 
@@ -88,11 +134,15 @@ export async function computeStageReconciliation(
     excluded_optout: 0,
     excluded_filter: 0,
     excluded_split: 0,
+    excluded_dedup: 0,
     qualified: 0,
   };
   const attempted = Number(attemptedRows[0]?.attempted ?? 0);
   const excluded_total =
-    Number(r.excluded_optout) + Number(r.excluded_filter) + Number(r.excluded_split);
+    Number(r.excluded_optout) +
+    Number(r.excluded_filter) +
+    Number(r.excluded_split) +
+    Number(r.excluded_dedup);
   const qualified = Number(r.qualified);
   const gap = qualified - attempted;
 
@@ -103,6 +153,7 @@ export async function computeStageReconciliation(
     excluded_optout: Number(r.excluded_optout),
     excluded_filter: Number(r.excluded_filter),
     excluded_split: Number(r.excluded_split),
+    excluded_dedup: Number(r.excluded_dedup),
     excluded_total,
     gap,
     closed: gap === 0,

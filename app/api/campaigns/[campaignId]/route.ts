@@ -89,6 +89,7 @@ export async function GET(
       audience_snapshot_count: campaigns.audience_snapshot_count,
       audience_cap: campaigns.audience_cap,
       exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
+      exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
       start_date: campaigns.start_date,
       end_date: campaigns.end_date,
       status: campaigns.status,
@@ -258,7 +259,8 @@ export async function PATCH(
     "audience_contact_group_ids" in rawBody ||
     "audience_filters" in rawBody ||
     "audience_cap" in rawBody ||
-    "exclude_in_use_contacts" in rawBody;
+    "exclude_in_use_contacts" in rawBody ||
+    "exclude_prior_offer_contacts" in rawBody;
   if (current[0].status !== "draft" && touchesAudience) {
     return apiError(
       400,

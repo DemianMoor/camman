@@ -81,6 +81,8 @@ type Offer = {
   created_at: string;
   org_id: string;
   network: Network | null;
+  // Distinct leads already used for this offer (content-dedup counter).
+  distinct_contacts_used: number;
 };
 
 type ListResponse = {
@@ -382,6 +384,22 @@ export default function OffersPage() {
             <Badge variant="secondary">
               {n} {n === 1 ? "page" : "pages"}
             </Badge>
+          );
+        },
+        enableSorting: false,
+      },
+      {
+        id: "leads_used",
+        header: "Leads used",
+        cell: ({ row }) => {
+          const n = row.original.distinct_contacts_used ?? 0;
+          return (
+            <span
+              className={n === 0 ? "text-muted-foreground" : undefined}
+              title={`${n.toLocaleString()} distinct leads already used for this offer`}
+            >
+              {n.toLocaleString()}
+            </span>
           );
         },
         enableSorting: false,

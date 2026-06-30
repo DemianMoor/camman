@@ -77,6 +77,9 @@ export async function GET(
       split_index: campaign_stages.split_index,
       split_total: campaign_stages.split_total,
       tracking_id: campaign_stages.tracking_id,
+      creative_id: campaign_stages.creative_id,
+      offer_id: campaigns.offer_id,
+      exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
     })
     .from(campaign_stages)
     .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
@@ -136,6 +139,15 @@ export async function GET(
             excludeClickers: excludeCl,
             splitIndex,
             splitTotal,
+          },
+          // Same content-dedup the send pipeline applies — an exported CSV is a
+          // manual send, so it must not re-send a creative/offer a lead already
+          // got. (Export still writes nothing to the ledger; externally-sent
+          // exposures remain the known manual-CSV blind spot.)
+          eligibility: {
+            creativeId: stage.creative_id ?? null,
+            offerId: stage.offer_id ?? null,
+            excludePriorOffer: stage.exclude_prior_offer_contacts,
           },
           limit: effectiveLimit,
           offset,

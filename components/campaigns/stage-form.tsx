@@ -160,6 +160,16 @@ type AudiencePreview = {
   // frozen); "frozen" once the campaign has been activated. The UI uses
   // it to swap labels and to nudge the operator about draft state.
   mode: "projected" | "frozen";
+  // Content-dedup eligibility breakdown (Phase 2 §5). truncated ⇒ the segment
+  // was too large to compute within the timeout; show a soft note, don't fail.
+  eligibility: {
+    segment_total: number | null;
+    saw_creative: number;
+    got_offer: number;
+    will_send: number | null;
+    truncated: boolean;
+    offer_excluded: boolean;
+  };
 };
 
 export interface StageFormActionContext {
@@ -662,6 +672,9 @@ export function StageForm({
             exclude_clickers: watchedExcludeClickers,
             split_index: splitIndex ?? null,
             split_total: splitTotal ?? null,
+            // Drives the content-dedup eligibility breakdown (saw-this-creative
+            // / will-send). Null ⇒ no creative dedup (Edge A).
+            creative_id: watchedCreativeId ?? null,
           }),
         },
       );
@@ -686,6 +699,7 @@ export function StageForm({
     watchedExcludeClickers,
     splitIndex,
     splitTotal,
+    watchedCreativeId,
     previewApi.execute,
   ]);
 
@@ -1543,6 +1557,39 @@ export function StageForm({
                         </span>
                       </span>
                     </div>
+                    {/* Content-dedup eligibility breakdown (Phase 2 §5). */}
+                    {audiencePreview.eligibility.truncated ? (
+                      <p className="text-[11px] text-muted-foreground">
+                        Audience too large to compute the dedup preview — it
+                        still applies at send time.
+                      </p>
+                    ) : (
+                      <div className="grid gap-0.5 rounded-md border border-dashed p-2 text-xs text-muted-foreground">
+                        <span>
+                          Already saw this creative:{" "}
+                          <span className="font-mono tabular-nums text-foreground">
+                            {audiencePreview.eligibility.saw_creative.toLocaleString()}
+                          </span>
+                        </span>
+                        {audiencePreview.eligibility.offer_excluded ? (
+                          <span>
+                            Already got this offer:{" "}
+                            <span className="font-mono tabular-nums text-foreground">
+                              {audiencePreview.eligibility.got_offer.toLocaleString()}
+                            </span>
+                          </span>
+                        ) : null}
+                        <span className="font-medium text-foreground">
+                          Will send:{" "}
+                          <span className="font-mono tabular-nums">
+                            {(
+                              audiencePreview.eligibility.will_send ??
+                              audiencePreview.count
+                            ).toLocaleString()}
+                          </span>
+                        </span>
+                      </div>
+                    )}
                     {audienceEmpty ? (
                       <p className="text-xs text-amber-700 dark:text-amber-400">
                         Empty audience. Adjust filters or check the parent

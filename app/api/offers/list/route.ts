@@ -11,7 +11,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { affiliate_networks, offers } from "@/db/schema";
+import { affiliate_networks, offer_exposure_counts, offers } from "@/db/schema";
 import {
   apiError,
   parseListParams,
@@ -82,6 +82,9 @@ export async function GET(req: NextRequest) {
         status: offers.status,
         archived_at: offers.archived_at,
         created_at: offers.created_at,
+        // Distinct leads already used for this offer (content-dedup counter,
+        // migration 0086). Precomputed — single-row join, never COUNT(DISTINCT).
+        distinct_contacts_used: drizzleSql<number>`coalesce(${offer_exposure_counts.distinct_contacts}, 0)::int`,
         network: {
           id: affiliate_networks.id,
           name: affiliate_networks.name,
@@ -93,6 +96,13 @@ export async function GET(req: NextRequest) {
       .leftJoin(
         affiliate_networks,
         eq(offers.network_id, affiliate_networks.id),
+      )
+      .leftJoin(
+        offer_exposure_counts,
+        and(
+          eq(offer_exposure_counts.offer_id, offers.id),
+          eq(offer_exposure_counts.org_id, orgId),
+        ),
       )
       .where(where)
       .orderBy(orderFn(sortColumn))

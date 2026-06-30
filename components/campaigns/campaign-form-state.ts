@@ -50,6 +50,9 @@ export interface CampaignFormValues {
   // Exclude contacts already in use by another active campaign. On by
   // default for new campaigns.
   exclude_in_use_contacts: boolean;
+  // Exclude leads who already received this offer in a previous campaign
+  // (Phase-2 content dedup, LAYER 3). Off by default; opt-in per campaign.
+  exclude_prior_offer_contacts: boolean;
   // Send method: 'manual' (pasted Short URL) or 'tracked' (API Send — mints a
   // per-recipient link). 'tracked' requires the brand to have an active short
   // domain (gated in the UI + on the server).
@@ -188,6 +191,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
       // Default ON for new campaigns; edit mode loads the stored value
       // (?? leaves an explicit false intact).
       exclude_in_use_contacts: initialValues?.exclude_in_use_contacts ?? true,
+      exclude_prior_offer_contacts:
+        initialValues?.exclude_prior_offer_contacts ?? false,
       link_mode: initialValues?.link_mode ?? "manual",
       start_date: initialValues?.start_date ?? "",
       end_date: initialValues?.end_date ?? "",
@@ -204,6 +209,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const watchedFilters = form.watch("audience_filters");
   const watchedCap = form.watch("audience_cap");
   const watchedExcludeInUse = form.watch("exclude_in_use_contacts");
+  const watchedExcludePriorOffer = form.watch("exclude_prior_offer_contacts");
   const watchedStart = form.watch("start_date");
   const watchedEnd = form.watch("end_date");
 
@@ -482,6 +488,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     watchedContactGroups,
     watchedCap,
     watchedExcludeInUse,
+    watchedExcludePriorOffer,
     watchedLinkMode,
     selectedBrandShortDomain,
     setLinkMode,

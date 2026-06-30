@@ -9,6 +9,7 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import {
   computeStageAudienceCount,
   computeStageAudienceCountForDraft,
+  computeStageEligibilityPreview,
 } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 
@@ -28,6 +29,10 @@ const previewSchema = z
     // applied.
     split_index: z.number().int().min(1).nullable().optional(),
     split_total: z.number().int().min(2).nullable().optional(),
+    // The stage's selected creative, for the content-dedup eligibility preview.
+    // Null/omitted ⇒ no creative dedup (Edge A): the eligibility breakdown still
+    // returns (offer exclusion may apply), with saw_creative = 0.
+    creative_id: z.number().int().positive().nullable().optional(),
   })
   .refine((d) => !(d.include_clickers && d.exclude_clickers), {
     path: ["include_clickers"],
@@ -75,6 +80,8 @@ export async function POST(
       audience_filters: campaigns.audience_filters,
       audience_cap: campaigns.audience_cap,
       exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
+      offer_id: campaigns.offer_id,
+      exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
@@ -127,6 +134,30 @@ export async function POST(
     ? campaignRow[0].audience_cap ?? result.count
     : campaignRow[0].audience_snapshot_count;
 
+  // Content-dedup eligibility breakdown (Phase 2 §5). Single timeout-guarded
+  // query; the qualifying set resolves once and the indexed ledgers are cheap
+  // joins on top. Reuses the same eligibility layers the send path EXCEPTs, so
+  // `will_send` equals what materializes for the same inputs.
+  const eligibility = await computeStageEligibilityPreview({
+    orgId,
+    campaignId: cid,
+    mode: isDraft ? "draft" : "active",
+    stageFilters: parsed.data,
+    eligibility: {
+      currentCreativeId: parsed.data.creative_id ?? null,
+      currentOfferId: campaignRow[0].offer_id,
+      excludePriorOffer: campaignRow[0].exclude_prior_offer_contacts,
+    },
+    draft: isDraft
+      ? {
+          segmentIds: campaignRow[0].audience_segment_ids ?? [],
+          contactGroupIds: campaignRow[0].audience_contact_group_ids ?? [],
+          filters: campaignRow[0].audience_filters ?? {},
+          excludeInUse: campaignRow[0].exclude_in_use_contacts,
+        }
+      : undefined,
+  });
+
   return NextResponse.json({
     count: result.count,
     breakdown: result.breakdown,
@@ -134,5 +165,12 @@ export async function POST(
     // `mode` lets the UI swap the "frozen" / "projected" labels without
     // duplicating the campaign-status check on the client.
     mode: isDraft ? "projected" : "frozen",
+    // Content-dedup preview: { segment_total, saw_creative, got_offer,
+    // will_send, truncated }. offer_excluded reflects the campaign toggle so the
+    // UI knows whether to show the "already got offer" line.
+    eligibility: {
+      ...eligibility,
+      offer_excluded: campaignRow[0].exclude_prior_offer_contacts,
+    },
   });
 }

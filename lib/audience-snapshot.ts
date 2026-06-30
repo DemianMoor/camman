@@ -5,6 +5,11 @@ import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
 
+import {
+  buildStageEligibilityExclusions,
+  type StageEligibilityParams,
+} from "./sends/eligibility";
+import { stageRecipientsSql } from "./sends/recipients";
 import { buildSegmentAudienceClause } from "./segment-rules-eval";
 
 // Compose the audience-source set (contact_ids, before status filters /
@@ -935,4 +940,225 @@ export async function snapshotAudience(
   `)) as unknown as { contact_id: string }[];
   const count = Array.isArray(result) ? result.length : 0;
   return { count, total_matching: total };
+}
+
+// ── Content-dedup eligibility preview (Phase 2, §5 of the brief) ──────────────
+// Build-time "what will the dedup filter do" breakdown for ONE stage:
+//   segment_total = the stage's qualifying audience (pool/projection ∩ stage
+//                   filters ∩ split) BEFORE dedup
+//   saw_creative  = of those, how many already got THIS creative elsewhere
+//   got_offer     = of those, how many already got THIS offer (only when the
+//                   campaign opts into offer exclusion)
+//   will_send     = after all dedup EXCEPTs — equals the real materialized count
+//                   for the same inputs (same qualifying base + same eligibility
+//                   layers as stageRecipientsSql), so preview == reality.
+// ONE query: the qualifying set resolves once, the indexed ledgers are cheap
+// LEFT JOINs on top. Wrapped in the segment-preview timeout mechanism (SET LOCAL
+// statement_timeout in a txn; 57014 ⇒ truncated) — pooler-safe (the SET LOCAL +
+// query run in the same explicit transaction, so they share one backend).
+export interface StageEligibilityPreviewResult {
+  segment_total: number | null;
+  saw_creative: number;
+  got_offer: number;
+  will_send: number | null;
+  truncated: boolean;
+  duration_ms: number;
+}
+
+export interface StageEligibilityPreviewInput {
+  orgId: string;
+  campaignId: number;
+  mode: "active" | "draft";
+  // Stage filter toggles + optional split, identical to the audience preview.
+  stageFilters: StageAudienceFilters;
+  // Resolved once by the caller: the stage's creative, the campaign's offer, the
+  // opt-in toggle. (org/campaign come from above.)
+  eligibility: Pick<
+    StageEligibilityParams,
+    "currentCreativeId" | "currentOfferId" | "excludePriorOffer"
+  >;
+  // Draft mode needs the campaign's planned audience recipe (no frozen pool yet).
+  draft?: {
+    segmentIds: number[];
+    contactGroupIds: number[];
+    filters: AudienceFilters;
+    excludeInUse?: boolean;
+  };
+}
+
+// An always-empty `SELECT contact_id` relation — substituted for an absent
+// eligibility layer so the LEFT JOIN + FILTER math is uniform (that layer simply
+// never matches: saw_creative/got_offer = 0, will_send doesn't subtract it).
+const EMPTY_CONTACTS = drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
+
+export async function computeStageEligibilityPreview(
+  input: StageEligibilityPreviewInput,
+  timeoutMs = 10_000,
+): Promise<StageEligibilityPreviewResult> {
+  const { orgId, campaignId, mode, stageFilters: sf } = input;
+  // Split is applied to the POST-dedup set (in the final query below), exactly
+  // like stageRecipientsSql (base → EXCEPT layers → split). So `qualifying` is
+  // the pre-dedup, PRE-split base ∩ stage-filters; subtracting the layers then
+  // splitting reproduces the send path bucket-for-bucket ⇒ will_send == reality.
+  const splitIndex = sf.split_index ?? null;
+  const splitTotal = sf.split_total ?? null;
+  const splitActive = splitIndex !== null && splitTotal !== null;
+
+  // The qualifying contact_id set (pre-dedup, pre-split), post stage-filters.
+  // ACTIVE reuses stageRecipientsSql WITHOUT eligibility AND WITHOUT split (the
+  // exact send base). DRAFT projects from the campaign's planned audience.
+  let qualifying: SQL;
+  if (mode === "active") {
+    qualifying = stageRecipientsSql({
+      campaignId,
+      orgId,
+      filters: {
+        includeNoStatus: sf.include_no_status,
+        includeClickers: sf.include_clickers,
+        excludeClickers: sf.exclude_clickers,
+        splitIndex: null,
+        splitTotal: null,
+      },
+    });
+  } else {
+    const draft = input.draft;
+    if (!draft || (draft.segmentIds.length === 0 && draft.contactGroupIds.length === 0)) {
+      return {
+        segment_total: 0,
+        saw_creative: 0,
+        got_offer: 0,
+        will_send: 0,
+        truncated: false,
+        duration_ms: 0,
+      };
+    }
+    const source = await buildAudienceSourceSql({
+      orgId,
+      segmentIds: draft.segmentIds,
+      contactGroupIds: draft.contactGroupIds,
+      filters: draft.filters,
+      excludeInUse: draft.excludeInUse,
+    });
+    const includeNoStatus = draft.filters.include_no_status === true;
+    const includeOptIn = draft.filters.include_opt_in === true;
+    const includeClickers = draft.filters.include_clickers === true;
+    const includeNotClicked = draft.filters.include_not_clicked === true;
+    const excludeInUse = draft.excludeInUse === true;
+    // No split here — applied post-dedup in the final query (see above).
+    qualifying = drizzleSql`
+      with sources as (select distinct contact_id from (${source}) u),
+      ${flagSetCtes(orgId)},
+      flagged as (
+        select
+          s.contact_id,
+          (oo_set.contact_id is not null) as has_opt_out,
+          (oi_set.contact_id is not null) as has_opt_in,
+          (cl_set.contact_id is not null) as has_clicker,
+          (iu_set.contact_id is not null) as is_in_use_elsewhere
+        from sources s
+        ${flagJoins("s")}
+      )
+      select contact_id
+      from flagged
+      where has_opt_out = false
+        and (
+          (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
+          or (${includeOptIn}::boolean and has_opt_in)
+          or (${includeClickers}::boolean and has_clicker)
+          or (${includeNotClicked}::boolean and not has_clicker)
+        )
+        and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
+        and (
+          (${sf.include_no_status}::boolean and not has_opt_in and not has_clicker)
+          or (${sf.include_clickers}::boolean and has_clicker)
+        )
+        and not (${sf.exclude_clickers}::boolean and has_clicker)
+    `;
+  }
+
+  const ex = buildStageEligibilityExclusions({
+    orgId,
+    currentCampaignId: campaignId,
+    currentCreativeId: input.eligibility.currentCreativeId,
+    currentOfferId: input.eligibility.currentOfferId,
+    excludePriorOffer: input.eligibility.excludePriorOffer,
+  });
+  const creativeRel = ex.creative ?? EMPTY_CONTACTS;
+  const inFlightRel = ex.inFlight ?? EMPTY_CONTACTS;
+  const offerRel = ex.offer ?? EMPTY_CONTACTS;
+
+  const start = Date.now();
+  try {
+    const rows = await db.transaction(async (tx) => {
+      const ms = Math.max(1, Math.floor(timeoutMs));
+      await tx.execute(drizzleSql.raw(`SET LOCAL statement_timeout = ${ms}`));
+      return (await tx.execute(drizzleSql`
+        with q as (${qualifying}),
+        ec as (${creativeRel}),
+        ei as (${inFlightRel}),
+        eo as (${offerRel}),
+        joined as (
+          select
+            q.contact_id,
+            (ec.contact_id is not null) as f_creative,
+            (ei.contact_id is not null) as f_inflight,
+            (eo.contact_id is not null) as f_offer
+          from q
+          left join ec on ec.contact_id = q.contact_id
+          left join ei on ei.contact_id = q.contact_id
+          left join eo on eo.contact_id = q.contact_id
+        ),
+        -- Post-dedup set, numbered for split — exactly the send path's order
+        -- (base EXCEPT layers, THEN split), so will_send == materialized.
+        eligible as (
+          select contact_id, row_number() over (order by contact_id) - 1 as rn
+          from joined
+          where not f_creative and not f_inflight and not f_offer
+        )
+        select
+          (select count(*) from joined)::int as segment_total,
+          (select count(*) from joined where f_creative)::int as saw_creative,
+          (select count(*) from joined where f_offer)::int as got_offer,
+          (select count(*) from eligible
+            where not ${splitActive}::boolean
+              or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
+          )::int as will_send
+      `)) as unknown as {
+        segment_total: number;
+        saw_creative: number;
+        got_offer: number;
+        will_send: number;
+      }[];
+    });
+    const r = rows[0] ?? {
+      segment_total: 0,
+      saw_creative: 0,
+      got_offer: 0,
+      will_send: 0,
+    };
+    return {
+      segment_total: r.segment_total,
+      saw_creative: r.saw_creative,
+      got_offer: r.got_offer,
+      will_send: r.will_send,
+      truncated: false,
+      duration_ms: Date.now() - start,
+    };
+  } catch (err) {
+    const duration_ms = Date.now() - start;
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("statement timeout") || msg.includes("57014")) {
+      // Headline number unavailable; the screen shows a "too large to preview"
+      // state rather than failing (mirrors the segment-rules preview contract).
+      return {
+        segment_total: null,
+        saw_creative: 0,
+        got_offer: 0,
+        will_send: null,
+        truncated: true,
+        duration_ms,
+      };
+    }
+    throw err;
+  }
 }

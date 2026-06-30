@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-06-24_
+_Last updated: 2026-06-30_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -55,6 +55,19 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 ## Audience semantics
 - Segment audience = manual membership **∪** rule matches (Model C); zero active rules ⇒ manual only (preserve this short-circuit).
 - Campaign audience is **frozen at activation**; locked afterward (`audience_locked_after_draft`). Both `exclude_in_use_contacts` flags (segment + campaign) only consider `status='active'` campaigns.
+
+## Content dedup & offer exposure (migration 0086 — see [04-features/content-dedup.md](04-features/content-dedup.md))
+- **"Used" = a `stage_sends` row that reached `status='sent'`** — the only per-recipient success marker. External-CSV campaigns (no `stage_sends`) are an accepted blind spot.
+- **Hard rule keys on `creatives.id`, never text/slug/hash.** Edits are in-place (same id); a new creative (via `/duplicate`) is the path for re-sending changed content.
+- **Dedup is org-scoped and intentionally spans brands.** Contacts (`UNIQUE(org_id, phone_number)`, no `brand_id`) and creatives are brand-agnostic. Never add `brand_id` to the exposure tables.
+- **A send's offer is the campaign's `offer_id`, never `creative_offers`.** `creative_offers` is authoring-only; offer attribution is unambiguous via `campaigns.offer_id`.
+- **Distinct counts are maintained write-time, read O(1).** `offer_exposure_counts` is trigger-maintained; the offer page reads one row, never `COUNT(DISTINCT …)`.
+- **The ledgers are populated by DB triggers on `stage_sends`, not app code** — `status='sent'` is set from multiple paths (drain + poller); a trigger guarantees none bypasses the ledger.
+- **Send-time eligibility has ONE shared builder** ([`lib/sends/eligibility.ts`](../lib/sends/eligibility.ts) — `buildStageEligibilityExclusions` / `applyEligibilityExcept` / `eligibilityUnion`), consumed by `stageRecipientsSql` (send kickoff + CSV export + preflight), `reconcile.ts`, and the preview. Never compute eligibility separately in any path. Keyed on the stage's `creative_id` + campaign's `offer_id`; the layer-1 clause `(campaign_id IS NULL OR campaign_id <> currentCampaignId)` is the in-campaign-reuse exception — never flatten it. Null creative ⇒ omit layers 1+2 (Edge A). Layer 3 only when `campaigns.exclude_prior_offer_contacts`.
+- **`campaigns.exclude_prior_offer_contacts`** (default false) is set in draft and locked after activation (in the audience-lock set), but its value is read **live** at send time (not baked into the frozen snapshot).
+- **`reconcile.ts` partitions `pool = attempted + excluded(opt_out | filter | split | dedup) + gap`** — the `dedup` bucket is essential; without it a deduped campaign shows a false materialization-gap alarm.
+- **The stages-list `audience_count` is the pre-dedup addressable pool** (perf-tuned batched query, untouched); the post-dedup will-send number is in the Prepare popup + the stage preview.
+- **The offer counter (`offer_exposure_counts`) and the preview breakdown are read-time-cheap** — single-row counter join, single-CTE preview (`computeStageEligibilityPreview`, timeout-guarded). Never `COUNT(DISTINCT …)` at read time; never recompute the preview as four segment resolutions.
 
 ## Sending safety
 - Drain requires all of: `send_approved` (per stage) + the **two-switch send gate** + `CRON_SECRET`/`campaigns.drain` + provider not `send_paused`.

@@ -64,6 +64,7 @@ type CampaignDetail = {
   audience_filters: AudienceFilters;
   audience_cap: number | null;
   exclude_in_use_contacts: boolean;
+  exclude_prior_offer_contacts: boolean;
   start_date: string | null;
   end_date: string | null;
   status: Status;
@@ -193,6 +194,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
     },
     audience_cap: data.audience_cap ?? null,
     exclude_in_use_contacts: data.exclude_in_use_contacts ?? true,
+    exclude_prior_offer_contacts: data.exclude_prior_offer_contacts ?? false,
     link_mode: data.link_mode ?? "manual",
     start_date: data.start_date ?? "",
     end_date: data.end_date ?? "",
@@ -285,6 +287,7 @@ function Inner({
       delete body.audience_filters;
       delete body.audience_cap;
       delete body.exclude_in_use_contacts;
+      delete body.exclude_prior_offer_contacts;
     }
     const result = await updateApi.execute(`/api/campaigns/${campaignId}`, {
       method: "PATCH",
@@ -802,6 +805,7 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
     watchedContactGroups,
     watchedFilters,
     watchedExcludeInUse,
+    watchedExcludePriorOffer,
     setFilter,
   } = state;
 
@@ -919,6 +923,27 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
               checked={watchedExcludeInUse}
               onCheckedChange={(v) =>
                 form.setValue("exclude_in_use_contacts", v, {
+                  shouldDirty: true,
+                })
+              }
+              disabled={audienceLocked || anySubmitting}
+            />
+          </div>
+          <div className="flex items-start justify-between gap-3 rounded-md border p-3">
+            <div className="grid gap-0.5">
+              <span className="text-sm font-medium">
+                Exclude leads who already got this offer
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Skip contacts who already received this campaign&apos;s offer in
+                a previous campaign. The same creative is never re-sent to a lead
+                regardless of this setting.
+              </span>
+            </div>
+            <Switch
+              checked={watchedExcludePriorOffer}
+              onCheckedChange={(v) =>
+                form.setValue("exclude_prior_offer_contacts", v, {
                   shouldDirty: true,
                 })
               }
@@ -1337,6 +1362,7 @@ function buildCreateBody(
     audience_filters: values.audience_filters,
     audience_cap: values.audience_cap,
     exclude_in_use_contacts: values.exclude_in_use_contacts,
+    exclude_prior_offer_contacts: values.exclude_prior_offer_contacts,
     link_mode: values.link_mode,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
@@ -1359,6 +1385,7 @@ function buildPatchBody(values: CampaignFormValues): Record<string, unknown> {
     audience_filters: values.audience_filters,
     audience_cap: values.audience_cap,
     exclude_in_use_contacts: values.exclude_in_use_contacts,
+    exclude_prior_offer_contacts: values.exclude_prior_offer_contacts,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
   };

@@ -63,6 +63,7 @@ interface MainRow {
   behavioral_tier: number | null;
   parent_stage_id: number | null;
   creative_text: string | null;
+  exclude_prior_offer_contacts: boolean;
 }
 
 export async function kickoffStageSend(
@@ -92,7 +93,8 @@ export async function kickoffStageSend(
       s.split_total              AS split_total,
       s.behavioral_tier          AS behavioral_tier,
       s.parent_stage_id          AS parent_stage_id,
-      cr.text                    AS creative_text
+      cr.text                    AS creative_text,
+      c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts
     FROM campaigns c
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
     LEFT JOIN brands b ON b.id = c.brand_id
@@ -141,6 +143,15 @@ export async function kickoffStageSend(
       splitTotal: row.split_total ?? null,
       behavioralTier: row.behavioral_tier ?? null,
       parentStageId: row.parent_stage_id ?? null,
+    },
+    // Content-dedup: never materialize a stage_sends row for a contact who
+    // already got this creative in another campaign (always), or this offer in
+    // a previous campaign (when the campaign opts in). creative_id NULL ⇒ Edge A
+    // (no creative dedup; offer exclusion may still apply).
+    eligibility: {
+      creativeId: row.creative_id ?? null,
+      offerId: row.offer_id ?? null,
+      excludePriorOffer: row.exclude_prior_offer_contacts,
     },
   });
   if (recipients.length === 0) return { ok: false, reason: "no_recipients" };

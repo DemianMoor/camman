@@ -43,6 +43,9 @@ interface MainRow {
   brand_id: number | null;
   campaign_tracking_id: string | null;
   creative_text: string | null;
+  creative_id: number | null;
+  offer_id: number | null;
+  exclude_prior_offer_contacts: boolean;
   stage_tracking_id: string | null;
   sms_provider_id: number | null;
   supports_api_send: boolean | null;
@@ -65,6 +68,9 @@ export async function preflightStageSend(
       c.brand_id          AS brand_id,
       c.tracking_id       AS campaign_tracking_id,
       cr.text             AS creative_text,
+      s.creative_id       AS creative_id,
+      c.offer_id          AS offer_id,
+      c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
       s.tracking_id       AS stage_tracking_id,
       s.sms_provider_id   AS sms_provider_id,
       p.supports_api_send AS supports_api_send,
@@ -114,6 +120,13 @@ export async function preflightStageSend(
           // kickoff will materialize (and the stages-list live preview).
           behavioralTier: row.behavioral_tier ?? null,
           parentStageId: row.parent_stage_id ?? null,
+        },
+        // Match the kickoff's content-dedup so the previewed recipient count
+        // equals what will actually materialize.
+        eligibility: {
+          creativeId: row.creative_id ?? null,
+          offerId: row.offer_id ?? null,
+          excludePriorOffer: row.exclude_prior_offer_contacts,
         },
       })}
     ) q

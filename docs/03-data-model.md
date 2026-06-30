@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-06-24_
+_Last updated: 2026-06-30_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -117,6 +117,14 @@ erDiagram
   stage_sends ||--o| stage_sends : "sale stamped by sub_id_1 = id"
 
   offers ||--o{ offer_payouts : "effective-dated CPA history"
+
+  contacts ||--o{ creative_exposures : "saw creative (hard-rule ledger)"
+  creatives ||--o{ creative_exposures : "creative_id"
+  campaigns ||--o{ creative_exposures : "first sender"
+  contacts ||--o{ offer_exposures : "got offer"
+  offers ||--o{ offer_exposures : "offer_id"
+  campaigns ||--o{ offer_exposures : "first sender"
+  offers ||--|| offer_exposure_counts : "precomputed distinct-lead count"
 ```
 
 > **Per-recipient sale attribution** (migration 0067): the Keitaro conversions poll
@@ -213,6 +221,17 @@ erDiagram
 | `stage_manual_sales` | `org_id`, `campaign_id`, `stage_id`, `delta` (signed), `entered_by?` (NULL=system/backfill), `created_at` | dated per-entry ledger of the operator's manual sales (migration 0079). Each manual-results save writes the signed CHANGE in `campaign_stages.sales_count`, dated to the save; `SUM(delta)` per stage == `sales_count`. **Read by [`lib/reporting/attribution.ts`](../lib/reporting/attribution.ts)** — the `/reports` tab AND the dashboard stats/daily-activity attribute manual sales by this **entry date** (in-range `SUM(delta)` combined with Keitaro conversions via `combineSales`). Pre-ledger totals were backfilled by 0079 as one delta dated `now()`; **migration 0084 re-dated those backfill rows** (`entered_by IS NULL`) to each stage's effective send day so historical manual sales spread across the calendar instead of lumping on one date |
 | `keitaro_stage_results` | UNIQUE(org_id, stage_id, stat_date), `stage_tracking_id`, `visit_clicks_raw`/`visit_clicks_clean` (Clickers), `redirect_clicks_raw`/`redirect_clicks_clean` (Offer Redirect), legacy `raw_clicks`/`clean_clicks` (= redirect, back-compat), `checkouts`/`sales`, `revenue`/`payout_at_conversion`/`cost`/`epc`, `synced_at` | per-stage daily aggregate from the Keitaro 5-min poll; idempotent UPSERT (last-write-wins). `sub_id_3` = stage tracking id; campaign totals = SUM across stages. **`cost` is ALWAYS 0 — do NOT use it for ROI/EPC/profit**: it's Keitaro ad-platform spend (we don't buy Keitaro traffic). Real stage cost = `campaign_stages.total_cost`; the `/reports` route folds this column in but overwrites it with `total_cost` before computing profit. `epc` is revenue-derived (`revenue / redirect raw clicks`), not cost-derived. **`revenue` is the REVENUE SOURCE OF TRUTH** (real summed per-conversion payout at sync time) — every reported revenue figure SUMs this, never `sales × offers.payout_cpa`. `payout_at_conversion` (migration 0083) = `revenue / NULLIF(sales,0)` frozen at sync, so a later CPA edit can't retro-change a row's rate. Clicks split by Keitaro campaign **name** `gk-lp-visits` (visits) vs offer campaigns (redirects); visits ⊇ redirects, never summed. Migrations 0061 + 0062 + 0083 |
 
+### Content dedup & offer exposure (migration 0086)
+| Table | Key columns | Notes |
+|-------|------------|-------|
+| `creative_exposures` | `id bigserial`, UNIQUE(org_id, contact_id, creative_id), `campaign_id` (**nullable, SET NULL**), `first_sent_at`; INDEX(org_id, creative_id, contact_id) | **hard-rule ledger**: the same `creatives.id` is recorded against a `contacts.id` exactly once. `campaign_id` = the FIRST campaign that sent it (first-write-wins via `ON CONFLICT DO NOTHING`) — load-bearing for the in-campaign-reuse exception in the send-time anti-join, hence `ON DELETE SET NULL` (a hard-deleted campaign must NOT cascade-delete the row and re-expose the contact). Phase 2 clause: `(campaign_id IS NULL OR campaign_id <> currentCampaignId)`. **Org-scoped, spans brands by design** (creatives/contacts are brand-agnostic). Populated write-time by the `stage_sends`→`sent` trigger |
+| `offer_exposures` | `id bigserial`, UNIQUE(org_id, contact_id, offer_id), `campaign_id` (**nullable, SET NULL**), `first_sent_at`; INDEX(org_id, offer_id, contact_id) | one row per (contact, offer); first campaign (`campaign_id` SET NULL on campaign hard-delete, same rationale as `creative_exposures`). Offer resolved from `campaigns.offer_id` (NEVER `creative_offers`). Feeds the optional per-campaign include/exclude filter (Phase 2) + the offer counter |
+| `offer_exposure_counts` | PK(org_id, offer_id), `distinct_contacts bigint` | precomputed "N distinct leads used for this offer" — the offer page reads this single row, never a `COUNT(DISTINCT …)`. Maintained by an AFTER INSERT trigger on `offer_exposures` (distinct by construction, since those inserts are `ON CONFLICT DO NOTHING`) |
+
+> **Phase 2 (migration 0087):** `campaigns.exclude_prior_offer_contacts` (boolean, NOT NULL DEFAULT false) — the per-campaign opt-in for LAYER 3 (offer-level exclusion). The send-time eligibility anti-join (`lib/sends/eligibility.ts`, wired into `stageRecipientsSql` for send + export) now actively suppresses; `reconcile.ts` gained an `excluded_dedup` bucket. See [`docs/04-features/content-dedup.md`](04-features/content-dedup.md) §6.
+
+> Both ledgers count a lead as **used** = a `stage_sends` row that reached `status='sent'` (the only per-recipient success marker). Pure external-CSV campaigns create no `stage_sends` rows → known, accepted blind spot. Backfill: [`scripts/backfill-content-dedup-exposures.ts`](../scripts/backfill-content-dedup-exposures.ts) (idempotent, earliest `sent_at` wins the `campaign_id`). The send-time eligibility anti-join + offer-page counter UI + per-campaign exclude toggle land in **Phase 2** — see [`docs/04-features/content-dedup.md`](04-features/content-dedup.md).
+
 ## Triggers & DB-side logic (in migrations, not Drizzle)
 - **`handle_new_user()`** (`0001`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row.
 - **`current_org_id()`** (`0001`): SECURITY DEFINER, backs RLS policies.
@@ -221,3 +240,6 @@ erDiagram
 - RLS policies per table across the security migrations (`0001`, `0021`, `0025`, `0028`, `0030`, …).
 - **RLS enabled on every `public` table.** `geoip_cache` (infra cache, no `org_id`, server-only) has RLS enabled with **no policies** (migration `0066`) — the direct postgres-js connection and `service_role` bypass RLS, so server reads/writes keep working while anon/authenticated access is denied. Clears the Supabase advisor `rls_disabled_in_public`.
 - **`stage_manual_sales` + `opt_out_attributions` RLS** (migration `0085`): both are tenant tables (`org_id`) written only by the privileged server connection but read org-scoped by the Reports tab, so each gets an `org_id = current_org_id()` **SELECT** policy and no write policies — mirroring `stage_sends` (`0050`). Second `rls_disabled_in_public` remediation after `geoip_cache`.
+- **`record_exposure_on_sent()` + two `stage_sends` triggers** (migration `0086`): `AFTER INSERT WHEN status='sent'` and `AFTER UPDATE OF status WHEN status='sent' AND OLD.status IS DISTINCT FROM 'sent'` — share one SECURITY DEFINER function that resolves the creative (via stage) + offer (via campaign) and inserts into `creative_exposures` / `offer_exposures` (`ON CONFLICT DO NOTHING`). Fires from every path that sets `'sent'`, so no send path can bypass the ledger.
+- **`bump_offer_exposure_count()` + `offer_exposures` AFTER INSERT trigger** (migration `0086`): upserts `offer_exposure_counts.distinct_contacts += 1`. Fires only on genuinely-new (org, contact, offer) rows. Same junction-trigger shape as `segment_stats.total_count`.
+- **`creative_exposures` / `offer_exposures` / `offer_exposure_counts` RLS** (migration `0086`): tenant tables written only by the server connection / SECURITY DEFINER triggers; each gets an `org_id = current_org_id()` SELECT policy and no write policies (0085 precedent).

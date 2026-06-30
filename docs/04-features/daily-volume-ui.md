@@ -1,6 +1,6 @@
 # Daily-Volume UI (WS4)
 
-_Last updated: 2026-06-22_
+_Last updated: 2026-06-30_
 
 The operating layer that makes running many tracked SMS campaigns a day fast and
 legible. Purely additive UI + read endpoints over the existing send pipeline
@@ -86,7 +86,13 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
   [live-sending-banner.tsx](../../components/sends/live-sending-banner.tsx) stays
   on the stage panel + provider page.
 - **B4 — volume-vs-caps meter.** [components/sends/volume-caps-meter.tsx](../../components/sends/volume-caps-meter.tsx)
-  — today's org-wide 24h sent vs the aggregate effective `max_sends_per_24h`.
+  — org-wide count of messages sent on the current **ET calendar day** (label
+  "Sent today (ET)") vs the aggregate effective `max_sends_per_24h`. The displayed
+  count is calendar-day so it reads as a true "what went out today" total and
+  matches the stage list; the breaker itself still accounts in a rolling
+  trailing-24h window (`countSentSince` in the drain), so near midnight the
+  meter can read lower than the breaker's view. `today.sent_today` on
+  `GET /api/sends/state`.
 - **B5 — send-window indicator.** [components/sends/send-window-indicator.tsx](../../components/sends/send-window-indicator.tsx)
   — "opens 08:00 ET" / "open · closes in 3h 12m" from
   `sendWindowForDay()` ([lib/quiet-hours.ts](../../lib/quiet-hours.ts)). Sender's
@@ -102,7 +108,8 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
 ## Endpoints added
 
 - `GET /api/sends/state` — global flags (incl. `sends_paused`) + paused providers
-  + 24h volume/cap + stuck count. Permission `campaigns.view`. Never emits credentials.
+  + today's ET-calendar-day sent count (`today.sent_today`) / 24h cap + stuck
+  count. Permission `campaigns.view`. Never emits credentials.
 - `POST /api/sends/pause` — `{ paused: boolean }`, the emergency hard-stop toggle.
   Permission `campaigns.drain` (manager+); audited in `org_setting_events`.
 - `GET /api/sends/today` — fleet dashboard data (tracked stages in play today).

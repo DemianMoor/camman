@@ -4,7 +4,8 @@ import { and, eq, ne, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { sms_providers } from "@/db/schema";
-import { countSentSince, resolve24hCap } from "@/lib/sends/circuit-breakers";
+import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
+import { resolve24hCap } from "@/lib/sends/circuit-breakers";
 
 // The operating layer's "send state" snapshot, computed for one org. Shared by
 // GET /api/sends/state (the endpoint other consumers — e.g. /sends/today — read)
@@ -50,10 +51,20 @@ export async function getSendState(orgId: string) {
       ),
     );
 
-  // Org-wide sent in the trailing 24h (matches breaker accounting) + the
-  // aggregate effective 24h cap across API providers. Null cap ⇒ no API
+  // Org-wide sent on the CURRENT ET calendar day (not a rolling 24h window) so
+  // the meter reads as a true "what went out today" total, matching the stage
+  // list on /sends/today. The breaker still accounts in rolling-24h via
+  // countSentSince() in the drain — this value is display-only. The cap below is
+  // the aggregate effective 24h ceiling across API providers; null ⇒ no API
   // provider configured, so there's nothing to meter against.
-  const sent24h = await countSentSince(db, orgId, 86400);
+  const sentTodayRows = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM stage_sends
+    WHERE org_id = ${orgId}
+      AND sent_at IS NOT NULL
+      AND (sent_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date
+        = (now() AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date
+  `)) as unknown as { n: number }[];
+  const sentToday = Number(sentTodayRows[0]?.n ?? 0);
   const cap24h =
     providers.length > 0
       ? providers.reduce((sum, p) => sum + resolve24hCap(p.max_sends_per_24h), 0)
@@ -85,7 +96,7 @@ export async function getSendState(orgId: string) {
         reason: p.send_paused_reason,
         at: p.send_paused_at,
       })),
-    today: { sent_24h: sent24h, cap_24h: cap24h },
+    today: { sent_today: sentToday, cap_24h: cap24h },
     stuck_count: stuckCount,
   };
 }

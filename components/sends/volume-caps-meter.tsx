@@ -2,10 +2,12 @@
 
 import { cn } from "@/lib/utils";
 
-// WS4 §B4 — volume-vs-caps meter. Today's org-wide sent count against the
-// aggregate 24h soft ceiling (matches the breaker's org-wide accounting). Lets
-// an operator see "9,200 / 10,000 today" before committing a big batch and
-// hitting a soft pause. Null cap ⇒ no API provider configured to meter against.
+// WS4 §B4 — volume-vs-caps meter. Org-wide count of messages sent on the current
+// ET calendar day (a true "what went out today" total) against the aggregate 24h
+// soft ceiling. Lets an operator see "9,200 / 10,000 today" before committing a
+// big batch. Null cap ⇒ no API provider configured to meter against. NOTE: the
+// breaker itself accounts in a rolling trailing-24h window (countSentSince), so
+// near midnight this calendar-day figure can read lower than the breaker's view.
 export function VolumeCapsMeter({
   sent,
   cap,
@@ -22,7 +24,7 @@ export function VolumeCapsMeter({
   return (
     <div className={cn("space-y-1", className)}>
       <div className="flex items-baseline justify-between text-xs">
-        <span className="font-medium text-muted-foreground">Sent today (24h)</span>
+        <span className="font-medium text-muted-foreground">Sent today (ET)</span>
         <span className="font-mono tabular-nums">
           {sent.toLocaleString()}
           {cap != null ? ` / ${cap.toLocaleString()}` : ""}

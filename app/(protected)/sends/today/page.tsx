@@ -57,7 +57,7 @@ type FleetResponse = {
 
 type SendState = {
   sends_paused: boolean;
-  today: { sent_24h: number; cap_24h: number | null };
+  today: { sent_today: number; cap_24h: number | null };
   stuck_count: number;
 };
 
@@ -205,7 +205,7 @@ export default function FleetTodayPage() {
           <CardContent className="pt-6">
             {sendState ? (
               <VolumeCapsMeter
-                sent={sendState.today.sent_24h}
+                sent={sendState.today.sent_today}
                 cap={sendState.today.cap_24h}
               />
             ) : null}

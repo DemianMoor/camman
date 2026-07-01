@@ -19,6 +19,9 @@ export interface CopyableIdProps {
   // Toast message on successful copy. Defaults to `${label} copied`.
   copiedMessage?: string;
   className?: string;
+  // Extra classes for the read-only input — e.g. a smaller font (`text-xs`)
+  // so a long ID + copy button fit inside a narrow column.
+  inputClassName?: string;
   // Optional id for the input so external <Label htmlFor=...> works.
   id?: string;
 }
@@ -34,6 +37,7 @@ export function CopyableId({
   helperText,
   copiedMessage,
   className,
+  inputClassName,
   id,
 }: CopyableIdProps) {
   const isEmpty = value == null || value.length === 0;
@@ -60,6 +64,7 @@ export function CopyableId({
           className={cn(
             "bg-muted font-mono text-sm",
             isEmpty && "text-muted-foreground italic",
+            inputClassName,
           )}
           // Select-on-focus so keyboard users can copy without the button.
           onFocus={(e) => e.currentTarget.select()}

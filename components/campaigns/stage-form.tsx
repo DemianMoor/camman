@@ -967,33 +967,59 @@ export function StageForm({
         <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
           <div className="grid min-w-0 gap-4">
             {/* Essentials — inline label + input */}
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="label"
-                render={({ field }) => (
-                  <FormItem className="flex items-center gap-3 space-y-0">
-                    <FormLabel className="shrink-0">Label</FormLabel>
-                    <div className="flex-1">
-                      <FormControl>
-                        <Input
-                          placeholder="e.g. Day 1 Initial Push"
-                          disabled={isSubmitting}
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </div>
-                  </FormItem>
-                )}
-              />
+            <div className="grid items-start gap-4 sm:grid-cols-2">
+              {/* Label + Tracking ID, stacked in the left column */}
+              <div className="space-y-3">
+                <FormField
+                  control={form.control}
+                  name="label"
+                  render={({ field }) => (
+                    <FormItem className="flex items-center gap-3 space-y-0">
+                      <FormLabel className="shrink-0">Label</FormLabel>
+                      <div className="flex-1">
+                        <FormControl>
+                          <Input
+                            placeholder="e.g. Day 1 Initial Push"
+                            disabled={isSubmitting}
+                            {...field}
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </div>
+                    </FormItem>
+                  )}
+                />
+                <CopyableId
+                  label="Tracking ID"
+                  value={effectiveTrackingId}
+                  inputClassName="text-xs md:text-xs"
+                  placeholder={
+                    isEdit
+                      ? "Pick a creative & save to generate"
+                      : campaignTrackingId
+                        ? "Pick a creative to generate"
+                        : "Set brand & offer on the campaign"
+                  }
+                  helperText={
+                    isEdit
+                      ? effectiveTrackingId
+                        ? "Auto-generated. Used in analytics URLs."
+                        : "Auto-generated when the campaign and creative are set."
+                      : effectiveTrackingId
+                        ? "Preview — finalized on save. Copy it now for tracking."
+                        : "Auto-generated on save once a creative is picked."
+                  }
+                  copiedMessage="Tracking ID copied"
+                />
+              </div>
 
-              <FormField
-                control={form.control}
-                name="scheduled_at"
-                render={({ field }) => (
-                  <FormItem className="space-y-1">
-                    <div className="flex items-center gap-3">
+              {/* Scheduled + quick-schedule presets, stacked in the right column */}
+              <div className="space-y-2">
+                <FormField
+                  control={form.control}
+                  name="scheduled_at"
+                  render={({ field }) => (
+                    <FormItem className="flex items-center gap-3 space-y-0">
                       <FormLabel className="shrink-0">Scheduled</FormLabel>
                       <div className="flex-1">
                         <FormControl>
@@ -1003,62 +1029,40 @@ export function StageForm({
                             {...field}
                           />
                         </FormControl>
+                        <FormMessage />
                       </div>
-                    </div>
-                    {!scheduledLocked ? (
-                      <ScheduledPresets
-                        disabled={isSubmitting}
-                        onPick={(v) =>
-                          form.setValue("scheduled_at", v, { shouldDirty: true })
-                        }
-                      />
-                    ) : null}
-                    {scheduledLocked ? (
-                      <FormDescription>
-                        {armed
-                          ? "Locked — this stage is armed (messages materialized for this schedule). Cancel the armed send to reschedule."
-                          : "Locked — this stage has been sent. The scheduled time can't be changed."}
-                      </FormDescription>
-                    ) : scheduledInPast ? (
-                      <p className="text-xs text-red-700 dark:text-red-400">
-                        This time is in the past. Pick a future time to schedule
-                        the send.
-                      </p>
-                    ) : scheduledOutsideWindow ? (
-                      <p className="text-xs text-amber-700 dark:text-amber-400">
-                        This time is outside {selectedProvider?.name ?? "the provider"}&apos;s
-                        sending hours — the message won&apos;t auto-send then. It
-                        holds until the window opens, or is marked missed if the
-                        day&apos;s window has closed.
-                      </p>
-                    ) : null}
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+                    </FormItem>
+                  )}
+                />
+                {!scheduledLocked ? (
+                  <ScheduledPresets
+                    disabled={isSubmitting}
+                    onPick={(v) =>
+                      form.setValue("scheduled_at", v, { shouldDirty: true })
+                    }
+                  />
+                ) : null}
+                {scheduledLocked ? (
+                  <p className="text-xs text-muted-foreground">
+                    {armed
+                      ? "Locked — this stage is armed (messages materialized for this schedule). Cancel the armed send to reschedule."
+                      : "Locked — this stage has been sent. The scheduled time can't be changed."}
+                  </p>
+                ) : scheduledInPast ? (
+                  <p className="text-xs text-red-700 dark:text-red-400">
+                    This time is in the past. Pick a future time to schedule the
+                    send.
+                  </p>
+                ) : scheduledOutsideWindow ? (
+                  <p className="text-xs text-amber-700 dark:text-amber-400">
+                    This time is outside {selectedProvider?.name ?? "the provider"}&apos;s
+                    sending hours — the message won&apos;t auto-send then. It holds
+                    until the window opens, or is marked missed if the day&apos;s
+                    window has closed.
+                  </p>
+                ) : null}
+              </div>
             </div>
-
-            <CopyableId
-              label="Tracking ID"
-              value={effectiveTrackingId}
-              placeholder={
-                isEdit
-                  ? "ID pending — pick a creative and save to generate"
-                  : campaignTrackingId
-                    ? "Pick a creative to generate the tracking ID"
-                    : "Set a brand & offer on the campaign to generate"
-              }
-              helperText={
-                isEdit
-                  ? effectiveTrackingId
-                    ? "Auto-generated. Used in analytics URLs."
-                    : "Auto-generated when the campaign and creative are set."
-                  : effectiveTrackingId
-                    ? "Preview — finalized on save. Copy it now for tracking."
-                    : "Auto-generated on save once a creative is picked."
-              }
-              copiedMessage="Tracking ID copied"
-            />
 
         {/* ============ Sales page & URLs ============ */}
         <div className="grid gap-3 border-t pt-3">
@@ -2061,18 +2065,6 @@ function UrlParamChips({
         Attach to URL
       </span>
       <div className="flex flex-wrap items-center gap-1.5">
-        <ParamChip
-          label="tracking_id"
-          active={trackingId ? fullUrl.includes(trackingId) : false}
-          disabled={disabled || !trackingId}
-          accent
-          title={
-            trackingId
-              ? `Appends the tracking ID value: ${trackingId}`
-              : "Pick a creative (and set brand + offer) to generate the tracking ID"
-          }
-          onClick={onToggleTracking}
-        />
         {utmAvailable ? (
           utmLoading ? (
             <span className="text-xs text-muted-foreground">
@@ -2096,6 +2088,18 @@ function UrlParamChips({
             ))
           )
         ) : null}
+        <ParamChip
+          label="tracking_id"
+          active={trackingId ? fullUrl.includes(trackingId) : false}
+          disabled={disabled || !trackingId}
+          accent
+          title={
+            trackingId
+              ? `Appends the tracking ID value: ${trackingId}`
+              : "Pick a creative (and set brand + offer) to generate the tracking ID"
+          }
+          onClick={onToggleTracking}
+        />
       </div>
     </div>
   );
@@ -2185,30 +2189,45 @@ function ScheduledPresets({
     const ymd = formatInTimeZone(d, CAMPAIGN_TIMEZONE, "yyyy-MM-dd");
     return `${ymd}T${hhmm}`;
   }
+
+  // Shared preset times, applied to both Today (offset 0) and Tomorrow (offset 1).
+  const TIMES: { label: string; hhmm: string }[] = [
+    { label: "9:30am", hhmm: "09:30" },
+    { label: "10am", hhmm: "10:00" },
+    { label: "6pm", hhmm: "18:00" },
+    { label: "6:20pm", hhmm: "18:20" },
+  ];
+  const ROWS: { label: string; offset: number }[] = [
+    { label: "Today", offset: 0 },
+    { label: "Tomorrow", offset: 1 },
+  ];
+
   return (
-    <div className="flex flex-wrap gap-1">
-      <button
-        type="button"
-        onClick={() => onPick(etAt(0, "10:00"))}
-        disabled={disabled}
-        className={cn(
-          "rounded-full border border-border bg-background px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-          disabled && "cursor-not-allowed opacity-60",
-        )}
-      >
-        Today 10am ET
-      </button>
-      <button
-        type="button"
-        onClick={() => onPick(etAt(1, "10:00"))}
-        disabled={disabled}
-        className={cn(
-          "rounded-full border border-border bg-background px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-          disabled && "cursor-not-allowed opacity-60",
-        )}
-      >
-        Tomorrow 10am ET
-      </button>
+    <div className="space-y-1">
+      {ROWS.map((row) => (
+        <div key={row.offset} className="flex items-center gap-1.5">
+          <span className="w-16 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">
+            {row.label}
+          </span>
+          <div className="flex flex-wrap gap-1">
+            {TIMES.map((t) => (
+              <button
+                key={t.hhmm}
+                type="button"
+                onClick={() => onPick(etAt(row.offset, t.hhmm))}
+                disabled={disabled}
+                className={cn(
+                  "inline-flex h-6 items-center rounded-full border border-border bg-background px-2.5 text-[11px] font-medium leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+                  disabled && "cursor-not-allowed opacity-60",
+                )}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      <p className="text-[10px] text-muted-foreground/70">Times in ET</p>
     </div>
   );
 }

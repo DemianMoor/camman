@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-06-24_
+_Last updated: 2026-07-01_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Four endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -8,12 +8,16 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 ## 2. The jobs (`vercel.json`)
 | Path | Schedule | Job | Auth |
 |------|----------|-----|------|
-| `/api/clicks/score-pending` | `*/15 * * * *` | enrich + score click rows, then propagate clean clicks → `clickers` | CRON_SECRET only (503 if unset) |
-| `/api/opt-outs/poll` | `*/15 * * * *` | poll TextHub inbox for STOP intake | CRON_SECRET (GET, all orgs) **or** session operator+ (POST, own org) |
+| `/api/clicks/score-pending` | `3,18,33,48 * * * *` | enrich + score click rows, then propagate clean clicks → `clickers` | CRON_SECRET only (503 if unset) |
+| `/api/opt-outs/poll` | `6,21,36,51 * * * *` | poll TextHub inbox for STOP intake | CRON_SECRET (GET, all orgs) **or** session operator+ (POST, own org) |
 | `/api/cron/send-scheduled` | `*/5 * * * *` | fire scheduled tracked sends | CRON_SECRET (GET, all orgs) **or** session `campaigns.drain` (POST, own org) |
 | `/api/keitaro/poll` | `*/5 * * * *` | pull Keitaro clicks/conversions → `keitaro_stage_results` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
-| `/api/keitaro/poll-conversions` | `*/15 * * * *` | per-recipient SALE attribution → `stage_sends.sale_status` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
-| `/api/keitaro/poll-offer-reaches` | `*/15 * * * *` | per-recipient OFFER-PAGE REACH (Level 2) → `stage_sends.offer_reached_at` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
+| `/api/keitaro/poll-conversions` | `9,24,39,54 * * * *` | per-recipient SALE attribution → `stage_sends.sale_status` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
+| `/api/keitaro/poll-offer-reaches` | `12,27,42,57 * * * *` | per-recipient OFFER-PAGE REACH (Level 2) → `stage_sends.offer_reached_at` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
+
+> **Schedules are staggered on purpose.** Previously the four `*/15` jobs all fired at `:00/:15/:30/:45` alongside the two `*/5` jobs — up to **5–6 crons at once**, each cold-starting and each grabbing pooler connections (the pool caps at `max:5` per instance against Supavisor's ~15-client ceiling). The `*/15` jobs now sit at distinct off-5 minute offsets (`3/6/9/12`), so they never coincide with the `*/5` jobs or each other — peak concurrency drops from ~6 to ~2. `send-scheduled` and `keitaro/poll` stay on `*/5` (both latency-sensitive; two concurrent is fine).
+>
+> **Both per-recipient pollers batch their writes.** `poll-conversions` and `poll-offer-reaches` fold their matches in memory and flush via a single `UPDATE … FROM (VALUES …)` per 500-row chunk, not one `UPDATE … WHERE id = …` round-trip per conversion. Measured: ~200 sequential round-trips ≈ **12.4 s** of pooler latency vs **~53 ms** batched — material against the poll's budget on a busy sales day.
 
 ## 3. How each works
 

@@ -293,36 +293,47 @@ export async function GET(
   // additionally fetch the campaign-level DISTINCT-contact total: summing the
   // per-stage counters would over-count anyone hit by multiple stages of this
   // campaign (window semantics credit every stage that sent to them).
-  const inboundStopContactsRow = (await db.execute(drizzleSql`
-    SELECT count(DISTINCT oo.contact_id)::int AS n
-    FROM opt_out_attributions oa
-    JOIN opt_outs oo ON oo.id = oa.opt_out_id
-    WHERE oa.org_id = ${orgId} AND oa.campaign_id = ${cid}
-  `)) as unknown as { n: number }[];
+  // These two are independent of each other — run in one round-trip, not two.
+  // (1) Inbound STOPs attributed to this campaign (migration 0075). Per-stage
+  // counts come from the persistent campaign_stages.inbound_opt_out_count counter
+  // (in the select above), maintained by the opt-out poller's 72h-window
+  // attribution — the SAME source the Reports page reads, so the two never
+  // disagree. Here we additionally fetch the campaign-level DISTINCT-contact total:
+  // summing the per-stage counters would over-count anyone hit by multiple stages.
+  // (2) WS4 §0 materialization signal: stage_sends counts by status, one grouped
+  // query (indexed on stage_id) — no N+1. Drives the Orange↔Blue operational-status
+  // split on the client via deriveStageOperationalStatus.
+  const [inboundStopContactsRow, sendCountRows] = (await Promise.all([
+    db.execute(drizzleSql`
+      SELECT count(DISTINCT oo.contact_id)::int AS n
+      FROM opt_out_attributions oa
+      JOIN opt_outs oo ON oo.id = oa.opt_out_id
+      WHERE oa.org_id = ${orgId} AND oa.campaign_id = ${cid}
+    `),
+    db.execute(drizzleSql`
+      SELECT
+        stage_id,
+        count(*)::int AS total,
+        count(*) FILTER (WHERE status = 'pending')::int AS pending,
+        count(*) FILTER (WHERE status = 'sending')::int AS sending,
+        count(*) FILTER (WHERE status = 'sent')::int AS sent,
+        count(*) FILTER (WHERE status IN ('failed', 'rejected'))::int AS failed
+      FROM stage_sends
+      WHERE org_id = ${orgId} AND campaign_id = ${cid}
+      GROUP BY stage_id
+    `),
+  ])) as unknown as [
+    { n: number }[],
+    {
+      stage_id: number;
+      total: number;
+      pending: number;
+      sending: number;
+      sent: number;
+      failed: number;
+    }[],
+  ];
   const inboundStopContacts = Number(inboundStopContactsRow[0]?.n ?? 0);
-
-  // WS4 §0 materialization signal: stage_sends counts by status, batched into a
-  // single grouped query (indexed on stage_id) — no N+1. Drives the Orange↔Blue
-  // operational-status split on the client via deriveStageOperationalStatus.
-  const sendCountRows = (await db.execute(drizzleSql`
-    SELECT
-      stage_id,
-      count(*)::int AS total,
-      count(*) FILTER (WHERE status = 'pending')::int AS pending,
-      count(*) FILTER (WHERE status = 'sending')::int AS sending,
-      count(*) FILTER (WHERE status = 'sent')::int AS sent,
-      count(*) FILTER (WHERE status IN ('failed', 'rejected'))::int AS failed
-    FROM stage_sends
-    WHERE org_id = ${orgId} AND campaign_id = ${cid}
-    GROUP BY stage_id
-  `)) as unknown as {
-    stage_id: number;
-    total: number;
-    pending: number;
-    sending: number;
-    sent: number;
-    failed: number;
-  }[];
   const sendCountsByStage = new Map(
     sendCountRows.map((r) => [
       Number(r.stage_id),

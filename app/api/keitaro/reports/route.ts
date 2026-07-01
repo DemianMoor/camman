@@ -232,53 +232,55 @@ export async function GET(req: NextRequest) {
     // Opt-outs = STOPs credited to the stage (opt_out_attributions) whose credit
     // landed in range. created_at ≈ STOP receipt (poller lag ≤15min); it's the
     // per-stage event time, unlike the lifetime campaign_stages.inbound_opt_out_count.
-    const optOutRows = await db
-      .select({
-        stage_id: opt_out_attributions.stage_id,
-        n: sql<number>`count(*)::int`,
-      })
-      .from(opt_out_attributions)
-      .where(
-        and(
-          eq(opt_out_attributions.org_id, auth.orgId),
-          inArray(opt_out_attributions.stage_id, stageIds),
-          gte(opt_out_attributions.created_at, fromUtc),
-          lt(opt_out_attributions.created_at, toExclusiveUtc),
-        ),
-      )
-      .groupBy(opt_out_attributions.stage_id);
+    // These three are independent and share the same stageIds/range — run them
+    // in parallel (one round-trip of latency instead of three sequential).
+    //  * optOutRows — opt-outs = STOPs credited to the stage (opt_out_attributions)
+    //    whose credit landed in range.
+    //  * sentRows — API (tracked) Total Sent = successful per-recipient sends
+    //    (status='sent') with sent_at in range. Manual-send campaigns have NO
+    //    stage_sends rows and fall back to the stage's lifetime sms_count below.
+    //  * manualSalesByStage — manual sales by LEDGER ENTRY DATE (conversion-date
+    //    basis), distinct from the send-moment gating that governs manual cost.
+    const [optOutRows, sentRows, manualSalesByStage] = await Promise.all([
+      db
+        .select({
+          stage_id: opt_out_attributions.stage_id,
+          n: sql<number>`count(*)::int`,
+        })
+        .from(opt_out_attributions)
+        .where(
+          and(
+            eq(opt_out_attributions.org_id, auth.orgId),
+            inArray(opt_out_attributions.stage_id, stageIds),
+            gte(opt_out_attributions.created_at, fromUtc),
+            lt(opt_out_attributions.created_at, toExclusiveUtc),
+          ),
+        )
+        .groupBy(opt_out_attributions.stage_id),
+      db
+        .select({
+          stage_id: stage_sends.stage_id,
+          sent: sql<number>`count(*)::int`,
+        })
+        .from(stage_sends)
+        .where(
+          and(
+            eq(stage_sends.org_id, auth.orgId),
+            eq(stage_sends.status, "sent"),
+            inArray(stage_sends.stage_id, stageIds),
+            gte(stage_sends.sent_at, fromUtc),
+            lt(stage_sends.sent_at, toExclusiveUtc),
+          ),
+        )
+        .groupBy(stage_sends.stage_id),
+      manualSalesByStageInRange({
+        orgId: auth.orgId,
+        fromUtc,
+        toExclusiveUtc,
+      }),
+    ]);
     const optOutsByStage = new Map(optOutRows.map((o) => [o.stage_id, Number(o.n)]));
-
-    // API (tracked) Total Sent = successful per-recipient sends (status='sent';
-    // failed/rejected/pending/filtered excluded) with sent_at in range. Used only
-    // for tracked campaigns — manual-send campaigns have NO stage_sends rows and
-    // fall back to the stage's lifetime sms_count below (anchored to sent_at).
-    const sentRows = await db
-      .select({
-        stage_id: stage_sends.stage_id,
-        sent: sql<number>`count(*)::int`,
-      })
-      .from(stage_sends)
-      .where(
-        and(
-          eq(stage_sends.org_id, auth.orgId),
-          eq(stage_sends.status, "sent"),
-          inArray(stage_sends.stage_id, stageIds),
-          gte(stage_sends.sent_at, fromUtc),
-          lt(stage_sends.sent_at, toExclusiveUtc),
-        ),
-      )
-      .groupBy(stage_sends.stage_id);
     const sentByStage = new Map(sentRows.map((s) => [s.stage_id, Number(s.sent)]));
-
-    // Manual sales credited to each stage by LEDGER ENTRY DATE (created_at in the
-    // report window) — the conversion-date basis. Distinct from the send-moment
-    // gating below, which still governs manual SENDS and cost.
-    const manualSalesByStage = await manualSalesByStageInRange({
-      orgId: auth.orgId,
-      fromUtc,
-      toExclusiveUtc,
-    });
 
     // Whether a stage's single send moment falls inside the report window. Manual
     // SENDS/cost carry no per-event timeline, so under activity-date scoping the

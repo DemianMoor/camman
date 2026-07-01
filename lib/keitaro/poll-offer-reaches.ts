@@ -1,4 +1,4 @@
-import { inArray, sql } from "drizzle-orm";
+import { inArray, sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import {
@@ -155,6 +155,10 @@ export async function pollKeitaroOfferReaches(
   let deduped = 0;
   let errored = 0;
 
+  // Collect one VALUES tuple per row to write, then flush as a single batched
+  // UPDATE (below) instead of one round-trip per reach — same pooler-latency win
+  // as the conversions poll (~12s of sequential UPDATEs on a busy day, measured).
+  const updateVals: SQL[] = [];
   for (const pick of earliest.values()) {
     if (!existing.has(pick.subId1)) {
       unmatched++;
@@ -167,17 +171,28 @@ export async function pollKeitaroOfferReaches(
       deduped++;
       continue;
     }
+    // dt bound as ::text (no timestamptz pre-shift); zoned-literal cast in SET.
+    updateVals.push(
+      sql`(${pick.subId1}::uuid, ${pick.dt ?? null}::text, ${pick.eventId || null}::text)`,
+    );
+  }
+
+  const CHUNK = 500;
+  for (let i = 0; i < updateVals.length; i += CHUNK) {
+    const chunk = updateVals.slice(i, i + CHUNK);
     try {
+      // `offer_reached_at IS NULL` guard preserved — monotonic, and safe against a
+      // concurrent poll that reached the same row between our read and this write.
       await database.execute(sql`
-        UPDATE stage_sends
-        SET offer_reached_at = (${pick.dt} || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz,
-            offer_reach_event_id = ${pick.eventId || null}
-        WHERE id = ${pick.subId1}::uuid
-          AND offer_reached_at IS NULL
+        UPDATE stage_sends AS s
+        SET offer_reached_at = (v.dt || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz,
+            offer_reach_event_id = v.event_id
+        FROM (VALUES ${sql.join(chunk, sql`, `)}) AS v(id, dt, event_id)
+        WHERE s.id = v.id AND s.offer_reached_at IS NULL
       `);
-      updated++;
+      updated += chunk.length;
     } catch {
-      errored++;
+      errored += chunk.length;
     }
   }
 

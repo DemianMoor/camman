@@ -1,4 +1,4 @@
-import { inArray, sql } from "drizzle-orm";
+import { inArray, sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import {
@@ -198,6 +198,11 @@ export async function pollKeitaroConversions(
   let deduped = 0;
   let errored = 0;
 
+  // Collect one VALUES tuple per row that needs writing, then flush in a single
+  // batched UPDATE (below) instead of one round-trip per conversion — on a busy
+  // sales day the old loop spent ~12s of pooler latency on ~200 sequential
+  // UPDATEs (measured), against the poll's 300s budget.
+  const updateVals: SQL[] = [];
   for (const pick of latest.values()) {
     if (!existing.has(pick.subId1)) {
       unmatched++;
@@ -210,24 +215,32 @@ export async function pollKeitaroConversions(
       deduped++;
       continue;
     }
+    // convertedAt is bound as ::text so postgres-js does NOT infer timestamptz and
+    // pre-shift it (a 2h error); the zoned-literal concat + cast happens in the SET
+    // clause below (see CLAUDE.md §6). NULL convertedAt → NULL converted_at.
+    updateVals.push(
+      sql`(${pick.subId1}::uuid, ${pick.status}::text, ${pick.revenue}::numeric, ${pick.convertedAt ?? null}::text, ${pick.eventId || null}::text)`,
+    );
+  }
+
+  // Flush in chunks (bounds statement size on huge sales days).
+  const CHUNK = 500;
+  for (let i = 0; i < updateVals.length; i += CHUNK) {
+    const chunk = updateVals.slice(i, i + CHUNK);
     try {
       await database.execute(sql`
-        UPDATE stage_sends
-        SET sale_status = ${pick.status},
-            sale_revenue = ${pick.revenue},
-            -- Keitaro returns the conversion datetime as ET wall-clock (the report
-            -- range is in CAMPAIGN_TIMEZONE). Build a zoned literal and cast to
-            -- timestamptz so the stored UTC instant is correct (see CLAUDE.md s6).
-            -- The concat form is deliberate: binding the bare string + a timestamp
-            -- cast lets postgres-js infer timestamptz and pre-shift it (a 2h error);
-            -- concatenation forces text binding. NULL concat yields NULL (no-op).
-            converted_at = (${pick.convertedAt} || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz,
-            keitaro_conversion_id = ${pick.eventId || null}
-        WHERE id = ${pick.subId1}::uuid
+        UPDATE stage_sends AS s
+        SET sale_status = v.status,
+            sale_revenue = v.revenue,
+            converted_at = (v.converted_at || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz,
+            keitaro_conversion_id = v.event_id
+        FROM (VALUES ${sql.join(chunk, sql`, `)})
+          AS v(id, status, revenue, converted_at, event_id)
+        WHERE s.id = v.id
       `);
-      updated++;
+      updated += chunk.length;
     } catch {
-      errored++;
+      errored += chunk.length;
     }
   }
 

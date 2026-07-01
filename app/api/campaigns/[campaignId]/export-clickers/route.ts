@@ -28,6 +28,11 @@ import { formatPhoneForExport } from "@/lib/phone-validation";
 //     default export honors it.
 //   * all — every click row, regardless of classification or scored state.
 
+// Streams a chunked, offset-paginated join over clicks→links→contacts; at scale
+// this can outlast Vercel's default function budget and get killed mid-stream
+// (silently truncated CSV). Match the other heavy routes' 60s ceiling.
+export const maxDuration = 60;
+
 function parseId(idParam: string) {
   const n = Number(idParam);
   if (!Number.isInteger(n) || n <= 0) return null;

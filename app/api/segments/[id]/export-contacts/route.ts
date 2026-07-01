@@ -24,6 +24,12 @@ import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
 // joined_at is the segment_contacts.created_at when the contact has a
 // manual row; NULL for rule-matched-only contacts.
 
+// Full-audience exports stream chunked, offset-paginated queries over the whole
+// segment audience; at scale this can outlast Vercel's default function budget
+// and get killed mid-stream (silently truncated CSV). Match the other heavy
+// routes' 60s ceiling. (Longer term: cursor pagination — see stream-export.ts.)
+export const maxDuration = 60;
+
 function parseId(idParam: string) {
   const n = Number(idParam);
   if (!Number.isInteger(n) || n <= 0) return null;

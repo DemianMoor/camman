@@ -40,6 +40,27 @@ export function campaignLocalInputToUtcIso(localInput: string): string {
   return fromZonedTime(localInput, CAMPAIGN_TIMEZONE).toISOString();
 }
 
+// UTC instants bounding the ET calendar day that contains `now` (half-open:
+// start <= day < end). Lets a query filter "today in ET" with a sargable
+// range (`ts >= start AND ts < end`) that an index on the timestamp column can
+// serve, instead of the non-sargable `(ts AT TIME ZONE 'ET')::date = ...` which
+// forces a scan of every row. DST-safe: +36h from ET midnight always lands in
+// the next ET calendar day (a day is 23–25h), so we never mis-bucket.
+export function campaignDayBoundsUtc(now: Date = new Date()): {
+  start: Date;
+  end: Date;
+} {
+  const etDate = formatInTimeZone(now, CAMPAIGN_TIMEZONE, "yyyy-MM-dd");
+  const start = fromZonedTime(`${etDate}T00:00:00`, CAMPAIGN_TIMEZONE);
+  const nextEtDate = formatInTimeZone(
+    new Date(start.getTime() + 36 * 60 * 60 * 1000),
+    CAMPAIGN_TIMEZONE,
+    "yyyy-MM-dd",
+  );
+  const end = fromZonedTime(`${nextEtDate}T00:00:00`, CAMPAIGN_TIMEZONE);
+  return { start, end };
+}
+
 // Convert a UTC instant to the "yyyy-MM-ddTHH:mm" string the datetime-local
 // input expects, expressed in the campaign timezone.
 export function utcToCampaignLocalInput(

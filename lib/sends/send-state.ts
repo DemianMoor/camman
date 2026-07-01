@@ -4,7 +4,7 @@ import { and, eq, ne, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { sms_providers } from "@/db/schema";
-import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
+import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { resolve24hCap } from "@/lib/sends/circuit-breakers";
 
 // The operating layer's "send state" snapshot, computed for one org. Shared by
@@ -57,12 +57,18 @@ export async function getSendState(orgId: string) {
   // countSentSince() in the drain — this value is display-only. The cap below is
   // the aggregate effective 24h ceiling across API providers; null ⇒ no API
   // provider configured, so there's nothing to meter against.
+  // Sargable ET-day range on sent_at (start <= sent_at < end) so the partial
+  // index stage_sends_org_sent_at_idx (org_id, sent_at) WHERE sent_at IS NOT NULL
+  // serves it as a narrow range scan of just today's rows — instead of the old
+  // `(sent_at AT TIME ZONE 'ET')::date = today` predicate, which wrapped the
+  // indexed column in a function and forced a scan of the org's entire send
+  // history on every page load.
+  const { start: dayStart, end: dayEnd } = campaignDayBoundsUtc();
   const sentTodayRows = (await db.execute(sql`
     SELECT count(*)::int AS n FROM stage_sends
     WHERE org_id = ${orgId}
-      AND sent_at IS NOT NULL
-      AND (sent_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date
-        = (now() AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date
+      AND sent_at >= ${dayStart.toISOString()}
+      AND sent_at < ${dayEnd.toISOString()}
   `)) as unknown as { n: number }[];
   const sentToday = Number(sentTodayRows[0]?.n ?? 0);
   const cap24h =

@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-06-30_
+_Last updated: 2026-07-01_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -34,6 +34,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Forms: `<input type="datetime-local">` ↔ `campaignLocalInputToUtcIso()` / `utcToCampaignLocalInput()`.
 - Send windows evaluated in ET via `lib/quiet-hours.ts` — sender-zone, not recipient-zone (known TCPA limitation).
 - **postgres-js timestamptz-inference gotcha:** binding a bare ET wall-clock string and casting `${s}::timestamp` (or `::timestamptz`) lets postgres-js infer a `timestamptz` parameter and **pre-shifts the instant** (a silent multi-hour error). To convert an external ET wall-clock (e.g. Keitaro's `datetime`) to the correct UTC instant, build a zoned literal instead: `(${s} || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz` — concatenation forces text binding; NULL concat → NULL. (Seen in `lib/keitaro/poll-conversions.ts`.)
+- **Filter "today in ET" with a sargable UTC range, never a function on the column.** `(sent_at AT TIME ZONE 'ET')::date = today` wraps the indexed column in a function, so no index can serve it — it scans the whole partition. Use `campaignDayBoundsUtc()` ([`lib/campaign-timezone.ts`](../lib/campaign-timezone.ts)) to get the ET-day `{start, end}` UTC instants and filter `col >= start AND col < end` (half-open, DST-safe). Fixed the `<SendStateStrip>` `sent_today` count that ran on **every** page: ~190 ms (full index scan of the org's send history) → ~20 ms (narrow range scan). See `lib/sends/send-state.ts`.
 - **TextHub inbox `received_at` is US Mountain Time, not UTC.** TextHub stamps inbound STOP messages "YYYY-MM-DD HH:MM:SS" with no zone in Mountain wall-clock (operator-confirmed). `parseProviderReceivedAt` ([`lib/sends/poll-opt-outs.ts`](../lib/sends/poll-opt-outs.ts)) interprets it in `America/Denver` (`TEXTHUB_RECEIVED_AT_TIMEZONE`, via `date-fns-tz` `fromZonedTime`) → true UTC; DST-aware (MDT/−6 summer, MST/−7 winter). ISO strings that carry their own offset are honored as-is. Parsing it as UTC (the original bug, fixed 2026-06-19) put the attribution anchor up to 7h early, so a campaign's own STOP replies failed the `sent_at <= anchor + 5min` upper bound and the stage's opt-out counter read 0 despite ~100 real replies. Empirically: our ingest clock ran a constant ~6h ahead of the stamped value (132 msgs, June/MDT).
 
 ## Money
@@ -48,6 +49,13 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Migrations are **not** auto-applied on deploy — run them locally against the target `DATABASE_URL` before pushing dependent code.
 - Soft-delete via `status='archived'` + `archived_at`; hard delete is rare and explicit (confirm before any DROP/DELETE/force-push).
 - Connection: Supabase **transaction pooler (port 6543)** + `?prepare=false`; `db/client.ts` caches the pool on `globalThis` (don't strip).
+
+## Performance (query & bundle)
+- **Substring phone search is trigram-indexed** (migration `0088`). List-view search is `ILIKE '%digits%'`; a plain btree can't serve a leading wildcard, so `contacts`/`opt_outs`/`opt_ins`/`clickers` carry `pg_trgm` GIN indexes on `phone_number` (`extensions.gin_trgm_ops`). Contacts search + its `COUNT(*)` went from a ~820 ms seq scan (752K rows) to ~3 ms. Don't reintroduce a search predicate a trigram index can't use. See [03-data-model.md](03-data-model.md).
+- **Sargable "today in ET" ranges** — see the Timezone section's `campaignDayBoundsUtc()` note. Never wrap an indexed timestamp in a function to bucket by day.
+- **Baseline harness:** `scripts/perf-baseline.ts` runs `EXPLAIN ANALYZE` (median of N) on the hot list-search + send-state queries and reports the scan node type (Seq Scan = will degrade). Run before/after any query-shape or index change on the large tables.
+- **Heavy client deps load on demand.** Recharts (~340 KB, the single biggest chunk) is imported via `next/dynamic({ ssr:false })` in the dashboard ([`components/dashboard/chart-panel.tsx`](../components/dashboard/chart-panel.tsx)) so it stays off the landing page's initial bundle. `next.config.ts` sets `experimental.optimizePackageImports` for `lucide-react`/`date-fns`/`recharts`/`radix-ui` (barrel → deep imports). Add new chart/heavy-widget code behind `dynamic()`, not a static import.
+- **CSV export routes set `maxDuration = 60`** — they stream chunked offset-paginated queries over a whole audience; without the cap a large export can outlast the default Vercel budget and get killed mid-stream (silently truncated file).
 
 ## Feature flags
 - `lib/feature-flags.ts` `ENTITY_AVAILABILITY` is the single source for "is this entity built?". Flip a new entity's flag to `true` **last**, after schema+API+UI work. Gate cross-entity fetches on `isEntityAvailable()` (no speculative 404s).

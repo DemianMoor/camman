@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-06-30_
+_Last updated: 2026-07-01_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -9,6 +9,8 @@ Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, 
 Every domain table carries `org_id UUID → organizations.id` and an index on it. **Every read/write filters by `org_id` in application code** (primary defense; RLS is secondary). The only tables without `org_id` are pure junctions whose parents are already org-scoped (`opt_out_brands`, `opt_out_providers`) and the external `auth.users` (Supabase-managed).
 
 > **Performance indexes (migration `0078`) — additive only, no behavior change.** Five indexes backing existing hot query paths: `opt_outs(org_id, contact_id)` (suppression `EXISTS` probes — compliance-critical table, index only, no suppression-logic change); `stage_result_rows(org_id, created_at)` (the only large domain table that had no `org_id` index); `contacts(org_id, created_at)` (default million-row list sort/paginate); a **partial** `campaign_stages(scheduled_at) WHERE sent_at IS NULL AND schedule_missed_at IS NULL` (the `*/15` scheduled-send cron's due-and-unfired scan, [`lib/sends/scheduled.ts`](../lib/sends/scheduled.ts)); `campaigns(org_id, status)` ("active campaigns for this org"); and partial `stage_sends(org_id) WHERE status='sending'` (the `/api/sends/state` stuck-row `count(*)` that runs on every protected page — `stage_sends` already had `(org_id, sent_at)` for breaker accounting but nothing for the `status='sending'` probe).
+
+> **Trigram phone-search indexes (migration `0088`) — additive only, no behavior change.** `pg_trgm` GIN indexes on `phone_number` for `contacts`, `opt_outs`, `opt_ins`, `clickers`, so the list-view substring search (`ILIKE '%digits%'`) is index-served instead of a full org-partition scan. A plain btree cannot serve a leading-wildcard match, so before this the contacts search **and** its mandatory `COUNT(*)` seq-scanned the whole table — measured at ~820 ms on 752K contacts, now ~3 ms (bitmap index scan). `pg_trgm` lives in the `extensions` schema (Supabase convention; already on the role `search_path`), referenced as `extensions.gin_trgm_ops`. The four indexes are declared in [`db/schema.ts`](../db/schema.ts) but not represented in the drizzle snapshot (managed in SQL, like `stage_sends`'s indexes). Built with `CREATE INDEX CONCURRENTLY` in prod to avoid a write lock; the migration's plain `CREATE INDEX IF NOT EXISTS` then no-ops. Sub-3-char search terms fall back to a scan (trigrams need 3 chars) — fine for phone digits.
 
 ```mermaid
 graph TD

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { formatDistanceToNow } from "date-fns";
 import {
   Activity,
@@ -18,15 +18,7 @@ import {
   Wallet,
 } from "lucide-react";
 import Link from "next/link";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import dynamic from "next/dynamic";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
@@ -41,6 +33,13 @@ import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
+
+// Recharts loads on demand — see components/dashboard/chart-panel.tsx. Keeps the
+// heaviest chunk out of the dashboard's initial bundle.
+const ChartPanel = dynamic(
+  () => import("@/components/dashboard/chart-panel").then((m) => m.ChartPanel),
+  { ssr: false, loading: () => <Skeleton className="h-[220px] w-full" /> },
+);
 
 // =============== Types ===============
 
@@ -221,44 +220,52 @@ export default function DashboardPage() {
   const [activeStages, setActiveStages] = useState<ActiveStage[]>([]);
   const [baseStats, setBaseStats] = useState<BaseStatsResponse | null>(null);
 
-  const refetch = useCallback(async () => {
-    // Range-dependent calls only fire once a custom range is fully picked.
+  // Range-INDEPENDENT data: active campaigns/stages + base contact stats don't
+  // depend on the date range or the compare toggle, so fetch them once on mount.
+  // (Previously they re-fired on every preset/compare change — wasted DB work.)
+  useEffect(() => {
+    void (async () => {
+      const [ac, rs, bs] = await Promise.all([
+        activeApi.execute("/api/dashboard/active-campaigns"),
+        activeStagesApi.execute("/api/dashboard/active-stages"),
+        baseApi.execute("/api/contacts/base-stats"),
+      ]);
+      if (ac.ok) setActiveCampaigns(ac.data.campaigns);
+      if (rs.ok) setActiveStages(rs.data.stages);
+      if (bs.ok) setBaseStats(bs.data);
+    })();
+    // .execute fns are stable (useApiCall); depending on the full api objects
+    // would loop. Mount-once, so range fields are intentionally excluded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeApi.execute, activeStagesApi.execute, baseApi.execute]);
+
+  // Range-DEPENDENT data: stats + daily activity. Re-fetch only when the range
+  // fields or the compare toggle change (both genuinely affect these queries).
+  useEffect(() => {
     const rangeReady =
       filters.preset !== "custom" ||
       (Boolean(filters.customFrom) && Boolean(filters.customTo));
+    if (!rangeReady) return;
     const q = buildRangeQuery(filters);
-
-    const [ac, rs, bs] = await Promise.all([
-      activeApi.execute("/api/dashboard/active-campaigns"),
-      activeStagesApi.execute("/api/dashboard/active-stages"),
-      baseApi.execute("/api/contacts/base-stats"),
-    ]);
-    if (ac.ok) setActiveCampaigns(ac.data.campaigns);
-    if (rs.ok) setActiveStages(rs.data.stages);
-    if (bs.ok) setBaseStats(bs.data);
-
-    if (rangeReady) {
+    void (async () => {
       const [s, d] = await Promise.all([
-        statsApi.execute(
-          `/api/dashboard/stats?${q}&compare=${filters.compare}`,
-        ),
+        statsApi.execute(`/api/dashboard/stats?${q}&compare=${filters.compare}`),
         dailyApi.execute(`/api/dashboard/daily-activity?${q}`),
       ]);
       if (s.ok) setStats(s.data);
       if (d.ok) setDaily(d.data);
-    }
+    })();
+    // Range fields listed explicitly; .execute fns are stable. Depending on the
+    // whole `filters` object or api objects would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    filters,
+    filters.preset,
+    filters.customFrom,
+    filters.customTo,
+    filters.compare,
     statsApi.execute,
     dailyApi.execute,
-    activeApi.execute,
-    activeStagesApi.execute,
-    baseApi.execute,
   ]);
-
-  useEffect(() => {
-    void refetch();
-  }, [refetch]);
 
   // =============== Active-campaigns table columns ===============
 
@@ -963,48 +970,3 @@ function DeltaBadge({
   );
 }
 
-function ChartPanel({
-  title,
-  data,
-  color,
-  yLabel,
-  isCurrency,
-}: {
-  title: string;
-  data: Array<{ date: string; value: number }>;
-  color: string;
-  yLabel: string;
-  isCurrency?: boolean;
-}) {
-  return (
-    <div className="rounded-md border bg-card p-3">
-      <p className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">
-        {title}
-      </p>
-      <ResponsiveContainer width="100%" height={200}>
-        <BarChart
-          data={data}
-          margin={{ top: 8, right: 8, left: 0, bottom: 8 }}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-          <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-          <YAxis allowDecimals={isCurrency} tick={{ fontSize: 11 }} />
-          <Tooltip
-            formatter={(value) => {
-              const n = typeof value === "number" ? value : Number(value);
-              return [
-                isCurrency
-                  ? `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                  : n.toLocaleString(),
-                yLabel,
-              ];
-            }}
-            labelFormatter={(label) => String(label)}
-            contentStyle={{ fontSize: 12 }}
-          />
-          <Bar dataKey="value" fill={color} radius={[2, 2, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}

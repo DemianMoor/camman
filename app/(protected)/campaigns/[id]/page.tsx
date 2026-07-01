@@ -22,6 +22,7 @@ import {
   Upload,
 } from "lucide-react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams } from "next/navigation";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
@@ -31,7 +32,6 @@ import { CampaignSendMode } from "@/components/campaigns/campaign-send-mode";
 import { CampaignActivitySection } from "@/components/campaigns/campaign-activity-section";
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
 import { ExportClickersDialog } from "@/components/campaigns/export-clickers-dialog";
-import { StageSendPanel } from "@/components/campaigns/stage-send-panel";
 import {
   StagePrepareDialog,
   type PrepareTarget,
@@ -41,8 +41,6 @@ import {
   deriveStageOperationalStatus,
   STAGE_STATUS_META,
 } from "@/lib/stages/stage-status";
-import { ImportHistoryDialog } from "@/components/campaigns/import-history-dialog";
-import { ManualResultsForm } from "@/components/campaigns/manual-results-form";
 import { PhoneUploadForm } from "@/components/phone-upload-form";
 import {
   combineSales,
@@ -50,7 +48,6 @@ import {
   formatRoi,
   stageRoi,
 } from "@/lib/stage-results";
-import { ResultsImportForm } from "@/components/campaigns/results-import-form";
 import { StageInlineEditor } from "@/components/campaigns/stage-inline-creator";
 import {
   StatusChangeDialog,
@@ -97,6 +94,43 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import { cn } from "@/lib/utils";
+
+// These heavy dialog/panel bodies are each mounted only when their `{state ?
+// <Comp/> : null}` guard opens the dialog, so load their code on demand rather
+// than in the campaign-detail page's initial bundle. ResultsImportForm (~793
+// lines) and StageSendPanel (~517 lines) are the biggest. ssr:false — they only
+// ever render client-side inside an opened dialog.
+const dlgLoading = () => (
+  <div className="p-6 text-sm text-muted-foreground">Loading…</div>
+);
+const ResultsImportForm = dynamic(
+  () =>
+    import("@/components/campaigns/results-import-form").then(
+      (m) => m.ResultsImportForm,
+    ),
+  { ssr: false, loading: dlgLoading },
+);
+const ManualResultsForm = dynamic(
+  () =>
+    import("@/components/campaigns/manual-results-form").then(
+      (m) => m.ManualResultsForm,
+    ),
+  { ssr: false, loading: dlgLoading },
+);
+const ImportHistoryDialog = dynamic(
+  () =>
+    import("@/components/campaigns/import-history-dialog").then(
+      (m) => m.ImportHistoryDialog,
+    ),
+  { ssr: false, loading: dlgLoading },
+);
+const StageSendPanel = dynamic(
+  () =>
+    import("@/components/campaigns/stage-send-panel").then(
+      (m) => m.StageSendPanel,
+    ),
+  { ssr: false, loading: dlgLoading },
+);
 
 // =============== Types ===============
 

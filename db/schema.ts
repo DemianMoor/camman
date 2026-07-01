@@ -646,6 +646,13 @@ export const contacts = pgTable(
     // Migration 0078: default list view sorts/paginates by created_at within an
     // org; at millions of rows this avoids sorting the whole org partition.
     index("contacts_org_id_created_at_idx").on(table.org_id, table.created_at),
+    // Migration 0088: trigram GIN index so substring phone search (ILIKE '%x%')
+    // uses an index instead of a full org-partition scan. pg_trgm lives in the
+    // `extensions` schema (Supabase). Managed in SQL — not in the drizzle snapshot.
+    index("contacts_phone_number_trgm_idx").using(
+      "gin",
+      sql`${table.phone_number} extensions.gin_trgm_ops`,
+    ),
   ],
 );
 
@@ -691,6 +698,11 @@ export const opt_outs = pgTable(
     // no suppression-logic change.
     index("opt_outs_org_id_contact_id_idx").on(table.org_id, table.contact_id),
     index("opt_outs_phone_number_idx").on(table.phone_number),
+    // Migration 0088: trigram GIN index for substring phone search (ILIKE '%x%').
+    index("opt_outs_phone_number_trgm_idx").using(
+      "gin",
+      sql`${table.phone_number} extensions.gin_trgm_ops`,
+    ),
     check(
       "opt_outs_reason_check",
       sql`${table.reason} IN ('opt_out', 'scrubbed', 'bounced', 'suppressed')`,
@@ -851,6 +863,11 @@ export const opt_ins = pgTable(
     index("opt_ins_phone_number_idx").on(table.phone_number),
     index("opt_ins_brand_id_idx").on(table.brand_id),
     index("opt_ins_provider_id_idx").on(table.provider_id),
+    // Migration 0088: trigram GIN index for substring phone search (ILIKE '%x%').
+    index("opt_ins_phone_number_trgm_idx").using(
+      "gin",
+      sql`${table.phone_number} extensions.gin_trgm_ops`,
+    ),
   ],
 );
 
@@ -896,6 +913,11 @@ export const clickers = pgTable(
     index("clickers_brand_id_idx").on(table.brand_id),
     index("clickers_provider_id_idx").on(table.provider_id),
     index("clickers_offer_id_idx").on(table.offer_id),
+    // Migration 0088: trigram GIN index for substring phone search (ILIKE '%x%').
+    index("clickers_phone_number_trgm_idx").using(
+      "gin",
+      sql`${table.phone_number} extensions.gin_trgm_ops`,
+    ),
   ],
 );
 

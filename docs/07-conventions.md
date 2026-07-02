@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-07-01_
+_Last updated: 2026-07-02_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -56,6 +56,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - **Baseline harness:** `scripts/perf-baseline.ts` runs `EXPLAIN ANALYZE` (median of N) on the hot list-search + send-state queries and reports the scan node type (Seq Scan = will degrade). Run before/after any query-shape or index change on the large tables.
 - **Heavy client deps load on demand.** Recharts (~340 KB, the single biggest chunk) is imported via `next/dynamic({ ssr:false })` in the dashboard ([`components/dashboard/chart-panel.tsx`](../components/dashboard/chart-panel.tsx)) so it stays off the landing page's initial bundle. `next.config.ts` sets `experimental.optimizePackageImports` for `lucide-react`/`date-fns`/`recharts`/`radix-ui` (barrel → deep imports). Add new chart/heavy-widget code behind `dynamic()`, not a static import.
 - **CSV export routes set `maxDuration = 60`** — they stream chunked offset-paginated queries over a whole audience; without the cap a large export can outlast the default Vercel budget and get killed mid-stream (silently truncated file).
+- **Large list counts are capped, not exact.** An exact `count(*)` over an org's contacts is inherently O(rows) (~670 ms at 752K — an index doesn't help, proven). `/api/contacts/list` counts at most `COUNT_CAP+1` (10,000) via a `LIMIT` subquery: exact under the cap, `countApprox:true` + `totalCount:COUNT_CAP` (UI shows "N+") over it. Paging no longer depends on the total — the page query fetches `pageSize+1` and returns `hasMore`, which drives `DataTable`'s Next button (optional `hasMore` / `totalCountApprox` props; omit them and a list keeps exact-count `of Y` behavior). Narrowing filters (search, segment, group, the opt-out/in/clicker views) return under the cap, so their counts stay exact. Apply this pattern to any other list that grows large; don't reintroduce an unbounded `count(*)`.
 
 ## Feature flags
 - `lib/feature-flags.ts` `ENTITY_AVAILABILITY` is the single source for "is this entity built?". Flip a new entity's flag to `true` **last**, after schema+API+UI work. Gate cross-entity fetches on `isEntityAvailable()` (no speculative 404s).

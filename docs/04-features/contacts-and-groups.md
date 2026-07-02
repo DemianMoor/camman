@@ -1,6 +1,6 @@
 # Feature — Contacts, Contact Groups, Opt-outs/ins & Clickers
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-07-02_
 
 ## 1. Purpose
 The central phone registry and the suppression/engagement records attached to it. Contacts are the atomic audience unit (scaling to millions); contact groups are tags; opt-outs/ins and clickers are the status signals that audience filters and segment rules read.
@@ -31,7 +31,7 @@ The central phone registry and the suppression/engagement records attached to it
 - Read by: segment rules (`is_clicker_*`, `is_optin_*`, `is_optout_for_brand`, `is_in_contact_group`), audience snapshot (status flags + opt-out exclusion), result-import propagation (writes opt-outs/clickers).
 
 ## 5. UI surface
-- `app/(protected)/contacts/` — list, search, sort, groups column, multi-select group filter, bulk "Apply to groups", status import.
+- `app/(protected)/contacts/` — list, search, sort, groups column, multi-select group filter, bulk "Apply to groups", status import. The list count is **capped at 10,000** for performance (an exact count over a 752K-row org is ~670 ms); above the cap the footer shows "10,000+" and paging is driven by a `hasMore` flag, not the total. Any active filter (search/segment/group/view) narrows below the cap → exact count. See [conventions](../07-conventions.md).
 - `app/(protected)/contact-groups/[id]/` — three tabs: Contacts (list/search/sort/bulk-remove), Add contacts (`PhoneUploadForm`), Remove contacts.
 - `opt-outs/`, `opt-ins/`, `clickers/` — list + phone-upload entry points (each exposes a `MultiSelectPicker` for contact groups).
 

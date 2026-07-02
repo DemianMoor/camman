@@ -2,6 +2,12 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-02 — Speed Tier 3: capped contacts-list count (kills the ~670ms every-load count) — docs: 07-conventions, 04-features/contacts-and-groups, CHANGELOG
+- **What.** `/api/contacts/list` ran an exact `count(*)` on every load; at 752K rows that's ~670 ms (inherently O(rows) — an index can't help, proven by forcing the index path). Now the count is **capped**: it counts at most `COUNT_CAP+1` (10,000) rows via a `LIMIT` subquery. Under the cap it's the exact total; over it, the response sets `countApprox:true` + `totalCount:10000` and the UI shows "10,000+". **670 ms → 84 ms.**
+- **Navigation stays correct.** The count no longer drives paging: the page query fetches `pageSize+1` and returns `hasMore`, so Previous/Next works past the cap. `DataTable` gained optional `hasMore` + `totalCountApprox` props (backward-compatible — other lists pass nothing and keep exact-count/`of Y` behavior). When approximate, the footer shows "N+" and "Page X" (no "of Y").
+- **Exact counts preserved when it matters.** Any narrowing filter (search — already trigram-fast per Tier 1, segment, group, or the opt_outs/opt_ins/clickers views) returns a set under the cap, so the count stays exact. Only the unfiltered full-org browse shows "10,000+".
+- Verified: capped-count speed + semantics (`scripts/verify-capped-count.ts`), Drizzle subquery SQL runs, `tsc`, production build. Scoped to the contacts endpoint (the measured pain); the `DataTable` mechanism is reusable for other large lists later.
+
 ## 2026-07-01 — Speed Tier 2: batched Keitaro pollers, staggered crons, parallelized queries, lazy campaign-detail dialogs — docs: 04-features/crons, CHANGELOG
 - **What.** Second measured performance batch. Baseline via new `scripts/perf-baseline-tier2.ts`. No behavior change.
 - **Keitaro pollers batched.** `poll-conversions.ts` and `poll-offer-reaches.ts` collected one round-trip per matched conversion (`UPDATE … WHERE id = …` in a loop). Now they fold matches in memory and flush a single `UPDATE … FROM (VALUES …)` per 500-row chunk. Measured round-trip overhead: **~12.4 s → ~53 ms** for 200 matches. Equivalence (incl. the ET-wall-clock → UTC `converted_at` cast) verified in a rolled-back transaction via `scripts/verify-keitaro-batch-update.ts`.

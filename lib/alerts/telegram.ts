@@ -35,3 +35,41 @@ export async function notifyTelegram(text: string): Promise<void> {
     console.error("[telegram] alert error (swallowed):", err);
   }
 }
+
+// Non-swallowing counterpart used by the scheduled performance report
+// (app/api/cron/telegram-report). Unlike notifyTelegram, this THROWS on any
+// failure (missing config, network error, non-200 from Telegram) so the cron
+// handler can return 500 and the scheduler's failure monitoring catches a
+// broken report. Sends with parse_mode "HTML" — callers must escape dynamic
+// substrings (see escapeHtml below).
+export async function sendTelegramHtml(text: string): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    throw new Error(
+      "Telegram not configured: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required",
+    );
+  }
+
+  const res = await fetch(`${TELEGRAM_API}/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Telegram sendMessage failed: HTTP ${res.status} ${body}`);
+  }
+}
+
+// Minimal HTML escaping for Telegram parse_mode "HTML" — only the three chars
+// Telegram treats as markup need escaping (&, <, >).
+export function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}

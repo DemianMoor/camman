@@ -1,9 +1,9 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-01_
+_Last updated: 2026-07-02_
 
 ## 1. Purpose
-All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Four endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
+All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
 
 ## 2. The jobs (`vercel.json`)
 | Path | Schedule | Job | Auth |
@@ -14,6 +14,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 | `/api/keitaro/poll` | `*/5 * * * *` | pull Keitaro clicks/conversions → `keitaro_stage_results` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/keitaro/poll-conversions` | `9,24,39,54 * * * *` | per-recipient SALE attribution → `stage_sends.sale_status` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/keitaro/poll-offer-reaches` | `12,27,42,57 * * * *` | per-recipient OFFER-PAGE REACH (Level 2) → `stage_sends.offer_reached_at` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
+| `/api/cron/telegram-report` | `0 * * * *` | send the daily/hourly performance report to Telegram (decides internally per Warsaw time) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 
 > **Schedules are staggered on purpose.** Previously the four `*/15` jobs all fired at `:00/:15/:30/:45` alongside the two `*/5` jobs — up to **5–6 crons at once**, each cold-starting and each grabbing pooler connections (the pool caps at `max:5` per instance against Supavisor's ~15-client ceiling). The `*/15` jobs now sit at distinct off-5 minute offsets (`3/6/9/12`), so they never coincide with the `*/5` jobs or each other — peak concurrency drops from ~6 to ~2. `send-scheduled` and `keitaro/poll` stay on `*/5` (both latency-sensitive; two concurrent is fine).
 >
@@ -48,10 +49,27 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - Fail-safe: a failed fetch returns `200 { degraded:true, error }` (logs + retries next cycle, never crashes); a single bad aggregate is counted (`errored`) and skipped, never aborting the batch. If the campaigns list (visit-name classifier) fails, rows fall back to redirect and `classification_degraded:true` is set. Unmatched `sub_id_3` values are sampled in the response for debugging.
 - Returns `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, classification_degraded, visit_campaigns_matched, unmatched_samples, error }`. See [keitaro-poll.md](keitaro-poll.md). Read stored results via `GET /api/keitaro/results?campaign_id=<id>` or the cross-campaign `GET /api/keitaro/reports` (the `/reports` page).
 
+### `/api/cron/telegram-report` (performance report)
+- **One external trigger fires it every hour on the hour (UTC)**; the handler decides internally what to do based on the **current Warsaw time**, computed with `Intl`-backed `formatInTimeZone` (never offset arithmetic — the Warsaw/ET offsets shift on DST weeks).
+  - Warsaw hour **11** → **daily** report for the **previous ET day** (final).
+  - Warsaw hour **16–23** (not Sunday) → **hourly** update (today-so-far, ET).
+  - Warsaw hour **0–1** (not Monday) → **hourly** update (belongs to the previous day's window; Mon 00/01 is Sunday's window, excluded).
+  - otherwise → `200 { skipped: true }`.
+- `?test=1` (still secret-protected) forces an immediate send regardless of time: hourly format if the current Warsaw hour is inside an hourly window shape, else daily. Response says which format was sent.
+- **Five metrics**, aggregated across **all orgs** (this tool is single-org in practice; the cron has no session to scope by), for one ET calendar day — the same day-attribution basis the `/reports` page uses so the numbers reconcile:
+  - **Sales / Revenue** → `salesRevenueTotals()` ([`lib/reporting/attribution.ts`](../../lib/reporting/attribution.ts)), conversion-dated (Keitaro `stat_date` ∨ manual-tally entry date, max-deduped per stage).
+  - **Spend** → Σ `campaign_stages.total_cost` attributed to the stage's send moment (`sent_at`).
+  - **Opt-outs** → count of `opt_outs` (`reason='opt_out'`) by `created_at`.
+  - **Delivered** → `stage_sends` accepted by the provider (`status='sent'`) by `sent_at`. CamMan does **not** poll DLR (CLAUDE.md §12), so "delivered" here means "provider-accepted" — the closest real signal for the opt-out ratio.
+  - **ROI %** = `(revenue − spend) / spend × 100`; `n/a` when spend = 0. Opt-out ratio = opt-outs ÷ delivered; `n/a` when delivered = 0.
+- Metric computation lives in [`lib/reporting/report-snapshot.ts`](../../lib/reporting/report-snapshot.ts) (`computeReportMetrics`). The message is sent via `sendTelegramHtml()` ([`lib/alerts/telegram.ts`](../../lib/alerts/telegram.ts)) with `parse_mode: "HTML"` — a **non-swallowing** counterpart to `notifyTelegram()`: on any failure (missing config, network, non-200) the handler returns **500** so the scheduler's failure monitoring catches a broken report. No in-process retry.
+- Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (fail-fast 500 if missing when a send is due), `CRON_SECRET`.
+
 ## 4. Data
 - Reads/writes `clicks`, `geoip_cache`; `opt_outs`, `texthub_inbound_events`; `stage_sends`, `links`, `campaign_stages`, `send_circuit_events`; `keitaro_stage_results` (reads `campaign_stages`/`campaigns` for sub_id_3 mapping).
+- `telegram-report` reads only: `organizations`, `keitaro_stage_results`, `stage_manual_sales`, `campaign_stages`, `opt_outs`, `stage_sends` (all via indexed date/status filters).
 
 ## 5–7. Notes
 - Vercel injects the `CRON_SECRET` Bearer header automatically when it calls the GET path; the dual POST paths exist so an operator can trigger the same work manually for their own org from the UI.
-- All four are idempotent / safe to run on a tick that has no work.
+- All are idempotent / safe to run on a tick that has no work (`telegram-report` returns `{ skipped: true }` outside its send windows).
 - Local testing: hit the endpoints with the Bearer header (see [08-local-setup.md](../08-local-setup.md)) and the various `scripts/test-*` scripts.

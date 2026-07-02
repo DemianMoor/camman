@@ -207,7 +207,9 @@ export interface MintLinkBatchInput {
   items: MintLinkBatchItem[];
 }
 
-const MINT_BATCH_CHUNK = 500;
+// 2000 rows × 11 columns = 22K bind params per INSERT — well under Postgres's
+// 65535 limit. 500 was conservative and did 4× the round-trips it needed.
+const MINT_BATCH_CHUNK = 2000;
 
 // Bulk equivalent of mintLink for a fresh send run (the kickoff path): all items
 // share ONE destination and ONE stage, so the destination is upserted ONCE and

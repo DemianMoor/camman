@@ -317,7 +317,11 @@ interface StageSendInsertRow {
   leadId: string;
 }
 
-const STAGE_SENDS_CHUNK = 500;
+// 1000 rows × 10 columns = 10K bind params per INSERT — well under Postgres's
+// 65535 limit. Kept at 1000 (not 2000 like the link mint) because rendered_text
+// is a wide column, so the statement payload stays reasonable. 500 was 2× the
+// round-trips it needed.
+const STAGE_SENDS_CHUNK = 1000;
 
 // Chunked multi-row INSERT — replaces the per-recipient round-trip loop that
 // dominated kickoff latency at scale.

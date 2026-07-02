@@ -1,6 +1,6 @@
 # Feature — Content Deduplication & Offer Exposure
 
-_Last updated: 2026-06-30_
+_Last updated: 2026-07-02_
 
 > **Status: LIVE (Phase 1 + Phase 2 shipped).** Phase 1 (migration `0086`):
 > ledgers, triggers, RLS, backfill. Phase 2 (migration `0087`): the send-time
@@ -119,7 +119,14 @@ The three layers:
   window between materialization and `status='sent'` (the ledger fills only at
   `'sent'`).
 - **LAYER 3** (only when `campaigns.exclude_prior_offer_contacts`): got this offer
-  in any previous campaign (`offer_exposures WHERE offer_id = :o`).
+  in a **different** campaign — `offer_exposures WHERE offer_id = :o AND
+  (campaign_id IS NULL OR campaign_id <> :currentCampaignId)`. The
+  `campaign_id <> current` clause is the **same in-campaign-reuse exception** as
+  LAYER 1: a multi-stage campaign may re-send its own offer across stages (a drip),
+  so a stage must not suppress contacts an EARLIER stage of the SAME campaign
+  already reached. Without it a single-offer drip self-cannibalizes — stage 1
+  reaches everyone, then stage 2+ see the whole audience as "already got this
+  offer" and reach ~nobody. (Fixed 2026-07-02; the clause was previously missing.)
 - **Edge A — null creative:** layers 1+2 are omitted entirely (the fragments are
   null); layer 3 may still apply (offer comes from the campaign).
 - Opt-out suppression is **not** re-added — it already lives in the base audience.

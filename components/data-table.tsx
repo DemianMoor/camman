@@ -36,6 +36,18 @@ export interface DataTableProps<T> {
   pageIndex: number;
   pageSize: number;
   totalCount: number;
+  /**
+   * When the list endpoint caps its count for performance, `totalCount` is the
+   * cap and this is true — the footer shows "N+" and drops the "of Y" page total
+   * (the real end is unknown). Pair with `hasMore` so Next stays correct.
+   */
+  totalCountApprox?: boolean;
+  /**
+   * Authoritative "is there a next page" signal from the endpoint (fetch
+   * pageSize+1). When provided it drives the Next button instead of deriving the
+   * last page from `totalCount` — required once the count is capped/approximate.
+   */
+  hasMore?: boolean;
   onPageChange: (pageIndex: number) => void;
   onPageSizeChange: (pageSize: number) => void;
   pageSizeOptions?: number[];
@@ -55,6 +67,8 @@ export function DataTable<T>({
   pageIndex,
   pageSize,
   totalCount,
+  totalCountApprox = false,
+  hasMore,
   onPageChange,
   onPageSizeChange,
   pageSizeOptions = [10, 20, 50, 100],
@@ -195,7 +209,9 @@ export function DataTable<T>({
             </SelectContent>
           </Select>
           <span className="text-muted-foreground">
-            {totalCount} {totalCount === 1 ? "item" : "items"} total
+            {totalCount}
+            {totalCountApprox ? "+" : ""}{" "}
+            {totalCount === 1 && !totalCountApprox ? "item" : "items"} total
           </span>
         </div>
 
@@ -209,13 +225,21 @@ export function DataTable<T>({
             Previous
           </Button>
           <span className="text-muted-foreground">
-            Page {pageIndex + 1} of {totalPages}
+            {/* When the count is capped the real end is unknown — show "Page X"
+                and let `hasMore` gate Next instead of a derived last page. */}
+            {totalCountApprox
+              ? `Page ${pageIndex + 1}`
+              : `Page ${pageIndex + 1} of ${totalPages}`}
           </span>
           <Button
             variant="outline"
             size="sm"
             onClick={() => onPageChange(pageIndex + 1)}
-            disabled={pageIndex + 1 >= totalPages || isLoading}
+            disabled={
+              (hasMore !== undefined
+                ? !hasMore
+                : pageIndex + 1 >= totalPages) || isLoading
+            }
           >
             Next
           </Button>

@@ -182,7 +182,21 @@ export async function GET(req: NextRequest) {
     where oo."contact_id" = "contacts"."id" and oo."org_id" = ${orgId}
   )`;
 
-  const [data, countRows] = await Promise.all([
+  // Exact count(*) over an org's contacts is inherently O(rows) — ~670ms on a
+  // 752K-row org (an index can't help; measured). Cap the scan: count at most
+  // COUNT_CAP+1 rows, so the count stays cheap. Under the cap it's the exact
+  // total; at the cap we report a capped total + countApprox=true and the UI
+  // shows "N+". Navigation correctness no longer depends on the total — we fetch
+  // pageSize+1 rows and return hasMore, so Next/Prev works past the cap too.
+  const COUNT_CAP = 10000;
+  const capSub = db
+    .select({ one: drizzleSql`1` })
+    .from(contacts)
+    .where(where)
+    .limit(COUNT_CAP + 1)
+    .as("cap_sub");
+
+  const [pageRows, countRows] = await Promise.all([
     db
       .select({
         id: contacts.id,
@@ -198,17 +212,22 @@ export async function GET(req: NextRequest) {
       .from(contacts)
       .where(where)
       .orderBy(orderFn(sortColumn))
-      .limit(params.pageSize)
+      .limit(params.pageSize + 1)
       .offset(params.page * params.pageSize),
-    db
-      .select({ count: drizzleSql<number>`count(*)::int` })
-      .from(contacts)
-      .where(where),
+    db.select({ count: drizzleSql<number>`count(*)::int` }).from(capSub),
   ]);
+
+  const hasMore = pageRows.length > params.pageSize;
+  const data = hasMore ? pageRows.slice(0, params.pageSize) : pageRows;
+  const rawCount = countRows[0]?.count ?? 0;
+  const countApprox = rawCount > COUNT_CAP;
+  const totalCount = countApprox ? COUNT_CAP : rawCount;
 
   return NextResponse.json({
     data,
-    totalCount: countRows[0]?.count ?? 0,
+    totalCount,
+    countApprox,
+    hasMore,
     page: params.page,
     pageSize: params.pageSize,
     view,

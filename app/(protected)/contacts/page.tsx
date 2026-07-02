@@ -119,6 +119,8 @@ type ContactView = "active" | "archived" | "opt_outs" | "opt_ins" | "clickers";
 type ListResponse = {
   data: Contact[];
   totalCount: number;
+  countApprox?: boolean;
+  hasMore?: boolean;
   page: number;
   pageSize: number;
   view: ContactView;
@@ -290,6 +292,8 @@ export default function ContactsPage() {
 
   const [data, setData] = useState<Contact[]>([]);
   const [totalCount, setTotalCount] = useState(0);
+  const [countApprox, setCountApprox] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [stats, setStats] = useState<BaseStats | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -375,6 +379,8 @@ export default function ContactsPage() {
       if (result.ok) {
         setData(result.data.data);
         setTotalCount(result.data.totalCount);
+        setCountApprox(result.data.countApprox ?? false);
+        setHasMore(result.data.hasMore ?? false);
       } else {
         setFetchError(result.error);
       }
@@ -901,6 +907,8 @@ export default function ContactsPage() {
           pageIndex={filters.page}
           pageSize={filters.pageSize}
           totalCount={totalCount}
+          totalCountApprox={countApprox}
+          hasMore={hasMore}
           onPageChange={(p) => updateFilters({ page: p })}
           onPageSizeChange={(s) =>
             updateFilters({ pageSize: s, page: 0 })

@@ -36,6 +36,10 @@ const money = (n: number): string =>
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+// Sign-aware currency for values that can go negative (net profit): the minus
+// sits before the $ (-$50.00, not $-50.00).
+const signedMoney = (n: number): string =>
+  n < 0 ? `-${money(-n)}` : money(n);
 const int = (n: number): string => n.toLocaleString("en-US");
 const roi = (pct: number | null): string =>
   pct == null ? "n/a" : `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
@@ -54,6 +58,7 @@ export function dailyMessage(dayLabel: string, m: ReportMetrics): string {
     `Revenue: ${money(m.revenue)}`,
     `Spend: ${money(m.spend)}`,
     `ROI: ${roi(m.roiPct)}`,
+    `Net Profit: ${signedMoney(m.revenue - m.spend)}`,
     optOutLine(m),
   ].join("\n");
 }
@@ -69,6 +74,7 @@ export function hourlyMessage(
     `Revenue: ${money(m.revenue)}`,
     `Spend: ${money(m.spend)}`,
     `ROI: ${roi(m.roiPct)}`,
+    `Net Profit: ${signedMoney(m.revenue - m.spend)}`,
     optOutLine(m),
     `Yesterday spend: ${money(yesterdaySpend)}`,
   ].join("\n");

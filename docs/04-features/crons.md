@@ -62,6 +62,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
   - **Opt-outs** → count of `opt_outs` (`reason='opt_out'`) by `created_at`.
   - **Delivered** → `stage_sends` accepted by the provider (`status='sent'`) by `sent_at`. CamMan does **not** poll DLR (CLAUDE.md §12), so "delivered" here means "provider-accepted" — the closest real signal for the opt-out ratio.
   - **ROI %** = `(revenue − spend) / spend × 100`; `n/a` when spend = 0. Opt-out ratio = opt-outs ÷ delivered; `n/a` when delivered = 0.
+  - **Net Profit** = `revenue − spend` (line after ROI). Renders sign-aware (`-$150.00` for a loss).
 - Metric computation lives in [`lib/reporting/report-snapshot.ts`](../../lib/reporting/report-snapshot.ts) (`computeReportMetrics`). The message is sent via `sendTelegramHtml()` ([`lib/alerts/telegram.ts`](../../lib/alerts/telegram.ts)) with `parse_mode: "HTML"` — a **non-swallowing** counterpart to `notifyTelegram()`: on any failure (missing config, network, non-200) the handler returns **500** so the scheduler's failure monitoring catches a broken report. No in-process retry.
 - Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (fail-fast 500 if missing when a send is due), `CRON_SECRET`.
 

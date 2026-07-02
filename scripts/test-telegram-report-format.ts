@@ -46,6 +46,7 @@ eq(
     "Revenue: $900.00",
     "Spend: $392.26",
     "ROI: +129.4%",
+    "Net Profit: $507.74",
     "Opt-outs: 853 (2.2% of 38,502 delivered)",
   ].join("\n"),
 );
@@ -60,8 +61,32 @@ eq(
     "Revenue: $75.00",
     "Spend: $0.00",
     "ROI: n/a",
+    "Net Profit: $75.00",
     "Opt-outs: 9 (n/a — 0 delivered)",
     "Yesterday spend: $392.26",
+  ].join("\n"),
+);
+
+// Negative net profit renders as -$X.XX (minus before the $).
+const loss: ReportMetrics = {
+  sales: 2,
+  revenue: 100,
+  spend: 250,
+  optOuts: 5,
+  delivered: 1000,
+  roiPct: ((100 - 250) / 250) * 100,
+};
+eq(
+  "daily (net loss ⇒ -$150.00, ROI -60.0%)",
+  dailyMessage("Fri 3 Jul", loss),
+  [
+    "📊 <b>CamMan — Fri 3 Jul</b> (final, ET)",
+    "Sales: 2",
+    "Revenue: $100.00",
+    "Spend: $250.00",
+    "ROI: -60.0%",
+    "Net Profit: -$150.00",
+    "Opt-outs: 5 (0.5% of 1,000 delivered)",
   ].join("\n"),
 );
 

@@ -55,6 +55,7 @@ import {
   transitionToStatus,
 } from "@/components/campaigns/status-change-dialog";
 import { DataTable } from "@/components/data-table";
+import { DeferUntilVisible } from "@/components/defer-until-visible";
 import { useAuth } from "@/components/protected/auth-context";
 import {
   StatusDropdown,
@@ -1894,19 +1895,26 @@ export default function CampaignDetailPage() {
       </section>
 
       {/* ============ Click attribution section ============ */}
+      {/* Below the fold + self-fetches a heavy clicks aggregation on mount —
+          defer until scrolled near so it's off the initial-paint critical path. */}
       <section className="space-y-4">
-        <ClickReportSection campaignId={campaignId} />
+        <DeferUntilVisible minHeight={240}>
+          <ClickReportSection campaignId={campaignId} />
+        </DeferUntilVisible>
       </section>
 
       {/* ============ Activity log section ============ */}
+      {/* Below the fold + self-fetches the activity endpoint on mount — defer too. */}
       <section className="space-y-4">
-        <CampaignActivitySection
-          campaignId={campaignId}
-          stages={stages.map((s) => ({
-            id: s.id,
-            stage_number: s.stage_number,
-          }))}
-        />
+        <DeferUntilVisible minHeight={240}>
+          <CampaignActivitySection
+            campaignId={campaignId}
+            stages={stages.map((s) => ({
+              id: s.id,
+              stage_number: s.stage_number,
+            }))}
+          />
+        </DeferUntilVisible>
       </section>
 
       {/* ============ Dialogs ============ */}

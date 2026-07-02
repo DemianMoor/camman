@@ -129,11 +129,9 @@ export async function GET(req: NextRequest) {
         created_at: campaigns.created_at,
         brand: { id: brands.id, name: brands.name, color: brands.color },
         offer: { id: offers.id, name: offers.name, color: offers.color },
-        stage_count_total: drizzleSql<number>`(
-          select count(*)::int from ${campaign_stages}
-          where ${campaign_stages.campaign_id} = ${campaigns.id}
-            and ${campaign_stages.status} <> 'archived'
-        )`,
+        // stage_count_total was a per-row correlated subquery; now batched into
+        // one grouped query over the page's campaign ids (stageCountByCampaign
+        // below) and mapped in at the end. Removes N per-row subplans.
       })
       .from(campaigns)
       .leftJoin(brands, eq(brands.id, campaigns.brand_id))
@@ -159,33 +157,55 @@ export async function GET(req: NextRequest) {
     number,
     { providers: Map<number, ProviderInfo>; phones: Map<number, PhoneInfo> }
   >();
+  const stageCountByCampaign = new Map<number, number>();
   if (pageIds.length > 0) {
-    const stageMeta = await db
-      .selectDistinct({
-        campaign_id: campaign_stages.campaign_id,
-        provider_id: sms_providers.id,
-        provider_name: sms_providers.name,
-        provider_color: sms_providers.color,
-        phone_id: provider_phones.id,
-        phone_number: provider_phones.phone_number,
-        number_type: provider_phones.number_type,
-      })
-      .from(campaign_stages)
-      .leftJoin(
-        sms_providers,
-        eq(sms_providers.id, campaign_stages.sms_provider_id),
-      )
-      .leftJoin(
-        provider_phones,
-        eq(provider_phones.id, campaign_stages.provider_phone_id),
-      )
-      .where(
-        and(
-          eq(campaign_stages.org_id, orgId),
-          inArray(campaign_stages.campaign_id, pageIds),
-          drizzleSql`${campaign_stages.status} <> 'archived'`,
+    // stageMeta (provider/phone dedup) and the non-archived stage count both scan
+    // campaign_stages filtered by the same page ids — run them together.
+    const [stageMeta, stageCounts] = await Promise.all([
+      db
+        .selectDistinct({
+          campaign_id: campaign_stages.campaign_id,
+          provider_id: sms_providers.id,
+          provider_name: sms_providers.name,
+          provider_color: sms_providers.color,
+          phone_id: provider_phones.id,
+          phone_number: provider_phones.phone_number,
+          number_type: provider_phones.number_type,
+        })
+        .from(campaign_stages)
+        .leftJoin(
+          sms_providers,
+          eq(sms_providers.id, campaign_stages.sms_provider_id),
+        )
+        .leftJoin(
+          provider_phones,
+          eq(provider_phones.id, campaign_stages.provider_phone_id),
+        )
+        .where(
+          and(
+            eq(campaign_stages.org_id, orgId),
+            inArray(campaign_stages.campaign_id, pageIds),
+            drizzleSql`${campaign_stages.status} <> 'archived'`,
+          ),
         ),
-      );
+      db
+        .select({
+          campaign_id: campaign_stages.campaign_id,
+          n: drizzleSql<number>`count(*)::int`,
+        })
+        .from(campaign_stages)
+        .where(
+          and(
+            eq(campaign_stages.org_id, orgId),
+            inArray(campaign_stages.campaign_id, pageIds),
+            drizzleSql`${campaign_stages.status} <> 'archived'`,
+          ),
+        )
+        .groupBy(campaign_stages.campaign_id),
+    ]);
+    for (const c of stageCounts) {
+      stageCountByCampaign.set(c.campaign_id, Number(c.n));
+    }
     for (const m of stageMeta) {
       let entry = metaByCampaign.get(m.campaign_id);
       if (!entry) {
@@ -217,6 +237,7 @@ export async function GET(req: NextRequest) {
       offer: r.offer && r.offer.id !== null ? r.offer : null,
       providers: entry ? [...entry.providers.values()] : [],
       phones: entry ? [...entry.phones.values()] : [],
+      stage_count_total: stageCountByCampaign.get(r.id) ?? 0,
     };
   });
 

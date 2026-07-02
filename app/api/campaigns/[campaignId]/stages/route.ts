@@ -180,13 +180,11 @@ export async function GET(
       bounced_count: campaign_stages.bounced_count,
       checkout_click_count: campaign_stages.checkout_click_count,
       sales_count: campaign_stages.sales_count,
-      // Keitaro conversions for this stage, summed across stat_dates. Added ON TOP
-      // of the manual sales_count at display (sales is additive, not overwritten).
-      keitaro_sales_count: drizzleSql<number>`COALESCE((SELECT sum(ksr.sales) FROM ${keitaro_stage_results} ksr WHERE ksr.stage_id = ${campaign_stages.id}), 0)::int`,
-      // Real per-conversion revenue recorded by Keitaro, summed across stat_dates.
-      // This — NOT sales_count × the offer's current CPA — is the revenue source
-      // of truth (a mid-flight CPA change would retro-misprice prior sales).
-      keitaro_revenue: drizzleSql<string>`COALESCE((SELECT sum(ksr.revenue) FROM ${keitaro_stage_results} ksr WHERE ksr.stage_id = ${campaign_stages.id}), 0)::numeric(12,4)::text`,
+      // keitaro_sales_count / keitaro_revenue were per-stage correlated subqueries
+      // in this SELECT (2 subplans PER stage row, filtered on a bare stage_id that
+      // keitaro_stage_results has no leading index for). Replaced by ONE grouped
+      // query keyed on campaign_id (indexed) in the Promise.all below, mapped in
+      // like sendCountsByStage. Same values (COALESCE 0), no N+1.
       sales_payout_each: campaign_stages.sales_payout_each,
       notes: campaign_stages.notes,
       tracking_id: campaign_stages.tracking_id,
@@ -303,7 +301,7 @@ export async function GET(
   // (2) WS4 §0 materialization signal: stage_sends counts by status, one grouped
   // query (indexed on stage_id) — no N+1. Drives the Orange↔Blue operational-status
   // split on the client via deriveStageOperationalStatus.
-  const [inboundStopContactsRow, sendCountRows] = (await Promise.all([
+  const [inboundStopContactsRow, sendCountRows, keitaroRows] = (await Promise.all([
     db.execute(drizzleSql`
       SELECT count(DISTINCT oo.contact_id)::int AS n
       FROM opt_out_attributions oa
@@ -322,6 +320,18 @@ export async function GET(
       WHERE org_id = ${orgId} AND campaign_id = ${cid}
       GROUP BY stage_id
     `),
+    // Keitaro sales/revenue per stage — one grouped query keyed on campaign_id
+    // (served by keitaro_stage_results_campaign_date_idx) instead of the former
+    // 2×N per-stage correlated subqueries. Numerically identical (missing stage
+    // → COALESCE 0 in the mapping below).
+    db.execute(drizzleSql`
+      SELECT stage_id,
+             sum(sales)::int AS sales,
+             sum(revenue)::numeric(12,4)::text AS revenue
+      FROM ${keitaro_stage_results}
+      WHERE org_id = ${orgId} AND campaign_id = ${cid}
+      GROUP BY stage_id
+    `),
   ])) as unknown as [
     { n: number }[],
     {
@@ -332,8 +342,15 @@ export async function GET(
       sent: number;
       failed: number;
     }[],
+    { stage_id: number; sales: number; revenue: string }[],
   ];
   const inboundStopContacts = Number(inboundStopContactsRow[0]?.n ?? 0);
+  const keitaroByStage = new Map(
+    keitaroRows.map((r) => [
+      Number(r.stage_id),
+      { sales: Number(r.sales ?? 0), revenue: r.revenue ?? "0.0000" },
+    ]),
+  );
   const sendCountsByStage = new Map(
     sendCountRows.map((r) => [
       Number(r.stage_id),
@@ -357,6 +374,8 @@ export async function GET(
     offer: r.offer?.id ? r.offer : null,
     audience_count: audienceCounts[i],
     inbound_stop_count: r.inbound_opt_out_count,
+    keitaro_sales_count: keitaroByStage.get(r.id)?.sales ?? 0,
+    keitaro_revenue: keitaroByStage.get(r.id)?.revenue ?? "0.0000",
     send_counts: sendCountsByStage.get(r.id) ?? {
       total: 0,
       pending: 0,

@@ -58,103 +58,110 @@ export async function GET(
   );
   const offset = (page - 1) * pageSize;
 
-  // ---- Send-status rollup (campaign-wide).
-  const totals = (await db.execute(drizzleSql`
-    SELECT
-      count(*) FILTER (WHERE status = 'sent')::int      AS sent,
-      count(*) FILTER (WHERE status = 'failed')::int    AS failed,
-      count(*) FILTER (WHERE status = 'rejected')::int  AS rejected,
-      count(*) FILTER (WHERE status = 'filtered')::int  AS filtered,
-      count(*) FILTER (WHERE status = 'pending')::int   AS pending,
-      count(*) FILTER (WHERE status = 'sending')::int   AS sending,
-      count(*)::int                                     AS total,
-      max(sent_at)                                      AS last_sent_at
-    FROM stage_sends
-    WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
-  `)) as unknown as {
-    sent: number;
-    failed: number;
-    rejected: number;
-    filtered: number;
-    pending: number;
-    sending: number;
-    total: number;
-    last_sent_at: string | null;
-  }[];
-
-  // ---- Replies: TextHub inbound events matched to this campaign's sends.
-  const replyRows = (await db.execute(drizzleSql`
-    SELECT count(DISTINCT ie.id)::int AS replies
-    FROM texthub_inbound_events ie
-    JOIN stage_sends ss
-      ON ss.texthub_message_id = ie.provider_message_id
-     AND ss.org_id = ie.org_id
-    WHERE ie.org_id = ${orgId}
-      AND ss.campaign_id = ${campaignId}
-      AND ie.provider_message_id IS NOT NULL
-  `)) as unknown as { replies: number }[];
-
-  // ---- Per-stage send breakdown.
-  const byStage = (await db.execute(drizzleSql`
-    SELECT
-      ss.stage_id                                       AS stage_id,
-      cs.stage_number                                   AS stage_number,
-      count(*) FILTER (WHERE ss.status = 'sent')::int   AS sent,
-      count(*) FILTER (WHERE ss.status = 'failed')::int AS failed,
-      count(*) FILTER (WHERE ss.status = 'filtered')::int AS filtered,
-      count(*) FILTER (WHERE ss.status IN ('pending','sending'))::int AS pending,
-      count(*)::int                                     AS total,
-      max(ss.sent_at)                                   AS last_sent_at
-    FROM stage_sends ss
-    JOIN campaign_stages cs ON cs.id = ss.stage_id
-    WHERE ss.org_id = ${orgId} AND ss.campaign_id = ${campaignId}
-    GROUP BY ss.stage_id, cs.stage_number
-    ORDER BY cs.stage_number ASC
-  `)) as unknown as {
-    stage_id: number;
-    stage_number: number;
-    sent: number;
-    failed: number;
-    filtered: number;
-    pending: number;
-    total: number;
-    last_sent_at: string | null;
-  }[];
-
-  // ---- Event timeline (paginated, newest first).
-  const eventRows = (await db.execute(drizzleSql`
-    SELECT
-      ce.id::text       AS id,
-      ce.event_type     AS event_type,
-      ce.summary        AS summary,
-      ce.metadata       AS metadata,
-      ce.stage_id       AS stage_id,
-      ce.created_at     AS created_at,
-      ce.actor_user_id  AS actor_user_id,
-      CASE WHEN ce.actor_user_id IS NULL THEN NULL
-           ELSE COALESCE(u.raw_user_meta_data->>'display_name', u.email)
-      END               AS actor_name
-    FROM campaign_events ce
-    LEFT JOIN auth.users u ON u.id = ce.actor_user_id
-    WHERE ce.org_id = ${orgId} AND ce.campaign_id = ${campaignId}
-    ORDER BY ce.created_at DESC, ce.id DESC
-    LIMIT ${pageSize} OFFSET ${offset}
-  `)) as unknown as {
-    id: string;
-    event_type: string;
-    summary: string;
-    metadata: Record<string, unknown> | null;
-    stage_id: number | null;
-    created_at: string;
-    actor_user_id: string | null;
-    actor_name: string | null;
-  }[];
-
-  const countRows = (await db.execute(drizzleSql`
-    SELECT count(*)::int AS n
-    FROM campaign_events
-    WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
-  `)) as unknown as { n: number }[];
+  // These five are independent — run them in one round-trip, not six serial
+  // ones (the ownership check above already gated the 404). On the transaction
+  // pooler each await is a separate RTT, so serial was ~6× the latency.
+  const [totals, replyRows, byStage, eventRows, countRows] = (await Promise.all([
+    // ---- Send-status rollup (campaign-wide).
+    db.execute(drizzleSql`
+      SELECT
+        count(*) FILTER (WHERE status = 'sent')::int      AS sent,
+        count(*) FILTER (WHERE status = 'failed')::int    AS failed,
+        count(*) FILTER (WHERE status = 'rejected')::int  AS rejected,
+        count(*) FILTER (WHERE status = 'filtered')::int  AS filtered,
+        count(*) FILTER (WHERE status = 'pending')::int   AS pending,
+        count(*) FILTER (WHERE status = 'sending')::int   AS sending,
+        count(*)::int                                     AS total,
+        max(sent_at)                                      AS last_sent_at
+      FROM stage_sends
+      WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
+    `),
+    // ---- Replies: TextHub inbound events matched to this campaign's sends.
+    db.execute(drizzleSql`
+      SELECT count(DISTINCT ie.id)::int AS replies
+      FROM texthub_inbound_events ie
+      JOIN stage_sends ss
+        ON ss.texthub_message_id = ie.provider_message_id
+       AND ss.org_id = ie.org_id
+      WHERE ie.org_id = ${orgId}
+        AND ss.campaign_id = ${campaignId}
+        AND ie.provider_message_id IS NOT NULL
+    `),
+    // ---- Per-stage send breakdown.
+    db.execute(drizzleSql`
+      SELECT
+        ss.stage_id                                       AS stage_id,
+        cs.stage_number                                   AS stage_number,
+        count(*) FILTER (WHERE ss.status = 'sent')::int   AS sent,
+        count(*) FILTER (WHERE ss.status = 'failed')::int AS failed,
+        count(*) FILTER (WHERE ss.status = 'filtered')::int AS filtered,
+        count(*) FILTER (WHERE ss.status IN ('pending','sending'))::int AS pending,
+        count(*)::int                                     AS total,
+        max(ss.sent_at)                                   AS last_sent_at
+      FROM stage_sends ss
+      JOIN campaign_stages cs ON cs.id = ss.stage_id
+      WHERE ss.org_id = ${orgId} AND ss.campaign_id = ${campaignId}
+      GROUP BY ss.stage_id, cs.stage_number
+      ORDER BY cs.stage_number ASC
+    `),
+    // ---- Event timeline (paginated, newest first).
+    db.execute(drizzleSql`
+      SELECT
+        ce.id::text       AS id,
+        ce.event_type     AS event_type,
+        ce.summary        AS summary,
+        ce.metadata       AS metadata,
+        ce.stage_id       AS stage_id,
+        ce.created_at     AS created_at,
+        ce.actor_user_id  AS actor_user_id,
+        CASE WHEN ce.actor_user_id IS NULL THEN NULL
+             ELSE COALESCE(u.raw_user_meta_data->>'display_name', u.email)
+        END               AS actor_name
+      FROM campaign_events ce
+      LEFT JOIN auth.users u ON u.id = ce.actor_user_id
+      WHERE ce.org_id = ${orgId} AND ce.campaign_id = ${campaignId}
+      ORDER BY ce.created_at DESC, ce.id DESC
+      LIMIT ${pageSize} OFFSET ${offset}
+    `),
+    db.execute(drizzleSql`
+      SELECT count(*)::int AS n
+      FROM campaign_events
+      WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
+    `),
+  ])) as unknown as [
+    {
+      sent: number;
+      failed: number;
+      rejected: number;
+      filtered: number;
+      pending: number;
+      sending: number;
+      total: number;
+      last_sent_at: string | null;
+    }[],
+    { replies: number }[],
+    {
+      stage_id: number;
+      stage_number: number;
+      sent: number;
+      failed: number;
+      filtered: number;
+      pending: number;
+      total: number;
+      last_sent_at: string | null;
+    }[],
+    {
+      id: string;
+      event_type: string;
+      summary: string;
+      metadata: Record<string, unknown> | null;
+      stage_id: number | null;
+      created_at: string;
+      actor_user_id: string | null;
+      actor_name: string | null;
+    }[],
+    { n: number }[],
+  ];
 
   const t = totals[0];
   return NextResponse.json({

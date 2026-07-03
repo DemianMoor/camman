@@ -59,9 +59,14 @@ async function main() {
         (await one<{ id: string }>(sql`
           INSERT INTO contacts (org_id, phone_number)
           VALUES (${orgId}, ${`+1560000${String(cSeq++).padStart(4, "0")}`}) RETURNING id`)).id;
+      // High caps so the soft rolling ceilings (org-wide 24h/minute send counts)
+      // don't trip — this test runs against a real org that may have real sends
+      // in the last 24h, which would otherwise stop the drain before it claims.
       const provider = await one<{ id: number }>(sql`
-        INSERT INTO sms_providers (sms_provider_id, org_id, name, supports_api_send, status)
-        VALUES (${"dd-prov"}, ${orgId}, ${"DD"}, true, 'active') RETURNING id`);
+        INSERT INTO sms_providers (sms_provider_id, org_id, name, supports_api_send, status,
+                                   max_sends_per_24h, max_sends_per_minute, max_sends_per_run)
+        VALUES (${"dd-prov"}, ${orgId}, ${"DD"}, true, 'active',
+                ${100_000_000}, ${100_000_000}, ${100_000_000}) RETURNING id`);
       await tx.execute(sql`
         INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key)
         VALUES (${orgId}, ${provider.id}, NULL, ${"key"})`);

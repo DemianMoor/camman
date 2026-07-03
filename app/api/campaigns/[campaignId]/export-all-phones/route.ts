@@ -11,6 +11,7 @@ import {
 } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
+import { splitBucketMatch } from "@/lib/sends/split-bucket";
 
 // Union-of-stages phone export for a campaign. Returns one row per
 // (phone, stage) pair from the resolved audience of every non-archived
@@ -119,10 +120,9 @@ export async function GET(
               const splitTotal = s.split_total ?? null;
               const splitActive = splitIndex !== null && splitTotal !== null;
               const label = s.label ?? "";
-              // Each stage's resolved set, partitioned by split bucket so
-              // siblings don't overlap. Mirrors the per-stage export and
-              // computeStageAudienceCount: ROW_NUMBER over `order by
-              // contact_id`, keep bucket == split_index-1.
+              // Each stage's resolved set, partitioned by the stable per-contact
+              // hash bucket so siblings never overlap and the split stays stable
+              // (mirrors stageRecipientsSql / splitBucketMatch — the send path).
               return drizzleSql`
                 select phone_number, stage_number, stage_label
                 from (
@@ -130,8 +130,7 @@ export async function GET(
                     c.phone_number,
                     p.contact_id,
                     ${s.stage_number}::int as stage_number,
-                    ${label}::text as stage_label,
-                    row_number() over (order by p.contact_id) - 1 as rn
+                    ${label}::text as stage_label
                   from campaign_audience_pool p
                   inner join contacts c on c.id = p.contact_id
                   where p.campaign_id = ${cid}::int
@@ -148,7 +147,7 @@ export async function GET(
                     and not (${excludeCl}::boolean and p.was_clicker_at_snapshot)
                 ) stage_q
                 where not ${splitActive}::boolean
-                  or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
+                  or ${splitBucketMatch(drizzleSql`contact_id`, drizzleSql`${splitTotal ?? 1}`, drizzleSql`${splitIndex ?? 1}`)}
               `;
             });
             const unionAll = fragments.reduce((acc, frag, i) =>

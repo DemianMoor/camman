@@ -6,6 +6,7 @@ import {
   applyEligibilityExcept,
   buildStageEligibilityExclusions,
 } from "@/lib/sends/eligibility";
+import { splitBucketMatch } from "@/lib/sends/split-bucket";
 
 // Content-dedup overlay (Phase 2). When provided, the stage's recipients also
 // subtract the eligibility exclusions (saw-this-creative-elsewhere [+ in-flight],
@@ -168,18 +169,7 @@ export function stageRecipientsSql(opts: {
     select contact_id, phone_number
     from qualified
     where not ${splitActive}::boolean
-      -- STABLE split bucket: a contact's bucket depends ONLY on its own id, never
-      -- on the surrounding set. This is load-bearing for RESUMABLE materialization
-      -- (excludeMaterializedStageId): a row_number()-based split re-numbered the
-      -- shrunken not-yet-materialized set on every resume, so rn % splitTotal
-      -- picked a DIFFERENT subset each pass and leaked the sibling stage's half
-      -- into this one (incident: campaign 8_62_070326_1 sent 7500 instead of 5000
-      -- per split half). hashtextextended is deterministic; the double-modulo
-      -- normalizes the signed int8 hash into [0, splitTotal). Approximately even,
-      -- not exactly 50/50 — acceptable for A/B splits.
-      or ((hashtextextended(contact_id::text, 0) % ${f.splitTotal ?? 1}::int)
-            + ${f.splitTotal ?? 1}::int) % ${f.splitTotal ?? 1}::int
-          = (${(f.splitIndex ?? 1) - 1})::int
+      or ${splitBucketMatch(sql`contact_id`, sql`${f.splitTotal ?? 1}`, sql`${f.splitIndex ?? 1}`)}
     order by contact_id
     ${limitClause}
     ${offsetClause}

@@ -6,6 +6,7 @@ import {
   eligibilityUnion,
 } from "@/lib/sends/eligibility";
 import type { StageRecipientFilters } from "@/lib/sends/recipients";
+import { splitBucketMatch } from "@/lib/sends/split-bucket";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -98,8 +99,7 @@ export async function computeStageReconciliation(
         ) AS passes_filter,
         CASE
           WHEN ${splitActive}::boolean
-            THEN (row_number() OVER (ORDER BY p.contact_id) - 1)
-                 % ${f.splitTotal ?? 1}::int = (${(f.splitIndex ?? 1) - 1})::int
+            THEN ${splitBucketMatch(sql`p.contact_id`, sql`${f.splitTotal ?? 1}`, sql`${f.splitIndex ?? 1}`)}
           ELSE true
         END AS in_split,
         ${dedupExpr} AS deduped

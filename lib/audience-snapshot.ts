@@ -10,6 +10,7 @@ import {
   type StageEligibilityParams,
 } from "./sends/eligibility";
 import { stageRecipientsSql } from "./sends/recipients";
+import { splitBucketMatch } from "./sends/split-bucket";
 import { buildSegmentAudienceClause } from "./segment-rules-eval";
 
 // Compose the audience-source set (contact_ids, before status filters /
@@ -305,8 +306,7 @@ export async function computeStageAudienceCount(
       select
         contact_id,
         was_clicker_at_snapshot,
-        was_no_status_at_snapshot,
-        row_number() over (order by contact_id) - 1 as rn
+        was_no_status_at_snapshot
       from joined
       where not is_opt_out_now
         and (
@@ -318,7 +318,7 @@ export async function computeStageAudienceCount(
     select
       count(*) filter (
         where not ${splitActive}::boolean
-          or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
+          or ${splitBucketMatch(drizzleSql`contact_id`, drizzleSql`${splitTotal ?? 1}`, drizzleSql`${splitIndex ?? 1}`)}
       )::int as count,
       (select count(*) from joined where not is_opt_out_now and was_no_status_at_snapshot)::int as no_status,
       (select count(*) from joined where not is_opt_out_now and was_clicker_at_snapshot)::int as clickers,
@@ -432,8 +432,7 @@ export async function computeStageAudienceCountForDraft(
     ),
     qualified as (
       select
-        contact_id,
-        row_number() over (order by contact_id) - 1 as rn
+        contact_id
       from flagged
       where has_opt_out = false
         and (
@@ -452,7 +451,7 @@ export async function computeStageAudienceCountForDraft(
     select
       count(*) filter (
         where not ${splitActive}::boolean
-          or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
+          or ${splitBucketMatch(drizzleSql`contact_id`, drizzleSql`${splitTotal ?? 1}`, drizzleSql`${splitIndex ?? 1}`)}
       )::int as count,
       (select count(*) from flagged
         where has_opt_out = false and not has_opt_in and not has_clicker)::int as no_status,
@@ -521,9 +520,8 @@ export interface StageCountBatchItem {
 
 // One row per stage, as a typed UNION ALL of SELECTs (robust against VALUES
 // type inference): stage_id + the three filter booleans + the split bounds.
-// The split filter `split_total is null or split_index is null or
-// rn % split_total = split_index - 1` reproduces the per-stage
-// `not splitActive or rn % splitTotal = splitIndex - 1` exactly.
+// The split filter (split_total/split_index null ⇒ no split, else the stable
+// hash bucket in BATCH_SPLIT_FILTER) reproduces the per-stage send split exactly.
 function buildStagesCte(stages: StageCountBatchItem[]): SQL {
   const rows = stages.map(
     (s) => drizzleSql`select
@@ -541,7 +539,7 @@ function buildStagesCte(stages: StageCountBatchItem[]): SQL {
 
 const BATCH_SPLIT_FILTER = drizzleSql`count(*) filter (
         where split_total is null or split_index is null
-          or rn % split_total = split_index - 1
+          or ${splitBucketMatch(drizzleSql`contact_id`, drizzleSql`split_total`, drizzleSql`split_index`)}
       )::int as count`;
 
 // Batched equivalent of computeStageAudienceCount(...).count for the ACTIVE
@@ -579,7 +577,7 @@ export async function computeStageAudienceCountsBatch(
         st.stage_id,
         st.split_index,
         st.split_total,
-        row_number() over (partition by st.stage_id order by base.contact_id) - 1 as rn
+        base.contact_id
       from st
       join base on
         not base.is_opt_out_now
@@ -1108,10 +1106,10 @@ export async function computeStageEligibilityPreview(
           left join ei on ei.contact_id = q.contact_id
           left join eo on eo.contact_id = q.contact_id
         ),
-        -- Post-dedup set, numbered for split — exactly the send path's order
-        -- (base EXCEPT layers, THEN split), so will_send == materialized.
+        -- Post-dedup set, split by the stable hash bucket — exactly the send
+        -- path (base EXCEPT layers, THEN split), so will_send == materialized.
         eligible as (
-          select contact_id, row_number() over (order by contact_id) - 1 as rn
+          select contact_id
           from joined
           where not f_creative and not f_inflight and not f_offer
         )
@@ -1121,7 +1119,7 @@ export async function computeStageEligibilityPreview(
           (select count(*) from joined where f_offer)::int as got_offer,
           (select count(*) from eligible
             where not ${splitActive}::boolean
-              or rn % ${splitTotal ?? 1}::int = (${(splitIndex ?? 1) - 1})::int
+              or ${splitBucketMatch(drizzleSql`contact_id`, drizzleSql`${splitTotal ?? 1}`, drizzleSql`${splitIndex ?? 1}`)}
           )::int as will_send
       `)) as unknown as {
         segment_total: number;

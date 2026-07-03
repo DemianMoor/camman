@@ -29,7 +29,7 @@ async function main() {
   const drainCalls: number[] = [];
   const fakeDrain = async (stageId: number): Promise<DrainResult> => {
     drainCalls.push(stageId);
-    return { ok: true, sent: 4, failed: 0, filtered: 0, processed: 4, halted: false, stuck: 0, remaining: 0, stopReason: null, pausedNow: false };
+    return { ok: true, sent: 4, failed: 0, filtered: 0, skippedDuplicate: 0, processed: 4, halted: false, stuck: 0, remaining: 0, stopReason: null, pausedNow: false };
   };
 
   try {

@@ -206,10 +206,16 @@ async function main() {
       await addCred(prov);
       const stageId = await mkStage(prov, false);
 
+      // Each pending row gets a UNIQUE phone so the drain's global 1-hour
+      // send-dedup gate (migration 0090) never fires here — this suite verifies
+      // drain mechanics (claim/send/breakers), not dedup. A shared phone would be
+      // skipped_duplicate across cases and break the sent/failed assertions.
+      let sendPhoneSeq = 0;
       const addPending = async (stage: number, contactId: string, text: string) =>
         tx.execute(sql`
           INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
-          VALUES (${orgId}, ${camp.id}, ${stage}, ${contactId}, ${"+15555550000"}, ${text}, 'pending')
+          VALUES (${orgId}, ${camp.id}, ${stage}, ${contactId},
+                  ${`+1557000${String(sendPhoneSeq++).padStart(4, "0")}`}, ${text}, 'pending')
         `);
       const statusOf = async (stage: number, predicate: string) =>
         Number((await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${stage} AND status = ${predicate}`)).n);

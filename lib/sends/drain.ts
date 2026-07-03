@@ -16,6 +16,7 @@ import {
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
+import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
 import { getOrgSendsEnabled, getOrgSendsPaused } from "@/lib/sends/org-send-flag";
 import { resolveProviderApiKey } from "@/lib/sends/provider-credential";
 import { buildSendUrl, sendSms as realSendSms, type SendSmsResult } from "@/lib/sends/texthub";
@@ -71,6 +72,10 @@ export interface DrainResult {
   // operator can see provider-suppression vs genuine failures. LABEL ONLY — these
   // are NOT opted out and NOT skipped in future campaigns.
   filtered: number;
+  // Rows NOT sent because the phone already received a message within the global
+  // 1-hour dedup window (lib/sends/dedup-window.ts). Marked 'skipped_duplicate' —
+  // terminal, not sent, not opted-out, not auto-retried.
+  skippedDuplicate: number;
   processed: number;
   halted: boolean; // stopped early (kill-switch off, pause, or a breaker trip)
   stuck: number; // rows left in 'sending' (crashed mid-send — manual review)
@@ -103,6 +108,7 @@ const EMPTY = {
   sent: 0,
   failed: 0,
   filtered: 0,
+  skippedDuplicate: 0,
   processed: 0,
   halted: false,
   stuck: 0,
@@ -230,6 +236,7 @@ export async function runStageDrain(
   let sent = 0;
   let failed = 0;
   let filtered = 0;
+  let skippedDuplicate = 0;
   let processed = 0;
   let halted = false;
   let stopReason: DrainStopReason | null = null;
@@ -296,6 +303,48 @@ export async function runStageDrain(
 
     if (claimed.length === 0) break;
 
+    // ── HARD 1-hour send-dedup gate (global, org-wide) ──────────────────────
+    // Before sending, drop any claimed row whose phone already received a message
+    // within SEND_DEDUP_WINDOW_MS — across ANY campaign/stage. This is the safety
+    // net against split-materialization bugs, cross-campaign overlap, and rapid
+    // drips: a number never gets two messages inside the window. Violators are
+    // marked 'skipped_duplicate' (terminal) and never dispatched. Two sources:
+    //   (a) already-'sent' rows in the DB within the window (incl. this run's
+    //       earlier slices, which committed sent_at per slice), and
+    //   (b) a phone appearing more than once WITHIN this batch (kept once).
+    const batchPhones = [...new Set(claimed.map((c) => c.phone))];
+    const recentRows = (await dbc.execute(sql`
+      SELECT DISTINCT phone FROM stage_sends
+      WHERE org_id = ${orgId}
+        AND status = 'sent'
+        AND sent_at >= now() - interval '1 millisecond' * ${SEND_DEDUP_WINDOW_MS}
+        AND phone IN (${sql.join(batchPhones.map((p) => sql`${p}`), sql`, `)})
+    `)) as unknown as { phone: string }[];
+    const recentPhones = new Set(recentRows.map((r) => r.phone));
+    const seenThisBatch = new Set<string>();
+    const toSend: ClaimedRow[] = [];
+    const skipIds: string[] = [];
+    for (const c of claimed) {
+      if (recentPhones.has(c.phone) || seenThisBatch.has(c.phone)) {
+        skipIds.push(c.id);
+      } else {
+        seenThisBatch.add(c.phone);
+        toSend.push(c);
+      }
+    }
+    if (skipIds.length > 0) {
+      await dbc.execute(sql`
+        UPDATE stage_sends
+        SET status = 'skipped_duplicate',
+            last_error = 'dedup: phone messaged within 1h window'
+        WHERE id IN (${sql.join(skipIds.map((id) => sql`${id}::uuid`), sql`, `)})
+      `);
+      skippedDuplicate += skipIds.length;
+    }
+    // Whole batch was duplicates — claim the next batch (skipped rows left the
+    // 'pending' set, so we make progress and can't loop forever).
+    if (toSend.length === 0) continue;
+
     // Build the redacted request shape once per batch — same URL TextHub gets,
     // but with a placeholder key so the api_key is NEVER persisted (the real key
     // is only ever passed to sendSms below).
@@ -315,9 +364,9 @@ export async function runStageDrain(
     // already fired/persisted by the time the breaker trips (≤ `rate`-1 sends
     // past the threshold — an acceptable widening of a heuristic stop). After each
     // slice we PACE to the provider's per-second `rate` (see below the fold).
-    for (let off = 0; off < claimed.length && !stopReason; off += rate) {
+    for (let off = 0; off < toSend.length && !stopReason; off += rate) {
       const sliceStart = Date.now();
-      const slice = claimed.slice(off, off + rate);
+      const slice = toSend.slice(off, off + rate);
       const results = await Promise.all(
         slice.map((c) =>
           sendSms({ apiKey, text: c.rendered_text, number: c.phone, leadId: c.lead_id }),
@@ -475,11 +524,24 @@ export async function runStageDrain(
     );
   }
 
+  // Dedup warning: numbers excluded because they were already messaged within the
+  // 1-hour window. Not an error — a safety net firing — but surfaced so a bug or
+  // an over-aggressive schedule that would double-text people is visible.
+  if (skippedDuplicate > 0) {
+    await notifyTelegram(
+      `⚠️ Send dedup: ${skippedDuplicate} number(s) SKIPPED (already messaged within 1h)\n` +
+        `stage: ${opts.stageId} · provider ${providerId} (org ${orgId})\n` +
+        `sent ${sent}, skipped_duplicate ${skippedDuplicate}, remaining ${remaining}\n` +
+        `These were excluded from sending, not opted out. Review the stage if unexpected.`,
+    );
+  }
+
   return {
     ok: true,
     sent,
     failed,
     filtered,
+    skippedDuplicate,
     processed,
     halted,
     stuck,

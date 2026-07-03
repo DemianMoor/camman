@@ -69,6 +69,7 @@ export async function GET(
         count(*) FILTER (WHERE status = 'failed')::int    AS failed,
         count(*) FILTER (WHERE status = 'rejected')::int  AS rejected,
         count(*) FILTER (WHERE status = 'filtered')::int  AS filtered,
+        count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate,
         count(*) FILTER (WHERE status = 'pending')::int   AS pending,
         count(*) FILTER (WHERE status = 'sending')::int   AS sending,
         count(*)::int                                     AS total,
@@ -95,6 +96,7 @@ export async function GET(
         count(*) FILTER (WHERE ss.status = 'sent')::int   AS sent,
         count(*) FILTER (WHERE ss.status = 'failed')::int AS failed,
         count(*) FILTER (WHERE ss.status = 'filtered')::int AS filtered,
+        count(*) FILTER (WHERE ss.status = 'skipped_duplicate')::int AS skipped_duplicate,
         count(*) FILTER (WHERE ss.status IN ('pending','sending'))::int AS pending,
         count(*)::int                                     AS total,
         max(ss.sent_at)                                   AS last_sent_at
@@ -134,6 +136,7 @@ export async function GET(
       failed: number;
       rejected: number;
       filtered: number;
+      skipped_duplicate: number;
       pending: number;
       sending: number;
       total: number;
@@ -146,6 +149,7 @@ export async function GET(
       sent: number;
       failed: number;
       filtered: number;
+      skipped_duplicate: number;
       pending: number;
       total: number;
       last_sent_at: string | null;
@@ -170,6 +174,7 @@ export async function GET(
       failed: t?.failed ?? 0,
       rejected: t?.rejected ?? 0,
       filtered: t?.filtered ?? 0,
+      skipped_duplicate: t?.skipped_duplicate ?? 0,
       pending: t?.pending ?? 0,
       sending: t?.sending ?? 0,
       total: t?.total ?? 0,

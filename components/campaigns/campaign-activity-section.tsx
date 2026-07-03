@@ -24,6 +24,7 @@ interface StageRollup {
   sent: number;
   failed: number;
   filtered: number;
+  skipped_duplicate: number;
   pending: number;
   total: number;
   last_sent_at: string | null;
@@ -33,6 +34,7 @@ interface ActivitySummary {
   failed: number;
   rejected: number;
   filtered: number;
+  skipped_duplicate: number;
   pending: number;
   sending: number;
   total: number;
@@ -97,6 +99,9 @@ const STATUS_STYLES: Record<string, string> = {
   failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
   rejected: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
   filtered: "bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300",
+  // 1-hour dedup gate excluded this number (already messaged within the window) —
+  // warning amber/orange, distinct from a genuine failure or a provider block.
+  skipped_duplicate: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
   pending: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   sending: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
 };
@@ -173,7 +178,7 @@ export function CampaignActivitySection({
       <h2 className="text-lg font-semibold">Activity</h2>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
         <SummaryCard label="Messages sent" value={s.sent} accent="text-emerald-700 dark:text-emerald-400" />
         <SummaryCard label="Failed" value={s.failed} accent={s.failed > 0 ? "text-red-700 dark:text-red-400" : undefined} />
         <SummaryCard
@@ -181,6 +186,12 @@ export function CampaignActivitySection({
           value={s.filtered}
           accent={s.filtered > 0 ? "text-violet-700 dark:text-violet-400" : undefined}
           hint="Rejected by TextHub as suppressed/unsubscribed on their side. Not opted out here and not skipped in future campaigns — label only."
+        />
+        <SummaryCard
+          label="Skipped (1h)"
+          value={s.skipped_duplicate}
+          accent={s.skipped_duplicate > 0 ? "text-orange-700 dark:text-orange-400" : undefined}
+          hint="Excluded by the global 1-hour dedup gate: the number already received a message within the last hour (any campaign). Not sent, not opted out."
         />
         <SummaryCard label="In flight" value={s.pending + s.sending} />
         <SummaryCard label="Replies" value={s.replies} />
@@ -425,6 +436,7 @@ function MessagesPanel({
             <SelectItem value="failed">Failed</SelectItem>
             <SelectItem value="rejected">Rejected</SelectItem>
             <SelectItem value="filtered">Filtered</SelectItem>
+            <SelectItem value="skipped_duplicate">Skipped (1h dedup)</SelectItem>
             <SelectItem value="pending">Pending</SelectItem>
             <SelectItem value="sending">Sending</SelectItem>
           </SelectContent>

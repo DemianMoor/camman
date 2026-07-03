@@ -18,6 +18,9 @@ const SEND_STATUSES = new Set([
   // TextHub-suppressed. Filterable on its own, but deliberately NOT part of the
   // "attention" quick-filter below — a suppression isn't a row a human must fix.
   "filtered",
+  // Excluded by the global 1-hour dedup gate (migration 0090). Filterable on its
+  // own; not in "attention" (the gate firing is expected safety behavior).
+  "skipped_duplicate",
 ]);
 
 function parseId(idParam: string) {

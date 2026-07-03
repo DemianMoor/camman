@@ -126,6 +126,21 @@ TextHub rejects a number it blocks on **its** side with a dedicated structured e
 - **Breaker note (unchanged behavior):** a `filtered` outcome still increments the per-run consecutive-failure counter exactly as before (suppressions were previously `'failed'`), so a wall of suppressions can still trip the failure-spike pause. Whether suppression *should* feed that breaker is a separate sending-behavior question, intentionally left unchanged here.
 - **Historical rows:** the ~262 pre-0065 suppressions stay `status='failed'` (not backfilled) — out of scope for this visibility change.
 
+### Stage split partitioning — stable hash bucket
+A stage can carry `split_index`/`split_total` (A/B split of the campaign audience). The bucket predicate is **`splitBucketMatch`** ([lib/sends/split-bucket.ts](../../lib/sends/split-bucket.ts)): `((hashtextextended(contact_id::text,0) % splitTotal) + splitTotal) % splitTotal = splitIndex-1`. A contact's bucket depends only on its own id — **never on the surrounding set** — which is load-bearing for windowed/resumable materialization.
+
+- **Why (incident).** The old bucket was `row_number() over (order by contact_id) % splitTotal`, computed AFTER the resumable "exclude already-materialized" filter. On a resume the row numbers were reassigned over the shrunken remaining set, so the modulo selected a different subset and **leaked the sibling stage's half** into this one — campaign `8_62_070326_1` materialized 7,500 instead of 5,000 per half (5,000 contacts in both stages; 4,926 double-sent). The hash bucket can't shift under resume.
+- **One definition, six call sites.** `splitBucketMatch` is the single source; the send recipient query, the all-phones CSV export, the frozen/draft/batched audience-count previews, the content-dedup `will_send` preview, and `computeStageReconciliation` all use it, so preview/export/reconcile mirror exactly what sends.
+- **Tradeoff:** buckets are *approximately* even (hash uniformity), not exactly 50/50 — acceptable for A/B splits. Exactly-balanced splits are out of scope.
+
+### Global 1-hour send-dedup gate (migration 0090)
+A HARD gate in the drain: before dispatching a claimed batch, any row whose **phone** already has a `status='sent'` row within `SEND_DEDUP_WINDOW_MS` (1h, [lib/sends/dedup-window.ts](../../lib/sends/dedup-window.ts)) — **org-wide, across every campaign/stage** — is marked **`stage_sends.status = 'skipped_duplicate'`** and never sent. Also dedups a phone appearing more than once within the same batch. Terminal: not sent, not opted-out, not auto-retried.
+
+- **Why.** The safety net against ANY duplicate cause — a split-materialization bug, cross-campaign audience overlap, or a rapid intentional drip to the same people. A number never receives two messages within the window, whatever the upstream mistake.
+- **Where.** Send-time (the drain) is the only place the prior message's actual `sent_at` is known and the single chokepoint every send passes; backed by partial index `stage_sends(org_id, phone, sent_at) WHERE status='sent'`.
+- **Surfaced.** The drain returns a `skippedDuplicate` count (separate from `sent`/`failed`/`filtered`); a **Telegram** alert fires per stage when > 0; the `send_drain` activity event + audit metadata report it; the **Activity** tab shows an orange **"Skipped (1h)"** summary tile + a `skipped_duplicate` status filter/badge. A stage fully drained with nothing sent but rows skipped reads **"Needs attention"**, not green.
+- **Behavior note:** an intentional back-to-back drip (stage 1 at 11:00, stage 2 at 11:30 to the same people) will skip the overlap in stage 2 — the strict global rule. Change the window in one place (`SEND_DEDUP_WINDOW_MS`).
+
 ### Scheduling & quiet hours (`scheduled.ts` + `lib/quiet-hours.ts`)
 - `scheduled_at` on a stage drives the `*/5` `send-scheduled` cron ([crons.md](crons.md)).
 - **Two phases per tick, sharing one per-provider per-tick send budget:**

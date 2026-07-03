@@ -52,6 +52,7 @@ async function main() {
       sent: processed,
       failed: 0,
       filtered: 0,
+      skippedDuplicate: 0,
       processed,
       halted: false,
       stuck: 0,

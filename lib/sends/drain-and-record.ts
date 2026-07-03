@@ -55,11 +55,12 @@ export async function runStageDrainAndRecord(
         stageId: opts.stageId,
         actorUserId: opts.actorUserId ?? null,
         eventType: "send_drain",
-        summary: `Stage ${stamp[0].stage_number} send run: ${result.sent.toLocaleString()} submitted (accepted by TextHub), ${result.failed} failed${result.filtered ? `, ${result.filtered} filtered (TextHub suppressed)` : ""}${stopped}`,
+        summary: `Stage ${stamp[0].stage_number} send run: ${result.sent.toLocaleString()} submitted (accepted by TextHub), ${result.failed} failed${result.filtered ? `, ${result.filtered} filtered (TextHub suppressed)` : ""}${result.skippedDuplicate ? `, ${result.skippedDuplicate} skipped (messaged within 1h)` : ""}${stopped}`,
         metadata: {
           sent: result.sent,
           failed: result.failed,
           filtered: result.filtered,
+          skipped_duplicate: result.skippedDuplicate,
           processed: result.processed,
           remaining: result.remaining,
           stopReason: result.stopReason,

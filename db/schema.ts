@@ -2200,9 +2200,15 @@ export const stage_sends = pgTable(
     index("stage_sends_org_id_idx").on(table.org_id),
     index("stage_sends_stage_id_idx").on(table.stage_id),
     index("stage_sends_link_id_idx").on(table.link_id),
+    // Migration 0090: recent-send dedup lookup ("has this phone been SENT within
+    // the last hour, org-wide?") for the drain's 1-hour dedup gate.
+    index("stage_sends_org_phone_sent_at_idx")
+      .on(table.org_id, table.phone, table.sent_at)
+      .where(sql`status = 'sent'`),
     check(
       "stage_sends_status_check",
-      sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected', 'filtered')`,
+      // Migration 0090 added 'skipped_duplicate' (drain 1-hour dedup gate).
+      sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected', 'filtered', 'skipped_duplicate')`,
     ),
     // Migration 0067: per-recipient sale attribution from Keitaro.
     check(

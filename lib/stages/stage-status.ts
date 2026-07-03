@@ -140,6 +140,9 @@ export interface StageSendCounts {
   sending: number;
   sent: number;
   failed: number;
+  // Rows excluded by the global 1-hour send-dedup gate (migration 0090). Terminal:
+  // never sent, never opted-out. Surfaced as a warning, not counted as sent.
+  skippedDuplicate: number;
 }
 
 export interface DeriveStageStatusInput {
@@ -163,6 +166,7 @@ const EMPTY_COUNTS: StageSendCounts = {
   sending: 0,
   sent: 0,
   failed: 0,
+  skippedDuplicate: 0,
 };
 
 /**
@@ -209,6 +213,9 @@ export function deriveStageOperationalStatus(
     if (c.sent > 0 || c.sending > 0) return "sending_sent";
     // 4. Materialized and waiting (Prepared / Blue) — the WS4 non-negotiable.
     if (c.pending > 0) return "prepared";
+    // 5. Fully drained with NOTHING sent but rows excluded by the 1-hour dedup
+    //    gate → needs attention (a silently-skipped stage must not read Green).
+    if (c.skippedDuplicate > 0) return "missed_failed";
     // Fully drained, zero sent, zero failed — nothing left; treat as sent.
     return "sending_sent";
   }

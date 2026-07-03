@@ -316,7 +316,8 @@ export async function GET(
         count(*) FILTER (WHERE status = 'pending')::int AS pending,
         count(*) FILTER (WHERE status = 'sending')::int AS sending,
         count(*) FILTER (WHERE status = 'sent')::int AS sent,
-        count(*) FILTER (WHERE status IN ('failed', 'rejected'))::int AS failed
+        count(*) FILTER (WHERE status IN ('failed', 'rejected'))::int AS failed,
+        count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate
       FROM stage_sends
       WHERE org_id = ${orgId} AND campaign_id = ${cid}
       GROUP BY stage_id
@@ -342,6 +343,7 @@ export async function GET(
       sending: number;
       sent: number;
       failed: number;
+      skipped_duplicate: number;
     }[],
     { stage_id: number; sales: number; revenue: string }[],
   ];
@@ -361,6 +363,7 @@ export async function GET(
         sending: Number(r.sending),
         sent: Number(r.sent),
         failed: Number(r.failed),
+        skippedDuplicate: Number(r.skipped_duplicate),
       },
     ]),
   );
@@ -383,6 +386,7 @@ export async function GET(
       sending: 0,
       sent: 0,
       failed: 0,
+      skippedDuplicate: 0,
     },
   }));
 

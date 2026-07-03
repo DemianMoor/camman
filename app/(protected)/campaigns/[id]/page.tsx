@@ -251,6 +251,7 @@ type Stage = {
     sending: number;
     sent: number;
     failed: number;
+    skippedDuplicate: number;
   };
   creative: { id: number; slug: string; text: string } | null;
   provider: Info | null;

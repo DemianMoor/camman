@@ -290,7 +290,11 @@ async function main() {
     console.log("\nAt-most-once (re-kickoff):");
     const before1 = (await materializedSet(lane[1].id)).size;
     const rAgain = await kickoffStageSend(db, { orgId, campaignId, stageId: lane[1].id });
-    check("re-kickoff refused with 'already_pending'", !rAgain.ok && rAgain.reason === "already_pending", JSON.stringify(rAgain));
+    check(
+      "re-kickoff is a no-op once fully materialized (complete, 0 new)",
+      rAgain.ok && rAgain.complete && rAgain.materialized === 0,
+      JSON.stringify(rAgain),
+    );
     check("no duplicate rows materialized", (await materializedSet(lane[1].id)).size === before1);
 
     // ====================================================================

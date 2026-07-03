@@ -2200,11 +2200,11 @@ export const stage_sends = pgTable(
     index("stage_sends_org_id_idx").on(table.org_id),
     index("stage_sends_stage_id_idx").on(table.stage_id),
     index("stage_sends_link_id_idx").on(table.link_id),
-    // Migration 0090: recent-send dedup lookup ("has this phone been SENT within
-    // the last hour, org-wide?") for the drain's 1-hour dedup gate.
-    index("stage_sends_org_phone_sent_at_idx")
-      .on(table.org_id, table.phone, table.sent_at)
-      .where(sql`status = 'sent'`),
+    // NOTE: the drain's 1-hour dedup lookup ("has this phone been SENT recently,
+    // org-wide?") reuses the existing partial index `stage_sends_org_phone_sent_idx`
+    // (migration 0075, declared below) — same (org_id, phone, sent_at) WHERE
+    // status='sent'. Migration 0090 briefly added an identical duplicate; 0091
+    // dropped it.
     check(
       "stage_sends_status_check",
       // Migration 0090 added 'skipped_duplicate' (drain 1-hour dedup gate).

@@ -1,6 +1,6 @@
 # Daily-Volume UI (WS4)
 
-_Last updated: 2026-06-30_
+_Last updated: 2026-07-03_
 
 The operating layer that makes running many tracked SMS campaigns a day fast and
 legible. Purely additive UI + read endpoints over the existing send pipeline
@@ -29,15 +29,22 @@ status is **derived** from the send pipeline and answers "will this stage fire?"
 |---|---|---|---|
 | ⚪ Grey | `draft` | Draft | No — not scheduled/configured |
 | 🟠 Orange | `scheduled_unprepared` | Scheduled, not prepared | **No** — time set, no rows |
-| 🔵 Blue | `prepared` | Prepared | Yes — rows materialized, waiting |
+| 🟣 Indigo | `materializing` | Materializing | In progress — rows landing in the background, not sendable yet |
+| 🔵 Blue | `prepared` | Prepared | Yes — fully materialized, waiting |
 | 🟢 Green | `sending_sent` | Sending / Sent | Submitted to provider |
 | 🔴 Red | `missed_failed` | Missed / Failed | Needs attention |
 
-**The non-negotiable rule:** Orange↔Blue is driven by **materialization**
-(whether `stage_sends` rows exist), NOT by whether `scheduled_at` is set. A
-scheduled stage with no rows reads Orange ("won't send until you Prepare it");
-once Prepared (rows exist) it reads Blue. This depends on Bug 1 (false `sent_at`)
-being fixed so a missed send reads Red, not Green.
+**The non-negotiable rule:** Orange↔Blue is driven by **materialization**, NOT by
+whether `scheduled_at` is set. A scheduled stage with no rows reads Orange ("won't
+send until you Prepare it"); once fully materialized it reads Blue. This depends on
+Bug 1 (false `sent_at`) being fixed so a missed send reads Red, not Green.
+
+**Indigo `materializing` (WS5):** materialization is windowed + resumable (see
+[sms-send-pipeline.md](sms-send-pipeline.md)), so a stage can have SOME
+`stage_sends` rows while `campaign_stages.materialized_at` is still NULL. That
+in-between state reads Indigo — the audience is incomplete and **cannot send yet**
+(the cron finishes it, then it flips to Blue). The deriver keys off `materializedAt`,
+not row existence, precisely so a half-built batch never reads "Prepared".
 
 `deriveStageOperationalStatus()` returns `null` for stages off the pipeline
 (manual-mode campaigns, archived stages) — callers fall back to the manual-status

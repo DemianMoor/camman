@@ -2,6 +2,14 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-03 — Windowed, resumable send materialization (migration 0089) — docs: 04-features/sms-send-pipeline, 04-features/daily-volume-ui, 03-data-model, CHANGELOG
+- **What.** "Prepare" (kickoff) materialized a stage's whole audience in ONE atomic transaction. Measured ~3.5 ms/recipient (enumerate + mint links + insert stage_sends across heavily-indexed tables), so it hit the 60s function limit around ~17K recipients and **rolled the whole batch back** — nothing prepared. Now materialization is **windowed + resumable**.
+- **Core.** New `campaign_stages.materialized_at` (migration [`0089`](../../db/migrations/0089_stage_materialized_at.sql)) — the completeness signal, set only when the last window lands (backfilled for pre-existing stages that already had rows). `kickoffStageSend` commits in 2000-row windows under a time budget, enumerating only not-yet-materialized recipients, idempotent via `ON CONFLICT DO NOTHING` + the enumerate exclusion. A timeout/crash resumes from committed rows; a re-Prepare is a no-op (`already_pending` retired).
+- **Never sends partial.** Scheduler Phase A resumes stages with `materialized_at IS NULL`; Phase B drains only `materialized_at IS NOT NULL`. So a half-built audience can't be sent — the cron finishes materialization, then drains.
+- **Guardrail (shipped separately).** Kickoff/approve-send `maxDuration` 60→300.
+- **Visibility.** A stage mid-materialization reads a new Indigo **"Materializing"** operational status (not "Prepared") so the operator sees steady progress instead of a stalled spinner; flips to Blue "Prepared" when complete. `materialized_at` surfaced on the stages + sends/today endpoints.
+- Verified: `scripts/test-resumable-materialization.ts` (13/13 — fresh, idempotent, resume-after-partial with no duplicates, no-early-send gate), `tsc`, production build. Migration applied to prod.
+
 ## 2026-07-02 — Fix: prior-offer dedup (LAYER 3) self-cannibalized single-offer drips — docs: 04-features/content-dedup, CHANGELOG
 - **What.** The offer-exposure exclusion (`campaigns.exclude_prior_offer_contacts`, eligibility LAYER 3) excluded EVERY contact in `offer_exposures` for the offer, with no same-campaign carve-out — unlike LAYER 1 (creative), which excepts `campaign_id <> current`. In a multi-stage campaign on one offer, stage 1's send registers the whole audience in `offer_exposures` under that campaign, so every LATER stage of the SAME campaign filtered them all out.
 - **Symptom.** Campaign 235 "Kinzeno - 14508 - 01/07/26 (Manifestation)" stage 667 "Day 2" materialized **1** recipient instead of **9,672** (100% of the suppression came from its own Day 1). The stages "Audience" column showed 9,672 because that count does not apply the eligibility overlay; only the materialized `stage_sends` reflected the collapse.

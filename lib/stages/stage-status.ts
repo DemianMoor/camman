@@ -19,6 +19,7 @@
 export type StageOperationalStatus =
   | "draft"
   | "scheduled_unprepared"
+  | "materializing"
   | "prepared"
   | "sending_sent"
   | "missed_failed";
@@ -71,6 +72,19 @@ export const STAGE_STATUS_META: Record<StageOperationalStatus, StageStatusMeta> 
     rowClass: "border-l-orange-500 bg-orange-50/40 dark:bg-orange-950/20",
     swatchClass: "bg-orange-500",
   },
+  materializing: {
+    key: "materializing",
+    label: "Materializing",
+    meaning:
+      "Preparing messages in the background — resumes automatically and will be ready to send shortly. (Large audiences finish across a few cron ticks.)",
+    willSend: "yes",
+    sortWeight: 10,
+    badgeClass:
+      "border-indigo-300 bg-indigo-100 text-indigo-800 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-200",
+    dotClass: "bg-indigo-500 animate-pulse",
+    rowClass: "border-l-indigo-500 bg-indigo-50/40 dark:bg-indigo-950/20",
+    swatchClass: "bg-indigo-500",
+  },
   prepared: {
     key: "prepared",
     label: "Prepared",
@@ -114,6 +128,7 @@ export const STAGE_STATUS_META: Record<StageOperationalStatus, StageStatusMeta> 
 export const STAGE_STATUS_ORDER: StageOperationalStatus[] = [
   "draft",
   "scheduled_unprepared",
+  "materializing",
   "prepared",
   "sending_sent",
   "missed_failed",
@@ -135,6 +150,9 @@ export interface DeriveStageStatusInput {
   scheduledAt: string | Date | null;
   sentAt: string | Date | null;
   scheduleMissedAt: string | Date | null;
+  /** campaign_stages.materialized_at — set only when EVERY recipient row exists.
+   *  NULL while windowed materialization is in progress (some rows may exist). */
+  materializedAt: string | Date | null;
   /** stage_sends counts by status. Null/absent ⇒ nothing materialized. */
   counts: StageSendCounts | null | undefined;
 }
@@ -175,6 +193,12 @@ export function deriveStageOperationalStatus(
   // 1. A missed scheduled window is always "needs attention" — must never read
   //    Green/Sent (Bug 1 makes schedule_missed_at trustworthy).
   if (input.scheduleMissedAt != null) return "missed_failed";
+
+  // 1b. Materialization in progress: rows are being written in committed windows
+  //     but materialized_at isn't set yet, so the audience is INCOMPLETE and must
+  //     NOT read "Prepared" (it can't send until complete). Distinct Indigo state
+  //     so the operator sees steady progress instead of a stalled/timed-out spinner.
+  if (input.materializedAt == null && hasRows) return "materializing";
 
   if (hasRows) {
     const draining = c.pending > 0;

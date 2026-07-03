@@ -164,6 +164,7 @@ export async function GET(
       include_no_status: campaign_stages.include_no_status,
       scheduled_at: campaign_stages.scheduled_at,
       sent_at: campaign_stages.sent_at,
+      materialized_at: campaign_stages.materialized_at,
       schedule_missed_at: campaign_stages.schedule_missed_at,
       send_approved: campaign_stages.send_approved,
       status_changed_at: campaign_stages.status_changed_at,

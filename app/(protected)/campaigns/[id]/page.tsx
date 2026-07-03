@@ -204,6 +204,7 @@ type Stage = {
   include_no_status: boolean;
   scheduled_at: string | null;
   sent_at: string | null;
+  materialized_at: string | null;
   schedule_missed_at: string | null;
   send_approved: boolean;
   status: StageStatus;
@@ -713,6 +714,7 @@ export default function CampaignDetailPage() {
       scheduledAt: s.scheduled_at,
       sentAt: s.sent_at,
       scheduleMissedAt: s.schedule_missed_at,
+      materializedAt: s.materialized_at,
       counts: s.send_counts,
     });
   }

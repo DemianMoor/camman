@@ -38,6 +38,7 @@ export async function GET() {
       s.label           AS label,
       s.scheduled_at    AS scheduled_at,
       s.sent_at         AS sent_at,
+      s.materialized_at AS materialized_at,
       s.schedule_missed_at AS schedule_missed_at,
       s.send_approved   AS send_approved,
       s.status          AS status,
@@ -69,6 +70,7 @@ export async function GET() {
     label: string | null;
     scheduled_at: string | null;
     sent_at: string | null;
+    materialized_at: string | null;
     schedule_missed_at: string | null;
     send_approved: boolean;
     status: string;
@@ -138,6 +140,7 @@ export async function GET() {
         scheduledAt: r.scheduled_at,
         sentAt: r.sent_at,
         scheduleMissedAt: r.schedule_missed_at,
+        materializedAt: r.materialized_at,
         counts,
       }) ?? "draft";
 

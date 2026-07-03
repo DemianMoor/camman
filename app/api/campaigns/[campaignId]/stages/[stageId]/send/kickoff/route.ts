@@ -8,7 +8,13 @@ import { kickoffStageSend } from "@/lib/sends/kickoff";
 import { KICKOFF_REFUSAL as REFUSAL } from "@/lib/sends/kickoff-refusals";
 import { can } from "@/lib/permissions";
 
-export const maxDuration = 60;
+// Materialization is O(recipients) index-maintenance work (measured ~3.5ms/
+// recipient: enumerate + mint links + insert stage_sends across heavily-indexed
+// tables). At 60s a stage timed out around ~17K recipients and rolled the whole
+// batch back. 300s (Vercel Pro ceiling) is the guardrail; the windowed,
+// per-window-commit materialization below (kickoffStageSend) is the real fix —
+// it commits progress incrementally and resumes, so a timeout no longer loses work.
+export const maxDuration = 300;
 
 function parseId(idParam: string) {
   const n = Number(idParam);

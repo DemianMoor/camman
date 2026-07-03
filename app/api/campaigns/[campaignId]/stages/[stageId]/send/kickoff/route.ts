@@ -43,21 +43,28 @@ export async function POST(
     return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION);
   }
 
-  const result = await db.transaction(async (tx) => {
-    const r = await kickoffStageSend(tx, { orgId, campaignId, stageId });
-    if (r.ok) {
-      await logCampaignEvent(tx, {
-        orgId,
-        campaignId,
-        stageId,
-        actorUserId: user.id,
-        eventType: "send_kickoff",
-        summary: `Send batch materialized: ${r.materialized.toLocaleString()} recipient${r.materialized === 1 ? "" : "s"} (${r.mode})`,
-        metadata: { materialized: r.materialized, mode: r.mode },
-      });
-    }
-    return r;
-  });
+  // Windowed + resumable: kickoffStageSend commits per window and manages its own
+  // transactions, so it must NOT be wrapped in an outer transaction. It returns
+  // complete=false when the time budget was hit mid-materialization — the
+  // scheduled-send cron then resumes the remainder before the send window opens.
+  const result = await kickoffStageSend(db, { orgId, campaignId, stageId });
+  if (result.ok) {
+    await logCampaignEvent(db, {
+      orgId,
+      campaignId,
+      stageId,
+      actorUserId: user.id,
+      eventType: "send_kickoff",
+      summary: result.complete
+        ? `Send batch materialized: ${result.materialized.toLocaleString()} recipient${result.materialized === 1 ? "" : "s"} (${result.mode})`
+        : `Materializing send batch in the background: ${result.materialized.toLocaleString()} so far (${result.mode})`,
+      metadata: {
+        materialized: result.materialized,
+        complete: result.complete,
+        mode: result.mode,
+      },
+    });
+  }
 
   if (!result.ok) {
     const r = REFUSAL[result.reason];

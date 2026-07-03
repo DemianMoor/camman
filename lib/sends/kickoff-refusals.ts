@@ -9,10 +9,6 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     status: 400,
     message: "Set a send date/time before sending (a copied stage starts with no date)",
   },
-  already_pending: {
-    status: 409,
-    message: "This stage already has a pending send batch — resolve it before starting another",
-  },
   no_recipients: { status: 400, message: "No recipients qualify for this stage" },
   stage_not_ready: {
     status: 400,

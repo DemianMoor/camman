@@ -6,20 +6,17 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { runStageDrainAndRecord } from "@/lib/sends/drain-and-record";
-import { kickoffStageSend, type KickoffRefusal } from "@/lib/sends/kickoff";
+import { kickoffStageSend } from "@/lib/sends/kickoff";
 import { KICKOFF_REFUSAL } from "@/lib/sends/kickoff-refusals";
 import { can } from "@/lib/permissions";
+
+// Materialization is windowed + resumable and can run up to its full budget.
+export const maxDuration = 300;
 
 function parseId(idParam: string) {
   const n = Number(idParam);
   if (!Number.isInteger(n) || n <= 0) return null;
   return n;
-}
-
-class Refusal extends Error {
-  constructor(public reason: KickoffRefusal) {
-    super(reason);
-  }
 }
 
 // Collapsed "Approve Send" commit (WS2). One operator action: approve the stage,
@@ -101,76 +98,69 @@ export async function POST(
     );
   }
 
-  // Approve + materialize atomically. A kickoff refusal rolls back the approval,
-  // so the stage is never left approved with no batch.
-  let materialized: number;
-  let mode: "manual" | "tracked";
-  try {
-    const r = await db.transaction(async (tx) => {
-      await tx.execute(sql`
-        UPDATE campaign_stages SET send_approved = true
-        WHERE id = ${stageId} AND org_id = ${orgId}
-      `);
-      // Explicit send-now on a not-yet-scheduled stage: stamp the send date to
-      // NOW before kickoff so the pipeline's no_schedule guard passes. Immediate
-      // sends are never routed through a null date.
-      if (sendNow && scheduledAt == null) {
-        await tx.execute(sql`
-          UPDATE campaign_stages SET scheduled_at = now()
-          WHERE id = ${stageId} AND org_id = ${orgId}
-        `);
-      }
-      const k = await kickoffStageSend(tx, { orgId, campaignId, stageId });
-      if (!k.ok && k.reason !== "already_pending") throw new Refusal(k.reason);
-
-      await logCampaignEvent(tx, {
-        orgId,
-        campaignId,
-        stageId,
-        actorUserId: user.id,
-        eventType: "send_approved",
-        summary: `Stage ${stageRows[0].stage_number} approved to send`,
-      });
-      if (k.ok) {
-        await logCampaignEvent(tx, {
-          orgId,
-          campaignId,
-          stageId,
-          actorUserId: user.id,
-          eventType: "send_kickoff",
-          summary: `Send batch materialized: ${k.materialized.toLocaleString()} recipient${k.materialized === 1 ? "" : "s"} (${k.mode})`,
-          metadata: { materialized: k.materialized, mode: k.mode },
-        });
-      }
-      return k;
-    });
-
-    if (r.ok) {
-      materialized = r.materialized;
-      mode = r.mode;
-    } else {
-      // already_pending — count the existing live batch.
-      const c = (await db.execute(sql`
-        SELECT count(*)::int AS n FROM stage_sends
-        WHERE stage_id = ${stageId} AND status IN ('pending', 'sending')
-      `)) as unknown as { n: number }[];
-      materialized = Number(c[0]?.n ?? 0);
-      mode = "tracked";
-    }
-  } catch (e) {
-    if (e instanceof Refusal) {
-      const m = KICKOFF_REFUSAL[e.reason];
-      return apiError(
-        m.status,
-        m.message,
-        m.status === 404 ? API_ERROR_CODES.NOT_FOUND : API_ERROR_CODES.VALIDATION,
-        { reason: e.reason },
-      );
-    }
-    throw e;
+  // Explicit send-now on a not-yet-scheduled stage: stamp the send date to NOW
+  // before kickoff so the pipeline's no_schedule guard passes. Immediate sends are
+  // never routed through a null date.
+  if (sendNow && scheduledAt == null) {
+    await db.execute(sql`
+      UPDATE campaign_stages SET scheduled_at = now()
+      WHERE id = ${stageId} AND org_id = ${orgId}
+    `);
   }
 
-  // Future schedule → armed; the cron drains it when the window opens.
+  // Materialize (windowed + resumable — own transactions, NOT wrapped here). A
+  // kickoff refusal happens BEFORE any rows are inserted, so we simply return it
+  // and never approve the stage (approval is stamped only on success below). This
+  // gives a generous budget so an explicit action usually completes in-request.
+  const k = await kickoffStageSend(db, {
+    orgId,
+    campaignId,
+    stageId,
+    budgetMs: 250_000,
+  });
+  if (!k.ok) {
+    const m = KICKOFF_REFUSAL[k.reason];
+    return apiError(
+      m.status,
+      m.message,
+      m.status === 404 ? API_ERROR_CODES.NOT_FOUND : API_ERROR_CODES.VALIDATION,
+      { reason: k.reason },
+    );
+  }
+  const materialized = k.materialized;
+  const mode = k.mode;
+
+  // Materialization succeeded (at least partially) → approve + log. If a tick died
+  // between here and the approve, the cron won't drain (Phase B needs send_approved)
+  // — the operator re-approves; no partial send.
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`
+      UPDATE campaign_stages SET send_approved = true
+      WHERE id = ${stageId} AND org_id = ${orgId}
+    `);
+    await logCampaignEvent(tx, {
+      orgId,
+      campaignId,
+      stageId,
+      actorUserId: user.id,
+      eventType: "send_approved",
+      summary: `Stage ${stageRows[0].stage_number} approved to send`,
+    });
+    await logCampaignEvent(tx, {
+      orgId,
+      campaignId,
+      stageId,
+      actorUserId: user.id,
+      eventType: "send_kickoff",
+      summary: k.complete
+        ? `Send batch materialized: ${materialized.toLocaleString()} recipient${materialized === 1 ? "" : "s"} (${mode})`
+        : `Materializing send batch in the background: ${materialized.toLocaleString()} so far (${mode})`,
+      metadata: { materialized, complete: k.complete, mode },
+    });
+  });
+
+  // Future schedule → armed; the cron drains it when the window opens (after
+  // finishing any remaining materialization first).
   if (!sendNow) {
     return NextResponse.json({
       ok: true,
@@ -178,11 +168,25 @@ export async function POST(
       armed: true,
       sent_now: false,
       materialized,
+      materializing: !k.complete,
       scheduled_at: scheduledAt,
     });
   }
 
-  // Send now → drain inline and return the real result.
+  // Send now, but NOT fully materialized yet → do NOT drain a partial audience.
+  // The cron finishes materialization (materialized_at) then drains the whole set.
+  if (!k.complete) {
+    return NextResponse.json({
+      ok: true,
+      mode,
+      armed: false,
+      sent_now: false,
+      materializing: true,
+      materialized,
+    });
+  }
+
+  // Send now + fully materialized → drain inline and return the real result.
   const drain = await runStageDrainAndRecord(db, {
     campaignId,
     stageId,

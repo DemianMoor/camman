@@ -1405,6 +1405,14 @@ export const campaign_stages = pgTable(
     include_no_status: boolean("include_no_status").notNull().default(true),
     scheduled_at: timestamp("scheduled_at", { withTimezone: true }),
     sent_at: timestamp("sent_at", { withTimezone: true }),
+    // Set ONLY when EVERY qualifying recipient has a stage_sends row — i.e. the
+    // stage is fully materialized. NULL while materialization is pending/partial.
+    // Materialization is windowed + committed per batch (resumable), so this flag
+    // — not the mere existence of stage_sends rows — is the completeness signal:
+    // the scheduler resumes any due stage with materialized_at IS NULL, and only
+    // DRAINS (sends) stages with materialized_at IS NOT NULL, so a half-built
+    // audience can never be sent. See lib/sends/kickoff.ts + lib/sends/scheduled.ts.
+    materialized_at: timestamp("materialized_at", { withTimezone: true }),
     // Terminal marker for a scheduled auto-send whose ET-day window closed
     // before it could fire (approved too late, or SEND_ENABLED was off). sent_at
     // stays NULL so the stage is NOT locked and stays reschedulable; editing

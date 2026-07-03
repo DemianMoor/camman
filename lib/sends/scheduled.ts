@@ -44,11 +44,14 @@ export interface DueRow {
   send_window_weekend_end: number | null;
 }
 
-// Read-only selection of DUE, NOT-YET-MATERIALIZED scheduled stages: tracked +
-// active campaign, approved, scheduled in the past, not yet fired (sent_at
-// NULL), not already missed, and with NO stage_sends rows yet (so a stage that
-// was materialized but not stamped — a tick killed between the two — isn't
-// re-materialized; phase B drains it instead). Exported for isolated tests.
+// Read-only selection of DUE stages that still need (more) materialization:
+// tracked + active campaign, approved, scheduled in the past, not yet fired
+// (sent_at NULL), not already missed, and NOT fully materialized yet
+// (materialized_at IS NULL). Windowed materialization commits partial progress,
+// so completeness is the materialized_at flag — NOT the mere existence of
+// stage_sends rows. A partially-materialized stage is re-selected here and
+// kickoff RESUMES it (materializing only the remaining recipients); once complete
+// it stamps materialized_at and drops out. Exported for isolated tests.
 export async function selectDueScheduledStages(
   dbc: typeof db,
   opts: { now: Date; orgId?: string; maxStages: number },
@@ -81,10 +84,10 @@ export async function selectDueScheduledStages(
       -- A paused provider holds ALL its scheduled stages: don't even consider
       -- them, so they materialize once a human resumes.
       AND (p.send_paused IS NOT TRUE)
-      -- Not yet materialized (idempotent re-entry after a killed tick).
-      AND NOT EXISTS (
-        SELECT 1 FROM stage_sends ss WHERE ss.stage_id = s.id
-      )
+      -- Not yet FULLY materialized (materialized_at IS NULL): fresh stages AND
+      -- partially-materialized ones (resumed here). Fully-materialized stages
+      -- drop out and are drained by Phase B.
+      AND s.materialized_at IS NULL
       ${orgId ? sql`AND c.org_id = ${orgId}` : sql``}
     ORDER BY s.scheduled_at ASC
     LIMIT ${maxStages}
@@ -139,6 +142,10 @@ export async function selectDrainableStages(
       AND s.send_approved = true
       AND s.archived_at IS NULL
       AND (p.send_paused IS NOT TRUE)
+      -- NEVER drain a partially-materialized audience: only stages whose
+      -- materialization is COMPLETE (materialized_at set) are drainable. Phase A
+      -- finishes any in-progress materialization first.
+      AND s.materialized_at IS NOT NULL
       -- Released already, OR due for first release. Future-armed stages
       -- (sent_at NULL and scheduled_at in the future) are held until due.
       AND (s.sent_at IS NOT NULL OR (s.scheduled_at IS NOT NULL AND s.scheduled_at <= ${nowIso}))
@@ -184,10 +191,14 @@ const BASE: ScheduledRunResult = {
   paused_now: 0,
 };
 
+// Per-stage materialization budget for a cron tick. Windowed materialization
+// commits per window, so a stage exceeding this just resumes next tick (its
+// committed rows persist). Kept well under the route's 300s ceiling so one huge
+// stage can't starve the whole tick — the rest resume next tick.
+const MATERIALIZE_BUDGET_MS = 120_000;
+
 // Kickoff refusals that won't self-resolve within the scheduled window — mark
 // the stage missed so it stops retrying every tick and surfaces for a human.
-// (`already_pending` is NOT here: it means another tick already materialized —
-// a benign race, not a config error.)
 const PERMANENT_REFUSALS: ReadonlySet<KickoffRefusal> = new Set([
   "not_found",
   "no_creative",
@@ -279,31 +290,29 @@ export async function runScheduledSends(
       continue;
     }
 
-    // Materialize. A thrown error (e.g. the dedup index firing on a concurrent
-    // materialize race) is caught per-stage so one stage can't fail the whole
-    // run; the stage simply retries next tick (its rows, if any, were rolled
-    // back with the transaction).
+    // Materialize (windowed + resumable — kickoff manages its own per-window
+    // transactions, so it is NOT wrapped in one here). A thrown error is caught
+    // per-stage so one stage can't fail the whole run; committed windows persist
+    // and the stage resumes next tick. complete=false (budget hit) also just
+    // resumes next tick (materialized_at stays NULL → re-selected by Phase A).
     let kickoff: Awaited<ReturnType<typeof kickoffStageSend>> | null = null;
     try {
-      kickoff = await dbc.transaction((tx) =>
-        kickoffStageSend(tx, {
-          orgId: row.org_id,
-          campaignId: row.campaign_id,
-          stageId: row.stage_id,
-        }),
-      );
+      kickoff = await kickoffStageSend(dbc, {
+        orgId: row.org_id,
+        campaignId: row.campaign_id,
+        stageId: row.stage_id,
+        budgetMs: MATERIALIZE_BUDGET_MS,
+      });
     } catch {
       result.refused++;
       continue;
     }
 
-    if (kickoff.ok || kickoff.reason === "already_pending") {
-      // Materialized only — do NOT stamp sent_at here (Bug 1 fix). sent_at now
-      // means "a drain actually sent ≥1 message"; Phase B stamps it after a
-      // successful drain. Re-materialization is already prevented by the rows
-      // existing (selectDueScheduledStages requires NOT EXISTS stage_sends), so no
-      // marker is needed here — and stamping before the drain would mark a stage
-      // "Sent" even when the drain is gate-refused (sends_enabled off).
+    if (kickoff.ok) {
+      // Made materialization progress (complete or partial). Do NOT stamp sent_at
+      // here (Bug 1 fix) — that means "a drain actually sent ≥1 message" and Phase
+      // B stamps it. Phase B only drains once materialized_at is set (complete), so
+      // a partially-materialized stage is never sent early.
       result.materialized++;
     } else if (PERMANENT_REFUSALS.has(kickoff.reason)) {
       await dbc.execute(sql`

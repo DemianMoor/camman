@@ -15,13 +15,33 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 // Kickoff materializes one stage_sends row per recipient and, in tracked mode,
 // mints one unique link per recipient (send_token = the row id). It does NOT
 // send anything — the Step-3 owner-gated drain does. campaign_stages.status /
-// sent_at are intentionally left untouched.
+// sent_at are left untouched.
+//
+// RESUMABLE (WS5): materialization is done in COMMITTED WINDOWS, not one atomic
+// transaction, so a huge audience can't blow the request/cron time budget and
+// roll everything back. The completeness signal is campaign_stages.materialized_at
+// — set ONLY when the last window lands. The scheduler resumes any due stage with
+// materialized_at IS NULL, and only DRAINS (sends) stages with materialized_at
+// IS NOT NULL, so a partially-built audience can never be sent. Re-runs are
+// idempotent: the recipient query excludes already-materialized contacts, and the
+// stage_sends insert is ON CONFLICT DO NOTHING against stage_sends_active_contact_uniq.
+//
+// kickoffStageSend takes the base `db` (NOT a tx) because it opens one
+// transaction PER WINDOW. Callers must NOT wrap it in an outer transaction.
+
+// One window = one committed transaction (mint + insert). 2000 keeps the link
+// mint (11 cols) and stage_sends insert (10 cols) well under Postgres's param cap.
+const MATERIALIZE_WINDOW = 2000;
+// Per-invocation time budget. When exceeded mid-materialization we stop and leave
+// materialized_at NULL; the next invocation (cron tick, or a re-Prepare) resumes
+// from the committed rows. 45s comfortably fits a manual Prepare inside its 300s
+// route ceiling while returning promptly; the cron passes a larger budget.
+export const DEFAULT_MATERIALIZE_BUDGET_MS = 45_000;
 
 export type KickoffRefusal =
   | "not_found"
   | "no_creative"
   | "no_schedule"
-  | "already_pending"
   | "no_recipients"
   // tracked-only:
   | "stage_not_ready"
@@ -35,7 +55,11 @@ export type KickoffResult =
   | {
       ok: true;
       mode: "manual" | "tracked";
+      // Recipients materialized in THIS invocation (0 when already complete).
       materialized: number;
+      // True when the stage is now FULLY materialized (materialized_at set). False
+      // when the time budget was hit mid-way — the remainder resumes next tick.
+      complete: boolean;
       shortDomain: string | null;
     }
   | { ok: false; reason: KickoffRefusal };
@@ -43,6 +67,7 @@ export type KickoffResult =
 interface MainRow {
   link_mode: string;
   scheduled_at: string | null;
+  materialized_at: string | null;
   brand_id: number | null;
   offer_id: number | null;
   campaign_tracking_id: string | null;
@@ -67,13 +92,21 @@ interface MainRow {
 }
 
 export async function kickoffStageSend(
-  tx: DbOrTx,
-  { orgId, campaignId, stageId }: { orgId: string; campaignId: number; stageId: number },
+  dbc: typeof db,
+  {
+    orgId,
+    campaignId,
+    stageId,
+    budgetMs = DEFAULT_MATERIALIZE_BUDGET_MS,
+  }: { orgId: string; campaignId: number; stageId: number; budgetMs?: number },
 ): Promise<KickoffResult> {
-  const main = (await tx.execute(sql`
+  const deadline = Date.now() + budgetMs;
+
+  const main = (await dbc.execute(sql`
     SELECT
       c.link_mode                AS link_mode,
       s.scheduled_at             AS scheduled_at,
+      s.materialized_at          AS materialized_at,
       c.brand_id                 AS brand_id,
       c.offer_id                 AS offer_id,
       c.tracking_id              AS campaign_tracking_id,
@@ -111,28 +144,102 @@ export async function kickoffStageSend(
   if (!row.creative_text) return { ok: false, reason: "no_creative" };
 
   // HARD GUARD: a stage with no send date is NEVER sent. A null scheduled_at is
-  // not "send now" — it means the stage hasn't been scheduled. This is the
-  // shared chokepoint for every send/materialize entry point (cron Phase A, the
-  // manual kickoff route, Approve-Send), so a copied/duplicated stage (which now
-  // always starts with a null date) can't fire until an operator sets one. The
-  // explicit "Send now" action stamps scheduled_at = now() BEFORE calling here.
+  // not "send now" — it means the stage hasn't been scheduled. Shared chokepoint
+  // for every send/materialize entry point (cron Phase A, the manual kickoff
+  // route, Approve-Send). "Send now" stamps scheduled_at = now() BEFORE calling.
   if (row.scheduled_at == null) return { ok: false, reason: "no_schedule" };
 
-  // Guard against accidental double-materialization: refuse if this stage
-  // already has un-sent (pending/sending) rows. A genuine resend clears/
-  // resolves those first, then re-kicks (new run, new tokens).
-  const existing = (await tx.execute(sql`
-    SELECT count(*)::int AS n FROM stage_sends
-    WHERE stage_id = ${stageId} AND status IN ('pending', 'sending')
-  `)) as unknown as { n: number }[];
-  if (Number(existing[0]?.n ?? 0) > 0) return { ok: false, reason: "already_pending" };
+  // Already fully materialized ⇒ idempotent no-op (resume/re-Prepare is a no-op).
+  if (row.materialized_at != null) {
+    return {
+      ok: true,
+      mode,
+      materialized: 0,
+      complete: true,
+      shortDomain: null,
+    };
+  }
 
-  // Behavioral-lane fields flow into the SAME stageRecipientsSql the preview
-  // count uses (lib/sends/recipients.ts), so the people SENT are byte-identical
-  // to the people PREVIEWED. NULL for ordinary stages ⇒ no overlay, unchanged.
-  // Opt-out suppression + converted exclusion happen inside that query, so they
-  // apply at send resolution, not just preview.
-  const recipients = await enumerateStageRecipients(tx, {
+  // ---- Resolve mode-specific send context (guards) BEFORE materializing, so a
+  // misconfigured stage refuses cheaply without inserting partial rows.
+  let shortDomain: { id: number; domain: string } | null = null;
+  let destinationUrl = "";
+  let manualText = "";
+
+  if (mode === "manual") {
+    // Freeze the pasted short_url into every row, no minting.
+    manualText = buildStageSms({
+      brandName,
+      creativeText: row.creative_text,
+      linkUrl: row.short_url,
+      stopText: row.stop_text,
+    });
+  } else {
+    // Tracked: enforce readiness + resolve provider/credential/domain/destination.
+    if (!row.stage_tracking_id || !row.campaign_tracking_id) {
+      return { ok: false, reason: "stage_not_ready" };
+    }
+    if (row.sms_provider_id == null) return { ok: false, reason: "no_provider" };
+
+    const provider = (await dbc.execute(sql`
+      SELECT supports_api_send FROM sms_providers
+      WHERE id = ${row.sms_provider_id} AND org_id = ${orgId} LIMIT 1
+    `)) as unknown as { supports_api_send: boolean }[];
+    if (!provider[0]?.supports_api_send) {
+      return { ok: false, reason: "provider_not_api_capable" };
+    }
+
+    // Brand-aware: require a key resolvable for (provider, this campaign's brand)
+    // or the provider-default. Matches what the Step-3 drain will use to send.
+    const hasCred = await hasResolvableCredential(dbc, {
+      orgId,
+      providerId: row.sms_provider_id,
+      brandId: row.brand_id,
+    });
+    if (!hasCred) return { ok: false, reason: "no_credentials" };
+
+    // Deterministic short-domain pick: active, brand-scoped, stable order so a
+    // brand always mints under the same domain.
+    const sd = (await dbc.execute(sql`
+      SELECT id, domain FROM short_domains
+      WHERE org_id = ${orgId} AND brand_id = ${row.brand_id} AND status = 'active'
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1
+    `)) as unknown as { id: number; domain: string }[];
+    if (!sd[0]) return { ok: false, reason: "no_short_domain" };
+    shortDomain = sd[0];
+
+    // Bug 3 fix: mint against the stage's stored Full URL — the exact value the
+    // operator controls — NOT a server-side rebuild. Use full_url only when it
+    // carries the stage tracking id; a bare (auto-mode) full_url falls back to the
+    // rebuild, which attaches tracking under the fixed sub_id3 key.
+    const storedFull = (row.full_url ?? "").trim();
+    const fullUrlHasTracking =
+      !!row.stage_tracking_id && storedFull.includes(row.stage_tracking_id);
+    destinationUrl = fullUrlHasTracking ? storedFull : "";
+    if (!destinationUrl) {
+      const ctxResult = await loadStageUrlContext({
+        orgId,
+        offerId: row.offer_id,
+        salesPageLabel: row.sales_page_label,
+        utmTagIds: row.utm_tag_ids ?? [],
+        dbc,
+      });
+      if (!ctxResult.ok) return { ok: false, reason: "stage_not_ready" };
+      destinationUrl = buildStageFullUrl({
+        salesPageUrl: ctxResult.ctx.salesPageUrl,
+        trackingId: row.stage_tracking_id,
+        utmTags: ctxResult.ctx.utmTags,
+      });
+    }
+    if (!destinationUrl) return { ok: false, reason: "no_destination" };
+  }
+
+  // ---- Enumerate the recipients NOT YET materialized (resumable). Behavioral-
+  // lane fields flow into the SAME stageRecipientsSql the preview count uses, so
+  // the people SENT are byte-identical to the people PREVIEWED. Opt-out + converted
+  // exclusion happen inside that query (live at resolution time).
+  const recipients = await enumerateStageRecipients(dbc, {
     campaignId,
     orgId,
     filters: {
@@ -144,165 +251,122 @@ export async function kickoffStageSend(
       behavioralTier: row.behavioral_tier ?? null,
       parentStageId: row.parent_stage_id ?? null,
     },
-    // Content-dedup: never materialize a stage_sends row for a contact who
-    // already got this creative in another campaign (always), or this offer in
-    // a previous campaign (when the campaign opts in). creative_id NULL ⇒ Edge A
-    // (no creative dedup; offer exclusion may still apply).
     eligibility: {
       creativeId: row.creative_id ?? null,
       offerId: row.offer_id ?? null,
       excludePriorOffer: row.exclude_prior_offer_contacts,
     },
+    excludeMaterializedStageId: stageId,
   });
-  if (recipients.length === 0) return { ok: false, reason: "no_recipients" };
 
-  // ---- Manual mode: freeze the pasted short_url into every row, no minting.
-  if (mode === "manual") {
-    const renderedText = buildStageSms({
-      brandName,
-      creativeText: row.creative_text,
-      linkUrl: row.short_url,
-      stopText: row.stop_text,
-    });
-    await bulkInsertStageSends(
-      tx,
-      recipients.map((r) => {
-        const id = randomUUID();
-        return {
-          id,
+  if (recipients.length === 0) {
+    // Nothing left to materialize. Either everything is already done (rows exist —
+    // a prior run inserted all but was killed before stamping), or the stage
+    // genuinely has no recipients.
+    const existing = (await dbc.execute(sql`
+      SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${stageId}
+    `)) as unknown as { n: number }[];
+    if (Number(existing[0]?.n ?? 0) > 0) {
+      await markMaterialized(dbc, stageId);
+      return { ok: true, mode, materialized: 0, complete: true, shortDomain: null };
+    }
+    return { ok: false, reason: "no_recipients" };
+  }
+
+  // ---- Materialize in committed windows until done or the budget is hit.
+  let materialized = 0;
+  let complete = true;
+  for (let i = 0; i < recipients.length; i += MATERIALIZE_WINDOW) {
+    if (Date.now() >= deadline) {
+      complete = false;
+      break;
+    }
+    const slice = recipients.slice(i, i + MATERIALIZE_WINDOW);
+    await dbc.transaction(async (tx) => {
+      let rows: StageSendInsertRow[];
+      if (mode === "manual") {
+        rows = slice.map((r) => {
+          const id = randomUUID();
+          return {
+            id,
+            orgId,
+            campaignId,
+            stageId,
+            contactId: r.contact_id,
+            phone: r.phone_number,
+            linkId: null,
+            renderedText: manualText,
+            leadId: id,
+          };
+        });
+      } else {
+        const sd = shortDomain!;
+        const tokens = slice.map((r) => ({
+          contactId: r.contact_id,
+          phone: r.phone_number,
+          sendToken: randomUUID(),
+        }));
+        const minted = await mintLinksBatch(tx, {
           orgId,
           campaignId,
           stageId,
-          contactId: r.contact_id,
-          phone: r.phone_number,
-          linkId: null,
-          renderedText,
-          leadId: id,
-        };
-      }),
-    );
-    return { ok: true, mode, materialized: recipients.length, shortDomain: null };
-  }
-
-  // ---- Tracked mode: enforce condition (b) + mint a unique link per recipient.
-  if (!row.stage_tracking_id || !row.campaign_tracking_id) {
-    return { ok: false, reason: "stage_not_ready" };
-  }
-  if (row.sms_provider_id == null) return { ok: false, reason: "no_provider" };
-
-  const provider = (await tx.execute(sql`
-    SELECT supports_api_send FROM sms_providers
-    WHERE id = ${row.sms_provider_id} AND org_id = ${orgId} LIMIT 1
-  `)) as unknown as { supports_api_send: boolean }[];
-  if (!provider[0]?.supports_api_send) {
-    return { ok: false, reason: "provider_not_api_capable" };
-  }
-
-  // Brand-aware: require a key resolvable for (provider, this campaign's brand)
-  // or the provider-default. Matches what the Step-3 drain will use to send.
-  const hasCred = await hasResolvableCredential(tx, {
-    orgId,
-    providerId: row.sms_provider_id,
-    brandId: row.brand_id,
-  });
-  if (!hasCred) return { ok: false, reason: "no_credentials" };
-
-  // Deterministic short-domain pick: active, brand-scoped, stable order so a
-  // brand always mints under the same domain. (No is_primary column exists; if
-  // one is added later, ORDER BY it first.)
-  const sd = (await tx.execute(sql`
-    SELECT id, domain FROM short_domains
-    WHERE org_id = ${orgId} AND brand_id = ${row.brand_id} AND status = 'active'
-    ORDER BY created_at ASC, id ASC
-    LIMIT 1
-  `)) as unknown as { id: number; domain: string }[];
-  if (!sd[0]) return { ok: false, reason: "no_short_domain" };
-  const shortDomain = sd[0];
-
-  // Bug 3 fix: mint against the stage's stored Full URL — the exact value the
-  // operator sees and controls in the UI — NOT a server-side rebuild. The rebuild
-  // (loadStageUrlContext + buildStageFullUrl) diverged from the stored full_url
-  // (an offer postfix used as a page slug, plus a UTM tag), producing malformed
-  // tracking params (e.g. `?knd=<id>&subid3=sub_id3` instead of `?sub_id3=<id>`).
-  // The operator's full_url already has the correct params + tracking_id baked in.
-  //
-  // Use full_url only when it actually carries the stage tracking id; an auto-mode
-  // stage stores the BARE sales URL (no tracking params), so fall back to the
-  // rebuild there to attach tracking.
-  const storedFull = (row.full_url ?? "").trim();
-  const fullUrlHasTracking =
-    !!row.stage_tracking_id && storedFull.includes(row.stage_tracking_id);
-  let destinationUrl = fullUrlHasTracking ? storedFull : "";
-  if (!destinationUrl) {
-    const ctxResult = await loadStageUrlContext({
-      orgId,
-      offerId: row.offer_id,
-      salesPageLabel: row.sales_page_label,
-      utmTagIds: row.utm_tag_ids ?? [],
-      dbc: tx,
-    });
-    // utm ownership was already verified at stage save; treat a failure as not-ready.
-    if (!ctxResult.ok) return { ok: false, reason: "stage_not_ready" };
-    destinationUrl = buildStageFullUrl({
-      salesPageUrl: ctxResult.ctx.salesPageUrl,
-      trackingId: row.stage_tracking_id,
-      utmTags: ctxResult.ctx.utmTags,
-    });
-  }
-  if (!destinationUrl) return { ok: false, reason: "no_destination" };
-
-  // One send_token (= the stage_sends row id) per recipient, minted in bulk.
-  const tokens = recipients.map((r) => ({
-    contactId: r.contact_id,
-    phone: r.phone_number,
-    sendToken: randomUUID(),
-  }));
-  const minted = await mintLinksBatch(tx, {
-    orgId,
-    campaignId,
-    stageId,
-    creativeId: row.creative_id,
-    shortDomainId: shortDomain.id,
-    destinationUrl,
-    campaignTrackingId: row.campaign_tracking_id,
-    stageTrackingId: row.stage_tracking_id,
-    items: tokens.map((t) => ({ contactId: t.contactId, sendToken: t.sendToken })),
-  });
-
-  // Build each row's frozen text from the code that actually landed, then bulk
-  // insert. The map is guaranteed complete — mintLinksBatch throws otherwise.
-  await bulkInsertStageSends(
-    tx,
-    tokens.map((t) => {
-      const link = minted.get(t.sendToken);
-      if (!link) {
-        throw new Error(`kickoff: missing minted link for send_token ${t.sendToken}`);
+          creativeId: row.creative_id,
+          shortDomainId: sd.id,
+          destinationUrl,
+          campaignTrackingId: row.campaign_tracking_id,
+          stageTrackingId: row.stage_tracking_id,
+          items: tokens.map((t) => ({ contactId: t.contactId, sendToken: t.sendToken })),
+        });
+        rows = tokens.map((t) => {
+          const link = minted.get(t.sendToken);
+          if (!link) {
+            throw new Error(`kickoff: missing minted link for send_token ${t.sendToken}`);
+          }
+          return {
+            id: t.sendToken,
+            orgId,
+            campaignId,
+            stageId,
+            contactId: t.contactId,
+            phone: t.phone,
+            linkId: link.id,
+            renderedText: buildStageSms({
+              brandName,
+              creativeText: row.creative_text!,
+              linkUrl: `https://${sd.domain}/r/${link.code}`,
+              stopText: row.stop_text,
+            }),
+            leadId: t.sendToken,
+          };
+        });
       }
-      return {
-        id: t.sendToken,
-        orgId,
-        campaignId,
-        stageId,
-        contactId: t.contactId,
-        phone: t.phone,
-        linkId: link.id,
-        renderedText: buildStageSms({
-          brandName,
-          creativeText: row.creative_text!,
-          linkUrl: `https://${shortDomain.domain}/r/${link.code}`,
-          stopText: row.stop_text,
-        }),
-        leadId: t.sendToken,
-      };
-    }),
-  );
+      const inserted = await bulkInsertStageSends(tx, rows);
+      materialized += inserted;
+    });
+  }
+
+  // Fully materialized ⇒ stamp the completeness marker (idempotent, only if all
+  // windows landed). If the budget was hit, materialized_at stays NULL and the
+  // next invocation resumes.
+  if (complete) {
+    await markMaterialized(dbc, stageId);
+  }
 
   return {
     ok: true,
     mode,
-    materialized: recipients.length,
-    shortDomain: shortDomain.domain,
+    materialized,
+    complete,
+    shortDomain: mode === "tracked" ? (shortDomain?.domain ?? null) : null,
   };
+}
+
+// Stamp materialized_at exactly once (only when currently NULL).
+async function markMaterialized(dbc: typeof db, stageId: number): Promise<void> {
+  await dbc.execute(sql`
+    UPDATE campaign_stages SET materialized_at = now()
+    WHERE id = ${stageId} AND materialized_at IS NULL
+  `);
 }
 
 interface StageSendInsertRow {
@@ -317,18 +381,18 @@ interface StageSendInsertRow {
   leadId: string;
 }
 
-// 1000 rows × 10 columns = 10K bind params per INSERT — well under Postgres's
-// 65535 limit. Kept at 1000 (not 2000 like the link mint) because rendered_text
-// is a wide column, so the statement payload stays reasonable. 500 was 2× the
-// round-trips it needed.
 const STAGE_SENDS_CHUNK = 1000;
 
-// Chunked multi-row INSERT — replaces the per-recipient round-trip loop that
-// dominated kickoff latency at scale.
+// Chunked multi-row INSERT. ON CONFLICT DO NOTHING against the active-contact
+// unique index (stage_id, contact_id) WHERE status IN ('pending','sending') makes
+// windowed materialization idempotent: a concurrent materializer (or a retried
+// window) can't create a second active row for a contact. Returns the number of
+// rows actually inserted (RETURNING count) so the caller's progress is accurate.
 async function bulkInsertStageSends(
   tx: DbOrTx,
   rows: StageSendInsertRow[],
-): Promise<void> {
+): Promise<number> {
+  let inserted = 0;
   for (let start = 0; start < rows.length; start += STAGE_SENDS_CHUNK) {
     const chunk = rows.slice(start, start + STAGE_SENDS_CHUNK);
     const values = chunk.map(
@@ -337,11 +401,16 @@ async function bulkInsertStageSends(
         ${r.phone}, ${r.linkId}, ${r.renderedText}, 'pending', ${r.leadId}
       )`,
     );
-    await tx.execute(sql`
+    const res = (await tx.execute(sql`
       INSERT INTO stage_sends
         (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
          rendered_text, status, lead_id)
       VALUES ${sql.join(values, sql`, `)}
-    `);
+      ON CONFLICT (stage_id, contact_id) WHERE status IN ('pending', 'sending')
+      DO NOTHING
+      RETURNING id
+    `)) as unknown as { id: string }[];
+    inserted += Array.isArray(res) ? res.length : 0;
   }
+  return inserted;
 }

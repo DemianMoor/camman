@@ -56,9 +56,25 @@ export function stageRecipientsSql(opts: {
   limit?: number;
   offset?: number;
   eligibility?: StageEligibilityOverlay;
+  // Resumable materialization: when set, exclude contacts that ALREADY have a
+  // stage_sends row for this stage (any status), so a windowed/interrupted
+  // kickoff re-run materializes only the REMAINING recipients. Omit for the
+  // export path + preview counts (they want the full qualifying set).
+  excludeMaterializedStageId?: number;
 }): SQL {
   const { campaignId, orgId, filters: f } = opts;
   const splitActive = f.splitIndex !== null && f.splitTotal !== null;
+  // Resumability filter (see excludeMaterializedStageId). Zero-width when unset,
+  // so the emitted query is byte-identical to the pre-resumable version.
+  const notYetMaterialized =
+    opts.excludeMaterializedStageId !== undefined
+      ? sql`
+      and not exists (
+        select 1 from stage_sends ss
+        where ss.stage_id = ${opts.excludeMaterializedStageId}::int
+          and ss.contact_id = p.contact_id
+      )`
+      : sql``;
   const limitClause = opts.limit !== undefined ? sql`limit ${opts.limit}` : sql``;
   const offsetClause =
     opts.offset !== undefined ? sql`offset ${opts.offset}` : sql``;
@@ -134,7 +150,7 @@ export function stageRecipientsSql(opts: {
         (${f.includeNoStatus}::boolean and p.was_no_status_at_snapshot)
         or (${f.includeClickers}::boolean and p.was_clicker_at_snapshot)
       )
-      and not (${f.excludeClickers}::boolean and p.was_clicker_at_snapshot)${behavioralWhere}
+      and not (${f.excludeClickers}::boolean and p.was_clicker_at_snapshot)${behavioralWhere}${notYetMaterialized}
   `;
 
   return sql`
@@ -192,6 +208,7 @@ export async function enumerateStageRecipients(
     orgId: string;
     filters: StageRecipientFilters;
     eligibility?: StageEligibilityOverlay;
+    excludeMaterializedStageId?: number;
   },
 ): Promise<StageRecipientRow[]> {
   const rows = (await dbc.execute(

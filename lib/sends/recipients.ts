@@ -134,9 +134,9 @@ export function stageRecipientsSql(opts: {
     : { creative: null, inFlight: null, offer: null };
 
   // base = frozen pool ∩ live opt-outs ∩ stage filter toggles ∩ lane overlays.
-  // The phone-number join + split row_number are deferred to `qualified` so the
-  // dedup EXCEPTs operate on a bare contact_id set, and the split partitions the
-  // POST-dedup audience (what actually sends).
+  // The phone-number join is deferred to `qualified` so the dedup EXCEPTs operate
+  // on a bare contact_id set. The split then partitions the POST-dedup audience
+  // (what actually sends) via a STABLE per-contact hash bucket — see below.
   const base = sql`
     select p.contact_id
     from campaign_audience_pool p${tierJoin}
@@ -161,15 +161,25 @@ export function stageRecipientsSql(opts: {
     qualified as (
       select
         c.phone_number,
-        e.contact_id,
-        row_number() over (order by e.contact_id) - 1 as rn
+        e.contact_id
       from eligible e
       inner join contacts c on c.id = e.contact_id
     )
     select contact_id, phone_number
     from qualified
     where not ${splitActive}::boolean
-      or rn % ${f.splitTotal ?? 1}::int = (${(f.splitIndex ?? 1) - 1})::int
+      -- STABLE split bucket: a contact's bucket depends ONLY on its own id, never
+      -- on the surrounding set. This is load-bearing for RESUMABLE materialization
+      -- (excludeMaterializedStageId): a row_number()-based split re-numbered the
+      -- shrunken not-yet-materialized set on every resume, so rn % splitTotal
+      -- picked a DIFFERENT subset each pass and leaked the sibling stage's half
+      -- into this one (incident: campaign 8_62_070326_1 sent 7500 instead of 5000
+      -- per split half). hashtextextended is deterministic; the double-modulo
+      -- normalizes the signed int8 hash into [0, splitTotal). Approximately even,
+      -- not exactly 50/50 — acceptable for A/B splits.
+      or ((hashtextextended(contact_id::text, 0) % ${f.splitTotal ?? 1}::int)
+            + ${f.splitTotal ?? 1}::int) % ${f.splitTotal ?? 1}::int
+          = (${(f.splitIndex ?? 1) - 1})::int
     order by contact_id
     ${limitClause}
     ${offsetClause}

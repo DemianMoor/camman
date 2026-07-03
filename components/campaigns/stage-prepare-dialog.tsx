@@ -62,12 +62,18 @@ export function StagePrepareDialog({
     armed: boolean;
     sent_now: boolean;
     materialized: number;
+    // true when the server hit its time budget mid-materialization — the cron
+    // finishes the rest before the send window.
+    materializing?: boolean;
     scheduled_at?: string | null;
     drain?: { sent: number; failed: number; halted: boolean; stuck: number };
   }>();
   const { execute: preflightExec } = preflightApi;
 
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  // Live materialization progress (rows written so far), polled while the
+  // approve-send call runs so the operator sees movement, not a frozen button.
+  const [materialized, setMaterialized] = useState(0);
 
   // A future schedule that hasn't been marked missed → Prepare arms it for the
   // scheduled window; otherwise Prepare sends now (manager+ only). The server
@@ -110,19 +116,53 @@ export function StagePrepareDialog({
 
   async function confirmPrepare() {
     if (!target) return;
-    const r = await approveSendApi.execute(
-      `/api/campaigns/${target.campaignId}/stages/${target.stageId}/send/approve-send`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // Explicit send-now (no future schedule) → the server stamps
-        // scheduled_at = now() so the send passes the no-schedule guard. A
-        // future schedule arms instead (send_now: false).
-        body: JSON.stringify({ send_now: !willSchedule }),
-      },
-    );
+    // Poll the read-only progress endpoint while approve-send materializes, so a
+    // large stage shows a live "Materializing N/total…" bar instead of freezing.
+    setMaterialized(0);
+    const poll = setInterval(() => {
+      void (async () => {
+        try {
+          const res = await fetch(
+            `/api/campaigns/${target.campaignId}/stages/${target.stageId}/send/materialize-progress`,
+          );
+          if (res.ok) {
+            const j = (await res.json()) as { materialized?: number };
+            setMaterialized(j.materialized ?? 0);
+          }
+        } catch {
+          // transient poll failure — the next tick retries; ignore.
+        }
+      })();
+    }, 1500);
+
+    let r;
+    try {
+      r = await approveSendApi.execute(
+        `/api/campaigns/${target.campaignId}/stages/${target.stageId}/send/approve-send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // Explicit send-now (no future schedule) → the server stamps
+          // scheduled_at = now() so the send passes the no-schedule guard. A
+          // future schedule arms instead (send_now: false).
+          body: JSON.stringify({ send_now: !willSchedule }),
+        },
+      );
+    } finally {
+      clearInterval(poll);
+    }
     if (!r.ok) {
       toastApiError(r, "Prepare failed");
+      return;
+    }
+    if (r.data.materializing) {
+      // Budget hit mid-materialization — the scheduled-send cron finishes the
+      // remainder before the send window. Tell the operator it's continuing.
+      toast.success(
+        `Materializing ${r.data.materialized.toLocaleString()} so far — the rest continues in the background and sends at the scheduled time.`,
+      );
+      onClose();
+      onPrepared?.();
       return;
     }
     if (r.data.armed) {
@@ -250,6 +290,33 @@ export function StagePrepareDialog({
                 <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
                 No schedule set — this sends immediately on confirm.
               </p>
+            ) : null}
+
+            {/* Live materialization progress — appears once Prepare is running so
+                a large stage shows a moving count instead of a frozen button. */}
+            {approveSendApi.isLoading ? (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>Materializing recipients…</span>
+                  <span className="tabular-nums">
+                    {materialized.toLocaleString()} /{" "}
+                    {preflight.recipient_count.toLocaleString()}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary transition-[width] duration-500"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        preflight.recipient_count > 0
+                          ? Math.round((materialized / preflight.recipient_count) * 100)
+                          : 0,
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
             ) : null}
 
             <AlertDialogFooter>

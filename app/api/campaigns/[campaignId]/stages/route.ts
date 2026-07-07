@@ -24,7 +24,6 @@ import {
 } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
-import { countStageRecipients } from "@/lib/sends/recipients";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
@@ -38,10 +37,11 @@ import {
   STAGE_STATUSES,
 } from "@/lib/validators/campaign-stages";
 
-// The GET batches all non-lane stage audience counts into one query (plus one
-// per behavioral lane). That's well under 10s even for large campaigns, but the
-// query does scan the frozen pool — give it headroom above Vercel's 10s default
-// so it degrades to "slow" rather than a hard timeout under load.
+// The GET batches all non-lane stage audience counts into one query. Behavioral
+// lanes (the expensive live-tier scan) are deferred to GET .../stages/lane-counts
+// so they don't block first paint. This handler stays well under 10s, but the
+// frozen-pool scan earns headroom above Vercel's 10s default so it degrades to
+// "slow" rather than a hard timeout under load.
 export const maxDuration = 30;
 
 function parseId(idParam: string) {
@@ -235,14 +235,15 @@ export async function GET(
     .orderBy(orderFn(sortColumn));
 
   // Per-stage audience_count. Two kinds of stage:
-  //   • Behavioral lanes (behavioral_tier set) → the LIVE lane preview (alive +
-  //     exact tier − opt-outs, converted excluded) via countStageRecipients.
-  //     Lanes are few; this stays a per-lane query (unchanged).
-  //   • Every other stage → counted in ONE batched pass (active frozen-pool or
-  //     draft projection), replacing the former one-query-per-stage N+1. The
+  //   • Every non-lane stage → counted in ONE batched pass (active frozen-pool
+  //     or draft projection), replacing the former one-query-per-stage N+1. The
   //     batched functions are numerically identical to the per-stage ones
   //     (proven by scripts/tmp-verify-batch.ts before ship).
-  const laneStages = rows.filter((r) => r.behavioral_tier != null);
+  //   • Behavioral lanes (behavioral_tier set) → their LIVE preview is a
+  //     seconds-long tier scan PER LANE. That work is deferred OFF this request:
+  //     lanes return audience_count = null here, and the client fills them in
+  //     from GET .../stages/lane-counts (one batched query) after first paint.
+  //     Keeping it inline made a 3-lane campaign's list take 30–60s.
   const plainStages = rows.filter((r) => r.behavioral_tier == null);
 
   const plainBatchItems = plainStages.map((r) => ({
@@ -254,35 +255,14 @@ export async function GET(
     split_total: r.split_total,
   }));
 
-  const [plainCounts, laneCountEntries] = await Promise.all([
-    isDraft
-      ? computeStageAudienceCountsBatchForDraft(draftAudienceInput, plainBatchItems)
-      : computeStageAudienceCountsBatch(cid, orgId, plainBatchItems),
-    Promise.all(
-      laneStages.map((r) =>
-        countStageRecipients(db, {
-          campaignId: cid,
-          orgId,
-          filters: {
-            includeNoStatus: r.include_no_status,
-            includeClickers: r.include_clickers,
-            excludeClickers: r.exclude_clickers,
-            splitIndex: r.split_index,
-            splitTotal: r.split_total,
-            behavioralTier: r.behavioral_tier,
-            parentStageId: r.parent_stage_id,
-          },
-        }).then((count) => [r.id, count] as [number, number]),
-      ),
-    ),
-  ]);
-  const laneCounts = new Map<number, number>(laneCountEntries);
+  const plainCounts = isDraft
+    ? await computeStageAudienceCountsBatchForDraft(draftAudienceInput, plainBatchItems)
+    : await computeStageAudienceCountsBatch(cid, orgId, plainBatchItems);
 
-  // Reassemble in the original row order.
+  // Reassemble in the original row order. Lane rows are null (deferred → filled
+  // client-side); non-lane rows get their batched count.
   const audienceCounts = rows.map((r) =>
-    r.behavioral_tier != null
-      ? laneCounts.get(r.id) ?? 0
-      : plainCounts.get(r.id) ?? 0,
+    r.behavioral_tier != null ? null : plainCounts.get(r.id) ?? 0,
   );
 
   // Inbound STOPs attributed to this campaign (migration 0075). Per-stage counts
@@ -392,11 +372,12 @@ export async function GET(
 
   // audience_count is derived in JS post-query; sort it here when the
   // client asks for it. SQL-side ordering is handled above for the
-  // built-in columns.
+  // built-in columns. Lane rows carry a null count (deferred to the
+  // lane-counts endpoint) — treat those as 0 for ordering purposes.
   if (listParams.sortBy === "audience_count") {
     const dir = sortDirRaw === "desc" ? -1 : 1;
     data = [...data].sort(
-      (a, b) => dir * (a.audience_count - b.audience_count),
+      (a, b) => dir * ((a.audience_count ?? 0) - (b.audience_count ?? 0)),
     );
   }
 

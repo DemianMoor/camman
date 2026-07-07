@@ -97,12 +97,24 @@ three lanes are mutually exclusive by construction.
 - **Lane display:** each lane row shows a tier chip (`↳ Ignored` / `Clicked` /
   `Reached offer`) with `· from #N` pointing at the parent position; the parent
   row shows an `N behavioral lanes` badge.
-- **Live preview counts:** the **Audience** column for a lane row is the live
-  lane count, computed via `countStageRecipients()` (wraps `stageRecipientsSql`)
-  in the stages list route — the same recipient query, not a second one. Lane
-  rows always show the number (even `0`) tagged `live`. An explainer above the
-  table notes that converted contacts exit and opted-out are suppressed, so lane
-  counts won't sum to the full pool, and that the numbers change until send.
+- **Live preview counts (deferred + batched):** the **Audience** column for a
+  lane row is the live lane count. Each lane's count is a seconds-long live-tier
+  scan (`links⋈clicks` + `stage_sends`), and a split has 3 lanes — computing them
+  inline made a 3-lane campaign's stages list take 30–60s (3× the same scan,
+  fired in parallel and CPU-contending). So the work is **deferred off the main
+  list**: the stages list returns lanes with `audience_count = null`, the table
+  paints immediately, and the client then fetches
+  `GET /api/campaigns/[campaignId]/stages/lane-counts` — which computes **all** of
+  a campaign's lanes in **one** query via `computeLaneAudienceCountsBatch()`
+  ([lib/audience-snapshot.ts](../../lib/audience-snapshot.ts): the campaign tier
+  map is a single `MATERIALIZED` CTE reused across every lane, and the parent
+  "alive" set is built once) — and patches the numbers into the null placeholders.
+  While a lane count is null the cell shows `computing…`. The batched counts are
+  proven byte-identical to the former per-lane `countStageRecipients()` path by
+  [scripts/verify-lane-batch.ts](../../scripts/verify-lane-batch.ts). Lane rows
+  always show the number (even `0`) tagged `live`. An explainer above the table
+  notes that converted contacts exit and opted-out are suppressed, so lane counts
+  won't sum to the full pool, and that the numbers change until send.
 - **Per-lane copy:** a lane is an ordinary editable stage — edit its message via
   the normal stage editor. Tier/parent are not editable.
 

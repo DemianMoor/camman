@@ -242,7 +242,10 @@ type Stage = {
   parent_stage_id: number | null;
   archived_at: string | null;
   created_at: string;
-  audience_count: number;
+  // Non-lane stages carry their batched count. Behavioral lanes come back null
+  // from the list (their live count is deferred to the lane-counts endpoint) and
+  // are patched in after first paint — null renders as a "computing…" state.
+  audience_count: number | null;
   // WS4 §0: campaign link mode (propagated from the parent) + stage_sends
   // materialization counts. Drive the derived operational status / row color.
   link_mode: "manual" | "tracked";
@@ -370,6 +373,9 @@ export default function CampaignDetailPage() {
 
   const campaignApi = useApiCall<CampaignDetail>();
   const stagesApi = useApiCall<StagesListResponse>();
+  // Behavioral-lane audience counts are fetched separately (deferred off the
+  // stages list so the table paints fast) and patched into `stages`.
+  const laneCountsApi = useApiCall<{ counts: Record<number, number> }>();
   const membersApi = useApiCall<{ data: Member[] }>();
   const campaignStatusApi = useApiCall<CampaignDetail>();
   const campaignArchiveApi = useApiCall<CampaignDetail>();
@@ -492,6 +498,26 @@ export default function CampaignDetailPage() {
       if (r.ok) {
         setStages(r.data.data);
         setInboundStopContacts(r.data.inbound_stop_contacts ?? 0);
+        // Lane audience counts are deferred (their live-tier scan is slow). Fetch
+        // them in the background only when lanes are actually on screen, then
+        // patch the null placeholders in place. First paint doesn't wait on this.
+        const hasLanes = r.data.data.some((s) => s.behavioral_tier != null);
+        if (hasLanes) {
+          const lr = await laneCountsApi.execute(
+            `/api/campaigns/${campaignId}/stages/lane-counts${qs ? `?${qs}` : ""}`,
+          );
+          if (cancelled) return;
+          if (lr.ok) {
+            const counts = lr.data.counts;
+            setStages((prev) =>
+              prev.map((s) =>
+                s.behavioral_tier != null && counts[s.id] != null
+                  ? { ...s, audience_count: counts[s.id] }
+                  : s,
+              ),
+            );
+          }
+        }
       } else setStagesError(r.error);
     })();
     return () => {
@@ -503,6 +529,7 @@ export default function CampaignDetailPage() {
     stageFilters.showArchived,
     stagesTick,
     stagesApi.execute,
+    laneCountsApi.execute,
   ]);
 
   useEffect(() => {
@@ -922,6 +949,17 @@ export default function CampaignDetailPage() {
           // (even 0 — honest "no one alive at this tier yet", not "no data")
           // with a "live" hint, so it reads as a moving target, not a snapshot.
           if (s.behavioral_tier != null) {
+            // null = the deferred lane-counts fetch hasn't landed yet.
+            if (n === null) {
+              return (
+                <span
+                  className="font-mono text-xs text-muted-foreground animate-pulse"
+                  title="Computing live audience…"
+                >
+                  computing…
+                </span>
+              );
+            }
             return (
               <span
                 className="font-mono text-sm tabular-nums"
@@ -934,13 +972,15 @@ export default function CampaignDetailPage() {
               </span>
             );
           }
+          // Non-lane rows never carry null; coalesce so TS narrows off number|null.
+          const count = n ?? 0;
           // Non-lane rows show the ADDRESSABLE pool (pool ∩ stage filters,
           // before content dedup). The post-dedup count that will actually send
           // — after removing leads who already got this creative/offer — is
           // shown in the Prepare popup, so the two numbers can differ by design.
           const addressableTitle =
             "Addressable pool (before content dedup). The post-dedup number that will actually send is shown in Prepare.";
-          if (n === 0)
+          if (count === 0)
             return (
               <span className="text-muted-foreground" title={addressableTitle}>
                 —
@@ -951,7 +991,7 @@ export default function CampaignDetailPage() {
               className="font-mono text-sm tabular-nums"
               title={addressableTitle}
             >
-              {n.toLocaleString()}
+              {count.toLocaleString()}
             </span>
           );
         },

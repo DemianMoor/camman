@@ -5,6 +5,7 @@ import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
 
+import { campaignTierExpr } from "./campaign-tier";
 import {
   buildStageEligibilityExclusions,
   type StageEligibilityParams,
@@ -693,6 +694,124 @@ export async function computeStageAudienceCountsBatchForDraft(
     result.set(s.stageId, cap !== null && cap < c ? cap : c);
   }
   return result;
+}
+
+// ── Batched behavioral-lane audience counts ──────────────────────────────────
+// Lane stages (behavioral_tier set) show a LIVE preview: alive (received the
+// parent position) ∩ exact current tier − opt-outs, converted excluded. The
+// per-lane path (countStageRecipients → campaignTierExpr) recomputes the SAME
+// expensive live-tier scan (links⋈clicks + stage_sends) once PER LANE — a
+// behavioral split has 3 lanes, so a single page load paid ~3× the same ~6.6s
+// query. This computes ALL lanes of one campaign in a SINGLE statement:
+//   • the campaign tier map (contact_id → high-water tier) is a MATERIALIZED CTE
+//     built ONCE and reused across the per-lane cross-join;
+//   • the parent "alive" set (contacts sent the parent stage) is built ONCE for
+//     all distinct parents;
+//   • each lane is a row in a per-lane CTE, cross-joined to the frozen pool and
+//     filtered by its tier / parent / toggles / split — byte-identical logic to
+//     stageRecipientsSql's lane overlays, proven equal by scripts/tmp-verify-
+//     lane-batch.ts before ship.
+// Returns stage_id → count; a lane with zero qualifying contacts is absent from
+// the map (caller defaults to 0, matching countStageRecipients returning 0).
+
+export interface LaneCountBatchItem {
+  stageId: number;
+  behavioralTier: number;
+  parentStageId: number | null;
+  include_no_status: boolean;
+  include_clickers: boolean;
+  exclude_clickers: boolean;
+  split_index: number | null;
+  split_total: number | null;
+}
+
+// One row per lane as a typed UNION ALL of SELECTs (mirrors buildStagesCte):
+// stage_id + tier + parent + the three filter booleans + the split bounds.
+function buildLanesCte(lanes: LaneCountBatchItem[]): SQL {
+  const rows = lanes.map(
+    (l) => drizzleSql`select
+      ${l.stageId}::int as stage_id,
+      ${l.behavioralTier}::int as tier,
+      ${l.parentStageId}::int as parent_stage_id,
+      ${l.include_no_status}::boolean as inc_ns,
+      ${l.include_clickers}::boolean as inc_cl,
+      ${l.exclude_clickers}::boolean as exc_cl,
+      ${l.split_index}::int as split_index,
+      ${l.split_total}::int as split_total`,
+  );
+  return rows.reduce((acc, r, i) =>
+    i === 0 ? r : drizzleSql`${acc} union all ${r}`,
+  );
+}
+
+export async function computeLaneAudienceCountsBatch(
+  campaignId: number,
+  orgId: string,
+  lanes: LaneCountBatchItem[],
+): Promise<Map<number, number>> {
+  if (lanes.length === 0) return new Map();
+  const lanesCte = buildLanesCte(lanes);
+  // Distinct non-null parent stage ids → the aliveness universe. Empty array is
+  // valid: null-parent lanes (aliveness off) don't need it.
+  const parentIds = [
+    ...new Set(
+      lanes
+        .map((l) => l.parentStageId)
+        .filter((p): p is number => p != null),
+    ),
+  ];
+  const parentArray = drizzleSql.raw(
+    "ARRAY[" + parentIds.join(",") + "]::int[]",
+  );
+
+  const rows = (await db.execute(drizzleSql`
+    with tier_map as materialized (
+      ${campaignTierExpr(campaignId, orgId)}
+    ),
+    -- Contacts who received (status='sent') each distinct parent stage. Built
+    -- once; the per-lane join below reproduces the aliveness EXISTS check.
+    alive as (
+      select distinct stage_id as parent_stage_id, contact_id
+      from stage_sends
+      where campaign_id = ${campaignId}::int
+        and org_id = ${orgId}::uuid
+        and status = 'sent'
+        and stage_id = any(${parentArray})
+    ),
+    ln as (${lanesCte}),
+    qualified as (
+      select
+        ln.stage_id,
+        ln.split_index,
+        ln.split_total,
+        p.contact_id
+      from ln
+      join campaign_audience_pool p
+        on p.campaign_id = ${campaignId}::int and p.org_id = ${orgId}::uuid
+      -- Aliveness: LEFT JOIN so a lane with a NULL parent (aliveness off) keeps
+      -- every contact via the parent_stage_id-is-null escape; a lane WITH a
+      -- parent keeps only rows that matched (a.contact_id is not null).
+      left join alive a
+        on a.parent_stage_id = ln.parent_stage_id and a.contact_id = p.contact_id
+      left join tier_map t on t.contact_id = p.contact_id
+      where not exists (
+          select 1 from opt_outs oo
+          where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
+        )
+        and (ln.parent_stage_id is null or a.contact_id is not null)
+        and (
+          (ln.inc_ns and p.was_no_status_at_snapshot)
+          or (ln.inc_cl and p.was_clicker_at_snapshot)
+        )
+        and not (ln.exc_cl and p.was_clicker_at_snapshot)
+        and coalesce(t.tier, 0) = ln.tier
+        and coalesce(t.tier, 0) <> 3
+    )
+    select stage_id, ${BATCH_SPLIT_FILTER}
+    from qualified
+    group by stage_id
+  `)) as unknown as { stage_id: number; count: number }[];
+  return new Map(rows.map((r) => [Number(r.stage_id), Number(r.count)]));
 }
 
 // Compute the count + composition breakdown for the UI's audience

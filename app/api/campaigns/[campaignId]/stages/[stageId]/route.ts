@@ -17,6 +17,7 @@ import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { buildStageFullUrl } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
+import { deleteStage } from "@/lib/stages/delete-stage";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 import {
   generateCampaignTrackingId,
@@ -547,4 +548,56 @@ export async function PATCH(
   }
 
   return NextResponse.json(updated);
+}
+
+export async function DELETE(
+  _req: NextRequest,
+  {
+    params,
+  }: { params: Promise<{ campaignId: string; stageId: string }> },
+) {
+  const auth = await requireApiMembership();
+  if ("error" in auth) return auth.error;
+  const { orgId, role, user } = auth;
+
+  if (!can(role, "stages.delete")) {
+    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
+  }
+
+  const { campaignId, stageId } = await params;
+  const cid = parseId(campaignId);
+  const sid = parseId(stageId);
+  if (cid === null || sid === null) {
+    return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION);
+  }
+
+  const result = await deleteStage({ orgId, campaignId: cid, stageId: sid });
+  if (!result.ok) {
+    const code =
+      result.code === "not_found"
+        ? API_ERROR_CODES.NOT_FOUND
+        : API_ERROR_CODES.CONFLICT;
+    return apiError(result.status, result.message, code, result.details);
+  }
+
+  // Row is gone; log with stageId null (campaign_events.stage_id SET NULL keeps
+  // the history entry). stage_number lives in the summary + metadata.
+  await logCampaignEvent(db, {
+    orgId,
+    campaignId: cid,
+    stageId: null,
+    actorUserId: user.id,
+    eventType: "stage_deleted",
+    summary: `Stage ${result.stage_number} deleted`,
+    metadata: {
+      stage_number: result.stage_number,
+      split_reset_stage_id: result.split_reset_stage_id,
+    },
+  });
+
+  return NextResponse.json({
+    deleted: true,
+    id: sid,
+    split_reset_stage_id: result.split_reset_stage_id,
+  });
 }

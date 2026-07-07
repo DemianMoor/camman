@@ -645,6 +645,13 @@
       "when": 1784246400000,
       "tag": "0091_drop_duplicate_dedup_index",
       "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1784332800000,
+      "tag": "0092_segment_rules_in_use_in_offer",
+      "breakpoints": true
     }
   ]
 }

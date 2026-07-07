@@ -1105,6 +1105,7 @@ export const segment_rules = pgTable(
         'joined_segment_in_last_n_days',
         'joined_segment_more_than_n_days_ago',
         'in_use_in_campaign_last_period',
+        'in_use_in_offer',
         'member_of_segment',
         'is_in_contact_group'
       )`,

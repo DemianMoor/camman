@@ -194,6 +194,31 @@ function ruleInnerQuery(
           )
       `;
     }
+    case "in_use_in_offer": {
+      // Contacts snapshotted into a campaign for the selected offer that still
+      // counts as "in use": campaign ran (status active/paused/completed — not
+      // draft, not archived) AND still has ≥1 live stage. "Live" = a stage in
+      // draft/pending/sent/success; if every stage is cancelled/failed/archived
+      // (or there are none) the campaign has released its contacts. Same
+      // live-campaign definition as in_use_in_campaign_last_period, scoped by
+      // offer instead of a time window.
+      return drizzleSql`
+        SELECT DISTINCT p.contact_id
+        FROM campaign_audience_pool p
+        JOIN campaigns ca ON ca.id = p.campaign_id
+        WHERE p.org_id = ${orgId}::uuid
+          AND ca.org_id = ${orgId}::uuid
+          AND ca.status IN ('active', 'paused', 'completed')
+          AND ca.offer_id = ${Number(v)}::int
+          AND EXISTS (
+            SELECT 1
+            FROM campaign_stages s
+            WHERE s.campaign_id = ca.id
+              AND s.org_id = ${orgId}::uuid
+              AND s.status IN ('draft', 'pending', 'sent', 'success')
+          )
+      `;
+    }
     case "member_of_segment":
       return drizzleSql`
         SELECT contact_id

@@ -156,6 +156,19 @@ export const RULE_TYPES = {
     operators: ["is", "is_not"],
     value_shape: "campaign_use_period",
   },
+  // "In use in a specific offer". A contact counts as in-use when it sits in
+  // a campaign_audience_pool for a campaign whose offer is the selected one,
+  // where the campaign ran (status active/paused/completed) AND still has at
+  // least one live stage (draft/pending/sent/success). Archived campaigns and
+  // campaigns whose stages are all cancelled/failed/archived have released
+  // their audience and do NOT count. Same live-campaign definition as
+  // in_use_in_campaign_last_period, minus the time window. See
+  // lib/segment-rules-eval.ts.
+  in_use_in_offer: {
+    label: "In use in a specific offer",
+    operators: ["is", "is_not"],
+    value_shape: "offer_id",
+  },
 
   // === Cross-segment ===
   member_of_segment: {

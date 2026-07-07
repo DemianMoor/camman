@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-07-03_
+_Last updated: 2026-07-07_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -184,6 +184,8 @@ erDiagram
 > **`reached_offer` / `reached_offer_for_brand` / `reached_offer_for_offer` rule types + `stage_sends.offer_reached_at` / `offer_reach_event_id` (migration `0070`):** engagement Level 2 — match contacts with ≥1 `stage_sends` row where `offer_reached_at IS NOT NULL` (an OFFER-campaign click, not the `gk-lp-visits` landing campaign). `offer_reached_at` is the earliest such click (monotonic, never cleared); `offer_reach_event_id` is the Keitaro click `event_id` dedup key. Stamped by [`lib/keitaro/poll-offer-reaches.ts`](../features/keitaro-poll.md). `0070` adds the two nullable columns + a partial index and restates the rule-type CHECK to add the three types. Empty until real sends accumulate. "Reached but didn't buy" = `reached_offer` is + `made_purchase` is_not.
 >
 > **`in_use_in_campaign_last_period` rule type (migration `0059`):** widened `segment_rules_rule_type_check` to add this type. Historical note: through `0068` the generated snapshots and `db/schema.ts`'s inline list omitted `is_in_contact_group` (added live by `0031`); the migration SQL was authoritative. `0069` reconciled the schema text + snapshot with the live constraint.
+>
+> **`in_use_in_offer` rule type (migration `0092`):** widened `segment_rules_rule_type_check` to add this type. Value shape `offer_id`; matches contacts in a `campaign_audience_pool` for a campaign with that `offer_id` that is `active`/`paused`/`completed` with ≥1 live stage (same live-campaign definition as `in_use_in_campaign_last_period`, minus the time window). Eval in [`lib/segment-rules-eval.ts`](../../lib/segment-rules-eval.ts).
 
 ### Creatives
 | Table | Key columns | Notes |

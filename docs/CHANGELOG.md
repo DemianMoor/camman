@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-07 — New segment rule `in_use_in_offer` ("In use in a specific offer") — migration 0092 — docs: 03-data-model, 04-features/audience-segments, CHANGELOG
+- New segment audience rule type `in_use_in_offer` (value shape `offer_id`, operators `is`/`is_not`). Matches contacts already snapshotted into a `campaign_audience_pool` for a campaign with the chosen `offer_id`, where the campaign is `active`/`paused`/`completed` and still has ≥1 live stage (`draft`/`pending`/`sent`/`success`) — same live-campaign definition as `in_use_in_campaign_last_period`, scoped by offer instead of a time window. Migration `0092` widens `segment_rules_rule_type_check`. Eval case in `lib/segment-rules-eval.ts`; no client changes (offer picker is value-shape-driven).
+
 ## 2026-07-03 — Prepare progress UI + drop duplicate dedup index (migration 0091) — docs: 04-features/sms-send-pipeline, CHANGELOG
 - **Prepare progress.** Materializing a stage is inherently O(recipients) index-maintenance (~3 ms/recipient across `links` + `stage_sends`) — a 10k stage takes ~30s, unavoidable at scale (no unused indexes to drop; enumeration adds a fixed ~3.2s dominated by the offer-exposure/opt-out reads). The Prepare dialog no longer freezes: it polls a new read-only `GET …/send/materialize-progress` (`{ materialized, complete }`) while `approve-send` runs and shows a live "Materializing N/total…" bar. No change to the send path.
 - **Duplicate index.** Migration `0091` drops `stage_sends_org_phone_sent_at_idx` (added in 0090) — byte-identical to `stage_sends_org_phone_sent_idx` (0075), which serves the 1-hour dedup lookup unchanged. Removes double write-cost on `sent` updates.

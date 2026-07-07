@@ -1,6 +1,6 @@
 # Feature — Segments & Segment Rules
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-07-07_
 
 ## 1. Purpose
 A **segment** is a named audience. Its effective membership is the **UNION** of manually-added contacts and contacts matching a chain of declarative **rules**. Segments feed campaign audiences. The rules engine compiles to SQL **set arithmetic** (not boolean predicates) so each branch can pick its own index plan against a >100K-row contacts table.
@@ -56,6 +56,7 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 | `joined_segment_in_last_n_days` | positive int | joined *this* segment ≤ N days ago |
 | `joined_segment_more_than_n_days_ago` | positive int | joined *this* segment > N days ago |
 | `in_use_in_campaign_last_period` | campaign-use period (`1d`/`3d`/`1w`/`2w`/`1m`/`3m`/`6m`/`1y`) | were in use in another campaign within the lookback window |
+| `in_use_in_offer` | offer id | were in use in a campaign for the chosen offer |
 | `member_of_segment` | segment id | are members of another segment |
 | `is_in_contact_group` | contact_group id | carry a contact-group tag |
 
@@ -66,6 +67,7 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 - **Engagement ladder:** Level 1 = clicker rules (clicked the SMS / landing); Level 2 = `reached_offer*` (offer page); Level 3 = `made_purchase*` (bought). Each usable as include (`is`) or exclude (`is_not`).
 - Time-based types accept `is` only (direction encoded in the name; the UI hides the operator select).
 - **`in_use_in_campaign_last_period`** accepts `is` (include) / `is_not` (exclude). A contact counts as "in use" when it sits in a `campaign_audience_pool` for a campaign whose `created_at` falls inside the window AND whose `status` is `active`/`paused`/`completed` ("any that ran" — draft has no pool, archived excluded) AND which still has ≥1 **live stage** (`draft`/`pending`/`sent`/`success`). A campaign whose stages are all `cancelled`/`failed` (or has none) releases its contacts. The 8 period codes map to SQL `make_interval` units in [`lib/segment-rules-eval.ts`](../../lib/segment-rules-eval.ts); only the opaque code is persisted in `value`. Differs from the `exclude_in_use_contacts` flag (above), which is time-less and `active`-only.
+- **`in_use_in_offer`** accepts `is` (include) / `is_not` (exclude). Same "in use" definition as `in_use_in_campaign_last_period` — pool membership + campaign `active`/`paused`/`completed` + ≥1 **live stage** (`draft`/`pending`/`sent`/`success`), so archived campaigns and campaigns whose stages are all `cancelled`/`failed`/`archived` count as **not used** — but scoped by the campaign's `offer_id` (`value`) instead of a time window. Lets an operator target (or exclude) contacts already used for a specific offer. Migration `0092`.
 - **Validation source of truth:** [`lib/validators/segment-rule-types.ts`](../../lib/validators/segment-rule-types.ts) maps each type → allowed operators + value shape. Both server (Zod in `lib/validators/segment-rules.ts`) and client (`RulesPanel`) read from it — **don't fork.**
 - **FK ownership:** brand/offer/segment/contact_group ids in rule values are re-verified against the user's org before insert/update (`verifyValueOwnership` in `app/api/segments/[id]/rules/route.ts`).
 

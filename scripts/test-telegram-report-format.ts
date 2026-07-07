@@ -1,7 +1,7 @@
 import {
   dailyMessage,
   hourlyMessage,
-} from "@/app/api/cron/telegram-report/route";
+} from "@/lib/reporting/telegram-report-format";
 import type { ReportMetrics } from "@/lib/reporting/report-snapshot";
 
 // Renders the daily + hourly messages from the ground-truth metrics pulled via

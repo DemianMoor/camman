@@ -1,6 +1,6 @@
 import { formatInTimeZone } from "date-fns-tz";
 
-import { decideFormat } from "@/app/api/cron/telegram-report/route";
+import { decideFormat } from "@/lib/reporting/telegram-report-format";
 
 // Verifies the Warsaw-time decision logic against the brief's edge cases.
 // ISO weekday: 1=Mon .. 7=Sun.

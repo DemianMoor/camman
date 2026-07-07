@@ -15,11 +15,19 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 // SAFETY — at-most-once. A row stuck in 'sending' may already have been accepted
 // by TextHub (the process died AFTER the send, before recording it), so it is
 // NEVER re-sent (that would double-text). We mark it 'failed' (terminal); the
-// operator can deliberately retry via the retry-failed flow. To be certain no
-// LIVE drain is holding a row, we only touch stages whose newest send activity
-// is older than `staleMinutes` — far beyond the drain route's 300s maxDuration,
-// so an actively-draining stage (which keeps producing recent 'sent' rows) is
-// never disturbed.
+// operator can deliberately retry via the retry-failed flow.
+//
+// To be certain no LIVE drain is holding a row, a stage is eligible only when it
+// has had NO send activity for `staleMinutes`, measured TWO ways: (a) no
+// `send_attempts` row (the drain writes one per attempt) within the window, and
+// (b) its newest 'sent'/'sending' row activity is older than the window. (a) is
+// the load-bearing guard — a 'sending' row's own `created_at` is its
+// MATERIALIZATION time (unrelated to when a drain claimed it), so a stage
+// materialized long ago and drained *now* by the concurrent manual /send/drain
+// route would look stale by (b) alone; the send_attempts clock tracks actual
+// drain liveness. The only residual (sub-second) window is a drain that has
+// claimed a batch but not yet recorded its first attempt — and even then the
+// drain's id-keyed 'sent' UPDATE is idempotent, so no message is re-sent.
 
 const DEFAULT_STALE_MINUTES = 15;
 const DEFAULT_MAX_STAGES = 200;
@@ -77,6 +85,15 @@ export async function reconcileStuckStages(
           )
         )
       )
+      -- (a) no drain has ATTEMPTED a send on this stage within the window (the
+      -- real drain-liveness clock — every attempt writes a send_attempts row).
+      AND NOT EXISTS (
+        SELECT 1 FROM send_attempts sa
+        JOIN stage_sends ss2 ON ss2.id = sa.stage_send_id
+        WHERE ss2.stage_id = s.id
+          AND sa.created_at >= ${nowIso}::timestamptz - make_interval(mins => ${staleMinutes})
+      )
+      -- (b) newest 'sent'/'sending' row activity is also stale (defense-in-depth).
       AND (
         SELECT max(GREATEST(ss.sent_at, ss.created_at))
         FROM stage_sends ss

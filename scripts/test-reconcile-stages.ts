@@ -8,7 +8,7 @@ import { db, sql as pgConn } from "@/db/client";
 import { reconcileStuckStages } from "@/lib/sends/reconcile-stages";
 
 const ORG_MARKER = "__RECONCILE_TEST__";
-const COUNTED = ["organizations", "campaigns", "campaign_stages", "stage_sends", "sms_providers", "provider_phones", "contacts"] as const;
+const COUNTED = ["organizations", "campaigns", "campaign_stages", "stage_sends", "send_attempts", "sms_providers", "provider_phones", "contacts"] as const;
 
 async function main() {
   let passed = 0, failed = 0;
@@ -38,14 +38,23 @@ async function main() {
       VALUES (${orgId}::uuid, ${campaignId}::int, ${n}, ${phoneId}::int, true, now(), 0, NULL) RETURNING id
     `)) as unknown as { id: number }[])[0].id;
   }
-  // Insert a stage_send with explicit status + age (minutes ago).
-  async function addSend(stageId: number, status: string, minsAgo: number): Promise<void> {
+  // Insert a stage_send with explicit status + age (minutes ago). Returns its id.
+  async function addSend(stageId: number, status: string, minsAgo: number): Promise<string> {
     const cid = await newContact();
     const sentAt = status === "sent" ? sql`now() - make_interval(mins => ${minsAgo})` : sql`NULL`;
-    await db.execute(sql`
+    return ((await db.execute(sql`
       INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status, created_at, sent_at)
       VALUES (${orgId}::uuid, ${campaignId}::int, ${stageId}::int, ${cid}::uuid, ${`+1${unique}${contactSeq}`}, ${"hi"}, ${status},
               now() - make_interval(mins => ${minsAgo}), ${sentAt})
+      RETURNING id::text AS id
+    `)) as unknown as { id: string }[])[0].id;
+  }
+  // Record a drain attempt on a stage_send `minsAgo` minutes ago (the drain-
+  // liveness clock the reconcile guard reads).
+  async function addAttempt(stageSendId: string, minsAgo: number): Promise<void> {
+    await db.execute(sql`
+      INSERT INTO send_attempts (org_id, stage_send_id, attempt_number, http_status, ok, classification, created_at)
+      VALUES (${orgId}::uuid, ${stageSendId}::uuid, 1, 200, true, ${"accepted"}, now() - make_interval(mins => ${minsAgo}))
     `);
   }
   async function stageRow(id: number) {
@@ -78,6 +87,24 @@ async function main() {
     await addSend(finalized, "sent", 30);
     await db.execute(sql`UPDATE campaign_stages SET sent_at = now() - make_interval(mins => 30) WHERE id = ${finalized}`);
 
+    // LIVE-DRAIN stage: old materialization (20 min) BUT a RECENT send_attempt
+    // (2 min ago) — a drain is actively working it, so reconcile must NOT touch
+    // its 'sending' rows (the send_attempts liveness guard, not created_at).
+    const liveDrain = await newStage(4);
+    await addSend(liveDrain, "sent", 20);
+    const liveSendingId = await addSend(liveDrain, "sending", 20);
+    await addAttempt(liveSendingId, 2);
+
+    // ZERO-SENT stranded: only 'sending' rows (20 min old), nothing ever sent,
+    // no attempts → reconcile marks them failed, does NOT stamp sent_at, cost 0.
+    const zeroSent = await newStage(5);
+    await addSend(zeroSent, "sending", 20);
+
+    // Org-scoping: a run scoped to a DIFFERENT org heals nothing here.
+    const bogus = await reconcileStuckStages(db, { orgId: "00000000-0000-0000-0000-000000000000", staleMinutes: 15 });
+    check("scoped to another org → nothing scanned here", bogus.scanned === 0, JSON.stringify(bogus));
+    check("org-scoping: our stranded 'sending' still intact after foreign-org run", ((await statusCounts(stranded)).sending ?? 0) === 1);
+
     const result = await reconcileStuckStages(db, { orgId, staleMinutes: 15 });
 
     // Stranded: sending -> failed, sent_at stamped, cost = 0.01 * 2 sent = 0.02.
@@ -98,14 +125,27 @@ async function main() {
     const finc = await statusCounts(finalized);
     check("finalized stage untouched — 1 sent, 0 failed", finc.sent === 1 && !finc.failed, JSON.stringify(finc));
 
-    // Result counters reflect exactly the one stranded stage.
-    check("result: 1 scanned, 1 reclaimed, 1 stampedSentAt", result.scanned === 1 && result.reclaimed === 1 && result.stampedSentAt === 1, JSON.stringify(result));
+    // Live-drain: a recent send_attempt protects it — 'sending' left untouched.
+    const lc = await statusCounts(liveDrain);
+    check("live-drain (recent send_attempt) NOT reclaimed — still 1 sending", (lc.sending ?? 0) === 1 && !lc.failed, JSON.stringify(lc));
+    check("live-drain: sent_at still NULL (not finalized under an active drain)", (await stageRow(liveDrain)).sent_at === null);
+
+    // Zero-sent stranded: sending -> failed, sent_at NOT stamped, cost 0.
+    const zc = await statusCounts(zeroSent);
+    check("zero-sent stranded: 1 failed, 0 sending", (zc.sending ?? 0) === 0 && zc.failed === 1, JSON.stringify(zc));
+    const zrow = await stageRow(zeroSent);
+    check("zero-sent: sent_at NOT stamped (nothing sent)", zrow.sent_at === null);
+    check("zero-sent: cost stays 0", Number(zrow.total_cost) === 0);
+
+    // Result counters: stranded + zeroSent scanned/reclaimed; only stranded stamped.
+    check("result: 2 scanned, 2 reclaimed, 1 stampedSentAt", result.scanned === 2 && result.reclaimed === 2 && result.stampedSentAt === 1, JSON.stringify(result));
   } finally {
     console.log("\nCleanup (scoped to test org only)");
     try {
       if (orgId) {
         const name = ((await db.execute(sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`)) as unknown as { name: string }[])[0]?.name ?? "";
         if (!name.startsWith(ORG_MARKER)) throw new Error(`Refusing teardown: org ${orgId} is not the test marker.`);
+        await db.execute(sql`DELETE FROM send_attempts WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM campaigns WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM contacts WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM provider_phones WHERE org_id = ${orgId}::uuid`);

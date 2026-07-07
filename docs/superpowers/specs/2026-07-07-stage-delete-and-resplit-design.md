@@ -10,14 +10,24 @@
    A stage created by a typo, an accidental duplicate, or a wrong split lingers
    in the campaign forever. The user wants to *remove* such stages — and their DB
    records — when they hold no real send data.
-2. **Re-split is permanently blocked after a split.** Splitting stage A into A/B/C
-   stamps `split_total` on the source A. Even after the extra variants (B, C) are
-   archived, A still reports "Split 1/3", so
-   [`/split`](../../../app/api/campaigns/[campaignId]/stages/[stageId]/split/route.ts)
-   rejects any re-split with `already_split`. The user is stuck.
+2. **Re-split is permanently blocked after a split — both split kinds.**
+   - **A/B split:** splitting stage A into A/B/C stamps `split_total` on the
+     source A. Even after B/C are archived, A still reports "Split 1/3", so
+     [`/split`](../../../app/api/campaigns/[campaignId]/stages/[stageId]/split/route.ts)
+     rejects re-split with `already_split`.
+   - **Behavioral split:** splitting a stage stamps 3 lane-stages with
+     `parent_stage_id = <stage>`. The guard in
+     [`performBehavioralSplit`](../../../lib/stages/behavioral-split.ts) counts
+     lanes by `parent_stage_id` **without excluding archived ones**, so after the
+     lanes are archived the parent is blocked forever with
+     `already_behaviorally_split`.
 
-The two are connected: removing the accidental variants should let the original
-stage become a normal, re-splittable stage again.
+   Confirmed live example — campaign `8_62_070126_1`, stage "Day 4" (id 719):
+   behavioral-split created lanes 730/731/732 (`parent_stage_id = 719`), all
+   later archived. Re-splitting "Day 4" now fails the archived-blind lane count.
+
+The two features are connected: removing (or archiving) the accidental variants
+should let the original stage become splittable again.
 
 ## Decisions (confirmed with user)
 
@@ -71,16 +81,18 @@ Mirrors the segment hard-delete pattern
    - `DELETE FROM campaign_stages WHERE id = sid AND campaign_id = cid AND org_id`
      `RETURNING id`. Cascade removes any child rows; `campaign_events.stage_id`
      is `SET NULL`, preserving campaign history.
-   - **Split-reset.** If the deleted stage had `split_total IS NOT NULL`, count
-     remaining stages in the campaign with `split_total IS NOT NULL AND status <>
-     'archived'`. If exactly **one** remains, `UPDATE` it to
+   - **A/B split-reset.** If the deleted stage had `split_total IS NOT NULL`,
+     count remaining stages in the campaign with `split_total IS NOT NULL AND
+     status <> 'archived'`. If exactly **one** remains, `UPDATE` it to
      `split_index = NULL, split_total = NULL` (revert to a normal stage). Zero or
-     >1 remaining → leave untouched.
+     >1 remaining → leave untouched. (Behavioral lanes carry no `split_total`, so
+     deleting a lane needs no parent reset — the parent already has no split
+     marker; guard 3b handles its re-splittability.)
 6. Log a `stage_deleted` campaign event via `logCampaignEvent` (stageId `null`
    since the row is gone; `stage_number` in the summary + metadata).
 7. Return `200 { deleted: true, id }`.
 
-### 3. Re-split guard fix
+### 3a. A/B re-split guard fix
 
 In [split/route.ts](../../../app/api/campaigns/[campaignId]/stages/[stageId]/split/route.ts),
 replace the blanket `if (source.split_total !== null)` rejection:
@@ -92,6 +104,17 @@ replace the blanket `if (source.split_total !== null)` rejection:
   **only if that count > 0**. Otherwise allow: the source stands alone (its
   variants were archived or deleted), and the existing transaction overwrites its
   `split_index`/`split_total` to the new count cleanly.
+
+### 3b. Behavioral re-split guard fix
+
+In [lib/stages/behavioral-split.ts](../../../lib/stages/behavioral-split.ts),
+the `existingLanes` guard counts child lanes by `parent_stage_id` **without a
+status filter**. Add `AND status <> 'archived'` so archived lanes no longer
+block a re-split. After the fix, re-splitting a parent whose lanes were archived
+(or deleted) succeeds and stamps a fresh lane trio; the archived lanes remain
+inert (excluded from sends). This is the exact bug behind the `8_62_070126_1`
+"Day 4" block. No parent-side reset is needed — a behavioral parent stays an
+ordinary stage and carries no split marker of its own (unlike the A/B source).
 
 ### 4. UI
 
@@ -128,10 +151,17 @@ replace the blanket `if (source.split_total !== null)` rejection:
   behavioral-lane child removes the child too (child is itself never-sent).
 - **Split-reset on delete:** split A/B/C → delete B and C → A reverts to
   `split_index = NULL, split_total = NULL` and shows no "Split" badge.
-- **Re-split after archive:** split A/B/C → archive B and C → re-split A succeeds
-  (no `already_split` 409); A becomes 1/N of the new split.
-- **Re-split still blocked with live partners:** split A/B/C (all live) →
+- **A/B re-split after archive:** split A/B/C → archive B and C → re-split A
+  succeeds (no `already_split` 409); A becomes 1/N of the new split.
+- **A/B re-split still blocked with live partners:** split A/B/C (all live) →
   re-split A → `409 already_split`.
+- **Behavioral re-split after archive (the `8_62_070126_1` case):** behavioral-
+  split a stage → archive its 3 lanes → behavioral-split the same stage again
+  succeeds (no `already_behaviorally_split` 409); a fresh lane trio is created.
+- **Behavioral re-split still blocked with live lanes:** lanes present and not
+  archived → `409 already_behaviorally_split`.
+- **Delete an archived lane:** an archived, never-sent behavioral lane is
+  deletable; its parent (if sent) stays archive-only.
 - **Permission:** an `operator` gets 403 on DELETE; `manager+` succeeds.
 - Typecheck + existing stage API tests pass; docs updated.
 

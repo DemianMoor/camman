@@ -12,6 +12,7 @@ import {
   generateStageTrackingId,
 } from "@/lib/tracking-id";
 import { STAGE_TRACKING_PARAM, setUrlParam } from "@/lib/stage-url";
+import { liveSplitPartnerCount } from "@/lib/stages/split-membership";
 
 // Split a stage into N siblings for A/B testing. The source stage is
 // repurposed as split 1 of N; (N-1) new stages clone its configuration
@@ -121,12 +122,22 @@ export async function POST(
   }
   const source = sourceRow[0];
   if (source.split_total !== null) {
-    return apiError(
-      409,
-      "This stage is already part of a split. Delete its sibling splits before re-splitting.",
-      API_ERROR_CODES.CONFLICT,
-      { reason: "already_split", split_total: source.split_total },
-    );
+    // Only block if LIVE (non-archived) variants still exist. Once the extra
+    // variants are archived or deleted, the source stands alone and re-splitting
+    // it is safe — the transaction below overwrites its split_index/split_total.
+    const partners = await liveSplitPartnerCount(db, {
+      orgId,
+      campaignId: cid,
+      stageId: sid,
+    });
+    if (partners > 0) {
+      return apiError(
+        409,
+        "This stage is already split into active variants. Archive or delete the other variants first.",
+        API_ERROR_CODES.CONFLICT,
+        { reason: "already_split", split_total: source.split_total },
+      );
+    }
   }
   if (source.status === "archived") {
     return apiError(

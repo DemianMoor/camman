@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { campaign_stages, campaigns } from "@/db/schema";
@@ -113,8 +113,10 @@ export async function performBehavioralSplit(
     };
   }
 
-  // Guard (defensive, the behavioral analog of A/B's "already split"): refuse if
-  // this stage already has behavioral lanes, so we never stack a second trio.
+  // Guard (behavioral analog of A/B's "already split"): refuse if this stage
+  // still has LIVE (non-archived) behavioral lanes, so we never stack a second
+  // trio. Archived lanes are excluded — archiving the accidental lanes frees the
+  // parent to be re-split (matches the A/B re-split rule).
   const existingLanes = await database
     .select({ n: sql<number>`count(*)::int` })
     .from(campaign_stages)
@@ -122,6 +124,7 @@ export async function performBehavioralSplit(
       and(
         eq(campaign_stages.parent_stage_id, stageId),
         eq(campaign_stages.org_id, orgId),
+        ne(campaign_stages.status, "archived"),
       ),
     );
   if (Number(existingLanes[0]?.n ?? 0) > 0) {

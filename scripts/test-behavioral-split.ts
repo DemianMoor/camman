@@ -140,6 +140,34 @@ async function main() {
     check("no lanes created under the rejected lane", (await lanesOf(aLaneId)).length === 0);
 
     // ====================================================================
+    // CASE 2b — ARCHIVED lanes no longer block a re-split of their parent.
+    // (The 8_62_070126_1 "Day 4" bug: archived lanes kept the parent stuck.)
+    // ====================================================================
+    console.log("\nCase 2b — re-split after archiving lanes:");
+    // Archive the 3 lanes created in Case 1.
+    await db.execute(sql`
+      UPDATE campaign_stages SET status = 'archived'
+      WHERE parent_stage_id = ${parent.id}::int AND org_id = ${orgId}::uuid
+    `);
+    const r2b = await performBehavioralSplit({ orgId, campaignId, stageId: parent.id });
+    check("re-split ALLOWED once lanes are archived", r2b.ok, JSON.stringify(r2b));
+    const liveLanes = (await db.execute(sql`
+      SELECT count(*)::int AS n FROM campaign_stages
+      WHERE parent_stage_id = ${parent.id}::int AND org_id = ${orgId}::uuid
+        AND status <> 'archived'
+    `)) as unknown as { n: number }[];
+    check("exactly 3 LIVE lanes after re-split", Number(liveLanes[0].n) === 3, `got ${liveLanes[0].n}`);
+
+    // And with LIVE lanes present, a further re-split is still rejected.
+    const r2bBlocked = await performBehavioralSplit({ orgId, campaignId, stageId: parent.id });
+    check(
+      "re-split still BLOCKED while live lanes exist",
+      !r2bBlocked.ok && r2bBlocked.status === 409 &&
+        (r2bBlocked.details as { reason?: string })?.reason === "already_behaviorally_split",
+      JSON.stringify(r2bBlocked),
+    );
+
+    // ====================================================================
     // CASE 3 — the CHECK constraint from step 1 is active (lanes are coherent,
     // and a half-configured / tier-3 row is rejected at the DB level).
     // ====================================================================

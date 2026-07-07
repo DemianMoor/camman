@@ -1,6 +1,6 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-06-23_
+_Last updated: 2026-07-07_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
@@ -78,8 +78,11 @@ three lanes are mutually exclusive by construction.
   the parent's date — a stale date would auto-fire on approval; see
   [conventions](../07-conventions.md)), leaves `split_index/split_total` NULL. Guards:
   rejects a source that is itself a lane (`already_lane`), archived, or already
-  split (`already_behaviorally_split`). Transactional. **No draft/status gate** —
-  lanes are created post-activation by design (the A/B split route has none either).
+  split (`already_behaviorally_split` — checked against **live**, non-archived
+  lanes only, so archiving or deleting all three lanes unblocks a re-split on the
+  original stage; see [campaigns-stages-creatives.md](campaigns-stages-creatives.md#deleting-stages)).
+  Transactional. **No draft/status gate** — lanes are created post-activation by
+  design (the A/B split route has none either).
 
 ## Operator UI (campaign detail page)
 

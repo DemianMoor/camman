@@ -2,6 +2,10 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-07 — Stage hard-delete + re-split unblock — docs: 04-features, 07-conventions, CHANGELOG
+- New `DELETE /api/campaigns/[campaignId]/stages/[stageId]` (`stages.delete`, manager+): removes a stage that has no send/result data (`sent_at` null AND no `stage_sends`/`stage_results_imports`/`stage_manual_sales`/`keitaro_stage_results`), cleaned up by existing FK cascades. Sent/result-bearing stages stay archive-only. Deleting the extra A/B variants reverts the lone survivor to a normal stage.
+- Re-split guards now ignore ARCHIVED siblings/lanes: A/B `/split` blocks only on live partners (`lib/stages/split-membership.ts`); behavioral `performBehavioralSplit` excludes archived lanes. Fixes stages stuck as "already split" after their variants were archived (e.g. `8_62_070126_1` "Day 4"). No schema change.
+
 ## 2026-07-07 — New segment rule `in_use_in_offer` ("In use in a specific offer") — migration 0092 — docs: 03-data-model, 04-features/audience-segments, CHANGELOG
 - New segment audience rule type `in_use_in_offer` (value shape `offer_id`, operators `is`/`is_not`). Matches contacts already snapshotted into a `campaign_audience_pool` for a campaign with the chosen `offer_id`, where the campaign is `active`/`paused`/`completed` and still has ≥1 live stage (`draft`/`pending`/`sent`/`success`) — same live-campaign definition as `in_use_in_campaign_last_period`, scoped by offer instead of a time window. Migration `0092` widens `segment_rules_rule_type_check`. Eval case in `lib/segment-rules-eval.ts`; no client changes (offer picker is value-shape-driven).
 

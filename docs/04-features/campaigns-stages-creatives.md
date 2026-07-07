@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-06-26_
+_Last updated: 2026-07-07_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -27,11 +27,25 @@ The campaign core: a **campaign** is a long-running container with a frozen audi
 ### Stages
 - `stage_number` auto-assigned by a BEFORE INSERT trigger (clients omit it); UNIQUE(campaign_id, stage_number) is a backstop against concurrent-insert races (one racer fails → retry).
 - Activity filters: `include_clickers` / `exclude_clickers` (mutually exclusive — CHECK `campaign_stages_clickers_mutex`), `include_no_status`.
-- **A/B split** (`split_index` / `split_total`): set only via `POST /api/campaigns/[campaignId]/stages/[stageId]/split`; audience filtered by `mod(hashtext(contact_id::text), split_total) = split_index - 1` so a contact always lands in the same bucket. Immutable via PATCH (like `tracking_id`). CHECK enforces `1 ≤ index ≤ total`, `2 ≤ total ≤ 1000`.
+- **A/B split** (`split_index` / `split_total`): set only via `POST /api/campaigns/[campaignId]/stages/[stageId]/split`; audience filtered by `mod(hashtext(contact_id::text), split_total) = split_index - 1` so a contact always lands in the same bucket. Immutable via PATCH (like `tracking_id`). CHECK enforces `1 ≤ index ≤ total`, `2 ≤ total ≤ 1000`. The `/split` guard blocks re-splitting a stage only while **live** (non-archived) split partners still exist (`lib/stages/split-membership.ts`); archiving or deleting the other variants unblocks it. See "Deleting stages" below.
 - **Scheduling:** `scheduled_at` drives the send-scheduled cron for tracked campaigns; `schedule_missed_at` marks a window that closed before firing (stays reschedulable); `send_approved` gates the real-send drain. See [sms-send-pipeline.md](sms-send-pipeline.md) & [crons.md](crons.md).
 - **SMS preview composition** (`lib/sends/stage-sms.ts`, `buildStageSms`): `<Brand>: <creative text>` + (if present) the `short_url` on its own line + `stop_text` (default `"Stop to END"`). The same shape renders in the stage form's live preview and the frozen `rendered_text`.
 - **Total Cost auto-derivation** (migration `0081`, [`lib/stages/total-cost.ts`](../../lib/stages/total-cost.ts)): a stage's `total_cost` defaults to `cost_per_sms × (sends + opt_out_count)` — the assigned provider phone's per-SMS rate times sends **plus** opt-out replies (STOPs are billed like sends). **`sends = GREATEST(sms_count, accepted stage_sends)`**: API/tracked stages dispatch one `stage_sends` row per recipient and leave `sms_count` at 0, so the count of provider-accepted rows (`status='sent'`, the same number the "Submitted / accepted by TextHub" badge shows) is used; manual/CSV stages have no `stage_sends` and carry the count in `sms_count`. **Gated on the send having happened:** the cost stays `$0` until `sent_at` is set (an API fire or a "Mark as sent" click) **or** results are hand-entered (`sms_count > 0`) — it does not appear at stage-creation time. It's recomputed on every write that moves those inputs: the manual-results save, the opt-out poller after a STOP bumps `opt_out_count`, and the stage PATCH when `provider_phone_id` changes. `total_cost_manual` is the override flag: the manual-results form's **Auto-calculate total cost** switch turns it on/off, and a CSV import that carries a real provider cost sets it (the imported figure is authoritative and replaces a previously auto-derived value). When the flag is true the auto formula never touches `total_cost`.
 - **Full URL builder** (`lib/stage-url.ts`): selected `utm_tag_ids` append `&<label>=<value_source>` to `full_url` in order.
+
+### Deleting stages
+
+Stages that were never sent, never marked-as-sent, and carry no imported/manual
+results can be hard-deleted (`DELETE /api/campaigns/[campaignId]/stages/[stageId]`,
+`stages.delete`, manager+). The delete removes the row and all its child records
+via DB cascade (`stage_sends`, `links`, result rows/imports, keitaro results,
+manual sales, opt-out attributions, behavioral lanes); `campaign_events` keep the
+history with `stage_id` set NULL. Sent/result-bearing stages stay archive-only.
+
+Deleting the extra variants of an A/B split reverts the lone remaining member to
+a normal stage. Archiving OR deleting the extra variants of either split kind
+(A/B or behavioral) unblocks re-splitting the original — only *live* (non-archived)
+variants/lanes block a re-split.
 
 ### Creatives
 - M:N with offers; `applies_to_all_offers=true` ⇒ valid for any offer (junction rows still allowed as a fallback list; toggling the flag does NOT auto-clear them).

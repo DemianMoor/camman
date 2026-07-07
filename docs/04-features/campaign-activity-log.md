@@ -1,6 +1,6 @@
 # Campaign Activity Log
 
-_Last updated: 2026-06-12_
+_Last updated: 2026-07-07_
 
 The **Activity** section at the bottom of a campaign's detail page
 ([app/(protected)/campaigns/[id]/page.tsx](../../app/(protected)/campaigns/[id]/page.tsx))
@@ -36,10 +36,12 @@ writes go through the app's privileged connection (mirrors `send_circuit_events`
 `campaign_created` · `campaign_status_changed` (activate / pause / complete /
 archive / restore) · `stage_created` (create + duplicate) ·
 `stage_status_changed` · `stage_scheduled` (set / moved / cleared — logged only
-when the value actually changes) · `send_approved` · `send_kickoff`
-(materialized recipient count) · `send_drain` (sent / failed / stop reason;
-written even for cron-driven runs, actor NULL) · `results_imported` ·
-`results_reverted`.
+when the value actually changes) · `stage_deleted` (hard delete of a
+never-sent, no-results stage — `stage_id` is NULL on the row itself since the
+stage is gone; see [campaigns-stages-creatives.md](campaigns-stages-creatives.md#deleting-stages))
+· `send_approved` · `send_kickoff` (materialized recipient count) · `send_drain`
+(sent / failed / stop reason; written even for cron-driven runs, actor NULL) ·
+`results_imported` · `results_reverted`.
 
 Generic field edits (renames, notes) are deliberately **not** logged — they'd
 bury the send-relevant signal. Add more types as needed.

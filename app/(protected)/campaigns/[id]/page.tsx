@@ -19,6 +19,7 @@ import {
   Plus,
   Send,
   Split,
+  Trash2,
   Upload,
 } from "lucide-react";
 import Link from "next/link";
@@ -376,6 +377,7 @@ export default function CampaignDetailPage() {
   const stageStatusApi = useApiCall<Stage>();
   const stageArchiveApi = useApiCall<Stage>();
   const stageRestoreApi = useApiCall<Stage>();
+  const stageDeleteApi = useApiCall<{ deleted: boolean; id: number; split_reset_stage_id: number | null }>();
   const stageDuplicateApi = useApiCall<Stage>();
   const behavioralSplitApi = useApiCall<{
     parent_stage_id: number;
@@ -543,6 +545,7 @@ export default function CampaignDetailPage() {
     kind: "archive" | "restore";
     stage: Stage;
   } | null>(null);
+  const [stageDeleteConfirm, setStageDeleteConfirm] = useState<Stage | null>(null);
   const [behavioralSplitStage, setBehavioralSplitStage] =
     useState<Stage | null>(null);
   const [importStage, setImportStage] = useState<Stage | null>(null);
@@ -565,6 +568,7 @@ export default function CampaignDetailPage() {
   const canSendStage = can("stages.send");
   const canArchiveStage = can("stages.archive");
   const canRestoreStage = can("stages.restore");
+  const canDeleteStage = can("stages.delete");
   const canImportResults = can("result_imports.create");
   const canViewImports = can("result_imports.view");
 
@@ -660,6 +664,22 @@ export default function CampaignDetailPage() {
     refetchCampaign();
   }
 
+  async function handleStageDelete() {
+    if (!stageDeleteConfirm) return;
+    const result = await stageDeleteApi.execute(
+      `/api/campaigns/${campaignId}/stages/${stageDeleteConfirm.id}`,
+      { method: "DELETE" },
+    );
+    if (!result.ok) {
+      toastApiError(result);
+      return;
+    }
+    toast.success("Stage deleted");
+    setStageDeleteConfirm(null);
+    refetchStages();
+    refetchCampaign();
+  }
+
   async function handleBehavioralSplit() {
     if (!behavioralSplitStage) return;
     const result = await behavioralSplitApi.execute(
@@ -677,13 +697,17 @@ export default function CampaignDetailPage() {
   }
 
   // ============ Behavioral-lane derivations ============
-  // parent_stage_id → its lane stages, and id → stage_number, so lane rows can
-  // show "from #N" and parent rows can show a "N lanes" badge. Derived from the
-  // already-loaded stages list — no extra fetch.
+  // parent_stage_id → its LIVE (non-archived) lane stages, and id → stage_number,
+  // so lane rows can show "from #N" and parent rows can show a "N lanes" badge.
+  // Archived lanes are excluded so a re-split (old lanes archived, new trio
+  // created) shows the current trio's count, not archived+live — matches the
+  // backend's own "already has lanes" gate (ne(status, "archived") in
+  // lib/stages/behavioral-split.ts). Derived from the already-loaded stages
+  // list — no extra fetch.
   const lanesByParent = useMemo(() => {
     const m = new Map<number, Stage[]>();
     for (const s of stages) {
-      if (s.parent_stage_id != null) {
+      if (s.parent_stage_id != null && s.status !== "archived") {
         const arr = m.get(s.parent_stage_id) ?? [];
         arr.push(s);
         m.set(s.parent_stage_id, arr);
@@ -1240,6 +1264,25 @@ export default function CampaignDetailPage() {
                       <ArchiveRestore className="size-4" aria-hidden /> Restore
                     </DropdownMenuItem>
                   ) : null}
+                  {canDeleteStage &&
+                  !s.sent_at &&
+                  s.sms_count === 0 &&
+                  s.delivered_count === 0 &&
+                  s.opt_out_count === 0 &&
+                  s.inbound_stop_count === 0 &&
+                  s.click_count === 0 &&
+                  s.sales_count === 0 &&
+                  s.keitaro_sales_count === 0 ? (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onSelect={() => setStageDeleteConfirm(s)}
+                      >
+                        <Trash2 className="size-4" aria-hidden /> Delete
+                      </DropdownMenuItem>
+                    </>
+                  ) : null}
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
@@ -1253,6 +1296,7 @@ export default function CampaignDetailPage() {
       canUpdateStage,
       canArchiveStage,
       canRestoreStage,
+      canDeleteStage,
       canSendStage,
       canActivate,
       canImportResults,
@@ -2115,6 +2159,41 @@ export default function CampaignDetailPage() {
               }
             >
               {stageArchiveConfirm?.kind === "archive" ? "Archive" : "Restore"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={stageDeleteConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open) setStageDeleteConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete stage {stageDeleteConfirm?.stage_number}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the stage and all of its records. This
+              can&apos;t be undone. Stages that were sent or have imported
+              results can&apos;t be deleted — archive those instead.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={stageDeleteApi.isLoading}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={stageDeleteApi.isLoading}
+              onClick={(e) => {
+                e.preventDefault();
+                void handleStageDelete();
+              }}
+            >
+              Delete
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -4,6 +4,7 @@ import { sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { isStatementTimeout } from "@/lib/db/statement-timeout";
 
 import { campaignTierExpr } from "./campaign-tier";
 import {
@@ -1263,8 +1264,10 @@ export async function computeStageEligibilityPreview(
     };
   } catch (err) {
     const duration_ms = Date.now() - start;
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("statement timeout") || msg.includes("57014")) {
+    // The 57014 code lives on err.cause (drizzle wraps the driver error), so
+    // detect it through the cause chain — a message-only check re-throws a
+    // timeout we mean to degrade. See lib/db/statement-timeout.ts.
+    if (isStatementTimeout(err)) {
       // Headline number unavailable; the screen shows a "too large to preview"
       // state rather than failing (mirrors the segment-rules preview contract).
       return {

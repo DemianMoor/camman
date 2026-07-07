@@ -4,6 +4,7 @@ import { and, asc, eq, sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { isStatementTimeout } from "@/lib/db/statement-timeout";
 import { segment_rules, segments } from "@/db/schema";
 
 import {
@@ -448,9 +449,10 @@ export async function previewSegmentAudienceCount(
     };
   } catch (err) {
     const durationMs = Date.now() - start;
-    const msg = err instanceof Error ? err.message : String(err);
-    // Postgres throws code 57014 (query_canceled) on statement_timeout.
-    if (msg.includes("statement timeout") || msg.includes("57014")) {
+    // Postgres throws code 57014 (query_canceled) on statement_timeout; it
+    // lives on err.cause (drizzle wraps the driver error), so detect it via the
+    // cause chain — a message-only check re-throws a timeout we mean to degrade.
+    if (isStatementTimeout(err)) {
       return { count: null, truncated: true, durationMs };
     }
     throw err;

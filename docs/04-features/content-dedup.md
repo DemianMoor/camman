@@ -1,6 +1,6 @@
 # Feature — Content Deduplication & Offer Exposure
 
-_Last updated: 2026-07-02_
+_Last updated: 2026-07-07_
 
 > **Status: LIVE (Phase 1 + Phase 2 shipped).** Phase 1 (migration `0086`):
 > ledgers, triggers, RLS, backfill. Phase 2 (migration `0087`): the send-time
@@ -167,7 +167,11 @@ query: the qualifying set resolves once, the indexed ledgers are cheap LEFT JOIN
 and `will_send` subtracts the **same** layers then splits (so it equals the real
 materialized count — split applied post-dedup, matching `stageRecipientsSql`).
 Wrapped in the segment-preview timeout mechanism (`SET LOCAL statement_timeout`
-inside a txn; `57014` ⇒ `truncated`, pooler-safe). Surfaced in the stage form's
+inside a txn; `57014` ⇒ `truncated`, pooler-safe — detected via
+[`isStatementTimeout`](../../lib/db/statement-timeout.ts), which walks the
+error's `cause` chain because the driver wraps the `57014` code there, not on
+`err.message`; a message-only check re-throws the timeout and 500s the whole
+stage-audience preview). Surfaced in the stage form's
 audience preview (debounced, recomputed only when segment/creative/offer/toggle
 change), showing *"N already saw this creative · M already got this offer · K will
 send"*.

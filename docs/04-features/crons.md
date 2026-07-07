@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-02_
+_Last updated: 2026-07-03_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -63,7 +63,8 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
   - **Delivered** → `stage_sends` accepted by the provider (`status='sent'`) by `sent_at`. CamMan does **not** poll DLR (CLAUDE.md §12), so "delivered" here means "provider-accepted" — the closest real signal for the opt-out ratio.
   - **ROI %** = `(revenue − spend) / spend × 100`; `n/a` when spend = 0. Opt-out ratio = opt-outs ÷ delivered; `n/a` when delivered = 0.
   - **Net Profit** = `revenue − spend` (line after ROI). Renders sign-aware (`-$150.00` for a loss).
-- Metric computation lives in [`lib/reporting/report-snapshot.ts`](../../lib/reporting/report-snapshot.ts) (`computeReportMetrics`). The message is sent via `sendTelegramHtml()` ([`lib/alerts/telegram.ts`](../../lib/alerts/telegram.ts)) with `parse_mode: "HTML"` — a **non-swallowing** counterpart to `notifyTelegram()`: on any failure (missing config, network, non-200) the handler returns **500** so the scheduler's failure monitoring catches a broken report. No in-process retry.
+- Metric computation lives in [`lib/reporting/report-snapshot.ts`](../../lib/reporting/report-snapshot.ts) (`computeReportMetrics`). The message is sent via `sendTelegramHtml(text, timeoutMs)` ([`lib/alerts/telegram.ts`](../../lib/alerts/telegram.ts)) with `parse_mode: "HTML"` — a **non-swallowing** counterpart to `notifyTelegram()`: on any failure (missing config, network, non-200) it throws.
+- **Resilient send:** the report fires once per hour with no natural recovery until the next tick, so the handler wraps the send in `sendHtmlWithRetry` — **2 attempts**, an **8 s** timeout each (up from the 4 s best-effort default), 1 s backoff. Only if BOTH attempts fail does the handler return **500** (so the scheduler's failure monitoring still catches a truly broken report) **and** fire a best-effort plain-text `notifyTelegram` alert (`⚠️ CamMan <format> report failed…`) so a dropped hour is visible instead of silent. Added after two consecutive top-of-hour ticks were lost to a transient blip (2026-07-03).
 - Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (fail-fast 500 if missing when a send is due), `CRON_SECRET`.
 
 ## 4. Data

@@ -41,8 +41,13 @@ export async function notifyTelegram(text: string): Promise<void> {
 // failure (missing config, network error, non-200 from Telegram) so the cron
 // handler can return 500 and the scheduler's failure monitoring catches a
 // broken report. Sends with parse_mode "HTML" — callers must escape dynamic
-// substrings (see escapeHtml below).
-export async function sendTelegramHtml(text: string): Promise<void> {
+// substrings (see escapeHtml below). `timeoutMs` defaults to the best-effort
+// TIMEOUT_MS; the report passes a longer budget since it retries and losing a
+// whole hour is worse than a slightly longer invocation.
+export async function sendTelegramHtml(
+  text: string,
+  timeoutMs: number = TIMEOUT_MS,
+): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) {
@@ -60,7 +65,7 @@ export async function sendTelegramHtml(text: string): Promise<void> {
       parse_mode: "HTML",
       disable_web_page_preview: true,
     }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");

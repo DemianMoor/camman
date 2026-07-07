@@ -3,7 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { formatInTimeZone } from "date-fns-tz";
 
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
-import { escapeHtml, sendTelegramHtml } from "@/lib/alerts/telegram";
+import { escapeHtml, notifyTelegram, sendTelegramHtml } from "@/lib/alerts/telegram";
 import {
   computeReportMetrics,
   etDayRange,
@@ -129,6 +129,32 @@ export function decideFormat(
   return null;
 }
 
+// ── resilient send ──────────────────────────────────────────────────────────
+// The report fires once per hour with no natural recovery until the next tick,
+// so a single transient Telegram/network blip silently drops an hour's report
+// (the failure mode we saw: two consecutive top-of-hour ticks lost, then
+// recovered). Retry once with a generous timeout — well within maxDuration=60 —
+// before giving up. 8s > the 4s best-effort default because losing a whole hour
+// is worse than a slightly longer invocation.
+const SEND_TIMEOUT_MS = 8000;
+const SEND_ATTEMPTS = 2;
+const RETRY_BACKOFF_MS = 1000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function sendHtmlWithRetry(message: string): Promise<void> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt++) {
+    try {
+      await sendTelegramHtml(message, SEND_TIMEOUT_MS);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < SEND_ATTEMPTS) await sleep(RETRY_BACKOFF_MS);
+    }
+  }
+  throw lastErr;
+}
+
 // ── handler ─────────────────────────────────────────────────────────────────
 async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;
@@ -165,13 +191,18 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     format === "daily" ? await buildDaily(now) : await buildHourly(now);
 
   try {
-    await sendTelegramHtml(message);
+    await sendHtmlWithRetry(message);
   } catch (err) {
-    console.error("[telegram-report] send failed:", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Telegram send failed" },
-      { status: 500 },
+    const detail = err instanceof Error ? err.message : "Telegram send failed";
+    console.error("[telegram-report] send failed after retries:", err);
+    // A silent 500 is invisible outside Vercel logs. Fire a best-effort
+    // plain-text alert (never throws, no HTML to misparse) so a dropped report
+    // is actually noticed. If the whole Telegram path is down this no-ops too —
+    // nothing more we can do — but a transient/HTML-parse failure surfaces here.
+    await notifyTelegram(
+      `⚠️ CamMan ${format} report failed to send (Warsaw ${warsawHour}:00). ${detail}`,
     );
+    return NextResponse.json({ error: detail }, { status: 500 });
   }
 
   return NextResponse.json({ sent: true, format, test });

@@ -253,9 +253,17 @@ async function pollCredential(
         `)) as unknown as { id: string }[];
         const contactId = c[0]?.id;
 
+        // created_at = the STOP's real receipt time (anchorIso), NOT the poll
+        // time (now()). Poll time can cross an ET-midnight boundary vs the reply,
+        // landing the opt-out on the wrong report day; the parsed provider time
+        // is the true moment. Falls back to now() only when unparseable (anchorIso
+        // already encodes that fallback). Keeps opt_outs.created_at ==
+        // opt_out_attributions.created_at so the Reports page (which buckets by the
+        // attribution date) and the opt-outs list agree on the day it happened.
         const oo = (await tx.execute(sql`
-          INSERT INTO opt_outs (org_id, contact_id, phone_number, source)
-          VALUES (${cred.org_id}, ${contactId}, ${phone}, 'sms_inbound')
+          INSERT INTO opt_outs (org_id, contact_id, phone_number, source, created_at)
+          VALUES (${cred.org_id}, ${contactId}, ${phone}, 'sms_inbound',
+                  ${anchorIso}::timestamptz)
           RETURNING id
         `)) as unknown as { id: number }[];
         const optOutId = oo[0]?.id;
@@ -269,11 +277,15 @@ async function pollCredential(
         if (match) {
           // ON CONFLICT guards the idempotent re-run case; the per-message claim
           // already makes this run once, so RETURNING is the increment gate.
+          // created_at = the STOP's real receipt time (anchorIso), matching the
+          // opt_out above. The Reports page (app/api/keitaro/reports) buckets
+          // per-stage opt-outs by THIS column, so it must be the day the reply
+          // arrived, not the poll time.
           const ins = (await tx.execute(sql`
             INSERT INTO opt_out_attributions
-              (org_id, opt_out_id, stage_send_id, stage_id, campaign_id)
+              (org_id, opt_out_id, stage_send_id, stage_id, campaign_id, created_at)
             VALUES (${cred.org_id}, ${optOutId}, ${match.stage_send_id},
-                    ${match.stage_id}, ${match.campaign_id})
+                    ${match.stage_id}, ${match.campaign_id}, ${anchorIso}::timestamptz)
             ON CONFLICT (opt_out_id, stage_id) DO NOTHING
             RETURNING id
           `)) as unknown as { id: number }[];

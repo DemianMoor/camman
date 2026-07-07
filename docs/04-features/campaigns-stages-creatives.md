@@ -35,12 +35,16 @@ The campaign core: a **campaign** is a long-running container with a frozen audi
 
 ### Deleting stages
 
-Stages that were never sent, never marked-as-sent, and carry no imported/manual
-results can be hard-deleted (`DELETE /api/campaigns/[campaignId]/stages/[stageId]`,
-`stages.delete`, manager+). The delete removes the row and all its child records
-via DB cascade (`stage_sends`, `links`, result rows/imports, keitaro results,
-manual sales, opt-out attributions, behavioral lanes); `campaign_events` keep the
-history with `stage_id` set NULL. Sent/result-bearing stages stay archive-only.
+A stage is deletable only if it was never sent or marked-as-sent (`sent_at` is
+null) **and** has no rows in `stage_sends`, `stage_results_imports`,
+`stage_manual_sales`, or `keitaro_stage_results` — i.e. no send or result data
+of any kind, including a Prepared/materialized-but-unsent stage (which already
+has `stage_sends` rows). Such stages can be hard-deleted (`DELETE
+/api/campaigns/[campaignId]/stages/[stageId]`, `stages.delete`, manager+). The
+delete removes the row and all its child records via DB cascade (`stage_sends`,
+`links`, result rows/imports, keitaro results, manual sales, opt-out
+attributions, behavioral lanes); `campaign_events` keep the history with
+`stage_id` set NULL. Sent/result-bearing stages stay archive-only.
 
 Deleting the extra variants of an A/B split reverts the lone remaining member to
 a normal stage. Archiving OR deleting the extra variants of either split kind

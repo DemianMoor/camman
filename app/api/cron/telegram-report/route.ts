@@ -4,7 +4,11 @@ import { formatInTimeZone } from "date-fns-tz";
 
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { notifyTelegram, sendTelegramHtml } from "@/lib/alerts/telegram";
-import { computeReportMetrics, etDayRange } from "@/lib/reporting/report-snapshot";
+import {
+  computeReportMetrics,
+  etDayRange,
+  spendInRange,
+} from "@/lib/reporting/report-snapshot";
 import {
   dailyMessage,
   decideFormat,
@@ -53,11 +57,15 @@ async function buildDaily(now: Date): Promise<string> {
 
 async function buildHourly(now: Date): Promise<string> {
   const { today, yesterday } = etDays(now);
-  const [m, yMetrics] = await Promise.all([
-    computeReportMetrics(etDayRange(today)),
-    computeReportMetrics(etDayRange(yesterday)),
-  ]);
-  return hourlyMessage(dayLabel(today), m, yMetrics.spend);
+  // Sequential, and yesterday only needs SPEND (one query) — not a whole second
+  // computeReportMetrics. This halves the cold-start DB fan-out: 8 concurrent
+  // queries → a peak of 4 (today's metrics), matching the daily path. The old
+  // 8-way burst hung the pooler on a cold serverless start during busy ET hours,
+  // running past maxDuration with no report — which is why the hourly report
+  // silently died while the lighter daily report kept delivering.
+  const m = await computeReportMetrics(etDayRange(today));
+  const yesterdaySpend = await spendInRange(etDayRange(yesterday));
+  return hourlyMessage(dayLabel(today), m, yesterdaySpend);
 }
 
 // ── resilient send ──────────────────────────────────────────────────────────
@@ -84,6 +92,24 @@ async function sendHtmlWithRetry(message: string): Promise<void> {
     }
   }
   throw lastErr;
+}
+
+// Overall cap on build + send. Must fire BELOW Vercel's maxDuration=60 kill —
+// a maxDuration kill produces no alert and no report (the exact silent failure
+// we hit). Capping here turns a hung metrics build (cold-start pooler stall)
+// into a caught error that alerts. 50s leaves ~10s of headroom for the alert
+// fetch afterward.
+const OVERALL_TIMEOUT_MS = 50000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
 // ── handler ─────────────────────────────────────────────────────────────────
@@ -118,20 +144,29 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const message =
-    format === "daily" ? await buildDaily(now) : await buildHourly(now);
-
+  // Build AND send inside ONE try/catch under an overall timeout. The build used
+  // to run outside the catch, so a slow/hung metrics build produced no alert and
+  // no report — the function just ran into Vercel's maxDuration kill with zero
+  // signal (this is what dropped the hourly report while daily kept working).
   try {
-    await sendHtmlWithRetry(message);
+    await withTimeout(
+      (async () => {
+        const message =
+          format === "daily" ? await buildDaily(now) : await buildHourly(now);
+        await sendHtmlWithRetry(message);
+      })(),
+      OVERALL_TIMEOUT_MS,
+      `${format} report`,
+    );
   } catch (err) {
-    const detail = err instanceof Error ? err.message : "Telegram send failed";
-    console.error("[telegram-report] send failed after retries:", err);
-    // A silent 500 is invisible outside Vercel logs. Fire a best-effort
-    // plain-text alert (never throws, no HTML to misparse) so a dropped report
-    // is actually noticed. If the whole Telegram path is down this no-ops too —
-    // nothing more we can do — but a transient/HTML-parse failure surfaces here.
+    const detail = err instanceof Error ? err.message : "report failed";
+    console.error("[telegram-report] failed:", err);
+    // A silent 500 is invisible outside Vercel logs (which aren't retained).
+    // Fire a best-effort plain-text alert (never throws, no HTML to misparse) so
+    // a dropped report is actually noticed — covers build hangs/timeouts now too,
+    // not just send failures.
     await notifyTelegram(
-      `⚠️ CamMan ${format} report failed to send (Warsaw ${warsawHour}:00). ${detail}`,
+      `⚠️ CamMan ${format} report failed (Warsaw ${warsawHour}:00). ${detail}`,
     );
     return NextResponse.json({ error: detail }, { status: 500 });
   }

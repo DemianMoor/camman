@@ -53,8 +53,10 @@ export function etDayRange(bounds: { start: Date; end: Date }): EtDayRange {
 }
 
 // Sum campaign_stages.total_cost across all orgs for stages sent within the
-// window. Archived stages excluded — matches salesRevenueTotals.
-async function spendInRange(range: EtDayRange): Promise<number> {
+// window. Archived stages excluded — matches salesRevenueTotals. Exported so the
+// hourly Telegram report can fetch yesterday's spend alone (one query) instead
+// of a full second computeReportMetrics — see app/api/cron/telegram-report.
+export async function spendInRange(range: EtDayRange): Promise<number> {
   const rows = (await db.execute(sql`
     select coalesce(sum(cs.total_cost), 0)::numeric(12,4)::text as spend
     from campaign_stages cs

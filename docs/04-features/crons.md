@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-03_
+_Last updated: 2026-07-07_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -64,7 +64,9 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
   - **ROI %** = `(revenue − spend) / spend × 100`; `n/a` when spend = 0. Opt-out ratio = opt-outs ÷ delivered; `n/a` when delivered = 0.
   - **Net Profit** = `revenue − spend` (line after ROI). Renders sign-aware (`-$150.00` for a loss).
 - Metric computation lives in [`lib/reporting/report-snapshot.ts`](../../lib/reporting/report-snapshot.ts) (`computeReportMetrics`). The message is sent via `sendTelegramHtml(text, timeoutMs)` ([`lib/alerts/telegram.ts`](../../lib/alerts/telegram.ts)) with `parse_mode: "HTML"` — a **non-swallowing** counterpart to `notifyTelegram()`: on any failure (missing config, network, non-200) it throws.
-- **Resilient send:** the report fires once per hour with no natural recovery until the next tick, so the handler wraps the send in `sendHtmlWithRetry` — **2 attempts**, an **8 s** timeout each (up from the 4 s best-effort default), 1 s backoff. Only if BOTH attempts fail does the handler return **500** (so the scheduler's failure monitoring still catches a truly broken report) **and** fire a best-effort plain-text `notifyTelegram` alert (`⚠️ CamMan <format> report failed…`) so a dropped hour is visible instead of silent. Added after two consecutive top-of-hour ticks were lost to a transient blip (2026-07-03).
+- **Resilient send:** the report fires once per hour with no natural recovery until the next tick, so the handler wraps the send in `sendHtmlWithRetry` — **2 attempts**, an **8 s** timeout each (up from the 4 s best-effort default), 1 s backoff.
+- **Build + send are wrapped in ONE try/catch under a 50 s overall timeout** (`withTimeout`, below `maxDuration=60`). Any failure — send error, **or a hung/slow metrics build** — returns **500** (scheduler failure-monitoring still catches it) **and** fires a best-effort plain-text `notifyTelegram` alert (`⚠️ CamMan <format> report failed…`) so a dropped report is visible instead of silent. Earlier the build ran *outside* the catch, so a hung build produced no report and no alert — just a silent `maxDuration` kill.
+- **Cold-start DB fan-out (why hourly silently died while daily worked, fixed 2026-07-07).** `buildHourly` used to run `2× computeReportMetrics` (today + yesterday) via `Promise.all` = **8 concurrent queries**; on a cold serverless start during busy ET hours that burst stalled the connection pooler past `maxDuration`. The queries themselves are ~16 ms — the cost was concurrent *connection acquisition*, not execution. Fix: hourly now fetches today's full metrics (4 queries) + yesterday's **spend only** (`spendInRange`, 1 query) **sequentially** — peak concurrency 4, matching the daily path that never failed. Daily (`buildDaily`, 4 queries at the quiet 05:00 ET hour) was always fine.
 - Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (fail-fast 500 if missing when a send is due), `CRON_SECRET`.
 
 ## 4. Data

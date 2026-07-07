@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-07-03_
+_Last updated: 2026-07-07_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -149,6 +149,13 @@ A HARD gate in the drain: before dispatching a claimed batch, any row whose **ph
 - Per-provider **ET send window** (`send_window_weekday/weekend_start/end`, default 08:00–21:00 ET). `decideScheduledSend(cfg, scheduledAt, now)` returns `hold` / `fire` / `missed`. The window anchors to `scheduled_at`'s ET day — once it closes the send is `missed` (sets `schedule_missed_at`, stays reschedulable), never rolled to the next day.
 - ⚠️ **Sender-zone limitation:** the window is evaluated in the sender's fixed ET zone, **not** each recipient's local time. Not fully TCPA-quiet-hours-safe for non-Eastern recipients. Conscious v1 simplification.
 - **`sent_at` is the scheduler's fire-lock.** `selectDueScheduledStages` only selects stages with `sent_at IS NULL`; the atomic claim stamps it. A stage with `sent_at` set is treated as already-fired and **permanently skipped** by the cron. Because of this, marking a **tracked** stage `'sent'` via the manual status action is **blocked** (`POST …/status` returns 409 `tracked_stage_sent_is_pipeline_owned`) — for tracked campaigns the pipeline owns `sent_at`; manual bookkeeping must not write it (doing so silently cancels the scheduled send, and reverting the status would not clear `sent_at`). To stop a tracked send, un-approve or reschedule the stage. The stage status dropdown hides `'sent'` for tracked campaigns.
+
+### Phase C — reconcile stranded stages (`reconcile-stages.ts`, `reconcileStuckStages`)
+A drain interrupted mid-flight (the 300s `maxDuration` cap, or a crash) can leave a stage with rows stuck in `sending` and `campaign_stages.sent_at` **NULL despite thousands already sent**. Such a stage has **0 `pending` rows**, so `selectDrainableStages` (which requires pending rows) never re-picks it — Phase B can't heal it. The `send-scheduled` cron route calls `reconcileStuckStages` once per tick (after `runScheduledSends`, `orgId`-scoped for a manual trigger, all-orgs for the cron), independent of the send gate (it dispatches nothing). For each stranded stage — `tracked`+`active`+`send_approved`+`materialized_at` set, no `pending`, needing finalization (stuck `sending` **or** `sent_at` NULL with ≥1 `sent`), and **idle past a 15-min stale threshold** (far beyond the 300s drain life, so a live drain is never disturbed) — it:
+  1. **Marks stale `sending` → `failed`** (`last_error = 'stranded in sending — drain interrupted; not retried (at-most-once)'`). Terminal, **never re-sent** — a stuck row may already have been accepted by TextHub (process died post-send), so re-dispatching would double-text. The operator can deliberately retry via retry-failed.
+  2. **Stamps `sent_at = COALESCE(sent_at, now())`** when ≥1 row actually sent (guarded so a zero-send stage never false-reads "Sent").
+  3. **Recomputes `total_cost`.**
+This is the counterpart to two behavior changes: **cost is now billed from `status='sent'` rows, not gated on `sent_at`** ([total-cost.ts](../../lib/stages/total-cost.ts)) — so a fully-sent stage whose finalization was skipped still shows its cost — and **a stage that sent anything reads Green "Sent", not Red "Failed"** ([stage-status.ts](../../lib/stages/stage-status.ts) `deriveStageOperationalStatus`): a few failed/stuck/dedup-skipped rows are a **warning** (`stageSendWarningCount`), not a whole-stage failure. Red is reserved for a missed window or a terminal stage with **nothing** sent.
 
 ### Alerts (`lib/alerts/`)
 Best-effort Telegram alerts on breaker trips / poller failures. If `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are unset, the alerter is a silent no-op and the drain/poller run unaffected.

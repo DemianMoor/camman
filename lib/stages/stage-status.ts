@@ -205,17 +205,18 @@ export function deriveStageOperationalStatus(
   if (input.materializedAt == null && hasRows) return "materializing";
 
   if (hasRows) {
-    const draining = c.pending > 0;
-    // 2. Drain has finished (nothing pending) but left failures or rows stuck in
-    //    "sending" (process died mid-send, never auto-retried) → needs attention.
-    if (!draining && (c.failed > 0 || c.sending > 0)) return "missed_failed";
-    // 3. Actively sending or already submitted.
+    // 2. The bulk went out. As long as ANY message was sent (or is actively being
+    //    submitted), the stage reads Green "Sent" — a handful of failed / stuck-
+    //    'sending' / dedup-skipped rows is a WARNING surfaced separately
+    //    (stageSendWarningCount), NOT a whole-stage failure. Stuck 'sending' rows
+    //    are converted to 'failed' by the reconciliation pass within ~15 min, so a
+    //    genuinely dead stage (nothing sent) lands in case 4 below, not here.
     if (c.sent > 0 || c.sending > 0) return "sending_sent";
-    // 4. Materialized and waiting (Prepared / Blue) — the WS4 non-negotiable.
+    // 3. Materialized and waiting (Prepared / Blue) — the WS4 non-negotiable.
     if (c.pending > 0) return "prepared";
-    // 5. Fully drained with NOTHING sent but rows excluded by the 1-hour dedup
-    //    gate → needs attention (a silently-skipped stage must not read Green).
-    if (c.skippedDuplicate > 0) return "missed_failed";
+    // 4. Terminal (nothing pending or sending) with NOTHING sent, but failures or
+    //    dedup-skips → the stage genuinely didn't deliver → needs attention (Red).
+    if (c.failed > 0 || c.skippedDuplicate > 0) return "missed_failed";
     // Fully drained, zero sent, zero failed — nothing left; treat as sent.
     return "sending_sent";
   }
@@ -224,4 +225,16 @@ export function deriveStageOperationalStatus(
   if (input.scheduledAt != null) return "scheduled_unprepared";
   // 6. Nothing scheduled, nothing prepared.
   return "draft";
+}
+
+// Recipients that did NOT get the message even though the stage sent: hard
+// failures + rows stranded in 'sending' (interrupted drain, pending reconciliation)
+// + rows the 1-hour dedup gate skipped. Surfaced as a "N not delivered" warning
+// next to a Green stage — the counterpart to no longer flipping the whole stage
+// Red when the bulk sent. Zero for a clean or not-yet-materialized stage.
+export function stageSendWarningCount(
+  counts: StageSendCounts | null | undefined,
+): number {
+  const c = counts ?? EMPTY_COUNTS;
+  return c.failed + c.sending + c.skippedDuplicate;
 }

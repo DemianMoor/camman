@@ -17,10 +17,14 @@ import type { db } from "@/db/client";
 // the operator-entered tally in `sms_count`. GREATEST(sms_count, sent_count)
 // resolves both without double-counting.
 //
-// Cost is only calculated once the stage has been SENT — not at creation time.
-// "Sent" means `sent_at IS NOT NULL` (an API fire or a "Mark as sent" click) OR
-// `sms_count > 0` (hand-entered results imply the send happened, even if the
-// stage was never marked sent). Before that, total_cost stays 0.
+// Cost is calculated from the messages ACTUALLY sent — a manual tally
+// (`sms_count > 0`) OR at least one accepted API send (a `status='sent'`
+// stage_sends row). It is deliberately NOT gated on `campaign_stages.sent_at`:
+// that stage-level fire-lock can stay NULL when a drain was interrupted before
+// its finalization step ran, yet thousands of rows already sent — gating cost on
+// it zeroed the cost of stages that had fully sent (the 8_62_070726_2 incident).
+// Failed / stuck / dedup-skipped rows are NOT 'sent', so they neither add cost
+// nor zero it. Before any send, total_cost stays 0.
 //
 // This auto formula owns total_cost only while campaign_stages.total_cost_manual
 // is false. When true — an operator override or a CSV-imported provider cost —
@@ -52,7 +56,11 @@ export async function recomputeStageTotalCost(
   await exec.execute(sql`
     UPDATE campaign_stages cs
     SET total_cost = CASE
-      WHEN cs.sent_at IS NOT NULL OR cs.sms_count > 0 THEN
+      WHEN cs.sms_count > 0
+        OR EXISTS (
+          SELECT 1 FROM stage_sends ss
+          WHERE ss.stage_id = cs.id AND ss.status = 'sent'
+        ) THEN
         COALESCE(
           (SELECT pp.cost_per_sms FROM provider_phones pp
            WHERE pp.id = cs.provider_phone_id),

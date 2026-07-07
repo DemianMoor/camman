@@ -19,7 +19,8 @@ export type CampaignEventType =
   | "send_drain"
   | "send_aborted"
   | "results_imported"
-  | "results_reverted";
+  | "results_reverted"
+  | "stage_deleted";
 
 export interface LogCampaignEventInput {
   orgId: string;

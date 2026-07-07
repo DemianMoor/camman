@@ -105,6 +105,7 @@ export type Permission =
   | "stages.send"
   | "stages.archive"
   | "stages.restore"
+  | "stages.delete"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -254,6 +255,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "campaigns.reassign",
   "campaigns.drain",
   "stages.restore",
+  "stages.delete",
   "registry.create",
   "registry.update",
   "registry.archive",

@@ -81,6 +81,32 @@ async function main() {
     // --- Case 5: 404 for a foreign / missing stage. ---
     const r5 = await deleteStage({ orgId, campaignId, stageId: 999999999 });
     check("missing stage → 404", !r5.ok && r5.status === 404, JSON.stringify(r5));
+
+    // --- Case 6: never-sent parent with a SENT behavioral lane is BLOCKED; nothing cascades. ---
+    const p1 = await stage(campaignId, 7);
+    const lane1Rows = (await db.execute(sql`
+      INSERT INTO campaign_stages (org_id, campaign_id, stage_number, behavioral_tier, parent_stage_id, status, sent_at)
+      VALUES (${orgId}::uuid, ${campaignId}::int, 8, 0, ${p1}::int, 'sent', '2026-07-06 14:00:00+00')
+      RETURNING id
+    `)) as unknown as { id: number }[];
+    const lane1 = lane1Rows[0].id;
+    const r6 = await deleteStage({ orgId, campaignId, stageId: p1 });
+    check("parent with sent lane blocked with 409 has_send_data", !r6.ok && r6.status === 409 && (r6 as { code: string }).code === "stage_has_send_data", JSON.stringify(r6));
+    check("parent still exists (not cascaded)", await exists(p1));
+    check("sent lane still exists (not cascaded)", await exists(lane1));
+
+    // --- Case 7: never-sent parent with only EMPTY lanes deletes (undo accidental split). ---
+    const p2 = await stage(campaignId, 9);
+    const lane2Rows = (await db.execute(sql`
+      INSERT INTO campaign_stages (org_id, campaign_id, stage_number, behavioral_tier, parent_stage_id, status, sent_at)
+      VALUES (${orgId}::uuid, ${campaignId}::int, 10, 0, ${p2}::int, 'draft', NULL)
+      RETURNING id
+    `)) as unknown as { id: number }[];
+    const lane2 = lane2Rows[0].id;
+    const r7 = await deleteStage({ orgId, campaignId, stageId: p2 });
+    check("parent with only empty lanes deletes ok (undo split)", r7.ok, JSON.stringify(r7));
+    check("parent gone", !(await exists(p2)));
+    check("empty lane gone (cascaded)", !(await exists(lane2)));
   } finally {
     console.log("\nCleanup (scoped to test org only)");
     try {

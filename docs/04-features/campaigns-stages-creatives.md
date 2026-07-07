@@ -51,6 +51,11 @@ a normal stage. Archiving OR deleting the extra variants of either split kind
 (A/B or behavioral) unblocks re-splitting the original — only *live* (non-archived)
 variants/lanes block a re-split.
 
+Deleting a behavioral parent also removes its lanes (the self-FK
+`parent_stage_id` cascades); this is allowed only when neither the parent nor
+any of its lanes has send/result data — lanes are best archived or deleted as a
+set.
+
 ### Creatives
 - M:N with offers; `applies_to_all_offers=true` ⇒ valid for any offer (junction rows still allowed as a fallback list; toggling the flag does NOT auto-clear them).
 - No provider/brand on the creative (those live at the stage level). No status state machine — `active`/`archived` only.

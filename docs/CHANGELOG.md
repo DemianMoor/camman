@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-07 — Stage delete gate now covers behavioral lanes; atomic self-guarding delete — docs: 04-features
+- Final whole-branch review of stage hard-delete found the gate only checked the TARGET stage's own send/result tables, so a never-sent behavioral parent could pass the gate and CASCADE-delete its sent lanes' data. `deleteStage` ([lib/stages/delete-stage.ts](../lib/stages/delete-stage.ts)) now blocks (409 `stage_has_send_data`) when the target OR any `parent_stage_id`-lane has `sent_at` set or rows in `stage_sends`/`stage_results_imports`/`stage_manual_sales`/`keitaro_stage_results`; a parent whose lanes are all truly empty still deletes (undo-split path unaffected). Gate + delete are now one atomic self-guarding `DELETE ... WHERE NOT EXISTS (...)` inside the transaction (was gate-SELECT-then-DELETE, a TOCTOU window for a concurrent Prepare). UI Delete action also now hides on a materialized/Prepared stage. No schema change.
+
 ## 2026-07-07 — Stage hard-delete + re-split unblock — docs: 04-features, 07-conventions, CHANGELOG
 - New `DELETE /api/campaigns/[campaignId]/stages/[stageId]` (`stages.delete`, manager+): removes a stage that has no send/result data (`sent_at` null AND no `stage_sends`/`stage_results_imports`/`stage_manual_sales`/`keitaro_stage_results`), cleaned up by existing FK cascades. Sent/result-bearing stages stay archive-only. Deleting the extra A/B variants reverts the lone survivor to a normal stage.
 - Re-split guards now ignore ARCHIVED siblings/lanes: A/B `/split` blocks only on live partners (`lib/stages/split-membership.ts`); behavioral `performBehavioralSplit` excludes archived lanes. Fixes stages stuck as "already split" after their variants were archived (e.g. `8_62_070126_1` "Day 4"). No schema change.

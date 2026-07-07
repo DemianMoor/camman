@@ -1266,6 +1266,8 @@ export default function CampaignDetailPage() {
                   ) : null}
                   {canDeleteStage &&
                   !s.sent_at &&
+                  !s.materialized_at &&
+                  s.send_counts.total === 0 &&
                   s.sms_count === 0 &&
                   s.delivered_count === 0 &&
                   s.opt_out_count === 0 &&

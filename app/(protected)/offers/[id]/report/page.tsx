@@ -112,7 +112,11 @@ export default function OfferGroupReportPage() {
   const benchmark = data ? { ...data.orgBenchmark, ...derive(data.orgBenchmark) } : null;
 
   const netRpmClass = (v: number | null) =>
-    v == null ? "" : breakEven != null && v >= breakEven ? "text-emerald-600" : "text-destructive";
+    v == null || breakEven == null
+      ? ""
+      : v >= breakEven
+        ? "text-emerald-600"
+        : "text-destructive";
   const ooClass = (v: number | null) =>
     v == null ? "" : v <= 2 ? "text-emerald-600" : v <= 3 ? "text-amber-600" : "text-destructive";
 

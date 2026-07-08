@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-07-08_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -136,6 +136,15 @@ erDiagram
 > redirect time) back to the row. `sub_id_1` is the per-recipient counterpart of
 > `sub_id_3` (the per-stage join key for `keitaro_stage_results`).
 
+> **Offer group report (migration 0093):** the reporting layer is not in the ERD
+> above — `offer_report_campaign_econ` (plain view) and `offer_group_report_mv` /
+> `offer_report_org_summary_mv` (materialized views) are **derived**, not base
+> tables. They read across `campaigns`, `campaign_stages`, `stage_sends`,
+> `stage_manual_sales`, `keitaro_stage_results`, `opt_out_attributions`, and
+> `contact_contact_groups`/`contact_groups` rather than declaring their own FKs.
+> See the "Reporting" subsection below and
+> [04-features/offer-group-report.md](04-features/offer-group-report.md).
+
 ## Tables by domain
 
 ### Tenancy & access
@@ -235,6 +244,18 @@ erDiagram
 > **Phase 2 (migration 0087):** `campaigns.exclude_prior_offer_contacts` (boolean, NOT NULL DEFAULT false) — the per-campaign opt-in for LAYER 3 (offer-level exclusion). The send-time eligibility anti-join (`lib/sends/eligibility.ts`, wired into `stageRecipientsSql` for send + export) now actively suppresses; `reconcile.ts` gained an `excluded_dedup` bucket. See [`docs/04-features/content-dedup.md`](04-features/content-dedup.md) §6.
 
 > Both ledgers count a lead as **used** = a `stage_sends` row that reached `status='sent'` (the only per-recipient success marker). Pure external-CSV campaigns create no `stage_sends` rows → known, accepted blind spot. Backfill: [`scripts/backfill-content-dedup-exposures.ts`](../scripts/backfill-content-dedup-exposures.ts) (idempotent, earliest `sent_at` wins the `campaign_id`). The send-time eligibility anti-join + offer-page counter UI + per-campaign exclude toggle land in **Phase 2** — see [`docs/04-features/content-dedup.md`](04-features/content-dedup.md).
+
+### Reporting (migration 0093)
+| Table/View | Key columns | Notes |
+|-------|------------|-------|
+| `report_refresh_log` | `view_name text` PK, `refreshed_at timestamptz` | one bookkeeping row per matview below, seeded `NULL` at migration time; stamped `now()` by the refresh cron on every successful run |
+| `offer_report_campaign_econ` (plain **view**) | `campaign_id`, `org_id`, `offer_id`, `group_ids int[]` (= `campaigns.audience_contact_group_ids`), `sends`, `revenue numeric(12,4)`, `sales`, `clicks`, `cost numeric(12,4)`, `optouts` | per-campaign economics for every campaign of an offer with ≥1 sent stage (tracked **and** manual); shared source for both matviews below — see the locked metric definitions in [04-features/offer-group-report.md](04-features/offer-group-report.md) |
+| `offer_group_report_mv` (**materialized**) | UNIQUE(`org_id`, `offer_id`, `group_id`); `group_name`, `sends`, `revenue`, `sales`, `clicks`, `cost`, `optouts`, `sent_7d`, `sent_30d`, `sent_90d`, `fresh_pool` | per org×offer×group rollup of `offer_report_campaign_econ` (`unnest(group_ids)`) — a campaign targeting multiple groups is counted FULLY in each one, not split. `sent_7d`/`sent_30d`/`sent_90d`/`fresh_pool` are derived from per-recipient `stage_sends` across **all** offers and **both** link modes |
+| `offer_report_org_summary_mv` (**materialized**) | UNIQUE(`org_id`); `sends`, `revenue`, `sales`, `clicks`, `cost`, `optouts` | de-duplicated org-wide benchmark — each campaign counted **once** (no group unnest), so it does NOT equal the sum of `offer_group_report_mv`'s group rows when multi-group campaigns exist |
+
+> **Matviews carry no RLS.** Postgres materialized views cannot have row-level security policies. `offer_group_report_mv` and `offer_report_org_summary_mv` are read only through the server-side helper [`lib/reporting/offer-group-report.ts`](../lib/reporting/offer-group-report.ts), which explicitly filters `WHERE org_id = ${orgId}`; the API route (`GET /api/offers/[id]/report`) never exposes them directly. Same primary-defense posture as CLAUDE.md §3 — here there is simply no RLS layer to add, so the application-level filter is the *only* defense (not defense-in-depth-plus-RLS as with base tables).
+
+> **New indexes (migration 0093):** `stage_sends (sent_at, contact_id)` and `contact_contact_groups (contact_group_id, contact_id)` — support the twice-daily refresh's list-pressure/fresh-pool joins. The pre-existing `contact_contact_groups` PK is `(contact_id, contact_group_id)`, the wrong column order for "all contacts in a group."
 
 ## Triggers & DB-side logic (in migrations, not Drizzle)
 - **`handle_new_user()`** (`0001`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row.

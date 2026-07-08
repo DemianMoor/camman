@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-07-08_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -128,6 +128,13 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Logging is **best-effort** (the helper swallows its own errors) so an audit write can't break the user action. Inside a transaction it must be the **last** statement and is trusted — a thrown error there aborts the whole tx regardless of the catch (Postgres aborts on any error). Outside a tx, the swallow makes it truly non-fatal.
 - `actor_user_id` NULL ⇒ system/cron (e.g. the scheduled drain); the UI renders "System / automatic".
 - The Activity **Messages** drill-down reads `stage_sends` live — individual recipient sends are **never** copied into `campaign_events`.
+
+## Offer group report (migration 0093, see [04-features/offer-group-report.md](04-features/offer-group-report.md))
+- **Sales are `GREATEST(Σ keitaro_stage_results.sales, Σ stage_manual_sales.delta)` per STAGE, then summed across stages — never simply summed with Keitaro's count.** Same `max`-not-sum convention as the Money section's `combineSales` above, restated here because this report computes it directly in SQL (`offer_report_campaign_econ`'s `stage_sales` CTE), not via `lib/reporting/attribution.ts`.
+- **Sends are `campaigns.link_mode`-based, not a single column.** `link_mode='tracked'` → `count(*)` of `stage_sends` rows with `sent_at IS NOT NULL`; `manual` → `Σ campaign_stages.sms_count` over sent stages. Revenue/Cost/Clicks/Opt-outs are drawn identically for both modes — only Sends branches.
+- **A campaign that targets multiple contact groups (`campaigns.audience_contact_group_ids`) is counted FULLY in every targeted group**, not split proportionally. `offer_group_report_mv` rows can therefore sum to MORE than `offer_report_org_summary_mv`'s de-duplicated (each campaign counted once) org-wide benchmark row. Footnoted in the UI — don't treat the mismatch as a bug.
+- **The twice-daily refresh cron is fixed-UTC (`0 5,20 * * *`) and drifts ~1h across DST**: 00:00 & 15:00 ET in winter (EST), 01:00 & 16:00 ET in summer (EDT). Acceptable for a historical, twice-daily report — the same fixed-UTC tradeoff CamMan already accepts for `telegram-report`'s Warsaw-time schedule; documented, not corrected.
+- **Per-contact columns (`Sent 7d/30d/90d`, `Fresh pool`) count every in-app per-recipient `stage_sends` row regardless of `link_mode`** — tracked AND manual in-app sends both write these rows. Only a send performed **entirely outside the app** (an operator hand-entering `campaign_stages.sms_count` with no corresponding `stage_sends` row) is invisible to these four columns. The economics columns (Sends/Revenue/Sales/Cost/Clicks/Opt-outs) are unaffected — they include external sends via `sms_count`.
 
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.

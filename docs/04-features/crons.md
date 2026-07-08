@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-07-08_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -15,6 +15,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 | `/api/keitaro/poll-conversions` | `9,24,39,54 * * * *` | per-recipient SALE attribution → `stage_sends.sale_status` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/keitaro/poll-offer-reaches` | `12,27,42,57 * * * *` | per-recipient OFFER-PAGE REACH (Level 2) → `stage_sends.offer_reached_at` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/cron/telegram-report` | `0 * * * *` | send the daily/hourly performance report to Telegram (decides internally per Warsaw time) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
+| `/api/cron/refresh-offer-group-report` | `0 5,20 * * *` | rebuild the offer group report matviews (`offer_group_report_mv`, `offer_report_org_summary_mv`) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 
 > **Schedules are staggered on purpose.** Previously the four `*/15` jobs all fired at `:00/:15/:30/:45` alongside the two `*/5` jobs — up to **5–6 crons at once**, each cold-starting and each grabbing pooler connections (the pool caps at `max:5` per instance against Supavisor's ~15-client ceiling). The `*/15` jobs now sit at distinct off-5 minute offsets (`3/6/9/12`), so they never coincide with the `*/5` jobs or each other — peak concurrency drops from ~6 to ~2. `send-scheduled` and `keitaro/poll` stay on `*/5` (both latency-sensitive; two concurrent is fine).
 >
@@ -69,9 +70,16 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - **Cold-start DB fan-out (why hourly silently died while daily worked, fixed 2026-07-07).** `buildHourly` used to run `2× computeReportMetrics` (today + yesterday) via `Promise.all` = **8 concurrent queries**; on a cold serverless start during busy ET hours that burst stalled the connection pooler past `maxDuration`. The queries themselves are ~16 ms — the cost was concurrent *connection acquisition*, not execution. Fix: hourly now fetches today's full metrics (4 queries) + yesterday's **spend only** (`spendInRange`, 1 query) **sequentially** — peak concurrency 4, matching the daily path that never failed. Daily (`buildDaily`, 4 queries at the quiet 05:00 ET hour) was always fine.
 - Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (fail-fast 500 if missing when a send is due), `CRON_SECRET`.
 
+### `/api/cron/refresh-offer-group-report` (offer group report refresh)
+- Calls `refreshOfferGroupReport()` ([lib/reporting/offer-group-report.ts](../../lib/reporting/offer-group-report.ts)): `REFRESH MATERIALIZED VIEW CONCURRENTLY` on `offer_report_org_summary_mv` then `offer_group_report_mv` (two separate statements — `CONCURRENTLY` cannot run inside an explicit transaction), then stamps both `report_refresh_log` rows with `now()`.
+- `maxDuration = 300` (not the default 60) — measured worst-case ~50s cold / ~37s warm for both refreshes against production data; this is a background job with nothing waiting on it, so the larger budget is free.
+- **DST drift:** `0 5,20 * * *` is fixed-UTC → 00:00 & 15:00 ET in winter (EST), 01:00 & 16:00 ET in summer (EDT). ~1h drift across the transition, irrelevant for a twice-daily historical report — same tradeoff already accepted for `telegram-report`'s Warsaw-time schedule.
+- No request body/params; returns `{ ok: true }`. See [offer-group-report.md](offer-group-report.md).
+
 ## 4. Data
 - Reads/writes `clicks`, `geoip_cache`; `opt_outs`, `texthub_inbound_events`; `stage_sends`, `links`, `campaign_stages`, `send_circuit_events`; `keitaro_stage_results` (reads `campaign_stages`/`campaigns` for sub_id_3 mapping).
 - `telegram-report` reads only: `organizations`, `keitaro_stage_results`, `stage_manual_sales`, `campaign_stages`, `opt_outs`, `stage_sends` (all via indexed date/status filters).
+- `refresh-offer-group-report` rebuilds `offer_group_report_mv` / `offer_report_org_summary_mv` from `offer_report_campaign_econ` (a view over `campaigns`, `campaign_stages`, `stage_sends`, `stage_manual_sales`, `keitaro_stage_results`, `opt_out_attributions`) plus `contact_contact_groups`/`contact_groups`, and updates `report_refresh_log`.
 
 ## 5–7. Notes
 - Vercel injects the `CRON_SECRET` Bearer header automatically when it calls the GET path; the dual POST paths exist so an operator can trigger the same work manually for their own org from the UI.

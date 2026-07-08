@@ -48,6 +48,21 @@ async function main() {
   check("[8] rows carry no internal contact ids (names only)",
     body.rows.every((r: any) => typeof r.group_name === "string"));
 
+  // [9] Cron rejects without secret
+  const noSecret = await fetch(`${BASE}/api/cron/refresh-offer-group-report`);
+  check("[9] cron 401 without secret", noSecret.status === 401, `got ${noSecret.status}`);
+
+  // [10] Cron accepts with secret + advances the log timestamp
+  const secret = process.env.CRON_SECRET;
+  if (secret) {
+    const ok = await fetch(`${BASE}/api/cron/refresh-offer-group-report`, {
+      headers: { "x-cron-secret": secret },
+    });
+    check("[10] cron 200 with secret", ok.status === 200, `got ${ok.status}`);
+  } else {
+    console.log("… [10] skipped (no CRON_SECRET in env)");
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
 }

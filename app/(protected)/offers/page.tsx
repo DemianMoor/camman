@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { format } from "date-fns";
 import {
   ArchiveRestore,
@@ -429,49 +430,57 @@ export default function OffersPage() {
           const showEdit = canUpdate;
           const showArchive = offer.status === "active" && canArchive;
           const showRestore = offer.status === "archived" && canRestore;
-          if (!showEdit && !showArchive && !showRestore) return null;
           return (
-            <div className="flex justify-end">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Actions"
+            <div className="flex items-center justify-end gap-1">
+              <Link
+                href={`/offers/${offer.id}/report`}
+                onClick={(e) => e.stopPropagation()}
+                className="text-sm font-medium text-primary hover:underline"
+              >
+                Group Report
+              </Link>
+              {showEdit || showArchive || showRestore ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Actions"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <MoreHorizontal className="size-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="end"
                     onClick={(e) => e.stopPropagation()}
                   >
-                    <MoreHorizontal className="size-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  align="end"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {showEdit ? (
-                    <DropdownMenuItem onSelect={() => setEditing(offer)}>
-                      <Pencil className="size-4" aria-hidden /> Edit
-                    </DropdownMenuItem>
-                  ) : null}
-                  {showArchive ? (
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        setConfirming({ kind: "archive", offer })
-                      }
-                    >
-                      <ArchiveIcon className="size-4" aria-hidden /> Archive
-                    </DropdownMenuItem>
-                  ) : null}
-                  {showRestore ? (
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        setConfirming({ kind: "restore", offer })
-                      }
-                    >
-                      <ArchiveRestore className="size-4" aria-hidden /> Restore
-                    </DropdownMenuItem>
-                  ) : null}
-                </DropdownMenuContent>
-              </DropdownMenu>
+                    {showEdit ? (
+                      <DropdownMenuItem onSelect={() => setEditing(offer)}>
+                        <Pencil className="size-4" aria-hidden /> Edit
+                      </DropdownMenuItem>
+                    ) : null}
+                    {showArchive ? (
+                      <DropdownMenuItem
+                        onSelect={() =>
+                          setConfirming({ kind: "archive", offer })
+                        }
+                      >
+                        <ArchiveIcon className="size-4" aria-hidden /> Archive
+                      </DropdownMenuItem>
+                    ) : null}
+                    {showRestore ? (
+                      <DropdownMenuItem
+                        onSelect={() =>
+                          setConfirming({ kind: "restore", offer })
+                        }
+                      >
+                        <ArchiveRestore className="size-4" aria-hidden /> Restore
+                      </DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
             </div>
           );
         },

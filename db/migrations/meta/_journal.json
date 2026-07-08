@@ -652,6 +652,13 @@
       "when": 1784332800000,
       "tag": "0092_segment_rules_in_use_in_offer",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1784419200000,
+      "tag": "0093_offer_group_report",
+      "breakpoints": true
     }
   ]
 }

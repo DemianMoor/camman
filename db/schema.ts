@@ -2553,3 +2553,14 @@ export const offer_exposure_counts = pgTable(
 
 export type OfferExposureCount = typeof offer_exposure_counts.$inferSelect;
 export type NewOfferExposureCount = typeof offer_exposure_counts.$inferInsert;
+
+// ============ Report refresh bookkeeping ============
+// One row per materialized view; the twice-daily cron stamps refreshed_at so the
+// UI can show "data as of …". Global (no org_id) — server-only bookkeeping.
+export const report_refresh_log = pgTable("report_refresh_log", {
+  view_name: text("view_name").primaryKey(),
+  refreshed_at: timestamp("refreshed_at", { withTimezone: true }),
+});
+
+export type ReportRefreshLog = typeof report_refresh_log.$inferSelect;
+export type NewReportRefreshLog = typeof report_refresh_log.$inferInsert;

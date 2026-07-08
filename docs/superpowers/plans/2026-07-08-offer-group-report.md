@@ -743,7 +743,10 @@ import { type NextRequest, NextResponse } from "next/server";
 import { refreshOfferGroupReport } from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Task 2 measured the full CONCURRENTLY refresh at ~50s worst-case (cold) / ~37s
+// warm. 60s left no cold-start headroom, so this cron gets a larger budget. It is
+// a background job (not user-facing), so a longer ceiling costs nothing.
+export const maxDuration = 300;
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;

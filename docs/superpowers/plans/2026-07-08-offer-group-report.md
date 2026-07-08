@@ -1036,8 +1036,8 @@ export default function OfferGroupReportPage() {
       <p className="text-xs text-muted-foreground">
         A campaign targeting multiple groups is counted fully in each group, so group
         rows may sum to more than the org-wide total. “Sent last 7/30/90d” and “Fresh
-        pool” reflect tracked (API) sends only — manually-sent messages have no
-        per-recipient record.
+        pool” count every in-app send (tracked or manual link mode); sends performed
+        entirely outside the app (count-only, no per-recipient record) aren’t included.
       </p>
     </div>
   );
@@ -1160,7 +1160,7 @@ Query the live matview for offer 62 and eyeball vs the brief's shape (Memory hig
 
 - [ ] **Step 3: Integrations** — in `docs/06-integrations.md`, add the new Vercel cron `/api/cron/refresh-offer-group-report` (`0 5,20 * * *`, `CRON_SECRET`-gated, `maxDuration=60`) to the cron list.
 
-- [ ] **Step 4: Conventions** — in `docs/07-conventions.md`, record: (a) sales = per-stage `max(Keitaro, manual)` never summed; (b) Sends = link_mode-based (tracked→stage_sends, manual→sms_count); (c) multi-group campaigns counted fully in each group; (d) matview refresh DST drift; (e) per-contact columns are tracked-only.
+- [ ] **Step 4: Conventions** — in `docs/07-conventions.md`, record: (a) sales = per-stage `max(Keitaro, manual)` never summed; (b) Sends = link_mode-based (tracked→stage_sends, manual→sms_count); (c) multi-group campaigns counted fully in each group; (d) matview refresh DST drift; (e) per-contact columns count every in-app per-recipient send (both link modes); only fully-external `sms_count`-only sends are excluded.
 
 - [ ] **Step 5: Changelog** — append to `docs/CHANGELOG.md`:
 `2026-07-08 — Added per-offer Group Performance Report (matviews + twice-daily cron) — docs/03-data-model, 04-features/offer-group-report, 06-integrations, 07-conventions`

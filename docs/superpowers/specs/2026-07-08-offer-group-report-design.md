@@ -35,11 +35,14 @@ opt-outs are drawn identically for both. This mirrors the `/reports` page's
 "Total Sent" convention, so the numbers reconcile with it.
 
 **Inherent data limitation (not a scoping choice):** the three per-contact
-columns — **Sent last 7/30/90d** and **Fresh pool** — reflect **tracked sends
-only**. They require per-recipient `stage_sends.contact_id` rows, which manual
-campaigns do not produce. There is no per-recipient record of a manual send, so
-these columns cannot account for them. Footnoted in the UI. (The economics
-columns are unaffected — they include manual campaigns fully.)
+columns — **Sent last 7/30/90d** and **Fresh pool** — are computed from
+per-recipient `stage_sends` rows. Every send made through the app's send pipeline
+— the in-app "Send…" button **or** the scheduled auto-send — writes these rows,
+**regardless of `link_mode`** (tracked *and* manual link modes both count). The
+only sends invisible to these columns are those performed **entirely outside the
+app**, where an operator recorded a `campaign_stages.sms_count` but no
+per-recipient send happened. Footnoted in the UI. (The economics columns are
+unaffected — they include those external sends via `sms_count`.)
 
 **Out of scope (v1) — documented, easy to add later:**
 - Proportional split of a multi-group campaign's numbers across its groups. v1
@@ -68,8 +71,8 @@ nothing.
 | **EPC** | `revenue / clicks` (0 clicks ⇒ "—"). Matches `withFunnelDerived().epc`. |
 | **Net profit** | `revenue - cost`. |
 | **Opt-out %** | `optouts / sends * 100`. |
-| **Sent last 7/30/90d** | `count(DISTINCT stage_sends.contact_id)` where the contact is in the group (`contact_contact_groups`) and has a `stage_sends.sent_at` within `now() - interval 'N days'`, **across all offers**. Windows are as-of the last refresh. **Tracked sends only** (manual sends have no per-recipient row — see §2). |
-| **Fresh pool** | Contacts in the group with no `stage_sends` row for a campaign of **this** offer AND not present in `opt_outs`. **Tracked sends only**: a contact sent this offer *manually* is not visible here and may still count as fresh (see §2). |
+| **Sent last 7/30/90d** | `count(DISTINCT stage_sends.contact_id)` where the contact is in the group (`contact_contact_groups`) and has a `stage_sends.sent_at` within `now() - interval 'N days'`, **across all offers**. Windows are as-of the last refresh. Counts every per-recipient `stage_sends` row **regardless of `link_mode`**; only fully-external `sms_count`-only sends are invisible (see §2). |
+| **Fresh pool** | Contacts in the group with no `stage_sends` row for a campaign of **this** offer AND not present in `opt_outs`. Based on per-recipient `stage_sends` (any `link_mode`); a contact reached only via a fully-external `sms_count`-only send is invisible and may still count as fresh (see §2). |
 
 Ratios on summary rows are always computed from **summed totals** (blended),
 never an average of per-group ratios.
@@ -205,8 +208,10 @@ Visible to anyone with `offers.view`.
    are explained by manual sales, not by a join error.
 2. A campaign with two groups in `audience_contact_group_ids` appears fully in
    both group rows; the offer-total row foots the visible columns.
-3. A **manual** campaign contributes to Sends/RPM/Sales/etc. (via `sms_count`)
-   but adds nothing to the 7/30/90d and Fresh-pool columns.
+3. A **fully-external** (`sms_count`-only) campaign contributes to
+   Sends/RPM/Sales/etc. but adds nothing to the 7/30/90d and Fresh-pool columns
+   (no per-recipient rows). An in-app manual-link-mode send DOES count toward
+   them.
 5. "Sent last X days" for a group never exceeds the group's total contact count.
 6. Org-benchmark row's totals are de-duplicated (do NOT equal the sum of group
    rows when multi-group campaigns exist).

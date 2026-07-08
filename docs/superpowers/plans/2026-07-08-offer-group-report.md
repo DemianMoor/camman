@@ -1161,7 +1161,7 @@ Query the live matview for offer 62 and eyeball vs the brief's shape (Memory hig
 
 - [ ] **Step 2: Feature doc** — create `docs/04-features/offer-group-report.md` covering: purpose, entry point (`/offers/[id]/report`), the exact metric definitions (copy spec §3 table), the manual-campaign inclusion + per-contact-column limitation, the twice-daily refresh + DST drift, and the files involved (route, helper, cron, page, migration 0093).
 
-- [ ] **Step 3: Integrations** — in `docs/06-integrations.md`, add the new Vercel cron `/api/cron/refresh-offer-group-report` (`0 5,20 * * *`, `CRON_SECRET`-gated, `maxDuration=60`) to the cron list.
+- [ ] **Step 3: Integrations** — in `docs/06-integrations.md`, add the new Vercel cron `/api/cron/refresh-offer-group-report` (`0 5,20 * * *`, `CRON_SECRET`-gated, `maxDuration=300`) to the cron list.
 
 - [ ] **Step 4: Conventions** — in `docs/07-conventions.md`, record: (a) sales = per-stage `max(Keitaro, manual)` never summed; (b) Sends = link_mode-based (tracked→stage_sends, manual→sms_count); (c) multi-group campaigns counted fully in each group; (d) matview refresh DST drift; (e) per-contact columns count every in-app per-recipient send (both link modes); only fully-external `sms_count`-only sends are excluded.
 

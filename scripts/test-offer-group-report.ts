@@ -28,7 +28,7 @@ async function main() {
 
   // [1] Unauthenticated → 401
   const anon = await fetch(`${BASE}/api/offers/62/report`);
-  check("[1] anon rejected", anon.status === 401 || anon.status === 403, `got ${anon.status}`);
+  check("[1] anon rejected (401)", anon.status === 401, `got ${anon.status}`);
 
   // [2] Invalid id → 400
   const bad = await apiFetch(`/api/offers/not-a-number/report`);
@@ -46,7 +46,7 @@ async function main() {
   check("[7] breakEven derived",
     body.breakEvenPer1k === null || typeof body.breakEvenPer1k === "number");
   check("[8] rows carry no internal contact ids (names only)",
-    body.rows.every((r: any) => typeof r.group_name === "string"));
+    body.rows.every((r: any) => typeof r.group_name === "string" && !("contact_id" in r)));
 
   // [9] Cron rejects without secret
   const noSecret = await fetch(`${BASE}/api/cron/refresh-offer-group-report`);

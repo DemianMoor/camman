@@ -2,7 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
-## 2026-07-08 — Added per-offer Group Performance Report (matviews + twice-daily cron) — docs/03-data-model, 04-features/offer-group-report, 06-integrations, 07-conventions
+## 2026-07-08 — Added per-offer Group Performance Report (matviews + twice-daily cron) — docs/03-data-model, 04-features/offer-group-report, 04-features/crons, 06-integrations, 07-conventions
 - New `/offers/[id]/report` page + `GET /api/offers/[id]/report`: per-(offer, contact group) lifetime economics (Sends/RPM/Net RPM/EPC/Sales/Opt-out %/Net profit) plus list-pressure (`Sent 7d/30d/90d`) and `Fresh pool`, with a pinned org-wide benchmark row and an offer-total row. Both tracked and manual campaigns are included in the economics; only per-contact columns are limited to in-app sends (any `link_mode`).
 - Precomputed via migration `0093_offer_group_report` (plain view `offer_report_campaign_econ` + materialized views `offer_group_report_mv`/`offer_report_org_summary_mv` + `report_refresh_log` + supporting indexes), refreshed twice daily by a new Vercel cron `/api/cron/refresh-offer-group-report` (`0 5,20 * * *`, `CRON_SECRET`-gated, `maxDuration=300`).
 - Multi-group campaigns count fully in each targeted group (group rows can sum to more than the de-duplicated org benchmark) — footnoted in the UI, documented in [07-conventions.md](07-conventions.md).

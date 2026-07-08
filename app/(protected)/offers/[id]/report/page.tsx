@@ -8,14 +8,8 @@ import { ArrowLeft, RefreshCw, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import type { RawMetrics, GroupRawRow } from "@/lib/reporting/offer-group-report";
 
-type RawMetrics = {
-  sends: number; revenue: number; sales: number; clicks: number; cost: number; optouts: number;
-};
-type GroupRawRow = RawMetrics & {
-  group_id: number; group_name: string;
-  sent_7d: number; sent_30d: number; sent_90d: number; fresh_pool: number;
-};
 type ReportResponse = {
   offerName: string;
   rows: GroupRawRow[];
@@ -64,6 +58,36 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
 
 type ViewRow = GroupRawRow & Derived;
 
+// ---- color helpers (pure, module scope) ----
+function netRpmClass(v: number | null, breakEven: number | null) {
+  return v == null || breakEven == null
+    ? ""
+    : v >= breakEven
+      ? "text-emerald-600"
+      : "text-destructive";
+}
+function ooClass(v: number | null) {
+  return v == null ? "" : v <= 2 ? "text-emerald-600" : v <= 3 ? "text-amber-600" : "text-destructive";
+}
+
+function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived; isGroup: boolean; breakEven: number | null }) {
+  return (
+    <>
+      <td className="px-3 py-2 text-right tabular-nums">{fmtInt(m.sends)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.rpm)}</td>
+      <td className={`px-3 py-2 text-right tabular-nums ${netRpmClass(m.net_rpm, breakEven)}`}>{fmtUsd(m.net_rpm)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.epc)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{fmtInt(m.sales)}</td>
+      <td className={`px-3 py-2 text-right tabular-nums ${ooClass(m.oo_pct)}`}>{fmtPct(m.oo_pct)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.net_profit)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_7d) : "—"}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_30d) : "—"}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_90d) : "—"}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).fresh_pool) : "—"}</td>
+    </>
+  );
+}
+
 export default function OfferGroupReportPage() {
   const params = useParams<{ id: string }>();
   const offerId = params.id;
@@ -111,15 +135,6 @@ export default function OfferGroupReportPage() {
   const offerTotal = data ? { ...data.offerTotals, ...derive(data.offerTotals) } : null;
   const benchmark = data ? { ...data.orgBenchmark, ...derive(data.orgBenchmark) } : null;
 
-  const netRpmClass = (v: number | null) =>
-    v == null || breakEven == null
-      ? ""
-      : v >= breakEven
-        ? "text-emerald-600"
-        : "text-destructive";
-  const ooClass = (v: number | null) =>
-    v == null ? "" : v <= 2 ? "text-emerald-600" : v <= 3 ? "text-amber-600" : "text-destructive";
-
   function toggleSort(key: SortKey) {
     if (key === sortBy) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else { setSortBy(key); setSortDir(key === "group_name" ? "asc" : "desc"); }
@@ -148,24 +163,6 @@ export default function OfferGroupReportPage() {
     const a = document.createElement("a");
     a.href = url; a.download = `offer-${offerId}-group-report.csv`; a.click();
     URL.revokeObjectURL(url);
-  }
-
-  function MetricCells({ m, isGroup }: { m: RawMetrics & Derived; isGroup: boolean }) {
-    return (
-      <>
-        <td className="px-3 py-2 text-right tabular-nums">{fmtInt(m.sends)}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.rpm)}</td>
-        <td className={`px-3 py-2 text-right tabular-nums ${netRpmClass(m.net_rpm)}`}>{fmtUsd(m.net_rpm)}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.epc)}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{fmtInt(m.sales)}</td>
-        <td className={`px-3 py-2 text-right tabular-nums ${ooClass(m.oo_pct)}`}>{fmtPct(m.oo_pct)}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.net_profit)}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_7d) : "—"}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_30d) : "—"}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_90d) : "—"}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).fresh_pool) : "—"}</td>
-      </>
-    );
   }
 
   return (
@@ -214,19 +211,19 @@ export default function OfferGroupReportPage() {
             {benchmark ? (
               <tr className="border-t bg-muted/30 font-medium">
                 <td className="px-3 py-2">All offers (org-wide)</td>
-                <MetricCells m={benchmark} isGroup={false} />
+                <MetricCells m={benchmark} isGroup={false} breakEven={breakEven} />
               </tr>
             ) : null}
             {sorted.map((r) => (
               <tr key={r.group_id} className="border-t">
                 <td className="px-3 py-2">{r.group_name}</td>
-                <MetricCells m={r} isGroup />
+                <MetricCells m={r} isGroup breakEven={breakEven} />
               </tr>
             ))}
             {offerTotal ? (
               <tr className="border-t bg-muted/30 font-medium">
                 <td className="px-3 py-2">This offer · all groups</td>
-                <MetricCells m={offerTotal} isGroup={false} />
+                <MetricCells m={offerTotal} isGroup={false} breakEven={breakEven} />
               </tr>
             ) : null}
             {data && sorted.length === 0 ? (

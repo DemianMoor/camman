@@ -1,6 +1,6 @@
 # Feature — Audience Snapshot (freeze-at-activation)
 
-_Last updated: 2026-06-19_
+_Last updated: 2026-07-09_
 
 ## 1. Purpose
 A campaign's audience is **computed and frozen** the moment it transitions `draft → active`, into `campaign_audience_pool`. The whole point: adding a contact to a referenced segment later does **not** retroactively expand a live campaign's reach. Drafts carry only the *recipe* (segment ids, group ids, filters, cap); the *contacts* are materialized once.
@@ -22,7 +22,7 @@ A campaign's audience is **computed and frozen** the moment it transitions `draf
 ### Key functions
 | Function | Role |
 |----------|------|
-| `previewAudience(input)` | SELECT-only; returns counts: `count` (post-cap), `total_matching` (the **intersected** audience when both dimensions are selected), `from_segments` / `from_groups` (each side's eligible pool — see the perf note: when both dimensions are selected `from_segments` is evaluated **within** the group set, so it equals `overlap`/`total_matching`), `overlap`, `excluded_for_optout`, `in_use_in_other_campaigns`. Powers the editor preview & "N excluded" UI. |
+| `previewAudience(input)` | SELECT-only; returns counts: `count` (post-cap), `total_matching` (the **intersected** audience when both dimensions are selected), `from_segments` / `from_groups` (each side's eligible pool — see the perf note: when both dimensions are selected `from_segments` is evaluated **within** the group set, so it equals `overlap`/`total_matching`), `overlap`, `excluded_for_optout`, `in_use_in_other_campaigns`, `got_offer_in_prior_campaign` (content-dedup LAYER 3 — in-audience leads who already received the campaign's offer; subtracted from `total_matching` only when `exclude_prior_offer_contacts` is on, and a point-in-time estimate — see [content-dedup.md §6b](content-dedup.md)). Powers the editor preview & "N excluded" UI. |
 | `buildAudienceSourceSql(input)` | composes the raw candidate set (segment ∩ group, before status filters). |
 | `buildQualifierFromRelation(input, rel)` | wraps a candidate relation with the status-flag joins + filter WHERE, projecting the snapshot booleans. |
 | `snapshotAudience(input, tx?)` | materializes the candidate set into a temp table, ANALYZEs it, then INSERTs the frozen rows into `campaign_audience_pool`; returns `{ count, total_matching }`. **Must** run inside a transaction (uses `ON COMMIT DROP` temp tables). |

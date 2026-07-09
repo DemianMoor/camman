@@ -1032,12 +1032,14 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     previewOverlap,
     previewExcludedOptOut,
     previewInUseElsewhere,
+    previewOfferExposed,
     previewError,
     previewLoading,
     watchedSegments,
     watchedContactGroups,
     watchedCap,
     watchedExcludeInUse,
+    watchedExcludePriorOffer,
   } = state;
 
   const hasSegments = watchedSegments.length > 0;
@@ -1193,6 +1195,28 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                       </div>
                     </div>
                   )
+                ) : null}
+                {/* Content-dedup LAYER 3. Only shown when the toggle is ON
+                    (the exclusion only happens then); a point-in-time estimate
+                    — the real send-time number can be higher as other
+                    campaigns send. */}
+                {watchedExcludePriorOffer &&
+                previewOfferExposed !== null &&
+                previewOfferExposed > 0 ? (
+                  <div className="flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                    <span
+                      className="mt-1 size-2 shrink-0 rounded-full bg-slate-400 dark:bg-slate-500"
+                      aria-hidden
+                    />
+                    <div>
+                      <span className="font-mono tabular-nums text-foreground">
+                        {previewOfferExposed.toLocaleString()}
+                      </span>{" "}
+                      lead{previewOfferExposed === 1 ? "" : "s"} excluded —
+                      already received this offer (estimate; may grow by send
+                      time).
+                    </div>
+                  </div>
                 ) : null}
               </div>
             ) : null}

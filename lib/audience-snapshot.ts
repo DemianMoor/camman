@@ -68,8 +68,17 @@ function buildGroupMembershipClause(
 // is dramatically cheaper than a correlated `EXISTS (…)` per candidate row —
 // the planner builds each hash once instead of probing per row. `clickers` /
 // `opt_ins` may be empty, in which case the join is a no-op.
-function flagSetCtes(orgId: string): SQL {
-  return drizzleSql`
+// `offerExposureOfferId` is opt-in and only used by the campaign audience
+// preview (content-dedup LAYER 3). When null/undefined the emitted CTE list is
+// byte-for-byte identical to before — the shared snapshot/draft callers pass
+// nothing and pay no extra cost. When set, an `oe_set` of leads who already
+// received that offer is added (single index-only scan on
+// offer_exposures(org_id, offer_id, contact_id)).
+function flagSetCtes(
+  orgId: string,
+  offerExposureOfferId?: number | null,
+): SQL {
+  const base = drizzleSql`
     oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid),
     oi_set as (select distinct contact_id from opt_ins where org_id = ${orgId}::uuid),
     cl_set as (select distinct contact_id from clickers where org_id = ${orgId}::uuid),
@@ -79,18 +88,28 @@ function flagSetCtes(orgId: string): SQL {
       join campaigns ca on ca.id = p.campaign_id
       where p.org_id = ${orgId}::uuid and ca.status = 'active'
     )`;
+  if (offerExposureOfferId == null) return base;
+  return drizzleSql`${base},
+    oe_set as (
+      select distinct contact_id from offer_exposures
+      where org_id = ${orgId}::uuid and offer_id = ${offerExposureOfferId}::int
+    )`;
 }
 
 // The LEFT JOINs that attach the flagSetCtes to a candidate relation aliased
 // `alias` (which must expose a `contact_id` column). Pair with the boolean
 // expressions `<set>.contact_id is not null` in the SELECT list.
-function flagJoins(alias: string): SQL {
+// `includeOfferExposure` must match whether flagSetCtes was given an offer id.
+function flagJoins(alias: string, includeOfferExposure = false): SQL {
   const a = drizzleSql.raw(alias);
-  return drizzleSql`
+  const base = drizzleSql`
     left join oo_set on oo_set.contact_id = ${a}.contact_id
     left join oi_set on oi_set.contact_id = ${a}.contact_id
     left join cl_set on cl_set.contact_id = ${a}.contact_id
     left join iu_set on iu_set.contact_id = ${a}.contact_id`;
+  if (!includeOfferExposure) return base;
+  return drizzleSql`${base}
+    left join oe_set on oe_set.contact_id = ${a}.contact_id`;
 }
 
 export interface AudienceFilters {
@@ -115,6 +134,15 @@ export interface AudiencePreviewInput {
   // cap then samples from the remaining unused pool only. Campaign-level
   // counterpart to the per-segment segments.exclude_in_use_contacts flag.
   excludeInUse?: boolean;
+  // Content-dedup LAYER 3 (preview only). When true AND offerId is set, the
+  // preview drops contacts who already received this offer in a previous
+  // campaign, and reports got_offer_in_prior_campaign. Mirrors the send-time
+  // exclusion in lib/sends/eligibility.ts so the previewed will-send count
+  // matches what actually sends. The frozen snapshot is NOT narrowed by this
+  // (Level A: preview visibility only) — the send-time layer stays the gate.
+  excludePriorOffer?: boolean;
+  // The campaign's offer. Only consumed when excludePriorOffer is true.
+  offerId?: number | null;
 }
 
 export interface AudienceSnapshotInput extends AudiencePreviewInput {
@@ -147,6 +175,13 @@ export interface AudiencePreviewResult {
   // campaign itself are not counted as conflicts because they don't have
   // pool rows yet (pools materialize at activation).
   in_use_in_other_campaigns: number;
+  // Count of qualifying, in-audience contacts who already received the
+  // campaign's offer in a previous campaign (content-dedup LAYER 3). Reported
+  // independently of the excludePriorOffer toggle; when the toggle is on these
+  // are subtracted from total_matching. A point-in-time estimate — the
+  // offer_exposures ledger grows as other campaigns send, so the send-time
+  // exclusion can be larger. Zero when no offerId is supplied.
+  got_offer_in_prior_campaign: number;
 }
 
 export interface AudienceSnapshotResult {
@@ -841,6 +876,7 @@ export async function previewAudience(
       overlap: 0,
       excluded_for_optout: 0,
       in_use_in_other_campaigns: 0,
+      got_offer_in_prior_campaign: 0,
     };
   }
 
@@ -850,6 +886,13 @@ export async function previewAudience(
   const includeClickers = filters.include_clickers === true;
   const includeNotClicked = filters.include_not_clicked === true;
   const excludeInUse = input.excludeInUse === true;
+  // Content-dedup LAYER 3: only computed when the toggle is on AND an offer is
+  // set. When off, `offerExposureId` stays null so flagSetCtes/flagJoins emit
+  // the exact same SQL as before — no oe_set CTE, no extra join.
+  const excludePriorOffer = input.excludePriorOffer === true;
+  const offerExposureId =
+    excludePriorOffer && input.offerId != null ? input.offerId : null;
+  const useOfferExposure = offerExposureId != null;
   // When BOTH dimensions are selected the audience is their INTERSECTION:
   // a contact must be in a selected segment AND a selected group. With only
   // one dimension populated, that side stands alone (no intersection).
@@ -899,7 +942,7 @@ export async function previewAudience(
       from unionized
       group by contact_id
     ),
-    ${flagSetCtes(orgId)},
+    ${flagSetCtes(orgId, offerExposureId)},
     flagged as (
       select
         s.contact_id,
@@ -908,9 +951,12 @@ export async function previewAudience(
         (oo_set.contact_id is not null) as has_opt_out,
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
-        (iu_set.contact_id is not null) as is_in_use_elsewhere
+        (iu_set.contact_id is not null) as is_in_use_elsewhere,
+        ${useOfferExposure
+          ? drizzleSql`(oe_set.contact_id is not null)`
+          : drizzleSql`false`} as is_offer_exposed
       from sources s
-      ${flagJoins("s")}
+      ${flagJoins("s", useOfferExposure)}
     ),
     qualified as (
       select
@@ -936,6 +982,7 @@ export async function previewAudience(
         (
           q.qualifies
           and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
+          and (not ${excludePriorOffer}::boolean or not q.is_offer_exposed)
         ) as is_eligible,
         (not ${bothSides}::boolean or (q.from_segment and q.from_group)) as membership_ok
       from qualified q
@@ -953,7 +1000,10 @@ export async function previewAudience(
       count(*) filter (where has_opt_out)::int as excluded_for_optout,
       -- Reported on the in-audience set (post-intersection, pre in-use
       -- exclusion) so the UI's "N excluded" reflects the real audience.
-      count(*) filter (where qualifies and membership_ok and is_in_use_elsewhere)::int as in_use_in_other_campaigns
+      count(*) filter (where qualifies and membership_ok and is_in_use_elsewhere)::int as in_use_in_other_campaigns,
+      -- In-audience leads who already got this offer (post-intersection, pre
+      -- offer exclusion). Zero when the toggle is off (is_offer_exposed=false).
+      count(*) filter (where qualifies and membership_ok and is_offer_exposed)::int as got_offer_in_prior_campaign
     from eligible
   `)) as unknown as {
     total_matching: number;
@@ -962,6 +1012,7 @@ export async function previewAudience(
     overlap: number;
     excluded_for_optout: number;
     in_use_in_other_campaigns: number;
+    got_offer_in_prior_campaign: number;
   }[];
 
   const row = Array.isArray(rows) ? rows[0] : null;
@@ -976,6 +1027,7 @@ export async function previewAudience(
     overlap: row?.overlap ?? 0,
     excluded_for_optout: row?.excluded_for_optout ?? 0,
     in_use_in_other_campaigns: row?.in_use_in_other_campaigns ?? 0,
+    got_offer_in_prior_campaign: row?.got_offer_in_prior_campaign ?? 0,
   };
 }
 

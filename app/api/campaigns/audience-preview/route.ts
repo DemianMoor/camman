@@ -89,6 +89,11 @@ export async function POST(req: NextRequest) {
     // Default true to mirror the campaign column default — a preview with
     // the flag omitted matches a campaign created without specifying it.
     excludeInUse: parsed.data.exclude_in_use_contacts ?? true,
+    // Content-dedup LAYER 3 (preview only). offer_id is scoped by org_id in
+    // the query, so no separate ownership check is needed — a foreign id
+    // simply matches no exposures (and we avoid the extra round-trip).
+    excludePriorOffer: parsed.data.exclude_prior_offer_contacts ?? false,
+    offerId: parsed.data.offer_id ?? null,
   });
   return NextResponse.json(result);
 }

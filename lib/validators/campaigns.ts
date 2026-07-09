@@ -179,6 +179,9 @@ export const audiencePreviewSchema = z
     audience_cap: z.number().int().positive().nullable().optional(),
     exclude_in_use_contacts: z.boolean().optional(),
     exclude_prior_offer_contacts: z.boolean().optional(),
+    // Consumed only when exclude_prior_offer_contacts is true, to count/drop
+    // leads who already received this offer (content-dedup LAYER 3 preview).
+    offer_id: z.number().int().positive().nullable().optional(),
   })
   .refine(
     (d) =>

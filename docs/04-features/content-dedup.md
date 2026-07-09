@@ -1,6 +1,6 @@
 # Feature — Content Deduplication & Offer Exposure
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-07-09_
 
 > **Status: LIVE (Phase 1 + Phase 2 shipped).** Phase 1 (migration `0086`):
 > ledgers, triggers, RLS, backfill. Phase 2 (migration `0087`): the send-time
@@ -147,6 +147,22 @@ The three layers:
   *addressable* pool size (the perf-tuned batched query is untouched). The
   post-dedup *will-send* number lives in the Prepare popup (preflight) and the §5
   preview.
+- **Campaign audience preview** ([`lib/audience-snapshot.ts`](../../lib/audience-snapshot.ts)
+  `previewAudience`, feeding the campaign-form right rail): when
+  `exclude_prior_offer_contacts` is on AND an offer is set, the preview subtracts
+  LAYER 3 from `total_matching` and reports `got_offer_in_prior_campaign` (the
+  "N leads excluded — already received this offer" line). This is **preview
+  visibility only** — the frozen `campaign_audience_pool` snapshot is NOT
+  narrowed by LAYER 3 (the send-time anti-join stays the gate), so the pool can
+  exceed the previewed will-send. The count is a **point-in-time estimate**: the
+  `offer_exposures` ledger grows as other campaigns send, so the real send-time
+  exclusion can be larger. **Perf:** the `oe_set` CTE + LEFT JOIN are added only
+  when the toggle is on. With it off there is **no `oe_set` CTE, no join, and no
+  `offer_exposures` table access** — the only difference from before is a couple
+  of constant `false` literals that Postgres folds away at planning, so runtime
+  is unchanged (the shared `flagSetCtes`/`flagJoins` emit byte-for-byte identical
+  SQL, and the snapshot/draft callers pass no offer id). When on, it is one extra
+  index-only `oe_set` CTE + hash LEFT JOIN, lighter than the existing `iu_set`.
 
 ### 6c. Per-campaign toggle
 `campaigns.exclude_prior_offer_contacts` (boolean, default **false** = opt-in).

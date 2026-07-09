@@ -288,6 +288,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     overlap: number;
     excluded_for_optout: number;
     in_use_in_other_campaigns: number;
+    got_offer_in_prior_campaign: number;
   }>();
   const [previewCount, setPreviewCount] = useState<number | null>(null);
   const [previewTotalMatching, setPreviewTotalMatching] = useState<
@@ -306,6 +307,11 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const [previewInUseElsewhere, setPreviewInUseElsewhere] = useState<
     number | null
   >(null);
+  // Leads in the audience who already got this offer (content-dedup LAYER 3).
+  // Only nonzero when the exclude-prior-offer toggle is on.
+  const [previewOfferExposed, setPreviewOfferExposed] = useState<
+    number | null
+  >(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
@@ -314,6 +320,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const filtersKey = JSON.stringify(watchedFilters);
   const capKey = watchedCap ?? "";
   const excludeInUseKey = watchedExcludeInUse ? "1" : "0";
+  const excludePriorOfferKey = watchedExcludePriorOffer ? "1" : "0";
+  const offerKey = watchedOfferId ?? "";
 
   useEffect(() => {
     if (
@@ -327,6 +335,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
       setPreviewOverlap(null);
       setPreviewExcludedOptOut(null);
       setPreviewInUseElsewhere(null);
+      setPreviewOfferExposed(null);
       setPreviewError(null);
       return;
     }
@@ -344,6 +353,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
             audience_filters: watchedFilters,
             audience_cap: watchedCap,
             exclude_in_use_contacts: watchedExcludeInUse,
+            exclude_prior_offer_contacts: watchedExcludePriorOffer,
+            offer_id: watchedOfferId,
           }),
         },
       );
@@ -357,6 +368,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
         setPreviewOverlap(result.data.overlap);
         setPreviewExcludedOptOut(result.data.excluded_for_optout);
         setPreviewInUseElsewhere(result.data.in_use_in_other_campaigns);
+        setPreviewOfferExposed(result.data.got_offer_in_prior_campaign);
         setPreviewError(null);
       } else {
         setPreviewError(result.error);
@@ -367,17 +379,27 @@ export function useCampaignFormState(props: CampaignFormProps) {
         setPreviewOverlap(null);
         setPreviewExcludedOptOut(null);
         setPreviewInUseElsewhere(null);
+        setPreviewOfferExposed(null);
       }
     }, 400);
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
-    // segmentsKey / groupsKey / filtersKey / capKey / excludeInUseKey
-    // collapse identity to stable primitives so this only re-runs on real
-    // change.
+    // segmentsKey / groupsKey / filtersKey / capKey / excludeInUseKey /
+    // excludePriorOfferKey / offerKey collapse identity to stable primitives
+    // so this only re-runs on real change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segmentsKey, groupsKey, filtersKey, capKey, excludeInUseKey, previewApi.execute]);
+  }, [
+    segmentsKey,
+    groupsKey,
+    filtersKey,
+    capKey,
+    excludeInUseKey,
+    excludePriorOfferKey,
+    offerKey,
+    previewApi.execute,
+  ]);
 
   // Date sanity (purely client-side hint; the server doesn't refuse
   // end<start because either field can be null).
@@ -499,6 +521,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     previewOverlap,
     previewExcludedOptOut,
     previewInUseElsewhere,
+    previewOfferExposed,
     previewError,
     previewLoading,
     hasAudienceSource,

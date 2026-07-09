@@ -2,6 +2,10 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-09 — Campaign audience preview now reflects the "Exclude leads who already got this offer" toggle (content-dedup LAYER 3, preview-only) — docs/04-features/content-dedup, 04-features/audience-snapshot
+- `previewAudience` gained `excludePriorOffer` + `offerId` inputs and a `got_offer_in_prior_campaign` output; when the toggle is on the preview subtracts LAYER 3 from `total_matching` and the campaign form shows a "N leads excluded — already received this offer" line. The frozen snapshot is unchanged (send-time anti-join stays the gate); the count is a point-in-time estimate.
+- Perf-preserving: with the toggle off there is no `oe_set` CTE, join, or `offer_exposures` access (only constant `false` literals that fold away); `flagSetCtes`/`flagJoins` take an optional offer id and are byte-for-byte unchanged for the snapshot/draft callers. Wired through `audiencePreviewSchema` (`offer_id`), the audience-preview route, and the campaign form (request body + debounce deps + new line).
+
 ## 2026-07-08 — Added per-offer Group Performance Report (matviews + twice-daily cron) — docs/03-data-model, 04-features/offer-group-report, 04-features/crons, 06-integrations, 07-conventions
 - New `/offers/[id]/report` page + `GET /api/offers/[id]/report`: per-(offer, contact group) lifetime economics (Sends/RPM/Net RPM/EPC/Sales/Opt-out %/Net profit) plus list-pressure (`Sent 7d/30d/90d`) and `Fresh pool`, with a pinned org-wide benchmark row and an offer-total row. Both tracked and manual campaigns are included in the economics; only per-contact columns are limited to in-app sends (any `link_mode`).
 - Precomputed via migration `0093_offer_group_report` (plain view `offer_report_campaign_econ` + materialized views `offer_group_report_mv`/`offer_report_org_summary_mv` + `report_refresh_log` + supporting indexes), refreshed twice daily by a new Vercel cron `/api/cron/refresh-offer-group-report` (`0 5,20 * * *`, `CRON_SECRET`-gated, `maxDuration=300`).

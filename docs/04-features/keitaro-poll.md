@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-06-29_
+_Last updated: 2026-07-10_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -230,6 +230,16 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   `campaigns.view`. Never triggers a poll. **Every metric is scoped to the
   selected ET date range** — there are no lifetime counters leaking into a
   date-ranged view (fixed 2026-06-20). Concretely:
+  - **Row set = Keitaro-present stages ∪ stages sent in-range.** The funnel base
+    is `keitaro_stage_results` (stages with click/conversion data), but stages
+    whose `sent_at` lands in range are folded in **even when they have no Keitaro
+    row yet** (a stage that got zero tracked clicks, or whose clicks haven't been
+    polled, produces no `keitaro_stage_results` row). They appear with real
+    `total_sent` + `cost` and a zeroed click/sales funnel. Without this, such a
+    stage was invisible and its send Cost + Total Sent were silently dropped, so
+    the grand totals under-reported vs send-truth and vs the Telegram spend
+    snapshot (which sums `campaign_stages.total_cost` by `sent_at`). Fixed
+    2026-07-10 — the two now reconcile. Concretely:
   - `opt_outs` = count of `opt_out_attributions` credited to the stage whose
     `created_at` falls in `[from 00:00 ET, day-after-`to` 00:00 ET)` (the credit
     time ≈ STOP receipt; poller lag ≤15min). Since 2026-06-24 each STOP credits

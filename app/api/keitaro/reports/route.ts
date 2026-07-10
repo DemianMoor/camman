@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { and, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
@@ -222,6 +222,56 @@ export async function GET(req: NextRequest) {
     `${addOneDay(to)}T00:00:00`,
     CAMPAIGN_TIMEZONE,
   );
+
+  // Include stages that were SENT in-range even when Keitaro has no results row
+  // for them yet (a stage that got zero tracked clicks, or whose clicks haven't
+  // been polled, produces no keitaro_stage_results row). Without this, such a
+  // stage is invisible here and its real send Cost + Total Sent are silently
+  // dropped — the Reports totals then under-report vs the send-truth (and vs the
+  // Telegram spend snapshot, which sums campaign_stages.total_cost by sent_at).
+  // We seed an empty funnel for each; the per-stage phase below fills in
+  // total_sent / opt_outs / cost exactly as it does for Keitaro-present stages.
+  const sentStageRows = await db
+    .select({
+      stage_id: campaign_stages.id,
+      campaign_id: campaign_stages.campaign_id,
+      campaign_name: campaigns.name,
+      link_mode: campaigns.link_mode,
+      stage_number: campaign_stages.stage_number,
+      stage_label: campaign_stages.label,
+      stage_tracking_id: campaign_stages.tracking_id,
+      stage_sent_at: campaign_stages.sent_at,
+      stage_sms_count: campaign_stages.sms_count,
+      stage_total_cost: campaign_stages.total_cost,
+    })
+    .from(campaign_stages)
+    .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
+    .where(
+      and(
+        eq(campaign_stages.org_id, auth.orgId),
+        isNull(campaign_stages.archived_at),
+        gte(campaign_stages.sent_at, fromUtc),
+        lt(campaign_stages.sent_at, toExclusiveUtc),
+      ),
+    );
+  for (const r of sentStageRows) {
+    if (byStage.has(r.stage_id)) continue;
+    byStage.set(r.stage_id, {
+      stage_id: r.stage_id,
+      campaign_id: r.campaign_id,
+      campaign_name: r.campaign_name ?? "(unnamed)",
+      link_mode: r.link_mode ?? "manual",
+      stage_number: r.stage_number,
+      stage_label: r.stage_label,
+      stage_tracking_id: r.stage_tracking_id ?? "",
+      stage_sent_at: r.stage_sent_at,
+      stage_sms_count: r.stage_sms_count ?? 0,
+      stage_total_cost: Number(r.stage_total_cost ?? 0),
+      opt_outs: 0,
+      total_sent: 0,
+      tally: emptyFunnel(),
+    });
+  }
 
   const stageIds = [...byStage.keys()];
   let grandOptOuts = 0;

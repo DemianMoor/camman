@@ -2,6 +2,10 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-10 — Reports now includes stages sent in-range with no Keitaro row (Cost/Total Sent reconcile with Telegram) — docs/04-features/keitaro-poll
+- `GET /api/keitaro/reports` folded in only stages that had a `keitaro_stage_results` row, so a stage sent in-range that got zero tracked clicks (or wasn't polled yet) was invisible — its send Cost and Total Sent were silently dropped, making the Reports totals under-report vs reality and vs the Telegram spend snapshot (07/09: Reports $176.50 vs Telegram $288.97; the gap was 3 tracked stages / $112.47 with no Keitaro row).
+- Fix ([app/api/keitaro/reports/route.ts](../../app/api/keitaro/reports/route.ts)): after building the Keitaro fold, query `campaign_stages` sent within `[from, day-after-to)` (org-scoped, `archived_at IS NULL`) and seed an empty funnel for any not already present. The existing per-stage phase fills their `total_sent` / `opt_outs` / `cost` unchanged. Additive + read-only; Keitaro-present stages are untouched (`byStage.has` guard).
+
 ## 2026-07-10 — "Prepared for today" total added to the /sends/today volume card — docs/04-features/daily-volume-ui
 - The volume card on `/sends/today` gained a "Prepared for today" line above the "Sent today" meter: the total messages materialized (`Σ counts.total`) across every tracked stage in play today. Derived client-side from the existing `GET /api/sends/today` payload (no API/schema change); accumulates as stages are prepared.
 

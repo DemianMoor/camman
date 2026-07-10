@@ -1,6 +1,6 @@
 # Daily-Volume UI (WS4)
 
-_Last updated: 2026-07-03_
+_Last updated: 2026-07-10_
 
 The operating layer that makes running many tracked SMS campaigns a day fast and
 legible. Purely additive UI + read endpoints over the existing send pipeline
@@ -100,6 +100,11 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
   trailing-24h window (`countSentSince` in the drain), so near midnight the
   meter can read lower than the breaker's view. `today.sent_today` on
   `GET /api/sends/state`.
+  - **Prepared for today.** A companion line above the meter (same card) shows
+    the total messages **prepared** (materialized) across every stage in play
+    today = `Σ counts.total` of the `GET /api/sends/today` rows, computed
+    client-side (no API change). It accumulates as each stage is prepared, and
+    since sent ⊆ prepared it pairs with the "Sent today" figure below it.
 - **B5 — send-window indicator.** [components/sends/send-window-indicator.tsx](../../components/sends/send-window-indicator.tsx)
   — "opens 08:00 ET" / "open · closes in 3h 12m" from
   `sendWindowForDay()` ([lib/quiet-hours.ts](../../lib/quiet-hours.ts)). Sender's

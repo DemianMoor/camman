@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-10 — "Prepared for today" total added to the /sends/today volume card — docs/04-features/daily-volume-ui
+- The volume card on `/sends/today` gained a "Prepared for today" line above the "Sent today" meter: the total messages materialized (`Σ counts.total`) across every tracked stage in play today. Derived client-side from the existing `GET /api/sends/today` payload (no API/schema change); accumulates as stages are prepared.
+
 ## 2026-07-09 — Campaign audience preview now reflects the "Exclude leads who already got this offer" toggle (content-dedup LAYER 3, preview-only) — docs/04-features/content-dedup, 04-features/audience-snapshot
 - `previewAudience` gained `excludePriorOffer` + `offerId` inputs and a `got_offer_in_prior_campaign` output; when the toggle is on the preview subtracts LAYER 3 from `total_matching` and the campaign form shows a "N leads excluded — already received this offer" line. The frozen snapshot is unchanged (send-time anti-join stays the gate); the count is a point-in-time estimate.
 - Perf-preserving: with the toggle off there is no `oe_set` CTE, join, or `offer_exposures` access (only constant `false` literals that fold away); `flagSetCtes`/`flagJoins` take an optional offer id and are byte-for-byte unchanged for the snapshot/draft callers. Wired through `audiencePreviewSchema` (`offer_id`), the audience-preview route, and the campaign form (request body + debounce deps + new line).

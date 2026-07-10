@@ -117,6 +117,12 @@ export default function FleetTodayPage() {
   const canActivate = can("campaigns.activate");
   const loading = fleet === null;
 
+  // Total messages materialized ("prepared") across every stage in play today.
+  // Accumulates as each stage is prepared; sent ⊆ prepared, so this pairs with
+  // the "Sent today" meter below it.
+  const preparedToday =
+    fleet?.data.reduce((sum, s) => sum + s.counts.total, 0) ?? 0;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -202,7 +208,20 @@ export default function FleetTodayPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent className="space-y-4 pt-6">
+            <div className="space-y-1">
+              <div className="flex items-baseline justify-between text-xs">
+                <span className="font-medium text-muted-foreground">
+                  Prepared for today
+                </span>
+                <span className="font-mono tabular-nums">
+                  {preparedToday.toLocaleString()}
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Messages prepared across today&apos;s stages.
+              </p>
+            </div>
             {sendState ? (
               <VolumeCapsMeter
                 sent={sendState.today.sent_today}

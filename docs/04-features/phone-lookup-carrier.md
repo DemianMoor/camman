@@ -81,9 +81,19 @@ The `AND messaging_status = 'eligible'` gate is threaded in as a **SQL literal**
 
 Active-pool reads (`computeStageAudienceCount*`, lane counts) need no gate — landlines never enter `campaign_audience_pool`. Verified: `scripts/test-eligible-gate.ts` (landline drops out of the segment audience but stays in contacts; partial-index selection via `EXPLAIN` + `enable_seqscan=off`). **Deferred:** re-run the `EXPLAIN` comparison after the 500-number calibration batch and again after backfill, once `not_applicable` rows exist, to confirm the planner chooses the partial indexes naturally for broad reads too.
 
+## Upload & backfill backend (phase 5 — API + helpers)
+
+Endpoints under `/api/telnyx/lookup/` (all in `lib/telnyx/`):
+- `POST preview` (`lookup.run`, operator+) — review-panel data for an upload: rows-in-file → unique (same-file dupes collapsed), valid/invalid, cached (free)/new, estimated cost, live balance. Read-only.
+- `POST enqueue` (`lookup.run`) — enqueue uploaded numbers (`trigger='upload'`, dedup vs cache/pending). Called by the upload UI after contacts insert when the toggle is ON — decoupled from the per-entity upload routes so ONE endpoint covers every phone-upload path.
+- `POST backfill/preview` + `POST backfill` (`lookup.admin`, manager+) — distinct non-archived phones needing a lookup, contact count, archived-excluded, cost, balance, daily-cap ETA; the run takes an optional `sampleLimit` that **randomly samples** (not first-N). The **500-number calibration run uses `sampleLimit=500` through this exact path** — no separate script. `confirm:true` required.
+- `POST csv-update` (`lookup.admin`) — bulk-update existing contacts from predefined `line_type`/`carrier` (`importCsvLookups`): writes `phone_lookups` `source='csv_import'` (never overwriting a `telnyx` row) + syncs. No Telnyx calls.
+
+Precedence/coercion (verified `scripts/test-lookup-uploads.ts`): `telnyx` wins, `csv_import` never overwrites it; type-without-carrier → `Unknown`; landline → `Unknown`; garbage `line_type` → `unknown` (never rejected); predefined rows are excluded from the enqueue (`predefinedPhonesOf`) so the toggle never double-spends. Toggle OFF → contacts keep the `Unidentified` default (no enqueue).
+
 ## Later phases (planned)
 
-- **Upload flows**: new-contact CSV (lookup toggle default ON → `Unidentified` when OFF + review panel with cost/balance), predefined `line_type`/`carrier` columns (→ a `phone_lookups` row, source `csv_import`), bulk-update existing contacts, backfill (scoped to `is_archived=false`).
+- **Upload UI (phase 5b)**: the lookup toggle (default ON) + review panel wired into the shared `PhoneUploadForm`, and a backfill admin page (preview + type-to-confirm for >100k). See enumerated upload paths in the code map.
 - **Segment rules** `phone_type` / `carrier`; **campaign carrier filter** on `audience_filters`; **admin UI** (batches, unmapped queue, settings, Contacts columns + base-mix stats).
 
 ## Integration facts

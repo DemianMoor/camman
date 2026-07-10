@@ -115,6 +115,8 @@ export type Permission =
   | "result_imports.revert"
   | "spam.view"
   | "spam.score"
+  | "lookup.run"
+  | "lookup.admin"
   | "segment_rules.view"
   | "segment_rules.create"
   | "segment_rules.update"
@@ -198,6 +200,9 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "import_mappings.update",
   "spam.score",
   "contact_contact_groups.manage",
+  // Telnyx number lookup: enqueue/preview on upload — a spend action, operator+
+  // (mirrors spam.score). Backfill/csv-update/settings are manager+ (lookup.admin).
+  "lookup.run",
 ]);
 
 const managerPerms: ReadonlySet<Permission> = new Set([
@@ -239,6 +244,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "contact_groups.archive",
   "contact_groups.restore",
   "contacts.delete",
+  "lookup.admin",
   "opt_outs.delete",
   "opt_ins.delete",
   "clickers.delete",

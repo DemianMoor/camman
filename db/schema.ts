@@ -635,7 +635,9 @@ export const contacts = pgTable(
     // 'eligible'` (eligible-partial indexes below). Never write it directly — the
     // trigger overrides it from line_type.
     line_type: text("line_type").notNull().default("unknown"),
-    carrier_norm: text("carrier_norm").notNull().default("Unknown"),
+    // Migration 0099: default 'Unidentified' = no phone_lookups row yet (never
+    // looked up). Distinct from 'Unknown' (looked up, carrier undetermined).
+    carrier_norm: text("carrier_norm").notNull().default("Unidentified"),
     messaging_status: text("messaging_status").notNull().default("eligible"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -671,6 +673,11 @@ export const contacts = pgTable(
     check(
       "contacts_messaging_status_check",
       sql`${table.messaging_status} IN ('eligible', 'not_applicable')`,
+    ),
+    // Migration 0099: includes 'Unidentified' (contacts-only; never in phone_lookups).
+    check(
+      "contacts_carrier_norm_check",
+      sql`${table.carrier_norm} IN ('AT&T', 'T-Mobile', 'Verizon', 'Other Mobile', 'VoIP', 'Unknown', 'Unmapped', 'Unidentified')`,
     ),
     // Migration 0096: eligible-partial hot-path indexes. Predicate mirrors the
     // `AND messaging_status = 'eligible'` filter on every audience/segment/send

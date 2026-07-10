@@ -4,8 +4,12 @@
 // Our internal line-type buckets (contacts.line_type / phone_lookups.line_type).
 export type LineType = "mobile" | "landline" | "voip" | "toll_free" | "unknown";
 
-// Our six carrier buckets + the internal 'Unmapped' sentinel (behaves as Unknown
-// in filters; exists only so the admin unmapped queue works).
+// Our six carrier buckets + two non-bucket states:
+//   'Unmapped'     — looked up, raw carrier string awaiting an admin mapping.
+//                    Groups with 'Unknown' in filters; only the queue tracks it.
+//   'Unidentified' — CONTACTS ONLY: no phone_lookups row exists for the phone
+//                    (never looked up). NEVER written to phone_lookups (0095 CHECK)
+//                    nor produced by resolveCarrierNorm — it's a contacts default.
 export type CarrierNorm =
   | "AT&T"
   | "T-Mobile"
@@ -13,7 +17,8 @@ export type CarrierNorm =
   | "Other Mobile"
   | "VoIP"
   | "Unknown"
-  | "Unmapped";
+  | "Unmapped"
+  | "Unidentified";
 
 // Raw shape of GET /v2/number_lookup/{+E164}?type=carrier (the fields we read).
 export interface TelnyxNumberLookupData {

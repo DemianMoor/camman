@@ -23,7 +23,12 @@ Phone line-type + carrier enrichment via the [Telnyx Number Lookup API](https://
 
 `AT&T` · `T-Mobile` · `Verizon` · `Other Mobile` · `VoIP` · `Unknown`
 
-Plus an internal `Unmapped` sentinel (stored on `phone_lookups`/`contacts`) for raw strings with no mapping yet — surfaced in the admin unmapped queue. `Unmapped` behaves identically to `Unknown` in all filter logic (grouped as the Unknown pool); it is tracked separately only so the admin queue works. Assigning a mapping inserts into `carrier_mappings` and retroactively updates `phone_lookups` + `contacts` for that raw string.
+Plus two non-bucket states (migration 0099):
+- **`Unidentified`** — CONTACTS ONLY: **no `phone_lookups` row exists** for the phone (never looked up, no user-provided data). The default for `contacts.carrier_norm`. Invariant: `carrier_norm='Unidentified'` ⇔ no lookup row exists. `phone_lookups.carrier_norm` may **never** hold `Unidentified` (0095 CHECK). Any lookup write (contact sync) replaces `Unidentified` with a real value — `Unknown` at worst.
+- **`Unknown`** — a lookup occurred (any source) but the carrier is undetermined (Telnyx returned unknown/absent carrier). Groups with `Unmapped`.
+- **`Unmapped`** — looked up, raw string awaiting an admin bucket mapping. Groups with `Unknown` in filters; tracked separately only so the admin queue works. Assigning a mapping inserts into `carrier_mappings` and retroactively updates `phone_lookups` + `contacts`.
+
+**Filter/rule treatment:** the campaign carrier filter offers the six buckets (`Unidentified` **not** selectable) and, when any filter is set, always excludes `Unidentified` on its own reported line; `Unknown` there matches `('Unknown','Unmapped')`. Segment rules offer both `Unknown` and `Unidentified`. Reporting counts `Unidentified` and `Unknown` separately everywhere.
 
 ## Line-type mapping (Telnyx → us)
 

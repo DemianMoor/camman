@@ -52,11 +52,12 @@ async function main() {
     );
     const msg = formatBatchSummary({
       trigger: "upload", orgName: "Acme", total: 100, cacheHits: 10, processed: 90,
-      failed: 2, lineTypeCounts: { mobile: 45, landline: 27, voip: 18 }, actualCostUsd: 1.23, balanceUsd: 142.55,
+      failed: 2, lineTypeCounts: { mobile: 45, landline: 27, voip: 18 }, actualCostUsd: 1.92, billedUsd: 0.75, balanceUsd: 142.55,
     });
     ok(msg.includes("90 new, 10 cached"), "summary shows new/cached");
     ok(msg.includes("50% mobile") && msg.includes("30% landline (N/A)"), "summary shows line-type %");
     ok(msg.includes("Telnyx balance: $142.55") && msg.includes("Failed: 2"), "summary shows balance + failed");
+    ok(msg.includes("Est (rate): $1.92") && msg.includes("Billed (ledger): $0.75"), "summary reconciles rate estimate vs ledger billed");
 
     // ---- DB: lease single-runner + CAS + crash recovery ----
     console.log("\nDB — lease single-runner:");

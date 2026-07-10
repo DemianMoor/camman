@@ -2733,6 +2733,11 @@ export const lookup_batches = pgTable(
     failed: integer("failed").notNull().default(0),
     est_cost_usd: numeric("est_cost_usd", { precision: 10, scale: 4 }),
     actual_cost_usd: numeric("actual_cost_usd", { precision: 10, scale: 4 }),
+    // Migration 0102: ledger reconciliation. Telnyx balance captured before the
+    // first drain pass + at finalize; billed = before - after (the truth source, vs
+    // the rate-computed actual_cost_usd which over-estimates — no mobile surcharge).
+    balance_before_usd: numeric("balance_before_usd", { precision: 10, scale: 4 }),
+    balance_after_usd: numeric("balance_after_usd", { precision: 10, scale: 4 }),
     status: text("status").notNull().default("pending"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()

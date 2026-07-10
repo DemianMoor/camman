@@ -715,6 +715,13 @@
       "when": 1785110400000,
       "tag": "0101_contacts_phone_number_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1785196800000,
+      "tag": "0102_lookup_batch_balance_reconcile",
+      "breakpoints": true
     }
   ]
 }

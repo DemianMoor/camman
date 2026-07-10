@@ -10,8 +10,9 @@ export interface BatchSummaryStats {
   processed: number; // completed lookups (done)
   failed: number;
   lineTypeCounts: Record<string, number>; // mobile/landline/voip/toll_free/unknown
-  actualCostUsd: number;
-  balanceUsd: number | null;
+  actualCostUsd: number; // rate-computed estimate (over-estimates — no mobile surcharge)
+  billedUsd: number | null; // ledger truth: Telnyx balance delta (before - after)
+  balanceUsd: number | null; // ending balance
 }
 
 function pct(n: number, total: number): string {
@@ -30,10 +31,13 @@ export function formatBatchSummary(s: BatchSummaryStats): string {
     `${pct(lt.unknown ?? 0, done)} unknown`,
   ];
   const bal = s.balanceUsd == null ? "n/a" : `$${s.balanceUsd.toFixed(2)}`;
+  // Reconciliation: the rate-computed number over-estimates (type=carrier is billed
+  // flat, no mobile surcharge), so the balance delta (billed) is the truth source.
+  const billed = s.billedUsd == null ? "n/a" : `$${s.billedUsd.toFixed(2)}`;
   return (
     `📇 Lookup batch complete (${s.trigger}, ${s.orgName}): ` +
     `${s.total.toLocaleString()} numbers → ${s.processed.toLocaleString()} new, ${s.cacheHits.toLocaleString()} cached.\n` +
     `Results: ${parts.join(", ")}. Failed: ${s.failed}. ` +
-    `Actual cost: $${s.actualCostUsd.toFixed(2)}. Telnyx balance: ${bal}.`
+    `Est (rate): $${s.actualCostUsd.toFixed(2)} · Billed (ledger): ${billed}. Telnyx balance: ${bal}.`
   );
 }

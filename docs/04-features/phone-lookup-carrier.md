@@ -95,6 +95,8 @@ Precedence/coercion (verified `scripts/test-lookup-uploads.ts`): `telnyx` wins, 
 
 **Calibration / on-demand drain** (while the `*/2` cron isn't deployed on the branch): `npx tsx scripts/run-lookup-calibration.ts [sampleLimit=500] [orgId?]` — enqueues a random sample via the real `runBackfill` path, drives `runLookupWorker` until the batch drains, prints the batch row each pass, and lists the unmapped-carrier queue at the end. Prereqs: `DATABASE_URL` + `TELNYX_API_KEY` in `.env.local` (spends real money). The 500-number calibration is `sampleLimit=500`.
 
+**Cost model note (calibration finding 2026-07-10).** The rate-computed cost over-estimates: `type=carrier` is billed **flat at the base rate, no mobile surcharge** (500-number calibration: model $1.92 vs $0.75 actually billed). So the batch Telegram summary now reports **`Est (rate): $X · Billed (ledger): $Y`**, where `Billed` = Telnyx **balance delta** (before/after, migration 0102 columns `lookup_batches.balance_before_usd`/`balance_after_usd`) — the truth source. `lookup_rate_mobile` is left as-is pending portal verification. **Phase 5b TODO:** the backfill/upload cost preview should use the **live observed line-type mix** from `phone_lookups` when available (the base ran ~93% mobile) instead of the 35% `DEFAULT_MOBILE_SHARE`.
+
 **Interim visibility (no admin UI yet):** batch progress = `SELECT status, processed, failed, actual_cost_usd FROM lookup_batches ORDER BY created_at DESC`; unmapped-carrier queue = `SELECT carrier_raw, COUNT(*) FROM phone_lookups WHERE carrier_norm='Unmapped' GROUP BY 1 ORDER BY 2 DESC`; completion also fires a Telegram summary.
 
 ## Later phases (planned)

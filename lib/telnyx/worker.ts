@@ -95,6 +95,13 @@ export async function runLookupWorker(now: Date = new Date()): Promise<WorkerRes
       return finish("balance_low");
     }
 
+    // Ledger reconciliation: snapshot balance-before on any batch about to drain
+    // (only if not already set — a batch spanning runs keeps its first snapshot).
+    await db.execute(sql`
+      UPDATE lookup_batches SET balance_before_usd = ${bal.availableCredit}
+      WHERE status IN ('pending', 'running') AND balance_before_usd IS NULL
+    `);
+
     const mappings = await loadCarrierMappings();
 
     // 3. Drain loop.
@@ -139,7 +146,7 @@ export async function runLookupWorker(now: Date = new Date()): Promise<WorkerRes
     }
 
     // 4. Finalize any batch whose queue is fully drained + Telegram summary.
-    const completed = await finalizeCompletedBatches(rates, bal.availableCredit);
+    const completed = await finalizeCompletedBatches(rates);
     return finish("done", completed);
   } finally {
     if (lease) await releaseWorkerLease(lease);
@@ -233,15 +240,19 @@ async function upsertPhoneLookup(r: ReturnType<typeof buildLookupRowFromTelnyx>)
 // summary each. Returns the number of batches completed.
 async function finalizeCompletedBatches(
   rates: { base: number; mobile: number },
-  balanceUsd: number,
 ): Promise<number> {
-  const candidates = await db.execute<{ id: string; trigger: string; total_numbers: number; cache_hits: number; org_name: string | null }>(sql`
-    SELECT b.id, b.trigger, b.total_numbers, b.cache_hits, o.name AS org_name
+  const candidates = await db.execute<{ id: string; trigger: string; total_numbers: number; cache_hits: number; org_name: string | null; balance_before_usd: string | null }>(sql`
+    SELECT b.id, b.trigger, b.total_numbers, b.cache_hits, b.balance_before_usd, o.name AS org_name
     FROM lookup_batches b
     LEFT JOIN organizations o ON o.id = b.org_id
     WHERE b.status IN ('pending', 'running')
       AND NOT EXISTS (SELECT 1 FROM lookup_queue q WHERE q.batch_id = b.id AND q.status = 'pending')
   `);
+  if (candidates.length === 0) return 0;
+
+  // Ledger truth: balance AFTER draining. billed = before - after (per batch).
+  const after = await telnyxBalance();
+  const balanceAfter = after.ok ? after.availableCredit : null;
   let completed = 0;
   for (const b of candidates) {
     const rows = await db.execute<{ status: string; line_type: string | null; n: string }>(sql`
@@ -262,11 +273,16 @@ async function finalizeCompletedBatches(
       } else if (r.status === "failed") failedCount += n;
     }
     const actualCostUsd = actualLookupCost(lineTypeCounts, rates);
+    const before = b.balance_before_usd != null ? Number(b.balance_before_usd) : null;
+    const billedUsd =
+      before != null && balanceAfter != null
+        ? Math.round((before - balanceAfter) * 1e4) / 1e4
+        : null;
 
     await db.execute(sql`
       UPDATE lookup_batches
       SET status = 'complete', processed = ${done}, failed = ${failedCount},
-          actual_cost_usd = ${actualCostUsd}, updated_at = now()
+          actual_cost_usd = ${actualCostUsd}, balance_after_usd = ${balanceAfter}, updated_at = now()
       WHERE id = ${b.id}::uuid
     `);
     completed++;
@@ -281,7 +297,8 @@ async function finalizeCompletedBatches(
         failed: failedCount,
         lineTypeCounts,
         actualCostUsd,
-        balanceUsd,
+        billedUsd,
+        balanceUsd: balanceAfter,
       }),
     );
   }

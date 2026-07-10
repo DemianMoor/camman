@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { notifyTelegram } from "@/lib/alerts/telegram";
 import { campaignTierExpr } from "@/lib/campaign-tier";
 import {
   applyEligibilityExcept,
@@ -43,6 +44,10 @@ export interface StageRecipientFilters {
 export interface StageRecipientRow {
   contact_id: string;
   phone_number: string;
+  // Migration 0096. Carried through the send path so the pre-mint backstop can
+  // detect (and skip + alert on) any not_applicable contact that leaked past the
+  // audience gates. Normally always 'eligible' — landlines never enter the pool.
+  messaging_status?: string;
 }
 
 // Builds the SELECT that yields a stage's qualifying recipients:
@@ -162,11 +167,12 @@ export function stageRecipientsSql(opts: {
     qualified as (
       select
         c.phone_number,
+        c.messaging_status,
         e.contact_id
       from eligible e
       inner join contacts c on c.id = e.contact_id
     )
-    select contact_id, phone_number
+    select contact_id, phone_number, messaging_status
     from qualified
     where not ${splitActive}::boolean
       or ${splitBucketMatch(sql`contact_id`, sql`${f.splitTotal ?? 1}`, sql`${f.splitIndex ?? 1}`)}
@@ -214,5 +220,24 @@ export async function enumerateStageRecipients(
   const rows = (await dbc.execute(
     stageRecipientsSql(opts),
   )) as unknown as StageRecipientRow[];
-  return Array.isArray(rows) ? rows : [];
+  if (!Array.isArray(rows)) return [];
+
+  // Backstop (defense in depth): the audience gates + snapshot + landline sync
+  // keep not_applicable contacts out of the pool, so this should never fire. If it
+  // does, an upstream gate leaked — skip the offenders, count them, and alert
+  // loudly rather than silently sending to a landline. NOT a quiet WHERE filter.
+  const leaked = rows.filter((r) => r.messaging_status === "not_applicable");
+  if (leaked.length > 0) {
+    console.error(
+      `[send-guard] ${leaked.length} not_applicable contact(s) leaked into stage ${opts.campaignId} recipients — skipping. Sample: ${leaked
+        .slice(0, 5)
+        .map((r) => r.contact_id)
+        .join(", ")}`,
+    );
+    void notifyTelegram(
+      `🛑 Send guard: ${leaked.length} landline/not_applicable contact(s) leaked into a send set (campaign ${opts.campaignId}) and were SKIPPED. An upstream audience gate leaked — investigate.`,
+    );
+    return rows.filter((r) => r.messaging_status !== "not_applicable");
+  }
+  return rows;
 }

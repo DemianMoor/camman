@@ -53,11 +53,20 @@ function buildGroupMembershipClause(
   contactGroupIds: number[],
 ): SQL | null {
   if (contactGroupIds.length === 0) return null;
+  // Landline hard stop (migration 0096): join contacts and keep only
+  // messaging_status='eligible' (LITERAL, not a bind). This gates the group
+  // dimension the same way buildSegmentAudienceClause gates the segment side, so
+  // every consumer (snapshot, preview, draft counts) sees a landline-free audience
+  // regardless of how it composes the two dimensions.
   return drizzleSql`
-    SELECT contact_id
-    FROM contact_contact_groups
-    WHERE org_id = ${orgId}::uuid
-      AND contact_group_id = ANY(${drizzleSql.raw(
+    SELECT ccg.contact_id
+    FROM contact_contact_groups ccg
+    INNER JOIN contacts c
+      ON c.id = ccg.contact_id
+      AND c.org_id = ${orgId}::uuid
+      AND c.messaging_status = 'eligible'
+    WHERE ccg.org_id = ${orgId}::uuid
+      AND ccg.contact_group_id = ANY(${drizzleSql.raw(
         "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
       )})
   `;

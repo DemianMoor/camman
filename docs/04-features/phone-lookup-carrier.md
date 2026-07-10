@@ -72,6 +72,15 @@ See [03-data-model.md](../03-data-model.md) for columns. `lookup_settings` is a 
 
 Live-fire drain needs `TELNYX_API_KEY` set; the first run is the 500-number calibration batch. Verified without HTTP (lease overlap/CAS/crash-recovery, attempt-summed cap, enqueue dedup — `scripts/test-lookup-worker.ts`).
 
+## Eligible-invariant wiring (phase 4)
+
+The `AND messaging_status = 'eligible'` gate is threaded in as a **SQL literal** (never a bind param — a bind wouldn't let the planner match the partial index) at the two per-dimension builders that every consumer funnels through, so preview, snapshot, and every draft count share the exact same landline-free audience:
+- **`buildSegmentAudienceClause`** ([lib/segment-rules-eval.ts](../../lib/segment-rules-eval.ts)) — output wrapped in a `gateEligible` join (correctness backstop; catches landlines entering via manual `segment_contacts` membership or non-contacts rules like clickers). Plus the `is_not` negation universe and the `contact_added_*` scans carry the literal directly → they use the partial indexes `contacts_org_eligible_idx` / `contacts_org_created_eligible_idx`.
+- **`buildGroupMembershipClause`** ([lib/audience-snapshot.ts](../../lib/audience-snapshot.ts)) — inner-joins contacts with the eligible literal, gating the group dimension.
+- **Send backstop** ([lib/sends/recipients.ts](../../lib/sends/recipients.ts) `enumerateStageRecipients`) — telemetry, **not** a silent filter: the frozen pool is already landline-free (snapshot gate + landline sync), so a `not_applicable` row here means an upstream gate leaked → log + skip + count + Telegram alert.
+
+Active-pool reads (`computeStageAudienceCount*`, lane counts) need no gate — landlines never enter `campaign_audience_pool`. Verified: `scripts/test-eligible-gate.ts` (landline drops out of the segment audience but stays in contacts; partial-index selection via `EXPLAIN` + `enable_seqscan=off`). **Deferred:** re-run the `EXPLAIN` comparison after the 500-number calibration batch and again after backfill, once `not_applicable` rows exist, to confirm the planner chooses the partial indexes naturally for broad reads too.
+
 ## Later phases (planned)
 
 - **Upload flows**: new-contact CSV (lookup toggle default ON → `Unidentified` when OFF + review panel with cost/balance), predefined `line_type`/`carrier` columns (→ a `phone_lookups` row, source `csv_import`), bulk-update existing contacts, backfill (scoped to `is_archived=false`).

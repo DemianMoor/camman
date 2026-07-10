@@ -626,6 +626,19 @@ export const contacts = pgTable(
     phone_number: text("phone_number").notNull(),
     is_archived: boolean("is_archived").notNull().default(false),
     archived_at: timestamp("archived_at", { withTimezone: true }),
+    // Migration 0096: Telnyx Number Lookup enrichment. line_type + carrier_norm
+    // are denormalized from the global phone_lookups cache. messaging_status is
+    // the landline hard stop (landline => 'not_applicable', else 'eligible'),
+    // derived by a BEFORE INSERT/UPDATE trigger (contacts_derive_messaging_status,
+    // in the migration — not a generated column, to avoid a full-table rewrite at
+    // scale). Every audience/segment/send query filters `messaging_status =
+    // 'eligible'` (eligible-partial indexes below). Never write it directly — the
+    // trigger overrides it from line_type.
+    line_type: text("line_type").notNull().default("unknown"),
+    // Migration 0099: default 'Unidentified' = no phone_lookups row yet (never
+    // looked up). Distinct from 'Unknown' (looked up, carrier undetermined).
+    carrier_norm: text("carrier_norm").notNull().default("Unidentified"),
+    messaging_status: text("messaging_status").notNull().default("eligible"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -653,6 +666,38 @@ export const contacts = pgTable(
       "gin",
       sql`${table.phone_number} extensions.gin_trgm_ops`,
     ),
+    // Migration 0101: btree for cross-org phone equality (the global phone_lookups
+    // cache → contacts sync matches by phone_number without org_id). Managed in SQL
+    // (built CONCURRENTLY); the unique(org_id, phone_number) can't serve this.
+    index("contacts_phone_number_idx").on(table.phone_number),
+    check(
+      "contacts_line_type_check",
+      sql`${table.line_type} IN ('mobile', 'landline', 'voip', 'toll_free', 'unknown')`,
+    ),
+    check(
+      "contacts_messaging_status_check",
+      sql`${table.messaging_status} IN ('eligible', 'not_applicable')`,
+    ),
+    // Migration 0099: includes 'Unidentified' (contacts-only; never in phone_lookups).
+    check(
+      "contacts_carrier_norm_check",
+      sql`${table.carrier_norm} IN ('AT&T', 'T-Mobile', 'Verizon', 'Other Mobile', 'VoIP', 'Unknown', 'Unmapped', 'Unidentified')`,
+    ),
+    // Migration 0096: eligible-partial hot-path indexes. Predicate mirrors the
+    // `AND messaging_status = 'eligible'` filter on every audience/segment/send
+    // query, so landline rows are physically absent from these structures.
+    index("contacts_org_eligible_idx")
+      .on(table.org_id)
+      .where(sql`${table.messaging_status} = 'eligible'`),
+    index("contacts_org_created_eligible_idx")
+      .on(table.org_id, table.created_at)
+      .where(sql`${table.messaging_status} = 'eligible'`),
+    index("contacts_org_carrier_eligible_idx")
+      .on(table.org_id, table.carrier_norm)
+      .where(sql`${table.messaging_status} = 'eligible'`),
+    index("contacts_org_linetype_eligible_idx")
+      .on(table.org_id, table.line_type)
+      .where(sql`${table.messaging_status} = 'eligible'`),
   ],
 );
 
@@ -1278,6 +1323,11 @@ export const campaigns = pgTable(
         include_opt_in?: boolean;
         include_clickers?: boolean;
         include_not_clicked?: boolean;
+        // Migration 0098 feature: optional carrier filter. When non-empty, only
+        // contacts whose carrier_norm is in the selection participate; Unidentified
+        // is always excluded (never selectable). 'Unknown' matches ('Unknown',
+        // 'Unmapped'). Empty/absent = no filter (everyone eligible, incl Unidentified).
+        carrier_filter?: string[];
       }>()
       .notNull()
       .default(sql`'{}'::jsonb`),
@@ -2192,6 +2242,10 @@ export const stage_sends = pgTable(
     // offer page (and for manual-mode rows that mint no tracked link).
     offer_reached_at: timestamp("offer_reached_at", { withTimezone: true }),
     offer_reach_event_id: text("offer_reach_event_id"),
+    // Migration 0096: carrier bucket stamped at materialization/send time from the
+    // contact's carrier_norm. Enables future per-carrier delivery/sales analytics;
+    // no report reads it yet. NULL for rows sent before enrichment.
+    carrier_norm: text("carrier_norm"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -2564,3 +2618,193 @@ export const report_refresh_log = pgTable("report_refresh_log", {
 
 export type ReportRefreshLog = typeof report_refresh_log.$inferSelect;
 export type NewReportRefreshLog = typeof report_refresh_log.$inferInsert;
+
+// ============ Telnyx Number Lookup (migrations 0095–0097) ============
+
+// GLOBAL cache (no org_id): carrier/line-type is a fact about a phone number, not
+// a tenant. One row per number ever. phone is E.164 (+1XXXXXXXXXX), matching
+// contacts.phone_number so the enrichment join hits. Written server-side only.
+export const phone_lookups = pgTable(
+  "phone_lookups",
+  {
+    phone: text("phone").primaryKey(),
+    line_type: text("line_type").notNull(),
+    carrier_raw: text("carrier_raw"),
+    carrier_norm: text("carrier_norm").notNull().default("Unknown"),
+    ocn: text("ocn"),
+    spid: text("spid"),
+    ported: boolean("ported"),
+    ported_date: date("ported_date"),
+    source: text("source").notNull(),
+    lookup_status: text("lookup_status").notNull().default("complete"),
+    retry_count: integer("retry_count").notNull().default(0),
+    raw_response: jsonb("raw_response"),
+    looked_up_at: timestamp("looked_up_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("phone_lookups_failed_idx")
+      .on(table.retry_count)
+      .where(sql`${table.lookup_status} = 'failed'`),
+    index("phone_lookups_unmapped_idx")
+      .on(table.carrier_raw)
+      .where(sql`${table.carrier_norm} = 'Unmapped'`),
+    check(
+      "phone_lookups_line_type_check",
+      sql`${table.line_type} IN ('mobile', 'landline', 'voip', 'toll_free', 'unknown')`,
+    ),
+    check(
+      "phone_lookups_carrier_norm_check",
+      sql`${table.carrier_norm} IN ('AT&T', 'T-Mobile', 'Verizon', 'Other Mobile', 'VoIP', 'Unknown', 'Unmapped')`,
+    ),
+    check(
+      "phone_lookups_source_check",
+      sql`${table.source} IN ('telnyx', 'csv_import', 'manual_edit', 'dlr_inferred')`,
+    ),
+    check(
+      "phone_lookups_lookup_status_check",
+      sql`${table.lookup_status} IN ('complete', 'failed')`,
+    ),
+  ],
+);
+
+export type PhoneLookup = typeof phone_lookups.$inferSelect;
+export type NewPhoneLookup = typeof phone_lookups.$inferInsert;
+
+// Raw carrier string -> one of the six buckets. Seeded (migration 0095); admin
+// assigns unmapped strings, which retroactively updates phone_lookups + contacts.
+export const carrier_mappings = pgTable(
+  "carrier_mappings",
+  {
+    raw_name: text("raw_name").primaryKey(),
+    carrier_norm: text("carrier_norm").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    mapped_by: text("mapped_by"),
+  },
+  (table) => [
+    check(
+      "carrier_mappings_carrier_norm_check",
+      sql`${table.carrier_norm} IN ('AT&T', 'T-Mobile', 'Verizon', 'Other Mobile', 'VoIP', 'Unknown')`,
+    ),
+  ],
+);
+
+export type CarrierMapping = typeof carrier_mappings.$inferSelect;
+export type NewCarrierMapping = typeof carrier_mappings.$inferInsert;
+
+// Account-global lookup config: single row (boolean PK fixed to true). Rates live
+// here because Telnyx exposes no pricing API; cost previews read them.
+export const lookup_settings = pgTable("lookup_settings", {
+  id: boolean("id").primaryKey().default(true),
+  lookup_paused: boolean("lookup_paused").notNull().default(false),
+  lookup_daily_cap: integer("lookup_daily_cap").notNull().default(50000),
+  lookup_rate_base: numeric("lookup_rate_base").notNull().default("0.0015"),
+  lookup_rate_mobile: numeric("lookup_rate_mobile").notNull().default("0.0025"),
+  lookup_concurrency_rps: integer("lookup_concurrency_rps")
+    .notNull()
+    .default(10),
+  // Migration 0100: single-runner lease for the worker drain (lease row, not an
+  // advisory lock — pooler-safe). Claimed if NULL or < now(); cleared on clean exit.
+  worker_lease_until: timestamp("worker_lease_until", { withTimezone: true }),
+  updated_at: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export type LookupSettings = typeof lookup_settings.$inferSelect;
+export type NewLookupSettings = typeof lookup_settings.$inferInsert;
+
+// Per-run batch tracking (org-scoped for reporting; the cache it fills is global).
+export const lookup_batches = pgTable(
+  "lookup_batches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    trigger: text("trigger").notNull(),
+    total_numbers: integer("total_numbers").notNull(),
+    cache_hits: integer("cache_hits").notNull().default(0),
+    processed: integer("processed").notNull().default(0),
+    failed: integer("failed").notNull().default(0),
+    est_cost_usd: numeric("est_cost_usd", { precision: 10, scale: 4 }),
+    actual_cost_usd: numeric("actual_cost_usd", { precision: 10, scale: 4 }),
+    // Migration 0102: ledger reconciliation. Telnyx balance captured before the
+    // first drain pass + at finalize; billed = before - after (the truth source, vs
+    // the rate-computed actual_cost_usd which over-estimates — no mobile surcharge).
+    balance_before_usd: numeric("balance_before_usd", { precision: 10, scale: 4 }),
+    balance_after_usd: numeric("balance_after_usd", { precision: 10, scale: 4 }),
+    status: text("status").notNull().default("pending"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("lookup_batches_org_id_idx").on(table.org_id),
+    index("lookup_batches_active_idx")
+      .on(table.status)
+      .where(sql`${table.status} IN ('pending', 'running')`),
+    check(
+      "lookup_batches_trigger_check",
+      sql`${table.trigger} IN ('upload', 'backfill', 'csv_update')`,
+    ),
+    check(
+      "lookup_batches_status_check",
+      sql`${table.status} IN ('pending', 'running', 'paused', 'complete', 'aborted')`,
+    ),
+  ],
+);
+
+export type LookupBatch = typeof lookup_batches.$inferSelect;
+export type NewLookupBatch = typeof lookup_batches.$inferInsert;
+
+// Worker queue. Claimed atomically (FOR UPDATE SKIP LOCKED). No org_id — global
+// worker state, RLS policy-less (server-only).
+export const lookup_queue = pgTable(
+  "lookup_queue",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    batch_id: uuid("batch_id")
+      .notNull()
+      .references(() => lookup_batches.id, { onDelete: "cascade" }),
+    phone: text("phone").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    last_error: text("last_error"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Migration 0100: stamped on every attempt. Drives the daily-cap attempt count
+    // (SUM(attempts) since Warsaw midnight) and the per-row retry cooldown.
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("lookup_queue_pending_idx")
+      .on(table.batch_id, table.id)
+      .where(sql`${table.status} = 'pending'`),
+    index("lookup_queue_phone_pending_idx")
+      .on(table.phone)
+      .where(sql`${table.status} = 'pending'`),
+    check(
+      "lookup_queue_status_check",
+      sql`${table.status} IN ('pending', 'done', 'failed')`,
+    ),
+  ],
+);
+
+export type LookupQueueRow = typeof lookup_queue.$inferSelect;
+export type NewLookupQueueRow = typeof lookup_queue.$inferInsert;

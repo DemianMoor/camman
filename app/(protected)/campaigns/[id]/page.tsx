@@ -2138,6 +2138,7 @@ export default function CampaignDetailPage() {
           endpoint={`/api/campaigns/${campaignId}/upload-contacts`}
           enableContactGroups
           requireContactGroups
+          enableLookup
           submitLabel="Upload to campaign"
           successLabel="Contacts uploaded to campaign"
           onSuccess={() => {

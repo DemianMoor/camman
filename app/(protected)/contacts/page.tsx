@@ -80,10 +80,23 @@ type Contact = {
   archived_at: string | null;
   created_at: string;
   updated_at: string;
+  line_type: string;
+  carrier_norm: string;
+  messaging_status: string;
   groups: ContactGroupBadge[];
   // Distinct opt_outs reasons present for this contact. Drives the
   // "Status indicators" column. Empty when the contact has no suppressions.
   statuses: string[];
+};
+
+// Contacts is the ONE screen where landlines remain visible, so the Type
+// column labels landline as "Landline / Not applicable".
+const LINE_TYPE_LABELS: Record<string, string> = {
+  mobile: "Mobile",
+  landline: "Landline / Not applicable",
+  voip: "VoIP",
+  toll_free: "Toll-free",
+  unknown: "Unknown",
 };
 
 // Reason → badge label + classes. Covers the three import statuses plus
@@ -133,6 +146,13 @@ type BaseStats = {
   opt_out_count: number;
   opt_in_count: number;
   clicker_count: number;
+};
+
+type CarrierStats = {
+  total: number;
+  by_line_type: Record<string, number>;
+  by_carrier_norm: Record<string, number>;
+  by_messaging_status: { eligible: number; not_applicable: number };
 };
 
 type Filters = {
@@ -258,6 +278,117 @@ function StatTile({
   );
 }
 
+// Short line-type labels for the compact base-mix widget (the table column
+// uses the longer LINE_TYPE_LABELS with the landline caveat).
+const LINE_TYPE_SHORT: Record<string, string> = {
+  mobile: "Mobile",
+  landline: "Landline",
+  voip: "VoIP",
+  toll_free: "Toll-free",
+  unknown: "Unknown",
+};
+
+const LINE_TYPE_ORDER = ["mobile", "voip", "toll_free", "landline", "unknown"];
+const CARRIER_ORDER = [
+  "AT&T",
+  "T-Mobile",
+  "Verizon",
+  "Other Mobile",
+  "VoIP",
+  "Unknown",
+  "Unmapped",
+  "Unidentified",
+];
+
+function MixRow({
+  label,
+  value,
+  total,
+  muted,
+}: {
+  label: string;
+  value: number;
+  total: number;
+  muted?: boolean;
+}) {
+  const pct = total > 0 ? Math.round((value / total) * 100) : 0;
+  return (
+    <div className="flex items-center justify-between gap-2 text-xs">
+      <span className={muted ? "text-muted-foreground" : undefined}>
+        {label}
+      </span>
+      <span className="font-mono tabular-nums text-muted-foreground">
+        {value.toLocaleString()}{" "}
+        <span className="opacity-60">({pct}%)</span>
+      </span>
+    </div>
+  );
+}
+
+// Base-mix breakdown by messaging status, line type, and carrier. This is
+// the one screen where landlines / not-applicable numbers stay visible.
+function BaseMixWidget({ stats }: { stats: CarrierStats | null }) {
+  if (!stats || stats.total === 0) return null;
+  const total = stats.total;
+  const lineTypes = LINE_TYPE_ORDER.filter((k) => (stats.by_line_type[k] ?? 0) > 0);
+  const carriers = CARRIER_ORDER.filter(
+    (k) => (stats.by_carrier_norm[k] ?? 0) > 0,
+  );
+  return (
+    <div className="rounded-md border bg-muted/20 p-3">
+      <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Base mix · {total.toLocaleString()} contacts
+      </div>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-1">
+          <div className="text-[11px] font-medium text-muted-foreground">
+            Messaging
+          </div>
+          <MixRow
+            label="Eligible"
+            value={stats.by_messaging_status.eligible}
+            total={total}
+          />
+          <MixRow
+            label="Not applicable"
+            value={stats.by_messaging_status.not_applicable}
+            total={total}
+            muted
+          />
+        </div>
+        <div className="grid gap-1">
+          <div className="text-[11px] font-medium text-muted-foreground">
+            Line type
+          </div>
+          {lineTypes.map((k) => (
+            <MixRow
+              key={k}
+              label={LINE_TYPE_SHORT[k] ?? k}
+              value={stats.by_line_type[k] ?? 0}
+              total={total}
+              muted={k === "landline" || k === "unknown"}
+            />
+          ))}
+        </div>
+        <div className="grid gap-1">
+          <div className="text-[11px] font-medium text-muted-foreground">
+            Carrier
+          </div>
+          {carriers.map((k) => (
+            <MixRow
+              key={k}
+              label={k}
+              value={stats.by_carrier_norm[k] ?? 0}
+              total={total}
+              muted={k === "Unidentified" || k === "Unmapped" || k === "Unknown"}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ContactsPage() {
   const { auth, can } = useAuth();
 
@@ -284,6 +415,7 @@ export default function ContactsPage() {
 
   const listApi = useApiCall<ListResponse>();
   const statsApi = useApiCall<BaseStats>();
+  const carrierStatsApi = useApiCall<CarrierStats>();
   const archiveApi = useApiCall<Contact>();
   const restoreApi = useApiCall<Contact>();
   const deleteApi = useApiCall<{ ok: true; id: string }>();
@@ -295,6 +427,7 @@ export default function ContactsPage() {
   const [countApprox, setCountApprox] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [stats, setStats] = useState<BaseStats | null>(null);
+  const [carrierStats, setCarrierStats] = useState<CarrierStats | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
@@ -414,6 +547,20 @@ export default function ContactsPage() {
       cancelled = true;
     };
   }, [refreshTick, statsApi.execute]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = await carrierStatsApi.execute(
+        "/api/contacts/carrier-stats",
+      );
+      if (cancelled) return;
+      if (result.ok) setCarrierStats(result.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshTick, carrierStatsApi.execute]);
 
   const [uploadOpen, setUploadOpen] = useState(false);
   // Optional segment assignment: contacts go into one segment if picked.
@@ -547,6 +694,47 @@ export default function ContactsPage() {
         header: "Phone Number",
         cell: ({ row }) => <PhoneCell contact={row.original} />,
         enableSorting: true,
+      },
+      {
+        id: "line_type",
+        header: "Type",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const lt = row.original.line_type;
+          const label = LINE_TYPE_LABELS[lt] ?? lt;
+          return (
+            <span
+              className={cn(
+                "text-sm",
+                lt === "landline" || lt === "unknown"
+                  ? "text-muted-foreground"
+                  : undefined,
+              )}
+            >
+              {label}
+            </span>
+          );
+        },
+      },
+      {
+        id: "carrier_norm",
+        header: "Carrier",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const c = row.original.carrier_norm;
+          return (
+            <span
+              className={cn(
+                "text-sm",
+                c === "Unidentified" || c === "Unmapped" || c === "Unknown"
+                  ? "text-muted-foreground"
+                  : undefined,
+              )}
+            >
+              {c}
+            </span>
+          );
+        },
       },
       {
         id: "indicators",
@@ -759,6 +947,8 @@ export default function ContactsPage() {
           onClick={() => updateFilters({ view: "clickers", page: 0 })}
         />
       </div>
+
+      <BaseMixWidget stats={carrierStats} />
 
       <div className="flex flex-wrap items-center gap-3">
         <Input
@@ -1011,6 +1201,7 @@ export default function ContactsPage() {
               submitLabel="Upload contacts"
               enableContactGroups
               requireContactGroups
+              enableLookup
             />
           )}
       </FormDialog>

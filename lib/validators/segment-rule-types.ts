@@ -12,7 +12,39 @@ export type ValueShape =
   | "offer_id"
   | "segment_id"
   | "contact_group_id"
-  | "campaign_use_period";
+  | "campaign_use_period"
+  | "phone_type_set"
+  | "carrier_set";
+
+// Value sets for the carrier/line-type rules (migration 0098). Stored in the
+// rule's `value` as a non-empty array of these codes. 'landline' is intentionally
+// absent from phone_type (landlines are not_applicable, absent from segments).
+// Carrier offers BOTH Unknown and Unidentified (segments are grouping tools):
+// Unknown matches ('Unknown','Unmapped'); Unidentified matches only itself.
+export const PHONE_TYPE_VALUES = ["mobile", "voip", "toll_free", "unknown"] as const;
+export type PhoneTypeValue = (typeof PHONE_TYPE_VALUES)[number];
+export const CARRIER_VALUES = [
+  "AT&T",
+  "T-Mobile",
+  "Verizon",
+  "Other Mobile",
+  "VoIP",
+  "Unknown",
+  "Unidentified",
+] as const;
+export type CarrierValue = (typeof CARRIER_VALUES)[number];
+
+export function isStringSubsetOf<T extends string>(
+  v: unknown,
+  allowed: readonly T[],
+): v is T[] {
+  return (
+    Array.isArray(v) &&
+    v.length > 0 &&
+    v.every((x) => typeof x === "string" && (allowed as readonly string[]).includes(x)) &&
+    new Set(v).size === v.length
+  );
+}
 
 // Fixed set of lookback windows for the "in use in another campaign" rule.
 // Stored in the rule's `value` as the code string (e.g. "1w"). The code →
@@ -182,6 +214,20 @@ export const RULE_TYPES = {
     label: "Is in contact group",
     operators: ["is", "is_not"],
     value_shape: "contact_group_id",
+  },
+
+  // === Carrier / line type (migration 0098) ===
+  // Evaluate against the denormalized, eligible-partial-indexed contact columns.
+  // phone_type is IN-only (a chosen set of line types); carrier is IN / NOT IN.
+  phone_type: {
+    label: "Phone type is one of",
+    operators: ["is"],
+    value_shape: "phone_type_set",
+  },
+  carrier: {
+    label: "Carrier is one of",
+    operators: ["is", "is_not"],
+    value_shape: "carrier_set",
   },
 } as const satisfies Record<string, RuleTypeSpec>;
 

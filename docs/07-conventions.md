@@ -67,6 +67,20 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Segment audience = manual membership **∪** rule matches (Model C); zero active rules ⇒ manual only (preserve this short-circuit).
 - Campaign audience is **frozen at activation**; locked afterward (`audience_locked_after_draft`). Both `exclude_in_use_contacts` flags (segment + campaign) only consider `status='active'` campaigns.
 
+## Carrier / line-type eligibility (migrations 0095–0098 — see [04-features/phone-lookup-carrier.md](04-features/phone-lookup-carrier.md))
+- **The landline hard stop is `contacts.messaging_status`** (`eligible` | `not_applicable`), derived by trigger from `line_type` (`landline ⇒ not_applicable`, everything else — incl. `voip`, `toll_free`, `unknown` — ⇒ `eligible`). Never write `messaging_status` directly; the trigger overrides it. Never treat `unknown` as ineligible (conservative default — never silently suppress).
+- **Every audience, segment, campaign, stage, and send query adds `AND messaging_status='eligible'`**, matching the eligible-partial indexes. Landlines must be absent from segments, audience counts, previews, stats, send queues, and link minting — **except the Contacts admin screen** (the one place they stay visible, shown as "Landline / Not applicable").
+- **`phone_lookups` is a GLOBAL cache** (no `org_id`) keyed on E.164 `+1XXXXXXXXXX`. Normalize to that exact shape (via `lib/phone-validation.ts`) before both the Telnyx call and the cache write, or the join to `contacts.phone_number` silently misses and you double-pay.
+- **Carrier buckets** are the six `carrier_norm` values (`AT&T`/`T-Mobile`/`Verizon`/`Other Mobile`/`VoIP`/`Unknown`). Two non-bucket states (migration 0099):
+  - **`Unidentified`** — CONTACTS ONLY: **no `phone_lookups` row exists** for the phone (never looked up, no user data). The default for `contacts.carrier_norm`. Invariant: `carrier_norm='Unidentified'` ⇔ no lookup row. `phone_lookups.carrier_norm` may **never** be `Unidentified` (CHECK-enforced, 0095). Contact sync always overwrites `Unidentified` with a real value (`Unknown` at worst) when a lookup row is written.
+  - **`Unknown`** — a lookup occurred (any source) but the carrier is undetermined. Groups with `Unmapped`.
+  - **`Unmapped`** — looked up, raw string awaiting an admin mapping. Groups with `Unknown`.
+- **Campaign carrier filter:** dropdown offers the six buckets (`Unknown` selectable; **`Unidentified` is not**). No filter ⇒ everyone eligible participates incl. `Unidentified`. Any filter set ⇒ `Unidentified` is **always excluded** and reported on its own line ("N removed as unidentified (never looked up)"); selecting `Unknown` matches `IN ('Unknown','Unmapped')`. Enforced in the shared audience builder (send-time), not just preview.
+- **Segment carrier rule:** both `Unknown` and `Unidentified` are selectable (`Unknown`→`('Unknown','Unmapped')`, `Unidentified`→itself).
+- **Reporting** (Telegram summaries, contacts stats widget, audience preview) counts `Unidentified` and `Unknown` as **separate lines** everywhere.
+- **Precedence:** `telnyx` overwrites anything; `csv_import` never overwrites an existing `telnyx` row.
+- **Landline cleanup cancels `stage_sends` `status='pending'` only — never `sending`** (mid-flight; deleting can't unsend and breaks the DLR match). The contact still becomes `not_applicable` for everything afterward.
+
 ## Content dedup & offer exposure (migration 0086 — see [04-features/content-dedup.md](04-features/content-dedup.md))
 - **"Used" = a `stage_sends` row that reached `status='sent'`** — the only per-recipient success marker. External-CSV campaigns (no `stage_sends`) are an accepted blind spot.
 - **Hard rule keys on `creatives.id`, never text/slug/hash.** Edits are in-place (same id); a new creative (via `/duplicate`) is the path for re-sending changed content.

@@ -31,6 +31,10 @@ export interface AudienceFilters {
   include_opt_in: boolean;
   include_clickers: boolean;
   include_not_clicked: boolean;
+  // Optional carrier allow-list (migration 0098). Empty = no carrier filter.
+  // When non-empty, only contacts whose carrier_norm is in the set qualify;
+  // Unidentified (never looked up) is always excluded once a filter is set.
+  carrier_filter: string[];
 }
 
 export interface CampaignFormValues {
@@ -83,6 +87,7 @@ export const DEFAULT_FILTERS: AudienceFilters = {
   include_opt_in: false,
   include_clickers: false,
   include_not_clicked: true,
+  carrier_filter: [],
 };
 
 // =============== Hook ===============
@@ -289,6 +294,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     excluded_for_optout: number;
     in_use_in_other_campaigns: number;
     got_offer_in_prior_campaign: number;
+    carrier_removed: Record<string, number>;
   }>();
   const [previewCount, setPreviewCount] = useState<number | null>(null);
   const [previewTotalMatching, setPreviewTotalMatching] = useState<
@@ -312,6 +318,12 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const [previewOfferExposed, setPreviewOfferExposed] = useState<
     number | null
   >(null);
+  // Per-bucket counts removed by the carrier filter (bucket → count).
+  // "Unidentified" is its own key (never-looked-up numbers). Empty when no
+  // carrier filter is active.
+  const [previewCarrierRemoved, setPreviewCarrierRemoved] = useState<
+    Record<string, number>
+  >({});
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
@@ -336,6 +348,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
       setPreviewExcludedOptOut(null);
       setPreviewInUseElsewhere(null);
       setPreviewOfferExposed(null);
+      setPreviewCarrierRemoved({});
       setPreviewError(null);
       return;
     }
@@ -369,6 +382,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
         setPreviewExcludedOptOut(result.data.excluded_for_optout);
         setPreviewInUseElsewhere(result.data.in_use_in_other_campaigns);
         setPreviewOfferExposed(result.data.got_offer_in_prior_campaign);
+        setPreviewCarrierRemoved(result.data.carrier_removed ?? {});
         setPreviewError(null);
       } else {
         setPreviewError(result.error);
@@ -380,6 +394,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
         setPreviewExcludedOptOut(null);
         setPreviewInUseElsewhere(null);
         setPreviewOfferExposed(null);
+        setPreviewCarrierRemoved({});
       }
     }, 400);
     return () => {
@@ -473,13 +488,21 @@ export function useCampaignFormState(props: CampaignFormProps) {
     }
   }, [watchedLinkMode, selectedBrandShortDomain, form]);
 
-  function setFilter<K extends keyof AudienceFilters>(
-    key: K,
+  function setFilter(
+    key: Exclude<keyof AudienceFilters, "carrier_filter">,
     value: boolean,
   ) {
     form.setValue(
       "audience_filters",
       { ...form.getValues("audience_filters"), [key]: value },
+      { shouldDirty: true },
+    );
+  }
+
+  function setCarrierFilter(next: string[]) {
+    form.setValue(
+      "audience_filters",
+      { ...form.getValues("audience_filters"), carrier_filter: next },
       { shouldDirty: true },
     );
   }
@@ -522,6 +545,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     previewExcludedOptOut,
     previewInUseElsewhere,
     previewOfferExposed,
+    previewCarrierRemoved,
     previewError,
     previewLoading,
     hasAudienceSource,
@@ -537,6 +561,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     filteredSegments,
     toggleSegment,
     setFilter,
+    setCarrierFilter,
     handleDraftClick,
     handleActivateClick,
     onCancel,

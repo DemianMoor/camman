@@ -741,6 +741,7 @@ export default function ClickersPage() {
                 submitLabel="Add clickers"
                 successLabel="Clickers added"
                 enableContactGroups
+                enableLookup
               />
             )}
           </div>

@@ -666,6 +666,62 @@
       "when": 1784505600000,
       "tag": "0094_link_destinations_guidekn_url_shape",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1784592000000,
+      "tag": "0095_phone_lookups_carrier_mappings_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1784678400000,
+      "tag": "0096_contacts_carrier_messaging_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1784764800000,
+      "tag": "0097_lookup_batches_queue",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1784851200000,
+      "tag": "0098_segment_rules_phone_carrier",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1784937600000,
+      "tag": "0099_carrier_norm_unidentified",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1785024000000,
+      "tag": "0100_lookup_worker_lease",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1785110400000,
+      "tag": "0101_contacts_phone_number_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1785196800000,
+      "tag": "0102_lookup_batch_balance_reconcile",
+      "breakpoints": true
     }
   ]
 }

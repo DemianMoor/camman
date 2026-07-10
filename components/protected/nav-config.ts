@@ -168,6 +168,11 @@ export const navGroups: NavGroup[] = [
         icon: Send,
       },
       {
+        label: "Carrier Lookup",
+        href: "/settings/lookup",
+        icon: Phone,
+      },
+      {
         label: "User Management",
         href: "/settings/users",
         icon: UserCog,

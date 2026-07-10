@@ -742,6 +742,7 @@ export default function SegmentDetailPage() {
               onCancel={() => setActiveTab("audience")}
               submitLabel="Add to segment"
               successLabel="Contacts added to segment"
+              enableLookup
             />
           </TabsContent>
         ) : null}

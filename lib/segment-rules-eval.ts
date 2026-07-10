@@ -59,6 +59,15 @@ function isRuleComplete(rule: {
   );
 }
 
+// Postgres text[] literal from a validated string set (single-quote escaped).
+// Empty → ARRAY[]::text[] (matches nothing — defensive; validation requires ≥1).
+function textArrayLiteral(values: string[]): string {
+  if (values.length === 0) return "ARRAY[]::text[]";
+  return (
+    "ARRAY[" + values.map((v) => `'${v.replace(/'/g, "''")}'`).join(",") + "]::text[]"
+  );
+}
+
 // Build the contact_id subquery for one rule. The returned fragment is a
 // parameterized "(SELECT contact_id FROM ...)" — the caller wraps it in
 // `contact_id IN (...)` or `contact_id NOT IN (...)` based on operator.
@@ -140,10 +149,13 @@ function ruleInnerQuery(
         WHERE o.org_id = ${orgId}::uuid AND ob.brand_id = ${Number(v)}::int
       `;
     case "contact_added_in_last_n_days":
+      // messaging_status literal (NOT a bind) so the planner matches the partial
+      // index contacts_org_created_eligible_idx. Migration 0096.
       return drizzleSql`
         SELECT id AS contact_id
         FROM contacts
         WHERE org_id = ${orgId}::uuid
+          AND messaging_status = 'eligible'
           AND created_at >= now() - make_interval(days => ${Number(v)})
       `;
     case "contact_added_more_than_n_days_ago":
@@ -151,6 +163,7 @@ function ruleInnerQuery(
         SELECT id AS contact_id
         FROM contacts
         WHERE org_id = ${orgId}::uuid
+          AND messaging_status = 'eligible'
           AND created_at < now() - make_interval(days => ${Number(v)})
       `;
     case "joined_segment_in_last_n_days":
@@ -232,6 +245,29 @@ function ruleInnerQuery(
         FROM contact_contact_groups
         WHERE org_id = ${orgId}::uuid AND contact_group_id = ${Number(v)}::int
       `;
+    case "phone_type": {
+      // Set membership over the eligible-partial-indexed line_type. messaging_status
+      // literal → uses contacts_org_linetype_eligible_idx (migration 0096).
+      const set = Array.isArray(v) ? (v as string[]) : [];
+      return drizzleSql`
+        SELECT id AS contact_id FROM contacts
+        WHERE org_id = ${orgId}::uuid AND messaging_status = 'eligible'
+          AND line_type = ANY(${drizzleSql.raw(textArrayLiteral(set))})
+      `;
+    }
+    case "carrier": {
+      // 'Unknown' expands to ('Unknown','Unmapped') (Unmapped groups with Unknown);
+      // 'Unidentified' matches only itself. Uses contacts_org_carrier_eligible_idx.
+      const set = Array.isArray(v) ? (v as string[]) : [];
+      const expanded = set.flatMap((c) =>
+        c === "Unknown" ? ["Unknown", "Unmapped"] : [c],
+      );
+      return drizzleSql`
+        SELECT id AS contact_id FROM contacts
+        WHERE org_id = ${orgId}::uuid AND messaging_status = 'eligible'
+          AND carrier_norm = ANY(${drizzleSql.raw(textArrayLiteral(expanded))})
+      `;
+    }
     default: {
       // Should be unreachable — server-side validation rejects unknown
       // rule_types before they ever get persisted. Defensive: return a
@@ -330,15 +366,33 @@ export async function buildSegmentAudienceClause(
     `;
   }
 
+  // Landline hard stop (migration 0096/0099): drop any contact_id that isn't
+  // messaging_status='eligible'. This is the correctness backstop for the whole
+  // segment audience — it catches landlines that enter via MANUAL membership
+  // (segment_contacts) or non-contacts rules (clickers, opt-ins, …), which the
+  // is_not/contact_added scan gates alone can't reach. messaging_status is a
+  // LITERAL (not a bind). Gating here (not per-consumer) means preview, snapshot,
+  // and every draft count share the exact same eligible audience.
+  function gateEligible(audience: SQL): SQL {
+    return drizzleSql`
+      SELECT elig_s.contact_id
+      FROM (${audience}) elig_s
+      INNER JOIN contacts elig_c
+        ON elig_c.id = elig_s.contact_id
+        AND elig_c.org_id = ${orgId}::uuid
+        AND elig_c.messaging_status = 'eligible'
+    `;
+  }
+
   // Zero-rule short-circuit: identical to pre-rules behavior — manual only.
   // Tested explicitly in scripts/test-segment-rules-api.ts.
   if (rules.length === 0) {
-    return applyInUseExclusion(drizzleSql`
+    return gateEligible(applyInUseExclusion(drizzleSql`
       SELECT sc.contact_id
       FROM segment_contacts sc
       WHERE sc.segment_id = ${segmentId}::int
         AND sc.org_id = ${orgId}::uuid
-    `);
+    `));
   }
 
   // Combine rules via SQL set arithmetic (UNION / INTERSECT / EXCEPT) so
@@ -363,9 +417,14 @@ export async function buildSegmentAudienceClause(
   // by default; the parens force left-to-right regardless.)
   // The universe for an `is_not` complement: either the full org contacts
   // table or the caller-supplied restriction (see the doc comment above).
+  // messaging_status literal (NOT a bind) so the full-contacts negation universe
+  // uses the partial index contacts_org_eligible_idx (migration 0096) and never
+  // materializes landlines. When restrictUniverse is the group set, that set is
+  // already eligible-gated (buildGroupMembershipClause). Either way the segment
+  // audience excludes landlines; the output gate below is the correctness backstop.
   const universeBase = restrictUniverse
     ? drizzleSql`SELECT contact_id FROM (${restrictUniverse}) ru_universe`
-    : drizzleSql`SELECT id AS contact_id FROM contacts WHERE org_id = ${orgId}::uuid`;
+    : drizzleSql`SELECT id AS contact_id FROM contacts WHERE org_id = ${orgId}::uuid AND messaging_status = 'eligible'`;
 
   function ruleSet(rule: (typeof rules)[number]): SQL {
     const inner = ruleInnerQuery(rule, segmentId, orgId);
@@ -406,7 +465,7 @@ export async function buildSegmentAudienceClause(
   // Manual membership ∪ rule-matched. UNION dedupes; UNION ALL would be
   // cheaper but the dedup is needed when a manual member also matches a
   // rule (otherwise the count is inflated).
-  return applyInUseExclusion(drizzleSql`
+  return gateEligible(applyInUseExclusion(drizzleSql`
     SELECT contact_id FROM (
       SELECT sc.contact_id AS contact_id
       FROM segment_contacts sc
@@ -415,7 +474,7 @@ export async function buildSegmentAudienceClause(
       UNION
       (${ruleMatches})
     ) AS combined
-  `);
+  `));
 }
 
 // Helper for the rules preview endpoint and refresh-stats endpoint:

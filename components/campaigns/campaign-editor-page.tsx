@@ -34,8 +34,10 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
 
+import { CarrierRemovedLines } from "./campaign-form-fields";
 import {
   NONE,
   useCampaignFormState,
@@ -97,7 +99,7 @@ const STATUS_COLOR: Record<Status, string> = {
 };
 
 const FILTER_DEFS: {
-  key: keyof AudienceFilters;
+  key: Exclude<keyof AudienceFilters, "carrier_filter">;
   label: string;
   tooltip: string;
 }[] = [
@@ -191,6 +193,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
       include_opt_in: data.audience_filters?.include_opt_in ?? false,
       include_clickers: data.audience_filters?.include_clickers ?? false,
       include_not_clicked: data.audience_filters?.include_not_clicked ?? true,
+      carrier_filter: data.audience_filters?.carrier_filter ?? [],
     },
     audience_cap: data.audience_cap ?? null,
     exclude_in_use_contacts: data.exclude_in_use_contacts ?? true,
@@ -807,6 +810,7 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
     watchedExcludeInUse,
     watchedExcludePriorOffer,
     setFilter,
+    setCarrierFilter,
   } = state;
 
   return (
@@ -981,6 +985,29 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
             · Opt-outs always excluded
           </span>
         </div>
+
+        {/* Carrier filter (optional). Empty = all carriers. */}
+        <div className="grid gap-1.5">
+          <Label>Carrier filter</Label>
+          <MultiSelectPicker
+            options={CAMPAIGN_CARRIER_FILTER_VALUES.map((c) => ({
+              id: c,
+              label: c,
+            }))}
+            value={watchedFilters.carrier_filter}
+            onChange={(next) => setCarrierFilter(next as string[])}
+            placeholder="All carriers (no filter)"
+            selectedLabel={(n) =>
+              `${n} carrier${n === 1 ? "" : "s"} selected`
+            }
+            disabled={audienceLocked || anySubmitting}
+            searchPlaceholder="Search carriers…"
+          />
+          <p className="text-xs text-muted-foreground">
+            Empty = every carrier. When set, only the selected carriers qualify;
+            never-looked-up (unidentified) numbers are excluded.
+          </p>
+        </div>
       </CardContent>
     </Card>
   );
@@ -1033,6 +1060,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     previewExcludedOptOut,
     previewInUseElsewhere,
     previewOfferExposed,
+    previewCarrierRemoved,
     previewError,
     previewLoading,
     watchedSegments,
@@ -1040,6 +1068,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     watchedCap,
     watchedExcludeInUse,
     watchedExcludePriorOffer,
+    watchedFilters,
   } = state;
 
   const hasSegments = watchedSegments.length > 0;
@@ -1250,6 +1279,11 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                 />
               ) : null}
             </div>
+
+            <CarrierRemovedLines
+              carrierFilter={watchedFilters.carrier_filter}
+              carrierRemoved={previewCarrierRemoved}
+            />
 
             {capActive ? (
               <p className="text-[11px] text-muted-foreground">

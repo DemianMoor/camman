@@ -663,6 +663,7 @@ export default function OptInsPage() {
                 submitLabel="Add opt-ins"
                 successLabel="Opt-ins added"
                 enableContactGroups
+                enableLookup
               />
             )}
           </div>

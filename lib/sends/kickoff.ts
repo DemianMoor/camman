@@ -317,6 +317,7 @@ export async function kickoffStageSend(
             linkId: null,
             renderedText: manualText,
             leadId: id,
+            carrierNorm: r.carrier_norm ?? null,
           };
         });
       } else {
@@ -325,6 +326,7 @@ export async function kickoffStageSend(
           contactId: r.contact_id,
           phone: r.phone_number,
           sendToken: randomUUID(),
+          carrierNorm: r.carrier_norm ?? null,
         }));
         const minted = await mintLinksBatch(tx, {
           orgId,
@@ -357,6 +359,7 @@ export async function kickoffStageSend(
               stopText: row.stop_text,
             }),
             leadId: t.sendToken,
+            carrierNorm: t.carrierNorm,
           };
         });
       }
@@ -399,6 +402,7 @@ interface StageSendInsertRow {
   linkId: number | null;
   renderedText: string;
   leadId: string;
+  carrierNorm: string | null;
 }
 
 const STAGE_SENDS_CHUNK = 1000;
@@ -418,13 +422,13 @@ async function bulkInsertStageSends(
     const values = chunk.map(
       (r) => sql`(
         ${r.id}, ${r.orgId}, ${r.campaignId}, ${r.stageId}, ${r.contactId},
-        ${r.phone}, ${r.linkId}, ${r.renderedText}, 'pending', ${r.leadId}
+        ${r.phone}, ${r.linkId}, ${r.renderedText}, 'pending', ${r.leadId}, ${r.carrierNorm}
       )`,
     );
     const res = (await tx.execute(sql`
       INSERT INTO stage_sends
         (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
-         rendered_text, status, lead_id)
+         rendered_text, status, lead_id, carrier_norm)
       VALUES ${sql.join(values, sql`, `)}
       ON CONFLICT (stage_id, contact_id) WHERE status IN ('pending', 'sending')
       DO NOTHING

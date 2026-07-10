@@ -48,6 +48,8 @@ export interface StageRecipientRow {
   // detect (and skip + alert on) any not_applicable contact that leaked past the
   // audience gates. Normally always 'eligible' — landlines never enter the pool.
   messaging_status?: string;
+  // Migration 0096: stamped onto stage_sends at materialization (§1.7 analytics enabler).
+  carrier_norm?: string;
 }
 
 // Builds the SELECT that yields a stage's qualifying recipients:
@@ -168,11 +170,12 @@ export function stageRecipientsSql(opts: {
       select
         c.phone_number,
         c.messaging_status,
+        c.carrier_norm,
         e.contact_id
       from eligible e
       inner join contacts c on c.id = e.contact_id
     )
-    select contact_id, phone_number, messaging_status
+    select contact_id, phone_number, messaging_status, carrier_norm
     from qualified
     where not ${splitActive}::boolean
       or ${splitBucketMatch(sql`contact_id`, sql`${f.splitTotal ?? 1}`, sql`${f.splitIndex ?? 1}`)}

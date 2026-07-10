@@ -91,9 +91,15 @@ Endpoints under `/api/telnyx/lookup/` (all in `lib/telnyx/`):
 
 Precedence/coercion (verified `scripts/test-lookup-uploads.ts`): `telnyx` wins, `csv_import` never overwrites it; type-without-carrier → `Unknown`; landline → `Unknown`; garbage `line_type` → `unknown` (never rejected); predefined rows are excluded from the enqueue (`predefinedPhonesOf`) so the toggle never double-spends. Toggle OFF → contacts keep the `Unidentified` default (no enqueue).
 
+**Backfill is re-runnable — re-runs cost only the delta.** `runBackfill` selects phones with NO `phone_lookups` row, and enqueue dedups against cache-complete, so a completed number is skipped for free; only new contacts and previously-failed numbers (which write no row) are picked up again. Safe to run repeatedly.
+
+**Calibration / on-demand drain** (while the `*/2` cron isn't deployed on the branch): `npx tsx scripts/run-lookup-calibration.ts [sampleLimit=500] [orgId?]` — enqueues a random sample via the real `runBackfill` path, drives `runLookupWorker` until the batch drains, prints the batch row each pass, and lists the unmapped-carrier queue at the end. Prereqs: `DATABASE_URL` + `TELNYX_API_KEY` in `.env.local` (spends real money). The 500-number calibration is `sampleLimit=500`.
+
+**Interim visibility (no admin UI yet):** batch progress = `SELECT status, processed, failed, actual_cost_usd FROM lookup_batches ORDER BY created_at DESC`; unmapped-carrier queue = `SELECT carrier_raw, COUNT(*) FROM phone_lookups WHERE carrier_norm='Unmapped' GROUP BY 1 ORDER BY 2 DESC`; completion also fires a Telegram summary.
+
 ## Later phases (planned)
 
-- **Upload UI (phase 5b)**: the lookup toggle (default ON) + review panel wired into the shared `PhoneUploadForm`, and a backfill admin page (preview + type-to-confirm for >100k). See enumerated upload paths in the code map.
+- **Upload UI (phase 5b)**: the lookup toggle (default ON) + review panel wired into the shared `PhoneUploadForm`, and a backfill admin page (preview + type-to-confirm for >100k). **Toggle appears on paths 3–7 only** (contacts / opt-ins / clickers / contact-group-add / segment / campaign uploads). It is **hidden / hard-forced OFF on opt-outs/upload (path 2)** and never offered on the STOP-intake or side-effect status/results import paths — those numbers are never messaged, so a lookup would be pure spend. Side-effect-created contacts (status/results imports) are enriched by the re-runnable backfill instead.
 - **Segment rules** `phone_type` / `carrier`; **campaign carrier filter** on `audience_filters`; **admin UI** (batches, unmapped queue, settings, Contacts columns + base-mix stats).
 
 ## Integration facts

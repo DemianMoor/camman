@@ -103,9 +103,13 @@ Precedence/coercion (verified `scripts/test-lookup-uploads.ts`): `telnyx` wins, 
 
 **Interim visibility (no admin UI yet):** batch progress = `SELECT status, processed, failed, actual_cost_usd FROM lookup_batches ORDER BY created_at DESC`; unmapped-carrier queue = `SELECT carrier_raw, COUNT(*) FROM phone_lookups WHERE carrier_norm='Unmapped' GROUP BY 1 ORDER BY 2 DESC`; completion also fires a Telegram summary.
 
-## Later phases (planned)
+## UI (phases 5b + 6)
 
-- **Upload UI (phase 5b)**: the lookup toggle (default ON) + review panel wired into the shared `PhoneUploadForm`, and a backfill admin page (preview + type-to-confirm for >100k). **Toggle appears on paths 3–7 only** (contacts / opt-ins / clickers / contact-group-add / segment / campaign uploads). It is **hidden / hard-forced OFF on opt-outs/upload (path 2)** and never offered on the STOP-intake or side-effect status/results import paths — those numbers are never messaged, so a lookup would be pure spend. Side-effect-created contacts (status/results imports) are enriched by the re-runnable backfill instead.
+- **Upload lookup toggle + review panel** — `PhoneUploadForm` gains `enableLookup` (checkbox default ON): on submit it POSTs `/api/telnyx/lookup/preview` → shows a review panel (rows→unique dedupe, valid/invalid, cached/new, est cost, live balance with a red under-balance warning) → Confirm runs the normal upload then best-effort `/api/telnyx/lookup/enqueue`. Wired on the six add paths (contacts / opt-ins / clickers / contact-group-add / segment / campaign uploads); **NOT on opt-outs/upload or any remove/STOP-intake/side-effect path** (never-messaged numbers). Side-effect-created contacts are enriched by the re-runnable backfill.
+- **Carrier Lookup admin** — `/settings/lookup` (manager+): backfill (preview + optional random `sampleLimit` + type-to-confirm >100k), settings (pause/cap/rates/concurrency), recent batches table (Est vs Billed), unmapped-carrier queue (assign → `assignCarrierMapping`), and bulk-update-existing CSV. Nav under Settings → Carrier Lookup.
+- **Segment rules** — `phone_type` / `carrier` value editors in the Rules panel (multi-select; phone_type shows only "is").
+- **Campaign carrier filter** — optional multi-select in the campaign audience step; the preview shows "N removed as unidentified" + per-bucket removals from `carrier_removed`.
+- **Contacts screen** — Type + Carrier columns (landline shown as "Landline / Not applicable" — the one screen landlines stay visible) + a base-mix stats widget (`/api/contacts/carrier-stats`).
 - **Segment rules** `phone_type` / `carrier`; **campaign carrier filter** on `audience_filters`; **admin UI** (batches, unmapped queue, settings, Contacts columns + base-mix stats).
 
 ## Integration facts

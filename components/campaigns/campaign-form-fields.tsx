@@ -25,6 +25,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
 
 import { NONE, type CampaignFormState } from "./campaign-form-state";
@@ -70,6 +71,7 @@ export function CampaignFormFields({
     setLinkMode,
     toggleSegment,
     setFilter,
+    setCarrierFilter,
     dateError,
   } = state;
 
@@ -525,6 +527,31 @@ export function CampaignFormFields({
           </p>
         </div>
 
+        {/* Carrier filter (optional). Empty = no filter. When set, only the
+            chosen carriers qualify and never-looked-up numbers are dropped. */}
+        <div className="grid gap-2">
+          <Label>Carrier filter</Label>
+          <MultiSelectPicker
+            options={CAMPAIGN_CARRIER_FILTER_VALUES.map((c) => ({
+              id: c,
+              label: c,
+            }))}
+            value={watchedFilters.carrier_filter}
+            onChange={(next) => setCarrierFilter(next as string[])}
+            placeholder="All carriers (no filter)"
+            selectedLabel={(n) =>
+              `${n} carrier${n === 1 ? "" : "s"} selected`
+            }
+            disabled={audienceLocked || anySubmitting}
+            searchPlaceholder="Search carriers…"
+          />
+          <p className="text-xs text-muted-foreground">
+            Leave empty to send to every carrier. When set, only contacts on
+            the selected carriers are included; numbers never looked up
+            (unidentified) are excluded.
+          </p>
+        </div>
+
         {/* Audience cap */}
         <FormField
           control={form.control}
@@ -642,6 +669,45 @@ export function CampaignFormFields({
   );
 }
 
+// Renders one line per carrier bucket dropped by an active carrier filter.
+// "Unidentified" (never-looked-up numbers) gets its own phrasing. Renders
+// nothing when no carrier filter is active or nothing was removed.
+export function CarrierRemovedLines({
+  carrierFilter,
+  carrierRemoved,
+}: {
+  carrierFilter: string[];
+  carrierRemoved: Record<string, number>;
+}) {
+  if (carrierFilter.length === 0) return null;
+  const unidentified = carrierRemoved["Unidentified"] ?? 0;
+  const others = Object.entries(carrierRemoved).filter(
+    ([bucket, n]) => bucket !== "Unidentified" && n > 0,
+  );
+  if (unidentified === 0 && others.length === 0) return null;
+  return (
+    <div className="grid gap-0.5 text-xs text-muted-foreground">
+      {unidentified > 0 ? (
+        <div>
+          <span className="font-mono tabular-nums text-foreground">
+            {unidentified.toLocaleString()}
+          </span>{" "}
+          number{unidentified === 1 ? "" : "s"} removed as unidentified (never
+          looked up)
+        </div>
+      ) : null}
+      {others.map(([bucket, n]) => (
+        <div key={bucket}>
+          <span className="font-mono tabular-nums text-foreground">
+            {n.toLocaleString()}
+          </span>{" "}
+          removed — {bucket}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function AudiencePreviewCard({ state }: { state: CampaignFormState }) {
   const {
     hasAudienceSource,
@@ -649,11 +715,13 @@ export function AudiencePreviewCard({ state }: { state: CampaignFormState }) {
     previewTotalMatching,
     previewError,
     previewLoading,
+    watchedFilters,
+    previewCarrierRemoved,
   } = state;
   return (
     <Card>
       <CardContent className="flex items-center justify-between gap-3 pt-6 text-sm">
-        <div>
+        <div className="grid gap-1.5">
           <div className="text-xs uppercase text-muted-foreground">
             Estimated audience
           </div>
@@ -690,6 +758,12 @@ export function AudiencePreviewCard({ state }: { state: CampaignFormState }) {
               {previewCount.toLocaleString()} contacts
             </div>
           )}
+          {hasAudienceSource && !previewError ? (
+            <CarrierRemovedLines
+              carrierFilter={watchedFilters.carrier_filter}
+              carrierRemoved={previewCarrierRemoved}
+            />
+          ) : null}
         </div>
         {previewLoading ? (
           <Loader2

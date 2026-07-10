@@ -206,6 +206,9 @@ export async function GET(req: NextRequest) {
         archived_at: contacts.archived_at,
         created_at: contacts.created_at,
         updated_at: contacts.updated_at,
+        line_type: contacts.line_type,
+        carrier_norm: contacts.carrier_norm,
+        messaging_status: contacts.messaging_status,
         groups: groupsAggSql,
         statuses: statusesAggSql,
       })

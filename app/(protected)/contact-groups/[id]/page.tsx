@@ -656,6 +656,7 @@ export default function ContactGroupDetailPage() {
               onCancel={() => setActiveTab("contacts")}
               submitLabel="Add to group"
               successLabel="Contacts added to group"
+              enableLookup
             />
           </TabsContent>
         ) : null}

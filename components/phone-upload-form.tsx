@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, Loader2, Upload } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, Upload } from "lucide-react";
 import Papa from "papaparse";
+import { toast } from "sonner";
 
 import { FileDropZone } from "@/components/file-drop-zone";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
@@ -13,6 +14,34 @@ import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
+
+// Review-panel shape from POST /api/telnyx/lookup/preview.
+type LookupPreview = {
+  rows_in_file: number;
+  unique_numbers: number;
+  valid: number;
+  invalid: number;
+  cached: number;
+  new_lookups: number;
+  est_cost_usd: number;
+  balance_usd: number | null;
+  balance_error?: string | null;
+};
+
+type LookupEnqueueResult = {
+  batchId: string;
+  total: number;
+  cacheHits: number;
+  enqueued: number;
+  estCostUsd: number;
+};
+
+function formatUsd(n: number): string {
+  return `$${n.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })}`;
+}
 
 export type UploadResultSummary = {
   submitted: number;
@@ -57,6 +86,12 @@ export interface PhoneUploadFormProps {
   // marker. Used by the contacts upload to enforce the policy that every
   // contact must land in a group.
   requireContactGroups?: boolean;
+  // When true, render a "Run carrier lookup via Telnyx" checkbox (default
+  // checked). When checked, submit first shows a cost/coverage review panel,
+  // then on confirm runs the normal upload and best-effort enqueues a Telnyx
+  // lookup for the numbers. Never set this on the opt-outs path — those
+  // numbers are never messaged.
+  enableLookup?: boolean;
 }
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
@@ -84,8 +119,11 @@ export function PhoneUploadForm({
   acceptCsv = true,
   enableContactGroups = false,
   requireContactGroups = false,
+  enableLookup = false,
 }: PhoneUploadFormProps) {
   const uploadApi = useApiCall<UploadResultSummary>();
+  const previewApi = useApiCall<LookupPreview>();
+  const enqueueApi = useApiCall<LookupEnqueueResult>();
   const contactGroupsApi = useApiCall<{ data: ContactGroupOption[] }>();
   const [pasteValue, setPasteValue] = useState("");
   const [csvLines, setCsvLines] = useState<string[]>([]);
@@ -97,6 +135,13 @@ export function PhoneUploadForm({
   const [showInvalid, setShowInvalid] = useState(false);
   const [contactGroups, setContactGroups] = useState<ContactGroupOption[]>([]);
   const [selectedGroupIds, setSelectedGroupIds] = useState<number[]>([]);
+  // Carrier-lookup flow state. `runLookup` defaults to enableLookup so the
+  // box starts checked. `lookupPreview` (when set) swaps the input screen for
+  // the review panel; `pendingPhones` holds the exact payload to upload +
+  // enqueue on confirm.
+  const [runLookup, setRunLookup] = useState(enableLookup);
+  const [lookupPreview, setLookupPreview] = useState<LookupPreview | null>(null);
+  const [pendingPhones, setPendingPhones] = useState<string | null>(null);
 
   // Lazy-load contact groups only when the multi-select is rendered.
   useEffect(() => {
@@ -123,6 +168,9 @@ export function PhoneUploadForm({
     setResult(null);
     setShowInvalid(false);
     setSelectedGroupIds([]);
+    setRunLookup(enableLookup);
+    setLookupPreview(null);
+    setPendingPhones(null);
   }
 
   function handleFileSelect(file: File) {
@@ -165,20 +213,21 @@ export function PhoneUploadForm({
     });
   }
 
-  async function handleSubmit() {
-    setResult(null);
+  function resolvePhones(): string | null {
     const phones =
       activeTab === "paste" ? pasteValue.trim() : csvLines.join("\n");
-
-    if (!phones) return;
-
+    if (!phones) return null;
     if (phones.length > MAX_PAYLOAD_BYTES) {
       setCsvError(
         `Payload too large (${(phones.length / 1024 / 1024).toFixed(1)}MB). Max 5MB.`,
       );
-      return;
+      return null;
     }
+    return phones;
+  }
 
+  // The real upload against the caller's endpoint. Returns true on success.
+  async function runUpload(phones: string): Promise<boolean> {
     // Include assign_to_group_ids when the user selected at least one
     // group. Omit the field entirely when empty so the endpoint can keep
     // its no-group fast path.
@@ -198,17 +247,71 @@ export function PhoneUploadForm({
 
     if (!result.ok) {
       toastApiError(result, "Upload failed");
-      return;
+      return false;
     }
     setResult(result.data);
     onSuccess?.(result.data);
+    return true;
+  }
+
+  async function handleSubmit() {
+    setResult(null);
+    const phones = resolvePhones();
+    if (!phones) return;
+
+    // Lookup enabled + checked: fetch the cost/coverage preview and show the
+    // review panel. The actual upload waits for confirm.
+    if (enableLookup && runLookup) {
+      const pr = await previewApi.execute("/api/telnyx/lookup/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phones }),
+      });
+      if (!pr.ok) {
+        toastApiError(pr, "Couldn't preview carrier lookup");
+        return;
+      }
+      setPendingPhones(phones);
+      setLookupPreview(pr.data);
+      return;
+    }
+
+    await runUpload(phones);
+  }
+
+  // Confirm from the review panel: run the upload, then best-effort enqueue a
+  // Telnyx lookup for the same numbers. Enqueue failure never blocks the
+  // upload result — the contacts are already saved.
+  async function handleConfirmUpload() {
+    if (!pendingPhones) return;
+    const ok = await runUpload(pendingPhones);
+    if (!ok) return;
+    const eq = await enqueueApi.execute("/api/telnyx/lookup/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phones: pendingPhones }),
+    });
+    if (eq.ok) {
+      toast.success(
+        `Queued ${eq.data.enqueued.toLocaleString()} number${
+          eq.data.enqueued === 1 ? "" : "s"
+        } for carrier lookup`,
+      );
+    } else {
+      toast.warning(
+        "Contacts uploaded, but the carrier lookup couldn't be queued. Retry from the lookup admin page.",
+      );
+    }
+    setLookupPreview(null);
+    setPendingPhones(null);
   }
 
   const phonesProvided =
     (activeTab === "paste" && pasteValue.trim().length > 0) ||
     (activeTab === "csv" && csvLines.length > 0);
   const groupsSatisfied = !requireContactGroups || selectedGroupIds.length > 0;
-  const canSubmit = !uploadApi.isLoading && phonesProvided && groupsSatisfied;
+  const submitBusy = uploadApi.isLoading || previewApi.isLoading;
+  const canSubmit = !submitBusy && phonesProvided && groupsSatisfied;
 
   // === Result screen ===
   if (result) {
@@ -291,6 +394,99 @@ export function PhoneUploadForm({
             Upload another batch
           </Button>
           <Button onClick={onCancel}>Done</Button>
+        </div>
+      </div>
+    );
+  }
+
+  // === Review screen (lookup enabled + checked) ===
+  if (lookupPreview) {
+    const p = lookupPreview;
+    const insufficient =
+      p.balance_usd !== null && p.balance_usd < p.est_cost_usd;
+    const busy = uploadApi.isLoading || enqueueApi.isLoading;
+    return (
+      <div className="grid gap-4">
+        <div className="text-sm font-medium">Review carrier lookup</div>
+
+        <div className="rounded-md border bg-muted/30 p-3 text-sm">
+          <span className="font-mono tabular-nums text-foreground">
+            {p.rows_in_file.toLocaleString()}
+          </span>{" "}
+          {p.rows_in_file === 1 ? "row" : "rows"} →{" "}
+          <span className="font-mono tabular-nums text-foreground">
+            {p.unique_numbers.toLocaleString()}
+          </span>{" "}
+          unique number{p.unique_numbers === 1 ? "" : "s"}
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Stat label="Valid" value={p.valid} tone="success" />
+          <Stat label="Invalid" value={p.invalid} tone="warn" />
+          <Stat label="Cached (free)" value={p.cached} tone="muted" />
+          <Stat label="New lookups" value={p.new_lookups} />
+        </div>
+
+        <div className="grid gap-2 rounded-md border p-3 text-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">Estimated cost</span>
+            <span className="font-mono font-semibold tabular-nums">
+              {formatUsd(p.est_cost_usd)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">Telnyx balance</span>
+            {p.balance_usd === null ? (
+              <span className="text-muted-foreground">Unavailable</span>
+            ) : (
+              <span
+                className={cn(
+                  "font-mono tabular-nums",
+                  insufficient && "font-semibold text-destructive",
+                )}
+              >
+                {formatUsd(p.balance_usd)}
+              </span>
+            )}
+          </div>
+          {insufficient ? (
+            <p className="flex items-center gap-1.5 text-xs text-destructive">
+              <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
+              Estimated cost exceeds the available Telnyx balance. Top up
+              before running, or uncheck lookup to upload without it.
+            </p>
+          ) : null}
+          {p.balance_usd === null && p.balance_error ? (
+            <p className="text-xs text-muted-foreground">
+              Couldn&apos;t read balance: {p.balance_error}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <Button
+            variant="outline"
+            onClick={() => {
+              setLookupPreview(null);
+              setPendingPhones(null);
+            }}
+            disabled={busy}
+          >
+            Back
+          </Button>
+          <Button onClick={() => void handleConfirmUpload()} disabled={busy}>
+            {busy ? (
+              <>
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+                Uploading…
+              </>
+            ) : (
+              <>
+                <Upload className="size-4" aria-hidden />
+                Confirm &amp; upload
+              </>
+            )}
+          </Button>
         </div>
       </div>
     );
@@ -419,16 +615,43 @@ export function PhoneUploadForm({
         ) : null}
       </Tabs>
 
+      {enableLookup ? (
+        <label className="flex cursor-pointer items-start gap-2 rounded-md border bg-muted/20 p-3">
+          <input
+            type="checkbox"
+            checked={runLookup}
+            onChange={(e) => setRunLookup(e.target.checked)}
+            disabled={submitBusy}
+            className="mt-0.5 size-4 cursor-pointer"
+          />
+          <span className="grid gap-0.5">
+            <span className="text-sm font-medium">
+              Run carrier lookup via Telnyx
+            </span>
+            <span className="text-xs text-muted-foreground">
+              Detects each number&apos;s line type and carrier. You&apos;ll see
+              a cost estimate before anything runs; numbers already looked up
+              are free.
+            </span>
+          </span>
+        </label>
+      ) : null}
+
       <div className="flex items-center justify-end gap-2 pt-2">
         <Button
           variant="outline"
           onClick={onCancel}
-          disabled={uploadApi.isLoading}
+          disabled={submitBusy}
         >
           Cancel
         </Button>
         <Button onClick={handleSubmit} disabled={!canSubmit}>
-          {uploadApi.isLoading ? (
+          {previewApi.isLoading ? (
+            <>
+              <Loader2 className="size-4 animate-spin" aria-hidden />
+              Checking…
+            </>
+          ) : uploadApi.isLoading ? (
             <>
               <Loader2 className="size-4 animate-spin" aria-hidden />
               Uploading…
@@ -436,7 +659,7 @@ export function PhoneUploadForm({
           ) : (
             <>
               <Upload className="size-4" aria-hidden />
-              {submitLabel}
+              {enableLookup && runLookup ? "Review & upload" : submitLabel}
             </>
           )}
         </Button>

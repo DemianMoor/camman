@@ -27,14 +27,25 @@ import { isEntityAvailable } from "@/lib/feature-flags";
 import { cn } from "@/lib/utils";
 import {
   CAMPAIGN_USE_PERIODS,
+  CARRIER_VALUES,
   getValueShapeForRuleType,
   isCampaignUsePeriod,
+  isStringSubsetOf,
   isValidOperatorForRuleType,
+  PHONE_TYPE_VALUES,
   RULE_TYPES,
   RULE_TYPE_KEYS,
   type RuleType,
   type ValueShape,
 } from "@/lib/validators/segment-rule-types";
+
+// Display labels for the phone_type set editor. Carrier codes are shown as-is.
+const PHONE_TYPE_LABELS: Record<string, string> = {
+  mobile: "Mobile",
+  voip: "VoIP",
+  toll_free: "Toll-free",
+  unknown: "Unknown",
+};
 
 type RefInfo = { id: number; name: string; color: string | null } | null;
 
@@ -97,6 +108,12 @@ function coerceValueForShape(
   if (shape === "campaign_use_period") {
     return isCampaignUsePeriod(prior) ? prior : "1w";
   }
+  if (shape === "phone_type_set") {
+    return isStringSubsetOf(prior, PHONE_TYPE_VALUES) ? prior : [];
+  }
+  if (shape === "carrier_set") {
+    return isStringSubsetOf(prior, CARRIER_VALUES) ? prior : [];
+  }
   if (
     shape === "brand_id" ||
     shape === "offer_id" ||
@@ -133,6 +150,10 @@ function isRuleReadyToSave(
     );
   }
   if (shape === "campaign_use_period") return isCampaignUsePeriod(value);
+  // Set shapes require a non-empty valid array (no "incomplete" state is
+  // accepted server-side); an empty set stays local and doesn't PATCH.
+  if (shape === "phone_type_set") return isStringSubsetOf(value, PHONE_TYPE_VALUES);
+  if (shape === "carrier_set") return isStringSubsetOf(value, CARRIER_VALUES);
   if (value === null || value === undefined) return true;
   return typeof value === "number" && Number.isInteger(value) && value >= 1;
 }
@@ -152,6 +173,9 @@ function isRuleIncomplete(
     shape === "campaign_use_period"
   ) {
     return false;
+  }
+  if (shape === "phone_type_set" || shape === "carrier_set") {
+    return !Array.isArray(value) || value.length === 0;
   }
   return value === null || value === undefined;
 }
@@ -637,6 +661,18 @@ function RuleRow({
     void savePatch({ value });
   }
 
+  // Set editors (phone_type / carrier). Commit on every toggle, sending
+  // rule_type + operator alongside the value — a switch TO a set type can't
+  // persist on its own (an empty set is invalid), so we carry the pending
+  // type/operator with the first non-empty selection. An empty set stays
+  // local (server rejects it) and leaves the row marked incomplete.
+  function handleSetChange(next: string[]) {
+    setValue(next);
+    if (next.length > 0) {
+      void savePatch({ rule_type: ruleType, operator, value: next });
+    }
+  }
+
   // Rule is "incomplete" (persisted but doesn't yet have a valid FK value).
   // The eval skips incomplete rules; mark the row so the user sees they
   // need to pick a value before it affects audience.
@@ -747,6 +783,7 @@ function RuleRow({
         onChange={setValue}
         onBlur={handleValueBlur}
         onValueCommit={(next) => void savePatch({ value: next })}
+        onSetChange={handleSetChange}
         disabled={!canEdit || saving}
         brands={brands}
         offers={offers}
@@ -801,6 +838,9 @@ interface ValueControlProps {
   // so callers don't read stale state from a closure.
   onBlur: () => void;
   onValueCommit: (next: number | string) => void;
+  // Commit handler for the set editors (phone_type / carrier). Receives the
+  // full next array.
+  onSetChange: (next: string[]) => void;
   disabled: boolean;
   brands: PickerOption[];
   offers: PickerOption[];
@@ -819,6 +859,7 @@ function ValueControl({
   onChange,
   onBlur,
   onValueCommit,
+  onSetChange,
   disabled,
   brands,
   offers,
@@ -831,6 +872,22 @@ function ValueControl({
   currentRef,
 }: ValueControlProps) {
   if (shape === "none") return null;
+  if (shape === "phone_type_set" || shape === "carrier_set") {
+    const arr = Array.isArray(value) ? (value as string[]) : [];
+    const options =
+      shape === "phone_type_set"
+        ? PHONE_TYPE_VALUES
+        : CARRIER_VALUES;
+    return (
+      <SetPills
+        options={options}
+        labels={shape === "phone_type_set" ? PHONE_TYPE_LABELS : undefined}
+        value={arr}
+        disabled={disabled}
+        onChange={onSetChange}
+      />
+    );
+  }
   if (shape === "positive_integer") {
     const n = typeof value === "number" ? value : "";
     return (
@@ -1010,6 +1067,53 @@ function ValueControl({
         ))}
       </SelectContent>
     </Select>
+  );
+}
+
+// Small pill/checkbox group for the phone_type / carrier set editors (≤7
+// options). Toggling commits immediately via onChange.
+function SetPills({
+  options,
+  labels,
+  value,
+  disabled,
+  onChange,
+}: {
+  options: readonly string[];
+  labels?: Record<string, string>;
+  value: string[];
+  disabled: boolean;
+  onChange: (next: string[]) => void;
+}) {
+  const selected = new Set(value);
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((opt) => {
+        const active = selected.has(opt);
+        return (
+          <button
+            key={opt}
+            type="button"
+            disabled={disabled}
+            aria-pressed={active}
+            onClick={() =>
+              onChange(
+                active ? value.filter((v) => v !== opt) : [...value, opt],
+              )
+            }
+            className={cn(
+              "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
+              active
+                ? "border-foreground bg-foreground text-background"
+                : "border-border bg-background text-muted-foreground hover:bg-muted",
+              disabled && "cursor-not-allowed opacity-60",
+            )}
+          >
+            {labels?.[opt] ?? opt}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

@@ -57,10 +57,11 @@ import { formatPhoneInternational } from "@/lib/phone-validation";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   appendParamName,
-  appendRawValue,
   hasUrlParam,
-  removeRawValue,
   removeUrlParam,
+  setUrlParam,
+  STAGE_TRACKING_PARAM,
+  validateDestination,
 } from "@/lib/stage-url";
 import { formatStageTrackingId } from "@/lib/tracking-id-format";
 import { cn } from "@/lib/utils";
@@ -177,6 +178,9 @@ export interface StageFormActionContext {
   isSubmitting: boolean;
   onSave: () => Promise<void>;
   onCancel: () => void;
+  // Non-null when Save must be blocked (e.g. a malformed destination URL). The
+  // host should disable its Save control; the message names the specific defect.
+  saveBlockedReason: string | null;
 }
 
 export interface StageFormProps {
@@ -770,18 +774,28 @@ export function StageForm({
     form.setValue("utm_tag_ids", nextIds, { shouldDirty: true });
   }
 
-  // The tracking_id chip brings only the VALUE — it appends the stage tracking
-  // ID to the end of the URL (right after the "=" of the param added before
-  // it). Toggling off removes that value substring.
+  // The tracking_id chip attaches the tracking ID as a PROPER `sub_id3=<id>`
+  // query param (via setUrlParam), never a bare glued-on value — the old
+  // appendRawValue approach produced `…/lp/knd<id>` (id in the path) whenever
+  // the `sub_id3=` key wasn't already present. Toggling off removes the whole
+  // param. No-op with no base URL yet (setUrlParam no-ops on an empty string).
   function toggleTrackingId() {
     if (!effectiveTrackingId) return;
     const current = form.getValues("full_url");
-    const next = current.includes(effectiveTrackingId)
-      ? removeRawValue(current, effectiveTrackingId)
-      : appendRawValue(current, effectiveTrackingId);
+    const next = hasUrlParam(current, STAGE_TRACKING_PARAM)
+      ? removeUrlParam(current, STAGE_TRACKING_PARAM)
+      : setUrlParam(current, STAGE_TRACKING_PARAM, effectiveTrackingId);
     form.setValue("full_url", next, { shouldDirty: true });
     form.setValue("full_url_auto", false, { shouldDirty: true });
   }
+
+  // Block saving a hand-edited Full URL that is a malformed guidekn destination
+  // (id in path, empty/placeholder/mismatched sub_id3). Auto mode stores the
+  // bare sales-page URL and the send path attaches sub_id3 canonically, so it's
+  // exempt. Non-guidekn / empty URLs pass (validateDestination returns null).
+  const destinationError = watchedFullUrlAuto
+    ? null
+    : validateDestination(watchedFullUrl, effectiveTrackingId);
 
   // full_url auto-derives from the selections (and re-derives as they change)
   // but stays hand-editable. On edit we reconcile once UTM tags load: if the
@@ -816,6 +830,10 @@ export function StageForm({
 
   // Submit
   async function handleSave() {
+    if (destinationError) {
+      toast.error(destinationError);
+      return;
+    }
     if (scheduledInPast) {
       toast.error("Scheduled time can't be in the past");
       return;
@@ -927,6 +945,50 @@ export function StageForm({
     !isAlreadySplit &&
     audiencePreview !== null &&
     audiencePreview.count >= 2;
+
+  // Live tracking-ID preview for each A/B variant, computed the SAME way the
+  // server will on save (formatStageTrackingId) so a split stage's IDs are
+  // visible "on the go" — parity with a regular stage's live preview. Variant A
+  // is the source (keeps its current id in edit mode; gets nextStageNumber in
+  // create mode); variants B..N are the new siblings, whose stage_numbers the
+  // BEFORE-INSERT trigger assigns consecutively from the campaign's current max
+  // (= nextStageNumber). Empty when the inputs to format an ID aren't all set.
+  const splitVariantPreviews = useMemo(() => {
+    if (
+      !campaignTrackingId ||
+      watchedCreativeId == null ||
+      nextStageNumber == null
+    ) {
+      return [] as { label: string; trackingId: string }[];
+    }
+    const mk = (stageNumber: number) =>
+      formatStageTrackingId({
+        campaignTrackingId,
+        stageNumber,
+        creativeId: watchedCreativeId,
+      });
+    const out: { label: string; trackingId: string }[] = [];
+    for (let i = 0; i < splitCount; i++) {
+      const label = i < 26 ? String.fromCharCode(65 + i) : `#${i + 1}`;
+      if (isEdit && i === 0) {
+        // Source keeps its existing tracking id (unchanged by the split).
+        out.push({ label, trackingId: effectiveTrackingId ?? mk(nextStageNumber) });
+        continue;
+      }
+      // Create mode: source is saved first at nextStageNumber, siblings follow.
+      // Edit mode: siblings start at nextStageNumber (source already numbered).
+      const stageNumber = isEdit ? nextStageNumber + (i - 1) : nextStageNumber + i;
+      out.push({ label, trackingId: mk(stageNumber) });
+    }
+    return out;
+  }, [
+    campaignTrackingId,
+    watchedCreativeId,
+    nextStageNumber,
+    splitCount,
+    isEdit,
+    effectiveTrackingId,
+  ]);
 
   const offerSalesPages = campaign.offer?.sales_pages ?? [];
   const audienceEmpty =
@@ -1265,6 +1327,11 @@ export function StageForm({
                     onToggleTracking={toggleTrackingId}
                     onToggleUtm={toggleUtmTag}
                   />
+                  {destinationError ? (
+                    <p className="text-xs text-red-700 dark:text-red-400">
+                      {destinationError} Saving is blocked until this is fixed.
+                    </p>
+                  ) : null}
                   <FormMessage />
                 </FormItem>
               )}
@@ -1783,6 +1850,7 @@ export function StageForm({
             isSubmitting,
             onSave: handleSave,
             onCancel,
+            saveBlockedReason: destinationError,
           })
         ) : (
           <div className="flex items-center justify-end gap-2 pt-2">
@@ -1794,7 +1862,11 @@ export function StageForm({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={isSubmitting}>
+            <Button
+              type="submit"
+              disabled={isSubmitting || !!destinationError}
+              title={destinationError ?? undefined}
+            >
               {isSubmitting ? (
                 <Loader2 className="size-4 animate-spin" aria-hidden />
               ) : null}
@@ -1918,6 +1990,34 @@ export function StageForm({
                 : "Estimate unavailable until the preview loads."}
             </p>
           </div>
+
+          {/* Live tracking-ID preview per variant — parity with a regular
+              stage's on-the-go tracking ID. Finalized on save. */}
+          {splitVariantPreviews.length > 0 ? (
+            <div className="grid gap-1 rounded-md border border-dashed p-2">
+              <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                Tracking IDs (preview — finalized on save)
+              </span>
+              {splitVariantPreviews.map((v) => (
+                <div
+                  key={v.label}
+                  className="flex items-center gap-2 text-xs"
+                >
+                  <span className="w-4 shrink-0 font-medium text-muted-foreground">
+                    {v.label}
+                  </span>
+                  <span className="truncate font-mono text-foreground">
+                    {v.trackingId}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              Pick a creative (and set brand + offer on the campaign) to preview
+              each variant&apos;s tracking ID.
+            </p>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-2 pt-2">
@@ -2090,7 +2190,7 @@ function UrlParamChips({
         ) : null}
         <ParamChip
           label="tracking_id"
-          active={trackingId ? fullUrl.includes(trackingId) : false}
+          active={hasUrlParam(fullUrl, STAGE_TRACKING_PARAM)}
           disabled={disabled || !trackingId}
           accent
           title={

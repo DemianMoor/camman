@@ -7,7 +7,11 @@ import { mintLinksBatch } from "@/lib/links/mint-link";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
 import { buildStageSms } from "@/lib/sends/stage-sms";
-import { buildStageFullUrl } from "@/lib/stage-url";
+import {
+  buildStageFullUrl,
+  isGuideknLpUrl,
+  validateDestination,
+} from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -49,7 +53,10 @@ export type KickoffRefusal =
   | "provider_not_api_capable"
   | "no_credentials"
   | "no_short_domain"
-  | "no_destination";
+  | "no_destination"
+  // The resolved destination is a malformed guidekn URL — refuse rather than
+  // ship a 404 that silently loses attribution.
+  | "invalid_destination";
 
 export type KickoffResult =
   | {
@@ -210,13 +217,21 @@ export async function kickoffStageSend(
     shortDomain = sd[0];
 
     // Bug 3 fix: mint against the stage's stored Full URL — the exact value the
-    // operator controls — NOT a server-side rebuild. Use full_url only when it
-    // carries the stage tracking id; a bare (auto-mode) full_url falls back to the
-    // rebuild, which attaches tracking under the fixed sub_id3 key.
+    // operator controls — NOT a server-side rebuild. But trust it ONLY when it
+    // actually carries this stage's tracking id in a WELL-FORMED way: for a
+    // guidekn /lp/ URL that means passing the shape guard. A bare `includes()`
+    // check (the old logic) was fooled by the id-glued-into-the-path defect
+    // (…/lp/knd8_62_…), minting a 404 and silently killing attribution — the
+    // exact bug this guards against. A malformed / bare / non-carrying full_url
+    // falls back to the canonical rebuild, which attaches tracking under sub_id3.
     const storedFull = (row.full_url ?? "").trim();
-    const fullUrlHasTracking =
+    const storedCarriesTracking =
       !!row.stage_tracking_id && storedFull.includes(row.stage_tracking_id);
-    destinationUrl = fullUrlHasTracking ? storedFull : "";
+    const storedGuideknWellFormed =
+      !isGuideknLpUrl(storedFull) ||
+      validateDestination(storedFull, row.stage_tracking_id) === null;
+    destinationUrl =
+      storedCarriesTracking && storedGuideknWellFormed ? storedFull : "";
     if (!destinationUrl) {
       const ctxResult = await loadStageUrlContext({
         orgId,
@@ -233,6 +248,11 @@ export async function kickoffStageSend(
       });
     }
     if (!destinationUrl) return { ok: false, reason: "no_destination" };
+    // Defense in depth: never mint a malformed guidekn destination — a 404 that
+    // silently loses attribution. Non-guidekn destinations pass through.
+    if (validateDestination(destinationUrl, row.stage_tracking_id)) {
+      return { ok: false, reason: "invalid_destination" };
+    }
   }
 
   // ---- Enumerate the recipients NOT YET materialized (resumable). Behavioral-

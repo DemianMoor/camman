@@ -11,7 +11,13 @@ import {
   generateCampaignTrackingId,
   generateStageTrackingId,
 } from "@/lib/tracking-id";
-import { STAGE_TRACKING_PARAM, setUrlParam } from "@/lib/stage-url";
+import {
+  buildStageFullUrl,
+  isGuideknLpUrl,
+  STAGE_TRACKING_PARAM,
+  setUrlParam,
+} from "@/lib/stage-url";
+import { loadStageUrlContext } from "@/lib/stage-url-context";
 import { liveSplitPartnerCount } from "@/lib/stages/split-membership";
 
 // Split a stage into N siblings for A/B testing. The source stage is
@@ -242,6 +248,25 @@ export async function POST(
     // Each new sibling gets its own tracking_id. Skip stages without a
     // creative_id (mirrors stage POST behavior).
     if (parentTrackingId != null) {
+      // For guidekn (or empty/auto) sources, rebuild each sibling's full_url
+      // CANONICALLY from its OWN tracking id (…/lp/<slug>?sub_id3=<id>) instead
+      // of inheriting the source's URL and patching sub_id3 — the old approach
+      // propagated a malformed base (id-in-path) verbatim. Custom non-guidekn
+      // URLs are preserved (best-effort sub_id3 rewrite). Resolve the source's
+      // sales page ONCE; all siblings share it.
+      const srcFull = (source.full_url ?? "").trim();
+      const rebuildFromSalesPage = srcFull === "" || isGuideknLpUrl(srcFull);
+      let salesPageUrl: string | null = null;
+      if (rebuildFromSalesPage) {
+        const ctx = await loadStageUrlContext({
+          orgId,
+          offerId: campaignRow[0].offer_id,
+          salesPageLabel: source.sales_page_label,
+          utmTagIds: [],
+          dbc: tx,
+        });
+        if (ctx.ok) salesPageUrl = ctx.ctx.salesPageUrl;
+      }
       for (const s of insertedStages) {
         if (s.creative_id == null) continue;
         const stageTrackingId = generateStageTrackingId({
@@ -249,11 +274,18 @@ export async function POST(
           stageNumber: s.stage_number,
           creativeId: s.creative_id,
         });
-        // Rewrite ONLY sub_id3 in the inherited URL to this sibling's own
-        // tracking ID, preserving all other params. No URL ⇒ nothing to rewrite.
-        const rewrittenFullUrl = s.full_url
-          ? setUrlParam(s.full_url, STAGE_TRACKING_PARAM, stageTrackingId)
-          : s.full_url;
+        let rewrittenFullUrl: string | null = s.full_url;
+        if (rebuildFromSalesPage && salesPageUrl) {
+          rewrittenFullUrl =
+            buildStageFullUrl({ salesPageUrl, trackingId: stageTrackingId }) ||
+            s.full_url;
+        } else if (s.full_url) {
+          rewrittenFullUrl = setUrlParam(
+            s.full_url,
+            STAGE_TRACKING_PARAM,
+            stageTrackingId,
+          );
+        }
         await tx
           .update(campaign_stages)
           .set({ tracking_id: stageTrackingId, full_url: rewrittenFullUrl })

@@ -31,4 +31,9 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     status: 400,
     message: "The tracked link has no destination — set a sales page (and tracking) on the stage",
   },
+  invalid_destination: {
+    status: 400,
+    message:
+      "The stage's destination URL is malformed (bad sub_id3) — fix the Full URL before sending",
+  },
 };

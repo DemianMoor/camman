@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-06-17_
+_Last updated: 2026-07-10_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -51,6 +51,17 @@ sequenceDiagram
 ## 5. UI surface
 - `components/campaigns/click-report-section.tsx` + `app/api/campaigns/[campaignId]/click-report/` — attribution reporting (filters out bot/prefetch via the score).
 - `CopyableId` / link mode toggle on the campaign editor.
+
+## 5b. Destination-URL contract & validation (guidekn shape guard)
+The canonical guidekn destination is exactly `https://www.guidekn.com/lp/<slug>?sub_id3=<stage tracking_id>` — one query param, lowercase-letter slug. A historical string-concatenation bug (the tracking-ID chip appended a **bare value** with no `sub_id3=` key) produced malformed destinations — the id glued into the path (`…/lp/knd8_62_…`), an empty `sub_id3=`, or an unsubstituted `subid3=sub_id3` placeholder — each a 404 that silently loses attribution.
+
+Guard, defense-in-depth (single source of truth: `validateDestination(url, trackingId?)` in [`lib/stage-url.ts`](../../lib/stage-url.ts)):
+1. **Form** — the stage form blocks Save (button disabled + the specific defect named on screen) when a hand-edited (non-auto) Full URL is a malformed guidekn URL. The tracking-ID chip now attaches a proper `sub_id3=<id>` param via `setUrlParam`, so the id can no longer glue onto the path.
+2. **Write routes** — the stage `POST`/`PATCH` reject a malformed guidekn `full_url` with 4xx (`field: full_url`), shape-only (the send path enforces `sub_id3 == tracking_id`).
+3. **Send path** — [`lib/sends/kickoff.ts`](../../lib/sends/kickoff.ts) trusts a stored `full_url` only when it carries the stage's tracking id in a **well-formed** way (`validateDestination(...) === null` for guidekn URLs); otherwise it rebuilds canonically. The old `storedFull.includes(trackingId)` check was fooled by the id-in-path case. A resolved destination that is still a malformed guidekn URL is refused (`reason: invalid_destination`).
+4. **DB** — CHECK constraint `link_destinations_guidekn_url_shape` (migration 0094, `NOT VALID`) rejects any malformed guidekn `url` on insert/update; non-guidekn URLs are unaffected (`url NOT LIKE '%guidekn.com/lp/%'`).
+
+Scope: only guidekn `/lp/` URLs are shape-checked; empty URLs (drafts/auto mode) and non-guidekn network URLs (e.g. `clicks2scale.com`) pass. **Splits/lanes** rebuild each sibling's `full_url` canonically from its OWN tracking id (guidekn/empty sources) instead of inheriting-and-patching a possibly-malformed base — see [campaigns-stages-creatives.md](campaigns-stages-creatives.md). Legacy repair: [`scripts/backfill-guidekn-destinations.ts`](../../scripts/backfill-guidekn-destinations.ts) (idempotent; dry-run by default, `--apply` to commit, `--skip=<stage_id>` to exclude).
 
 ## 6. Rules & edge cases / known constraints
 - **Classify-don't-delete:** raw click rows are never mutated to "clean" data; the `classification` first-pass verdict is overwritten by the scoring job, and reports filter on `bot_score`/`classification`.

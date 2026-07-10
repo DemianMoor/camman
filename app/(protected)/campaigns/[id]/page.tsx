@@ -95,6 +95,7 @@ import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
+import { formatStageTrackingId } from "@/lib/tracking-id-format";
 import { cn } from "@/lib/utils";
 
 // These heavy dialog/panel bodies are each mounted only when their `{state ?
@@ -2036,6 +2037,39 @@ export default function CampaignDetailPage() {
                   exit; opted-out are suppressed. This stage stays as the parent
                   position. Nothing is sent now.
                 </p>
+                {(() => {
+                  const campaignTrackingId = campaign.tracking_id;
+                  const creativeId = behavioralSplitStage?.creative_id;
+                  if (!campaignTrackingId || creativeId == null) return null;
+                  const nextNo =
+                    stages.reduce((m, s) => Math.max(m, s.stage_number), 0) + 1;
+                  return (
+                    <div className="grid gap-1 rounded-md border border-dashed p-2">
+                      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                        Lane tracking IDs (preview — finalized on save)
+                      </span>
+                      {["Ignored", "Clicked", "Reached offer"].map(
+                        (laneLabel, i) => (
+                          <div
+                            key={laneLabel}
+                            className="flex items-center gap-2 text-xs"
+                          >
+                            <span className="w-24 shrink-0 text-muted-foreground">
+                              {laneLabel}
+                            </span>
+                            <span className="truncate font-mono text-foreground">
+                              {formatStageTrackingId({
+                                campaignTrackingId,
+                                stageNumber: nextNo + i,
+                                creativeId,
+                              })}
+                            </span>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>

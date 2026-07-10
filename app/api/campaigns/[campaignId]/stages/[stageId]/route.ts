@@ -15,7 +15,7 @@ import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
-import { buildStageFullUrl } from "@/lib/stage-url";
+import { buildStageFullUrl, validateDestination } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import { deleteStage } from "@/lib/stages/delete-stage";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
@@ -423,6 +423,19 @@ export async function PATCH(
       // attached manually and stored verbatim once the URL is hand-edited.
       updates.full_url =
         buildStageFullUrl({ salesPageUrl: ctxResult.ctx.salesPageUrl }) || null;
+    }
+  }
+
+  // Reject a malformed guidekn destination on a hand-edited (non-auto) full_url
+  // before it's persisted. Shape-only; the send path enforces sub_id3 ==
+  // tracking_id and rebuilds if it drifts. Skipped in auto mode (bare URL) and
+  // when the payload doesn't touch full_url.
+  if (!fullUrlAuto && typeof updates.full_url === "string") {
+    const destErr = validateDestination(updates.full_url, null);
+    if (destErr) {
+      return apiError(400, destErr, API_ERROR_CODES.VALIDATION, {
+        field: "full_url",
+      });
     }
   }
 

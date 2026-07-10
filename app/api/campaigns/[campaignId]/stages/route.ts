@@ -25,7 +25,7 @@ import {
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
-import { buildStageFullUrl } from "@/lib/stage-url";
+import { buildStageFullUrl, validateDestination } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
   generateCampaignTrackingId,
@@ -530,6 +530,20 @@ export async function POST(
     );
   }
   const urlCtx = urlCtxResult.ctx;
+
+  // Reject a malformed guidekn destination on a hand-edited (non-auto) full_url
+  // BEFORE it can be stored. Shape-only (the stage tracking id isn't generated
+  // until the transaction below); the send path re-validates and rebuilds if
+  // sub_id3 ever drifts from the stage's tracking_id. Auto mode stores the bare
+  // sales-page URL and is exempt.
+  if (!fullUrlAuto) {
+    const destErr = validateDestination(nullIfEmpty(input.full_url) ?? "", null);
+    if (destErr) {
+      return apiError(400, destErr, API_ERROR_CODES.VALIDATION, {
+        field: "full_url",
+      });
+    }
+  }
 
   // stage_number is auto-assigned by the BEFORE INSERT trigger; we pass
   // undefined and let the trigger fill it in. The TS shape requires the

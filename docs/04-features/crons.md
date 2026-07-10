@@ -16,6 +16,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 | `/api/keitaro/poll-offer-reaches` | `12,27,42,57 * * * *` | per-recipient OFFER-PAGE REACH (Level 2) → `stage_sends.offer_reached_at` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/cron/telegram-report` | `0 * * * *` | send the daily/hourly performance report to Telegram (decides internally per Warsaw time) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 | `/api/cron/refresh-offer-group-report` | `0 5,20 * * *` | rebuild the offer group report matviews (`offer_group_report_mv`, `offer_report_org_summary_mv`) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
+| `/api/cron/lookup-worker` | `*/2 * * * *` | drain the Telnyx number-lookup queue (`lib/telnyx/worker.ts`); single-runner lease | CRON_SECRET only (503 if unset, 401 otherwise) |
 
 > **Schedules are staggered on purpose.** Previously the four `*/15` jobs all fired at `:00/:15/:30/:45` alongside the two `*/5` jobs — up to **5–6 crons at once**, each cold-starting and each grabbing pooler connections (the pool caps at `max:5` per instance against Supavisor's ~15-client ceiling). The `*/15` jobs now sit at distinct off-5 minute offsets (`3/6/9/12`), so they never coincide with the `*/5` jobs or each other — peak concurrency drops from ~6 to ~2. `send-scheduled` and `keitaro/poll` stay on `*/5` (both latency-sensitive; two concurrent is fine).
 >
@@ -75,6 +76,13 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - `maxDuration = 300` (not the default 60) — measured worst-case ~50s cold / ~37s warm for both refreshes against production data; this is a background job with nothing waiting on it, so the larger budget is free.
 - **DST drift:** `0 5,20 * * *` is fixed-UTC → 00:00 & 15:00 ET in winter (EST), 01:00 & 16:00 ET in summer (EDT). ~1h drift across the transition, irrelevant for a twice-daily historical report — same tradeoff already accepted for `telegram-report`'s Warsaw-time schedule.
 - No request body/params; returns `{ ok: true }`. See [offer-group-report.md](offer-group-report.md).
+
+### `/api/cron/lookup-worker` (Telnyx number-lookup drain)
+- Calls `runLookupWorker()` ([`lib/telnyx/worker.ts`](../../lib/telnyx/worker.ts)) every 2 min. See [phone-lookup-carrier.md](phone-lookup-carrier.md).
+- **Single-runner lease** (not a `pg_try_advisory_lock` — advisory locks are unsafe through the transaction pooler): a `lookup_settings.worker_lease_until` row claimed via a conditional UPDATE (only if NULL/expired), leased 4 min, heartbeat-renewed (CAS on the token) each ~60 s, cleared on clean exit. An overlapping invocation exits as a no-op; a crashed drain's lease simply expires and the next tick proceeds — so a slow run can't multiply the effective Telnyx rate.
+- **Guards in order:** `lookup_paused` → daily cap (SUM of `lookup_queue.attempts` since Warsaw midnight, so failed calls + retries consume cap) → Telnyx balance (`available_credit`; if it can't cover the next chunk → Telegram alert + skip, auto-resumes when topped up; a 402/feature-gate mid-run halts the run).
+- **Claim:** `FOR UPDATE SKIP LOCKED`, incrementing `attempts` + stamping `updated_at` at claim (each claim = one Telnyx call). A 429'd row is left `pending` and skipped by a 60 s cooldown until it ages out (backoff); terminal failures (bad number / 3 attempts) mark the queue row `failed` and write **no** `phone_lookups` row (the contact stays `Unidentified`). Paced to `lookup_concurrency_rps`/sec.
+- On each completed lookup, contact sync copies line_type/carrier down and, for landlines, cancels **pending** `stage_sends` + removes the contact from `campaign_audience_pool`. A drained batch is finalized (actual cost from the line-type mix) with a Telegram summary.
 
 ## 4. Data
 - Reads/writes `clicks`, `geoip_cache`; `opt_outs`, `texthub_inbound_events`; `stage_sends`, `links`, `campaign_stages`, `send_circuit_events`; `keitaro_stage_results` (reads `campaign_stages`/`campaigns` for sub_id_3 mapping).

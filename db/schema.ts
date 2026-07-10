@@ -666,6 +666,10 @@ export const contacts = pgTable(
       "gin",
       sql`${table.phone_number} extensions.gin_trgm_ops`,
     ),
+    // Migration 0101: btree for cross-org phone equality (the global phone_lookups
+    // cache → contacts sync matches by phone_number without org_id). Managed in SQL
+    // (built CONCURRENTLY); the unique(org_id, phone_number) can't serve this.
+    index("contacts_phone_number_idx").on(table.phone_number),
     check(
       "contacts_line_type_check",
       sql`${table.line_type} IN ('mobile', 'landline', 'voip', 'toll_free', 'unknown')`,
@@ -2703,6 +2707,9 @@ export const lookup_settings = pgTable("lookup_settings", {
   lookup_concurrency_rps: integer("lookup_concurrency_rps")
     .notNull()
     .default(10),
+  // Migration 0100: single-runner lease for the worker drain (lease row, not an
+  // advisory lock — pooler-safe). Claimed if NULL or < now(); cleared on clean exit.
+  worker_lease_until: timestamp("worker_lease_until", { withTimezone: true }),
   updated_at: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -2767,6 +2774,11 @@ export const lookup_queue = pgTable(
     attempts: integer("attempts").notNull().default(0),
     last_error: text("last_error"),
     created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Migration 0100: stamped on every attempt. Drives the daily-cap attempt count
+    // (SUM(attempts) since Warsaw midnight) and the per-row retry cooldown.
+    updated_at: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },

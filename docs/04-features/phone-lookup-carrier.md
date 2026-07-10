@@ -62,11 +62,19 @@ Unknown stays **eligible** — conservative, never silently suppresses. The full
 
 See [03-data-model.md](../03-data-model.md) for columns. `lookup_settings` is a single global row (boolean PK fixed `true`): `lookup_paused`, `lookup_daily_cap` (Warsaw-tz), `lookup_rate_base` / `lookup_rate_mobile` (admin-editable — Telnyx exposes no pricing API), `lookup_concurrency_rps`.
 
+## Worker (built — phase 3)
+
+`lib/telnyx/` + the `*/2` cron `/api/cron/lookup-worker` ([crons.md](crons.md)). `enqueueLookups(orgId, phones, trigger)` creates a `lookup_batch` and enqueues numbers not already cache-complete or pending. `runLookupWorker()`:
+- **Single-runner lease** — `lookup_settings.worker_lease_until` (a lease row, NOT a `pg_try_advisory_lock`, which is unsafe through the transaction pooler): conditional-UPDATE claim (NULL/expired only), 4-min lease, CAS heartbeat-renew ~60s, clear on clean exit. Overlapping invocation → no-op; crashed drain's lease expires and the next tick proceeds.
+- **Guards in order:** paused → daily cap (SUM `lookup_queue.attempts` since Warsaw midnight — retries/failures consume cap) → balance (`available_credit`; can't cover next chunk → alert + skip, auto-resumes; 402/feature-gate mid-run halts).
+- **Claim** `FOR UPDATE SKIP LOCKED`, `attempts++`+`updated_at` at claim; 429 → left pending, 60s cooldown (backoff); terminal fail → queue `failed`, no `phone_lookups` row (contact stays `Unidentified`). Paced to `lookup_concurrency_rps`/sec.
+- **Contact sync** per completed lookup (`syncContactsForPhones`): copies line_type/carrier down (replacing `Unidentified`), and for landlines cancels **pending** `stage_sends` only (never `sending` — mid-flight; deleting can't unsend and breaks the DLR match) + removes from `campaign_audience_pool`. Drained batch → finalized (actual cost from line-type mix) + Telegram summary.
+
+Live-fire drain needs `TELNYX_API_KEY` set; the first run is the 500-number calibration batch. Verified without HTTP (lease overlap/CAS/crash-recovery, attempt-summed cap, enqueue dedup — `scripts/test-lookup-worker.ts`).
+
 ## Later phases (planned)
 
-- **Worker** (`lib/telnyx/` + cron): deferred lookup, atomic queue claim (`FOR UPDATE SKIP LOCKED`), balance/daily-cap/pause guards, self-healing on degraded API, Telegram batch summaries. Mirrors the send-drain + spam-classifier + click-scoring templates.
-- **Contact sync on lookup write**: copy line_type/carrier down to all matching contacts (global cache → org-scoped contacts); on landline, cancel the contact's **pending** `stage_sends` (never `sending` — mid-flight; deleting can't unsend and breaks DLR match) and remove from `campaign_audience_pool`.
-- **Upload flows**: new-contact CSV (lookup toggle default ON + review panel with cost/balance), predefined `line_type`/`carrier` columns, bulk-update existing contacts, backfill (scoped to `is_archived=false`).
+- **Upload flows**: new-contact CSV (lookup toggle default ON → `Unidentified` when OFF + review panel with cost/balance), predefined `line_type`/`carrier` columns (→ a `phone_lookups` row, source `csv_import`), bulk-update existing contacts, backfill (scoped to `is_archived=false`).
 - **Segment rules** `phone_type` / `carrier`; **campaign carrier filter** on `audience_filters`; **admin UI** (batches, unmapped queue, settings, Contacts columns + base-mix stats).
 
 ## Integration facts

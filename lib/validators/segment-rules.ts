@@ -1,9 +1,12 @@
 import { z } from "zod";
 
 import {
+  CARRIER_VALUES,
   getValueShapeForRuleType,
   isCampaignUsePeriod,
+  isStringSubsetOf,
   isValidOperatorForRuleType,
+  PHONE_TYPE_VALUES,
   RULE_TYPE_KEYS,
   type ValueShape,
 } from "./segment-rule-types";
@@ -42,6 +45,10 @@ function validateValueByShape(shape: ValueShape, value: unknown): boolean {
         Number.isInteger(value) &&
         value >= 1
       );
+    case "phone_type_set":
+      return isStringSubsetOf(value, PHONE_TYPE_VALUES);
+    case "carrier_set":
+      return isStringSubsetOf(value, CARRIER_VALUES);
     default:
       return false;
   }

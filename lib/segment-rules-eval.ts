@@ -59,6 +59,15 @@ function isRuleComplete(rule: {
   );
 }
 
+// Postgres text[] literal from a validated string set (single-quote escaped).
+// Empty → ARRAY[]::text[] (matches nothing — defensive; validation requires ≥1).
+function textArrayLiteral(values: string[]): string {
+  if (values.length === 0) return "ARRAY[]::text[]";
+  return (
+    "ARRAY[" + values.map((v) => `'${v.replace(/'/g, "''")}'`).join(",") + "]::text[]"
+  );
+}
+
 // Build the contact_id subquery for one rule. The returned fragment is a
 // parameterized "(SELECT contact_id FROM ...)" — the caller wraps it in
 // `contact_id IN (...)` or `contact_id NOT IN (...)` based on operator.
@@ -236,6 +245,29 @@ function ruleInnerQuery(
         FROM contact_contact_groups
         WHERE org_id = ${orgId}::uuid AND contact_group_id = ${Number(v)}::int
       `;
+    case "phone_type": {
+      // Set membership over the eligible-partial-indexed line_type. messaging_status
+      // literal → uses contacts_org_linetype_eligible_idx (migration 0096).
+      const set = Array.isArray(v) ? (v as string[]) : [];
+      return drizzleSql`
+        SELECT id AS contact_id FROM contacts
+        WHERE org_id = ${orgId}::uuid AND messaging_status = 'eligible'
+          AND line_type = ANY(${drizzleSql.raw(textArrayLiteral(set))})
+      `;
+    }
+    case "carrier": {
+      // 'Unknown' expands to ('Unknown','Unmapped') (Unmapped groups with Unknown);
+      // 'Unidentified' matches only itself. Uses contacts_org_carrier_eligible_idx.
+      const set = Array.isArray(v) ? (v as string[]) : [];
+      const expanded = set.flatMap((c) =>
+        c === "Unknown" ? ["Unknown", "Unmapped"] : [c],
+      );
+      return drizzleSql`
+        SELECT id AS contact_id FROM contacts
+        WHERE org_id = ${orgId}::uuid AND messaging_status = 'eligible'
+          AND carrier_norm = ANY(${drizzleSql.raw(textArrayLiteral(expanded))})
+      `;
+    }
     default: {
       // Should be unreachable — server-side validation rejects unknown
       // rule_types before they ever get persisted. Defensive: return a

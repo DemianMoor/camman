@@ -127,6 +127,52 @@ export interface AudienceFilters {
   include_clickers?: boolean;
   include_not_clicked?: boolean;
   // include_opt_out is implicitly false — opt-outs are always excluded.
+  // Optional campaign carrier filter (migration 0098). Non-empty ⇒ only these
+  // carrier_norm buckets participate; Unidentified always excluded; 'Unknown'
+  // matches ('Unknown','Unmapped'). Applied in the shared builder so the frozen
+  // snapshot, the preview, and send-time recompute all agree.
+  carrier_filter?: string[];
+}
+
+// Expand a carrier selection to the carrier_norm values it matches. 'Unknown'
+// also matches 'Unmapped' (the looked-up-undetermined family). Unidentified, if
+// somehow present, matches only itself — but it is never a selectable filter value.
+function expandCarrierSelection(sel: string[]): string[] {
+  const out = new Set<string>();
+  for (const c of sel) {
+    out.add(c);
+    if (c === "Unknown") out.add("Unmapped");
+  }
+  return [...out];
+}
+
+// Text[] literal for a validated carrier set (single-quote escaped).
+function carrierArrayLiteral(values: string[]): string {
+  if (values.length === 0) return "ARRAY['__none__']::text[]";
+  return (
+    "ARRAY[" + values.map((v) => `'${v.replace(/'/g, "''")}'`).join(",") + "]::text[]"
+  );
+}
+
+// Wrap a contact_id-producing source with the campaign carrier filter (join
+// contacts, keep only rows whose carrier_norm is in the expanded selection). No-op
+// when the filter is empty. carrier_norm literal-ish (validated set) → uses
+// contacts_org_carrier_eligible_idx. Returns the (possibly unchanged) source.
+function applyCarrierFilter(
+  source: SQL,
+  orgId: string,
+  carrierFilter: string[] | undefined,
+): SQL {
+  if (!carrierFilter || carrierFilter.length === 0) return source;
+  const expanded = carrierArrayLiteral(expandCarrierSelection(carrierFilter));
+  return drizzleSql`
+    SELECT cf_src.contact_id
+    FROM (${source}) cf_src
+    INNER JOIN contacts cf_c
+      ON cf_c.id = cf_src.contact_id
+      AND cf_c.org_id = ${orgId}::uuid
+      AND cf_c.carrier_norm = ANY(${drizzleSql.raw(expanded)})
+  `;
 }
 
 export interface AudiencePreviewInput {
@@ -191,6 +237,11 @@ export interface AudiencePreviewResult {
   // offer_exposures ledger grows as other campaigns send, so the send-time
   // exclusion can be larger. Zero when no offerId is supplied.
   got_offer_in_prior_campaign: number;
+  // Per-bucket counts of contacts dropped by the campaign carrier filter (empty
+  // {} when no filter). Keys are the six buckets + 'Unidentified'; 'Unknown'
+  // aggregates Unknown+Unmapped. The UI surfaces "N removed as unidentified" and
+  // the other non-zero buckets.
+  carrier_removed: Record<string, number>;
 }
 
 export interface AudienceSnapshotResult {
@@ -457,7 +508,11 @@ export async function computeStageAudienceCountForDraft(
   const segmentBranches = perSegmentClauses.map(
     (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
   );
-  const source = buildAudienceSourceClause(segmentBranches, groupClause);
+  const source = applyCarrierFilter(
+    buildAudienceSourceClause(segmentBranches, groupClause),
+    orgId,
+    filters.carrier_filter,
+  );
 
   // Row-number partitioning over the qualified set so splits are as
   // equal as possible. Mirrors the active-pool path.
@@ -886,6 +941,7 @@ export async function previewAudience(
       excluded_for_optout: 0,
       in_use_in_other_campaigns: 0,
       got_offer_in_prior_campaign: 0,
+      carrier_removed: {},
     };
   }
 
@@ -902,6 +958,19 @@ export async function previewAudience(
   const offerExposureId =
     excludePriorOffer && input.offerId != null ? input.offerId : null;
   const useOfferExposure = offerExposureId != null;
+  // Campaign carrier filter (migration 0098). Only wire the contacts join +
+  // carrier logic when a filter is set, so the common no-filter preview is byte-for-
+  // byte unchanged (no perf regression). Unidentified is never selectable, so it is
+  // always in the "removed" set once any filter is active.
+  const carrierFilter = input.filters.carrier_filter ?? [];
+  const hasCarrierFilter = carrierFilter.length > 0;
+  const carrierMatchSql = hasCarrierFilter
+    ? drizzleSql`carrier_norm = ANY(${drizzleSql.raw(carrierArrayLiteral(expandCarrierSelection(carrierFilter)))})`
+    : drizzleSql`true`;
+  const carrierJoin = hasCarrierFilter
+    ? drizzleSql`inner join contacts pc on pc.id = s.contact_id`
+    : drizzleSql``;
+  const carrierCol = hasCarrierFilter ? drizzleSql`, pc.carrier_norm` : drizzleSql``;
   // When BOTH dimensions are selected the audience is their INTERSECTION:
   // a contact must be in a selected segment AND a selected group. With only
   // one dimension populated, that side stands alone (no intersection).
@@ -963,9 +1032,10 @@ export async function previewAudience(
         (iu_set.contact_id is not null) as is_in_use_elsewhere,
         ${useOfferExposure
           ? drizzleSql`(oe_set.contact_id is not null)`
-          : drizzleSql`false`} as is_offer_exposed
+          : drizzleSql`false`} as is_offer_exposed${carrierCol}
       from sources s
       ${flagJoins("s", useOfferExposure)}
+      ${carrierJoin}
     ),
     qualified as (
       select
@@ -997,8 +1067,22 @@ export async function previewAudience(
       from qualified q
     )
     select
-      -- The audience that actually sends = eligible ∩ membership rule.
-      count(*) filter (where is_eligible and membership_ok)::int as total_matching,
+      -- The audience that actually sends = eligible ∩ membership rule ∩ carrier filter.
+      count(*) filter (where is_eligible and membership_ok and (${carrierMatchSql}))::int as total_matching,
+      -- Per-bucket counts of contacts dropped BY the carrier filter (empty when no
+      -- filter). Unidentified is its own line. Reported over the eligible ∩ membership
+      -- audience so the UI can show "N removed as unidentified" + per-bucket removals.
+      ${hasCarrierFilter
+        ? drizzleSql`jsonb_build_object(
+            'AT&T', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'AT&T'),
+            'T-Mobile', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'T-Mobile'),
+            'Verizon', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Verizon'),
+            'Other Mobile', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Other Mobile'),
+            'VoIP', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'VoIP'),
+            'Unknown', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm in ('Unknown','Unmapped')),
+            'Unidentified', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Unidentified')
+          )`
+        : drizzleSql`'{}'::jsonb`} as carrier_removed,
       -- Per-source contributions stay PRE-intersection (eligible on each
       -- side) so the UI can show how the two dimensions narrow down; the
       -- intersection itself is the overlap column, which equals
@@ -1022,6 +1106,7 @@ export async function previewAudience(
     excluded_for_optout: number;
     in_use_in_other_campaigns: number;
     got_offer_in_prior_campaign: number;
+    carrier_removed: Record<string, number>;
   }[];
 
   const row = Array.isArray(rows) ? rows[0] : null;
@@ -1037,6 +1122,7 @@ export async function previewAudience(
     excluded_for_optout: row?.excluded_for_optout ?? 0,
     in_use_in_other_campaigns: row?.in_use_in_other_campaigns ?? 0,
     got_offer_in_prior_campaign: row?.got_offer_in_prior_campaign ?? 0,
+    carrier_removed: row?.carrier_removed ?? {},
   };
 }
 
@@ -1072,7 +1158,11 @@ export async function snapshotAudience(
   // temp table gives the planner true row counts, so the exclusions hash-join
   // and the whole snapshot runs in ~2s instead of timing out. The temp table
   // also lets count + insert share one evaluation of the source set ops.
-  const source = await buildAudienceSourceSql(input);
+  const source = applyCarrierFilter(
+    await buildAudienceSourceSql(input),
+    input.orgId,
+    input.filters.carrier_filter,
+  );
   await runner.execute(drizzleSql`
     create temp table audience_candidates on commit drop as
     select distinct contact_id from (${source}) src

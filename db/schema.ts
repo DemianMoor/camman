@@ -1323,6 +1323,11 @@ export const campaigns = pgTable(
         include_opt_in?: boolean;
         include_clickers?: boolean;
         include_not_clicked?: boolean;
+        // Migration 0098 feature: optional carrier filter. When non-empty, only
+        // contacts whose carrier_norm is in the selection participate; Unidentified
+        // is always excluded (never selectable). 'Unknown' matches ('Unknown',
+        // 'Unmapped'). Empty/absent = no filter (everyone eligible, incl Unidentified).
+        carrier_filter?: string[];
       }>()
       .notNull()
       .default(sql`'{}'::jsonb`),

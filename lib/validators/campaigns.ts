@@ -10,12 +10,27 @@ export const CAMPAIGN_STATUSES = [
   "archived",
 ] as const;
 
+// Campaign carrier filter buckets (migration 0098). Unidentified is NOT selectable
+// — when any filter is set, Unidentified contacts are always excluded.
+export const CAMPAIGN_CARRIER_FILTER_VALUES = [
+  "AT&T",
+  "T-Mobile",
+  "Verizon",
+  "Other Mobile",
+  "VoIP",
+  "Unknown",
+] as const;
+
 const audienceFiltersSchema = z
   .object({
     include_no_status: z.boolean().optional(),
     include_opt_in: z.boolean().optional(),
     include_clickers: z.boolean().optional(),
     include_not_clicked: z.boolean().optional(),
+    carrier_filter: z
+      .array(z.enum(CAMPAIGN_CARRIER_FILTER_VALUES))
+      .max(6)
+      .optional(),
   })
   .default({});
 

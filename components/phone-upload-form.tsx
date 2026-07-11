@@ -282,10 +282,17 @@ export function PhoneUploadForm({
   // Confirm from the review panel: run the upload, then best-effort enqueue a
   // Telnyx lookup for the same numbers. Enqueue failure never blocks the
   // upload result — the contacts are already saved.
-  async function handleConfirmUpload() {
+  async function handleConfirmUpload(enqueueLookup: boolean) {
     if (!pendingPhones) return;
-    const ok = await runUpload(pendingPhones);
+    const phones = pendingPhones;
+    const ok = await runUpload(phones);
     if (!ok) return;
+    if (!enqueueLookup) {
+      // "Upload without lookup" — contacts saved, no Telnyx spend.
+      setLookupPreview(null);
+      setPendingPhones(null);
+      return;
+    }
     const eq = await enqueueApi.execute("/api/telnyx/lookup/enqueue", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -463,7 +470,7 @@ export function PhoneUploadForm({
           ) : null}
         </div>
 
-        <div className="flex items-center justify-end gap-2 pt-2">
+        <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
           <Button
             variant="outline"
             onClick={() => {
@@ -474,7 +481,14 @@ export function PhoneUploadForm({
           >
             Back
           </Button>
-          <Button onClick={() => void handleConfirmUpload()} disabled={busy}>
+          <Button
+            variant="outline"
+            onClick={() => void handleConfirmUpload(false)}
+            disabled={busy}
+          >
+            Upload without lookup
+          </Button>
+          <Button onClick={() => void handleConfirmUpload(true)} disabled={busy}>
             {busy ? (
               <>
                 <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -483,7 +497,7 @@ export function PhoneUploadForm({
             ) : (
               <>
                 <Upload className="size-4" aria-hidden />
-                Confirm &amp; upload
+                Confirm &amp; run lookup
               </>
             )}
           </Button>

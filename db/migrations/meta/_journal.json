@@ -729,6 +729,20 @@
       "when": 1785283200000,
       "tag": "0103_cron_locks",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1785369600000,
+      "tag": "0104_carrier_resolver_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1785456000000,
+      "tag": "0105_carrier_classify_queue",
+      "breakpoints": true
     }
   ]
 }

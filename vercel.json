@@ -35,6 +35,10 @@
     {
       "path": "/api/cron/lookup-worker",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/cron/carrier-triage",
+      "schedule": "17,47 * * * *"
     }
   ]
 }

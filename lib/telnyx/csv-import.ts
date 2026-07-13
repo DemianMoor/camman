@@ -6,8 +6,10 @@ import { db } from "@/db/client";
 import { phone_lookups, type NewPhoneLookup } from "@/db/schema";
 import { validatePhone } from "@/lib/phone-validation";
 
-import { loadCarrierMappings } from "./carrier-mappings";
-import { resolveCarrierNorm } from "./map-carrier";
+import { classifyCarrier } from "../carrier/classify";
+import { loadClassifierContext } from "../carrier/classify-context";
+import { normalizeCarrierKey } from "../carrier/normalize-key";
+import { enqueueUnresolved, type TriageEntry } from "../carrier/triage-queue";
 import { mapTelnyxLineType } from "./map-line-type";
 import { syncContactsForPhones } from "./sync-contacts";
 
@@ -35,9 +37,10 @@ export interface CsvImportResult {
 // predefined-columns upload path and the bulk-update-existing action.
 export async function importCsvLookups(rows: CsvLookupRow[]): Promise<CsvImportResult> {
   const submitted = rows.length;
-  const mappings = await loadCarrierMappings();
+  const ctx = await loadClassifierContext();
 
   const values: NewPhoneLookup[] = [];
+  const triage: TriageEntry[] = [];
   const seen = new Set<string>();
   let invalid = 0;
   for (const r of rows) {
@@ -49,7 +52,12 @@ export async function importCsvLookups(rows: CsvLookupRow[]): Promise<CsvImportR
     const line_type = mapTelnyxLineType(r.line_type);
     const carrier_raw = r.carrier?.trim() || null;
     const carrier_norm =
-      line_type === "landline" ? "Unknown" : resolveCarrierNorm(carrier_raw, mappings);
+      line_type === "landline"
+        ? "Unknown"
+        : classifyCarrier({ carrierName: carrier_raw }, ctx).carrier_norm;
+    if (ctx.v2 && carrier_norm === "Unmapped" && carrier_raw) {
+      triage.push({ matchKey: normalizeCarrierKey(carrier_raw), rawExample: carrier_raw });
+    }
     values.push({
       phone: p.normalized,
       line_type,
@@ -87,6 +95,9 @@ export async function importCsvLookups(rows: CsvLookupRow[]): Promise<CsvImportR
   const writtenPhones = written.map((w) => w.phone);
   const sync =
     writtenPhones.length > 0 ? await syncContactsForPhones(writtenPhones) : { contactsUpdated: 0 };
+  // Unmapped carrier strings from this import -> AI triage (same queue as the
+  // automated path). Idempotent; resolved strings never re-enqueue.
+  if (triage.length > 0) await enqueueUnresolved(triage);
 
   return {
     submitted,

@@ -12,6 +12,8 @@ export interface LookupSettingsRow {
   lookup_rate_mobile: number;
   lookup_concurrency_rps: number;
   worker_lease_until: Date | null;
+  carrier_resolver_v2: boolean;
+  carrier_ai_run_cap: number;
 }
 
 // Load the single global lookup_settings row. Seeded in migration 0095, so it
@@ -32,6 +34,8 @@ export async function loadLookupSettings(): Promise<LookupSettingsRow> {
       lookup_rate_mobile: 0.0025,
       lookup_concurrency_rps: 10,
       worker_lease_until: null,
+      carrier_resolver_v2: false,
+      carrier_ai_run_cap: 200,
     };
   }
   return {
@@ -41,5 +45,7 @@ export async function loadLookupSettings(): Promise<LookupSettingsRow> {
     lookup_rate_mobile: Number(r.lookup_rate_mobile),
     lookup_concurrency_rps: r.lookup_concurrency_rps,
     worker_lease_until: r.worker_lease_until,
+    carrier_resolver_v2: r.carrier_resolver_v2,
+    carrier_ai_run_cap: r.carrier_ai_run_cap,
   };
 }

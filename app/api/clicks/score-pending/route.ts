@@ -49,8 +49,11 @@ export async function GET(req: NextRequest) {
   // `clickers` engagement table so segment clicker rules see tracked clickers.
   // Idempotent + best-effort: a failure here must not fail the scoring run.
   let clickersInserted = 0;
+  let clickerWatermark: string | null = null;
   try {
-    clickersInserted = (await propagateTrackedClickers(db)).inserted;
+    const propagated = await propagateTrackedClickers(db);
+    clickersInserted = propagated.inserted;
+    clickerWatermark = propagated.watermarkTo;
   } catch (err) {
     console.error("score-pending: propagateTrackedClickers failed", err);
   }
@@ -67,5 +70,6 @@ export async function GET(req: NextRequest) {
     degraded: result.degraded,
     enrichment: result.enrichment,
     clickersInserted,
+    clickerWatermark,
   });
 }

@@ -16,6 +16,11 @@ import { pollOptOuts } from "@/lib/sends/poll-opt-outs";
 // never exposed to the client.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+// Pin to Frankfurt (eu-central-1), co-located with Supabase, so the thousands
+// of sequential DB round-trips this job makes don't cross the Atlantic (~90ms
+// each). Per-route only — do NOT set a global region; US-facing routes such as
+// the /r/[code] redirect must stay in the US region.
+export const preferredRegion = "fra1";
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;

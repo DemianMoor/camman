@@ -17,6 +17,11 @@ import { scoreClicks, type ScoreMode } from "@/lib/links/score-clicks";
 // lambda is deliberately untouched; the .mmdb lives only here.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+// Pin to Frankfurt (eu-central-1), co-located with Supabase, so the thousands
+// of sequential DB round-trips this job makes don't cross the Atlantic (~90ms
+// each). Per-route only — do NOT set a global region; US-facing routes such as
+// the /r/[code] redirect must stay in the US region.
+export const preferredRegion = "fra1";
 
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET;

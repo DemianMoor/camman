@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
+import { withCronLease } from "@/lib/cron/lease";
 import { pollKeitaro } from "@/lib/keitaro/poll";
 import { can } from "@/lib/permissions";
 
@@ -34,6 +35,23 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     Number.isFinite(windowRaw) && windowRaw > 0
       ? Math.min(30, Math.floor(windowRaw))
       : undefined;
+
+  // Scheduled (cron) runs are single-runner: a prior tick whose SQL is still
+  // draining server-side after a timeout-kill must not get piled on. Manual
+  // operator runs bypass the lease (they must not silently no-op).
+  if (bearerMatches) {
+    const leased = await withCronLease("keitaro-poll", () =>
+      pollKeitaro(db, { windowDays }),
+    );
+    if (!leased.ran) {
+      return NextResponse.json({
+        skipped: true,
+        reason: "prior_run_in_progress",
+        skippedCount: leased.skippedCount,
+      });
+    }
+    return NextResponse.json(leased.result);
+  }
 
   const result = await pollKeitaro(db, { windowDays });
 

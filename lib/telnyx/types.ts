@@ -28,12 +28,18 @@ export interface TelnyxNumberLookupData {
   country_code?: string;
   carrier?: {
     name?: string | null;
+    // Telnyx's network-normalized carrier name (chain step 1). Populated on only
+    // ~39% of rows but resolves opaque legacy names (e.g. OMNIPOINT -> T-Mobile)
+    // that raw-name string-matching can't. Read defensively (see extractTelnyxNormalized).
+    normalized_carrier?: string | null;
     // libphonenumber's PhoneNumberType enum — NOTE: no 'landline' value.
     type?: string | null;
     mobile_country_code?: string | null;
     mobile_network_code?: string | number | null;
     error_code?: string | null;
   } | null;
+  // Some Telnyx responses surface a top-level normalized_carrier; read both paths.
+  normalized_carrier?: string | null;
   portability?: {
     lrn?: string | null;
     ocn?: string | null;

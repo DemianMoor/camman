@@ -4,6 +4,7 @@ import { formatInTimeZone } from "date-fns-tz";
 
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { notifyTelegram, sendTelegramHtml } from "@/lib/alerts/telegram";
+import { carrierTriageSummary } from "@/lib/carrier/queue-stats";
 import {
   computeReportMetrics,
   etDayRange,
@@ -52,7 +53,15 @@ function dayLabel(bounds: { start: Date }): string {
 async function buildDaily(now: Date): Promise<string> {
   const { yesterday } = etDays(now);
   const m = await computeReportMetrics(etDayRange(yesterday));
-  return dailyMessage(dayLabel(yesterday), m);
+  let msg = dailyMessage(dayLabel(yesterday), m);
+  // Fold in a one-line carrier-triage summary (brief §9). Sequential + one small
+  // query — the daily path is the robust one, so this doesn't touch the hourly
+  // cold-start fan-out. Only shown once the queue has any rows.
+  const t = await carrierTriageSummary();
+  if (t.resolved + t.needsHuman + t.pending > 0) {
+    msg += `\nCarrier triage: ${t.resolved} auto-mapped · ${t.needsHuman} need review · ${t.pending} pending`;
+  }
+  return msg;
 }
 
 async function buildHourly(now: Date): Promise<string> {

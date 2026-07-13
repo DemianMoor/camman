@@ -127,6 +127,7 @@ export function LookupAdmin() {
       <SettingsSection />
       <BulkUpdateSection />
       <BatchesSection />
+      <TriageQueueSection />
       <UnmappedSection />
     </div>
   );
@@ -702,6 +703,166 @@ function UnmappedSection() {
                 </li>
               );
             })}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ===== (d2) Carrier triage queue (AI + human review) =====
+
+type TriageRow = {
+  match_key: string;
+  raw_example: string;
+  status: string;
+  confidence: number | null;
+  last_error: string | null;
+  contact_count: number;
+};
+
+function TriageQueueSection() {
+  const listApi = useApiCall<{ data: TriageRow[] }>();
+  const assignApi = useApiCall<{
+    lookups_updated: number;
+    contacts_updated: number;
+  }>();
+  const { execute } = listApi;
+  const [rows, setRows] = useState<TriageRow[]>([]);
+  const [tick, setTick] = useState(0);
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [assigning, setAssigning] = useState<string | null>(null);
+
+  const refresh = useCallback(() => setTick((n) => n + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const r = await execute("/api/carrier/triage-queue");
+      if (!cancelled && r.ok) setRows(r.data.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [execute, tick]);
+
+  async function handleAssign(row: TriageRow) {
+    const bucket = picks[row.match_key];
+    if (!bucket) return;
+    setAssigning(row.match_key);
+    const r = await assignApi.execute("/api/carrier/triage-queue/assign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        match_key: row.match_key,
+        raw_example: row.raw_example,
+        bucket,
+      }),
+    });
+    setAssigning(null);
+    if (!r.ok) {
+      toastApiError(r, "Couldn't assign mapping");
+      return;
+    }
+    toast.success(
+      `Mapped "${row.raw_example}" → ${bucket} (${r.data.lookups_updated.toLocaleString()} lookups, ${r.data.contacts_updated.toLocaleString()} contacts)`,
+    );
+    refresh();
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between border-b py-3">
+        <CardTitle className="text-sm font-semibold">
+          Carrier triage — needs review
+        </CardTitle>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={refresh}
+          disabled={listApi.isLoading}
+        >
+          {listApi.isLoading ? (
+            <Loader2 className="size-4 animate-spin" aria-hidden />
+          ) : null}
+          Refresh
+        </Button>
+      </CardHeader>
+      <CardContent className="grid gap-2 p-5">
+        <p className="text-sm text-muted-foreground">
+          Carrier strings the resolver chain couldn&apos;t bucket, ranked by
+          affected contacts. AI triage resolves recognizable names automatically;
+          what remains here names no identifiable network — assign it and every
+          route-suffix variant is reclassified at once.
+        </p>
+        {rows.length === 0 ? (
+          <p className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+            {listApi.isLoading ? (
+              <>
+                <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="size-4 text-emerald-600" aria-hidden />{" "}
+                Nothing awaiting review.
+              </>
+            )}
+          </p>
+        ) : (
+          <ul className="grid gap-2">
+            {rows.map((row) => (
+              <li
+                key={row.match_key}
+                className="flex flex-wrap items-center gap-2 rounded-md border p-2"
+              >
+                <span className="font-mono text-sm">{row.raw_example}</span>
+                <span className="text-xs text-muted-foreground">
+                  {row.contact_count.toLocaleString()} contact
+                  {row.contact_count === 1 ? "" : "s"}
+                </span>
+                <span
+                  className={cn(
+                    "rounded px-1.5 py-0.5 text-[11px] font-medium",
+                    row.status === "needs_human"
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-muted text-muted-foreground",
+                  )}
+                >
+                  {row.status === "needs_human" ? "AI: unresolved" : "pending AI"}
+                </span>
+                <div className="ml-auto flex items-center gap-2">
+                  <Select
+                    value={picks[row.match_key] ?? ""}
+                    onValueChange={(v) =>
+                      setPicks((prev) => ({ ...prev, [row.match_key]: v }))
+                    }
+                  >
+                    <SelectTrigger className="h-8 w-[150px]">
+                      <SelectValue placeholder="Pick bucket" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CAMPAIGN_CARRIER_FILTER_VALUES.map((b) => (
+                        <SelectItem key={b} value={b}>
+                          {b}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    size="sm"
+                    onClick={() => handleAssign(row)}
+                    disabled={
+                      !picks[row.match_key] || assigning === row.match_key
+                    }
+                  >
+                    {assigning === row.match_key ? (
+                      <Loader2 className="size-4 animate-spin" aria-hidden />
+                    ) : null}
+                    Assign
+                  </Button>
+                </div>
+              </li>
+            ))}
           </ul>
         )}
       </CardContent>

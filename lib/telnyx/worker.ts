@@ -5,8 +5,11 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 
+import type { ClassifierContext } from "../carrier/classify";
+import { loadClassifierContext } from "../carrier/classify-context";
+import { normalizeCarrierKey } from "../carrier/normalize-key";
+import { enqueueUnresolved, type TriageEntry } from "../carrier/triage-queue";
 import { buildLookupRowFromTelnyx } from "./build-lookup-row";
-import { loadCarrierMappings } from "./carrier-mappings";
 import { telnyxBalance, telnyxNumberLookup } from "./client";
 import { actualLookupCost } from "./cost";
 import { countAttemptsToday, remainingCap } from "./daily-cap";
@@ -18,7 +21,6 @@ import {
 import { loadLookupSettings } from "./settings";
 import { formatBatchSummary } from "./summary";
 import { syncContactsForPhones } from "./sync-contacts";
-import type { CarrierNorm } from "./types";
 
 const BUDGET_MS = 250_000; // stay comfortably under the 300s maxDuration
 const RENEW_EVERY_MS = 60_000;
@@ -102,7 +104,7 @@ export async function runLookupWorker(now: Date = new Date()): Promise<WorkerRes
       WHERE status IN ('pending', 'running') AND balance_before_usd IS NULL
     `);
 
-    const mappings = await loadCarrierMappings();
+    const ctx = await loadClassifierContext();
 
     // 3. Drain loop.
     while (remaining > 0 && Date.now() - startMs < BUDGET_MS) {
@@ -121,17 +123,23 @@ export async function runLookupWorker(now: Date = new Date()): Promise<WorkerRes
       remaining -= claimed.length;
 
       const iterStart = Date.now();
-      const results = await Promise.all(claimed.map((r) => processOne(r, mappings)));
+      const results = await Promise.all(claimed.map((r) => processOne(r, ctx)));
 
       const donePhones: string[] = [];
+      const triage: TriageEntry[] = [];
       let fatal = false;
       for (const r of results) {
-        if (r.kind === "done") { processed++; donePhones.push(r.phone); }
-        else if (r.kind === "failed") failed++;
+        if (r.kind === "done") {
+          processed++;
+          donePhones.push(r.phone);
+          if (r.triage) triage.push(r.triage);
+        } else if (r.kind === "failed") failed++;
         if (r.fatal) fatal = true;
       }
       // Sync contacts for the just-completed phones (copy down; landline cleanup).
       await syncContactsForPhones(donePhones);
+      // Enqueue any unresolved carrier strings (v2) for async AI triage.
+      if (ctx.v2 && triage.length > 0) await enqueueUnresolved(triage);
 
       if (fatal) {
         await notifyTelegram(
@@ -190,17 +198,22 @@ async function claimQueueBatch(size: number): Promise<ClaimedRow[]> {
 }
 
 type ProcessResult =
-  | { kind: "done"; phone: string; fatal?: false }
+  | { kind: "done"; phone: string; triage?: TriageEntry; fatal?: false }
   | { kind: "retry"; fatal?: false }
   | { kind: "failed"; fatal: boolean };
 
-async function processOne(row: ClaimedRow, mappings: Map<string, CarrierNorm>): Promise<ProcessResult> {
+async function processOne(row: ClaimedRow, ctx: ClassifierContext): Promise<ProcessResult> {
   const res = await telnyxNumberLookup(row.phone);
   if (res.ok) {
-    const lookup = buildLookupRowFromTelnyx(row.phone, res.data, mappings);
+    const lookup = buildLookupRowFromTelnyx(row.phone, res.data, ctx);
     await upsertPhoneLookup(lookup);
     await db.execute(sql`UPDATE lookup_queue SET status = 'done', updated_at = now() WHERE id = ${row.id}::bigint`);
-    return { kind: "done", phone: row.phone };
+    // Unmapped -> queue the normalized key for AI triage (worker bulk-enqueues).
+    const triage =
+      lookup.carrier_norm === "Unmapped" && lookup.carrier_raw
+        ? { matchKey: normalizeCarrierKey(lookup.carrier_raw), rawExample: lookup.carrier_raw }
+        : undefined;
+    return { kind: "done", phone: row.phone, triage };
   }
   // Fatal (balance/feature-gate): stop the whole run, don't retry-loop.
   const isFatal = res.status === 402 || /10038/.test(res.error);
@@ -223,12 +236,13 @@ async function upsertPhoneLookup(r: ReturnType<typeof buildLookupRowFromTelnyx>)
   // Worker source is always 'telnyx', which overwrites any prior row (precedence).
   await db.execute(sql`
     INSERT INTO phone_lookups
-      (phone, line_type, carrier_raw, carrier_norm, ocn, spid, ported, ported_date, source, lookup_status, raw_response, looked_up_at, updated_at)
+      (phone, line_type, carrier_raw, carrier_norm, normalized_carrier, ocn, spid, ported, ported_date, source, lookup_status, raw_response, looked_up_at, updated_at)
     VALUES
-      (${r.phone}, ${r.line_type}, ${r.carrier_raw ?? null}, ${r.carrier_norm}, ${r.ocn ?? null}, ${r.spid ?? null},
+      (${r.phone}, ${r.line_type}, ${r.carrier_raw ?? null}, ${r.carrier_norm}, ${r.normalized_carrier ?? null}, ${r.ocn ?? null}, ${r.spid ?? null},
        ${r.ported ?? null}, ${r.ported_date ?? null}, 'telnyx', 'complete', ${r.raw_response ? JSON.stringify(r.raw_response) : null}::jsonb, now(), now())
     ON CONFLICT (phone) DO UPDATE SET
       line_type = EXCLUDED.line_type, carrier_raw = EXCLUDED.carrier_raw, carrier_norm = EXCLUDED.carrier_norm,
+      normalized_carrier = EXCLUDED.normalized_carrier,
       ocn = EXCLUDED.ocn, spid = EXCLUDED.spid, ported = EXCLUDED.ported, ported_date = EXCLUDED.ported_date,
       source = 'telnyx', lookup_status = 'complete', raw_response = EXCLUDED.raw_response,
       looked_up_at = now(), updated_at = now()

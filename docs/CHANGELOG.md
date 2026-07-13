@@ -2,6 +2,10 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-13 — Carrier normalization v2: resolver chain + AI triage (migrations 0104–0105) — docs/04-features/phone-lookup-carrier, docs/03-data-model, docs/04-features/crons, docs/06-integrations
+- `carrier_norm` now resolves through a single shared classifier (`lib/carrier/classify.ts`): Telnyx `normalized_carrier` → learned `carrier_mappings` (normalized key) → seeded `carrier_patterns` regex → `Unmapped`→AI triage. Gated by `lookup_settings.carrier_resolver_v2` (default false); buckets unchanged. Key normalization strips route/SPID suffixes so variants collapse to one mapping.
+- New tables `carrier_patterns` (0104), `carrier_classify_queue` (0105); `phone_lookups.normalized_carrier` + `lookup_settings.carrier_resolver_v2`/`carrier_ai_run_cap`. New cron `/api/cron/carrier-triage` (`17,47`) batches unresolved strings to `claude-haiku-4-5` (constrained JSON), writes confident buckets to `carrier_mappings`, parks the rest for human review (`/settings/lookup` triage section, ranked by contact count). New dep `@anthropic-ai/sdk`; env `ANTHROPIC_API_KEY`. Backfill: `scripts/backfill-carrier-v2.ts` (dry-run default, `--apply` with rollback snapshot). Tests: `scripts/test-carrier-classify.ts`. NOT YET APPLIED to prod; flag OFF pending backfill review.
+
 ## 2026-07-13 — Pin two DB-heavy cron routes to Frankfurt (fra1) — docs/06-integrations.md
 - Added `export const preferredRegion = "fra1"` to `/api/clicks/score-pending` and `/api/opt-outs/poll` only, co-locating them with the eu-central-1 Supabase DB to kill ~90ms transatlantic latency per round-trip (both jobs do thousands of sequential round-trips and were timing out at the 60s cap). Per-route segment export only — no global `regions` field in `vercel.json`, so `/r/[code]` and all other routes stay in the US region. `maxDuration` left at 60 (a post-move timeout stays visible as signal). No conflicting `preferredRegion`/`runtime` exports existed beforehand.
 

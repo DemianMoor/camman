@@ -1,6 +1,6 @@
 # Phone Lookup & Carrier Enrichment (Telnyx)
 
-_Last updated: 2026-07-10_
+_Last updated: 2026-07-13_
 
 > **Status: in build** (`feat/telnyx-number-lookup`). Phase 1 (schema) is authored; the worker, upload flows, segment/campaign wiring, and admin UI land in later phases. This doc is updated as each phase ships.
 
@@ -29,6 +29,26 @@ Plus two non-bucket states (migration 0099):
 - **`Unmapped`** — looked up, raw string awaiting an admin bucket mapping. Groups with `Unknown` in filters; tracked separately only so the admin queue works. Assigning a mapping inserts into `carrier_mappings` and retroactively updates `phone_lookups` + `contacts`.
 
 **Filter/rule treatment:** the campaign carrier filter offers the six buckets (`Unidentified` **not** selectable) and, when any filter is set, always excludes `Unidentified` on its own reported line; `Unknown` there matches `('Unknown','Unmapped')`. Segment rules offer both `Unknown` and `Unidentified`. Reporting counts `Unidentified` and `Unknown` separately everywhere.
+
+## Carrier resolution v2 — resolver chain + AI triage (migrations 0104–0105)
+
+`carrier_norm` is resolved by the **single shared classifier** `classifyCarrier` ([lib/carrier/classify.ts](../../lib/carrier/classify.ts)) — used by the lookup worker, CSV import, manual upload, and backfill alike (no second classifier). Gated by `lookup_settings.carrier_resolver_v2` (**default false**): until the flag is flipped, every path keeps the exact v1 behaviour (exact `carrier_mappings` lookup only). The buckets are **unchanged** (the six above).
+
+**Chain (v2, first hit wins):**
+1. **Telnyx `normalized_carrier`** — Telnyx's own network-normalized name (newly stored on `phone_lookups`; populated ~39% of the time). Resolves opaque legacy names (`OMNIPOINT` → T-Mobile) that raw-string matching can't. Itself run through the mapping/pattern layers (a value like `"Verizon Wireless"` → `Verizon`).
+2. **Learned `carrier_mappings`** — exact match on the **normalized key** (§ key normalization below).
+3. **`carrier_patterns`** — seeded regex/substring rules ([db/migrations/0104](../../db/migrations/0104_carrier_resolver_v2.sql)) against the normalized key; catches future variants of known brands.
+4. **`Unmapped`** — written immediately; the distinct normalized key is enqueued into `carrier_classify_queue` for async AI triage. The send/lookup path never waits on triage.
+
+**Key normalization** ([lib/carrier/normalize-key.ts](../../lib/carrier/normalize-key.ts)): uppercases, collapses `.`/`,`/`-` to spaces (keeps `&` — AT&T stays AT&T), and strips trailing route/SPID artifacts (`/2`, `-NSR/1`, `-SVR-10X/2`, `:6921 - SVR/2`, …) so suffix variants collapse to ONE key/mapping (e.g. `T-Mobile US-SVR-10X/2` → `T MOBILE US`). Imperfect stripping is fine — the pattern layer still catches the brand substring.
+
+**AI triage** (`/api/cron/carrier-triage`, `17,47 * * * *`, [lib/carrier/ai-triage.ts](../../lib/carrier/ai-triage.ts)): drains `carrier_classify_queue` under `withCronLease` (single-runner). Batches 50 distinct strings per call to **`claude-haiku-4-5`** with a constrained JSON schema (brand ∈ the six buckets; return `Unknown` rather than guess). `confidence ≥ 0.85` → written to `carrier_mappings` (`mapped_by='ai'`, retro-updates all Unmapped variants + contacts via [lib/carrier/apply-mapping.ts](../../lib/carrier/apply-mapping.ts)) and marked `ai_resolved`; below threshold / `Unknown` / out-of-enum → `needs_human`. **One API call per distinct string, ever** — the second occurrence is served from `carrier_mappings`. Guardrails: per-run API-call cap (`lookup_settings.carrier_ai_run_cap`, default 200) + bounded attempts (3). Env: `ANTHROPIC_API_KEY` (unset → cron no-ops, sends continue under the Unmapped policy).
+
+**Telegram alerts** (existing `notifyTelegram` surface): API failure, rate-limit storm, out-of-enum brand (rejected + requeued), unresolved string affecting ≥250 contacts, and cost-cap tripped. A one-line triage summary folds into the daily 11 AM report (`X auto-mapped · Y need review · Z pending`).
+
+**Admin review** — the `/settings/lookup` "Carrier triage — needs review" section (`/api/carrier/triage-queue`) lists `pending`/`needs_human` strings **ranked by affected contact count**; assigning a bucket (`/api/carrier/triage-queue/assign`) writes the mapping on the normalized key (fixing all variants) and marks the row `human_resolved`. The legacy "Unmapped carriers" section (by exact `carrier_raw`) remains.
+
+**Backfill** — [scripts/backfill-carrier-v2.ts](../../scripts/backfill-carrier-v2.ts): dry-run (default) reports the before→after bucket distribution over `phone_lookups` without writing; `--apply` backfills `normalized_carrier` from `raw_response` (free), snapshots `contacts.carrier_norm` to `carrier_norm_backfill_snapshot` (rollback), recomputes `carrier_norm` in batches, syncs contacts, and enqueues still-Unmapped keys. Run the dry-run and review before flipping `carrier_resolver_v2`.
 
 ## Line-type mapping (Telnyx → us)
 

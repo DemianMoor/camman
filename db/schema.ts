@@ -2631,6 +2631,9 @@ export const phone_lookups = pgTable(
     line_type: text("line_type").notNull(),
     carrier_raw: text("carrier_raw"),
     carrier_norm: text("carrier_norm").notNull().default("Unknown"),
+    // Migration 0104: Telnyx's own normalized_carrier field (chain step 1). Nullable
+    // (Telnyx populates it on only ~39% of rows). Backfilled from raw_response.
+    normalized_carrier: text("normalized_carrier"),
     ocn: text("ocn"),
     spid: text("spid"),
     ported: boolean("ported"),
@@ -2715,6 +2718,11 @@ export const lookup_settings = pgTable("lookup_settings", {
   // Migration 0100: single-runner lease for the worker drain (lease row, not an
   // advisory lock — pooler-safe). Claimed if NULL or < now(); cleared on clean exit.
   worker_lease_until: timestamp("worker_lease_until", { withTimezone: true }),
+  // Migration 0104: gate for the v2 carrier resolver chain. false = keep v1
+  // exact-mapping behaviour until the backfill is reviewed and the flag flipped.
+  carrier_resolver_v2: boolean("carrier_resolver_v2").notNull().default(false),
+  // Migration 0105: per-run Anthropic API-call cost breaker for the AI triage cron.
+  carrier_ai_run_cap: integer("carrier_ai_run_cap").notNull().default(200),
   updated_at: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -2722,6 +2730,72 @@ export const lookup_settings = pgTable("lookup_settings", {
 
 export type LookupSettings = typeof lookup_settings.$inferSelect;
 export type NewLookupSettings = typeof lookup_settings.$inferInsert;
+
+// Migration 0104: broad, seeded regex rules matched against the NORMALIZED carrier
+// key (resolver chain step 3 — a fallback after the exact carrier_mappings lookup).
+// Global; policy-less RLS (server-only, phone_lookups precedent).
+export const carrier_patterns = pgTable(
+  "carrier_patterns",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    pattern: text("pattern").notNull(),
+    brand: text("brand").notNull(),
+    priority: integer("priority").notNull().default(100),
+    is_active: boolean("is_active").notNull().default(true),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("carrier_patterns_pattern_uniq").on(table.pattern),
+    index("carrier_patterns_active_priority_idx")
+      .on(table.priority)
+      .where(sql`${table.is_active}`),
+    check(
+      "carrier_patterns_brand_check",
+      sql`${table.brand} IN ('AT&T', 'T-Mobile', 'Verizon', 'Other Mobile', 'VoIP', 'Unknown')`,
+    ),
+  ],
+);
+
+export type CarrierPattern = typeof carrier_patterns.$inferSelect;
+export type NewCarrierPattern = typeof carrier_patterns.$inferInsert;
+
+// Migration 0105: distinct unresolved normalized carrier strings awaiting async AI
+// triage. Global (carrier identity is a global fact). contact_count is derived on
+// read (never stored). Durable status prevents re-billing AI-failed strings.
+export const carrier_classify_queue = pgTable(
+  "carrier_classify_queue",
+  {
+    match_key: text("match_key").primaryKey(),
+    raw_example: text("raw_example").notNull(),
+    status: text("status").notNull().default("pending"),
+    confidence: numeric("confidence"),
+    attempts: integer("attempts").notNull().default(0),
+    last_error: text("last_error"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("carrier_classify_queue_pending_idx")
+      .on(table.created_at)
+      .where(sql`${table.status} = 'pending'`),
+    index("carrier_classify_queue_needs_human_idx")
+      .on(table.updated_at)
+      .where(sql`${table.status} = 'needs_human'`),
+    check(
+      "carrier_classify_queue_status_check",
+      sql`${table.status} IN ('pending', 'ai_resolved', 'needs_human', 'human_resolved')`,
+    ),
+  ],
+);
+
+export type CarrierClassifyQueue = typeof carrier_classify_queue.$inferSelect;
+export type NewCarrierClassifyQueue = typeof carrier_classify_queue.$inferInsert;
 
 // Per-run batch tracking (org-scoped for reporting; the cache it fills is global).
 export const lookup_batches = pgTable(

@@ -64,6 +64,11 @@ eq(resolveCarrierNorm("Some Random Telco LLC", mappings), "Unmapped", "unmatched
 eq(resolveCarrierNorm(null, mappings), "Unknown", "no carrier info -> Unknown (not Unmapped)");
 eq(resolveCarrierNorm("   ", mappings), "Unknown", "blank -> Unknown");
 
+// v1 classifier context (resolver-v2 flag OFF) — buildLookupRowFromTelnyx now
+// takes a ClassifierContext; v1 mode reproduces the exact prior resolveCarrierNorm
+// behaviour these assertions were written against.
+const v1ctx = { v2: false as const, mappings, patterns: [] };
+
 console.log("\ncost math (base=0.0015, mobile=0.0025):");
 const rates = { base: 0.0015, mobile: 0.0025 };
 eq(estimateLookupCost(0, rates), 0, "0 lookups -> $0");
@@ -80,7 +85,7 @@ const voipData: TelnyxNumberLookupData = {
   carrier: { name: "Telnyx/4", type: "voip", mobile_network_code: 866 },
   portability: { lrn: "2245701999", ocn: "073H", spid: "073H", ported_status: "Y", ported_date: "2017-10-20", line_type: "voip" },
 };
-const voipRow = buildLookupRowFromTelnyx("+13129457420", voipData, mappings);
+const voipRow = buildLookupRowFromTelnyx("+13129457420", voipData, v1ctx);
 eq(voipRow.line_type, "voip", "line_type voip");
 eq(voipRow.carrier_raw, "Telnyx/4", "carrier_raw preserved");
 eq(voipRow.carrier_norm, "Unmapped", "'Telnyx/4' not in seed -> Unmapped");
@@ -95,7 +100,7 @@ const mobileData: TelnyxNumberLookupData = {
   carrier: { name: "Cellco Partnership DBA Verizon Wireless", type: "mobile" },
   portability: { ocn: "6180", spid: "6180", ported_status: "N", line_type: "mobile" },
 };
-const mobileRow = buildLookupRowFromTelnyx("+14155552671", mobileData, mappings);
+const mobileRow = buildLookupRowFromTelnyx("+14155552671", mobileData, v1ctx);
 eq(mobileRow.line_type, "mobile", "line_type mobile");
 eq(mobileRow.carrier_norm, "Verizon", "resolved to Verizon");
 eq(mobileRow.ported, false, "ported_status 'N' -> false");
@@ -104,7 +109,7 @@ console.log("\nbuildLookupRowFromTelnyx — landline (the hard-stop case):");
 const landlineRow = buildLookupRowFromTelnyx(
   "+12125551234",
   { carrier: { name: "PACIFIC BELL", type: "fixed line" } },
-  mappings,
+  v1ctx,
 );
 eq(landlineRow.line_type, "landline", "'fixed line' -> landline (=> not_applicable downstream)");
 eq(landlineRow.carrier_raw, "PACIFIC BELL", "landline carrier_raw still kept for audit");

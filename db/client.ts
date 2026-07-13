@@ -17,6 +17,18 @@ export const sql =
   postgres(connectionString, {
     prepare: false,
     max: 5,
+    // Connection hygiene for transaction-pooler (Supavisor :6543) use:
+    // - idle_timeout (s): return an idle client to the pooler after 20s so a
+    //   warm-but-quiet serverless instance doesn't pin its 5 slots between
+    //   invocations. The pooler multiplexes per-transaction, so holding idle
+    //   client connections open buys nothing.
+    // - connect_timeout (s): fail fast (10s) if the pooler is saturated rather
+    //   than hanging the whole request until the platform kills it.
+    // - max_lifetime (s): recycle a client every 30min so it never rides a
+    //   stale server-side backend the pooler may have rotated underneath us.
+    idle_timeout: 20,
+    connect_timeout: 10,
+    max_lifetime: 60 * 30,
   });
 
 if (process.env.NODE_ENV !== "production") {

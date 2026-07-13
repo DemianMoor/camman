@@ -174,11 +174,11 @@ This recipe is now battle-tested across four entities (Brands, Offers, Networks,
 
 Real bugs hit. Read them.
 
-**Supabase direct DB doesn't resolve from non-IPv6 networks** on the free tier (`db.<ref>.supabase.co` is IPv6-only without the IPv4 add-on). Use the Supavisor **session pooler** (`aws-X-region.pooler.supabase.com:5432`). Username must include the project ref: `postgres.<project-ref>`. `prepare: false` is required and already set in `db/client.ts`.
+**Supabase direct DB doesn't resolve from non-IPv6 networks** on the free tier (`db.<ref>.supabase.co` is IPv6-only without the IPv4 add-on). The **application** `DATABASE_URL` always uses the Supavisor **transaction pooler** (`aws-X-region.pooler.supabase.com:6543` + `?prepare=false`) — required for serverless (see CLAUDE.md §6). The **session pooler** (`:5432`) is only a fallback for local direct-DB tooling (`psql`, one-off scripts) on non-IPv6 networks; never point the app at it. Username must include the project ref: `postgres.<project-ref>`. `prepare: false` is required and already set in `db/client.ts`.
 
 **`DATABASE_URL` password must be URL-safe.** A `#` in the password gets parsed as a URL fragment by `postgres-js`, truncating the connection string. URL-encode special chars (`#` → `%23`, `,` → `%2C`) or pick an alphanumeric password. The `@` between password and host must NOT be encoded — that's a structural delimiter.
 
-**`db/client.ts` uses a `globalThis`-cached pool with `max: 5`.** Next.js HMR re-evaluates this module on every code change in dev. Without the cache, each reload opens a fresh pool and the session pooler's ~15-client cap is exhausted, surfacing as `EMAXCONNSESSION`. Don't strip the caching.
+**`db/client.ts` uses a `globalThis`-cached pool with `max: 5`.** Next.js HMR re-evaluates this module on every code change in dev. Without the cache, each reload opens a fresh pool and the pooler's per-client cap is exhausted, surfacing as `EMAXCONNSESSION`. Don't strip the caching. (The app connects via the transaction pooler :6543; `db/client.ts` also sets `idle_timeout`/`connect_timeout`/`max_lifetime` for connection hygiene.)
 
 **Next.js 16 renamed `middleware.ts` to `proxy.ts`.** Exported function is `proxy`, not `middleware`. Legacy name issues a deprecation warning.
 

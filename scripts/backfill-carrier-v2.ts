@@ -13,17 +13,24 @@
 // in batches; (4) syncs the denormalized contacts.carrier_norm. Landlines are left
 // at 'Unknown' (never carrier-segmented), matching the ingest path.
 import { config } from "dotenv";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
+// Neutralize the `server-only` guard for this tsx run BEFORE any server-only module
+// loads (same shim as scripts/run-lookup-calibration.ts). The server-only modules
+// are dynamic-imported inside main() so they resolve after this stub is in place.
+const req = createRequire(import.meta.url);
+try {
+  const p = req.resolve("server-only");
+  // @ts-expect-error minimal Module cache entry
+  req.cache[p] = { id: p, filename: p, loaded: true, exports: {} };
+} catch {
+  /* noop */
+}
 
 import { sql } from "drizzle-orm";
 
-import { db } from "@/db/client";
-import { classifyCarrier } from "@/lib/carrier/classify";
-import { loadClassifierContext } from "@/lib/carrier/classify-context";
-import { normalizeCarrierKey } from "@/lib/carrier/normalize-key";
-import { enqueueUnresolved, type TriageEntry } from "@/lib/carrier/triage-queue";
-import { extractTelnyxNormalized } from "@/lib/telnyx/build-lookup-row";
+import type { TriageEntry } from "@/lib/carrier/triage-queue";
 import type { CarrierNorm, TelnyxNumberLookupData } from "@/lib/telnyx/types";
 
 const APPLY = process.argv.includes("--apply");
@@ -51,6 +58,14 @@ function printDist(label: string, m: Map<string, number>, total: number) {
 
 async function main() {
   console.log(`Carrier v2 backfill — ${APPLY ? "APPLY (writing)" : "DRY RUN (no writes)"}`);
+  // Dynamic imports so the server-only stub (top of file) is in place first.
+  const { db } = await import("@/db/client");
+  const { classifyCarrier } = await import("@/lib/carrier/classify");
+  const { loadClassifierContext } = await import("@/lib/carrier/classify-context");
+  const { normalizeCarrierKey } = await import("@/lib/carrier/normalize-key");
+  const { enqueueUnresolved } = await import("@/lib/carrier/triage-queue");
+  const { extractTelnyxNormalized } = await import("@/lib/telnyx/build-lookup-row");
+
   const ctx = await loadClassifierContext(true); // preview/apply always use v2 semantics
 
   if (APPLY) {
@@ -80,8 +95,11 @@ async function main() {
 
   const before = new Map<string, number>();
   const after = new Map<string, number>();
+  const sources = new Map<string, number>(); // resolver source breakdown (non-landline)
   let changed = 0;
   let total = 0;
+  let landline = 0;
+  let normPresent = 0; // rows with a non-empty normalized_carrier in raw_response
   let lastPhone = "";
 
   for (;;) {
@@ -99,16 +117,17 @@ async function main() {
     for (const r of rows) {
       total++;
       tallyRow(before, r.carrier_norm);
-      const newNorm: CarrierNorm =
-        r.line_type === "landline"
-          ? "Unknown"
-          : classifyCarrier(
-              {
-                telnyxNormalized: r.raw_response ? extractTelnyxNormalized(r.raw_response) : null,
-                carrierName: r.carrier_raw,
-              },
-              ctx,
-            ).carrier_norm;
+      const tn = r.raw_response ? extractTelnyxNormalized(r.raw_response) : null;
+      if (tn) normPresent++;
+      let newNorm: CarrierNorm;
+      if (r.line_type === "landline") {
+        newNorm = "Unknown";
+        landline++;
+      } else {
+        const res = classifyCarrier({ telnyxNormalized: tn, carrierName: r.carrier_raw }, ctx);
+        newNorm = res.carrier_norm;
+        tallyRow(sources, res.source);
+      }
       tallyRow(after, newNorm);
       if (newNorm !== r.carrier_norm) {
         changed++;
@@ -136,6 +155,20 @@ async function main() {
   }
 
   console.log(`\n\nTotal phone_lookups rows: ${total}. Would change bucket: ${changed}.`);
+  const pct = (n: number) => (total ? ((n / total) * 100).toFixed(1) : "0.0");
+  console.log(
+    `Landline rows (skip carrier classify, forced Unknown): ${landline} (${pct(landline)}%)`,
+  );
+  console.log(
+    `\nTelnyx normalized_carrier PRESENT in raw_response: ${normPresent} (${pct(normPresent)}%)` +
+      `  ← JSON-path check vs ~39.3% baseline`,
+  );
+  printDist("RESOLVER SOURCE (non-landline rows)", sources, total - landline);
+  const telnyxNorm = sources.get("telnyx_norm") ?? 0;
+  console.log(
+    `\n(b) Resolved by STEP 1 (source=telnyx_norm): ${telnyxNorm} = ${pct(telnyxNorm)}% of all rows, ` +
+      `${total - landline ? ((telnyxNorm / (total - landline)) * 100).toFixed(1) : "0.0"}% of non-landline`,
+  );
   printDist("BEFORE (current carrier_norm)", before, total);
   printDist("AFTER (v2 resolver)", after, total);
   if (!APPLY) {

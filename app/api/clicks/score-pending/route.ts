@@ -17,6 +17,11 @@ import { scoreClicks, type ScoreMode } from "@/lib/links/score-clicks";
 // lambda is deliberately untouched; the .mmdb lives only here.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+// Pin to Frankfurt (eu-central-1), co-located with Supabase, so the thousands
+// of sequential DB round-trips this job makes don't cross the Atlantic (~90ms
+// each). Per-route only — do NOT set a global region; US-facing routes such as
+// the /r/[code] redirect must stay in the US region.
+export const preferredRegion = "fra1";
 
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET;
@@ -44,8 +49,11 @@ export async function GET(req: NextRequest) {
   // `clickers` engagement table so segment clicker rules see tracked clickers.
   // Idempotent + best-effort: a failure here must not fail the scoring run.
   let clickersInserted = 0;
+  let clickerWatermark: string | null = null;
   try {
-    clickersInserted = (await propagateTrackedClickers(db)).inserted;
+    const propagated = await propagateTrackedClickers(db);
+    clickersInserted = propagated.inserted;
+    clickerWatermark = propagated.watermarkTo;
   } catch (err) {
     console.error("score-pending: propagateTrackedClickers failed", err);
   }
@@ -62,5 +70,6 @@ export async function GET(req: NextRequest) {
     degraded: result.degraded,
     enrichment: result.enrichment,
     clickersInserted,
+    clickerWatermark,
   });
 }

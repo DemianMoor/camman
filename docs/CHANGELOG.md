@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-13 — Pin two DB-heavy cron routes to Frankfurt (fra1) — docs/06-integrations.md
+- Added `export const preferredRegion = "fra1"` to `/api/clicks/score-pending` and `/api/opt-outs/poll` only, co-locating them with the eu-central-1 Supabase DB to kill ~90ms transatlantic latency per round-trip (both jobs do thousands of sequential round-trips and were timing out at the 60s cap). Per-route segment export only — no global `regions` field in `vercel.json`, so `/r/[code]` and all other routes stay in the US region. `maxDuration` left at 60 (a post-move timeout stays visible as signal). No conflicting `preferredRegion`/`runtime` exports existed beforehand.
+
 ## 2026-07-10 — Telnyx Number Lookup, phases 5b + 6 UI — docs/04-features/phone-lookup-carrier
 - Upload lookup toggle (default ON) + review panel in `PhoneUploadForm` (six add paths, NOT opt-outs/remove); `/settings/lookup` admin (backfill preview + type-to-confirm >100k, settings, batches table with Est vs Billed, unmapped-carrier assign queue, bulk-update CSV); `phone_type`/`carrier` segment rule editors; campaign carrier filter multi-select + `carrier_removed` breakdown ("N removed as unidentified"); Contacts Type/Carrier columns + base-mix widget. New endpoints: `GET /api/telnyx/lookup/{batches,unmapped}`, `POST /api/telnyx/lookup/assign-mapping`, `GET|PATCH /api/telnyx/lookup/settings`, `GET /api/contacts/carrier-stats` (all permission-gated). Nav: Settings → Carrier Lookup. `next build` passes.
 

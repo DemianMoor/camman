@@ -1,7 +1,7 @@
-import { inArray, sql } from "drizzle-orm";
+import { inArray, sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
-import { campaign_stages, campaigns, keitaro_stage_results } from "@/db/schema";
+import { campaign_stages, campaigns } from "@/db/schema";
 import {
   CAMPAIGN_TIMEZONE,
   formatInCampaignTimezone,
@@ -363,57 +363,65 @@ export async function pollKeitaro(
     applyConversionRowToAggregate(aggFor(stage, tid, statDate), row);
   }
 
-  let upserted = 0;
-  let errored = 0;
-  for (const agg of aggregates.values()) {
+  // Collect one VALUES tuple per (stage, date) aggregate, then flush in chunked,
+  // batched INSERT … ON CONFLICT statements inside a single transaction — instead
+  // of one round-trip per aggregate. The old per-row loop fired ~one DB round-trip
+  // per (stage, day) — hundreds on a busy 3-day window — which, cross-region to the
+  // Frankfurt DB, overran the function's maxDuration and dropped the tail (new
+  // same-day stages never landed, so the report undercounted). Mirrors the batched
+  // write in poll-conversions.ts; the SET references EXCLUDED since each row updates
+  // to its own freshly-computed metrics. Column order below is load-bearing — it
+  // must match the INSERT column list exactly.
+  const rowVals: SQL[] = [...aggregates.values()].map((agg) => {
     // EPC is revenue per offer-redirect raw click (derived from the fold).
     const epc = agg.redirectRaw > 0 ? agg.revenue / agg.redirectRaw : 0;
     // Per-conversion payout, frozen onto the row so a later CPA edit can't
     // retro-change it. = revenue / conversions; NULL when there are no sales.
     const payoutAtConversion = agg.sales > 0 ? agg.revenue / agg.sales : null;
-    const values = {
-      visit_clicks_raw: agg.visitRaw,
-      visit_clicks_clean: agg.visitClean,
-      redirect_clicks_raw: agg.redirectRaw,
-      redirect_clicks_clean: agg.redirectClean,
-      // Mirror redirect totals into the legacy columns so the pre-5b column
-      // meaning (offer clicks) stays consistent for any back-compat reader.
-      raw_clicks: agg.redirectRaw,
-      clean_clicks: agg.redirectClean,
-      checkouts: agg.checkouts,
-      sales: agg.sales,
-      revenue: toNumericString(agg.revenue),
-      payout_at_conversion:
-        payoutAtConversion == null ? null : toNumericString(payoutAtConversion),
-      cost: toNumericString(agg.cost),
-      epc: toNumericString(epc),
-    };
+    // Legacy raw_clicks/clean_clicks mirror the redirect totals so the pre-5b
+    // column meaning (offer clicks) stays consistent for any back-compat reader.
+    return sql`(${agg.orgId}::uuid, ${agg.campaignId}::integer, ${agg.stageId}::integer, ${agg.tid}::text, ${agg.statDate}::date, ${agg.visitRaw}::integer, ${agg.visitClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.checkouts}::integer, ${agg.sales}::integer, ${toNumericString(agg.revenue)}::numeric, ${payoutAtConversion == null ? null : toNumericString(payoutAtConversion)}::numeric, ${toNumericString(agg.cost)}::numeric, ${toNumericString(epc)}::numeric)`;
+  });
+
+  let upserted = 0;
+  let errored = 0;
+  if (rowVals.length > 0) {
+    // 17 params/row ⇒ Postgres's 65535-param ceiling allows ~3855 rows/statement;
+    // 500 leaves ample headroom and matches poll-conversions. One transaction so
+    // the write is all-or-nothing even once multiple chunks engage (pooler-safe in
+    // transaction mode). now() evaluates once per batch — a consistent sync stamp.
+    const CHUNK = 500;
     try {
-      await database
-        .insert(keitaro_stage_results)
-        .values({
-          org_id: agg.orgId,
-          campaign_id: agg.campaignId,
-          stage_id: agg.stageId,
-          stage_tracking_id: agg.tid,
-          stat_date: agg.statDate,
-          ...values,
-        })
-        .onConflictDoUpdate({
-          target: [
-            keitaro_stage_results.org_id,
-            keitaro_stage_results.stage_id,
-            keitaro_stage_results.stat_date,
-          ],
-          set: {
-            stage_tracking_id: agg.tid,
-            ...values,
-            synced_at: sql`now()`,
-          },
-        });
-      upserted++;
+      await database.transaction(async (tx) => {
+        for (let i = 0; i < rowVals.length; i += CHUNK) {
+          const chunk = rowVals.slice(i, i + CHUNK);
+          await tx.execute(sql`
+            INSERT INTO keitaro_stage_results
+              (org_id, campaign_id, stage_id, stage_tracking_id, stat_date,
+               visit_clicks_raw, visit_clicks_clean, redirect_clicks_raw, redirect_clicks_clean,
+               raw_clicks, clean_clicks, checkouts, sales, revenue, payout_at_conversion, cost, epc)
+            VALUES ${sql.join(chunk, sql`, `)}
+            ON CONFLICT (org_id, stage_id, stat_date) DO UPDATE SET
+              stage_tracking_id     = EXCLUDED.stage_tracking_id,
+              visit_clicks_raw      = EXCLUDED.visit_clicks_raw,
+              visit_clicks_clean    = EXCLUDED.visit_clicks_clean,
+              redirect_clicks_raw   = EXCLUDED.redirect_clicks_raw,
+              redirect_clicks_clean = EXCLUDED.redirect_clicks_clean,
+              raw_clicks            = EXCLUDED.raw_clicks,
+              clean_clicks          = EXCLUDED.clean_clicks,
+              checkouts             = EXCLUDED.checkouts,
+              sales                 = EXCLUDED.sales,
+              revenue               = EXCLUDED.revenue,
+              payout_at_conversion  = EXCLUDED.payout_at_conversion,
+              cost                  = EXCLUDED.cost,
+              epc                   = EXCLUDED.epc,
+              synced_at             = now()
+          `);
+        }
+      });
+      upserted = rowVals.length;
     } catch {
-      errored++;
+      errored = rowVals.length;
     }
   }
 

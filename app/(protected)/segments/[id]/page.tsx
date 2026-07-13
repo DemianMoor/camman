@@ -736,13 +736,15 @@ export default function SegmentDetailPage() {
               Contacts already in your registry are reused; new phones are added
               to Contacts and assigned to this segment.
             </p>
+            {/* No carrier-lookup toggle on segment upload — a segment is a
+                targeting construct; enrichment happens via the contacts/upload
+                paths or the backfill, not on segment membership adds. */}
             <PhoneUploadForm
               endpoint={`/api/segments/${segment.id}/contacts/upload`}
               onSuccess={handleUploadSuccess}
               onCancel={() => setActiveTab("audience")}
               submitLabel="Add to segment"
               successLabel="Contacts added to segment"
-              enableLookup
             />
           </TabsContent>
         ) : null}

@@ -14,6 +14,13 @@ import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
 
+// Streams a chunked, content-deduped recipient query. Without an explicit
+// budget this ran on the platform default (~15s) and silently truncated the
+// CSV mid-stream on large stages (recon §6). Match the sibling exports
+// (export-clickers / export-contacts), which are already 60. Deeper fix of the
+// OFFSET pagination in the chunker is deferred to W3.
+export const maxDuration = 60;
+
 function parseId(idParam: string) {
   const n = Number(idParam);
   if (!Number.isInteger(n) || n <= 0) return null;

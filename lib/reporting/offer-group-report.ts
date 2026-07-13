@@ -93,11 +93,25 @@ export async function getOfferGroupReport(
 // Rebuild both matviews (CONCURRENTLY — non-blocking) and stamp the refresh log.
 // Called by the twice-daily cron. CONCURRENTLY must run outside a transaction, so
 // each statement is its own execute() call.
-export async function refreshOfferGroupReport(): Promise<void> {
+export type RefreshDurations = {
+  summaryMs: number;
+  groupMs: number;
+  totalMs: number;
+};
+
+// Both refreshes re-scan the full base tables and their cost grows with total
+// send/result history against a fixed 300s cron ceiling (recon §5). Return
+// per-view durations so the caller can log growth over time and alert on
+// failure instead of failing silently.
+export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
+  const t0 = Date.now();
   await db.execute(sql`refresh materialized view concurrently offer_report_org_summary_mv`);
+  const t1 = Date.now();
   await db.execute(sql`refresh materialized view concurrently offer_group_report_mv`);
+  const t2 = Date.now();
   await db.execute(sql`
     update report_refresh_log set refreshed_at = now()
     where view_name in ('offer_group_report_mv', 'offer_report_org_summary_mv')
   `);
+  return { summaryMs: t1 - t0, groupMs: t2 - t1, totalMs: Date.now() - t0 };
 }

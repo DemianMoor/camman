@@ -69,15 +69,17 @@ async function main() {
   const ctx = await loadClassifierContext(true); // preview/apply always use v2 semantics
 
   if (APPLY) {
-    // (1) normalized_carrier from raw_response — free, idempotent.
+    // (1) normalized_carrier from raw_response — free, idempotent. RETURNING so the
+    // count is the rows ACTUALLY updated (a bare UPDATE returns no rows → logs 0).
     const nc = await db.execute(sql`
       UPDATE phone_lookups
       SET normalized_carrier = COALESCE(
         NULLIF(TRIM(raw_response->'carrier'->>'normalized_carrier'), ''),
         NULLIF(TRIM(raw_response->>'normalized_carrier'), '')
       )
-      WHERE normalized_carrier IS NULL AND raw_response IS NOT NULL`);
-    console.log(`normalized_carrier backfilled where present in raw_response (rows scanned: ${nc.length ?? "n/a"})`);
+      WHERE normalized_carrier IS NULL AND raw_response IS NOT NULL
+      RETURNING phone`);
+    console.log(`normalized_carrier backfilled on ${nc.length} rows (from raw_response)`);
 
     // (2) rollback snapshot of contacts.carrier_norm (only once).
     await db.execute(sql`
@@ -86,11 +88,14 @@ async function main() {
         carrier_norm text NOT NULL,
         snapped_at timestamptz NOT NULL DEFAULT now()
       )`);
-    const snap = await db.execute(sql`
+    await db.execute(sql`
       INSERT INTO carrier_norm_backfill_snapshot (contact_id, carrier_norm)
       SELECT id, carrier_norm FROM contacts
       ON CONFLICT (contact_id) DO NOTHING`);
-    console.log(`contacts.carrier_norm snapshot rows: ${snap.length ?? "(existing snapshot kept)"}`);
+    // Total snapshot size (idempotent: a re-run adds nothing) — the rollback source.
+    const snap = await db.execute<{ n: number }>(sql`
+      SELECT COUNT(*)::int AS n FROM carrier_norm_backfill_snapshot`);
+    console.log(`carrier_norm_backfill_snapshot total rows: ${snap[0]?.n ?? 0} (rollback source)`);
   }
 
   const before = new Map<string, number>();

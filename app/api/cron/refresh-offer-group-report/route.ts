@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { notifyTelegram } from "@/lib/alerts/telegram";
 import { refreshOfferGroupReport } from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
@@ -15,8 +16,36 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   if (!secret || (!bearer && !headerSecret)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  await refreshOfferGroupReport();
-  return NextResponse.json({ ok: true });
+
+  const startedAt = Date.now();
+  try {
+    const durations = await refreshOfferGroupReport();
+    // Log runtime every run so we can watch it grow toward the 300s ceiling.
+    console.log(
+      `[refresh-offer-group-report] ok summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} totalMs=${durations.totalMs}`,
+    );
+    return NextResponse.json({ ok: true, durations });
+  } catch (err) {
+    // Previously this failed silently against a growing ~27s refresh. Fire a
+    // Tier-1 Telegram alert with duration + error, then surface a 500 so the
+    // scheduler flags red too. notifyTelegram is best-effort (never throws);
+    // awaiting it ensures delivery before the serverless invocation ends.
+    const elapsedMs = Date.now() - startedAt;
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[refresh-offer-group-report] FAILED after ${elapsedMs}ms:`,
+      err,
+    );
+    await notifyTelegram(
+      `🔴 Tier-1: offer-group-report matview refresh FAILED after ${(
+        elapsedMs / 1000
+      ).toFixed(1)}s\nError: ${message}`,
+    );
+    return NextResponse.json(
+      { error: "refresh_failed", detail: message },
+      { status: 500 },
+    );
+  }
 }
 
 export async function GET(req: NextRequest) { return handle(req); }

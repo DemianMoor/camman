@@ -994,6 +994,17 @@ export function StageForm({
   const audienceEmpty =
     audiencePreview !== null && audiencePreview.count === 0;
 
+  // Single action context shared by the sticky top bar AND the bottom bar so
+  // both are driven by the exact same handlers + disabled state — no duplicated
+  // logic, guaranteed in sync. Also handed to a host-supplied renderActions.
+  const actionCtx: StageFormActionContext = {
+    isEdit,
+    isSubmitting,
+    onSave: handleSave,
+    onCancel,
+    saveBlockedReason: destinationError,
+  };
+
   return (
     <Form {...form}>
       <form
@@ -1022,13 +1033,30 @@ export function StageForm({
             onCancel();
           }
         }}
-        className="grid gap-6"
+        className="grid gap-4"
         noValidate
       >
+        {/* Sticky top action bar — pins to the top of the editor while
+            scrolling. Shares actionCtx with the bottom bar. top-0 because the
+            app header (layout.tsx) is not sticky, so nothing needs clearing.
+            z-20 sits under the portaled Select popovers (z-50). */}
+        <StageActionBar ctx={actionCtx} position="top" />
+
         {/* ============ Two-column body ============ */}
-        <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-          <div className="grid min-w-0 gap-4">
-            {/* Essentials — inline label + input */}
+        {/* items-start: the right rail is taller than the main column, and
+            without this the grid stretches the main cell to match — then, since
+            a grid's align-content defaults to `stretch`, that extra height is
+            distributed as gaps BETWEEN the sections (the big void under Tracking
+            ID, the gap under the SALES heading). items-start keeps each cell at
+            its natural height; content-start on the column below packs its
+            sections to the top so any slack trails at the bottom. */}
+        <div className="grid items-start gap-4 lg:grid-cols-[1fr_320px]">
+          <div className="grid min-w-0 content-start gap-3">
+            {/* Essentials. Left stack (Label + Tracking ID) and right stack
+                (Scheduled + presets/notes) are two INDEPENDENT vertical stacks in
+                a single items-start row — neither cell stretches to the other's
+                height, so any leftover space is just trailing at the bottom of the
+                shorter column, not a void between fields. */}
             <div className="grid items-start gap-4 sm:grid-cols-2">
               {/* Label + Tracking ID, stacked in the left column */}
               <div className="space-y-3">
@@ -1131,12 +1159,19 @@ export function StageForm({
           <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             Sales page & URLs
           </span>
-          {/* Row 1: Creative + Sales page packed in left col, Stop text in right col */}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="creative_id"
+          {/* Left column ([Creative | Sales page] then Short URL) and right
+              column (Stop text then Full URL) are two INDEPENDENT vertical stacks
+              joined by one items-start 2-col split — neither column is height-
+              coupled to the other, so a short field is never stretched to a tall
+              neighbour. Every field keeps its original column + order; the two
+              columns simply no longer align row-to-row. */}
+          <div className="grid gap-3 sm:grid-cols-2 sm:items-start">
+            {/* Left column */}
+            <div className="grid min-w-0 gap-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <FormField
+                  control={form.control}
+                  name="creative_id"
                 render={() => (
                   <FormItem>
                     <FormLabel>Creative</FormLabel>
@@ -1172,7 +1207,7 @@ export function StageForm({
                         can read what they selected in one place. Hidden
                         until a creative is actually picked. */}
                     {selectedCreative ? (
-                      <div className="mt-1 rounded-md border bg-muted/40 px-2.5 py-1.5 text-xs">
+                      <div className="mt-1 rounded-md border bg-muted/40 px-2 py-1 text-xs">
                         <div className="mb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                           Creative text
                         </div>
@@ -1186,9 +1221,9 @@ export function StageForm({
                 )}
               />
 
-              <FormField
-                control={form.control}
-                name="sales_page_label"
+                <FormField
+                  control={form.control}
+                  name="sales_page_label"
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Sales page</FormLabel>
@@ -1223,27 +1258,12 @@ export function StageForm({
                   </FormItem>
                 )}
               />
-            </div>
-
-            <FormField
-              control={form.control}
-              name="stop_text"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel required>Stop text</FormLabel>
-                  <FormControl>
-                    <Input disabled={isSubmitting} {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </div>
-          {/* Row 2: Short URL + Full URL aligned with the 2-col grid above */}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <FormField
-              control={form.control}
-              name="short_url"
+              </div>
+              {/* Short URL — full-half width in the left column, directly under
+                  the Creative / Sales-page row. */}
+              <FormField
+                control={form.control}
+                name="short_url"
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Short URL</FormLabel>
@@ -1264,11 +1284,26 @@ export function StageForm({
                   <FormMessage />
                 </FormItem>
               )}
-            />
-
-            <FormField
-              control={form.control}
-              name="full_url"
+              />
+            </div>
+            {/* Right column */}
+            <div className="grid min-w-0 gap-3">
+              <FormField
+                control={form.control}
+                name="stop_text"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel required>Stop text</FormLabel>
+                    <FormControl>
+                      <Input disabled={isSubmitting} {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="full_url"
               render={({ field }) => (
                 <FormItem>
                   <div className="flex items-center justify-between">
@@ -1335,12 +1370,16 @@ export function StageForm({
                   <FormMessage />
                 </FormItem>
               )}
-            />
+              />
+            </div>
           </div>
         </div>
 
         {/* ============ Provider, phone & audience filters ============ */}
-        <div className="grid gap-3 border-t pt-3 sm:grid-cols-2">
+        {/* Provider/Phone (left) and Audience filters (right) are two independent
+            column stacks in a single items-start 2-col — the shorter column just
+            trails space at its bottom instead of stretching to the other's height. */}
+        <div className="grid gap-3 border-t pt-3 sm:grid-cols-2 sm:items-start">
           {/* Left: Provider & Phone */}
           <div className="grid gap-3">
             <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -1437,7 +1476,7 @@ export function StageForm({
             </div>
           </div>
 
-          {/* Right: Audience filters */}
+          {/* Audience filters */}
           <div className="grid gap-3">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -1501,13 +1540,38 @@ export function StageForm({
             </p>
           </div>
         </div>
+
+        {/* Notes — moved here from the right rail (bottom of the left column) so
+            the Results card sits higher in the rail. */}
+        <div className="grid gap-3 border-t pt-3">
+          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Notes
+          </span>
+          <FormField
+            control={form.control}
+            name="notes"
+            render={({ field }) => (
+              <FormItem>
+                <FormControl>
+                  <Textarea
+                    rows={2}
+                    placeholder="Anything to remember for this stage"
+                    disabled={isSubmitting}
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
           </div>
 
           {/* ============ Right aside: previews + results ============ */}
-          <aside className="grid min-w-0 gap-3 lg:sticky lg:top-4 lg:self-start">
+          <aside className="grid min-w-0 gap-2 lg:sticky lg:top-4 lg:self-start">
             {/* SMS preview */}
-            <Card>
-              <CardContent className="grid gap-2 p-3 text-sm">
+            <Card size="sm">
+              <CardContent className="grid gap-1.5 p-2.5 text-sm">
                 <div className="flex items-center justify-between">
                   <div className="text-xs uppercase text-muted-foreground">
                     SMS preview
@@ -1564,8 +1628,8 @@ export function StageForm({
             </Card>
 
             {/* Stage audience preview */}
-            <Card>
-              <CardContent className="grid gap-2 p-3 text-sm">
+            <Card size="sm">
+              <CardContent className="grid gap-1.5 p-2.5 text-sm">
                 <div className="flex items-center justify-between">
                   <div className="text-xs uppercase text-muted-foreground">
                     Stage audience
@@ -1732,36 +1796,10 @@ export function StageForm({
               </CardContent>
             </Card>
 
-            {/* Notes */}
-            <Card>
-              <CardContent className="grid gap-2 p-3 text-sm">
-                <div className="text-xs uppercase text-muted-foreground">
-                  Notes
-                </div>
-                <FormField
-                  control={form.control}
-                  name="notes"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormControl>
-                        <Textarea
-                          rows={2}
-                          placeholder="Anything to remember for this stage"
-                          disabled={isSubmitting}
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </CardContent>
-            </Card>
-
             {/* Results (edit mode only) */}
             {isEdit && resultsCounters ? (
-              <Card>
-                <CardContent className="grid gap-2 p-3 text-sm">
+              <Card size="sm">
+                <CardContent className="grid gap-1.5 p-2.5 text-sm">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs uppercase text-muted-foreground">
                       Results
@@ -1845,34 +1883,9 @@ export function StageForm({
         </div>
 
         {renderActions ? (
-          renderActions({
-            isEdit,
-            isSubmitting,
-            onSave: handleSave,
-            onCancel,
-            saveBlockedReason: destinationError,
-          })
+          renderActions(actionCtx)
         ) : (
-          <div className="flex items-center justify-end gap-2 pt-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onCancel}
-              disabled={isSubmitting}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              disabled={isSubmitting || !!destinationError}
-              title={destinationError ?? undefined}
-            >
-              {isSubmitting ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden />
-              ) : null}
-              {isEdit ? "Save changes" : "Create stage"}
-            </Button>
-          </div>
+          <StageActionBar ctx={actionCtx} position="bottom" />
         )}
       </form>
 
@@ -2050,6 +2063,57 @@ export function StageForm({
 }
 
 // =============== Sub-components ===============
+
+// Save/Cancel bar rendered in TWO places (sticky top + bottom of the form) from
+// one shared StageFormActionContext. Both Save buttons are type="submit" so they
+// trip the form's onSubmit → handleSave; disabled state + blocked-reason tooltip
+// come straight from the shared ctx, so the two bars can never disagree.
+function StageActionBar({
+  ctx,
+  position,
+}: {
+  ctx: StageFormActionContext;
+  position: "top" | "bottom";
+}) {
+  const { isEdit, isSubmitting, onCancel, saveBlockedReason } = ctx;
+  const top = position === "top";
+  return (
+    <div
+      className={cn(
+        "flex items-center justify-end gap-2",
+        top
+          ? "sticky top-0 z-20 -mx-4 -mt-4 mb-1 border-b bg-card px-4 py-2"
+          : "pt-2",
+      )}
+    >
+      {top ? (
+        <span className="mr-auto text-sm font-medium">
+          {isEdit ? "Edit stage" : "New stage"}
+        </span>
+      ) : null}
+      <Button
+        type="button"
+        variant="outline"
+        size={top ? "sm" : "default"}
+        onClick={onCancel}
+        disabled={isSubmitting}
+      >
+        Cancel
+      </Button>
+      <Button
+        type="submit"
+        size={top ? "sm" : "default"}
+        disabled={isSubmitting || !!saveBlockedReason}
+        title={saveBlockedReason ?? undefined}
+      >
+        {isSubmitting ? (
+          <Loader2 className="size-4 animate-spin" aria-hidden />
+        ) : null}
+        {isEdit ? "Save changes" : "Create stage"}
+      </Button>
+    </div>
+  );
+}
 
 // Renders a small color dot + score number for the creative picker.
 // Green = not_spam, red = spam, gray = no cached score yet.

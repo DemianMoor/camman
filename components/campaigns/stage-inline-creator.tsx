@@ -195,7 +195,10 @@ export function StageInlineEditor({
     : "New stage";
 
   return (
-    <Card>
+    // overflow-visible (Card defaults to overflow-hidden) so the form's
+    // sticky top action bar can pin to the viewport instead of being clipped
+    // by the card's own overflow context.
+    <Card className="overflow-visible">
       <CardHeader className="flex flex-row items-center justify-between border-b py-2">
         <span className="text-sm font-medium">{headerTitle}</span>
         <Button

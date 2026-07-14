@@ -117,7 +117,7 @@ export async function runCarrierTriage(): Promise<TriageSummary> {
       apiCalls++;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await bumpAttempts(batch.map((b) => b.match_key), msg);
+      await recordBatchError(batch.map((b) => b.match_key), msg);
       if (err instanceof Anthropic.RateLimitError) {
         await notifyTelegram(
           `⚠️ Carrier triage rate-limited beyond backoff (${msg}). Paused for this run; ${batch.length} strings still pending.`,
@@ -237,13 +237,18 @@ async function markNeedsHuman(
   }
 }
 
-// A transport/API failure isn't a classification verdict: keep the rows pending but
-// count the attempt so a persistently-failing string eventually parks itself.
-async function bumpAttempts(matchKeys: string[], error: string): Promise<void> {
+// A transport/API failure is GLOBAL/transient (rate limit, 5xx, a disabled org),
+// not the string's fault — so record the error for visibility but DON'T consume the
+// per-string attempt budget. The rows stay pending and self-heal on the next run
+// once the API recovers, instead of being permanently stranded after MAX_ATTEMPTS
+// global failures. (Per-string verdict failures still park via markNeedsHuman, which
+// does bump attempts.) Trade-off: a batch whose CONTENT always 400s would retry
+// indefinitely — but the Telegram alert fires every run, surfacing it for a human.
+async function recordBatchError(matchKeys: string[], error: string): Promise<void> {
   for (const k of matchKeys) {
     await db.execute(sql`
       UPDATE carrier_classify_queue
-      SET attempts = attempts + 1, last_error = ${error.slice(0, 500)}, updated_at = now()
+      SET last_error = ${error.slice(0, 500)}, updated_at = now()
       WHERE match_key = ${k}`);
   }
 }

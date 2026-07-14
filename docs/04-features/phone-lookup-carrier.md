@@ -32,7 +32,7 @@ Plus two non-bucket states (migration 0099):
 
 ## Carrier resolution v2 — resolver chain + AI triage (migrations 0104–0105)
 
-`carrier_norm` is resolved by the **single shared classifier** `classifyCarrier` ([lib/carrier/classify.ts](../../lib/carrier/classify.ts)) — used by the lookup worker, CSV import, manual upload, and backfill alike (no second classifier). Gated by `lookup_settings.carrier_resolver_v2` (**default false**): until the flag is flipped, every path keeps the exact v1 behaviour (exact `carrier_mappings` lookup only). The buckets are **unchanged** (the six above).
+`carrier_norm` is resolved by the **single shared classifier** `classifyCarrier` ([lib/carrier/classify.ts](../../lib/carrier/classify.ts)) — used by the lookup worker, CSV import, and manual upload alike (no second classifier). Gated by `lookup_settings.carrier_resolver_v2` (**default false**): until the flag is flipped, every path keeps the exact v1 behaviour (exact `carrier_mappings` lookup only). The buckets are **unchanged** (the six above).
 
 **Chain (v2, first hit wins):**
 1. **Telnyx `normalized_carrier`** — Telnyx's own network-normalized name (newly stored on `phone_lookups`; populated ~39% of the time). Resolves opaque legacy names (`OMNIPOINT` → T-Mobile) that raw-string matching can't. Itself run through the mapping/pattern layers (a value like `"Verizon Wireless"` → `Verizon`).
@@ -101,32 +101,50 @@ The `AND messaging_status = 'eligible'` gate is threaded in as a **SQL literal**
 
 Active-pool reads (`computeStageAudienceCount*`, lane counts) need no gate — landlines never enter `campaign_audience_pool`. Verified: `scripts/test-eligible-gate.ts` (landline drops out of the segment audience but stays in contacts; partial-index selection via `EXPLAIN` + `enable_seqscan=off`). **Deferred:** re-run the `EXPLAIN` comparison after the 500-number calibration batch and again after backfill, once `not_applicable` rows exist, to confirm the planner chooses the partial indexes naturally for broad reads too.
 
-## Upload & backfill backend (phase 5 — API + helpers)
+## Upload backend (phase 5 — API + helpers)
+
+> **Scope:** lookups are always **scoped** — a bounded subset of existing contacts (an upload, a contact group, or a matched list). There is **no full-database / "backfill everything" pathway**; the former `POST backfill`/`backfill/preview` routes, `lib/telnyx/backfill.ts`, and the `run-lookup-calibration` script were removed (feat/targeted-lookups). Scoped enqueues share the same worker, daily cap, lease, and balance gate.
 
 Endpoints under `/api/telnyx/lookup/` (all in `lib/telnyx/`):
 - `POST preview` (`lookup.run`, operator+) — review-panel data for an upload: rows-in-file → unique (same-file dupes collapsed), valid/invalid, cached (free)/new, estimated cost, live balance. Read-only.
 - `POST enqueue` (`lookup.run`) — enqueue uploaded numbers (`trigger='upload'`, dedup vs cache/pending). Called by the upload UI after contacts insert when the toggle is ON — decoupled from the per-entity upload routes so ONE endpoint covers every phone-upload path.
-- `POST backfill/preview` + `POST backfill` (`lookup.admin`, manager+) — distinct non-archived phones needing a lookup, contact count, archived-excluded, cost, balance, daily-cap ETA; the run takes an optional `sampleLimit` that **randomly samples** (not first-N). The **500-number calibration run uses `sampleLimit=500` through this exact path** — no separate script. `confirm:true` required.
 - `POST csv-update` (`lookup.admin`) — bulk-update existing contacts from predefined `line_type`/`carrier` (`importCsvLookups`): writes `phone_lookups` `source='csv_import'` (never overwriting a `telnyx` row) + syncs. No Telnyx calls.
 
 Precedence/coercion (verified `scripts/test-lookup-uploads.ts`): `telnyx` wins, `csv_import` never overwrites it; type-without-carrier → `Unknown`; landline → `Unknown`; garbage `line_type` → `unknown` (never rejected); predefined rows are excluded from the enqueue (`predefinedPhonesOf`) so the toggle never double-spends. Toggle OFF → contacts keep the `Unidentified` default (no enqueue).
 
-**Backfill is re-runnable — re-runs cost only the delta.** `runBackfill` selects phones with NO `phone_lookups` row, and enqueue dedups against cache-complete, so a completed number is skipped for free; only new contacts and previously-failed numbers (which write no row) are picked up again. Safe to run repeatedly.
-
-**Calibration / on-demand drain** (while the `*/2` cron isn't deployed on the branch): `npx tsx scripts/run-lookup-calibration.ts [sampleLimit=500] [orgId?]` — enqueues a random sample via the real `runBackfill` path, drives `runLookupWorker` until the batch drains, prints the batch row each pass, and lists the unmapped-carrier queue at the end. Prereqs: `DATABASE_URL` + `TELNYX_API_KEY` in `.env.local` (spends real money). The 500-number calibration is `sampleLimit=500`.
+**Enqueue is always delta-only — re-runs cost only the delta.** The shared enqueue path (`enqueueNormalized`) dedups against cache-complete + already-pending in one `INSERT … SELECT`, so a completed number is skipped for free; only new contacts and previously-failed numbers (which write no row) are ever re-enqueued. Safe to trigger repeatedly for any scoped set.
 
 **Cost model note (calibration finding 2026-07-10).** The rate-computed cost over-estimates: the 500-number calibration billed a flat $0.75 (base $0.0015 × 500) vs the model's $1.92. So the batch Telegram summary now reports **`Est (rate): $X · Billed (ledger): $Y`**, where `Billed` = Telnyx **balance delta** (before/after, migration 0102 columns `lookup_batches.balance_before_usd`/`balance_after_usd`) — the truth source.
 
 **`lookup_rate_mobile` set to 0 — PROVISIONAL.** This is inferred from the balance delta and the **absence of Mcc/Mnc records in the Telnyx Usage Report**, which had **not yet posted the calibration data** at the time — it is NOT confirmed that `type=carrier` never incurs the mobile surcharge. Restore to `0.0025` if the report later shows Mcc/Mnc lines for the calibration.
 
-**⚠️ Full-backfill preflight (before authorizing the full run):** re-check the Telnyx Usage Report for **both** the Number Lookup **(Lrn)** and **(Mcc/Mnc)** lines on the calibration date. **If Mcc/Mnc shows ~466 records**, the surcharge did apply after all → restore `lookup_rate_mobile = 0.0025` and re-quote the budget before running. Also (Phase-5b) the cost preview should use the **live observed line-type mix** from `phone_lookups` (base ran ~93% mobile) instead of the 35% `DEFAULT_MOBILE_SHARE`.
+**⚠️ Rate/estimate follow-ups (non-blocking):** if the Telnyx Usage Report later shows **(Mcc/Mnc)** lines alongside the Number Lookup **(Lrn)** line on the calibration date (~466 records), the mobile surcharge did apply → restore `lookup_rate_mobile = 0.0025`. Separately, the cost preview still uses the 35% `DEFAULT_MOBILE_SHARE` rather than the **live observed line-type mix** from `phone_lookups` (base ran ~93% mobile). Neither is authoritative — actual spend surfaces on the batch **Est vs Billed** (ledger) line, so scoped-run previews are labeled "provisional".
 
 **Interim visibility (no admin UI yet):** batch progress = `SELECT status, processed, failed, actual_cost_usd FROM lookup_batches ORDER BY created_at DESC`; unmapped-carrier queue = `SELECT carrier_raw, COUNT(*) FROM phone_lookups WHERE carrier_norm='Unmapped' GROUP BY 1 ORDER BY 2 DESC`; completion also fires a Telegram summary.
 
+## Targeted (scoped) lookups — group action + upload-existing list
+
+Two scoped entry points feed the **same** queue/worker/cap/lease/balance machinery
+— the only new thing is how a bounded set of contacts gets onto the queue. Both
+are **manager-gated** (`lookup.admin`) on UI and route; both enqueue under
+`trigger='upload'` (the `lookup_batches.trigger` CHECK allows only
+`upload|backfill|csv_update`, so scoped runs reuse `'upload'` to stay
+no-schema-change). Cached/already-pending numbers are never re-enqueued
+(no double-spend); there is no "re-look-up" path (only-missing by design).
+
+- **Look up this group** — per-row action on the Stats Panel table.
+  - `GET /api/telnyx/lookup/group-preview?groupId=` → `previewGroupLookup` ([lib/telnyx/preview.ts](../../lib/telnyx/preview.ts)): `remaining` (**exactly** the Stats Panel "Remaining un-looked-up" predicate — `contacts` is unique on `(org_id, phone_number)`, so distinct-phone == contact count), `already_queued`, `to_enqueue = remaining − already_queued`, provisional `est_cost_usd`, live balance, `eta_days = ceil(to_enqueue / daily_cap)`, `large_run` (> 25k). Read-only.
+  - `POST /api/telnyx/lookup/enqueue-group` → `enqueueGroup(orgId, groupId, 'upload')` ([lib/telnyx/enqueue.ts](../../lib/telnyx/enqueue.ts)): **set-based** `INSERT … SELECT` sourced directly from the group join (never round-trips 100K+ phones through the app) with the identical cache-complete + already-pending guards as `enqueueNormalized`. Same batch semantics; the worker drains it identically.
+- **Look up a list of existing numbers** — its own card on `/settings/lookup`. Matches a pasted/CSV list against **existing contacts only** — never creates contacts.
+  - `POST /api/telnyx/lookup/match-preview` → `previewMatchList`: breakdown `matched / not_found (skipped) / already_looked_up (free) / to_enqueue`, cost, balance, ETA. `matchExistingContacts` ([lib/telnyx/match-list.ts](../../lib/telnyx/match-list.ts)) normalizes E.164 (`validatePhonesBatch`) + dedups + org-scoped `contacts` match (chunked).
+  - `POST /api/telnyx/lookup/enqueue-matched` → **re-matches server-side** (never trusts a client match set), then `enqueueNormalized(matchedPhones, 'upload')`. Returns `{ …EnqueueResult, matched, not_found, already_looked_up, already_queued }`; not-found numbers are reported, never enqueued, never created.
+- **Large-run guard:** `to_enqueue > LARGE_RUN_THRESHOLD` (25,000, `lib/telnyx/preview.ts`) escalates the confirm to a type-to-confirm ("LOOKUP") — still allowed (the operator chose the scope), just scale-conscious. Preview always shows count, live balance, and days-to-drain at the shared cap; a large group simply drains over multiple days.
+- **Cost caveat:** the estimate is **provisional** (`lookup_rate_mobile` provisional; 35% mobile-share estimate) — labeled as such; actual spend surfaces on the batch **Est vs Billed** ledger line.
+
 ## UI (phases 5b + 6)
 
-- **Upload lookup toggle + review panel** — `PhoneUploadForm` gains `enableLookup` (checkbox default ON): on submit it POSTs `/api/telnyx/lookup/preview` → shows a review panel (rows→unique dedupe, valid/invalid, cached/new, est cost, live balance with a red under-balance warning) → Confirm runs the normal upload then best-effort `/api/telnyx/lookup/enqueue`. Wired on the six add paths (contacts / opt-ins / clickers / contact-group-add / segment / campaign uploads); **NOT on opt-outs/upload or any remove/STOP-intake/side-effect path** (never-messaged numbers). Side-effect-created contacts are enriched by the re-runnable backfill.
-- **Carrier Lookup admin** — `/settings/lookup` (manager+): backfill (preview + optional random `sampleLimit` + type-to-confirm >100k), settings (pause/cap/rates/concurrency), recent batches table (Est vs Billed), unmapped-carrier queue (assign → `assignCarrierMapping`), and bulk-update-existing CSV. Nav under Settings → Carrier Lookup.
+- **Upload lookup toggle + review panel** — `PhoneUploadForm` gains `enableLookup` (checkbox default ON): on submit it POSTs `/api/telnyx/lookup/preview` → shows a review panel (rows→unique dedupe, valid/invalid, cached/new, est cost, live balance with a red under-balance warning) → Confirm runs the normal upload then best-effort `/api/telnyx/lookup/enqueue`. Wired on the six add paths (contacts / opt-ins / clickers / contact-group-add / segment / campaign uploads); **NOT on opt-outs/upload or any remove/STOP-intake/side-effect path** (never-messaged numbers). Side-effect-created contacts are enriched later via a scoped "look up this group" run.
+- **Carrier Lookup admin** — `/settings/lookup` (manager+): coverage-by-group stats panel (with a per-row **Look up** action → group-preview dialog → enqueue), a **Look up a list of existing numbers** card (paste/CSV → match-preview → enqueue-matched), settings (pause/cap/rates/concurrency), recent batches table (Est vs Billed), unmapped-carrier queue (assign → `assignCarrierMapping`), and bulk-update-existing CSV. Nav under Settings → Carrier Lookup. (See "Targeted (scoped) lookups" above.)
 - **Segment rules** — `phone_type` / `carrier` value editors in the Rules panel (multi-select; phone_type shows only "is").
 - **Campaign carrier filter** — optional multi-select in the campaign audience step; the preview shows "N removed as unidentified" + per-bucket removals from `carrier_removed`.
 - **Contacts screen** — Type + Carrier columns (landline shown as "Landline / Not applicable" — the one screen landlines stay visible) + a base-mix stats widget (`/api/contacts/carrier-stats`).

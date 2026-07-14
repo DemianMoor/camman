@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-07-10_
+_Last updated: 2026-07-14_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -79,6 +79,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - **Segment carrier rule:** both `Unknown` and `Unidentified` are selectable (`Unknown`→`('Unknown','Unmapped')`, `Unidentified`→itself).
 - **Reporting** (Telegram summaries, contacts stats widget, audience preview) counts `Unidentified` and `Unknown` as **separate lines** everywhere.
 - **Precedence:** `telnyx` overwrites anything; `csv_import` never overwrites an existing `telnyx` row.
+- **Lookups are SCOPED-only — there is no full-database run.** Every lookup targets a bounded subset of existing contacts: an upload, a **contact group** ("Look up this group"), or a **matched list** ("Look up a list of existing numbers", existing contacts only — never creates contacts). The old whole-table "backfill everything" pathway was removed. All entry points enqueue into the one queue and drain under the one worker/cap/lease/balance gate; enqueue dedups against cache-complete + already-pending (never re-pays), and there is no re-look-up path (only-missing). Scoped enqueues use `trigger='upload'` (the `lookup_batches.trigger` CHECK is unchanged). Runs over 25k numbers get a heavier type-to-confirm; the preview always shows count, live balance, and days-to-drain at the cap. Cost estimates are **provisional** — real spend is the batch Est-vs-Billed (ledger) line.
 - **Landline cleanup cancels `stage_sends` `status='pending'` only — never `sending`** (mid-flight; deleting can't unsend and breaks the DLR match). The contact still becomes `not_applicable` for everything afterward.
 
 ## Content dedup & offer exposure (migration 0086 — see [04-features/content-dedup.md](04-features/content-dedup.md))

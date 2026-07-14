@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -45,26 +46,6 @@ import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
 
 // ===== Types =====
-
-type BackfillPreview = {
-  distinct_phones_needing: number;
-  contact_count: number;
-  archived_excluded: number;
-  sample_limit: number | null;
-  to_run: number;
-  est_cost_usd: number;
-  balance_usd: number | null;
-  daily_cap: number;
-  eta_days: number;
-};
-
-type BackfillRunResult = {
-  batchId: string;
-  total: number;
-  cacheHits: number;
-  enqueued: number;
-  estCostUsd: number;
-};
 
 type LookupSettings = {
   lookup_paused: boolean;
@@ -100,8 +81,56 @@ type CsvUpdateResult = {
   contacts_synced: number;
 };
 
-const TYPE_TO_CONFIRM_THRESHOLD = 100_000;
-const CONFIRM_WORD = "BACKFILL";
+// Targeted (scoped) lookup — client mirrors of lib/telnyx/preview + enqueue shapes.
+type GroupLookupPreview = {
+  group_id: number;
+  group_name: string | null;
+  remaining: number;
+  already_queued: number;
+  to_enqueue: number;
+  est_cost_usd: number;
+  balance_usd: number | null;
+  balance_error: string | null;
+  daily_cap: number;
+  eta_days: number;
+  large_run: boolean;
+};
+
+type MatchListPreview = {
+  rows_in: number;
+  unique_numbers: number;
+  valid: number;
+  invalid: number;
+  matched: number;
+  not_found: number;
+  already_looked_up: number;
+  already_queued: number;
+  to_enqueue: number;
+  est_cost_usd: number;
+  balance_usd: number | null;
+  balance_error: string | null;
+  daily_cap: number;
+  eta_days: number;
+  large_run: boolean;
+};
+
+type EnqueueResult = {
+  batchId: string;
+  total: number;
+  cacheHits: number;
+  enqueued: number;
+  estCostUsd: number;
+};
+
+type EnqueueMatchedResult = EnqueueResult & {
+  matched: number;
+  not_found: number;
+  already_looked_up: number;
+  already_queued: number;
+};
+
+// Word an operator types to confirm a large scoped run (> LARGE_RUN_THRESHOLD).
+const LARGE_RUN_CONFIRM_WORD = "LOOKUP";
 const LINE_TYPE_HINTS = ["mobile", "landline", "voip", "toll_free", "unknown"];
 // Bulk CSV rows are POSTed in chunks: one request with the whole file blows Vercel's
 // ~4.5MB serverless request-body limit (413) at ~60K+ rows, and the route caps at
@@ -134,7 +163,7 @@ export function LookupAdmin() {
   return (
     <div className="space-y-6">
       <LookupStatsSection />
-      <BackfillSection />
+      <UploadListSection />
       <SettingsSection />
       <BulkUpdateSection />
       <BatchesSection />
@@ -178,10 +207,15 @@ function num(n: number): string {
 function LookupStatsSection() {
   const loadApi = useApiCall<LookupStats>();
   const refreshApi = useApiCall<LookupStats>();
+  const groupPreviewApi = useApiCall<GroupLookupPreview>();
+  const enqueueGroupApi = useApiCall<EnqueueResult>();
   const { execute } = loadApi;
   const [stats, setStats] = useState<LookupStats | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("total");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [groupPreview, setGroupPreview] = useState<GroupLookupPreview | null>(null);
+  const [groupDialogOpen, setGroupDialogOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -206,6 +240,48 @@ function LookupStatsSection() {
     setStats(r.data);
     toast.success("Lookup stats refreshed");
   }
+
+  async function openGroupLookup(groupId: number) {
+    setGroupPreview(null);
+    setConfirmText("");
+    setGroupDialogOpen(true);
+    const r = await groupPreviewApi.execute(
+      `/api/telnyx/lookup/group-preview?groupId=${groupId}`,
+    );
+    if (!r.ok) {
+      toastApiError(r, "Couldn't load the group preview");
+      setGroupDialogOpen(false);
+      return;
+    }
+    setGroupPreview(r.data);
+  }
+
+  async function confirmGroupLookup() {
+    if (!groupPreview) return;
+    const r = await enqueueGroupApi.execute("/api/telnyx/lookup/enqueue-group", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ groupId: groupPreview.group_id }),
+    });
+    if (!r.ok) {
+      toastApiError(r, "Couldn't enqueue lookups");
+      return;
+    }
+    toast.success(
+      `Enqueued ${r.data.enqueued.toLocaleString()} number${
+        r.data.enqueued === 1 ? "" : "s"
+      } for "${groupPreview.group_name ?? "group"}" — the worker drains them at the daily cap`,
+    );
+    setGroupDialogOpen(false);
+    setGroupPreview(null);
+    setConfirmText("");
+  }
+
+  const groupNeedsHeavyConfirm = groupPreview?.large_run ?? false;
+  const groupConfirmReady =
+    groupPreview != null &&
+    groupPreview.to_enqueue > 0 &&
+    (!groupNeedsHeavyConfirm || confirmText === LARGE_RUN_CONFIRM_WORD);
 
   function toggleSort(k: SortKey) {
     if (k === sortKey) {
@@ -347,6 +423,7 @@ function LookupStatsSection() {
                         </button>
                       </th>
                     ))}
+                    <th className="px-2 py-2" aria-label="Actions" />
                   </tr>
                 </thead>
                 <tbody>
@@ -395,6 +472,22 @@ function LookupStatsSection() {
                             {num(g.remaining)}
                           </span>
                         </td>
+                        <td className="px-2 py-2 text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            onClick={() => openGroupLookup(g.group_id)}
+                            disabled={g.remaining === 0 || groupDialogOpen}
+                            title={
+                              g.remaining === 0
+                                ? "Nothing to look up — fully covered"
+                                : "Enqueue this group's un-looked-up numbers"
+                            }
+                          >
+                            Look up
+                          </Button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -409,93 +502,253 @@ function LookupStatsSection() {
           </>
         )}
       </CardContent>
+
+      <AlertDialog open={groupDialogOpen} onOpenChange={setGroupDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Look up{" "}
+              {groupPreview ? `"${groupPreview.group_name ?? "group"}"` : "group"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Enqueues this group&apos;s un-looked-up numbers into the existing
+              lookup queue. The worker drains them at the daily cap — cached
+              numbers are skipped and never re-paid. This doesn&apos;t run
+              inline.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {groupPreviewApi.isLoading || !groupPreview ? (
+            <p className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" aria-hidden /> Computing…
+            </p>
+          ) : (
+            <div className="grid gap-3">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                <Metric label="Un-looked-up" value={num(groupPreview.remaining)} />
+                <Metric
+                  label="To enqueue"
+                  value={num(groupPreview.to_enqueue)}
+                  sub={
+                    groupPreview.already_queued > 0
+                      ? `${num(groupPreview.already_queued)} already queued`
+                      : undefined
+                  }
+                />
+                <Metric
+                  label="Est. cost"
+                  value={usd(groupPreview.est_cost_usd)}
+                  sub="provisional"
+                />
+                <Metric
+                  label="Telnyx balance"
+                  value={usd(groupPreview.balance_usd)}
+                />
+                <Metric
+                  label="Time to drain"
+                  value={`~${num(groupPreview.eta_days)} day${
+                    groupPreview.eta_days === 1 ? "" : "s"
+                  }`}
+                  sub={`at ${num(groupPreview.daily_cap)}/day cap`}
+                />
+              </div>
+              {groupPreview.balance_usd !== null &&
+              groupPreview.balance_usd < groupPreview.est_cost_usd ? (
+                <p className="text-xs text-destructive">
+                  Estimated cost exceeds the available Telnyx balance (estimate is
+                  provisional; actual spend shows on the batch Est-vs-Billed line).
+                </p>
+              ) : null}
+              {groupPreview.to_enqueue === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  Nothing to enqueue — every number here is already looked up or
+                  already queued.
+                </p>
+              ) : null}
+              {groupNeedsHeavyConfirm ? (
+                <div className="grid gap-1.5 rounded-md border border-amber-300 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950/20">
+                  <Label htmlFor="group-confirm-word" className="text-amber-900 dark:text-amber-200">
+                    Large run — {num(groupPreview.to_enqueue)} numbers, ~
+                    {num(groupPreview.eta_days)} day
+                    {groupPreview.eta_days === 1 ? "" : "s"} to drain at the cap.
+                    Type{" "}
+                    <span className="font-mono font-semibold">
+                      {LARGE_RUN_CONFIRM_WORD}
+                    </span>{" "}
+                    to confirm.
+                  </Label>
+                  <Input
+                    id="group-confirm-word"
+                    value={confirmText}
+                    onChange={(e) => setConfirmText(e.target.value)}
+                    placeholder={LARGE_RUN_CONFIRM_WORD}
+                    autoComplete="off"
+                  />
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={enqueueGroupApi.isLoading}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void confirmGroupLookup();
+              }}
+              disabled={!groupConfirmReady || enqueueGroupApi.isLoading}
+            >
+              {enqueueGroupApi.isLoading ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+              ) : null}
+              {groupPreview && groupPreview.to_enqueue > 0
+                ? `Enqueue ${num(groupPreview.to_enqueue)}`
+                : "Enqueue"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }
 
-// ===== (a) Backfill =====
+// ===== (a) Upload a list to look up (existing numbers only) =====
 
-function BackfillSection() {
-  const previewApi = useApiCall<BackfillPreview>();
-  const runApi = useApiCall<BackfillRunResult>();
-  const [sampleLimit, setSampleLimit] = useState("");
-  const [preview, setPreview] = useState<BackfillPreview | null>(null);
+function UploadListSection() {
+  const previewApi = useApiCall<MatchListPreview>();
+  const enqueueApi = useApiCall<EnqueueMatchedResult>();
+  const [text, setText] = useState("");
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [preview, setPreview] = useState<MatchListPreview | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmText, setConfirmText] = useState("");
 
-  const sampleLimitValue = sampleLimit.trim() === "" ? null : Number(sampleLimit);
+  function handleFile(file: File) {
+    setFileName(file.name);
+    setPreview(null);
+    if (file.name.toLowerCase().endsWith(".csv")) {
+      // CSV: pull the phone column (or the first column if none is named).
+      Papa.parse<Record<string, string>>(file, {
+        header: true,
+        skipEmptyLines: true,
+        transformHeader: (h) => h.trim().toLowerCase(),
+        complete: (parsed) => {
+          const fields = parsed.meta.fields ?? [];
+          const key =
+            fields.find((f) =>
+              ["phone", "phone_number", "number", "mobile", "msisdn"].includes(f),
+            ) ?? fields[0];
+          const out: string[] = [];
+          for (const r of parsed.data) {
+            const v = (r[key] ?? "").trim();
+            if (v) out.push(v);
+          }
+          setText(out.join("\n"));
+        },
+        error: () => toast.error("Couldn't parse the CSV"),
+      });
+    } else {
+      // Plain text: one number per line (invalid tokens are reported, not run).
+      file
+        .text()
+        .then((t) => setText(t))
+        .catch(() => toast.error("Couldn't read the file"));
+    }
+  }
 
   async function handlePreview() {
     setPreview(null);
-    const r = await previewApi.execute("/api/telnyx/lookup/backfill/preview", {
+    const r = await previewApi.execute("/api/telnyx/lookup/match-preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sampleLimit: sampleLimitValue }),
+      body: JSON.stringify({ phones: text }),
     });
     if (!r.ok) {
-      toastApiError(r, "Couldn't preview backfill");
+      toastApiError(r, "Couldn't preview the list");
       return;
     }
     setPreview(r.data);
   }
 
-  const needsTypeToConfirm =
-    preview !== null && preview.to_run > TYPE_TO_CONFIRM_THRESHOLD;
-  const confirmReady = !needsTypeToConfirm || confirmText === CONFIRM_WORD;
-
-  async function handleRun() {
-    const r = await runApi.execute("/api/telnyx/lookup/backfill", {
+  async function handleConfirm() {
+    const r = await enqueueApi.execute("/api/telnyx/lookup/enqueue-matched", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sampleLimit: sampleLimitValue, confirm: true }),
+      body: JSON.stringify({ phones: text }),
     });
     if (!r.ok) {
-      toastApiError(r, "Couldn't start backfill");
+      toastApiError(r, "Couldn't enqueue lookups");
       return;
     }
+    const d = r.data;
     toast.success(
-      `Backfill queued — ${r.data.enqueued.toLocaleString()} number${
-        r.data.enqueued === 1 ? "" : "s"
-      } enqueued`,
+      `Enqueued ${d.enqueued.toLocaleString()} number${
+        d.enqueued === 1 ? "" : "s"
+      }${
+        d.not_found > 0
+          ? ` · ${d.not_found.toLocaleString()} weren't in the system (skipped, not created)`
+          : ""
+      }`,
     );
     setConfirmOpen(false);
     setConfirmText("");
     setPreview(null);
+    setText("");
+    setFileName(null);
   }
+
+  const needsHeavyConfirm = preview?.large_run ?? false;
+  const confirmReady =
+    !needsHeavyConfirm || confirmText === LARGE_RUN_CONFIRM_WORD;
 
   return (
     <Card>
       <CardHeader className="border-b py-3">
-        <CardTitle className="text-sm font-semibold">Backfill</CardTitle>
+        <CardTitle className="text-sm font-semibold">
+          Look up a list of existing numbers
+        </CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4 p-5">
         <p className="text-sm text-muted-foreground">
-          Look up carrier + line type for existing contacts that have never
-          been enriched. Preview the cost first; the worker drains the queue at
-          the configured daily cap.
+          Paste or upload numbers that <strong>already exist</strong> in the
+          system to enqueue carrier lookups for them. Numbers not found are
+          reported and skipped — this never creates contacts. Already-looked-up
+          numbers are skipped (free). Enqueues into the same worker queue,
+          drained at the daily cap.
         </p>
-        <div className="grid gap-1.5 sm:max-w-xs">
-          <Label htmlFor="sample-limit">Sample limit</Label>
-          <Input
-            id="sample-limit"
-            type="number"
-            min={1}
-            step={1}
-            placeholder="Blank = full backfill"
-            value={sampleLimit}
-            onChange={(e) => setSampleLimit(e.target.value)}
-            disabled={previewApi.isLoading || runApi.isLoading}
+
+        <div className="grid gap-1.5">
+          <Label htmlFor="list-numbers">Numbers</Label>
+          <Textarea
+            id="list-numbers"
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              setPreview(null);
+            }}
+            placeholder={"One per line, or comma/semicolon separated\n+12125550100\n+12125550101"}
+            className="min-h-28 font-mono text-xs"
+            disabled={previewApi.isLoading || enqueueApi.isLoading}
           />
-          <p className="text-xs text-muted-foreground">
-            Cap how many numbers to enqueue. Leave blank to enqueue everything
-            that needs a lookup.
-          </p>
         </div>
+
+        <FileDropZone
+          accept=".csv,.txt"
+          onFile={handleFile}
+          hint="…or click to select / drag a CSV or text file of numbers"
+          selectedSummary={fileName ? { name: fileName } : null}
+          disabled={previewApi.isLoading || enqueueApi.isLoading}
+        />
+
         <div>
           <Button
             variant="outline"
             onClick={handlePreview}
-            disabled={previewApi.isLoading || runApi.isLoading}
+            disabled={
+              text.trim() === "" || previewApi.isLoading || enqueueApi.isLoading
+            }
           >
             {previewApi.isLoading ? (
               <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -506,32 +759,56 @@ function BackfillSection() {
 
         {preview ? (
           <div className="grid gap-3 rounded-md border p-4">
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Metric label="Matched existing" value={num(preview.matched)} />
               <Metric
-                label="Needs lookup"
-                value={preview.distinct_phones_needing.toLocaleString()}
+                label="Not found (skipped)"
+                value={num(preview.not_found)}
               />
               <Metric
-                label="Contacts"
-                value={preview.contact_count.toLocaleString()}
+                label="Already looked up"
+                value={num(preview.already_looked_up)}
+                sub="free"
               />
               <Metric
-                label="Archived excluded"
-                value={preview.archived_excluded.toLocaleString()}
+                label="To enqueue"
+                value={num(preview.to_enqueue)}
+                sub={
+                  preview.already_queued > 0
+                    ? `${num(preview.already_queued)} already queued`
+                    : undefined
+                }
               />
-              <Metric label="To run" value={preview.to_run.toLocaleString()} />
-              <Metric label="Est. cost" value={usd(preview.est_cost_usd)} />
-              <Metric label="Balance" value={usd(preview.balance_usd)} />
+              <Metric
+                label="Est. cost"
+                value={usd(preview.est_cost_usd)}
+                sub="provisional"
+              />
+              <Metric label="Telnyx balance" value={usd(preview.balance_usd)} />
+              <Metric
+                label="Time to drain"
+                value={`~${num(preview.eta_days)} day${
+                  preview.eta_days === 1 ? "" : "s"
+                }`}
+                sub={`at ${num(preview.daily_cap)}/day cap`}
+              />
+              <Metric
+                label="Invalid / unique"
+                value={`${num(preview.invalid)} / ${num(preview.unique_numbers)}`}
+              />
             </div>
-            <p className="text-xs text-muted-foreground">
-              At {preview.daily_cap.toLocaleString()}/day: ~
-              {preview.eta_days.toLocaleString()} day
-              {preview.eta_days === 1 ? "" : "s"} to finish.
-            </p>
             {preview.balance_usd !== null &&
             preview.balance_usd < preview.est_cost_usd ? (
               <p className="text-xs text-destructive">
-                Estimated cost exceeds the available Telnyx balance.
+                Estimated cost exceeds the available Telnyx balance (estimate is
+                provisional; actual spend shows on the batch Est-vs-Billed line).
+              </p>
+            ) : null}
+            {preview.not_found > 0 ? (
+              <p className="text-xs text-muted-foreground">
+                {num(preview.not_found)} number
+                {preview.not_found === 1 ? "" : "s"} weren&apos;t found in the
+                system and will be skipped — no contacts are created.
               </p>
             ) : null}
             <div>
@@ -540,9 +817,9 @@ function BackfillSection() {
                   setConfirmText("");
                   setConfirmOpen(true);
                 }}
-                disabled={runApi.isLoading || preview.to_run === 0}
+                disabled={enqueueApi.isLoading || preview.to_enqueue === 0}
               >
-                Run backfill
+                Enqueue {num(preview.to_enqueue)}
               </Button>
             </div>
           </div>
@@ -553,45 +830,57 @@ function BackfillSection() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Run backfill for {preview?.to_run.toLocaleString() ?? 0} numbers?
+              Enqueue {preview ? num(preview.to_enqueue) : 0} lookup
+              {preview?.to_enqueue === 1 ? "" : "s"}?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This enqueues {preview?.to_run.toLocaleString() ?? 0} Telnyx
-              lookups at an estimated cost of {usd(preview?.est_cost_usd ?? 0)}.
-              Cached numbers are free. The worker drains at the daily cap.
+              Enqueues {preview ? num(preview.to_enqueue) : 0} matched existing
+              number{preview?.to_enqueue === 1 ? "" : "s"} at an estimated{" "}
+              {usd(preview?.est_cost_usd ?? 0)} (provisional). Cached numbers are
+              free.{" "}
+              {preview && preview.not_found > 0
+                ? `${num(preview.not_found)} not-found number${
+                    preview.not_found === 1 ? "" : "s"
+                  } will be skipped (not created).`
+                : ""}{" "}
+              The worker drains at the daily cap.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {needsTypeToConfirm ? (
-            <div className="grid gap-1.5">
-              <Label htmlFor="confirm-word">
-                This is a large backfill. Type{" "}
-                <span className="font-mono font-semibold">{CONFIRM_WORD}</span>{" "}
+          {needsHeavyConfirm ? (
+            <div className="grid gap-1.5 rounded-md border border-amber-300 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950/20">
+              <Label htmlFor="list-confirm-word" className="text-amber-900 dark:text-amber-200">
+                Large run — {preview ? num(preview.to_enqueue) : 0} numbers, ~
+                {preview ? num(preview.eta_days) : 0} day
+                {preview?.eta_days === 1 ? "" : "s"} to drain at the cap. Type{" "}
+                <span className="font-mono font-semibold">
+                  {LARGE_RUN_CONFIRM_WORD}
+                </span>{" "}
                 to confirm.
               </Label>
               <Input
-                id="confirm-word"
+                id="list-confirm-word"
                 value={confirmText}
                 onChange={(e) => setConfirmText(e.target.value)}
-                placeholder={CONFIRM_WORD}
+                placeholder={LARGE_RUN_CONFIRM_WORD}
                 autoComplete="off"
               />
             </div>
           ) : null}
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={runApi.isLoading}>
+            <AlertDialogCancel disabled={enqueueApi.isLoading}>
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();
-                void handleRun();
+                void handleConfirm();
               }}
-              disabled={!confirmReady || runApi.isLoading}
+              disabled={!confirmReady || enqueueApi.isLoading}
             >
-              {runApi.isLoading ? (
+              {enqueueApi.isLoading ? (
                 <Loader2 className="size-4 animate-spin" aria-hidden />
               ) : null}
-              Run backfill
+              Enqueue
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

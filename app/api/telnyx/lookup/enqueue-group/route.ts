@@ -4,19 +4,17 @@ import { z } from "zod";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
-import { runBackfill } from "@/lib/telnyx/backfill";
+import { enqueueGroup } from "@/lib/telnyx/enqueue";
 
+// Set-based INSERT..SELECT over the group; heavier than a small upload at scale.
 export const maxDuration = 60;
 
-const schema = z.object({
-  sampleLimit: z.number().int().positive().max(10_000_000).nullable().optional(),
-  confirm: z.literal(true),
-});
+const schema = z.object({ groupId: z.number().int().positive() });
 
-// Kick a lookup backfill batch over the org's non-archived phones lacking a lookup.
-// An optional sampleLimit RANDOMLY samples that many (the 500-number calibration run
-// uses sampleLimit=500 through this exact path — no separate script). Requires
-// confirm:true. Permission: manager+ (lookup.admin).
+// Enqueue a contact group's remaining un-looked-up numbers into the existing
+// lookup queue (trigger='upload', dedup vs cache-complete + already-pending). The
+// existing worker drains it under the existing daily cap / lease / balance gate —
+// no new pipeline. Never runs inline. Permission: manager+ (lookup.admin).
 export async function POST(req: NextRequest) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -31,7 +29,7 @@ export async function POST(req: NextRequest) {
   }
   const parsed = schema.safeParse(json);
   if (!parsed.success) {
-    return apiError(400, parsed.error.issues[0]?.message ?? "confirm:true required", API_ERROR_CODES.VALIDATION);
+    return apiError(400, "groupId (positive integer) required", API_ERROR_CODES.VALIDATION);
   }
-  return NextResponse.json(await runBackfill(auth.orgId, parsed.data.sampleLimit ?? null));
+  return NextResponse.json(await enqueueGroup(auth.orgId, parsed.data.groupId, "upload"));
 }

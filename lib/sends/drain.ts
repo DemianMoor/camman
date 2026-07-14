@@ -19,7 +19,9 @@ import { classifyAttempt } from "@/lib/sends/classify-attempt";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
 import { getOrgSendsEnabled, getOrgSendsPaused } from "@/lib/sends/org-send-flag";
 import { resolveProviderApiKey } from "@/lib/sends/provider-credential";
-import { buildSendUrl, sendSms as realSendSms, type SendSmsResult } from "@/lib/sends/texthub";
+import { getAdapter, UnknownProviderError } from "@/lib/sends/providers/registry";
+import type { NormalizedSendParams } from "@/lib/sends/providers/types";
+import { buildSendUrl, type SendSmsResult } from "@/lib/sends/texthub";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -60,6 +62,7 @@ export type DrainRefusal =
   | "send_paused_org" // org_settings.sends_paused — the emergency hard-stop
   | "provider_paused" // the latching circuit breaker is engaged for this provider
   | "no_provider"
+  | "unknown_provider" // provider row's sms_provider_id has no registered adapter (G3)
   | "no_credentials";
 
 export interface DrainResult {
@@ -102,6 +105,17 @@ function envSendEnabled(): boolean {
 // just yields wall-clock against the 300s budget.
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Resolve the send function for a stage's provider. Injected fake (verify-drain)
+// wins for determinism; otherwise the registry adapter's bound send. Throws
+// UnknownProviderError for an unregistered key — the caller maps it to the
+// `unknown_provider` refusal (G3: never a raw throw out of the drain run).
+export function resolveSenderForStage(providerKey: string, injected?: Sender): Sender {
+  if (injected) return injected;
+  const adapter = getAdapter(providerKey);
+  return ({ apiKey, text, number, leadId }) =>
+    adapter.send({ apiKey, text, recipientE164: number, senderNumber: null, leadId });
 }
 
 const EMPTY = {
@@ -153,7 +167,6 @@ export async function runStageDrain(
     concurrency?: number;
   },
 ): Promise<DrainResult> {
-  const sendSms = opts.sendSms ?? realSendSms;
   const isEnabled = opts.isEnabled ?? envSendEnabled;
   const isOrgEnabled =
     opts.isOrgEnabled ?? ((orgId: string) => getOrgSendsEnabled(dbc, orgId));
@@ -163,6 +176,7 @@ export async function runStageDrain(
 
   const ctx = (await dbc.execute(sql`
     SELECT s.sms_provider_id AS provider_id,
+           p.sms_provider_id AS provider_key,
            s.send_approved    AS send_approved,
            c.org_id           AS org_id,
            c.brand_id         AS brand_id,
@@ -181,6 +195,7 @@ export async function runStageDrain(
     LIMIT 1
   `)) as unknown as {
     provider_id: number | null;
+    provider_key: string | null;
     send_approved: boolean;
     org_id: string;
     brand_id: number | null;
@@ -216,6 +231,28 @@ export async function runStageDrain(
     brandId: stage.brand_id,
   });
   if (!apiKey) return { ok: false, reason: "no_credentials", ...EMPTY };
+
+  let sendSms: Sender;
+  // Resolved alongside sendSms, once, and reused for the per-attempt redaction
+  // below. When a sender is injected (verify-drain's test seam),
+  // resolveSenderForStage never calls getAdapter — its synthetic sms_providers
+  // rows carry a disposable unique key (needed to satisfy the DB's
+  // sms_provider_id UNIQUE constraint across many isolated breaker-test
+  // providers), not a real "texthub"/"ahoi" key. Redaction is audit evidence
+  // only, so the injected path keeps the raw TextHub URL shape (pre-registry
+  // behavior, G2) instead of requiring a registry hit. A real (non-injected)
+  // drain always resolves the adapter above first and would already have
+  // returned `unknown_provider` before ever reaching a send.
+  let buildRedacted: (p: NormalizedSendParams) => string;
+  try {
+    sendSms = resolveSenderForStage(stage.provider_key ?? "", opts.sendSms);
+    buildRedacted = opts.sendSms
+      ? (p) => buildSendUrl({ apiKey: p.apiKey, text: p.text, number: p.recipientE164, leadId: p.leadId })
+      : (p) => getAdapter(stage.provider_key ?? "").buildRedactedRequest(p);
+  } catch (e) {
+    if (e instanceof UnknownProviderError) return { ...EMPTY, ok: false, reason: "unknown_provider" };
+    throw e;
+  }
 
   const providerId = stage.provider_id;
   const orgId = stage.org_id;
@@ -425,10 +462,11 @@ export async function runStageDrain(
           messageId: res.messageId,
           timedOut: res.timedOut,
         });
-        const requestRedacted = buildSendUrl({
+        const requestRedacted = buildRedacted({
           apiKey: `redacted_${keyLast4}`,
           text: c.rendered_text,
-          number: c.phone,
+          recipientE164: c.phone,
+          senderNumber: null,
           leadId: c.lead_id,
         });
         const attemptNumber = attemptsById.get(c.id) ?? 1;

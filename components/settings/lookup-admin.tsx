@@ -103,6 +103,10 @@ type CsvUpdateResult = {
 const TYPE_TO_CONFIRM_THRESHOLD = 100_000;
 const CONFIRM_WORD = "BACKFILL";
 const LINE_TYPE_HINTS = ["mobile", "landline", "voip", "toll_free", "unknown"];
+// Bulk CSV rows are POSTed in chunks: one request with the whole file blows Vercel's
+// ~4.5MB serverless request-body limit (413) at ~60K+ rows, and the route caps at
+// 100K rows. 20K rows/chunk (~1.5MB) stays comfortably under both.
+const CSV_UPLOAD_CHUNK = 20_000;
 
 function usd(n: number | string | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -1156,6 +1160,10 @@ function BulkUpdateSection() {
   const [fileName, setFileName] = useState<string | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
   const [result, setResult] = useState<CsvUpdateResult | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(
+    null,
+  );
 
   function handleFile(file: File) {
     setParseError(null);
@@ -1202,20 +1210,51 @@ function BulkUpdateSection() {
   }
 
   async function handleSubmit() {
-    if (rows.length === 0) return;
-    const r = await importApi.execute("/api/telnyx/lookup/csv-update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows }),
-    });
-    if (!r.ok) {
-      toastApiError(r, "Couldn't update contacts");
-      return;
+    if (rows.length === 0 || submitting) return;
+    setSubmitting(true);
+    setResult(null);
+    const agg: CsvUpdateResult = {
+      submitted: 0,
+      valid: 0,
+      invalid: 0,
+      written: 0,
+      skipped_telnyx: 0,
+      contacts_synced: 0,
+    };
+    setProgress({ done: 0, total: rows.length });
+    // POST in chunks so a large file doesn't exceed the 4.5MB body / 100K-row limits.
+    // The upsert is idempotent, so a mid-run failure is safe to re-run from the file.
+    for (let i = 0; i < rows.length; i += CSV_UPLOAD_CHUNK) {
+      const chunk = rows.slice(i, i + CSV_UPLOAD_CHUNK);
+      const r = await importApi.execute("/api/telnyx/lookup/csv-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: chunk }),
+      });
+      if (!r.ok) {
+        setProgress(null);
+        setSubmitting(false);
+        toastApiError(
+          r,
+          `Couldn't update contacts (stopped after ${agg.submitted.toLocaleString()} of ${rows.length.toLocaleString()} rows — safe to retry)`,
+        );
+        if (agg.submitted > 0) setResult(agg);
+        return;
+      }
+      agg.submitted += r.data.submitted;
+      agg.valid += r.data.valid;
+      agg.invalid += r.data.invalid;
+      agg.written += r.data.written;
+      agg.skipped_telnyx += r.data.skipped_telnyx;
+      agg.contacts_synced += r.data.contacts_synced;
+      setProgress({ done: Math.min(i + CSV_UPLOAD_CHUNK, rows.length), total: rows.length });
     }
-    setResult(r.data);
+    setProgress(null);
+    setSubmitting(false);
+    setResult(agg);
     toast.success(
-      `Updated ${r.data.written.toLocaleString()} lookup${
-        r.data.written === 1 ? "" : "s"
+      `Updated ${agg.written.toLocaleString()} lookup${
+        agg.written === 1 ? "" : "s"
       }`,
     );
   }
@@ -1272,13 +1311,19 @@ function BulkUpdateSection() {
                 value={withCarrier.toLocaleString()}
               />
             </div>
-            <div>
-              <Button onClick={handleSubmit} disabled={importApi.isLoading}>
-                {importApi.isLoading ? (
+            <div className="flex items-center gap-3">
+              <Button onClick={handleSubmit} disabled={submitting}>
+                {submitting ? (
                   <Loader2 className="size-4 animate-spin" aria-hidden />
                 ) : null}
                 Update {rows.length.toLocaleString()} contacts
               </Button>
+              {progress ? (
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  Uploading {progress.done.toLocaleString()} /{" "}
+                  {progress.total.toLocaleString()} rows…
+                </span>
+              ) : null}
             </div>
           </div>
         ) : null}

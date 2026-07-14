@@ -2731,6 +2731,23 @@ export const lookup_settings = pgTable("lookup_settings", {
 export type LookupSettings = typeof lookup_settings.$inferSelect;
 export type NewLookupSettings = typeof lookup_settings.$inferInsert;
 
+// Migration 0106: per-org cache for the Lookup Stats Panel. One row per org; `data`
+// holds the whole { summary, groups[] } blob written atomically. Refreshed on a
+// TTL / manual "Refresh now"; a failed recompute leaves the prior row intact.
+export const lookup_group_stats_cache = pgTable("lookup_group_stats_cache", {
+  org_id: uuid("org_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  data: jsonb("data").notNull(),
+  computed_at: timestamp("computed_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export type LookupGroupStatsCache = typeof lookup_group_stats_cache.$inferSelect;
+export type NewLookupGroupStatsCache =
+  typeof lookup_group_stats_cache.$inferInsert;
+
 // Migration 0104: broad, seeded regex rules matched against the NORMALIZED carrier
 // key (resolver chain step 3 — a fallback after the exact carrier_mappings lookup).
 // Global; policy-less RLS (server-only, phone_lookups precedent).

@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-07-13_
+_Last updated: 2026-07-14_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -19,6 +19,7 @@ Every domain table carries `org_id UUID → organizations.id` and an index on it
 > - **`carrier_classify_queue`** _(migration 0105)_ — distinct unresolved normalized carrier strings (PK `match_key`, `raw_example`, `status` ∈ `pending`/`ai_resolved`/`needs_human`/`human_resolved`, `confidence`, `attempts`, `last_error`) awaiting async AI triage. `contact_count` derived on read (never stored).
 > - **`lookup_settings`** — account-global single row (boolean PK fixed `true`): `lookup_paused`, `lookup_daily_cap`, `lookup_rate_base`, `lookup_rate_mobile`, `lookup_concurrency_rps`, `worker_lease_until`, `carrier_resolver_v2` (chain feature flag, default false), `carrier_ai_run_cap` (triage per-run API-call breaker, default 200). Rates admin-editable (Telnyx has no pricing API).
 > - **`carrier_norm_backfill_snapshot`** — created on demand by the v2 backfill (`scripts/backfill-carrier-v2.ts --apply`) to snapshot `contacts.carrier_norm` before recompute (rollback source).
+> - **`lookup_group_stats_cache`** _(migration 0106)_ — per-org cache for the Lookup Stats Panel (PK `org_id`, `data` jsonb = the whole `{summary, groups[]}` blob, `computed_at`). The ~2s full-population coverage/suppression aggregate is cached here; the panel reads it in ~46ms. Written atomically (single upsert) so a failed refresh leaves the prior row intact. RLS: own-org SELECT (`current_org_id()`), server-only writes. Reversible/additive.
 > - **`lookup_batches`** (org-scoped, reporting only) + **`lookup_queue`** (worker state, no `org_id`, claimed `FOR UPDATE SKIP LOCKED`).
 > - **`contacts`** gains `line_type`, `carrier_norm` (default `Unidentified` = no `phone_lookups` row yet; migration 0099 split the former `Unknown` into `Unidentified` vs looked-up-but-`Unknown`), and `messaging_status` (`eligible`/`not_applicable`). `messaging_status` is the DB-enforced landline hard stop, derived by trigger `contacts_derive_messaging_status` (`line_type='landline' ⇒ not_applicable`, else `eligible`). Trigger, not a generated column, so `ADD COLUMN` is metadata-only (no rewrite at scale). Four **eligible-partial** indexes `(org_id[, …]) WHERE messaging_status='eligible'` back the hot paths (built concurrently via `scripts/apply-eligible-indexes-concurrent.ts`, 0088 pattern); the pre-existing non-partial indexes stay for the Contacts admin screen (the one place landlines remain visible). Every audience/segment/send query adds `AND messaging_status='eligible'`.
 > - **`stage_sends`** gains `carrier_norm` (stamped at send time; future per-carrier analytics; no report reads it yet).

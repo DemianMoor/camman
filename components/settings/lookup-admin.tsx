@@ -1,7 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowUpDown,
+  CheckCircle2,
+  Loader2,
+  RefreshCw,
+} from "lucide-react";
 import Papa from "papaparse";
 import { toast } from "sonner";
 
@@ -123,6 +129,7 @@ export function LookupAdmin() {
   }
   return (
     <div className="space-y-6">
+      <LookupStatsSection />
       <BackfillSection />
       <SettingsSection />
       <BulkUpdateSection />
@@ -130,6 +137,275 @@ export function LookupAdmin() {
       <TriageQueueSection />
       <UnmappedSection />
     </div>
+  );
+}
+
+// ===== (0) Lookup stats panel — coverage + suppression per contact group =====
+
+type StatGroup = {
+  group_id: number;
+  name: string;
+  total: number;
+  looked_up: number;
+  telnyx: number;
+  manual: number;
+  coverage_pct: number;
+  landlines: number;
+  opt_outs: number;
+  sendable: number;
+  remaining: number;
+};
+type StatSummary = Omit<StatGroup, "group_id" | "name"> & { groups: number };
+type LookupStats = {
+  data: { summary: StatSummary; groups: StatGroup[] };
+  computed_at: string;
+  stale: boolean;
+};
+
+// A group is flagged "needs a lookup run" when >50% of it has no carrier lookup.
+const UNLOOKED_FLAG_RATIO = 0.5;
+
+type SortKey = keyof Omit<StatGroup, "group_id" | "name"> | "name";
+
+function num(n: number): string {
+  return n.toLocaleString();
+}
+
+function LookupStatsSection() {
+  const loadApi = useApiCall<LookupStats>();
+  const refreshApi = useApiCall<LookupStats>();
+  const { execute } = loadApi;
+  const [stats, setStats] = useState<LookupStats | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("total");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const r = await execute("/api/telnyx/lookup/group-stats");
+      if (!cancelled && r.ok) setStats(r.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [execute]);
+
+  async function handleRefresh() {
+    const r = await refreshApi.execute("/api/telnyx/lookup/group-stats/refresh", {
+      method: "POST",
+    });
+    if (!r.ok) {
+      // Prior data is preserved server-side; keep showing it, just surface the failure.
+      toastApiError(r, "Refresh failed — still showing the last good data");
+      return;
+    }
+    setStats(r.data);
+    toast.success("Lookup stats refreshed");
+  }
+
+  function toggleSort(k: SortKey) {
+    if (k === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(k);
+      setSortDir(k === "name" ? "asc" : "desc");
+    }
+  }
+
+  const sortedGroups = useMemo(() => {
+    const g = stats?.data.groups ?? [];
+    return [...g].sort((a, b) => {
+      const av = a[sortKey];
+      const bv = b[sortKey];
+      const cmp =
+        typeof av === "string" && typeof bv === "string"
+          ? av.localeCompare(bv)
+          : Number(av) - Number(bv);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [stats, sortKey, sortDir]);
+
+  const computedAt = stats ? new Date(stats.computed_at) : null;
+  const isStale = stats?.stale ?? false;
+  const s = stats?.data.summary;
+
+  const cols: { key: SortKey; label: string; className?: string }[] = [
+    { key: "name", label: "Group", className: "text-left" },
+    { key: "total", label: "Total" },
+    { key: "looked_up", label: "Looked up" },
+    { key: "coverage_pct", label: "Coverage %" },
+    { key: "telnyx", label: "Telnyx / Manual" },
+    { key: "landlines", label: "Landlines suppressed" },
+    { key: "sendable", label: "Sendable" },
+    { key: "remaining", label: "Remaining un-looked-up" },
+  ];
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-3 border-b py-3">
+        <div className="flex flex-col">
+          <CardTitle className="text-sm font-semibold">
+            Lookup coverage by contact group
+          </CardTitle>
+          <span className="mt-0.5 flex items-center gap-1.5 text-xs">
+            {computedAt ? (
+              <>
+                <span
+                  className={cn(
+                    "font-medium",
+                    isStale ? "text-amber-700" : "text-muted-foreground",
+                  )}
+                >
+                  as of {formatCampaignDateTime(computedAt)}
+                </span>
+                {isStale ? (
+                  <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800">
+                    <AlertTriangle className="size-3" aria-hidden /> may be stale
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <span className="text-muted-foreground">not computed yet</span>
+            )}
+          </span>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleRefresh}
+          disabled={refreshApi.isLoading || loadApi.isLoading}
+        >
+          {refreshApi.isLoading ? (
+            <Loader2 className="size-4 animate-spin" aria-hidden />
+          ) : (
+            <RefreshCw className="size-4" aria-hidden />
+          )}
+          Refresh now
+        </Button>
+      </CardHeader>
+      <CardContent className="grid gap-4 p-5">
+        {!stats && loadApi.isLoading ? (
+          <p className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" aria-hidden /> Computing…
+          </p>
+        ) : !s ? (
+          <p className="py-4 text-sm text-muted-foreground">No data.</p>
+        ) : (
+          <>
+            {/* Summary strip — distinct contacts across all active groups */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+              <Metric label="Total contacts" value={num(s.total)} />
+              <Metric
+                label="Looked up"
+                value={`${num(s.looked_up)}`}
+                sub={`Telnyx ${num(s.telnyx)} · Manual ${num(s.manual)}`}
+              />
+              <Metric label="Landlines suppressed" value={num(s.landlines)} />
+              <Metric label="Sendable" value={num(s.sendable)} />
+              <Metric label="Remaining un-looked-up" value={num(s.remaining)} />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Summary counts each contact once. A contact in multiple groups is
+              counted in each group&apos;s row below.
+            </p>
+
+            {/* Per-group sortable table */}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b text-xs text-muted-foreground">
+                    {cols.map((c) => (
+                      <th
+                        key={c.key}
+                        className={cn(
+                          "px-2 py-2 font-medium",
+                          c.className ?? "text-right",
+                        )}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => toggleSort(c.key)}
+                          className={cn(
+                            "inline-flex items-center gap-1 hover:text-foreground",
+                            c.className === "text-left" ? "" : "flex-row-reverse",
+                          )}
+                        >
+                          {c.label}
+                          <ArrowUpDown
+                            className={cn(
+                              "size-3",
+                              sortKey === c.key
+                                ? "text-foreground"
+                                : "text-muted-foreground/40",
+                            )}
+                            aria-hidden
+                          />
+                        </button>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedGroups.map((g) => {
+                    const needsLookup =
+                      g.total > 0 && g.remaining / g.total > UNLOOKED_FLAG_RATIO;
+                    return (
+                      <tr
+                        key={g.group_id}
+                        className={cn(
+                          "border-b",
+                          needsLookup ? "bg-amber-50" : "",
+                        )}
+                      >
+                        <td className="px-2 py-2 text-left font-medium">
+                          {g.name}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {num(g.total)}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {num(g.looked_up)}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {g.coverage_pct}%
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums text-muted-foreground">
+                          {num(g.telnyx)} / {num(g.manual)}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {num(g.landlines)}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          {num(g.sendable)}
+                        </td>
+                        <td className="px-2 py-2 text-right tabular-nums">
+                          <span
+                            className={cn(
+                              "inline-flex items-center gap-1",
+                              needsLookup ? "font-semibold text-amber-800" : "",
+                            )}
+                          >
+                            {needsLookup ? (
+                              <AlertTriangle className="size-3.5" aria-hidden />
+                            ) : null}
+                            {num(g.remaining)}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Highlighted rows are more than 50% un-looked-up — run a carrier
+              lookup there before sending. Sendable = eligible contacts minus
+              suppressed landlines and opt-outs (the same audience a send targets).
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1048,11 +1324,24 @@ function BulkUpdateSection() {
 
 // ===== Shared =====
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+}) {
   return (
     <div className="rounded-md border bg-background p-2.5">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="text-lg font-semibold tabular-nums">{value}</div>
+      {sub ? (
+        <div className="mt-0.5 text-xs text-muted-foreground tabular-nums">
+          {sub}
+        </div>
+      ) : null}
     </div>
   );
 }

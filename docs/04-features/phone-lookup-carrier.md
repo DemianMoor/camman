@@ -1,6 +1,6 @@
 # Phone Lookup & Carrier Enrichment (Telnyx)
 
-_Last updated: 2026-07-13_
+_Last updated: 2026-07-14_
 
 > **Status: in build** (`feat/telnyx-number-lookup`). Phase 1 (schema) is authored; the worker, upload flows, segment/campaign wiring, and admin UI land in later phases. This doc is updated as each phase ships.
 
@@ -131,6 +131,14 @@ Precedence/coercion (verified `scripts/test-lookup-uploads.ts`): `telnyx` wins, 
 - **Campaign carrier filter** — optional multi-select in the campaign audience step; the preview shows "N removed as unidentified" + per-bucket removals from `carrier_removed`.
 - **Contacts screen** — Type + Carrier columns (landline shown as "Landline / Not applicable" — the one screen landlines stay visible) + a base-mix stats widget (`/api/contacts/carrier-stats`).
 - **Segment rules** `phone_type` / `carrier`; **campaign carrier filter** on `audience_filters`; **admin UI** (batches, unmapped queue, settings, Contacts columns + base-mix stats).
+
+## Lookup Stats Panel (coverage + suppression per contact group)
+
+A read-only reporting section at the top of `/settings/lookup` (`LookupStatsSection` in [components/settings/lookup-admin.tsx](../../components/settings/lookup-admin.tsx)) answering, per Contact Group: how much is looked up (Telnyx vs manual), how many landlines were suppressed, how many contacts are sendable, and how many still need a lookup run. **Coverage/suppression only — no cost/spend metric** (deferred until Telnyx per-lookup cost is confirmed).
+
+- **Definitions** ([lib/telnyx/lookup-stats.ts](../../lib/telnyx/lookup-stats.ts)): **Total** = contacts carrying the group (via `contact_contact_groups`; a multi-group contact counts per group). **Looked up** = a `phone_lookups` row exists, split by `source` (`telnyx` = API, `csv_import` = manual). **Landlines suppressed** = `line_type='landline'` (retained, `messaging_status='not_applicable'`). **Sendable** = `messaging_status='eligible'` AND NOT in the org's `opt_outs` set — **reuses the send-audience definition verbatim** ([lib/audience-snapshot.ts](../../lib/audience-snapshot.ts) / [lib/segment-rules-eval.ts](../../lib/segment-rules-eval.ts)). **Remaining un-looked-up** = Total − Looked up (the "run a lookup here" flag; rows >50% un-looked-up are highlighted).
+- **Disjoint reconciliation (permanent invariant):** columns partition the population so `total = sendable + landlines + opt_outs(non-landline)` and `telnyx + manual = looked_up`. `computeLookupGroupStats` **asserts this on every compute** (throws on drift), not just in tests — because `messaging_status='eligible' ⇔ line_type<>'landline'`, a future non-landline `not_applicable` reason would fail the assertion loudly rather than silently mis-count. The **summary strip** counts distinct contacts across active groups (multi-group deduped); per-group rows count per group.
+- **Perf / caching:** the aggregate is a ~2s full-population scan (750K+ contacts, opt-outs pre-hashed to a set like the audience builder), too heavy per page view. Cached per-org in `lookup_group_stats_cache` (migration 0106); the panel reads it in ~46ms with a prominent "as of ET" label + "may be stale" badge past the 15-min TTL, and a manager-only "Refresh now". **Fail-safe:** `refreshLookupGroupStats` computes FIRST, then does one atomic upsert of the whole blob — a failed recompute (query error or broken invariant) leaves the prior cache intact and returns 500, so the panel degrades to older data, never blank. `GET /api/telnyx/lookup/group-stats` (read/first-compute) + `POST …/refresh` (force), both manager+. Verified: `scripts/test-lookup-stats.ts`.
 
 ## Integration facts
 

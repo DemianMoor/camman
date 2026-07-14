@@ -750,6 +750,13 @@
       "when": 1785542400000,
       "tag": "0106_lookup_group_stats_cache",
       "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1785628800000,
+      "tag": "0107_seed_ahoi_provider",
+      "breakpoints": true
     }
   ]
 }

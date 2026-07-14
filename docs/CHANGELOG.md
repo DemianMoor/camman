@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-14 — Ahoi provider seeded (migration 0107) — docs/03-data-model.md
+
 ## 2026-07-14 — Targeted (scoped) lookups: group action + upload-existing list — docs/04-features/phone-lookup-carrier, docs/07-conventions
 - Two manager-gated entry points into the EXISTING lookup queue/worker/cap/lease/balance machinery. (A) "Look up this group" — per-row action on the Stats Panel (`GET group-preview` + `POST enqueue-group`); `enqueueGroup` is a set-based `INSERT..SELECT` from the group join (no phone round-trip at 100K+ scale) with the same cache-complete/already-pending guards. (B) "Look up a list of existing numbers" — new `/settings/lookup` card (`POST match-preview` + `POST enqueue-matched`); matches a pasted/CSV list against existing contacts ONLY, never creates contacts, re-matches server-side on enqueue. Only-missing (no re-lookup path); 25k large-run type-to-confirm; provisional cost (real spend on the Est-vs-Billed line). No schema change — scoped runs reuse `trigger='upload'` (the trigger CHECK is unchanged). New files: `lib/telnyx/match-list.ts`, four routes under `app/api/telnyx/lookup/`. Verified read-only against prod: preview.remaining == Stats Panel predicate (148,013) and the enqueueGroup query (rolled back) produces exactly to_enqueue rows; match splits real vs fabricated correctly and creates no contacts; gating rejects operator/viewer.
 

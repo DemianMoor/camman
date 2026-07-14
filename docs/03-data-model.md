@@ -182,6 +182,8 @@ erDiagram
 | `routing_types`, `traffic_types` | `*_id` (text uniq), `name` | campaign metadata dimensions |
 | `utm_tags` | `tag_id` (text uniq), `label`, `value_source`, `affiliate_network_id` | appended to stage Full URLs |
 
+> **Ahoi provider seed (migration `0107`)** — no schema change, a new `sms_providers` row (`sms_provider_id='ahoi'`, `supports_api_send=true`), seeded additively/idempotently via `ON CONFLICT (sms_provider_id) DO NOTHING` against the single `organizations` row. The approved number (`provider_phones`) and provider-default credential (`provider_credentials`, `brand_id IS NULL`) are seeded separately by `scripts/seed-ahoi-number-credential.ts` (reads `AHOI_API_TOKEN`, run after 0107 applies) since they carry env secrets and don't belong in a committed migration. Part of Section 1 of the Ahoi provider build (adapter registry + drain integration); `SEND_ENABLED` stays off and no Ahoi send code ships in this section — see `docs/superpowers/specs/2026-07-14-ahoi-sms-provider-phase-1-design.md`.
+
 ### Contacts & engagement
 | Table | Key columns | Notes |
 |-------|------------|-------|

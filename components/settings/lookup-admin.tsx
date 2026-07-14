@@ -13,16 +13,6 @@ import { toast } from "sonner";
 
 import { FileDropZone } from "@/components/file-drop-zone";
 import { useAuth } from "@/components/protected/auth-context";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -45,26 +35,6 @@ import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
 
 // ===== Types =====
-
-type BackfillPreview = {
-  distinct_phones_needing: number;
-  contact_count: number;
-  archived_excluded: number;
-  sample_limit: number | null;
-  to_run: number;
-  est_cost_usd: number;
-  balance_usd: number | null;
-  daily_cap: number;
-  eta_days: number;
-};
-
-type BackfillRunResult = {
-  batchId: string;
-  total: number;
-  cacheHits: number;
-  enqueued: number;
-  estCostUsd: number;
-};
 
 type LookupSettings = {
   lookup_paused: boolean;
@@ -100,8 +70,6 @@ type CsvUpdateResult = {
   contacts_synced: number;
 };
 
-const TYPE_TO_CONFIRM_THRESHOLD = 100_000;
-const CONFIRM_WORD = "BACKFILL";
 const LINE_TYPE_HINTS = ["mobile", "landline", "voip", "toll_free", "unknown"];
 // Bulk CSV rows are POSTed in chunks: one request with the whole file blows Vercel's
 // ~4.5MB serverless request-body limit (413) at ~60K+ rows, and the route caps at
@@ -134,7 +102,6 @@ export function LookupAdmin() {
   return (
     <div className="space-y-6">
       <LookupStatsSection />
-      <BackfillSection />
       <SettingsSection />
       <BulkUpdateSection />
       <BatchesSection />
@@ -409,193 +376,6 @@ function LookupStatsSection() {
           </>
         )}
       </CardContent>
-    </Card>
-  );
-}
-
-// ===== (a) Backfill =====
-
-function BackfillSection() {
-  const previewApi = useApiCall<BackfillPreview>();
-  const runApi = useApiCall<BackfillRunResult>();
-  const [sampleLimit, setSampleLimit] = useState("");
-  const [preview, setPreview] = useState<BackfillPreview | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [confirmText, setConfirmText] = useState("");
-
-  const sampleLimitValue = sampleLimit.trim() === "" ? null : Number(sampleLimit);
-
-  async function handlePreview() {
-    setPreview(null);
-    const r = await previewApi.execute("/api/telnyx/lookup/backfill/preview", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sampleLimit: sampleLimitValue }),
-    });
-    if (!r.ok) {
-      toastApiError(r, "Couldn't preview backfill");
-      return;
-    }
-    setPreview(r.data);
-  }
-
-  const needsTypeToConfirm =
-    preview !== null && preview.to_run > TYPE_TO_CONFIRM_THRESHOLD;
-  const confirmReady = !needsTypeToConfirm || confirmText === CONFIRM_WORD;
-
-  async function handleRun() {
-    const r = await runApi.execute("/api/telnyx/lookup/backfill", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sampleLimit: sampleLimitValue, confirm: true }),
-    });
-    if (!r.ok) {
-      toastApiError(r, "Couldn't start backfill");
-      return;
-    }
-    toast.success(
-      `Backfill queued — ${r.data.enqueued.toLocaleString()} number${
-        r.data.enqueued === 1 ? "" : "s"
-      } enqueued`,
-    );
-    setConfirmOpen(false);
-    setConfirmText("");
-    setPreview(null);
-  }
-
-  return (
-    <Card>
-      <CardHeader className="border-b py-3">
-        <CardTitle className="text-sm font-semibold">Backfill</CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-4 p-5">
-        <p className="text-sm text-muted-foreground">
-          Look up carrier + line type for existing contacts that have never
-          been enriched. Preview the cost first; the worker drains the queue at
-          the configured daily cap.
-        </p>
-        <div className="grid gap-1.5 sm:max-w-xs">
-          <Label htmlFor="sample-limit">Sample limit</Label>
-          <Input
-            id="sample-limit"
-            type="number"
-            min={1}
-            step={1}
-            placeholder="Blank = full backfill"
-            value={sampleLimit}
-            onChange={(e) => setSampleLimit(e.target.value)}
-            disabled={previewApi.isLoading || runApi.isLoading}
-          />
-          <p className="text-xs text-muted-foreground">
-            Cap how many numbers to enqueue. Leave blank to enqueue everything
-            that needs a lookup.
-          </p>
-        </div>
-        <div>
-          <Button
-            variant="outline"
-            onClick={handlePreview}
-            disabled={previewApi.isLoading || runApi.isLoading}
-          >
-            {previewApi.isLoading ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden />
-            ) : null}
-            Preview
-          </Button>
-        </div>
-
-        {preview ? (
-          <div className="grid gap-3 rounded-md border p-4">
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-              <Metric
-                label="Needs lookup"
-                value={preview.distinct_phones_needing.toLocaleString()}
-              />
-              <Metric
-                label="Contacts"
-                value={preview.contact_count.toLocaleString()}
-              />
-              <Metric
-                label="Archived excluded"
-                value={preview.archived_excluded.toLocaleString()}
-              />
-              <Metric label="To run" value={preview.to_run.toLocaleString()} />
-              <Metric label="Est. cost" value={usd(preview.est_cost_usd)} />
-              <Metric label="Balance" value={usd(preview.balance_usd)} />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              At {preview.daily_cap.toLocaleString()}/day: ~
-              {preview.eta_days.toLocaleString()} day
-              {preview.eta_days === 1 ? "" : "s"} to finish.
-            </p>
-            {preview.balance_usd !== null &&
-            preview.balance_usd < preview.est_cost_usd ? (
-              <p className="text-xs text-destructive">
-                Estimated cost exceeds the available Telnyx balance.
-              </p>
-            ) : null}
-            <div>
-              <Button
-                onClick={() => {
-                  setConfirmText("");
-                  setConfirmOpen(true);
-                }}
-                disabled={runApi.isLoading || preview.to_run === 0}
-              >
-                Run backfill
-              </Button>
-            </div>
-          </div>
-        ) : null}
-      </CardContent>
-
-      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Run backfill for {preview?.to_run.toLocaleString() ?? 0} numbers?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              This enqueues {preview?.to_run.toLocaleString() ?? 0} Telnyx
-              lookups at an estimated cost of {usd(preview?.est_cost_usd ?? 0)}.
-              Cached numbers are free. The worker drains at the daily cap.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {needsTypeToConfirm ? (
-            <div className="grid gap-1.5">
-              <Label htmlFor="confirm-word">
-                This is a large backfill. Type{" "}
-                <span className="font-mono font-semibold">{CONFIRM_WORD}</span>{" "}
-                to confirm.
-              </Label>
-              <Input
-                id="confirm-word"
-                value={confirmText}
-                onChange={(e) => setConfirmText(e.target.value)}
-                placeholder={CONFIRM_WORD}
-                autoComplete="off"
-              />
-            </div>
-          ) : null}
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={runApi.isLoading}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault();
-                void handleRun();
-              }}
-              disabled={!confirmReady || runApi.isLoading}
-            >
-              {runApi.isLoading ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden />
-              ) : null}
-              Run backfill
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </Card>
   );
 }

@@ -1,5 +1,5 @@
-// Phase 5 backend tests: csv_import precedence + coercions, backfill sampling,
-// preview dedupe. DB-level, test rows cleaned up in finally. No Telnyx HTTP.
+// Phase 5 backend tests: csv_import precedence + coercions, preview dedupe.
+// DB-level, test rows cleaned up in finally. No Telnyx HTTP.
 // Run: npx tsx scripts/test-lookup-uploads.ts
 import { config } from "dotenv";
 import { createRequire } from "node:module";
@@ -29,7 +29,6 @@ try {
 async function main() {
   const { importCsvLookups } = await import("@/lib/telnyx/csv-import");
   const { previewLookup } = await import("@/lib/telnyx/preview");
-  const { previewBackfill, runBackfill } = await import("@/lib/telnyx/backfill");
   const { pgArray } = await import("@/lib/telnyx/pg-array");
   const { db } = await import("@/db/client");
   const { sql: raw } = await import("@/db/client");
@@ -43,7 +42,6 @@ async function main() {
 
   const P = { mob: "+12122000001", noCarr: "+12122000002", land: "+12122000003", garbage: "+12122000004", telnyx: "+12122000005" };
   const all = Object.values(P);
-  const batchIds: string[] = [];
 
   try {
     // precondition: none of the test phones are real contacts (so sync touches nothing)
@@ -84,19 +82,7 @@ async function main() {
     eq(prev.invalid, 1, "invalid counted");
     eq(prev.cached, 1, "P.mob now cached (we wrote it above) → 1 cached");
     eq(prev.new_lookups, 0, "cached ⇒ 0 new lookups");
-
-    console.log("\nbackfill preview + sampled run:");
-    const org = await db.execute<{ id: string }>(sql`SELECT id FROM organizations LIMIT 1`);
-    const bp = await previewBackfill(org[0].id, 500);
-    eq(bp.to_run, Math.min(500, bp.distinct_phones_needing), "to_run = min(sampleLimit, needing)");
-    eq(bp.eta_days, bp.daily_cap > 0 ? Math.ceil(bp.to_run / bp.daily_cap) : 0, "eta_days = ceil(to_run / daily_cap)");
-    console.log(`  · needing=${bp.distinct_phones_needing} archived_excluded=${bp.archived_excluded} to_run=${bp.to_run} eta=${bp.eta_days}d`);
-    const run = await runBackfill(org[0].id, 2);
-    batchIds.push(run.batchId);
-    eq(run.enqueued <= 2, true, "sampled backfill enqueues ≤ sampleLimit (random sample, not first-N)");
   } finally {
-    // Deleting the batch cascades its lookup_queue rows (the 2 sampled real phones).
-    if (batchIds.length) await db.execute(sql`DELETE FROM lookup_batches WHERE id = ANY(${pgArray(batchIds, "uuid")})`);
     await db.execute(sql`DELETE FROM phone_lookups WHERE phone = ANY(${pgArray(all, "text")})`);
     await raw.end({ timeout: 5 });
   }

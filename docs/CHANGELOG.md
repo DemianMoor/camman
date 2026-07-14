@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-14 — Remove full-database backfill (scoped-only lookup model) — docs/04-features/phone-lookup-carrier
+- Removed the whole-database "backfill everything" pathway: `BackfillSection` UI (`components/settings/lookup-admin.tsx`), routes `POST /api/telnyx/lookup/backfill` + `backfill/preview`, `lib/telnyx/backfill.ts` (`runBackfill`/`previewBackfill`), and the `scripts/run-lookup-calibration.ts` whole-table sampler. Trimmed the backfill-only assertions out of `scripts/test-lookup-uploads.ts` (its csv_import/preview coverage stays). No schema change; shared enqueue core, worker, daily cap, lease + balance gates untouched. Lookups are now always scoped (upload / group / matched list). Isolated commit ahead of the targeted-lookups build.
+
 ## 2026-07-14 — Stage editor density + sticky top action bar + layout void fix (presentation-only) — docs/04-features/campaigns-stages-creatives
 - `stage-form.tsx`/`stage-inline-creator.tsx`: compact spacing pass; added a sticky top Save/Cancel bar sharing one action context with the bottom bar; moved Notes to the bottom of the left column so Results sits higher in the right rail. Fixed the persistent inter-section blank space — the tall right rail was stretching the main column and `align-content:stretch` (grid default) spread the slack as gaps between sections; fixed with `items-start` on the body grid + `content-start` on the main column. Editor `<Card>` set to `overflow-visible` so the sticky bar isn't clipped. No behavior/data/query changes; locked/sent-stage semantics untouched.
 

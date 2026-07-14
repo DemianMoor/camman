@@ -17,9 +17,9 @@ async function main() {
   const prov = await sql`SELECT id, supports_api_send FROM sms_providers WHERE sms_provider_id = 'ahoi'`;
   check("ahoi provider row exists", prov.length === 1);
   check("supports_api_send = true", prov[0]?.supports_api_send === true);
-  const cred = await sql`SELECT 1 FROM provider_credentials WHERE provider_id = ${prov[0]?.id} AND brand_id IS NULL`;
+  const cred = await sql`SELECT 1 FROM provider_credentials WHERE provider_id = ${prov[0]?.id ?? null} AND brand_id IS NULL`;
   check("provider-default credential exists", cred.length === 1);
-  const ph = await sql`SELECT 1 FROM provider_phones WHERE provider_id = ${prov[0]?.id}`;
+  const ph = await sql`SELECT 1 FROM provider_phones WHERE provider_id = ${prov[0]?.id ?? null}`;
   check("at least one provider_phone", ph.length >= 1);
   await sql.end();
   console.log(failed === 0 ? "\nALL PASS" : `\n${failed} FAILED`);

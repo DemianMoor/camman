@@ -74,29 +74,44 @@ export async function importCsvLookups(rows: CsvLookupRow[]): Promise<CsvImportR
 
   // Upsert, but NEVER overwrite a telnyx row (setWhere). New phones insert;
   // existing csv_import rows update; existing telnyx rows are left untouched.
-  const written = await db
-    .insert(phone_lookups)
-    .values(values)
-    .onConflictDoUpdate({
-      target: phone_lookups.phone,
-      set: {
-        line_type: sql`excluded.line_type`,
-        carrier_raw: sql`excluded.carrier_raw`,
-        carrier_norm: sql`excluded.carrier_norm`,
-        source: sql`'csv_import'`,
-        lookup_status: sql`'complete'`,
-        looked_up_at: sql`now()`,
-        updated_at: sql`now()`,
-      },
-      setWhere: sql`${phone_lookups.source} <> 'telnyx'`,
-    })
-    .returning({ phone: phone_lookups.phone });
+  //
+  // CHUNKED: a single INSERT with every row blows Postgres's 65,535-bind-parameter
+  // limit at scale (drizzle binds ~13 columns/row, so ~5K rows is the ceiling; a
+  // 36K-row upload was ~470K params → 500). Chunk well under it. The upsert is
+  // idempotent, so per-batch commits are safe to re-run.
+  const CHUNK = 3000;
+  const writtenPhones: string[] = [];
+  for (let i = 0; i < values.length; i += CHUNK) {
+    const written = await db
+      .insert(phone_lookups)
+      .values(values.slice(i, i + CHUNK))
+      .onConflictDoUpdate({
+        target: phone_lookups.phone,
+        set: {
+          line_type: sql`excluded.line_type`,
+          carrier_raw: sql`excluded.carrier_raw`,
+          carrier_norm: sql`excluded.carrier_norm`,
+          source: sql`'csv_import'`,
+          lookup_status: sql`'complete'`,
+          looked_up_at: sql`now()`,
+          updated_at: sql`now()`,
+        },
+        setWhere: sql`${phone_lookups.source} <> 'telnyx'`,
+      })
+      .returning({ phone: phone_lookups.phone });
+    for (const w of written) writtenPhones.push(w.phone);
+  }
 
-  const writtenPhones = written.map((w) => w.phone);
-  const sync =
-    writtenPhones.length > 0 ? await syncContactsForPhones(writtenPhones) : { contactsUpdated: 0 };
+  // Sync contacts in the same chunk size (bounds each UPDATE's ANY(array) literal).
+  let contactsUpdated = 0;
+  for (let i = 0; i < writtenPhones.length; i += CHUNK) {
+    const sync = await syncContactsForPhones(writtenPhones.slice(i, i + CHUNK));
+    contactsUpdated += sync.contactsUpdated;
+  }
+
   // Unmapped carrier strings from this import -> AI triage (same queue as the
-  // automated path). Idempotent; resolved strings never re-enqueue.
+  // automated path). enqueueUnresolved dedups internally (distinct carrier strings
+  // are few), so the array literal stays small even for a large upload.
   if (triage.length > 0) await enqueueUnresolved(triage);
 
   return {
@@ -105,7 +120,7 @@ export async function importCsvLookups(rows: CsvLookupRow[]): Promise<CsvImportR
     invalid,
     written: writtenPhones.length,
     skipped_telnyx: values.length - writtenPhones.length,
-    contacts_synced: sync.contactsUpdated,
+    contacts_synced: contactsUpdated,
   };
 }
 

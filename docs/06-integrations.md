@@ -56,6 +56,8 @@ External services CamMan talks to, their contracts, and every environment variab
 | `TELNYX_API_URL` | server | Telnyx base URL override (default `https://api.telnyx.com`; trailing slashes stripped) |
 | `AHOI_API_BASE_URL` | server | optional override for the Ahoi/api19 base URL (default `https://v1.api19.com`) |
 | `AHOI_API_TOKEN` | **local only** | one-time seed input for `scripts/seed-ahoi-number-credential.ts`; not read at runtime after seeding |
+| `AHOI_DLR_REJECT_SPIKE_THRESHOLD` | server | rejected-DLR count that latches the Ahoi provider pause (default 10) |
+| `AHOI_DLR_REJECT_SPIKE_WINDOW_SEC` | server | rolling window (seconds) for the DLR reject-rate breaker (default 900) |
 | `TEST_USER_EMAIL` / `TEST_USER_PASSWORD` | **local only** | credentials for `scripts/test-*-api.ts`; remove after use |
 
 ### Secrets handling rules (CLAUDE.md §11)

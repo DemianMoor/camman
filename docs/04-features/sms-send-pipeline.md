@@ -113,6 +113,8 @@ Every statement is a **single query** (never concurrent on one connection), so t
 - **Auto-trips:** failure spike (≥10 consecutive failures) and a pacing tripwire (processed > expected — structural-bug guard). Counts are org-wide as a proxy for "this provider" until a second provider exists.
 - Every pause/resume is appended to `send_circuit_events` (actor NULL = auto-trip; actor set = manual). Resumes are manager+ audited actions.
 
+**Ahoi DLR reject-rate (Section 3, migration 0109).** A second, independent signal: `send_status='rejected'` DLRs (asynchronous, minutes after a send that looked fine at send time) feed a provider-scoped rolling count (`countAhoiDlrRejectsSince`) — a threshold count (`AHOI_DLR_REJECT_SPIKE_THRESHOLD`, default 10) of rejects within a rolling window (`AHOI_DLR_REJECT_SPIKE_WINDOW_SEC`, default 900) latches the same `sms_providers.send_paused` kill-switch the send-time failure-spike breaker uses. The two signals compose additively (both latch the one pause; neither double-counts — they read disjoint tables). Doc-inferred/defensive (never observed live in Phase 0 recon) — see `docs/07-conventions.md`'s G4 note.
+
 ### Submission integrity, evidence & classification (Workstream 3, migration 0064)
 The responsibility boundary: everything up to and including TextHub's response envelope is ours to prove clean; everything after is theirs. UI copy says **"Submitted" / "Accepted by TextHub", never "Delivered"** — there is no DLR.
 

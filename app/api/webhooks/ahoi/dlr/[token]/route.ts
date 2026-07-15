@@ -3,7 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { provider_credentials } from "@/db/schema";
-import { captureAhoiDlrEvent } from "@/lib/sends/ahoi-dlr";
+import { captureAhoiDlrEvent, reconcileAhoiDlrEvent } from "@/lib/sends/ahoi-dlr";
 import {
   extractClientIp,
   headersToObject,
@@ -22,7 +22,7 @@ import { ahoiAdapter, extractAhoiWebhookFields } from "@/lib/sends/providers/aho
 //
 // Capture + parse + reconcile all happen in this one request (unlike
 // TextHub's historical Stage A/B split) — reconcile is a cheap single-row
-// lookup, so there's no reason to defer it. Reconcile itself lands in Task 5.
+// lookup, so there's no reason to defer it (reconcileAhoiDlrEvent, Task 5).
 //
 // force-dynamic: every callback must run and be recorded, never cached.
 export const dynamic = "force-dynamic";
@@ -67,7 +67,7 @@ export async function POST(
   const fields = extractAhoiWebhookFields(raw);
   const parsed = ahoiAdapter.parseDlr(raw);
 
-  await captureAhoiDlrEvent(db, {
+  const captured = await captureAhoiDlrEvent(db, {
     orgId: cred[0].org_id,
     credentialId: cred[0].id,
     providerId: cred[0].provider_id,
@@ -78,6 +78,16 @@ export async function POST(
     fields,
     parsed,
   });
+
+  if (parsed) {
+    await reconcileAhoiDlrEvent(db, {
+      eventId: captured.id,
+      orgId: cred[0].org_id,
+      providerId: cred[0].provider_id,
+      providerUuid: parsed.providerUuid,
+      sendStatus: parsed.sendStatus,
+    });
+  }
 
   return NextResponse.json({ ok: true });
 }

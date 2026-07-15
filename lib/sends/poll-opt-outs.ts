@@ -75,7 +75,7 @@ export function parseProviderReceivedAt(raw: string | null): Date | null {
 export type Database = typeof db;
 
 // Any drizzle executor — the top-level client or a transaction handle.
-type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export interface AttributionMatch {
   stage_send_id: string;
@@ -118,7 +118,7 @@ export async function latestSendForAttribution(
 
 export type InboxFetcher = (opts: { apiKey: string }) => Promise<FetchInboxResult>;
 
-interface CredentialRow {
+export interface CredentialRow {
   credential_id: number;
   org_id: string;
   provider_id: number;
@@ -349,6 +349,30 @@ async function pollCredential(
   };
 }
 
+// This poller only knows how to talk to TextHub's inbox endpoint
+// (api.texthub.com/...?inbox=true) — it fires each credential's api_key at
+// that URL. Scoped to sms_provider_id = 'txh' so a different api-send-capable
+// provider (e.g. Ahoi — sms_provider_id = 'ahoi', which has its own opt-out
+// intake, see lib/sends/ahoi-optout.ts / ahoi-dlr-optout.ts / ahoi-inbound.ts)
+// never gets its key thrown at TextHub's endpoint (404 -> false "poller
+// FAILED" alert; regression fixed 2026-07-15). Exported so the credential
+// selection is unit-testable in isolation from the fetch/suppression logic.
+export async function selectPollableCredentials(
+  database: Executor,
+  orgId?: string,
+): Promise<CredentialRow[]> {
+  const orgFilter = orgId ? sql`AND pc.org_id = ${orgId}` : sql``;
+  return (await database.execute(sql`
+    SELECT pc.id AS credential_id, pc.org_id AS org_id,
+           pc.provider_id AS provider_id, pc.api_key AS api_key
+    FROM provider_credentials pc
+    JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
+    WHERE p.supports_api_send = true
+      AND p.sms_provider_id = 'txh'
+    ${orgFilter}
+  `)) as unknown as CredentialRow[];
+}
+
 // Poll inbound opt-outs for every API-capable TextHub credential (optionally
 // scoped to one org). Per-credential failures are isolated — one bad inbox
 // fetch never aborts the rest.
@@ -357,16 +381,7 @@ export async function pollOptOuts(
   opts?: { orgId?: string; fetchInbox?: InboxFetcher },
 ): Promise<PollOptOutsResult> {
   const fetchInbox = opts?.fetchInbox ?? realFetchInbox;
-  const orgFilter = opts?.orgId ? sql`AND pc.org_id = ${opts.orgId}` : sql``;
-
-  const creds = (await database.execute(sql`
-    SELECT pc.id AS credential_id, pc.org_id AS org_id,
-           pc.provider_id AS provider_id, pc.api_key AS api_key
-    FROM provider_credentials pc
-    JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
-    WHERE p.supports_api_send = true
-    ${orgFilter}
-  `)) as unknown as CredentialRow[];
+  const creds = await selectPollableCredentials(database, opts?.orgId);
 
   const perCredential: CredentialPollSummary[] = [];
   let fetched = 0;

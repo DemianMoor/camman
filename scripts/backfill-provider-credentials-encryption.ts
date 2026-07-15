@@ -54,9 +54,13 @@ const EXPECTED = {
   skippedProviders: ["snx", "smpl"].sort(),
 };
 
+// Thrown instead of process.exit(1) so the top-level catch runs AFTER the
+// `finally` that closes the pg connection — process.exit from inside the try
+// would skip that teardown.
+class BackfillError extends Error {}
+
 function fail(msg: string): never {
-  console.error(`\nFAIL: ${msg}`);
-  process.exit(1);
+  throw new BackfillError(msg);
 }
 
 async function main() {
@@ -211,43 +215,120 @@ async function main() {
     }
 
     // ============ Step 4: reconciliation assertion ============
+    // Two shapes, deliberately different:
+    //  - DRY-RUN asserts the CANDIDATE sets (what a first apply WOULD do),
+    //    built from the pre-write SELECTs above. Correct here because nothing
+    //    was written, so candidates == what the healthy DB still needs.
+    //  - APPLY asserts the FINAL DB STATE by re-querying, NOT the candidate
+    //    sets. On an idempotent re-run the candidate sets are empty (the gates
+    //    match nothing), so asserting them would falsely fail — but the state
+    //    is still correct. Re-querying holds on every apply run.
     console.log("\n=== Reconciliation ===");
-    const actualCredIds = credRows.map((c) => c.id).sort((a, b) => a - b);
-    const actualPhoneLinks: Record<number, number[]> = {};
-    for (const l of phoneLinks) {
-      actualPhoneLinks[l.credential_id] = [...l.phone_ids].sort((a, b) => a - b);
-    }
-    const actualSkipped = skippedProviders.map((s) => s.sms_provider_id).sort();
-
-    console.log(`  Expected credentials to encrypt: [${EXPECTED.credentialIdsToEncrypt.join(", ")}]`);
-    console.log(`  Actual credentials to encrypt:   [${actualCredIds.join(", ")}]`);
-    for (const [credId, expectedPhones] of Object.entries(EXPECTED.phoneLinks)) {
-      const actual = actualPhoneLinks[Number(credId)] ?? [];
-      console.log(
-        `  Expected phones -> cred ${credId}: [${expectedPhones.join(", ")}]  Actual: [${actual.join(", ")}]`,
-      );
-    }
-    console.log(`  Expected skipped providers: [${EXPECTED.skippedProviders.join(", ")}]`);
-    console.log(`  Actual skipped providers:   [${actualSkipped.join(", ")}]`);
-
     const mismatches: string[] = [];
-    if (JSON.stringify(actualCredIds) !== JSON.stringify(EXPECTED.credentialIdsToEncrypt)) {
-      mismatches.push(
-        `credential ids to encrypt: expected [${EXPECTED.credentialIdsToEncrypt.join(", ")}], got [${actualCredIds.join(", ")}]`,
-      );
-    }
-    for (const [credId, expectedPhones] of Object.entries(EXPECTED.phoneLinks)) {
-      const actual = actualPhoneLinks[Number(credId)] ?? [];
-      if (JSON.stringify(actual) !== JSON.stringify(expectedPhones)) {
-        mismatches.push(
-          `phones -> cred ${credId}: expected [${expectedPhones.join(", ")}], got [${actual.join(", ")}]`,
+
+    if (APPLY) {
+      // --- Post-write STATE check (re-queried from the DB) ---
+      // Explicit ARRAY[...]::int[] construction (the repo's proven db.execute
+      // array pattern — see scripts/test-campaign-tier.ts) rather than binding
+      // a raw JS array, which drizzle+postgres-js does not reliably serialize.
+      const credIdArray = drizzleSql`ARRAY[${drizzleSql.join(
+        EXPECTED.credentialIdsToEncrypt.map((n) => drizzleSql`${n}`),
+        drizzleSql`, `,
+      )}]::int[]`;
+      const encRows = (await db.execute(drizzleSql`
+        SELECT id FROM provider_credentials
+        WHERE id = ANY(${credIdArray}) AND api_key_encrypted IS NOT NULL
+        ORDER BY id
+      `)) as unknown as { id: number }[];
+      const stateCredIds = encRows.map((r) => r.id).sort((a, b) => a - b);
+
+      const linkRows = (await db.execute(drizzleSql`
+        SELECT credential_id, id FROM provider_phones
+        WHERE credential_id = ANY(${credIdArray})
+        ORDER BY credential_id, id
+      `)) as unknown as { credential_id: number; id: number }[];
+      const statePhoneLinks: Record<number, number[]> = {};
+      for (const r of linkRows) {
+        (statePhoneLinks[r.credential_id] ??= []).push(r.id);
+      }
+      for (const k of Object.keys(statePhoneLinks)) {
+        statePhoneLinks[Number(k)].sort((a, b) => a - b);
+      }
+
+      const untouchedRows = (await db.execute(drizzleSql`
+        SELECT count(*)::int AS n
+        FROM provider_phones ph
+        JOIN sms_providers p ON p.id = ph.provider_id
+        WHERE p.sms_provider_id IN ('snx', 'smpl') AND ph.credential_id IS NOT NULL
+      `)) as unknown as { n: number }[];
+      const skippedLinkedCount = untouchedRows[0]?.n ?? 0;
+
+      console.log(`  Expected credentials encrypted: [${EXPECTED.credentialIdsToEncrypt.join(", ")}]`);
+      console.log(`  Actual   credentials encrypted: [${stateCredIds.join(", ")}]`);
+      for (const [credId, expectedPhones] of Object.entries(EXPECTED.phoneLinks)) {
+        const actual = statePhoneLinks[Number(credId)] ?? [];
+        console.log(
+          `  Expected phones @ cred ${credId}: [${expectedPhones.join(", ")}]  Actual: [${actual.join(", ")}]`,
         );
       }
-    }
-    if (JSON.stringify(actualSkipped) !== JSON.stringify(EXPECTED.skippedProviders)) {
-      mismatches.push(
-        `skipped providers: expected [${EXPECTED.skippedProviders.join(", ")}], got [${actualSkipped.join(", ")}]`,
-      );
+      console.log(`  Expected snx/smpl phones with a credential: 0  Actual: ${skippedLinkedCount}`);
+
+      if (JSON.stringify(stateCredIds) !== JSON.stringify(EXPECTED.credentialIdsToEncrypt)) {
+        mismatches.push(
+          `credentials encrypted: expected [${EXPECTED.credentialIdsToEncrypt.join(", ")}], got [${stateCredIds.join(", ")}]`,
+        );
+      }
+      for (const [credId, expectedPhones] of Object.entries(EXPECTED.phoneLinks)) {
+        const actual = statePhoneLinks[Number(credId)] ?? [];
+        if (JSON.stringify(actual) !== JSON.stringify(expectedPhones)) {
+          mismatches.push(
+            `phones @ cred ${credId}: expected [${expectedPhones.join(", ")}], got [${actual.join(", ")}]`,
+          );
+        }
+      }
+      if (skippedLinkedCount !== 0) {
+        mismatches.push(
+          `snx/smpl phones must keep credential_id NULL, but ${skippedLinkedCount} are linked`,
+        );
+      }
+    } else {
+      // --- Dry-run CANDIDATE check (pre-write SELECTs) ---
+      const actualCredIds = credRows.map((c) => c.id).sort((a, b) => a - b);
+      const actualPhoneLinks: Record<number, number[]> = {};
+      for (const l of phoneLinks) {
+        actualPhoneLinks[l.credential_id] = [...l.phone_ids].sort((a, b) => a - b);
+      }
+      const actualSkipped = skippedProviders.map((s) => s.sms_provider_id).sort();
+
+      console.log(`  Expected credentials to encrypt: [${EXPECTED.credentialIdsToEncrypt.join(", ")}]`);
+      console.log(`  Actual credentials to encrypt:   [${actualCredIds.join(", ")}]`);
+      for (const [credId, expectedPhones] of Object.entries(EXPECTED.phoneLinks)) {
+        const actual = actualPhoneLinks[Number(credId)] ?? [];
+        console.log(
+          `  Expected phones -> cred ${credId}: [${expectedPhones.join(", ")}]  Actual: [${actual.join(", ")}]`,
+        );
+      }
+      console.log(`  Expected skipped providers: [${EXPECTED.skippedProviders.join(", ")}]`);
+      console.log(`  Actual skipped providers:   [${actualSkipped.join(", ")}]`);
+
+      if (JSON.stringify(actualCredIds) !== JSON.stringify(EXPECTED.credentialIdsToEncrypt)) {
+        mismatches.push(
+          `credential ids to encrypt: expected [${EXPECTED.credentialIdsToEncrypt.join(", ")}], got [${actualCredIds.join(", ")}]`,
+        );
+      }
+      for (const [credId, expectedPhones] of Object.entries(EXPECTED.phoneLinks)) {
+        const actual = actualPhoneLinks[Number(credId)] ?? [];
+        if (JSON.stringify(actual) !== JSON.stringify(expectedPhones)) {
+          mismatches.push(
+            `phones -> cred ${credId}: expected [${expectedPhones.join(", ")}], got [${actual.join(", ")}]`,
+          );
+        }
+      }
+      if (JSON.stringify(actualSkipped) !== JSON.stringify(EXPECTED.skippedProviders)) {
+        mismatches.push(
+          `skipped providers: expected [${EXPECTED.skippedProviders.join(", ")}], got [${actualSkipped.join(", ")}]`,
+        );
+      }
     }
 
     if (mismatches.length > 0) {
@@ -264,6 +345,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error(err instanceof BackfillError ? `\nFAIL: ${err.message}` : err);
   process.exit(1);
 });

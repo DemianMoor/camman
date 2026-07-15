@@ -5,6 +5,7 @@ import { formatInTimeZone } from "date-fns-tz";
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { CAMPAIGN_TIMEZONE, campaignDayBoundsUtc } from "@/lib/campaign-timezone";
+import { processAhoiInboundOptOut } from "@/lib/sends/ahoi-optout";
 import { ahoiBaseUrl } from "@/lib/sends/providers/ahoi";
 
 // Rolling ET window (today + a midnight overlap — CDR timestamps are ET,
@@ -127,18 +128,44 @@ export async function pollAhoiCdr(
     inbound += inRows.length;
 
     for (const r of inRows) {
-      const inserted = (await database.execute(sql`
-        INSERT INTO ahoi_inbound_events
-          (org_id, credential_id, provider_id, source, source_number, destination_number,
-           message, type, cost, provider_uuid, method, raw_body)
-        VALUES (${cred.org_id}, ${cred.credential_id}, ${cred.provider_id}, 'cdr', ${r.src}, ${r.dst},
-                ${r.message}, ${r.msg_type ?? null}, ${parseCdrCost(r.your_cost)}, ${r.uuid},
-                'poll', ${JSON.stringify(r)})
-        ON CONFLICT (provider_id, provider_uuid) WHERE provider_uuid IS NOT NULL DO NOTHING
-        RETURNING id
-      `)) as unknown as { id: string }[];
-      if (inserted.length > 0) neu++;
-      else dupe++;
+      try {
+        // Capture + process ATOMICALLY per row (unlike the webhook path,
+        // which can't — a Next.js route handler using the `db` singleton has
+        // no outer transaction to join). If processing throws, the capture
+        // rolls back too, so the SAME provider_uuid is naturally re-fetched
+        // and retried on the NEXT poll tick — the CDR channel's own
+        // idempotent uuid-keyed capture becomes its own retry mechanism,
+        // mirroring TextHub's per-message claim+process transaction in
+        // lib/sends/poll-opt-outs.ts.
+        const outcome = await database.transaction(async (tx) => {
+          const inserted = (await tx.execute(sql`
+            INSERT INTO ahoi_inbound_events
+              (org_id, credential_id, provider_id, source, source_number, destination_number,
+               message, type, cost, provider_uuid, method, raw_body)
+            VALUES (${cred.org_id}, ${cred.credential_id}, ${cred.provider_id}, 'cdr', ${r.src}, ${r.dst},
+                    ${r.message}, ${r.msg_type ?? null}, ${parseCdrCost(r.your_cost)}, ${r.uuid},
+                    'poll', ${JSON.stringify(r)})
+            ON CONFLICT (provider_id, provider_uuid) WHERE provider_uuid IS NOT NULL DO NOTHING
+            RETURNING id
+          `)) as unknown as { id: string }[];
+          if (inserted.length === 0) return "dupe" as const;
+
+          // Layer 2 (spec §6): same processing core Layer 1 uses, tagged
+          // ahoi_cdr. CARRY 1's cross-channel dedup lives inside this call.
+          await processAhoiInboundOptOut(tx, {
+            eventId: inserted[0]!.id,
+            orgId: cred.org_id,
+            sourceNumber: r.src,
+            message: r.message,
+            optOutSource: "ahoi_cdr",
+            receivedAt: new Date(),
+          });
+          return "new" as const;
+        });
+        if (outcome === "dupe") dupe++; else neu++;
+      } catch (e) {
+        console.error("[ahoi-cdr-poll] row processing failed, will retry next poll:", e);
+      }
     }
   }
 

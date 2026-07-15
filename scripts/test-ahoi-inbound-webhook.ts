@@ -79,12 +79,17 @@ async function main() {
     // NOTE: message deliberately does NOT start with a STOP keyword. Section
     // 4's processAhoiInboundOptOut now runs on EVERY captured+parsed row, and
     // a STOP-classified message would run `marker` (a non-numeric string)
-    // through ahoiSourceToE164 -> validatePhone — which, via libphonenumber's
-    // alpha-vanity-number letter-to-digit mapping, can unexpectedly resolve
-    // "zzztest..." to a "valid" (bogus) NANP number and materialize a REAL
-    // contact/opt_out row outside this test's cleanup. Keeping this fixture's
-    // message non-STOP sends it down the early `ignored` branch (before any
-    // phone parsing happens), so it only ever tests capture + multi-line
+    // through ahoiSourceToE164 — which is self-contained (NOT via
+    // validatePhone/libphonenumber). The prior risk was that stripping ALL
+    // non-digit characters from a junk string like "+1zzztest138438531"
+    // coincidentally leaves a 10-digit sequence ("1138438531"), which the old
+    // implementation would then treat as a "valid" NANP number and
+    // materialize a REAL contact/opt_out row outside this test's cleanup.
+    // ahoiSourceToE164 now rejects any input containing non-numeric,
+    // non-formatting characters (i.e. anything but digits/+/space/-/()/.) up
+    // front, so this can't happen. Keeping this fixture's message non-STOP
+    // still sends it down the early `ignored` branch (before any phone
+    // parsing happens), so it only ever tests capture + multi-line
     // form-decoding, never opt-out processing (see the dedicated STOP/ignore
     // fixtures below, which use genuinely valid 10-digit NANP numbers).
     const body = `source=${encodeURIComponent(marker)}&destination=3158359592&message=Hello+there%0Athanks&type=sms&cost=0`;

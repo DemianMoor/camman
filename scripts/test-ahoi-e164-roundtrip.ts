@@ -32,6 +32,11 @@ check(
 check("too few digits -> null (invalid NANP number)", ahoiSourceToE164("12345") === null);
 check("empty string -> null", ahoiSourceToE164("") === null);
 check("non-numeric junk -> null", ahoiSourceToE164("not-a-phone") === null);
+check(
+  "alphanumeric junk that digit-strips to a coincidental 10-digit sequence -> null",
+  ahoiSourceToE164("+1zzztest138438531") === null,
+  ahoiSourceToE164("+1zzztest138438531") ?? "null",
+);
 
 console.log(failed === 0 ? "\nALL PASS" : `\n${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);

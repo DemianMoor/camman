@@ -30,7 +30,12 @@ export function toAhoiRecipient(e164: string): string {
 // stored E.164 (+1XXXXXXXXXX), so this is the normalization used on BOTH the
 // contact-match and upsert-contact paths in Section 4.
 export function ahoiSourceToE164(source: string): string | null {
-  const digits = (source ?? "").replace(/\D/g, "");
+  const s = (source ?? "").trim();
+  // Reject anything that isn't a plain phone: only digits + common formatting
+  // chars (+, space, -, (, ), .). A junk string like "+1zzztest…" must NOT
+  // coincidentally normalize to a phone (opt-out is compliance-sensitive).
+  if (!/^[+\d\s().-]+$/.test(s)) return null;
+  const digits = s.replace(/\D/g, "");
   if (digits.length === 10) return `+1${digits}`;
   if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
   return null; // not a NANP-shaped number

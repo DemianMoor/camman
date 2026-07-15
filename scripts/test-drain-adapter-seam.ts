@@ -16,8 +16,8 @@ function check(name: string, cond: boolean, detail = "") {
 import { resolveSenderForStage } from "@/lib/sends/drain";
 
 const injected = async () => ({ ok: true } as never);
-check("injected sender wins", resolveSenderForStage("texthub", injected) === injected);
-check("texthub resolves to adapter.send", typeof resolveSenderForStage("texthub") === "function");
+check("injected sender wins", resolveSenderForStage("txh", injected) === injected);
+check("texthub resolves to adapter.send", typeof resolveSenderForStage("txh") === "function");
 
 let threw: unknown = null;
 try { resolveSenderForStage("bogus"); } catch (e) { threw = e; }

@@ -25,7 +25,7 @@ async function main() {
     };
   }) as unknown as typeof fetch;
 
-  const sendSms = resolveSenderForStage("ahoi");
+  const sendSms = resolveSenderForStage("ahi");
   await sendSms({
     apiKey: "k",
     text: "hi",
@@ -43,7 +43,7 @@ async function main() {
   // TextHub-shaped call site must still compile and run). The resolved ahoi
   // closure forwards null and ahoi.send refuses cleanly rather than posting
   // a malformed request.
-  const sendSmsNoSender = resolveSenderForStage("ahoi");
+  const sendSmsNoSender = resolveSenderForStage("ahi");
   const res = await sendSmsNoSender({ apiKey: "k", text: "hi", number: "+15642155963" });
   check("senderNumber omitted -> ahoi.send refuses without throwing", res.ok === false);
 

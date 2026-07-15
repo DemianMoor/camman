@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-15 — Ahoi inbound webhook + capture (Section 3 Task 6) — docs/05-flows.md, docs/06-integrations.md
+
 ## 2026-07-15 — Ahoi DLR reconcile + reject-rate circuit breaker (Section 3 Task 5) — docs/04-features/sms-send-pipeline.md, docs/06-integrations.md, docs/07-conventions.md
 
 ## 2026-07-15 — Ahoi DLR webhook + capture (Section 3 Task 4) — docs/05-flows.md, docs/06-integrations.md

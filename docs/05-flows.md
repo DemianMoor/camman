@@ -132,6 +132,20 @@ sequenceDiagram
   Note over App,DB: capture + reconcile only — no opt_outs write (Section 4's job)
 ```
 
+## E3. Ahoi inbound (STOP-carrying) webhook capture
+
+```mermaid
+sequenceDiagram
+  participant Ahoi
+  participant App
+  participant DB
+  Ahoi->>App: POST /api/webhooks/ahoi/inbound/<token> (form-encoded)
+  App->>DB: resolve token -> (org, provider, credential) — same token as the DLR webhook
+  App->>App: parseInbound (source/destination/message/type/cost)
+  App->>DB: INSERT ahoi_inbound_events (source='webhook')
+  Note over App,DB: CAPTURE ONLY — no keyword match, no opt_outs write (Section 4)
+```
+
 ## F. Segment rule audience resolution
 See [04-features/audience-segments.md](04-features/audience-segments.md) — `buildSegmentAudienceClause` compiles rules to UNION/INTERSECT/EXCEPT set arithmetic and UNIONs the result with manual membership.
 

@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-15 — Ahoi webhook token seed script (Section 3 Task 3) — docs/06-integrations.md
+
 ## 2026-07-15 — ahoi_dlr_events + ahoi_inbound_events (migration 0109) — docs/03-data-model.md
 
 ## 2026-07-15 — Creative form: allow_multi_segment toggle + segment warnings (Section 2 Task 6) — docs/04-features/campaigns-stages-creatives.md

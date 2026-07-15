@@ -46,4 +46,8 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     status: 400,
     message: `This message renders to more than ${MAX_SEGMENTS} SMS segments — shorten the text (even multi-segment creatives can't exceed this)`,
   },
+  no_sender_number: {
+    status: 400,
+    message: "This provider needs a sending number — assign a provider phone to this stage before sending",
+  },
 };

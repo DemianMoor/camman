@@ -64,7 +64,14 @@ export type KickoffRefusal =
   | "multi_segment_not_allowed"
   // G8 hard ceiling: text exceeds MAX_SEGMENTS regardless of the creative's
   // allow_multi_segment override — never runaway multipart.
-  | "segment_ceiling_exceeded";
+  | "segment_ceiling_exceeded"
+  // Ahoi's send() requires a `source` number (spec §5 carry, Section 2 final
+  // review): a stage with no provider_phone_id previously passed kickoff,
+  // materialized every recipient, then failed at DRAIN — wasteful and risks
+  // tripping the failure-spike breaker on a pure config problem. Gated to
+  // providers that actually need one (currently just Ahoi) — TextHub's
+  // number is bound to the api_key account-side, not per-stage.
+  | "no_sender_number";
 
 export type KickoffResult =
   | {
@@ -95,6 +102,7 @@ interface MainRow {
   sales_page_label: string | null;
   utm_tag_ids: number[];
   sms_provider_id: number | null;
+  provider_phone_id: number | null;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -135,6 +143,7 @@ export async function kickoffStageSend(
       s.sales_page_label         AS sales_page_label,
       s.utm_tag_ids              AS utm_tag_ids,
       s.sms_provider_id          AS sms_provider_id,
+      s.provider_phone_id        AS provider_phone_id,
       s.include_no_status        AS include_no_status,
       s.include_clickers         AS include_clickers,
       s.exclude_clickers         AS exclude_clickers,
@@ -199,11 +208,19 @@ export async function kickoffStageSend(
     if (row.sms_provider_id == null) return { ok: false, reason: "no_provider" };
 
     const provider = (await dbc.execute(sql`
-      SELECT supports_api_send FROM sms_providers
+      SELECT supports_api_send, sms_provider_id AS provider_key FROM sms_providers
       WHERE id = ${row.sms_provider_id} AND org_id = ${orgId} LIMIT 1
-    `)) as unknown as { supports_api_send: boolean }[];
+    `)) as unknown as { supports_api_send: boolean; provider_key: string }[];
     if (!provider[0]?.supports_api_send) {
       return { ok: false, reason: "provider_not_api_capable" };
+    }
+
+    // No-sender-number guard (Section 3 Task 8; carried from Section 2's
+    // final review). Only Ahoi needs a provider_phone_id — see the design
+    // note in the Section 3 plan for why this is a plain key check rather
+    // than a new adapter capability flag.
+    if (provider[0].provider_key === "ahoi" && row.provider_phone_id == null) {
+      return { ok: false, reason: "no_sender_number" };
     }
 
     // Brand-aware: require a key resolvable for (provider, this campaign's brand)

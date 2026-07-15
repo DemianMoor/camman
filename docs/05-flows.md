@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-06-18_
+_Last updated: 2026-07-15_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -115,6 +115,22 @@ sequenceDiagram
 ```
 
 Attribution rule (migration 0075): TextHub's inbox has no campaign reference, so a STOP is credited to **every** stage that sent to the number within a 72h trailing window (`OPT_OUT_ATTRIBUTION_WINDOW_HOURS`). One `opt_out_attributions` row per (opt_out, stage); the per-stage `inbound_opt_out_count` counter drives the Reports "Opt-outs" column, and the campaign page shows DISTINCT attributed contacts. No match ⇒ org-wide opt-out only. See [lib/sends/poll-opt-outs.ts](../lib/sends/poll-opt-outs.ts).
+
+## E2. Ahoi DLR (delivery receipt) capture
+
+```mermaid
+sequenceDiagram
+  participant Ahoi
+  participant App
+  participant DB
+  Ahoi->>App: POST /api/webhooks/ahoi/dlr/<token> (form-encoded)
+  App->>DB: resolve token -> (org, provider, credential)
+  Note over App: 207.181.190.0/24 IP check is LOGGED ONLY (G1: token is the gate)
+  App->>App: parseDlr (uuid/source/destination/send_status/status/smpp_status/smpp_code/error)
+  App->>DB: INSERT ahoi_dlr_events (raw + parsed)
+  App->>DB: reconcile uuid -> stage_sends.texthub_message_id (Task 5)
+  Note over App,DB: capture + reconcile only — no opt_outs write (Section 4's job)
+```
 
 ## F. Segment rule audience resolution
 See [04-features/audience-segments.md](04-features/audience-segments.md) — `buildSegmentAudienceClause` compiles rules to UNION/INTERSECT/EXCEPT set arithmetic and UNIONs the result with manual membership.

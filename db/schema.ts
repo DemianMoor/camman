@@ -425,6 +425,119 @@ export const texthub_inbound_events = pgTable(
 export type TexthubInboundEvent = typeof texthub_inbound_events.$inferSelect;
 export type NewTexthubInboundEvent = typeof texthub_inbound_events.$inferInsert;
 
+// ============ Ahoi DLR + inbound capture (Phase 1 Section 3, G5) ============
+// Provider-specific capture tables mirroring texthub_inbound_events' shape
+// (migration 0055) rather than generalizing it. See lib/sends/ahoi-dlr.ts /
+// lib/sends/ahoi-inbound.ts / lib/sends/ahoi-cdr-poll.ts for the write paths.
+
+export const ahoi_dlr_events = pgTable(
+  "ahoi_dlr_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "set null" },
+    ),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    received_at: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    method: text("method").notNull(),
+    query: jsonb("query"),
+    headers: jsonb("headers"),
+    raw_body: text("raw_body"),
+    provider_uuid: text("provider_uuid"),
+    source: text("source"),
+    destination: text("destination"),
+    send_status: text("send_status"),
+    status: text("status"),
+    smpp_status: text("smpp_status"),
+    smpp_code: text("smpp_code"),
+    error: text("error"),
+    // NAMING DEBT: matches stage_sends.texthub_message_id, which also holds
+    // Ahoi's send-time uuid since Section 2 — not renamed (G2).
+    matched_stage_send_id: uuid("matched_stage_send_id").references(
+      () => stage_sends.id,
+      { onDelete: "set null" },
+    ),
+    result: text("result"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("ahoi_dlr_events_org_id_idx").on(table.org_id),
+    index("ahoi_dlr_events_received_at_idx").on(table.received_at),
+    index("ahoi_dlr_events_provider_reject_idx").on(
+      table.provider_id,
+      table.send_status,
+      table.received_at,
+    ),
+  ],
+);
+
+export type AhoiDlrEvent = typeof ahoi_dlr_events.$inferSelect;
+export type NewAhoiDlrEvent = typeof ahoi_dlr_events.$inferInsert;
+
+export const ahoi_inbound_events = pgTable(
+  "ahoi_inbound_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "set null" },
+    ),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    // Ingestion channel ('webhook' | 'cdr') — NOT the sending phone number,
+    // see source_number for that.
+    source: text("source").notNull(),
+    source_number: text("source_number"),
+    destination_number: text("destination_number"),
+    message: text("message"),
+    type: text("type"),
+    cost: numeric("cost", { precision: 12, scale: 4 }),
+    provider_uuid: text("provider_uuid"),
+    received_at: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    method: text("method").notNull(),
+    raw_body: text("raw_body"),
+    // Section 4 fills these (opt-out intake) — pre-created, see migration 0109.
+    matched_contact_id: uuid("matched_contact_id").references(
+      () => contacts.id,
+      { onDelete: "set null" },
+    ),
+    matched_stage_send_id: uuid("matched_stage_send_id").references(
+      () => stage_sends.id,
+      { onDelete: "set null" },
+    ),
+    result: text("result"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("ahoi_inbound_events_org_id_idx").on(table.org_id),
+    index("ahoi_inbound_events_received_at_idx").on(table.received_at),
+    uniqueIndex("ahoi_inbound_events_provider_uuid_uniq")
+      .on(table.provider_id, table.provider_uuid)
+      .where(sql`provider_uuid IS NOT NULL`),
+    check(
+      "ahoi_inbound_events_source_check",
+      sql`${table.source} IN ('webhook', 'cdr')`,
+    ),
+  ],
+);
+
+export type AhoiInboundEvent = typeof ahoi_inbound_events.$inferSelect;
+export type NewAhoiInboundEvent = typeof ahoi_inbound_events.$inferInsert;
+
 export type SmsProvider = typeof sms_providers.$inferSelect;
 export type NewSmsProvider = typeof sms_providers.$inferInsert;
 
@@ -2309,6 +2422,11 @@ export const stage_sends = pgTable(
     index("stage_sends_org_sending_idx")
       .on(table.org_id)
       .where(sql`status = 'sending'`),
+    // Migration 0109: DLR reconcile looks up stage_sends by this column
+    // (Ahoi's send-time uuid — see the naming-debt note on ahoi_dlr_events).
+    index("stage_sends_texthub_message_id_idx")
+      .on(table.texthub_message_id)
+      .where(sql`texthub_message_id IS NOT NULL`),
   ],
 );
 

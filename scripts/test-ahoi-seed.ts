@@ -14,8 +14,8 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 async function main() {
-  const prov = await sql`SELECT id, supports_api_send FROM sms_providers WHERE sms_provider_id = 'ahoi'`;
-  check("ahoi provider row exists", prov.length === 1);
+  const prov = await sql`SELECT id, supports_api_send FROM sms_providers WHERE sms_provider_id = 'ahi'`;
+  check("ahi provider row exists", prov.length === 1);
   check("supports_api_send = true", prov[0]?.supports_api_send === true);
   const cred = await sql`SELECT 1 FROM provider_credentials WHERE provider_id = ${prov[0]?.id ?? null} AND brand_id IS NULL`;
   check("provider-default credential exists", cred.length === 1);

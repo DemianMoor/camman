@@ -31,8 +31,8 @@ async function main() {
         WHERE b.org_id = ${orgId} LIMIT 1`);
       if (!brand) { console.log("SKIP: need a brand with an active short domain"); throw ROLLBACK; }
 
-      const ahoiProv = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahoi'`);
-      if (!ahoiProv) { console.log("SKIP: no seeded ahoi provider row (run Section 1's seed)."); throw ROLLBACK; }
+      const ahoiProv = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahi'`);
+      if (!ahoiProv) { console.log("SKIP: no seeded ahi provider row (run Section 1's seed)."); throw ROLLBACK; }
       await tx.execute(sql`
         INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key)
         VALUES (${orgId}, ${ahoiProv.id}, NULL, 'k') ON CONFLICT DO NOTHING`);

@@ -38,15 +38,10 @@ async function main() {
   check("at least one api-send provider row exists", rows.length > 0, `found ${rows.length}`);
   for (const row of rows) {
     const key = row.sms_provider_id;
-    // Known duplicate Ahoi provider row (sms_provider_id='ahoi', id 332) —
-    // a leftover from before the registry was re-keyed to the real 'ahi'
-    // code, slated for removal in a separate reconciliation (Issue 2). It is
-    // NOT a key the registry is expected to serve, so it's excluded here
-    // rather than asserted against.
-    if (key === "ahoi") {
-      console.log(`  (skipping known duplicate provider row sms_provider_id='ahoi' — separate reconciliation, Issue 2)`);
-      continue;
-    }
+    // The leftover duplicate Ahoi provider row (sms_provider_id='ahoi', id
+    // 332 — a pre-re-key seed artifact) has been removed (Issue 2
+    // reconciliation); every remaining supports_api_send row is a real key
+    // the registry is expected to serve, so no special-case skip is needed.
     let threw: unknown = null;
     try { getAdapter(key); } catch (e) { threw = e; }
     check(`getAdapter('${key}') resolves (real DB key)`, threw === null, String(threw));

@@ -22,9 +22,9 @@ async function main() {
   const origin =
     process.argv[2] ?? process.env.NEXT_PUBLIC_SITE_URL ?? "https://<your-prod-origin>";
 
-  const prov = await sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahoi'`;
+  const prov = await sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahi'`;
   if (!prov[0]) {
-    console.error("No ahoi provider row — run Section 1's seed (scripts/seed-ahoi-number-credential.ts) first.");
+    console.error("No ahi provider row — run Section 1's seed (scripts/seed-ahoi-number-credential.ts) first.");
     await sql.end();
     process.exit(1);
   }

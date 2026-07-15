@@ -37,7 +37,7 @@ async function main() {
     const cred = await sql`
       SELECT pc.inbound_webhook_token AS token, pc.org_id AS org_id
       FROM provider_credentials pc JOIN sms_providers p ON p.id = pc.provider_id
-      WHERE p.sms_provider_id = 'ahoi' AND pc.brand_id IS NULL
+      WHERE p.sms_provider_id = 'ahi' AND pc.brand_id IS NULL
     `;
     const token = cred[0]?.token as string | undefined;
     const orgId = cred[0]?.org_id as string | undefined;
@@ -54,7 +54,7 @@ async function main() {
 
     // Token that resolves, but to a NON-ahoi provider's credential (e.g.
     // TextHub) -> 401, nothing written. Guards provider mis-attribution: the
-    // resolver must scope the join to sms_provider_id = 'ahoi', not just
+    // resolver must scope the join to sms_provider_id = 'ahi', not just
     // "provider_id is non-null".
     const foreignToken = `${marker}-foreign-token`;
     const foreignMarker = `${marker}9`; // still starts with marker -> caught by the marker cleanup below

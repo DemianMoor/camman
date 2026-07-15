@@ -1,7 +1,7 @@
 // Proves stage.sender_number flows: resolveSenderForStage's closure ->
 // adapter.send's NormalizedSendParams -> the real Ahoi request body. No
 // network (fetch stubbed), no DB (resolveSenderForStage is exercised
-// directly with providerKey="ahoi" — the registry resolution itself was
+// directly with providerKey="ahi" — the registry resolution itself was
 // proven in Section 1's test-ahoi-registry.ts).
 // Run: npx tsx scripts/test-drain-sender-number.ts
 import { resolveSenderForStage } from "@/lib/sends/drain";

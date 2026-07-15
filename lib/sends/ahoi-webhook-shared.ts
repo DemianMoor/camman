@@ -13,7 +13,7 @@ export interface AhoiWebhookCredential {
 }
 
 // Resolves a webhook path token to (org, provider, credential), scoped to the
-// Ahoi provider ONLY (mirrors the `sms_provider_id = 'ahoi'` join
+// Ahoi provider ONLY (mirrors the `sms_provider_id = 'ahi'` join
 // pollAhoiCdr uses). inbound_webhook_token is a single shared column — a
 // token belonging to a DIFFERENT provider (e.g. TextHub) would otherwise
 // authenticate here and capture a row under the wrong provider_id, which
@@ -41,7 +41,7 @@ export async function resolveAhoiCredential(
     .where(
       and(
         eq(provider_credentials.inbound_webhook_token, token),
-        eq(sms_providers.sms_provider_id, "ahoi"),
+        eq(sms_providers.sms_provider_id, "ahi"),
       ),
     )
     .limit(1);

@@ -8,7 +8,7 @@
 // (lib/sends/ahoi-optout.ts et al) — this poller is TextHub-only.
 //
 // Seeds throwaway BRAND-scoped credentials (not provider-default) for the
-// REAL 'txh' and 'ahoi' provider rows inside a rolled-back transaction, so it
+// REAL 'txh' and 'ahi' provider rows inside a rolled-back transaction, so it
 // can't collide with provider_credentials_provider_default_uniq (both real
 // providers already carry a brand_id-NULL default credential) or
 // provider_credentials_provider_brand_uniq (provider_id, brand_id) — see
@@ -44,10 +44,10 @@ async function main() {
         sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'txh' AND org_id = ${orgId}`,
       );
       const ahoiProvider = await one<{ id: number }>(
-        sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahoi' AND org_id = ${orgId}`,
+        sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahi' AND org_id = ${orgId}`,
       );
       check("real 'txh' provider row exists", !!txhProvider, JSON.stringify(txhProvider));
-      check("real 'ahoi' provider row exists", !!ahoiProvider, JSON.stringify(ahoiProvider));
+      check("real 'ahi' provider row exists", !!ahoiProvider, JSON.stringify(ahoiProvider));
       if (!txhProvider || !ahoiProvider) throw ROLLBACK;
 
       // Throwaway brand so the credential inserts land under

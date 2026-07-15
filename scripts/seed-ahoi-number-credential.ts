@@ -13,7 +13,7 @@ if (!/^\d{10}$/.test(num10 ?? "")) throw new Error("pass a 10-digit number, e.g.
 
 const sql = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
 async function main() {
-  const [prov] = await sql`SELECT id, org_id FROM sms_providers WHERE sms_provider_id = 'ahoi'`;
+  const [prov] = await sql`SELECT id, org_id FROM sms_providers WHERE sms_provider_id = 'ahi'`;
   if (!prov) throw new Error("Ahoi provider row missing — apply migration 0107 first");
   const e164 = `+1${num10}`;
   await sql`

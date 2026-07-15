@@ -31,7 +31,7 @@ import { ahoiAdapter } from "@/lib/sends/providers/ahoi";
 // (G1) mirrors the DLR route: path token only, resolved via the SAME
 // provider_credentials row/token the DLR webhook uses (the URL path
 // distinguishes the two). resolveAhoiCredential scopes the lookup to
-// sms_provider_id = 'ahoi' so a token belonging to a different provider
+// sms_provider_id = 'ahi' so a token belonging to a different provider
 // can't authenticate here.
 //
 // force-dynamic: every callback must run and be recorded, never cached.

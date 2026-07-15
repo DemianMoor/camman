@@ -219,7 +219,7 @@ export async function kickoffStageSend(
     // final review). Only Ahoi needs a provider_phone_id — see the design
     // note in the Section 3 plan for why this is a plain key check rather
     // than a new adapter capability flag.
-    if (provider[0].provider_key === "ahoi" && row.provider_phone_id == null) {
+    if (provider[0].provider_key === "ahi" && row.provider_phone_id == null) {
       return { ok: false, reason: "no_sender_number" };
     }
 

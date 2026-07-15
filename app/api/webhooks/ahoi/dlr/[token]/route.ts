@@ -18,7 +18,7 @@ import { ahoiAdapter, extractAhoiWebhookFields } from "@/lib/sends/providers/aho
 // via provider_credentials.inbound_webhook_token — the SAME column/token
 // Ahoi's inbound (STOP) webhook uses (see ../inbound/[token]/route.ts); the
 // URL PATH distinguishes which handler runs. resolveAhoiCredential additionally
-// scopes the lookup to sms_provider_id = 'ahoi' so a token belonging to a
+// scopes the lookup to sms_provider_id = 'ahi' so a token belonging to a
 // different provider (e.g. TextHub) can't authenticate here. The
 // 207.181.190.0/24 IP check below is defense-in-depth ONLY (logged, never
 // blocking).

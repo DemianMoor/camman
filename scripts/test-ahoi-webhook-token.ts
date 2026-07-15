@@ -18,9 +18,9 @@ async function main() {
     SELECT pc.inbound_webhook_token AS token
     FROM provider_credentials pc
     JOIN sms_providers p ON p.id = pc.provider_id
-    WHERE p.sms_provider_id = 'ahoi' AND pc.brand_id IS NULL
+    WHERE p.sms_provider_id = 'ahi' AND pc.brand_id IS NULL
   `;
-  check("ahoi provider-default credential exists", rows.length === 1, JSON.stringify(rows));
+  check("ahi provider-default credential exists", rows.length === 1, JSON.stringify(rows));
   check(
     "inbound_webhook_token is set (>=32 hex chars)",
     typeof rows[0]?.token === "string" && rows[0].token.length >= 32,

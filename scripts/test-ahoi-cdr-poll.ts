@@ -57,15 +57,15 @@ async function main() {
       const org = await one<{ id: string }>(sql`SELECT id FROM organizations LIMIT 1`);
       const orgId = org.id;
       // pollAhoiCdr targets the credential of the provider whose
-      // sms_provider_id = 'ahoi' (seeded in Section 1). Run against it directly
+      // sms_provider_id = 'ahi' (seeded in Section 1). Run against it directly
       // with an INJECTED fetcher (no network) and a rolled-back tx, so nothing
       // survives. Count assertions below assume the single seeded provider-
       // default ahoi credential this single-org install has (MEMORY: org count
       // = 1); `new`/`dupe` dedup by (provider_id, provider_uuid) so they're
       // robust even if extra ahoi credentials existed, and `inbound` is 1 per
       // credential.
-      const realAhoi = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahoi'`);
-      if (!realAhoi) { console.log("SKIP: no seeded ahoi provider row (run Section 1's seed)."); throw ROLLBACK; }
+      const realAhoi = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahi'`);
+      if (!realAhoi) { console.log("SKIP: no seeded ahi provider row (run Section 1's seed)."); throw ROLLBACK; }
 
       const rows: AhoiCdrRow[] = [
         { date: "07/15/2026 10:00:00", your_cost: "0", submaster_id: "1", user_id: "1", submaster_cost: "0", user_cost: "0", surcharge: "0", src: "5642155963", dst: "3158359592", message: "Stop", direction: "in", alpha: "", msg_type: "sms", uuid: `cdrtest-${sfx}-1` },

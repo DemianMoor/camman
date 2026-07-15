@@ -104,7 +104,7 @@ export async function pollAhoiCdr(
     SELECT pc.id AS credential_id, pc.org_id AS org_id, pc.provider_id AS provider_id, pc.api_key AS api_key
     FROM provider_credentials pc
     JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
-    WHERE p.sms_provider_id = 'ahoi'
+    WHERE p.sms_provider_id = 'ahi'
     ${orgFilter}
   `)) as unknown as { credential_id: number; org_id: string; provider_id: number; api_key: string }[];
 

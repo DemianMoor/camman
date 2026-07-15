@@ -8,6 +8,8 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 
 ## 2026-07-15 — Ahoi go-live harness (CARRY 4/G7) — Section 4 code-complete, SEND_ENABLED flip still gated — docs/04-features/sms-send-pipeline.md
 
+## 2026-07-15 — Closed Issue 2: removed duplicate sms_provider_id='ahoi' row, re-pointed remaining code-level provider-key comparisons/queries to canonical 'ahi' (id 314) — docs/07-conventions.md
+
 ## 2026-07-15 — Ahoi Layer 3 (DLR opt-out-error, defensive/empty allowlist, G4/O1) — docs/07-conventions.md
 
 ## 2026-07-15 — Ahoi CDR poll Layer 2 opt-out write, per-row transaction (Section 4 Task 5) — docs/05-flows.md

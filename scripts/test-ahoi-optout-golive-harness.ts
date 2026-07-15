@@ -140,9 +140,9 @@ async function main() {
         console.log(`SKIP Part 5 (preflight proof): ${skipReason}.`);
         throw SKIPPED;
       }
-      const ahoiProv = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahoi'`);
+      const ahoiProv = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahi'`);
       if (!ahoiProv) {
-        skipReason = "no seeded 'ahoi' provider row (run Section 1's seed)";
+        skipReason = "no seeded 'ahi' provider row (run Section 1's seed)";
         console.log(`SKIP Part 5: ${skipReason}.`);
         throw SKIPPED;
       }

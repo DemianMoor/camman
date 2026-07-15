@@ -352,7 +352,7 @@ async function pollCredential(
 // This poller only knows how to talk to TextHub's inbox endpoint
 // (api.texthub.com/...?inbox=true) — it fires each credential's api_key at
 // that URL. Scoped to sms_provider_id = 'txh' so a different api-send-capable
-// provider (e.g. Ahoi — sms_provider_id = 'ahoi', which has its own opt-out
+// provider (e.g. Ahoi — sms_provider_id = 'ahi', which has its own opt-out
 // intake, see lib/sends/ahoi-optout.ts / ahoi-dlr-optout.ts / ahoi-inbound.ts)
 // never gets its key thrown at TextHub's endpoint (404 -> false "poller
 // FAILED" alert; regression fixed 2026-07-15). Exported so the credential

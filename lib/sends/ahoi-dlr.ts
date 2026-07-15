@@ -87,7 +87,7 @@ export async function reconcileAhoiDlrEvent(
   await dbc.execute(sql`
     UPDATE ahoi_dlr_events
     SET matched_stage_send_id = ${matchedStageSendId}, result = ${result}, processed_at = now()
-    WHERE id = ${o.eventId}
+    WHERE id = ${o.eventId} AND org_id = ${o.orgId}
   `);
 
   let pausedNow = false;

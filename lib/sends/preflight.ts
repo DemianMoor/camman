@@ -48,6 +48,7 @@ interface MainRow {
   exclude_prior_offer_contacts: boolean;
   stage_tracking_id: string | null;
   sms_provider_id: number | null;
+  provider_phone_id: number | null;
   supports_api_send: boolean | null;
   include_no_status: boolean;
   include_clickers: boolean;
@@ -73,6 +74,7 @@ export async function preflightStageSend(
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
       s.tracking_id       AS stage_tracking_id,
       s.sms_provider_id   AS sms_provider_id,
+      s.provider_phone_id AS provider_phone_id,
       p.supports_api_send AS supports_api_send,
       s.include_no_status AS include_no_status,
       s.include_clickers  AS include_clickers,
@@ -164,6 +166,7 @@ export async function preflightStageSend(
           orgId,
           providerId: row.sms_provider_id!,
           brandId: row.brand_id,
+          providerPhoneId: row.provider_phone_id,
         })
       : false;
     add("credential", hasCred, "API credential resolvable", "no_credentials");

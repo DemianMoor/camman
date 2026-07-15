@@ -229,6 +229,7 @@ export async function kickoffStageSend(
       orgId,
       providerId: row.sms_provider_id,
       brandId: row.brand_id,
+      providerPhoneId: row.provider_phone_id,
     });
     if (!hasCred) return { ok: false, reason: "no_credentials" };
 

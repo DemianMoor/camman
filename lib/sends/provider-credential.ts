@@ -34,13 +34,12 @@ function readKey(row: { api_key_encrypted: string | null; api_key: string | null
 // credential, or — only when the provider has exactly one credential — the
 // provider-scoped legacy (provider, brand)/default lookup. Mirrors
 // resolveKeyForStage's reachability WITHOUT ever selecting the secret
-// columns. providerPhoneId is optional for backward compatibility with
-// callers that predate multi-account (treated the same as null: no
-// phone-scoped lookup).
+// columns. providerPhoneId is required (pass null when the stage genuinely
+// has no phone context: no phone-scoped lookup, legacy fallback only).
 export async function hasResolvableCredential(
   dbc: DbOrTx,
   { orgId, providerId, brandId, providerPhoneId }:
-    { orgId: string; providerId: number; brandId: number | null; providerPhoneId?: number | null },
+    { orgId: string; providerId: number; brandId: number | null; providerPhoneId: number | null },
 ): Promise<boolean> {
   if (providerPhoneId != null) {
     const rows = (await dbc.execute(sql`

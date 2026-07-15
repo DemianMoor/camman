@@ -3,9 +3,12 @@ import assert from "node:assert";
 import { db } from "@/db/client";
 import { sql } from "drizzle-orm";
 import { encryptSecret } from "@/lib/crypto/secret-box";
-import { resolveKeyForStage } from "@/lib/sends/provider-credential";
+import { maskApiKey, resolveKeyForStage } from "@/lib/sends/provider-credential";
 
 async function run() {
+  assert.strictEqual(maskApiKey("BRANDKEY-5678").last4, "5678", "maskApiKey last4");
+  assert.strictEqual(maskApiKey("BRANDKEY-5678").masked, "••••5678", "maskApiKey masked");
+
   await db.transaction(async (tx) => {
     const org = (await tx.execute(sql`SELECT id FROM organizations LIMIT 1`)) as any as { id: string }[];
     const orgId = org[0].id;

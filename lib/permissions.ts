@@ -36,6 +36,8 @@ export type Permission =
   | "provider_phones.update"
   | "provider_phones.archive"
   | "provider_phones.restore"
+  | "provider_credentials.view"
+  | "provider_credentials.manage"
   | "routing_types.view"
   | "routing_types.create"
   | "routing_types.update"
@@ -227,6 +229,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "provider_phones.update",
   "provider_phones.archive",
   "provider_phones.restore",
+  "provider_credentials.view",
   "routing_types.create",
   "routing_types.update",
   "routing_types.archive",
@@ -272,6 +275,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
 const adminPerms: ReadonlySet<Permission> = new Set([
   ...managerPerms,
   "users.manage",
+  "provider_credentials.manage",
 ]);
 
 const ownerPerms: ReadonlySet<Permission> = new Set([

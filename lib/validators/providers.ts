@@ -64,6 +64,10 @@ export type ProviderFormValues = z.input<typeof providerCreateSchema>;
 export const providerCredentialSetSchema = z.object({
   brand_id: z.number().int().positive().nullable().optional().default(null),
   api_key: z.string().trim().min(1, "API key is required").max(500),
+  // Optional forward-compat: an operator-facing name for this credential row.
+  // Not required — the live (pre-multi-account) UI never sends it, and the
+  // route derives a default (brand name, or "Default") when absent.
+  label: z.string().trim().min(1).max(120).optional(),
 });
 
 export type ProviderCredentialSetInput = z.infer<

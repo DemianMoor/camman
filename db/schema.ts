@@ -345,10 +345,10 @@ export const provider_credentials = pgTable(
     brand_id: integer("brand_id").references(() => brands.id, {
       onDelete: "cascade",
     }),
-    // DB column is nullable as of migration 0110 (encrypted-only writes), but
-    // the Drizzle type stays non-null until the write path (later task) actually
-    // inserts NULL — nothing does yet. Retained for dual-read during backfill.
-    api_key: text("api_key").notNull(),
+    // DB column is nullable as of migration 0110 (encrypted-only writes); the
+    // write path now inserts/rotates to NULL and stores the encrypted blob
+    // instead. Retained (nullable) for dual-read during the backfill window.
+    api_key: text("api_key"),
     // Encrypted-at-rest secret (migration 0110). Replaces plaintext `api_key`
     // going forward; see docs/security-notes.md for the encryption scheme.
     api_key_encrypted: text("api_key_encrypted"),

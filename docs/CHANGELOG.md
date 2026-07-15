@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-15 — Ahoi inbound webhook Layer 1 opt-out write (Section 4 Task 4) — docs/05-flows.md, docs/06-integrations.md
+
 ## 2026-07-15 — Ahoi opt-out intake Layer 1/2 core (processAhoiInboundOptOut, CARRY 1+2) — docs/03-data-model.md, docs/07-conventions.md
 
 ## 2026-07-15 — no_sender_number kickoff guard for Ahoi (Section 3 Task 8) — docs/04-features/sms-send-pipeline.md

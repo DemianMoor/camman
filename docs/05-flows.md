@@ -143,7 +143,8 @@ sequenceDiagram
   App->>DB: resolve token -> (org, provider, credential) — same token as the DLR webhook
   App->>App: parseInbound (source/destination/message/type/cost)
   App->>DB: INSERT ahoi_inbound_events (source='webhook')
-  Note over App,DB: CAPTURE ONLY — no keyword match, no opt_outs write (Section 4)
+  App->>App: processAhoiInboundOptOut (Section 4): keyword match, dedup vs CDR (CARRY 1), contact upsert, opt_outs write
+  Note over App,DB: capture ALWAYS commits + always 200-acks Ahoi; a process failure fires a LOUD Telegram alert (never silent) and the CDR poll (Layer 2, ≤45min) re-runs it
 ```
 
 ## E4. Ahoi CDR poll (every 15 min, inbound backstop)
@@ -161,6 +162,29 @@ sequenceDiagram
   App->>DB: INSERT ahoi_inbound_events (source='cdr') ON CONFLICT (provider_id, provider_uuid) DO NOTHING
   Note over App,DB: idempotent backstop, not because the webhook is lossy —<br/>upstream-carrier loss is unrecoverable by either channel (Phase 0 recon)
 ```
+
+## E5. Ahoi opt-out intake — 3 layers converge on `opt_outs`
+
+```mermaid
+sequenceDiagram
+  participant L1 as Layer 1 (E3 webhook)
+  participant L2 as Layer 2 (E4 CDR poll)
+  participant L3 as Layer 3 (E2 DLR)
+  participant App
+  participant DB
+  L1->>App: parsed STOP, source_number (10-digit)
+  L2->>App: parsed STOP, source_number (10-digit)
+  L3->>App: rejected DLR, destination (10-digit)
+  App->>App: keyword match (L1/L2) or classifyAhoiDlrOptOut (L3, G4 defensive — empty allowlist today)
+  App->>App: findDuplicateAhoiInbound (CARRY 1, L1/L2 only) — same physical STOP via both channels?
+  App->>App: ahoiSourceToE164 (CARRY 2) — 10-digit -> E.164
+  App->>DB: upsert contacts (org_id, phone_number)
+  App->>DB: INSERT opt_outs (source: ahoi_inbound_webhook | ahoi_cdr | ahoi_dlr_optout)
+  App->>DB: latestSendForAttribution (shared w/ TextHub) -> opt_out_attributions + campaign_stages counters
+  Note over App,DB: existing lib/sends/recipients.ts opt_outs NOT-EXISTS check now suppresses these contacts — zero enforcement-side changes
+```
+
+Layer 3 ships with an intentionally EMPTY known-opt-out-code allowlist (`AHOI_KNOWN_OPTOUT_DLR_CODES`, `lib/sends/ahoi-dlr-optout.ts`) — no real Ahoi opt-out DLR signature has been observed live (O1). It is fully wired and tested but will not classify anything as an opt-out in production until a human adds a real code after seeing one in the `[ahoi-dlr-optout]` distinct-log lines. See [07-conventions.md](07-conventions.md).
 
 ## F. Segment rule audience resolution
 See [04-features/audience-segments.md](04-features/audience-segments.md) — `buildSegmentAudienceClause` compiles rules to UNION/INTERSECT/EXCEPT set arithmetic and UNIONs the result with manual membership.

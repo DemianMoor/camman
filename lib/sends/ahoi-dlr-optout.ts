@@ -17,6 +17,14 @@ import type { DbOrTx } from "@/lib/sends/ahoi-dlr";
 // [ahoi-dlr-optout] distinct-log lines (processAhoiDlrOptOut, below) and
 // confirming it against a real MO STOP. Keys are lowercase-trimmed `error`
 // OR `smpp_code` values.
+//
+// ⚠️ WHEN ACTIVATING (adding a real code here): the DLR route currently calls
+// processAhoiDlrOptOut on the `db` singleton (harmless while this set is empty
+// — it returns before any write). Once a code can match, that call performs a
+// multi-statement write (contact → opt_out → attribution → counters) and MUST
+// be wrapped in `db.transaction(tx => processAhoiDlrOptOut(tx, …))` — matching
+// the inbound-webhook path — so a partial failure can't leave a half-written
+// opt_out. Do not activate a code without also wrapping the route call.
 export const AHOI_KNOWN_OPTOUT_DLR_CODES: ReadonlySet<string> = new Set([]);
 
 export function classifyAhoiDlrOptOut(

@@ -39,7 +39,7 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 // unique index is the hard guarantee, the retry loop the safety net.
 const CODE_ALPHABET =
   "23456789abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ";
-const CODE_LENGTH = 7;
+export const CODE_LENGTH = 7;
 const generateCode = customAlphabet(CODE_ALPHABET, CODE_LENGTH);
 const MAX_CODE_ATTEMPTS = 5;
 

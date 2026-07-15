@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-07-15_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -40,8 +40,15 @@ The underlying primitives (Step 1 kickoff, Step 2 drain) are unchanged and still
   - **Nothing sends until complete.** `selectDueScheduledStages` (Phase A) resumes any due stage with `materialized_at IS NULL`; `selectDrainableStages` (Phase B) drains ONLY stages with `materialized_at IS NOT NULL`. A partially-materialized audience is therefore never sent — the cron finishes materialization first, then drains. A killed tick / hit budget just resumes next tick from the committed rows (idempotent).
   - **Visibility.** A stage mid-materialization reads the Indigo **"Materializing"** operational status (not "Prepared") — see [daily-volume-ui.md](daily-volume-ui.md). `already_pending` is retired: a re-Prepare is now an idempotent no-op.
   - Backfill: migration `0089` marks every pre-existing stage that already had `stage_sends` rows as complete (they were atomic before), so the new drain gate doesn't strand in-flight sends.
-- Refuses with explicit reasons: `not_found`, `no_creative`, `no_schedule`, `already_pending`, `no_recipients`, `stage_not_ready`, `no_provider`, `provider_not_api_capable`, `no_credentials`, `no_short_domain`, `no_destination`.
+- Refuses with explicit reasons: `not_found`, `no_creative`, `no_schedule`, `already_pending`, `no_recipients`, `stage_not_ready`, `no_provider`, `provider_not_api_capable`, `no_credentials`, `no_short_domain`, `no_destination`, `multi_segment_not_allowed`, `segment_ceiling_exceeded`.
 - **`no_schedule` is the hard null-date guard.** `kickoffStageSend` refuses any stage with a NULL `scheduled_at` before materializing — the shared chokepoint for every entry point (cron Phase A never selects NULLs anyway; the manual kickoff route; Approve-Send). A null date is **never** treated as "send now"; an explicit Send now stamps `scheduled_at = now()` upstream so it passes. This guards the copied-stage auto-fire bug at the pipeline level, not just the UI.
+
+### Segment policy preflight (G8, Ahoi Phase 1 Section 2)
+Before any recipient is enumerated or materialized, `kickoffStageSend` builds one **representative** rendered SMS — creative text + brand prefix + a fixed-width tracked link (`CODE_LENGTH`-character placeholder code, [lib/links/mint-link.ts](../../lib/links/mint-link.ts)) or the pasted `short_url` in manual mode + stop text, i.e. exactly what `buildStageSms` produces for a real recipient — and runs it through `countSegments()` ([lib/sends/segments.ts](../../lib/sends/segments.ts)). This is accurate for the **whole stage**, not just one recipient: within a stage the rendered text is recipient-invariant (same creative text, same brand name, same stop text, and every minted link is the same length since `mintLinksBatch` always generates a `CODE_LENGTH`-char code under one `shortDomain` resolved once for the stage).
+- **Default policy is single-segment-only.** More than 1 segment refuses with `multi_segment_not_allowed` unless the stage's creative has `allow_multi_segment = true` (migration `0108`).
+- **Hard ceiling (G8), unconditional.** Regardless of the override, more than `MAX_SEGMENTS` segments refuses with `segment_ceiling_exceeded` — Ahoi's silent multipart splitting (see [06-integrations.md](../06-integrations.md)) can never runaway-bill or send an unbounded number of parts. See the G8 entry in [07-conventions.md](../07-conventions.md) for the ceiling rationale (kept in one place, not duplicated here).
+- **Applies uniformly to manual and tracked modes** — both build the same representative text shape, so a manual-mode stage with a pasted long `short_url` is gated the same way.
+- Both refusals are in `scheduled.ts`'s `PERMANENT_REFUSALS` — a stage refused this way won't self-resolve within a scheduled window; a human must edit the creative (shorten the text or flip the override).
 
 ### Step 2 — Drain (`drain.ts`, `runStageDrain`)
 ```mermaid

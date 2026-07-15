@@ -8,6 +8,8 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 
 ## 2026-07-15 — Ahoi send() + buildRedactedRequest() implemented (Section 2 Task 1) — docs/06-integrations.md
 
+## 2026-07-15 — Kickoff segment preflight gate (multi_segment_not_allowed / segment_ceiling_exceeded, Section 2 Task 5) — docs/04-features/sms-send-pipeline.md
+
 ## 2026-07-14 — Ahoi provider seeded (migration 0107) — docs/03-data-model.md
 
 ## 2026-07-14 — Targeted (scoped) lookups: group action + upload-existing list — docs/04-features/phone-lookup-carrier, docs/07-conventions

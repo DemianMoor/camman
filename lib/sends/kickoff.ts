@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
-import { mintLinksBatch } from "@/lib/links/mint-link";
+import { CODE_LENGTH, mintLinksBatch } from "@/lib/links/mint-link";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
+import { countSegments, MAX_SEGMENTS } from "@/lib/sends/segments";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   buildStageFullUrl,
@@ -56,7 +57,14 @@ export type KickoffRefusal =
   | "no_destination"
   // The resolved destination is a malformed guidekn URL — refuse rather than
   // ship a 404 that silently loses attribution.
-  | "invalid_destination";
+  | "invalid_destination"
+  // Rendered text (creative + brand prefix + tracked link + stop text)
+  // exceeds 1 SMS segment and the creative hasn't opted in
+  // (allow_multi_segment=false). Spec §4.
+  | "multi_segment_not_allowed"
+  // G8 hard ceiling: text exceeds MAX_SEGMENTS regardless of the creative's
+  // allow_multi_segment override — never runaway multipart.
+  | "segment_ceiling_exceeded";
 
 export type KickoffResult =
   | {
@@ -95,6 +103,7 @@ interface MainRow {
   behavioral_tier: number | null;
   parent_stage_id: number | null;
   creative_text: string | null;
+  creative_allow_multi_segment: boolean;
   exclude_prior_offer_contacts: boolean;
 }
 
@@ -134,6 +143,7 @@ export async function kickoffStageSend(
       s.behavioral_tier          AS behavioral_tier,
       s.parent_stage_id          AS parent_stage_id,
       cr.text                    AS creative_text,
+      cr.allow_multi_segment     AS creative_allow_multi_segment,
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts
     FROM campaigns c
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
@@ -253,6 +263,28 @@ export async function kickoffStageSend(
     if (validateDestination(destinationUrl, row.stage_tracking_id)) {
       return { ok: false, reason: "invalid_destination" };
     }
+  }
+
+  // ---- Segment policy preflight (G8 + spec §4). Rendered text is
+  // recipient-invariant WITHIN a stage — see the plan's design note — so one
+  // representative count is accurate for every recipient. Checked BEFORE any
+  // recipient enumeration/materialization so a misconfigured creative refuses
+  // cheaply, same pattern as the mode-specific guards above.
+  const representativeText =
+    mode === "manual"
+      ? manualText
+      : buildStageSms({
+          brandName,
+          creativeText: row.creative_text,
+          linkUrl: `https://${shortDomain!.domain}/r/${"X".repeat(CODE_LENGTH)}`,
+          stopText: row.stop_text,
+        });
+  const segCheck = countSegments(representativeText);
+  if (segCheck.segments > MAX_SEGMENTS) {
+    return { ok: false, reason: "segment_ceiling_exceeded" };
+  }
+  if (segCheck.segments > 1 && !row.creative_allow_multi_segment) {
+    return { ok: false, reason: "multi_segment_not_allowed" };
   }
 
   // ---- Enumerate the recipients NOT YET materialized (resumable). Behavioral-

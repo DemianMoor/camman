@@ -23,7 +23,7 @@ async function main() {
   await sql`
     INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key)
     VALUES (${prov.org_id}, ${prov.id}, NULL, ${token!})
-    ON CONFLICT (provider_id, brand_id) DO UPDATE SET api_key = EXCLUDED.api_key, updated_at = now()`;
+    ON CONFLICT (provider_id) WHERE brand_id IS NULL DO UPDATE SET api_key = EXCLUDED.api_key, updated_at = now()`;
   await sql.end();
   console.log(`seeded Ahoi number ${e164} + provider-default credential`);
 }

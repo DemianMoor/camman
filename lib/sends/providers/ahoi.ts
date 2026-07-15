@@ -1,6 +1,7 @@
 // Ahoi (api19/CallAPI) adapter. Section 1 built the skeleton (recipient
-// conversion). Section 2 implements send()/buildRedactedRequest(); parseDlr/
-// parseInbound remain Section 3.
+// conversion). Section 2 implements send()/buildRedactedRequest(). Section 3
+// implements parseDlr()/parseInbound() (pure field extraction from
+// form-encoded webhook bodies).
 import type {
   DlrEvent, InboundEvent, NormalizedSendParams, RawWebhook,
   SendSmsResult, SmsProviderAdapter,
@@ -12,7 +13,7 @@ import type {
 const AHOI_DEFAULT_BASE_URL = "https://v1.api19.com";
 const DEFAULT_TIMEOUT_MS = 15000;
 
-function ahoiBaseUrl(): string {
+export function ahoiBaseUrl(): string {
   return process.env.AHOI_API_BASE_URL ?? AHOI_DEFAULT_BASE_URL;
 }
 
@@ -21,6 +22,24 @@ export function toAhoiRecipient(e164: string): string {
   const digits = e164.replace(/\D/g, "");
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
   return digits; // already 10-digit (or leave as-is for non-US, handled later)
+}
+
+// Merge query params + form-decoded body into one flat field map. Body wins
+// on key collision (Ahoi's confirmed shape is POST form-encoded; query is a
+// defensive fallback in case a future callback arrives as GET). Used by both
+// parseDlr/parseInbound (which need the typed subset) AND the capture
+// functions in lib/sends/ahoi-dlr.ts / lib/sends/ahoi-inbound.ts (which
+// archive raw source/destination fields that DlrEvent doesn't carry) — so
+// both paths extract fields identically and can never disagree.
+export function extractAhoiWebhookFields(raw: RawWebhook): Record<string, string> {
+  const out: Record<string, string> = { ...raw.query };
+  if (raw.body) {
+    const params = new URLSearchParams(raw.body);
+    params.forEach((v, k) => {
+      out[k] = v;
+    });
+  }
+  return out;
 }
 
 interface AhoiSendParams {
@@ -164,10 +183,30 @@ export const ahoiAdapter: SmsProviderAdapter = {
   buildRedactedRequest(p: NormalizedSendParams): string {
     return buildRedactedBody(p);
   },
-  parseDlr(_raw: RawWebhook): DlrEvent | null {
-    throw new Error("ahoi.parseDlr not implemented until Section 3");
+  parseDlr(raw: RawWebhook): DlrEvent | null {
+    const f = extractAhoiWebhookFields(raw);
+    const uuid = f.uuid?.trim();
+    if (!uuid) return null; // nothing to reconcile against
+    return {
+      providerUuid: uuid,
+      sendStatus: (f.send_status ?? "").trim(),
+      status: (f.status ?? "").trim(),
+      smppStatus: f.smpp_status?.trim() || null,
+      smppCode: f.smpp_code?.trim() || null,
+      error: f.error?.trim() || null,
+    };
   },
-  parseInbound(_raw: RawWebhook): InboundEvent | null {
-    throw new Error("ahoi.parseInbound not implemented until Section 3");
+  parseInbound(raw: RawWebhook): InboundEvent | null {
+    const f = extractAhoiWebhookFields(raw);
+    const source = f.source?.trim();
+    const destination = f.destination?.trim();
+    if (!source || !destination) return null;
+    return {
+      source,
+      destination,
+      message: f.message ?? "",
+      type: (f.type ?? "sms").trim(),
+      cost: f.cost?.trim() || null,
+    };
   },
 };

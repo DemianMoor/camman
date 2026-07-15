@@ -8,10 +8,10 @@ function check(name: string, cond: boolean, detail = "") {
   console.log(`${cond ? "✓" : "✗"} ${name}${cond ? "" : `  ${detail}`}`);
 }
 
-const th = getAdapter("texthub");
-check("texthub adapter resolves", th.key === "texthub");
-const ah = getAdapter("ahoi");
-check("ahoi adapter resolves", ah.key === "ahoi");
+const th = getAdapter("txh");
+check("texthub adapter resolves", th.key === "txh");
+const ah = getAdapter("ahi");
+check("ahoi adapter resolves", ah.key === "ahi");
 
 let threw: unknown = null;
 try { getAdapter("nope"); } catch (e) { threw = e; }

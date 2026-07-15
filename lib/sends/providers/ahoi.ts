@@ -170,7 +170,7 @@ function buildRedactedBody(p: NormalizedSendParams): string {
 }
 
 export const ahoiAdapter: SmsProviderAdapter = {
-  key: "ahoi",
+  key: "ahi",
   toProviderRecipient: toAhoiRecipient,
   async send(p: NormalizedSendParams): Promise<SendSmsResult> {
     if (!p.senderNumber) {

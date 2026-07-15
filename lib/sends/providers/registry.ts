@@ -10,8 +10,8 @@ export class UnknownProviderError extends Error {
 }
 
 const ADAPTERS: Record<string, SmsProviderAdapter> = {
-  texthub: texthubAdapter,
-  ahoi: ahoiAdapter,
+  txh: texthubAdapter,
+  ahi: ahoiAdapter,
 };
 
 export function getAdapter(key: string): SmsProviderAdapter {

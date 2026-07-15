@@ -9,7 +9,7 @@ import type {
 } from "./types";
 
 export const texthubAdapter: SmsProviderAdapter = {
-  key: "texthub",
+  key: "txh",
   // TextHub's number is international format already — identity conversion.
   toProviderRecipient(e164: string): string {
     return e164;

@@ -28,7 +28,7 @@ import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 
-import { eq, isNull, sql as drizzleSql } from "drizzle-orm";
+import { eq, sql as drizzleSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 

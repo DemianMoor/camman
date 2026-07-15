@@ -146,6 +146,22 @@ sequenceDiagram
   Note over App,DB: CAPTURE ONLY — no keyword match, no opt_outs write (Section 4)
 ```
 
+## E4. Ahoi CDR poll (every 15 min, inbound backstop)
+
+```mermaid
+sequenceDiagram
+  participant Cron as ahoi-cdr-poll (13,28,43,58)
+  participant App
+  participant Ahoi as Ahoi CDR (system of record)
+  participant DB
+  Cron->>App: GET /api/cron/ahoi-cdr-poll (Bearer CRON_SECRET)
+  App->>Ahoi: GET /cdrs/download/csv?startdate=<ET yesterday>&enddate=<ET today>&key=
+  Ahoi-->>App: CSV (all directions)
+  App->>App: filter direction=in
+  App->>DB: INSERT ahoi_inbound_events (source='cdr') ON CONFLICT (provider_id, provider_uuid) DO NOTHING
+  Note over App,DB: idempotent backstop, not because the webhook is lossy —<br/>upstream-carrier loss is unrecoverable by either channel (Phase 0 recon)
+```
+
 ## F. Segment rule audience resolution
 See [04-features/audience-segments.md](04-features/audience-segments.md) — `buildSegmentAudienceClause` compiles rules to UNION/INTERSECT/EXCEPT set arithmetic and UNIONs the result with manual membership.
 

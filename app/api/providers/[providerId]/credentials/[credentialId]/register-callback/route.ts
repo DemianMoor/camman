@@ -54,7 +54,7 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "provider_credentials.manage")) {
+  if (!can(role, "providers.update")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

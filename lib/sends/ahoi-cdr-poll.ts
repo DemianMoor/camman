@@ -117,13 +117,26 @@ export async function pollAhoiCdr(
   }[];
 
   // Dual-read: resolve each row's plaintext key from the encrypted column
-  // (migration 0110) or the legacy plaintext column. A row with neither is a
-  // broken credential — skip it (warn) rather than crash the whole poll.
+  // (migration 0110) or the legacy plaintext column. A row with neither, OR a
+  // row whose encrypted blob won't decrypt (malformed/wrong version/bad auth
+  // tag/misconfigured PROVIDER_CREDENTIALS_KEY — decryptSecret THROWS), is a
+  // broken credential — skip it (warn, never log the key/error) rather than
+  // crash the whole poll.
   const creds: { credential_id: number; org_id: string; provider_id: number; api_key: string }[] = [];
   for (const row of credRows) {
-    const api_key = decryptCredentialKey(row);
+    let api_key: string | null;
+    try {
+      api_key = decryptCredentialKey(row);
+    } catch {
+      console.warn(
+        `pollAhoiCdr: credential ${row.credential_id} (provider ${row.provider_id}) failed to decrypt, skipping`,
+      );
+      continue;
+    }
     if (api_key === null) {
-      console.warn(`pollAhoiCdr: credential ${row.credential_id} has no usable api key, skipping`);
+      console.warn(
+        `pollAhoiCdr: credential ${row.credential_id} (provider ${row.provider_id}) has no usable api key, skipping`,
+      );
       continue;
     }
     creds.push({ credential_id: row.credential_id, org_id: row.org_id, provider_id: row.provider_id, api_key });

@@ -375,13 +375,26 @@ export async function selectPollableCredentials(
   `)) as unknown as (CredentialRow & { api_key_encrypted: string | null })[];
 
   // Dual-read: resolve each row's plaintext key from the encrypted column
-  // (migration 0110) or the legacy plaintext column. A row with neither is a
-  // broken credential — skip it (warn) rather than crash the whole poll.
+  // (migration 0110) or the legacy plaintext column. A row with neither, OR a
+  // row whose encrypted blob won't decrypt (malformed/wrong version/bad auth
+  // tag/misconfigured PROVIDER_CREDENTIALS_KEY — decryptSecret THROWS), is a
+  // broken credential — skip it (warn, never log the key/error) rather than
+  // crash the whole poll.
   const resolved: CredentialRow[] = [];
   for (const row of rows) {
-    const api_key = decryptCredentialKey(row);
+    let api_key: string | null;
+    try {
+      api_key = decryptCredentialKey(row);
+    } catch {
+      console.warn(
+        `selectPollableCredentials: credential ${row.credential_id} (provider ${row.provider_id}) failed to decrypt, skipping`,
+      );
+      continue;
+    }
     if (api_key === null) {
-      console.warn(`selectPollableCredentials: credential ${row.credential_id} has no usable api key, skipping`);
+      console.warn(
+        `selectPollableCredentials: credential ${row.credential_id} (provider ${row.provider_id}) has no usable api key, skipping`,
+      );
       continue;
     }
     resolved.push({ ...row, api_key });

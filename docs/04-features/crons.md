@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-13_
+_Last updated: 2026-07-14_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -8,7 +8,8 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 ## 2. The jobs (`vercel.json`)
 | Path | Schedule | Job | Auth |
 |------|----------|-----|------|
-| `/api/clicks/score-pending` | `3,18,33,48 * * * *` | enrich + score click rows, then propagate clean clicks → `clickers` | CRON_SECRET only (503 if unset) |
+| `/api/clicks/score-pending` | `3,18,33,48 * * * *` | enrich + score click rows (scoring only since W1.1) | CRON_SECRET only (503 if unset) |
+| `/api/cron/propagate-clickers` | `8,23,38,53 * * * *` | propagate freshly-scored clean clicks → `clickers` (incremental watermark); `withCronLease` single-runner sharing the `propagate-clickers` `cron_locks` row | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 | `/api/opt-outs/poll` | `6,21,36,51 * * * *` | poll TextHub inbox for STOP intake | CRON_SECRET (GET, all orgs) **or** session operator+ (POST, own org) |
 | `/api/cron/send-scheduled` | `*/5 * * * *` | fire scheduled tracked sends | CRON_SECRET (GET, all orgs) **or** session `campaigns.drain` (POST, own org) |
 | `/api/keitaro/poll` | `*/5 * * * *` | pull Keitaro clicks/conversions → `keitaro_stage_results` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
@@ -19,7 +20,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 | `/api/cron/lookup-worker` | `*/2 * * * *` | drain the Telnyx number-lookup queue (`lib/telnyx/worker.ts`); single-runner lease | CRON_SECRET only (503 if unset, 401 otherwise) |
 | `/api/cron/carrier-triage` | `17,47 * * * *` | drain `carrier_classify_queue` — batch unresolved carrier strings to `claude-haiku-4-5`, write confident buckets to `carrier_mappings` (`lib/carrier/ai-triage.ts`); `withCronLease` single-runner; per-run API-call cap | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 
-> **Schedules are staggered on purpose.** Previously the four `*/15` jobs all fired at `:00/:15/:30/:45` alongside the two `*/5` jobs — up to **5–6 crons at once**, each cold-starting and each grabbing pooler connections (the pool caps at `max:5` per instance against Supavisor's ~15-client ceiling). The `*/15` jobs now sit at distinct off-5 minute offsets (`3/6/9/12`), so they never coincide with the `*/5` jobs or each other — peak concurrency drops from ~6 to ~2. `send-scheduled` and `keitaro/poll` stay on `*/5` (both latency-sensitive; two concurrent is fine).
+> **Schedules are staggered on purpose.** Previously the four `*/15` jobs all fired at `:00/:15/:30/:45` alongside the two `*/5` jobs — up to **5–6 crons at once**, each cold-starting and each grabbing pooler connections (the pool caps at `max:5` per instance against Supavisor's ~15-client ceiling). The `*/15` jobs now sit at distinct off-5 minute offsets (`3/6/8/9/12`, plus `carrier-triage` at `17/47`), so they never coincide with the `*/5` jobs or each other — peak concurrency drops from ~6 to ~2. `propagate-clickers` at `8` runs alone at that minute. `send-scheduled` and `keitaro/poll` stay on `*/5` (both latency-sensitive; two concurrent is fine).
 >
 > **Both per-recipient pollers batch their writes.** `poll-conversions` and `poll-offer-reaches` fold their matches in memory and flush via a single `UPDATE … FROM (VALUES …)` per 500-row chunk, not one `UPDATE … WHERE id = …` round-trip per conversion. Measured: ~200 sequential round-trips ≈ **12.4 s** of pooler latency vs **~53 ms** batched — material against the poll's budget on a busy sales day.
 
@@ -29,8 +30,15 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - CRON_SECRET Bearer only; returns 401 on bad/missing secret, **503 if `CRON_SECRET` is unconfigured**.
 - Params: `?mode=pending|rescore` (default pending), `?maxRows=N` (default 2000, ≤20000).
 - Calls `scoreClicks()` ([`lib/links/score-clicks.ts`](../../lib/links/score-clicks.ts)); Node runtime (filesystem for the MaxMind `.mmdb`).
-- After scoring, calls `propagateTrackedClickers()` ([`lib/links/propagate-clickers.ts`](../../lib/links/propagate-clickers.ts)) to materialize freshly-scored clean (`human`) clicks into the `clickers` engagement table so segment clicker rules see them. Best-effort (a failure here is logged but does not fail the scoring run) and idempotent.
-- Returns `{ mode, scored, byClassification, capped, degraded, enrichment, clickersInserted }`. `degraded:true` ⇒ no rows scored (enrichment failed) — rows stay pending. See [tracking-attribution.md](tracking-attribution.md).
+- **Scoring only since W1.1** — clicker propagation moved to its own cron (`/api/cron/propagate-clickers`, below). Previously this route called `propagateTrackedClickers()` best-effort after scoring, where a heavy scoring run ate the 60 s budget and starved it (watermark stalled ~5 h on 2026-07-14).
+- Returns `{ mode, scored, byClassification, capped, degraded, enrichment }`. `degraded:true` ⇒ no rows scored (enrichment failed) — rows stay pending. See [tracking-attribution.md](tracking-attribution.md).
+
+### `/api/cron/propagate-clickers` (clicker propagation)
+- CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise.
+- Calls `propagateTrackedClickers()` ([`lib/links/propagate-clickers.ts`](../../lib/links/propagate-clickers.ts)) under `withCronLease("propagate-clickers", …)` to materialize freshly-scored clean (`human`) clicks into the `clickers` engagement table so segment clicker rules see them. Idempotent (`NOT EXISTS` guard) and incremental: an `scored_at` high-water mark in `cron_locks.watermark` bounds each run to `(watermark, now()−5min]`, advanced only after the INSERT commits.
+- **Shared `cron_locks` row (by design):** `withCronLease` uses the `lease_until` column of the `propagate-clickers` row while `propagateTrackedClickers` uses its `watermark` column — distinct columns on the same row, so the lease and the progress marker compose.
+- **W1.1 (2026-07-14):** split out of `score-pending` so a heavy scoring run can no longer starve it. Runs at `8,23,38,53` — 5 min after each `score-pending` tick (`3,18,33,48`) so freshly-scored clicks are available; the 5-min safety lag also defers any click scored right at the boundary to the next run.
+- Returns `{ ok, inserted, watermarkFrom, watermarkTo }`, or `{ ok, skipped, skippedCount }` on lease contention.
 
 ### `/api/opt-outs/poll` (STOP intake)
 - Polls each provider credential's TextHub `?inbox=true` endpoint and inserts new opt-outs (`opt_outs`, source `sms_inbound`, org-wide). The TextHub *push* callback is broken on their side, so intake pivoted to **polling**; the Stage-A inbound webhook is a dormant fallback. Manual "Poll now" button uses the POST path (operator+).

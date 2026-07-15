@@ -1,7 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { propagateTrackedClickers } from "@/lib/links/propagate-clickers";
 import { scoreClicks, type ScoreMode } from "@/lib/links/score-clicks";
 
 // Cron-triggered click scoring. Vercel Cron hits this on a schedule (see
@@ -45,18 +44,9 @@ export async function GET(req: NextRequest) {
 
   const result = await scoreClicks(db, { mode, maxRows });
 
-  // After scoring, materialize freshly-scored clean (human) clicks into the
-  // `clickers` engagement table so segment clicker rules see tracked clickers.
-  // Idempotent + best-effort: a failure here must not fail the scoring run.
-  let clickersInserted = 0;
-  let clickerWatermark: string | null = null;
-  try {
-    const propagated = await propagateTrackedClickers(db);
-    clickersInserted = propagated.inserted;
-    clickerWatermark = propagated.watermarkTo;
-  } catch (err) {
-    console.error("score-pending: propagateTrackedClickers failed", err);
-  }
+  // Clicker propagation (clicks → `clickers`) moved to its own cron in W1.1
+  // (/api/cron/propagate-clickers) so a heavy scoring run here can no longer
+  // starve it of this function's 60s budget. This route now does scoring only.
 
   // Surface enrichment health explicitly so a degraded run (e.g. MaxMind 429 /
   // missing key) is impossible to miss in the cron response — not just buried
@@ -69,7 +59,5 @@ export async function GET(req: NextRequest) {
     capped: result.capped,
     degraded: result.degraded,
     enrichment: result.enrichment,
-    clickersInserted,
-    clickerWatermark,
   });
 }

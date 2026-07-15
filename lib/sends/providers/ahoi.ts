@@ -24,6 +24,18 @@ export function toAhoiRecipient(e164: string): string {
   return digits; // already 10-digit (or leave as-is for non-US, handled later)
 }
 
+// Inverse of toAhoiRecipient: Ahoi's 10-digit inbound source_number -> E.164.
+// Self-contained (NOT via validatePhone/libphonenumber — that lib throws under
+// tsx, and an Ahoi inbound source is already a real number). Contacts are
+// stored E.164 (+1XXXXXXXXXX), so this is the normalization used on BOTH the
+// contact-match and upsert-contact paths in Section 4.
+export function ahoiSourceToE164(source: string): string | null {
+  const digits = (source ?? "").replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return null; // not a NANP-shaped number
+}
+
 // Merge query params + form-decoded body into one flat field map. Body wins
 // on key collision (Ahoi's confirmed shape is POST form-encoded; query is a
 // defensive fallback in case a future callback arrives as GET). Used by both

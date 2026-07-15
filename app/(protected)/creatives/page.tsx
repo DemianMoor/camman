@@ -99,6 +99,7 @@ type Creative = {
   sequence_placement: CreativeSequencePlacement;
   funnel_stage: CreativeFunnelStage;
   applies_to_all_offers: boolean;
+  allow_multi_segment: boolean;
   status: Status;
   archived_at: string | null;
   created_at: string;
@@ -679,6 +680,7 @@ export default function CreativesPage() {
       sequence_placement: values.sequence_placement,
       funnel_stage: values.funnel_stage,
       applies_to_all_offers: values.applies_to_all_offers,
+      allow_multi_segment: values.allow_multi_segment,
       offer_ids: values.offer_ids,
     };
     const result = await updateApi.execute(`/api/creatives/${editing.id}`, {
@@ -1289,6 +1291,7 @@ export default function CreativesPage() {
               sequence_placement: editing.sequence_placement,
               funnel_stage: editing.funnel_stage,
               applies_to_all_offers: editing.applies_to_all_offers,
+              allow_multi_segment: editing.allow_multi_segment,
               offer_ids: editing.offers.map((o) => o.id),
             }}
             initialSpamResult={

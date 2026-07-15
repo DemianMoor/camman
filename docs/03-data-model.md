@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-07-14_
+_Last updated: 2026-07-15_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -116,6 +116,8 @@ erDiagram
   sms_providers ||--o{ send_circuit_events : "pause/resume audit"
   stage_sends ||--o{ send_attempts : "per-attempt evidence"
   provider_credentials ||--o{ texthub_inbound_events : "STOP intake"
+  provider_credentials ||--o{ ahoi_dlr_events : "DLR capture"
+  provider_credentials ||--o{ ahoi_inbound_events : "inbound capture"
   opt_outs ||--o| opt_out_attributions : "STOP → latest-stage credit (1 row)"
   campaign_stages ||--o{ opt_out_attributions : "inbound STOPs"
   stage_sends ||--o{ opt_out_attributions : "triggering send"
@@ -182,6 +184,8 @@ erDiagram
 | `routing_types`, `traffic_types` | `*_id` (text uniq), `name` | campaign metadata dimensions |
 | `utm_tags` | `tag_id` (text uniq), `label`, `value_source`, `affiliate_network_id` | appended to stage Full URLs |
 
+> **Ahoi provider seed (migration `0107`)** — no schema change, a new `sms_providers` row (`sms_provider_id='ahoi'`, `supports_api_send=true`), seeded additively/idempotently via `ON CONFLICT (sms_provider_id) DO NOTHING` against the single `organizations` row. The approved number (`provider_phones`) and provider-default credential (`provider_credentials`, `brand_id IS NULL`) are seeded separately by `scripts/seed-ahoi-number-credential.ts` (reads `AHOI_API_TOKEN`, run after 0107 applies) since they carry env secrets and don't belong in a committed migration. Part of Section 1 of the Ahoi provider build (adapter registry + drain integration); `SEND_ENABLED` stays off and no Ahoi send code ships in this section — see `docs/superpowers/specs/2026-07-14-ahoi-sms-provider-phase-1-design.md`.
+
 ### Contacts & engagement
 | Table | Key columns | Notes |
 |-------|------------|-------|
@@ -212,7 +216,7 @@ erDiagram
 ### Creatives
 | Table | Key columns | Notes |
 |-------|------------|-------|
-| `creatives` | `slug` (uniq), `creative_id` (uniq, optional), `text`, `quality`, `sequence_placement`, `funnel_stage`, `applies_to_all_offers`, `spam_score`/`spam_label`/`spam_score_error` | spam columns mirrored from `spam_scores` on save. `funnel_stage` (migration `0076`) is manual metadata — `start`/`clicked`/`checkout`/`ignored`/`unknown` (default `unknown`), like `quality` |
+| `creatives` | `slug` (uniq), `creative_id` (uniq, optional), `text`, `quality`, `sequence_placement`, `funnel_stage`, `applies_to_all_offers`, `allow_multi_segment`, `spam_score`/`spam_label`/`spam_score_error` | spam columns mirrored from `spam_scores` on save. `funnel_stage` (migration `0076`) is manual metadata — `start`/`clicked`/`checkout`/`ignored`/`unknown` (default `unknown`), like `quality`. `allow_multi_segment` (migration `0108`) — per-creative override for the single-segment-only send policy; enforced at kickoff preflight, see `docs/07-conventions.md` G8 |
 | `creative_offers` | PK(creative_id, offer_id) | M:N |
 
 ### Campaigns & stages
@@ -243,6 +247,8 @@ erDiagram
 | `send_attempts` | `stage_send_id`, `attempt_number`, `request_redacted`, `http_status`, `raw_body`, `ok`, `message_id`, `classification` | append-only per-attempt evidence (migration 0064). Verbatim TextHub body + classification (`accepted`/`mine_transport`/`theirs_rejected`/`indeterminate`); api_key never stored. `stage_sends` is current state, this is immutable history |
 | `campaign_events` | `campaign_id`, `stage_id?`, `event_type` (free-text), `actor_user_id?` (NULL=system), `summary`, `metadata jsonb` | append-only campaign activity log (Activity tab timeline); migration 0060 |
 | `texthub_inbound_events` | `credential_id`, `provider_message_id`, `matched_contact_id`, `matched_stage_send_id`, `provider_received_at`, `result` | raw inbound STOP capture. `matched_stage_send_id`/`provider_received_at` added migration 0075 (attribution debugging + window anchor) |
+| `ahoi_dlr_events` | `provider_id`, `provider_uuid`, `send_status`, `status`, `smpp_status`, `smpp_code`, `matched_stage_send_id`, `result` | append-only DLR capture + reconcile (migration 0109). NAMING DEBT: reconciles against `stage_sends.texthub_message_id`, which also holds Ahoi's send-time uuid (see `docs/07-conventions.md`) |
+| `ahoi_inbound_events` | `provider_id`, `source` (channel: webhook/cdr), `source_number`, `destination_number`, `provider_uuid`, `matched_contact_id`, `matched_stage_send_id`, `result` | append-only inbound (STOP-carrying) capture from TWO channels (migration 0109); `matched_*`/`result`/`processed_at` are filled by Section 4's `processAhoiInboundOptOut` (`lib/sends/ahoi-optout.ts`) — `result` also takes `'duplicate'` for a cross-channel repeat of an already-suppressed STOP (CARRY 1) |
 | `opt_out_attributions` | `opt_out_id`, `stage_send_id` (SET NULL), `stage_id`, `campaign_id`, UNIQUE(opt_out_id, stage_id) | inbound STOP → campaign/stage credit (migration 0075). **One row per opt_out** — the single most-recent stage that sent to the number within 72h of the reply (`OPT_OUT_ATTRIBUTION_WINDOW_HOURS`; latest-stage-only since 2026-06-24, was one-row-per-stage before). `stage_id`/`campaign_id` denormalized so a pruned send keeps the credit. Drives `campaign_stages.inbound_opt_out_count` (Reports "Opt-outs" + campaign "Inbound STOPs"). Additive — the org-wide `opt_outs` row is the suppression of record |
 | `stage_manual_sales` | `org_id`, `campaign_id`, `stage_id`, `delta` (signed), `entered_by?` (NULL=system/backfill), `created_at` | dated per-entry ledger of the operator's manual sales (migration 0079). Each manual-results save writes the signed CHANGE in `campaign_stages.sales_count`, dated to the save; `SUM(delta)` per stage == `sales_count`. **Read by [`lib/reporting/attribution.ts`](../lib/reporting/attribution.ts)** — the `/reports` tab AND the dashboard stats/daily-activity attribute manual sales by this **entry date** (in-range `SUM(delta)` combined with Keitaro conversions via `combineSales`). Pre-ledger totals were backfilled by 0079 as one delta dated `now()`; **migration 0084 re-dated those backfill rows** (`entered_by IS NULL`) to each stage's effective send day so historical manual sales spread across the calendar instead of lumping on one date |
 | `keitaro_stage_results` | UNIQUE(org_id, stage_id, stat_date), `stage_tracking_id`, `visit_clicks_raw`/`visit_clicks_clean` (Clickers), `redirect_clicks_raw`/`redirect_clicks_clean` (Offer Redirect), legacy `raw_clicks`/`clean_clicks` (= redirect, back-compat), `checkouts`/`sales`, `revenue`/`payout_at_conversion`/`cost`/`epc`, `synced_at` | per-stage daily aggregate from the Keitaro 5-min poll; idempotent UPSERT (last-write-wins). `sub_id_3` = stage tracking id; campaign totals = SUM across stages. **`cost` is ALWAYS 0 — do NOT use it for ROI/EPC/profit**: it's Keitaro ad-platform spend (we don't buy Keitaro traffic). Real stage cost = `campaign_stages.total_cost`; the `/reports` route folds this column in but overwrites it with `total_cost` before computing profit. `epc` is revenue-derived (`revenue / redirect raw clicks`), not cost-derived. **`revenue` is the REVENUE SOURCE OF TRUTH** (real summed per-conversion payout at sync time) — every reported revenue figure SUMs this, never `sales × offers.payout_cpa`. `payout_at_conversion` (migration 0083) = `revenue / NULLIF(sales,0)` frozen at sync, so a later CPA edit can't retro-change a row's rate. Clicks split by Keitaro campaign **name** `gk-lp-visits` (visits) vs offer campaigns (redirects); visits ⊇ redirects, never summed. Migrations 0061 + 0062 + 0083 |

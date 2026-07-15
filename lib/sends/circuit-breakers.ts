@@ -147,3 +147,45 @@ export async function latchPause(
   `);
   return true;
 }
+
+// Ahoi DLR-driven reject-rate signal (Section 3, spec §5 derived signal (a)).
+// Distinct from FAILURE_SPIKE_THRESHOLD above (consecutive SEND-time failures
+// within one drain invocation): a DLR can report `rejected` for a send that
+// looked fine at send time (Ahoi's always-200 body said {status:"ok"}), so
+// this is a genuinely different, asynchronous, carrier-level signal that only
+// arrives minutes later. Provider-scoped (not the org-wide proxy the
+// send-time breaker uses) since ahoi_dlr_events already carries a real
+// provider_id per row — no "until provider #2" caveat applies here.
+//
+// DEFENSIVE (G4/O1): `rejected` is doc-inferred, never observed live in Phase
+// 0 recon (only carrier_sent/delivered with error=000 were seen). This
+// threshold exists so that WHEN it does start appearing, a spike trips a
+// pause instead of silently burning through a broken number/route.
+//
+// CONFIG, not hardcoded: threshold + window are env-tunable so ops can adjust
+// sensitivity without a code change (the whole signal is provisional until a
+// real reject rate is observed). Defaults are identical to the original
+// constants (10 rejects / 900s). Read through helpers, not module-load
+// constants, so a redeploy isn't needed to pick up a changed env value.
+export function ahoiDlrRejectSpikeThreshold(): number {
+  const v = Number(process.env.AHOI_DLR_REJECT_SPIKE_THRESHOLD);
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 10;
+}
+export function ahoiDlrRejectWindowSeconds(): number {
+  const v = Number(process.env.AHOI_DLR_REJECT_SPIKE_WINDOW_SEC);
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 900;
+}
+
+export async function countAhoiDlrRejectsSince(
+  dbc: DbOrTx,
+  providerId: number,
+  seconds: number,
+): Promise<number> {
+  const r = (await dbc.execute(sql`
+    SELECT count(*)::int AS n FROM ahoi_dlr_events
+    WHERE provider_id = ${providerId}
+      AND send_status = 'rejected'
+      AND received_at > now() - make_interval(secs => ${seconds})
+  `)) as unknown as { n: number }[];
+  return Number(r[0]?.n ?? 0);
+}

@@ -184,6 +184,7 @@ export async function GET(req: NextRequest) {
         sequence_placement: creatives.sequence_placement,
         funnel_stage: creatives.funnel_stage,
         applies_to_all_offers: creatives.applies_to_all_offers,
+        allow_multi_segment: creatives.allow_multi_segment,
         // Direct columns: filled in by the scoring step on save. The
         // cache lookup below is the legacy path; we still consult it so
         // pre-migration creatives (which have NULLs in the columns)
@@ -323,6 +324,7 @@ export async function GET(req: NextRequest) {
       sequence_placement: r.sequence_placement,
       funnel_stage: r.funnel_stage,
       applies_to_all_offers: r.applies_to_all_offers,
+      allow_multi_segment: r.allow_multi_segment,
       status: r.status,
       archived_at: r.archived_at,
       created_at: r.created_at,

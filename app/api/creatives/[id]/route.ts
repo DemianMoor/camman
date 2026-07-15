@@ -74,6 +74,7 @@ export async function GET(
       sequence_placement: creatives.sequence_placement,
       funnel_stage: creatives.funnel_stage,
       applies_to_all_offers: creatives.applies_to_all_offers,
+      allow_multi_segment: creatives.allow_multi_segment,
       spam_score: creatives.spam_score,
       spam_label: creatives.spam_label,
       spam_scored_at: creatives.spam_scored_at,

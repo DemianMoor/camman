@@ -212,6 +212,9 @@ const PERMANENT_REFUSALS: ReadonlySet<KickoffRefusal> = new Set([
   "no_credentials",
   "no_short_domain",
   "no_destination",
+  "multi_segment_not_allowed",
+  "segment_ceiling_exceeded",
+  "no_sender_number",
 ]);
 
 function envSendEnabled(): boolean {

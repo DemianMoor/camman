@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-07-15_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -40,8 +40,16 @@ The underlying primitives (Step 1 kickoff, Step 2 drain) are unchanged and still
   - **Nothing sends until complete.** `selectDueScheduledStages` (Phase A) resumes any due stage with `materialized_at IS NULL`; `selectDrainableStages` (Phase B) drains ONLY stages with `materialized_at IS NOT NULL`. A partially-materialized audience is therefore never sent — the cron finishes materialization first, then drains. A killed tick / hit budget just resumes next tick from the committed rows (idempotent).
   - **Visibility.** A stage mid-materialization reads the Indigo **"Materializing"** operational status (not "Prepared") — see [daily-volume-ui.md](daily-volume-ui.md). `already_pending` is retired: a re-Prepare is now an idempotent no-op.
   - Backfill: migration `0089` marks every pre-existing stage that already had `stage_sends` rows as complete (they were atomic before), so the new drain gate doesn't strand in-flight sends.
-- Refuses with explicit reasons: `not_found`, `no_creative`, `no_schedule`, `already_pending`, `no_recipients`, `stage_not_ready`, `no_provider`, `provider_not_api_capable`, `no_credentials`, `no_short_domain`, `no_destination`.
+- Refuses with explicit reasons: `not_found`, `no_creative`, `no_schedule`, `already_pending`, `no_recipients`, `stage_not_ready`, `no_provider`, `provider_not_api_capable`, `no_credentials`, `no_short_domain`, `no_destination`, `multi_segment_not_allowed`, `segment_ceiling_exceeded`, `no_sender_number`.
 - **`no_schedule` is the hard null-date guard.** `kickoffStageSend` refuses any stage with a NULL `scheduled_at` before materializing — the shared chokepoint for every entry point (cron Phase A never selects NULLs anyway; the manual kickoff route; Approve-Send). A null date is **never** treated as "send now"; an explicit Send now stamps `scheduled_at = now()` upstream so it passes. This guards the copied-stage auto-fire bug at the pipeline level, not just the UI.
+- **No-sender-number guard (`no_sender_number`, Section 3).** A provider whose adapter requires a per-stage sending number (currently only Ahoi — TextHub's number is bound to the api_key account-side) is refused at kickoff, before any recipient materialization, when the stage has no `provider_phone_id`. Closes a gap where such a stage previously materialized every recipient and only failed at drain.
+
+### Segment policy preflight (G8, Ahoi Phase 1 Section 2)
+Before any recipient is enumerated or materialized, `kickoffStageSend` builds one **representative** rendered SMS — creative text + brand prefix + a fixed-width tracked link (`CODE_LENGTH`-character placeholder code, [lib/links/mint-link.ts](../../lib/links/mint-link.ts)) or the pasted `short_url` in manual mode + stop text, i.e. exactly what `buildStageSms` produces for a real recipient — and runs it through `countSegments()` ([lib/sends/segments.ts](../../lib/sends/segments.ts)). This is accurate for the **whole stage**, not just one recipient: within a stage the rendered text is recipient-invariant (same creative text, same brand name, same stop text, and every minted link is the same length since `mintLinksBatch` always generates a `CODE_LENGTH`-char code under one `shortDomain` resolved once for the stage).
+- **Default policy is single-segment-only.** More than 1 segment refuses with `multi_segment_not_allowed` unless the stage's creative has `allow_multi_segment = true` (migration `0108`).
+- **Hard ceiling (G8), unconditional.** Regardless of the override, more than `MAX_SEGMENTS` segments refuses with `segment_ceiling_exceeded` — Ahoi's silent multipart splitting (see [06-integrations.md](../06-integrations.md)) can never runaway-bill or send an unbounded number of parts. See the G8 entry in [07-conventions.md](../07-conventions.md) for the ceiling rationale (kept in one place, not duplicated here).
+- **Applies uniformly to manual and tracked modes** — both build the same representative text shape, so a manual-mode stage with a pasted long `short_url` is gated the same way.
+- Both refusals are in `scheduled.ts`'s `PERMANENT_REFUSALS` — a stage refused this way won't self-resolve within a scheduled window; a human must edit the creative (shorten the text or flip the override).
 
 ### Step 2 — Drain (`drain.ts`, `runStageDrain`)
 ```mermaid
@@ -105,6 +113,8 @@ Every statement is a **single query** (never concurrent on one connection), so t
 - Soft stops leave rows `pending` for the next tick. Hard stops latch `send_paused=true` (+ reason/at) and fire a Telegram alert.
 - **Auto-trips:** failure spike (≥10 consecutive failures) and a pacing tripwire (processed > expected — structural-bug guard). Counts are org-wide as a proxy for "this provider" until a second provider exists.
 - Every pause/resume is appended to `send_circuit_events` (actor NULL = auto-trip; actor set = manual). Resumes are manager+ audited actions.
+
+**Ahoi DLR reject-rate (Section 3, migration 0109).** A second, independent signal: `send_status='rejected'` DLRs (asynchronous, minutes after a send that looked fine at send time) feed a provider-scoped rolling count (`countAhoiDlrRejectsSince`) — a threshold count (`AHOI_DLR_REJECT_SPIKE_THRESHOLD`, default 10) of rejects within a rolling window (`AHOI_DLR_REJECT_SPIKE_WINDOW_SEC`, default 900) latches the same `sms_providers.send_paused` kill-switch the send-time failure-spike breaker uses. The two signals compose additively (both latch the one pause; neither double-counts — they read disjoint tables). Doc-inferred/defensive (never observed live in Phase 0 recon) — see `docs/07-conventions.md`'s G4 note.
 
 ### Submission integrity, evidence & classification (Workstream 3, migration 0064)
 The responsibility boundary: everything up to and including TextHub's response envelope is ours to prove clean; everything after is theirs. UI copy says **"Submitted" / "Accepted by TextHub", never "Delivered"** — there is no DLR.
@@ -182,3 +192,4 @@ Best-effort Telegram alerts on breaker trips / poller failures. If `TELEGRAM_BOT
 - Rate ceilings are org-wide until provider #2; per-provider accounting is a known follow-up.
 - `api_key` is plaintext at rest — encryption/secret-manager is deferred.
 - See memory notes: live-fire is owner-gated and has not been exercised end-to-end.
+- **Ahoi opt-out intake is complete (Phase 1 Section 4) but Ahoi sending is still gated.** All 3 opt-out layers (inbound webhook, CDR poll, DLR opt-out-error) write `opt_outs`; the go-live harness (`scripts/test-ahoi-optout-golive-harness.ts`) proves suppression end-to-end through the real preflight. `SEND_ENABLED` for Ahoi requires BOTH that harness green AND a one-time manual real-STOP smoke test (documented in the harness script's header) — the flip itself is a separate, gated, out-of-band step, not part of any code change.

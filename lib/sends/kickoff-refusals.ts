@@ -1,3 +1,4 @@
+import { MAX_SEGMENTS } from "@/lib/sends/segments";
 import type { KickoffRefusal } from "@/lib/sends/kickoff";
 
 // Operator-readable message + HTTP status per kickoff refusal. Shared by the
@@ -35,5 +36,18 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     status: 400,
     message:
       "The stage's destination URL is malformed (bad sub_id3) — fix the Full URL before sending",
+  },
+  multi_segment_not_allowed: {
+    status: 400,
+    message:
+      'This message renders to more than 1 SMS segment — turn on "Allow multi-segment" on the creative to send it, or shorten the text',
+  },
+  segment_ceiling_exceeded: {
+    status: 400,
+    message: `This message renders to more than ${MAX_SEGMENTS} SMS segments — shorten the text (even multi-segment creatives can't exceed this)`,
+  },
+  no_sender_number: {
+    status: 400,
+    message: "This provider needs a sending number — assign a provider phone to this stage before sending",
   },
 };

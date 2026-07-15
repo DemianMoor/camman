@@ -43,6 +43,10 @@
     {
       "path": "/api/cron/carrier-triage",
       "schedule": "17,47 * * * *"
+    },
+    {
+      "path": "/api/cron/ahoi-cdr-poll",
+      "schedule": "13,28,43,58 * * * *"
     }
   ]
 }

@@ -75,7 +75,12 @@ export async function POST(
             slug,
             quality: src.quality,
             sequence_placement: src.sequence_placement,
+            funnel_stage: src.funnel_stage,
             applies_to_all_offers: src.applies_to_all_offers,
+            // allow_multi_segment is DELIBERATELY NOT copied — it resets to the
+            // default (false) on a duplicate. A copy may be edited longer, so the
+            // segment-policy override must be re-reviewed/re-enabled explicitly
+            // rather than silently inherited. (Do not "fix" by copying it.)
             status: "active",
           })
           .returning();

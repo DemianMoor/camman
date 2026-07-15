@@ -37,6 +37,10 @@ const REFUSAL: Record<DrainRefusal, { status: number; message: string }> = {
     message: "Sending is paused for this provider (circuit breaker engaged)",
   },
   no_provider: { status: 400, message: "Stage has no SMS provider" },
+  unknown_provider: {
+    status: 400,
+    message: "Stage's SMS provider has no registered adapter",
+  },
   no_credentials: {
     status: 400,
     message: "No API credentials for the stage's provider/brand",

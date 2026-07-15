@@ -2,6 +2,48 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-15 — Re-key provider adapter registry to real DB sms_provider_id values (txh/ahi, was texthub/ahoi — would have broken all TextHub sending on deploy) — docs/07-conventions.md
+
+## 2026-07-15 — Scope TextHub opt-out poller to sms_provider_id='txh' (excludes Ahoi, fixes false "poller FAILED" alert) — docs/06-integrations.md
+
+## 2026-07-15 — Ahoi go-live harness (CARRY 4/G7) — Section 4 code-complete, SEND_ENABLED flip still gated — docs/04-features/sms-send-pipeline.md
+
+## 2026-07-15 — Closed Issue 2: removed duplicate sms_provider_id='ahoi' row, re-pointed remaining code-level provider-key comparisons/queries to canonical 'ahi' (id 314) — docs/07-conventions.md
+
+## 2026-07-15 — Ahoi Layer 3 (DLR opt-out-error, defensive/empty allowlist, G4/O1) — docs/07-conventions.md
+
+## 2026-07-15 — Ahoi CDR poll Layer 2 opt-out write, per-row transaction (Section 4 Task 5) — docs/05-flows.md
+
+## 2026-07-15 — Ahoi inbound webhook Layer 1 opt-out write (Section 4 Task 4) — docs/05-flows.md, docs/06-integrations.md
+
+## 2026-07-15 — Ahoi opt-out intake Layer 1/2 core (processAhoiInboundOptOut, CARRY 1+2) — docs/03-data-model.md, docs/07-conventions.md
+
+## 2026-07-15 — no_sender_number kickoff guard for Ahoi (Section 3 Task 8) — docs/04-features/sms-send-pipeline.md
+
+## 2026-07-15 — Ahoi CDR poll cron (Section 3 Task 7) — vercel.json, docs/05-flows.md, docs/06-integrations.md
+
+## 2026-07-15 — Ahoi inbound webhook + capture (Section 3 Task 6) — docs/05-flows.md, docs/06-integrations.md
+
+## 2026-07-15 — Ahoi DLR reconcile + reject-rate circuit breaker (Section 3 Task 5) — docs/04-features/sms-send-pipeline.md, docs/06-integrations.md, docs/07-conventions.md
+
+## 2026-07-15 — Ahoi DLR webhook + capture (Section 3 Task 4) — docs/05-flows.md, docs/06-integrations.md
+
+## 2026-07-15 — Ahoi webhook token seed script (Section 3 Task 3) — docs/06-integrations.md
+
+## 2026-07-15 — ahoi_dlr_events + ahoi_inbound_events (migration 0109) — docs/03-data-model.md
+
+## 2026-07-15 — Creative form: allow_multi_segment toggle + segment warnings (Section 2 Task 6) — docs/04-features/campaigns-stages-creatives.md
+
+## 2026-07-15 — creatives.allow_multi_segment (migration 0108) — docs/03-data-model.md
+
+## 2026-07-15 — Segment counting + G8 ceiling (lib/sends/segments.ts, Section 2 Task 3) — docs/07-conventions.md
+
+## 2026-07-15 — Ahoi send() + buildRedactedRequest() implemented (Section 2 Task 1) — docs/06-integrations.md
+
+## 2026-07-15 — Kickoff segment preflight gate (multi_segment_not_allowed / segment_ceiling_exceeded, Section 2 Task 5) — docs/04-features/sms-send-pipeline.md
+
+## 2026-07-14 — Ahoi provider seeded (migration 0107) — docs/03-data-model.md
+
 ## 2026-07-14 — W1.1: decouple clicker propagation into its own cron — docs/04-features/crons
 - New cron `/api/cron/propagate-clickers` (`8,23,38,53 * * * *`) runs `propagateTrackedClickers()` under `withCronLease("propagate-clickers", …)`; the inline best-effort call was removed from `/api/clicks/score-pending` (now scoring-only). Fixes a starvation bug: a heavy scoring run ate score-pending's 60 s budget and never reached the tail propagate, stalling the watermark ~5 h on 2026-07-14 while clicks kept scoring. The `propagate-clickers` `cron_locks` row is shared by design — `lease_until` (lease) + `watermark` (progress) are distinct columns. No schema change (reuses migration 0103's `cron_locks`). New file: `app/api/cron/propagate-clickers/route.ts`.
 

@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { isOptOutKeyword } from "@/lib/sends/opt-out-keywords";
+import { decryptCredentialKey } from "@/lib/sends/provider-credential";
 import { fetchInbox as realFetchInbox, type FetchInboxResult } from "@/lib/sends/texthub-inbox";
 import { validatePhone } from "@/lib/phone-validation";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
@@ -362,15 +363,30 @@ export async function selectPollableCredentials(
   orgId?: string,
 ): Promise<CredentialRow[]> {
   const orgFilter = orgId ? sql`AND pc.org_id = ${orgId}` : sql``;
-  return (await database.execute(sql`
+  const rows = (await database.execute(sql`
     SELECT pc.id AS credential_id, pc.org_id AS org_id,
-           pc.provider_id AS provider_id, pc.api_key AS api_key
+           pc.provider_id AS provider_id, pc.api_key AS api_key,
+           pc.api_key_encrypted AS api_key_encrypted
     FROM provider_credentials pc
     JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
     WHERE p.supports_api_send = true
       AND p.sms_provider_id = 'txh'
     ${orgFilter}
-  `)) as unknown as CredentialRow[];
+  `)) as unknown as (CredentialRow & { api_key_encrypted: string | null })[];
+
+  // Dual-read: resolve each row's plaintext key from the encrypted column
+  // (migration 0110) or the legacy plaintext column. A row with neither is a
+  // broken credential — skip it (warn) rather than crash the whole poll.
+  const resolved: CredentialRow[] = [];
+  for (const row of rows) {
+    const api_key = decryptCredentialKey(row);
+    if (api_key === null) {
+      console.warn(`selectPollableCredentials: credential ${row.credential_id} has no usable api key, skipping`);
+      continue;
+    }
+    resolved.push({ ...row, api_key });
+  }
+  return resolved;
 }
 
 // Poll inbound opt-outs for every API-capable TextHub credential (optionally

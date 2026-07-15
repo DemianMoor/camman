@@ -8,6 +8,7 @@ import { provider_credentials } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { resolveCredentialKeyById } from "@/lib/sends/provider-credential";
 import { registerOptOutCallback } from "@/lib/sends/texthub-optout";
 import { registerOptOutCallbackSchema } from "@/lib/validators/providers";
 
@@ -53,7 +54,7 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "providers.update")) {
+  if (!can(role, "provider_credentials.manage")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -91,10 +92,10 @@ export async function POST(
   }
 
   // Resolve the credential, org- and provider-scoped (ownership check).
+  // Non-secret columns only — the key is resolved separately below.
   const cred = await db
     .select({
       id: provider_credentials.id,
-      api_key: provider_credentials.api_key,
       inbound_webhook_token: provider_credentials.inbound_webhook_token,
     })
     .from(provider_credentials)
@@ -107,6 +108,14 @@ export async function POST(
     )
     .limit(1);
   if (!cred[0]) {
+    return apiError(404, "Credential not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "provider_credential",
+    });
+  }
+
+  // Dual-read resolve (decrypt if encrypted, else legacy plaintext).
+  const apiKey = await resolveCredentialKeyById(db, { orgId, credentialId });
+  if (apiKey === null) {
     return apiError(404, "Credential not found", API_ERROR_CODES.NOT_FOUND, {
       entity: "provider_credential",
     });
@@ -146,7 +155,7 @@ export async function POST(
   }
 
   const result = await registerOptOutCallback({
-    apiKey: cred[0].api_key,
+    apiKey,
     callbackUrl,
     keywords: parsed.data.keywords,
   });

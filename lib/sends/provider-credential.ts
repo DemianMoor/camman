@@ -24,8 +24,10 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 
 // Dual-read a credential row's key: prefer the encrypted blob (migration
 // 0110), else the legacy plaintext column. Keeps pre-backfill rows working
-// while the encryption rollout is in progress.
-function readKey(row: { api_key_encrypted: string | null; api_key: string | null }): string | null {
+// while the encryption rollout is in progress. The single dual-read primitive
+// — every other read site (pollers, test route, register-callback route)
+// calls this rather than inlining `decryptSecret(...) ?? ...`.
+export function decryptCredentialKey(row: { api_key_encrypted: string | null; api_key: string | null }): string | null {
   if (row.api_key_encrypted) return decryptSecret(row.api_key_encrypted);
   return row.api_key ?? null;
 }
@@ -85,7 +87,7 @@ export async function resolveKeyForStage(
       WHERE ph.id = ${providerPhoneId} AND ph.org_id = ${orgId} AND pc.org_id = ${orgId}
       LIMIT 1
     `)) as unknown as { api_key_encrypted: string | null; api_key: string | null }[];
-    if (rows[0]) return readKey(rows[0]);
+    if (rows[0]) return decryptCredentialKey(rows[0]);
     // phone exists but no credential_id yet (pre-backfill) -> fall through to legacy
   }
   // (b) provider-scoped legacy fallback — ONLY when exactly one credential exists.
@@ -100,7 +102,7 @@ export async function resolveKeyForStage(
     ORDER BY (brand_id IS NOT NULL) DESC
     LIMIT 1
   `)) as unknown as { api_key_encrypted: string | null; api_key: string | null }[];
-  return rows[0] ? readKey(rows[0]) : null;
+  return rows[0] ? decryptCredentialKey(rows[0]) : null;
 }
 
 // Dual-read decrypt for a specific credential id (test route / pollers).
@@ -112,7 +114,7 @@ export async function resolveCredentialKeyById(
     SELECT api_key_encrypted, api_key FROM provider_credentials
     WHERE id = ${credentialId} AND org_id = ${orgId} LIMIT 1
   `)) as unknown as { api_key_encrypted: string | null; api_key: string | null }[];
-  return rows[0] ? readKey(rows[0]) : null;
+  return rows[0] ? decryptCredentialKey(rows[0]) : null;
 }
 
 // Resolve the api_key to use for (provider, brand): brand-specific first, then

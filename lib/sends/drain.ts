@@ -52,6 +52,11 @@ export type Sender = (opts: {
   text: string;
   number: string;
   leadId?: string | null;
+  // Stage's provider_phones.phone_number (E.164), for adapters that need a
+  // sending number (Ahoi). OPTIONAL so existing injected test fakes
+  // (scripts/verify-drain.ts) that don't destructure it keep compiling
+  // unchanged. TextHub's adapter ignores it.
+  senderNumber?: string | null;
 }) => Promise<SendSmsResult>;
 
 export type DrainRefusal =
@@ -114,8 +119,8 @@ function sleep(ms: number): Promise<void> {
 export function resolveSenderForStage(providerKey: string, injected?: Sender): Sender {
   if (injected) return injected;
   const adapter = getAdapter(providerKey);
-  return ({ apiKey, text, number, leadId }) =>
-    adapter.send({ apiKey, text, recipientE164: number, senderNumber: null, leadId });
+  return ({ apiKey, text, number, leadId, senderNumber }) =>
+    adapter.send({ apiKey, text, recipientE164: number, senderNumber: senderNumber ?? null, leadId });
 }
 
 const EMPTY = {
@@ -186,7 +191,8 @@ export async function runStageDrain(
            p.max_sends_per_24h     AS max_sends_per_24h,
            -- Per-second rate lives on the PHONE (carrier limit, differs by number
            -- type within one provider). Resolved from the stage's chosen phone.
-           pp.max_sends_per_second AS max_sends_per_second
+           pp.max_sends_per_second AS max_sends_per_second,
+           pp.phone_number         AS sender_number
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
@@ -204,6 +210,7 @@ export async function runStageDrain(
     max_sends_per_minute: number | null;
     max_sends_per_24h: number | null;
     max_sends_per_second: number | null;
+    sender_number: string | null;
   }[];
 
   const stage = ctx[0];
@@ -406,7 +413,10 @@ export async function runStageDrain(
       const slice = toSend.slice(off, off + rate);
       const results = await Promise.all(
         slice.map((c) =>
-          sendSms({ apiKey, text: c.rendered_text, number: c.phone, leadId: c.lead_id }),
+          sendSms({
+            apiKey, text: c.rendered_text, number: c.phone, leadId: c.lead_id,
+            senderNumber: stage.sender_number,
+          }),
         ),
       );
 
@@ -466,7 +476,7 @@ export async function runStageDrain(
           apiKey: `redacted_${keyLast4}`,
           text: c.rendered_text,
           recipientE164: c.phone,
-          senderNumber: null,
+          senderNumber: stage.sender_number,
           leadId: c.lead_id,
         });
         const attemptNumber = attemptsById.get(c.id) ?? 1;

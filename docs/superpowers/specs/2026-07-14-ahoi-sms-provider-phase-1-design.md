@@ -178,6 +178,7 @@ DLR scope = **capture + reconcile only** + two derived aggregate signals. **No `
 
 - **O1 (provisional mapping):** exact Ahoi opt-out DLR error code unobserved (only `000`/`600` seen). Layer-3 mapping ships defensive; finalized on first production sighting via the distinct unmapped-code log (G4).
 - **O2 (upstream carrier loss):** ~50%-in-test inbound loss is upstream and unrecoverable by webhook or poll; likely a burst-from-single-number artifact. Recommend a realistic multi-number test pre-prod if opt-out completeness is compliance-critical.
+- **O3 (cost-estimate uses segment count — DEFERRED fast-follow, tracked):** §4 says "segment count multiplies `cost_per_sms` in estimates." Section 2 builds the segment counter (`lib/sends/segments.ts`) + the hard kickoff gate, but does NOT wire segment count into cost estimation (no cost-estimate call site consumes it yet). Deferred by decision 2026-07-15 as a tracked fast-follow (not dropped) — an estimate refinement, not a safety gate. Pick up after Section 2 (or alongside a later cost-reporting change); `countSegments()` is the hook.
 
 ---
 

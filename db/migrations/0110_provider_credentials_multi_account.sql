@@ -8,6 +8,8 @@ ALTER TABLE provider_credentials ADD COLUMN IF NOT EXISTS api_key_last4 TEXT;
 ALTER TABLE provider_credentials ADD COLUMN IF NOT EXISTS label TEXT;
 
 -- 2. Allow encrypted-only writes: plaintext api_key no longer required.
+--    The DB column becomes nullable now; the Drizzle type in db/schema.ts stays
+--    non-null until the write-path task actually inserts NULL (nothing does yet).
 ALTER TABLE provider_credentials ALTER COLUMN api_key DROP NOT NULL;
 
 -- 3. Number -> account link.

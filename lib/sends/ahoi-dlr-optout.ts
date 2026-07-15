@@ -65,6 +65,8 @@ export async function processAhoiDlrOptOut(
   dbc: DbOrTx,
   o: ProcessAhoiDlrOptOutOpts,
 ): Promise<ProcessAhoiDlrOptOutOutcome> {
+  const isOptOut = classifyAhoiDlrOptOut({ sendStatus: o.sendStatus, error: o.error, smppCode: o.smppCode }, o.knownCodes);
+
   if (o.sendStatus === "rejected") {
     // G4: every rejected DLR gets a DISTINCT log line with its error/smpp_code
     // so the real opt-out signature is spottable the first time Ahoi's
@@ -73,12 +75,18 @@ export async function processAhoiDlrOptOut(
     // statuses OTHER than carrier_sent/delivered/rejected — 'rejected'
     // itself is already a KNOWN send_status, just not yet resolved to a
     // specific REASON).
-    console.warn(
-      `[ahoi-dlr-optout] rejected DLR received (error="${o.error ?? ""}", smpp_code="${o.smppCode ?? ""}") — ` +
-        `not classified as opt-out (no confirmed signature yet — see AHOI_KNOWN_OPTOUT_DLR_CODES)`,
-    );
+    if (isOptOut) {
+      console.warn(
+        `[ahoi-dlr-optout] recognized opt-out DLR code (error="${o.error ?? ""}", smpp_code="${o.smppCode ?? ""}") -> suppressing ${o.destinationNumber}`,
+      );
+    } else {
+      console.warn(
+        `[ahoi-dlr-optout] unmapped reject code (error="${o.error ?? ""}", smpp_code="${o.smppCode ?? ""}") — not classified as opt-out (add to AHOI_KNOWN_OPTOUT_DLR_CODES if this is the opt-out signature)`,
+      );
+    }
   }
-  if (!classifyAhoiDlrOptOut({ sendStatus: o.sendStatus, error: o.error, smppCode: o.smppCode }, o.knownCodes)) {
+
+  if (!isOptOut) {
     return { kind: "not_opt_out" };
   }
 

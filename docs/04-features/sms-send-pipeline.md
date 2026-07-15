@@ -192,3 +192,4 @@ Best-effort Telegram alerts on breaker trips / poller failures. If `TELEGRAM_BOT
 - Rate ceilings are org-wide until provider #2; per-provider accounting is a known follow-up.
 - `api_key` is plaintext at rest — encryption/secret-manager is deferred.
 - See memory notes: live-fire is owner-gated and has not been exercised end-to-end.
+- **Ahoi opt-out intake is complete (Phase 1 Section 4) but Ahoi sending is still gated.** All 3 opt-out layers (inbound webhook, CDR poll, DLR opt-out-error) write `opt_outs`; the go-live harness (`scripts/test-ahoi-optout-golive-harness.ts`) proves suppression end-to-end through the real preflight. `SEND_ENABLED` for Ahoi requires BOTH that harness green AND a one-time manual real-STOP smoke test (documented in the harness script's header) — the flip itself is a separate, gated, out-of-band step, not part of any code change.

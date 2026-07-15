@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-15 — Ahoi go-live harness (CARRY 4/G7) — Section 4 code-complete, SEND_ENABLED flip still gated — docs/04-features/sms-send-pipeline.md
+
 ## 2026-07-15 — Ahoi Layer 3 (DLR opt-out-error, defensive/empty allowlist, G4/O1) — docs/07-conventions.md
 
 ## 2026-07-15 — Ahoi CDR poll Layer 2 opt-out write, per-row transaction (Section 4 Task 5) — docs/05-flows.md

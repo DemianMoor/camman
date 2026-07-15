@@ -24,12 +24,24 @@ function check(name: string, cond: boolean, detail = "") {
 const ROLLBACK = Symbol("rollback");
 
 // ---- Pure normalizer tests (CARRY 1's crux — webhook vs CDR representation) ----
-check("webhook 'Stop' and CDR 'Stop - 1' normalize equal", normalizeAhoiMessageForDedup("Stop") === normalizeAhoiMessageForDedup("Stop - 1"));
-check("multi-segment CDR marker ' - 2 of 2' stripped", normalizeAhoiMessageForDedup("Stop") === normalizeAhoiMessageForDedup("Stop - 2 of 2"));
-check("commas removed (CDR strips them)", normalizeAhoiMessageForDedup("Stop, please") === normalizeAhoiMessageForDedup("Stop please - 1"));
-check("case + whitespace collapsed", normalizeAhoiMessageForDedup("  STOP   please  ") === "stop please");
-check("two genuinely different messages do NOT normalize equal", normalizeAhoiMessageForDedup("Stop") !== normalizeAhoiMessageForDedup("Start"));
-check("null/empty -> empty string", normalizeAhoiMessageForDedup(null) === "" && normalizeAhoiMessageForDedup("") === "");
+// Source-aware: only 'cdr' text gets the trailing segment marker stripped.
+check("webhook 'Stop' and CDR 'Stop - 1' normalize equal", normalizeAhoiMessageForDedup("Stop", "webhook") === normalizeAhoiMessageForDedup("Stop - 1", "cdr"));
+check("multi-segment CDR marker ' - 2 of 2' stripped", normalizeAhoiMessageForDedup("Stop", "webhook") === normalizeAhoiMessageForDedup("Stop - 2 of 2", "cdr"));
+check("commas removed (CDR strips them)", normalizeAhoiMessageForDedup("Stop, please", "webhook") === normalizeAhoiMessageForDedup("Stop please - 1", "cdr"));
+check("case + whitespace collapsed", normalizeAhoiMessageForDedup("  STOP   please  ", "webhook") === "stop please");
+check("two genuinely different messages do NOT normalize equal", normalizeAhoiMessageForDedup("Stop", "webhook") !== normalizeAhoiMessageForDedup("Start", "webhook"));
+check("null/empty -> empty string", normalizeAhoiMessageForDedup(null, "webhook") === "" && normalizeAhoiMessageForDedup("", "webhook") === "");
+// The fix itself: webhook content ending in "<word>-<digits>" must NOT be
+// corrupted by a marker-strip that should only ever apply to CDR text — if
+// normalization wrongly strips webhook "-1234", this collapses to the wrong
+// (over-stripped) string and would falsely equal a truncated CDR variant,
+// or simply fail to preserve the real content. Assert it matches its own
+// genuine CDR twin (marker appended) exactly, "-1234" intact on both sides.
+check(
+  "webhook 'Stop order 555-1234' is NOT over-stripped and matches its CDR twin 'Stop order 555-1234 - 1'",
+  normalizeAhoiMessageForDedup("Stop order 555-1234", "webhook") === "stop order 555-1234" &&
+    normalizeAhoiMessageForDedup("Stop order 555-1234", "webhook") === normalizeAhoiMessageForDedup("Stop order 555-1234 - 1", "cdr"),
+);
 
 async function main() {
   try {
@@ -60,7 +72,7 @@ async function main() {
         VALUES (${orgId}, 'cdr', ${srcNum}, 'Stop - 1', 'poll', ${"cdr-" + sfx}, ${now.toISOString()}::timestamptz)
         RETURNING id`);
       const dup = await findDuplicateAhoiInbound(tx, {
-        orgId, sourceNumber: srcNum, message: "Stop - 1", excludeEventId: newEvent.id, anchor: now,
+        orgId, sourceNumber: srcNum, message: "Stop - 1", source: "cdr", excludeEventId: newEvent.id, anchor: now,
       });
       check("webhook 'Stop' row dedups against CDR 'Stop - 1' lookup (normalized match)", dup?.matched_contact_id === contact.id, JSON.stringify(dup));
       check("duplicate carries the prior event id + channel for logging", dup?.event_id === priorEvent.id && dup?.source === "webhook", JSON.stringify(dup));
@@ -72,23 +84,58 @@ async function main() {
         VALUES (${orgId}, 'cdr', ${srcNum}, 'Start', 'poll', ${now.toISOString()}::timestamptz)
         RETURNING id`);
       const noDupMsg = await findDuplicateAhoiInbound(tx, {
-        orgId, sourceNumber: srcNum, message: "Start", excludeEventId: otherMsgEvent.id, anchor: now,
+        orgId, sourceNumber: srcNum, message: "Start", source: "cdr", excludeEventId: otherMsgEvent.id, anchor: now,
       });
       check("a different message from the same number in-window does NOT dedup", noDupMsg === null, JSON.stringify(noDupMsg));
 
-      // Case 2: outside the window (window + 10 min in the past) -> not found.
+      // Case 2: window boundary. Each half uses its OWN source_number so the
+      // two halves can't contaminate each other's candidate set (a shared
+      // number would let the "inside" row leak into the "outside" query and
+      // vice versa, muddying what's actually being proven). Critically,
+      // excludeEventId in BOTH halves is the id of the QUERYING row itself —
+      // never the target/far row's id — so a passing/failing result can only
+      // be explained by the received_at BETWEEN clause, not the `id !=
+      // excludeEventId` filter.
+      const winNumIn = "557" + sfx;
+      const winNumOut = "558" + sfx;
+
+      // Case 2a: a suppressed row JUST INSIDE the window (1 minute inside the
+      // 45-min boundary) -> IS matched. Specific assertion on the event id.
+      const insideTime = new Date(now.getTime() - (AHOI_OPTOUT_DEDUP_WINDOW_MINUTES - 1) * 60 * 1000);
+      const insideEvent = await one<{ id: string }>(sql`
+        INSERT INTO ahoi_inbound_events
+          (org_id, source, source_number, message, method, result, matched_contact_id, processed_at, received_at)
+        VALUES (${orgId}, 'webhook', ${winNumIn}, 'Stop', 'POST', 'suppressed', ${contact.id}, now(), ${insideTime.toISOString()}::timestamptz)
+        RETURNING id`);
+      const queryRowIn = await one<{ id: string }>(sql`
+        INSERT INTO ahoi_inbound_events (org_id, source, source_number, message, method, received_at)
+        VALUES (${orgId}, 'cdr', ${winNumIn}, 'Stop - 1', 'poll', ${now.toISOString()}::timestamptz)
+        RETURNING id`);
+      const dupInside = await findDuplicateAhoiInbound(tx, {
+        orgId, sourceNumber: winNumIn, message: "Stop - 1", source: "cdr", excludeEventId: queryRowIn.id, anchor: now,
+      });
+      check("a suppressed row JUST INSIDE the window IS matched", dupInside?.event_id === insideEvent.id, JSON.stringify(dupInside));
+
+      // Case 2b: a suppressed row OUTSIDE the window (10 min past the 45-min
+      // boundary) -> NOT matched. excludeEventId is the querying row's OWN
+      // id (not farEvent.id), so only the window clause can be excluding
+      // farEvent — proving the BETWEEN bound actually works, not just the
+      // id != filter that Case 2's old version relied on.
       const farPast = new Date(now.getTime() - (AHOI_OPTOUT_DEDUP_WINDOW_MINUTES + 10) * 60 * 1000);
       const farEvent = await one<{ id: string }>(sql`
         INSERT INTO ahoi_inbound_events
           (org_id, source, source_number, message, method, result, matched_contact_id, processed_at, received_at)
-        VALUES (${orgId}, 'webhook', ${srcNum}, 'Stop', 'POST', 'suppressed', ${contact.id}, now(), ${farPast.toISOString()}::timestamptz)
+        VALUES (${orgId}, 'webhook', ${winNumOut}, 'Stop', 'POST', 'suppressed', ${contact.id}, now(), ${farPast.toISOString()}::timestamptz)
+        RETURNING id`);
+      const queryRowOut = await one<{ id: string }>(sql`
+        INSERT INTO ahoi_inbound_events (org_id, source, source_number, message, method, received_at)
+        VALUES (${orgId}, 'cdr', ${winNumOut}, 'Stop - 1', 'poll', ${now.toISOString()}::timestamptz)
         RETURNING id`);
       const noDup = await findDuplicateAhoiInbound(tx, {
-        orgId, sourceNumber: srcNum, message: "Stop - 1", excludeEventId: farEvent.id, anchor: now,
+        orgId, sourceNumber: winNumOut, message: "Stop - 1", source: "cdr", excludeEventId: queryRowOut.id, anchor: now,
       });
-      // (Case 1's prior row is 5 min ago and would still match; assert the FAR
-      // row specifically isn't what's returned by checking it's the near one.)
-      check("a suppressed row OUTSIDE the window is not matched (near one still is)", noDup === null || noDup.event_id !== farEvent.id, JSON.stringify(noDup));
+      check("a suppressed row OUTSIDE the window is not matched (window clause, not id filter, excludes it)", noDup === null, JSON.stringify(noDup));
+      check("(fixture sanity) far row really exists outside the window", true, farEvent.id);
 
       // Case 3: different source_number + no other in-window suppressed row for
       // it -> not found (result NULL rows and different numbers are ignored).
@@ -102,7 +149,7 @@ async function main() {
         VALUES (${orgId}, 'cdr', ${otherNum}, 'Stop - 1', 'poll', ${now.toISOString()}::timestamptz)
         RETURNING id`);
       const noDup2 = await findDuplicateAhoiInbound(tx, {
-        orgId, sourceNumber: otherNum, message: "Stop - 1", excludeEventId: secondEvent.id, anchor: now,
+        orgId, sourceNumber: otherNum, message: "Stop - 1", source: "cdr", excludeEventId: secondEvent.id, anchor: now,
       });
       check("does NOT match an unprocessed (result=NULL) row", noDup2 === null, JSON.stringify(noDup2));
       check("(fixture sanity) unprocessed row really has no result", true, unprocessed.id);
@@ -113,7 +160,7 @@ async function main() {
         VALUES (${orgId}, 'cdr', ${"999" + sfx}, 'Stop - 1', 'poll', ${now.toISOString()}::timestamptz)
         RETURNING id`);
       const noDup3 = await findDuplicateAhoiInbound(tx, {
-        orgId, sourceNumber: "999" + sfx, message: "Stop - 1", excludeEventId: diffNumEvent.id, anchor: now,
+        orgId, sourceNumber: "999" + sfx, message: "Stop - 1", source: "cdr", excludeEventId: diffNumEvent.id, anchor: now,
       });
       check("does NOT match a different source_number", noDup3 === null);
 

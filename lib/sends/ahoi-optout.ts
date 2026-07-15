@@ -34,15 +34,26 @@ import type { DbOrTx } from "@/lib/sends/ahoi-dlr";
 // dedup is observable in production.
 export const AHOI_OPTOUT_DEDUP_WINDOW_MINUTES = 45;
 
-// Reconcile the webhook vs CDR message representations to a comparable form:
-// strip a trailing " - <n>" / " - <n> of <m>" CDR segment marker, remove
-// commas (CDR strips them), collapse whitespace, trim, lowercase. Pure.
-export function normalizeAhoiMessageForDedup(msg: string | null): string {
+// Reconcile the webhook vs CDR message representations to a comparable form.
+// SOURCE-AWARE: the trailing " - <n>" / " - <n> of <m>" segment marker is
+// ALWAYS appended by the CDR export and NEVER present in a webhook payload —
+// so stripping it unconditionally corrupts real message content that happens
+// to end in "<word>-<digits>" (e.g. webhook "Stop order 555-1234" would lose
+// "-1234"). Only CDR-sourced text gets the marker stripped; webhook text is
+// never touched by that regex. Both sources still get: commas removed (CDR
+// strips them), whitespace collapsed, trimmed, lowercased. Pure.
+export function normalizeAhoiMessageForDedup(
+  msg: string | null,
+  source: string,
+): string {
   if (!msg) return "";
-  return msg
-    .replace(/\s*-\s*\d+(?:\s+of\s+\d+)?\s*$/i, "") // drop CDR segment suffix
-    .replace(/,/g, "")                               // CDR strips commas
-    .replace(/\s+/g, " ")                            // collapse whitespace
+  let out = msg;
+  if (source === "cdr") {
+    out = out.replace(/\s*-\s*\d+(?:\s+of\s+\d+)?\s*$/i, ""); // drop CDR segment suffix
+  }
+  return out
+    .replace(/,/g, "")    // CDR strips commas
+    .replace(/\s+/g, " ") // collapse whitespace
     .trim()
     .toLowerCase();
 }
@@ -60,6 +71,7 @@ export async function findDuplicateAhoiInbound(
     orgId: string;
     sourceNumber: string;
     message: string;
+    source: string;
     excludeEventId: string;
     anchor: Date;
     windowMinutes?: number;
@@ -85,8 +97,10 @@ export async function findDuplicateAhoiInbound(
     id: string; source: string; message: string | null;
     matched_contact_id: string; matched_stage_send_id: string | null;
   }[];
-  const target = normalizeAhoiMessageForDedup(opts.message);
-  const hit = rows.find((r) => normalizeAhoiMessageForDedup(r.message) === target);
+  const target = normalizeAhoiMessageForDedup(opts.message, opts.source);
+  const hit = rows.find(
+    (r) => normalizeAhoiMessageForDedup(r.message, r.source) === target,
+  );
   return hit
     ? {
         event_id: hit.id,

@@ -74,6 +74,7 @@ export const creativeCreateSchema = z
       .default("unknown"),
     funnel_stage: z.enum(FUNNEL_STAGE_VALUES).default("unknown"),
     applies_to_all_offers: z.boolean().default(false),
+    allow_multi_segment: z.boolean().default(false),
     offer_ids: z.array(z.number().int().positive()).default([]),
   })
   .refine(
@@ -93,6 +94,7 @@ export const creativeUpdateSchema = z
     sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES).optional(),
     funnel_stage: z.enum(FUNNEL_STAGE_VALUES).optional(),
     applies_to_all_offers: z.boolean().optional(),
+    allow_multi_segment: z.boolean().optional(),
     offer_ids: z.array(z.number().int().positive()).optional(),
   })
   .refine((d) => Object.values(d).some((v) => v !== undefined), {

@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-07-14_
+_Last updated: 2026-07-15_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -66,6 +66,7 @@ set.
   - **Offer widening:** the campaign's offer is pre-checked and locked on; other active org offers are checkboxes that broaden the list. This drives the multi-offer `offer_ids` (CSV) param on `/api/creatives/list` ([`lib/creatives/list-filters.ts`](../../lib/creatives/list-filters.ts)): eligible = a junction row to ANY selected offer, plus (when `include_all_offers` ≠ `false`) any `applies_to_all_offers=true` creative.
   - **ALL toggle:** an "ALL" checkbox in the Offers panel, **off by default**, sends `include_all_offers=false` so `applies_to_all_offers` creatives are hidden until the operator opts in; checking it adds them. The single `offer_id` param still works (and is what `/creatives` uses; it always includes all-offers creatives). Spam dot/score + metrics come from the list endpoint's cache/aggregate joins (read-only — listing does NOT trigger scoring). See [spam-classifier.md](spam-classifier.md).
 - Bulk-create: up to 50 rows/request, shared offer/quality/sequence/funnel stage, one transaction. Bulk-edit applies one set of `quality`/`sequence_placement`/`funnel_stage`/`status`/offer changes across many selected creatives.
+- `allow_multi_segment` (migration `0108`, default `false`) — per-creative override for the send-path segment gate (see `docs/07-conventions.md` G8 and `docs/04-features/sms-send-pipeline.md`). Advisory-only in the creative form (a multi-segment creative can be saved); the hard gate is at kickoff, not save.
 - **30-day performance columns** (creatives list, [`app/api/creatives/list/route.ts`](../../app/api/creatives/list/route.ts)): the list endpoint joins two per-creative aggregates and returns a `metrics` object → four sortable, server-ranked columns. Clean clicks = manual-mode stage clicks (`click_count`) + tracked-mode clean clicks (clicks where `classification NOT IN ('bot','prefetch','suspect')`, same "clean" rule as the click report). Stage counters anchor on `campaign_stages.created_at`; tracked clicks anchor on `clicks.clicked_at`; both windowed to the last 30 days.
   - **CTR** = clean clicks ÷ delivered · **Checkout Rate** = checkouts ÷ clean clicks · **Sales CR** = sales ÷ clean clicks · **EPC** = payout ÷ clean clicks (payout = `Σ sales_count × sales_payout_each`).
   - Each ratio is NULL (renders "—") when its denominator is 0, so "no data" never shows as 0%. Sort uses the ratio expression with `NULLS LAST` + an `id` tiebreaker. (The former `Campaigns` and `Quality` table columns were removed; `quality` remains a field, form input, and list filter.)

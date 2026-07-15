@@ -38,6 +38,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { calculateSmsSegments, containsEmDash } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { MAX_SEGMENTS } from "@/lib/sends/segments";
 import { cn } from "@/lib/utils";
 import {
   FUNNEL_STAGE_VALUES,
@@ -72,6 +73,7 @@ const formSchema = z.object({
   sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES),
   funnel_stage: z.enum(FUNNEL_STAGE_VALUES),
   applies_to_all_offers: z.boolean(),
+  allow_multi_segment: z.boolean(),
   offer_ids: z.array(z.number().int().positive()),
 });
 export type CreativeFormValues = z.input<typeof formSchema>;
@@ -161,12 +163,14 @@ export function CreativeForm({
       sequence_placement: initialValues?.sequence_placement ?? "unknown",
       funnel_stage: initialValues?.funnel_stage ?? "unknown",
       applies_to_all_offers: initialValues?.applies_to_all_offers ?? false,
+      allow_multi_segment: initialValues?.allow_multi_segment ?? false,
       offer_ids: initialValues?.offer_ids ?? [],
     },
   });
 
   const text = form.watch("text");
   const appliesToAll = form.watch("applies_to_all_offers");
+  const allowMultiSegment = form.watch("allow_multi_segment");
   const segments = useMemo(() => calculateSmsSegments(text ?? ""), [text]);
   const isLongText = (text?.length ?? 0) > TEXT_WARN_THRESHOLD;
   const hasEmDash = containsEmDash(text ?? "");
@@ -212,7 +216,7 @@ export function CreativeForm({
 
   const counterTone = isLongText
     ? "text-red-700 dark:text-red-400"
-    : segments.segments > 4
+    : segments.segments > MAX_SEGMENTS
       ? "text-amber-700 dark:text-amber-400"
       : "text-muted-foreground";
 
@@ -292,6 +296,24 @@ export function CreativeForm({
                     Contains an em dash (—). It forces UCS-2 encoding (shorter
                     segments) and reads as a spam/AI tell — consider a hyphen
                     (-) instead.
+                  </span>
+                </FormDescription>
+              ) : null}
+              {segments.segments > MAX_SEGMENTS ? (
+                <FormDescription className="flex items-start gap-1.5 text-red-700 dark:text-red-400">
+                  <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  <span>
+                    Exceeds the hard limit of {MAX_SEGMENTS} segments — this
+                    will be refused at send no matter what. Shorten the text.
+                  </span>
+                </FormDescription>
+              ) : segments.segments > 1 && !allowMultiSegment ? (
+                <FormDescription className="flex items-start gap-1.5 text-amber-700 dark:text-amber-400">
+                  <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  <span>
+                    Renders to {segments.segments} segments. Turn on &quot;Allow
+                    multi-segment&quot; below to send this, or shorten the text
+                    to fit 1 segment.
                   </span>
                 </FormDescription>
               ) : null}
@@ -375,6 +397,33 @@ export function CreativeForm({
               </FormItem>
             )}
           />
+        </div>
+
+        <div className="grid gap-3 rounded-md border p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <Label className="cursor-pointer" htmlFor="allow-multi-segment">
+                Allow multi-segment
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Off (default): this creative is refused at send if it renders
+                to more than 1 SMS segment. On: allows up to {MAX_SEGMENTS}{" "}
+                segments — never more, a hard limit.
+              </p>
+            </div>
+            <FormField
+              control={form.control}
+              name="allow_multi_segment"
+              render={({ field }) => (
+                <Switch
+                  id="allow-multi-segment"
+                  checked={field.value}
+                  onCheckedChange={field.onChange}
+                  disabled={isSubmitting}
+                />
+              )}
+            />
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3">

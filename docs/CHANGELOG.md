@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-15 — creatives.allow_multi_segment (migration 0108) — docs/03-data-model.md
+
 ## 2026-07-15 — Segment counting + G8 ceiling (lib/sends/segments.ts, Section 2 Task 3) — docs/07-conventions.md
 
 ## 2026-07-15 — Ahoi send() + buildRedactedRequest() implemented (Section 2 Task 1) — docs/06-integrations.md

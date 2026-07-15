@@ -1193,6 +1193,14 @@ export const creatives = pgTable(
     applies_to_all_offers: boolean("applies_to_all_offers")
       .notNull()
       .default(false),
+    // Segment policy override (Ahoi Section 2, spec §4). Default false: the
+    // creative is refused at kickoff preflight if its rendered text (+ link
+    // + brand prefix + stop text) exceeds 1 SMS segment. Turning this on
+    // allows up to MAX_SEGMENTS (G8, lib/sends/segments.ts) — never
+    // unlimited.
+    allow_multi_segment: boolean("allow_multi_segment")
+      .notNull()
+      .default(false),
     // Mirrored from spam_scores on save. spam_score is 0-100 from the
     // provider; spam_label is the binary verdict (score > 50 ⇒ 'spam').
     // spam_score_error is set when scoring failed; in that case score /

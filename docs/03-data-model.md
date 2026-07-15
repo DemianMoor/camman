@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-07-14_
+_Last updated: 2026-07-15_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -214,7 +214,7 @@ erDiagram
 ### Creatives
 | Table | Key columns | Notes |
 |-------|------------|-------|
-| `creatives` | `slug` (uniq), `creative_id` (uniq, optional), `text`, `quality`, `sequence_placement`, `funnel_stage`, `applies_to_all_offers`, `spam_score`/`spam_label`/`spam_score_error` | spam columns mirrored from `spam_scores` on save. `funnel_stage` (migration `0076`) is manual metadata — `start`/`clicked`/`checkout`/`ignored`/`unknown` (default `unknown`), like `quality` |
+| `creatives` | `slug` (uniq), `creative_id` (uniq, optional), `text`, `quality`, `sequence_placement`, `funnel_stage`, `applies_to_all_offers`, `allow_multi_segment`, `spam_score`/`spam_label`/`spam_score_error` | spam columns mirrored from `spam_scores` on save. `funnel_stage` (migration `0076`) is manual metadata — `start`/`clicked`/`checkout`/`ignored`/`unknown` (default `unknown`), like `quality`. `allow_multi_segment` (migration `0108`) — per-creative override for the single-segment-only send policy; enforced at kickoff preflight, see `docs/07-conventions.md` G8 |
 | `creative_offers` | PK(creative_id, offer_id) | M:N |
 
 ### Campaigns & stages

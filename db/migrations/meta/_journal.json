@@ -758,5 +758,13 @@
       "tag": "0107_seed_ahoi_provider",
       "breakpoints": true
     }
+    ,
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1785715200000,
+      "tag": "0108_creatives_allow_multi_segment",
+      "breakpoints": true
+    }
   ]
 }

@@ -1,14 +1,13 @@
-import { eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { provider_credentials } from "@/db/schema";
 import { captureAhoiDlrEvent, reconcileAhoiDlrEvent } from "@/lib/sends/ahoi-dlr";
 import {
   extractClientIp,
   headersToObject,
   isKnownAhoiIp,
   queryToObject,
+  resolveAhoiCredential,
 } from "@/lib/sends/ahoi-webhook-shared";
 import { ahoiAdapter, extractAhoiWebhookFields } from "@/lib/sends/providers/ahoi";
 
@@ -17,8 +16,11 @@ import { ahoiAdapter, extractAhoiWebhookFields } from "@/lib/sends/providers/aho
 // G1: auth is the path token ONLY, resolved to (org, provider, credential)
 // via provider_credentials.inbound_webhook_token — the SAME column/token
 // Ahoi's inbound (STOP) webhook uses (see ../inbound/[token]/route.ts); the
-// URL PATH distinguishes which handler runs. The 207.181.190.0/24 IP check
-// below is defense-in-depth ONLY (logged, never blocking).
+// URL PATH distinguishes which handler runs. resolveAhoiCredential additionally
+// scopes the lookup to sms_provider_id = 'ahoi' so a token belonging to a
+// different provider (e.g. TextHub) can't authenticate here. The
+// 207.181.190.0/24 IP check below is defense-in-depth ONLY (logged, never
+// blocking).
 //
 // Capture + parse + reconcile all happen in this one request (unlike
 // TextHub's historical Stage A/B split) — reconcile is a cheap single-row
@@ -34,18 +36,8 @@ export async function POST(
   const { token } = await params;
   if (!token) return new NextResponse("Not found", { status: 404 });
 
-  const cred = await db
-    .select({
-      id: provider_credentials.id,
-      org_id: provider_credentials.org_id,
-      provider_id: provider_credentials.provider_id,
-    })
-    .from(provider_credentials)
-    .where(eq(provider_credentials.inbound_webhook_token, token))
-    .limit(1);
-
-  if (!cred[0]) return new NextResponse("Unauthorized", { status: 401 });
-  if (cred[0].provider_id == null) return new NextResponse("Unauthorized", { status: 401 });
+  const cred = await resolveAhoiCredential(db, token);
+  if (!cred) return new NextResponse("Unauthorized", { status: 401 });
 
   const ip = extractClientIp(req.headers.get("x-forwarded-for"));
   if (!isKnownAhoiIp(ip)) {
@@ -68,9 +60,9 @@ export async function POST(
   const parsed = ahoiAdapter.parseDlr(raw);
 
   const captured = await captureAhoiDlrEvent(db, {
-    orgId: cred[0].org_id,
-    credentialId: cred[0].id,
-    providerId: cred[0].provider_id,
+    orgId: cred.org_id,
+    credentialId: cred.id,
+    providerId: cred.provider_id,
     method: req.method,
     query,
     headers,
@@ -82,8 +74,8 @@ export async function POST(
   if (parsed) {
     await reconcileAhoiDlrEvent(db, {
       eventId: captured.id,
-      orgId: cred[0].org_id,
-      providerId: cred[0].provider_id,
+      orgId: cred.org_id,
+      providerId: cred.provider_id,
       providerUuid: parsed.providerUuid,
       sendStatus: parsed.sendStatus,
     });

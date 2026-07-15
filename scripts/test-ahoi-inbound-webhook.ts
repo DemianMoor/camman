@@ -27,14 +27,16 @@ function postReq(url: string, body: string, ip = "207.181.190.161"): NextRequest
 
 async function main() {
   const marker = `+1zzztest${Date.now().toString().slice(-9)}`;
+  let foreignProviderId: number | null = null;
   try {
     const cred = await sql`
-      SELECT pc.inbound_webhook_token AS token
+      SELECT pc.inbound_webhook_token AS token, pc.org_id AS org_id
       FROM provider_credentials pc JOIN sms_providers p ON p.id = pc.provider_id
       WHERE p.sms_provider_id = 'ahoi' AND pc.brand_id IS NULL
     `;
     const token = cred[0]?.token as string | undefined;
-    if (!token) {
+    const orgId = cred[0]?.org_id as string | undefined;
+    if (!token || !orgId) {
       console.log("SKIP: run scripts/seed-ahoi-webhook-token.ts first (no token set).");
       await sql.end();
       process.exit(0);
@@ -44,6 +46,30 @@ async function main() {
       params: Promise.resolve({ token: "bogus-token" }),
     });
     check("unknown token -> 401", badRes.status === 401);
+
+    // Token that resolves, but to a NON-ahoi provider's credential (e.g.
+    // TextHub) -> 401, nothing written. Guards provider mis-attribution: the
+    // resolver must scope the join to sms_provider_id = 'ahoi', not just
+    // "provider_id is non-null".
+    const foreignToken = `${marker}-foreign-token`;
+    const foreignMarker = `${marker}9`; // still starts with marker -> caught by the marker cleanup below
+    const foreignProvider = await sql`
+      INSERT INTO sms_providers (sms_provider_id, org_id, name)
+      VALUES (${marker + "-foreign-provider"}, ${orgId}, 'zzz-test foreign provider')
+      RETURNING id
+    `;
+    foreignProviderId = foreignProvider[0].id as number;
+    await sql`
+      INSERT INTO provider_credentials (org_id, provider_id, api_key, inbound_webhook_token)
+      VALUES (${orgId}, ${foreignProviderId}, 'zzz-test-key', ${foreignToken})
+    `;
+    const foreignRes = await POST(
+      postReq(`https://x/api/webhooks/ahoi/inbound/${foreignToken}`, `source=${foreignMarker}`),
+      { params: Promise.resolve({ token: foreignToken }) },
+    );
+    check("token belonging to non-ahoi provider -> 401", foreignRes.status === 401);
+    const foreignRow = await sql`SELECT * FROM ahoi_inbound_events WHERE source_number = ${foreignMarker}`;
+    check("no row captured for non-ahoi provider token", foreignRow.length === 0);
 
     const body = `source=${encodeURIComponent(marker)}&destination=3158359592&message=Stop+please%0Athanks&type=sms&cost=0`;
     const res = await POST(postReq(`https://x/api/webhooks/ahoi/inbound/${token}`, body), {
@@ -58,7 +84,11 @@ async function main() {
     check("no reconcile fields set (Section 4's job)", row[0]?.matched_contact_id === null && row[0]?.processed_at === null);
     check("provider_uuid is null (webhook payload has none)", row[0]?.provider_uuid === null);
   } finally {
-    await sql`DELETE FROM ahoi_inbound_events WHERE source_number = ${marker}`;
+    await sql`DELETE FROM ahoi_inbound_events WHERE source_number LIKE ${marker + "%"}`;
+    if (foreignProviderId !== null) {
+      await sql`DELETE FROM provider_credentials WHERE provider_id = ${foreignProviderId}`;
+      await sql`DELETE FROM sms_providers WHERE id = ${foreignProviderId}`;
+    }
     await sql.end();
   }
   console.log(failed === 0 ? "\nALL PASS" : `\n${failed} FAILED`);

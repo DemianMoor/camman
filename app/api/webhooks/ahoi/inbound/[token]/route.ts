@@ -1,14 +1,13 @@
-import { eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { provider_credentials } from "@/db/schema";
 import { captureAhoiInboundEvent } from "@/lib/sends/ahoi-inbound";
 import {
   extractClientIp,
   headersToObject,
   isKnownAhoiIp,
   queryToObject,
+  resolveAhoiCredential,
 } from "@/lib/sends/ahoi-webhook-shared";
 import { ahoiAdapter } from "@/lib/sends/providers/ahoi";
 
@@ -18,7 +17,9 @@ import { ahoiAdapter } from "@/lib/sends/providers/ahoi";
 // contact, does NOT write opt_outs. That is Section 4 (spec §6), built
 // against the rows this route captures. Auth (G1) mirrors the DLR route:
 // path token only, resolved via the SAME provider_credentials row/token the
-// DLR webhook uses (the URL path distinguishes the two).
+// DLR webhook uses (the URL path distinguishes the two). resolveAhoiCredential
+// scopes the lookup to sms_provider_id = 'ahoi' so a token belonging to a
+// different provider can't authenticate here.
 //
 // force-dynamic: every callback must run and be recorded, never cached.
 export const dynamic = "force-dynamic";
@@ -30,18 +31,8 @@ export async function POST(
   const { token } = await params;
   if (!token) return new NextResponse("Not found", { status: 404 });
 
-  const cred = await db
-    .select({
-      id: provider_credentials.id,
-      org_id: provider_credentials.org_id,
-      provider_id: provider_credentials.provider_id,
-    })
-    .from(provider_credentials)
-    .where(eq(provider_credentials.inbound_webhook_token, token))
-    .limit(1);
-
-  if (!cred[0]) return new NextResponse("Unauthorized", { status: 401 });
-  if (cred[0].provider_id == null) return new NextResponse("Unauthorized", { status: 401 });
+  const cred = await resolveAhoiCredential(db, token);
+  if (!cred) return new NextResponse("Unauthorized", { status: 401 });
 
   const ip = extractClientIp(req.headers.get("x-forwarded-for"));
   if (!isKnownAhoiIp(ip)) {
@@ -61,9 +52,9 @@ export async function POST(
   const parsed = ahoiAdapter.parseInbound(raw);
 
   await captureAhoiInboundEvent(db, {
-    orgId: cred[0].org_id,
-    credentialId: cred[0].id,
-    providerId: cred[0].provider_id,
+    orgId: cred.org_id,
+    credentialId: cred.id,
+    providerId: cred.provider_id,
     method: req.method,
     rawBody: rawBody || null,
     parsed,

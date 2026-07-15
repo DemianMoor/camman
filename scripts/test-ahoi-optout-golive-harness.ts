@@ -33,11 +33,22 @@ import { processAhoiDlrOptOut } from "@/lib/sends/ahoi-dlr-optout";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
 
 let failed = 0;
+let executed = 0;
+// Full-run check count = the number of check() call sites below (currently 15).
+// If a check is added/removed, update this constant — the completeness guard
+// compares against it, so a stale value here fails loud (never silently green).
+const EXPECTED_CHECKS = 15;
 function check(name: string, cond: boolean, detail = "") {
+  executed++;
   if (!cond) failed++;
   console.log(`${cond ? "✓" : "✗"} ${name}${cond ? "" : `  ${detail}`}`);
 }
 const ROLLBACK = Symbol("rollback");
+// Distinct from ROLLBACK: thrown when a precondition for Part 5 (the crux
+// preflight-proof block, G7c/G7d) is absent. A SKIPPED run must never be
+// reported as a pass — see the completeness guard in main() below.
+const SKIPPED = Symbol("skipped");
+let skipReason: string | null = null;
 
 async function main() {
   try {
@@ -125,13 +136,15 @@ async function main() {
         SELECT b.id FROM brands b JOIN short_domains sd ON sd.brand_id = b.id AND sd.status = 'active'
         WHERE b.org_id = ${orgId} LIMIT 1`);
       if (!brand) {
-        console.log("SKIP Part 5 (preflight proof): need a brand with an active short domain in this org.");
-        throw ROLLBACK;
+        skipReason = "need a brand with an active short domain in this org";
+        console.log(`SKIP Part 5 (preflight proof): ${skipReason}.`);
+        throw SKIPPED;
       }
       const ahoiProv = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahoi'`);
       if (!ahoiProv) {
-        console.log("SKIP Part 5: no seeded ahoi provider row (run Section 1's seed).");
-        throw ROLLBACK;
+        skipReason = "no seeded 'ahoi' provider row (run Section 1's seed)";
+        console.log(`SKIP Part 5: ${skipReason}.`);
+        throw SKIPPED;
       }
       await tx.execute(sql`
         INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key)
@@ -172,15 +185,42 @@ async function main() {
       throw ROLLBACK;
     });
   } catch (e) {
-    if (e !== ROLLBACK) throw e;
+    if (e !== ROLLBACK && e !== SKIPPED) throw e;
   }
   await pgConn.end({ timeout: 5 });
-  if (failed === 0) {
-    console.log("\nALL PASS (rolled back). GO-LIVE HARNESS GREEN.");
-    console.log("Reminder: the real-STOP smoke test (see this file's header comment) is STILL REQUIRED before flipping SEND_ENABLED.");
-  } else {
-    console.log(`\n${failed} FAILED — DO NOT flip SEND_ENABLED for Ahoi.`);
-    process.exit(1);
+
+  // A skip is NEVER a pass, regardless of how many checks happened to run
+  // before the precondition check bailed out.
+  if (skipReason) {
+    console.log(
+      `\nHARNESS SKIPPED — preconditions absent (${skipReason}). ${executed}/${EXPECTED_CHECKS} checks ran before the skip.`,
+    );
+    console.log("This is NOT a pass. Go-live gate NOT satisfied. Provide the missing precondition and re-run.");
+    process.exit(2);
+    return;
   }
+
+  if (failed > 0) {
+    console.log(`\n${failed}/${executed} FAILED — DO NOT flip SEND_ENABLED for Ahoi.`);
+    process.exit(1);
+    return;
+  }
+
+  // Completeness guard: even with zero failures and no explicit skip, a Part
+  // could have short-circuited (e.g. returned early, or an await resolved to
+  // something that made a later check unreachable) without every check()
+  // call site executing. Refuse to go green unless the FULL run happened.
+  if (executed !== EXPECTED_CHECKS) {
+    console.log(
+      `\nINCOMPLETE RUN: only ${executed}/${EXPECTED_CHECKS} checks executed — a Part was skipped or short-circuited.`,
+    );
+    console.log("This is NOT a pass. Go-live gate NOT satisfied.");
+    process.exit(2);
+    return;
+  }
+
+  console.log(`\nALL ${executed}/${EXPECTED_CHECKS} CHECKS PASS (rolled back). GO-LIVE HARNESS GREEN.`);
+  console.log("Reminder: the real-STOP smoke test (see this file's header comment) is STILL REQUIRED before flipping SEND_ENABLED.");
+  process.exit(0);
 }
 main().catch((e) => { console.error(e); process.exit(1); });

@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { captureAhoiDlrEvent, reconcileAhoiDlrEvent } from "@/lib/sends/ahoi-dlr";
+import { processAhoiDlrOptOut } from "@/lib/sends/ahoi-dlr-optout";
 import {
   extractClientIp,
   headersToObject,
@@ -79,6 +80,22 @@ export async function POST(
       providerUuid: parsed.providerUuid,
       sendStatus: parsed.sendStatus,
     });
+
+    // Layer 3 (spec §6), best-effort — never throws back to Ahoi. See
+    // processAhoiDlrOptOut's own comment for why CARRY 1's cross-channel
+    // dedup doesn't apply here.
+    try {
+      await processAhoiDlrOptOut(db, {
+        orgId: cred.org_id,
+        destinationNumber: fields.destination ?? null,
+        sendStatus: parsed.sendStatus,
+        error: parsed.error,
+        smppCode: parsed.smppCode,
+        receivedAt: new Date(),
+      });
+    } catch (e) {
+      console.error("[ahoi-dlr-webhook] opt-out processing failed (non-fatal):", e);
+    }
   }
 
   return NextResponse.json({ ok: true });

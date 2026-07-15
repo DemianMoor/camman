@@ -87,8 +87,18 @@ async function main() {
     check("raw_body stored verbatim", row[0]?.raw_body === body);
     check("source archived (fields, not DlrEvent)", row[0]?.source === "3158359592");
     check("destination archived", row[0]?.destination === "5642155963");
+
+    // ---- NEW (Section 4, Task 6): a rejected DLR must not crash the route,
+    // even though the production allowlist is empty (nothing WILL classify
+    // as opt-out yet — that's proven separately in test-ahoi-dlr-optout.ts
+    // via the knownCodes test seam). ----
+    const rejectedBody = `uuid=s-rejtest-${Date.now()}&source=3158359592&destination=5642155963&send_status=rejected&status=rejected&error=600`;
+    const rejectedRes = await POST(postReq(`https://x/api/webhooks/ahoi/dlr/${token}`, rejectedBody), {
+      params: Promise.resolve({ token }),
+    });
+    check("rejected DLR through the route -> still 200 (Layer 3 is non-fatal best-effort)", rejectedRes.status === 200);
   } finally {
-    await sql`DELETE FROM ahoi_dlr_events WHERE provider_uuid LIKE ${marker + "%"}`;
+    await sql`DELETE FROM ahoi_dlr_events WHERE provider_uuid LIKE ${marker + "%"} OR provider_uuid LIKE 's-rejtest-%'`;
     if (foreignProviderId !== null) {
       await sql`DELETE FROM provider_credentials WHERE provider_id = ${foreignProviderId}`;
       await sql`DELETE FROM sms_providers WHERE id = ${foreignProviderId}`;

@@ -74,6 +74,28 @@ export type ProviderCredentialSetInput = z.infer<
   typeof providerCredentialSetSchema
 >;
 
+// Update an existing credential (account): label, brand scoping, its linked
+// numbers, and/or rotate the key. `phone_ids`, when present, is the COMPLETE
+// set of provider_phones ids that should belong to this credential — the
+// route links those and unlinks any of this credential's phones not in the
+// set (see lib/providers/credential-phone-links.ts). `api_key`, when
+// present, rotates the stored secret (re-encrypted server-side; never
+// echoed back).
+export const providerCredentialUpdateSchema = z
+  .object({
+    label: z.string().trim().min(1).max(120).optional(),
+    brand_id: z.number().int().positive().nullable().optional(),
+    api_key: z.string().trim().min(1).max(500).optional(),
+    phone_ids: z.array(z.number().int().positive()).max(200).optional(),
+  })
+  .refine((d) => Object.values(d).some((v) => v !== undefined), {
+    message: "At least one field must be provided",
+  });
+
+export type ProviderCredentialUpdateInput = z.infer<
+  typeof providerCredentialUpdateSchema
+>;
+
 // Send a one-off test SMS using a specific stored credential. The key is
 // resolved server-side from credential_id (never sent by the client). number
 // is validated/normalized to E.164 in the route.

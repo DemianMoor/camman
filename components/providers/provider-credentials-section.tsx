@@ -49,7 +49,12 @@ type Cred = {
 };
 type Brand = { id: number; name: string };
 // Only the fields this component needs from GET /api/providers/[id]/phones.
-type Phone = { id: number; phone_number: string; credential_id: number | null };
+type Phone = {
+  id: number;
+  phone_number: string;
+  credential_id: number | null;
+  status: string;
+};
 
 const NONE_BRAND = "none";
 
@@ -77,6 +82,11 @@ export function ProviderCredentialsSection({
   const [creds, setCreds] = useState<Cred[] | null>(null);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [phones, setPhones] = useState<Phone[]>([]);
+  // False until the phones fetch has resolved at least once. Both the Add
+  // and Edit dialogs' numbers pickers stay disabled while this is false so a
+  // dialog opened before the first fetch resolves can't be "touched" against
+  // an incomplete/empty phones list (see the picker-disabling below).
+  const [phonesLoaded, setPhonesLoaded] = useState(false);
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
@@ -104,11 +114,24 @@ export function ProviderCredentialsSection({
   // Provider's phones — populates the numbers picker in Add/Edit and lets us
   // flag a phone that's already linked to a DIFFERENT account. Refetched on
   // the same `tick` as credentials so a link/unlink via PATCH shows up.
+  // Requests every status (including archived): the Edit dialog pre-selects
+  // whichever phones are currently linked to the credential, and the PATCH
+  // unlink sweep clears credential_id on ALL of a credential's phones,
+  // archived included — if this list excluded archived phones, the picker
+  // would silently drop them from the save and unlink them.
   useEffect(() => {
     let active = true;
     void (async () => {
-      const r = await phonesExec(`/api/providers/${providerId}/phones`);
-      if (active && r.ok) setPhones(r.data.data);
+      const r = await phonesExec(
+        `/api/providers/${providerId}/phones?status=active,suspended,blocked,archived`,
+      );
+      // Only a successful fetch unblocks the picker — flipping this on
+      // failure would unblock it against an incomplete/empty list, which is
+      // the exact hazard this guard exists to prevent.
+      if (active && r.ok) {
+        setPhones(r.data.data);
+        setPhonesLoaded(true);
+      }
     })();
     return () => {
       active = false;
@@ -130,10 +153,13 @@ export function ProviderCredentialsSection({
         p.credential_id !== null && p.credential_id !== excludeCredentialId
           ? credLabelById.get(p.credential_id)
           : undefined;
+      const metaParts: string[] = [];
+      if (other) metaParts.push(`linked to ${other}`);
+      if (p.status === "archived") metaParts.push("archived");
       return {
         id: p.id,
         label: p.phone_number,
-        meta: other ? `linked to ${other}` : undefined,
+        meta: metaParts.length > 0 ? metaParts.join(" · ") : undefined,
       };
     });
   }
@@ -177,6 +203,7 @@ export function ProviderCredentialsSection({
 
     // POST returns the new row's id — labels aren't unique, so the id is the
     // only safe way to address the account for the follow-up numbers link.
+    let linkFailed = false;
     if (addPhoneIds.length > 0) {
       const linkResult = await updateApi.execute(
         `/api/providers/${providerId}/credentials/${r.data.id}`,
@@ -186,15 +213,16 @@ export function ProviderCredentialsSection({
           body: JSON.stringify({ phone_ids: addPhoneIds }),
         },
       );
-      if (!linkResult.ok) {
-        toastApiError(
-          linkResult,
-          "Account created, but couldn't link numbers — link them from Edit",
-        );
-      }
+      linkFailed = !linkResult.ok;
     }
 
-    toast.success("Account added");
+    // Only one toast, ever — a partial failure (account created, link
+    // failed) must not also claim full success.
+    if (linkFailed) {
+      toast.warning("Account created, but linking numbers failed — open Edit to link them");
+    } else {
+      toast.success("Account added");
+    }
     closeAdd();
     setTick((n) => n + 1);
   }
@@ -242,15 +270,28 @@ export function ProviderCredentialsSection({
     setEditing(c);
     setEditLabel(c.label);
     setEditBrandId(c.brand_id === null ? NONE_BRAND : String(c.brand_id));
-    setEditPhoneIds(
-      phones.filter((p) => p.credential_id === c.id).map((p) => p.id),
-    );
     setEditPhoneIdsTouched(false);
+    // editPhoneIds itself isn't set here — the picker's displayed value
+    // (editPhoneIdsValue below) derives it live from `phones` while
+    // untouched, so it's always the freshest snapshot rather than whatever
+    // `phones` happened to hold at the moment Edit was opened.
   }
   function closeEdit() {
     setEditing(null);
     setEditPhoneIdsTouched(false);
   }
+
+  // Derived selection for the Edit picker. While untouched, this always
+  // mirrors the credential's currently-linked phones from the freshest
+  // `phones` list — closing the race where opening Edit before the phones
+  // fetch resolves would otherwise snapshot an empty/incomplete set as the
+  // pre-selection. Once the operator touches the picker, editPhoneIdsTouched
+  // flips true and this stops re-deriving, so it never clobbers their
+  // in-progress edit.
+  const editPhoneIdsValue = useMemo(() => {
+    if (!editing || editPhoneIdsTouched) return editPhoneIds;
+    return phones.filter((p) => p.credential_id === editing.id).map((p) => p.id);
+  }, [editing, editPhoneIdsTouched, phones, editPhoneIds]);
 
   async function handleEditSave() {
     if (!editing || !editLabel.trim()) return;
@@ -262,7 +303,7 @@ export function ProviderCredentialsSection({
     // touched, even if it round-trips to the same set (we can't cheaply tell
     // "touched but unchanged" from "matches on reload", and re-sending the
     // same set is a harmless no-op server-side).
-    if (editPhoneIdsTouched) patch.phone_ids = editPhoneIds;
+    if (editPhoneIdsTouched) patch.phone_ids = editPhoneIdsValue;
 
     if (Object.keys(patch).length === 0) {
       closeEdit();
@@ -541,7 +582,8 @@ export function ProviderCredentialsSection({
               value={addPhoneIds}
               onChange={(next) => setAddPhoneIds(next.map(Number))}
               isLoading={phonesApi.isLoading}
-              placeholder="No numbers linked"
+              disabled={!phonesLoaded}
+              placeholder={phonesLoaded ? "No numbers linked" : "Loading numbers…"}
               selectedLabel={numberWord}
               emptyMessage="No numbers on this provider yet."
             />
@@ -666,13 +708,14 @@ export function ProviderCredentialsSection({
             <label className="text-sm font-medium">Numbers</label>
             <MultiSelectPicker
               options={editing ? phoneOptions(editing.id) : []}
-              value={editPhoneIds}
+              value={editPhoneIdsValue}
               onChange={(next) => {
                 setEditPhoneIds(next.map(Number));
                 setEditPhoneIdsTouched(true);
               }}
               isLoading={phonesApi.isLoading}
-              placeholder="No numbers linked"
+              disabled={!phonesLoaded}
+              placeholder={phonesLoaded ? "No numbers linked" : "Loading numbers…"}
               selectedLabel={numberWord}
               emptyMessage="No numbers on this provider yet."
             />
@@ -883,11 +926,21 @@ export function ProviderCredentialsSection({
             <AlertDialogTitle>Remove this account?</AlertDialogTitle>
             <AlertDialogDescription>
               {deleting
-                ? `The "${deleting.label}" account will be removed` +
-                  (deleting.linked_numbers > 0
-                    ? ` and its ${numberWord(deleting.linked_numbers)} will be unlinked`
-                    : "") +
-                  `. Tracked sends that rely on it will fail until a key is set again.`
+                ? (() => {
+                    const numbersClause =
+                      deleting.linked_numbers > 0
+                        ? ` and its ${numberWord(deleting.linked_numbers)} will be unlinked`
+                        : "";
+                    // Numberless/unlinked resolution only ever falls back
+                    // when EXACTLY one account remains — mirrors
+                    // resolveKeyForStage's fallback rule.
+                    const remaining = (creds?.length ?? 1) - 1;
+                    const fallbackClause =
+                      remaining === 1
+                        ? " With one account left on this provider, its unlinked or numberless sends will automatically use that account's key."
+                        : " With no single surviving account, its unlinked or numberless sends will be refused until a number is re-linked.";
+                    return `The "${deleting.label}" account will be removed${numbersClause}.${fallbackClause}`;
+                  })()
                 : ""}
             </AlertDialogDescription>
           </AlertDialogHeader>

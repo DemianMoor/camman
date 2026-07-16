@@ -132,6 +132,19 @@ export async function PATCH(
   }
 
   await db.transaction(async (tx) => {
+    // Run the link sync first so we know whether it actually changed
+    // anything — a phone_ids-only PATCH that round-trips to the same set
+    // shouldn't bump updated_at, but one that links/unlinks a phone should.
+    let linksChanged = false;
+    if (uniquePhoneIds !== undefined) {
+      const linkResult = await applyCredentialPhoneLinks(tx, {
+        orgId,
+        credentialId,
+        phoneIds: uniquePhoneIds,
+      });
+      linksChanged = linkResult.linked > 0 || linkResult.unlinked > 0;
+    }
+
     const updates: Partial<typeof provider_credentials.$inferInsert> = {};
     if (label !== undefined) updates.label = label;
     if (brand_id !== undefined) updates.brand_id = brand_id;
@@ -140,20 +153,17 @@ export async function PATCH(
       updates.api_key_last4 = rotatedLast4;
       updates.api_key = null;
     }
-    if (Object.keys(updates).length > 0) {
+    if (Object.keys(updates).length > 0 || linksChanged) {
       updates.updated_at = new Date();
       await tx
         .update(provider_credentials)
         .set(updates)
-        .where(eq(provider_credentials.id, credentialId));
-    }
-
-    if (uniquePhoneIds !== undefined) {
-      await applyCredentialPhoneLinks(tx, {
-        orgId,
-        credentialId,
-        phoneIds: uniquePhoneIds,
-      });
+        .where(
+          and(
+            eq(provider_credentials.id, credentialId),
+            eq(provider_credentials.org_id, orgId),
+          ),
+        );
     }
   });
 

@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -6,6 +6,7 @@ import { brands, provider_credentials, sms_providers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { encryptSecret } from "@/lib/crypto/secret-box";
+import { countNumberlessSendEligibleStages } from "@/lib/providers/second-account-guard";
 import { maskApiKey } from "@/lib/sends/provider-credential";
 import { can } from "@/lib/permissions";
 import { providerCredentialSetSchema } from "@/lib/validators/providers";
@@ -98,8 +99,15 @@ export async function GET(
   return NextResponse.json({ data });
 }
 
-// POST — set or rotate a key for (provider, brand|default). Upsert; the key is
-// never logged and never echoed back (response is masked).
+// POST — create a new credential (account) for a provider. Multi-account
+// (Phase 3): always INSERTs a new row; never upserts or rotates. Rotation of
+// an existing account goes through PATCH .../credentials/[credentialId]. The
+// key is never logged and never echoed back (response is masked).
+//
+// Guardrail: adding a 2nd+ account is blocked (409) while the provider has
+// any send-eligible stage with no provider_phone_id — such a stage resolves
+// its key via the single-credential legacy fallback, which is ambiguous once
+// a 2nd account exists. See lib/providers/second-account-guard.ts.
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ providerId: string }> },
@@ -133,13 +141,9 @@ export async function POST(
   }
   const { brand_id, api_key, label } = parsed.data;
 
-  // Derived default label: the owning brand's name, or "Default" for the
-  // provider-wide key. Never overwrites an existing label on rotate (see the
-  // COALESCE below) — only used for brand-new rows / rows with no label yet.
-  let derivedLabel = "Default";
   if (brand_id != null) {
     const b = await db
-      .select({ id: brands.id, name: brands.name })
+      .select({ id: brands.id })
       .from(brands)
       .where(and(eq(brands.id, brand_id), eq(brands.org_id, orgId)))
       .limit(1);
@@ -148,7 +152,6 @@ export async function POST(
         field: "brand_id",
       });
     }
-    derivedLabel = b[0].name;
   }
 
   // Encrypt once outside the transaction — the plaintext never touches the
@@ -156,45 +159,46 @@ export async function POST(
   const { last4, masked } = maskApiKey(api_key);
   const enc = encryptSecret(api_key);
 
-  await db.transaction(async (tx) => {
-    const existing = await tx
-      .select({ id: provider_credentials.id })
-      .from(provider_credentials)
-      .where(
-        and(
-          eq(provider_credentials.provider_id, providerId),
-          eq(provider_credentials.org_id, orgId),
-          brand_id == null
-            ? isNull(provider_credentials.brand_id)
-            : eq(provider_credentials.brand_id, brand_id),
-        ),
-      )
-      .limit(1);
+  let blockedCount: number | null = null;
 
-    if (existing[0]) {
-      // Rotate: replace the secret, clear the legacy plaintext column, and
-      // only set a label if one isn't already there.
-      await tx
-        .update(provider_credentials)
-        .set({
-          api_key_encrypted: enc,
-          api_key_last4: last4,
-          api_key: null,
-          label: sql`COALESCE(${provider_credentials.label}, ${label ?? derivedLabel})`,
-          updated_at: new Date(),
-        })
-        .where(eq(provider_credentials.id, existing[0].id));
-    } else {
-      await tx.insert(provider_credentials).values({
-        org_id: orgId,
-        provider_id: providerId,
-        brand_id: brand_id ?? null,
-        api_key_encrypted: enc,
-        api_key_last4: last4,
-        label: label ?? derivedLabel,
-      });
+  await db.transaction(async (tx) => {
+    // Best-effort: the existing-credential count and the insert share this
+    // transaction so a single request's decision is internally consistent,
+    // but Postgres READ COMMITTED means two concurrent POSTs can still both
+    // read count=0 and both insert — this narrows the race, it doesn't close
+    // it. Acceptable for an operator-driven, low-frequency action.
+    const existingRows = (await tx.execute(sql`
+      SELECT count(*)::int AS n FROM provider_credentials
+      WHERE provider_id = ${providerId} AND org_id = ${orgId}
+    `)) as unknown as { n: number }[];
+    const existingCount = existingRows[0]?.n ?? 0;
+
+    if (existingCount >= 1) {
+      const n = await countNumberlessSendEligibleStages(tx, { orgId, providerId });
+      if (n > 0) {
+        blockedCount = n;
+        return;
+      }
     }
+
+    await tx.insert(provider_credentials).values({
+      org_id: orgId,
+      provider_id: providerId,
+      brand_id: brand_id ?? null,
+      api_key_encrypted: enc,
+      api_key_last4: last4,
+      label,
+    });
   });
+
+  if (blockedCount !== null) {
+    return apiError(
+      409,
+      "Assign numbers to all existing stages for this provider before adding a second account",
+      API_ERROR_CODES.CONFLICT,
+      { reason: "numberless_stages_block_multi_account", count: blockedCount },
+    );
+  }
 
   return NextResponse.json({ ok: true, brand_id, masked, last4 });
 }

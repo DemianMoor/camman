@@ -96,20 +96,23 @@ export async function PATCH(
   // phone_ids: every id must be a provider_phones row in this org+provider.
   // A phone already linked to a different credential may be re-linked here
   // (an explicit move) — ownership only checks org+provider, not credential.
-  if (phone_ids !== undefined && phone_ids.length > 0) {
+  // Deduped up front: the SELECT returns DISTINCT rows, so comparing against
+  // the raw length would false-positive on a payload like [5,5].
+  const uniquePhoneIds = phone_ids !== undefined ? [...new Set(phone_ids)] : undefined;
+  if (uniquePhoneIds !== undefined && uniquePhoneIds.length > 0) {
     const rows = await db
       .select({ id: provider_phones.id })
       .from(provider_phones)
       .where(
         and(
-          inArray(provider_phones.id, phone_ids),
+          inArray(provider_phones.id, uniquePhoneIds),
           eq(provider_phones.org_id, orgId),
           eq(provider_phones.provider_id, providerId),
         ),
       );
-    if (rows.length !== phone_ids.length) {
+    if (rows.length !== uniquePhoneIds.length) {
       const found = new Set(rows.map((r) => r.id));
-      const invalidIds = phone_ids.filter((id) => !found.has(id));
+      const invalidIds = uniquePhoneIds.filter((id) => !found.has(id));
       return apiError(
         400,
         `${invalidIds.length} phone id(s) do not belong to this provider: ${invalidIds.join(", ")}`,
@@ -145,11 +148,11 @@ export async function PATCH(
         .where(eq(provider_credentials.id, credentialId));
     }
 
-    if (phone_ids !== undefined) {
+    if (uniquePhoneIds !== undefined) {
       await applyCredentialPhoneLinks(tx, {
         orgId,
         credentialId,
-        phoneIds: phone_ids,
+        phoneIds: uniquePhoneIds,
       });
     }
   });

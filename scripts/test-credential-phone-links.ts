@@ -88,9 +88,48 @@ async function run() {
       assert.strictEqual(r.unlinked, 1, "(3b) p3 unlinked");
       assert.strictEqual(await credOf(p3), null, "(3b) p3 -> NULL");
 
+      // (3c) Negative multi-tenancy: a phone belonging to ANOTHER org must be
+      // untouchable even when its id is passed in phoneIds. Create a second
+      // org, a provider under it, and a phone p4 under org2; then, acting as
+      // org1, request the set [p2, p4] for credential A. The org filter must
+      // link p2 (org1's phone) and silently skip p4 (linked=1, not 2).
+      const org2 = (await tx.execute(sql`
+        INSERT INTO organizations (name) VALUES ('Phone-Links Test Org 2') RETURNING id
+      `)) as unknown as { id: string }[];
+      const org2Id = org2[0].id;
+      const prov2 = (await tx.execute(sql`
+        INSERT INTO sms_providers (sms_provider_id, org_id, name, supports_api_send)
+        VALUES (${"tpl2_" + Date.now()}, ${org2Id}, 'Phone-Links Test P2', true)
+        RETURNING id
+      `)) as unknown as { id: number }[];
+      const p4 = (
+        (await tx.execute(sql`
+          INSERT INTO provider_phones (org_id, provider_id, phone_number)
+          VALUES (${org2Id}, ${prov2[0].id}, ${"+1555" + uniq + "4"})
+          RETURNING id
+        `)) as unknown as { id: number }[]
+      )[0].id;
+
+      r = await applyCredentialPhoneLinks(tx, { orgId, credentialId: credA, phoneIds: [p2, p4] });
+      assert.strictEqual(r.linked, 1, "(3c) only org1's p2 linked — p4 blocked by the org filter");
+      assert.strictEqual(await credOf(p2), credA, "(3c) p2 -> A (moved back from B)");
+      assert.strictEqual(await credOf(p4), null, "(3c) p4 (org2) untouched by the link statement");
+
+      // ...and the unlink statement is org-scoped too: even if p4 somehow
+      // carried credential A's id, an org1 sync couldn't clear it. Force the
+      // state directly (bypassing the helper) and prove the unlink skips it.
+      await tx.execute(sql`UPDATE provider_phones SET credential_id = ${credA} WHERE id = ${p4}`);
+      r = await applyCredentialPhoneLinks(tx, { orgId, credentialId: credA, phoneIds: [p2] });
+      assert.strictEqual(r.unlinked, 0, "(3c) unlink never touches the org2 phone");
+      assert.strictEqual(await credOf(p4), credA, "(3c) p4's forced link untouched by an org1 unlink");
+      await tx.execute(sql`UPDATE provider_phones SET credential_id = NULL WHERE id = ${p4}`);
+
       // (4) FK ON DELETE SET NULL: deleting credential B must auto-unlink p2
       // without any application-level cleanup — this is what the route's
-      // DELETE handler relies on.
+      // DELETE handler relies on. (p2 was moved back to A in 3c; the FK
+      // behavior is independent of which phones point at B — re-link p2 to B
+      // first so the assertion is observable.)
+      await tx.execute(sql`UPDATE provider_phones SET credential_id = ${credB} WHERE id = ${p2}`);
       await tx.execute(sql`DELETE FROM provider_credentials WHERE id = ${credB}`);
       assert.strictEqual(await credOf(p2), null, "(4) p2 unlinked after credential B deleted (FK ON DELETE SET NULL)");
 

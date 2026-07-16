@@ -70,7 +70,10 @@ export async function GET(
         eq(provider_credentials.provider_id, providerId),
         eq(provider_credentials.org_id, orgId),
       ),
-    );
+    )
+    // Stable creation order — labels aren't unique, so without this the list
+    // renders in whatever order the planner returns.
+    .orderBy(provider_credentials.id);
 
   // Mask before serializing — the plaintext api_key never leaves the server,
   // and it is never decrypted here (api_key_last4 is populated at write time;
@@ -162,6 +165,7 @@ export async function POST(
   const enc = encryptSecret(api_key);
 
   let blockedCount: number | null = null;
+  let insertedId: number | null = null;
 
   await db.transaction(async (tx) => {
     // Best-effort: the existing-credential count and the insert share this
@@ -183,14 +187,18 @@ export async function POST(
       }
     }
 
-    await tx.insert(provider_credentials).values({
-      org_id: orgId,
-      provider_id: providerId,
-      brand_id: brand_id ?? null,
-      api_key_encrypted: enc,
-      api_key_last4: last4,
-      label,
-    });
+    const inserted = await tx
+      .insert(provider_credentials)
+      .values({
+        org_id: orgId,
+        provider_id: providerId,
+        brand_id: brand_id ?? null,
+        api_key_encrypted: enc,
+        api_key_last4: last4,
+        label,
+      })
+      .returning({ id: provider_credentials.id });
+    insertedId = inserted[0].id;
   });
 
   if (blockedCount !== null) {
@@ -202,5 +210,7 @@ export async function POST(
     );
   }
 
-  return NextResponse.json({ ok: true, brand_id, masked, last4 });
+  // `id` lets the UI immediately address the new account (e.g. a follow-up
+  // PATCH { phone_ids }) — labels are NOT unique, so id is the only safe key.
+  return NextResponse.json({ ok: true, id: insertedId, brand_id, masked, last4 });
 }

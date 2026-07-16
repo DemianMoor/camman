@@ -67,7 +67,7 @@ export function ProviderCredentialsSection({
   const listApi = useApiCall<{ data: Cred[] }>();
   const brandsApi = useApiCall<{ data: Brand[] }>();
   const phonesApi = useApiCall<{ data: Phone[] }>();
-  const saveApi = useApiCall<unknown>();
+  const saveApi = useApiCall<{ ok: boolean; id: number }>();
   const updateApi = useApiCall<unknown>();
   const deleteApi = useApiCall<unknown>();
   const { execute: listExec } = listApi;
@@ -175,35 +175,22 @@ export function ProviderCredentialsSection({
       return;
     }
 
-    // POST is create-only and its response doesn't echo the new row's id
-    // (see the route — it returns only { ok, brand_id, masked, last4 }). If
-    // numbers were selected in this dialog we need that id to link them, so
-    // we pragmatically re-fetch the list here and match on the label we just
-    // submitted — this UI is the only writer of credentials, so the label
-    // just typed identifies the new row. If no match is found (e.g. a
-    // concurrent edit renamed it), the account still exists; numbers can be
-    // linked afterward from its Edit dialog.
+    // POST returns the new row's id — labels aren't unique, so the id is the
+    // only safe way to address the account for the follow-up numbers link.
     if (addPhoneIds.length > 0) {
-      const refreshed = await listExec(`/api/providers/${providerId}/credentials`);
-      if (refreshed.ok) {
-        setCreds(refreshed.data.data);
-        const created = refreshed.data.data.find((c) => c.label === addLabel.trim());
-        if (created) {
-          const linkResult = await updateApi.execute(
-            `/api/providers/${providerId}/credentials/${created.id}`,
-            {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ phone_ids: addPhoneIds }),
-            },
-          );
-          if (!linkResult.ok) {
-            toastApiError(
-              linkResult,
-              "Account created, but couldn't link numbers — link them from Edit",
-            );
-          }
-        }
+      const linkResult = await updateApi.execute(
+        `/api/providers/${providerId}/credentials/${r.data.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone_ids: addPhoneIds }),
+        },
+      );
+      if (!linkResult.ok) {
+        toastApiError(
+          linkResult,
+          "Account created, but couldn't link numbers — link them from Edit",
+        );
       }
     }
 

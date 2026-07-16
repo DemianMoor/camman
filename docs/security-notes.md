@@ -31,7 +31,7 @@ below — encryption was the hardening item that decision explicitly deferred.
   been backfilled and a stability window has passed (`0111` first tightens
   the new columns to `NOT NULL`); neither is applied yet.
 - The plaintext key is never sent to the browser — every list/GET response
-  shows `label`/`last4`/`masked` only. Decryption happens in exactly four
+  shows `label`/`last4`/`masked` only. Decryption happens in exactly five
   places: the send drain, the opt-out/DLR pollers, and the credential
   test-send / register-callback actions — never in a list or response path.
   See [04-features/sms-send-pipeline.md](04-features/sms-send-pipeline.md)
@@ -51,7 +51,7 @@ below — encryption was the hardening item that decision explicitly deferred.
 - Migration `0111` (NOT NULL the new columns + encrypted-only reads) and
   `0112` (drop the plaintext `api_key` column, retiring the legacy
   `resolveProviderApiKey` helper and `scripts/probe-texthub-status.ts`'s use
-  of it) are written but **not yet applied** — each is its own explicit prod
+  of it) are **planned, not yet drafted** — each is its own explicit prod
   gate, run only after a stability window on the prior step.
 - No per-key rotation schedule or last-used auditing yet (the `v1.` prefix
   makes a future master-key rotation *possible*, not automatic).

@@ -1,7 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Ban, KeyRound, Plus, RotateCw, SendHorizonal, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Ban,
+  KeyRound,
+  Pencil,
+  Plus,
+  RotateCw,
+  SendHorizonal,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -19,44 +27,323 @@ import { Card, CardContent } from "@/components/ui/card";
 import { DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { Input } from "@/components/ui/input";
+import {
+  MultiSelectPicker,
+  type MultiSelectOption,
+} from "@/components/multi-select-picker";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 // Masked credential row from GET /api/providers/[id]/credentials — never the
-// plaintext key.
+// plaintext key. One row per account (Phase 3 multi-account: a provider can
+// have several accounts, each with its own key + label + linked numbers).
 type Cred = {
   id: number;
   brand_id: number | null;
   brand_name: string | null;
+  label: string;
   last4: string;
   masked: string;
+  linked_numbers: number;
   updated_at: string;
 };
 type Brand = { id: number; name: string };
+// Only the fields this component needs from GET /api/providers/[id]/phones.
+type Phone = {
+  id: number;
+  phone_number: string;
+  credential_id: number | null;
+  status: string;
+};
 
-const DEFAULT_LABEL = "Default (all brands)";
+const NONE_BRAND = "none";
 
-export function ProviderCredentialsSection({ providerId }: { providerId: number }) {
+function numberWord(n: number) {
+  return `${n} number${n === 1 ? "" : "s"}`;
+}
+
+export function ProviderCredentialsSection({
+  providerId,
+  canManage,
+}: {
+  providerId: number;
+  canManage: boolean;
+}) {
   const listApi = useApiCall<{ data: Cred[] }>();
   const brandsApi = useApiCall<{ data: Brand[] }>();
-  const saveApi = useApiCall<unknown>();
+  const phonesApi = useApiCall<{ data: Phone[] }>();
+  const saveApi = useApiCall<{ ok: boolean; id: number }>();
+  const updateApi = useApiCall<unknown>();
   const deleteApi = useApiCall<unknown>();
   const { execute: listExec } = listApi;
   const { execute: brandsExec } = brandsApi;
+  const { execute: phonesExec } = phonesApi;
 
   const [creds, setCreds] = useState<Cred[] | null>(null);
   const [brands, setBrands] = useState<Brand[]>([]);
+  const [phones, setPhones] = useState<Phone[]>([]);
+  // False until the phones fetch has resolved at least once. Both the Add
+  // and Edit dialogs' numbers pickers stay disabled while this is false so a
+  // dialog opened before the first fetch resolves can't be "touched" against
+  // an incomplete/empty phones list (see the picker-disabling below).
+  const [phonesLoaded, setPhonesLoaded] = useState(false);
   const [tick, setTick] = useState(0);
 
-  // Add/rotate dialog. brandId === undefined means "choosing" (add mode).
-  const [dialog, setDialog] = useState<
-    | { mode: "add" }
-    | { mode: "rotate"; brandId: number | null; label: string }
-    | null
-  >(null);
-  const [formBrandId, setFormBrandId] = useState<string>("default"); // "default" | "<id>"
-  const [apiKey, setApiKey] = useState("");
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const r = await listExec(`/api/providers/${providerId}/credentials`);
+      if (active && r.ok) setCreds(r.data.data);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [providerId, tick, listExec]);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const r = await brandsExec(`/api/brands/list?pageSize=100`);
+      if (active && r.ok) setBrands(r.data.data);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [brandsExec]);
+
+  // Provider's phones — populates the numbers picker in Add/Edit and lets us
+  // flag a phone that's already linked to a DIFFERENT account. Refetched on
+  // the same `tick` as credentials so a link/unlink via PATCH shows up.
+  // Requests every status (including archived): the Edit dialog pre-selects
+  // whichever phones are currently linked to the credential, and the PATCH
+  // unlink sweep clears credential_id on ALL of a credential's phones,
+  // archived included — if this list excluded archived phones, the picker
+  // would silently drop them from the save and unlink them.
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const r = await phonesExec(
+        `/api/providers/${providerId}/phones?status=active,suspended,blocked,archived`,
+      );
+      // Only a successful fetch unblocks the picker — flipping this on
+      // failure would unblock it against an incomplete/empty list, which is
+      // the exact hazard this guard exists to prevent.
+      if (active && r.ok) {
+        setPhones(r.data.data);
+        setPhonesLoaded(true);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [providerId, tick, phonesExec]);
+
+  const credLabelById = useMemo(
+    () => new Map((creds ?? []).map((c) => [c.id, c.label] as const)),
+    [creds],
+  );
+
+  // Build the numbers picker's option list. `excludeCredentialId` is the
+  // credential currently being edited (or null when adding) — a phone linked
+  // to that same credential isn't "elsewhere", but a phone linked to any
+  // other credential shows a "linked to <label>" hint (selecting it MOVES it).
+  function phoneOptions(excludeCredentialId: number | null): MultiSelectOption[] {
+    return phones.map((p) => {
+      const other =
+        p.credential_id !== null && p.credential_id !== excludeCredentialId
+          ? credLabelById.get(p.credential_id)
+          : undefined;
+      const metaParts: string[] = [];
+      if (other) metaParts.push(`linked to ${other}`);
+      if (p.status === "archived") metaParts.push("archived");
+      return {
+        id: p.id,
+        label: p.phone_number,
+        meta: metaParts.length > 0 ? metaParts.join(" · ") : undefined,
+      };
+    });
+  }
+
+  // --- Add account dialog ---
+  const [addOpen, setAddOpen] = useState(false);
+  const [addLabel, setAddLabel] = useState("");
+  const [addApiKey, setAddApiKey] = useState("");
+  const [addBrandId, setAddBrandId] = useState<string>(NONE_BRAND);
+  const [addPhoneIds, setAddPhoneIds] = useState<number[]>([]);
+
+  function openAdd() {
+    setAddOpen(true);
+    setAddLabel("");
+    setAddApiKey("");
+    setAddBrandId(NONE_BRAND);
+    setAddPhoneIds([]);
+  }
+  function closeAdd() {
+    setAddOpen(false);
+    setAddLabel("");
+    setAddApiKey(""); // don't keep the secret in component state
+    setAddBrandId(NONE_BRAND);
+    setAddPhoneIds([]);
+  }
+
+  async function handleAdd() {
+    if (!addLabel.trim() || !addApiKey.trim()) return;
+    const brand_id = addBrandId === NONE_BRAND ? null : Number(addBrandId);
+    const r = await saveApi.execute(`/api/providers/${providerId}/credentials`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: addLabel.trim(), api_key: addApiKey, brand_id }),
+    });
+    if (!r.ok) {
+      // Surfaces the 409 numberless_stages_block_multi_account message (and
+      // any other server error) verbatim via toastApiError's CONFLICT branch.
+      toastApiError(r, "Couldn't add account");
+      return;
+    }
+
+    // POST returns the new row's id — labels aren't unique, so the id is the
+    // only safe way to address the account for the follow-up numbers link.
+    let linkFailed = false;
+    if (addPhoneIds.length > 0) {
+      const linkResult = await updateApi.execute(
+        `/api/providers/${providerId}/credentials/${r.data.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone_ids: addPhoneIds }),
+        },
+      );
+      linkFailed = !linkResult.ok;
+    }
+
+    // Only one toast, ever — a partial failure (account created, link
+    // failed) must not also claim full success.
+    if (linkFailed) {
+      toast.warning("Account created, but linking numbers failed — open Edit to link them");
+    } else {
+      toast.success("Account added");
+    }
+    closeAdd();
+    setTick((n) => n + 1);
+  }
+
+  // --- Rotate key dialog ---
+  const [rotating, setRotating] = useState<Cred | null>(null);
+  const [rotateApiKey, setRotateApiKey] = useState("");
+
+  function openRotate(c: Cred) {
+    setRotating(c);
+    setRotateApiKey("");
+  }
+  function closeRotate() {
+    setRotating(null);
+    setRotateApiKey("");
+  }
+
+  async function handleRotate() {
+    if (!rotating || !rotateApiKey.trim()) return;
+    const r = await updateApi.execute(
+      `/api/providers/${providerId}/credentials/${rotating.id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: rotateApiKey }),
+      },
+    );
+    if (!r.ok) {
+      toastApiError(r, "Couldn't rotate key");
+      return;
+    }
+    toast.success("Key rotated");
+    closeRotate();
+    setTick((n) => n + 1);
+  }
+
+  // --- Edit account dialog ---
+  const [editing, setEditing] = useState<Cred | null>(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [editBrandId, setEditBrandId] = useState<string>(NONE_BRAND);
+  const [editPhoneIds, setEditPhoneIds] = useState<number[]>([]);
+  const [editPhoneIdsTouched, setEditPhoneIdsTouched] = useState(false);
+
+  function openEdit(c: Cred) {
+    setEditing(c);
+    setEditLabel(c.label);
+    setEditBrandId(c.brand_id === null ? NONE_BRAND : String(c.brand_id));
+    setEditPhoneIdsTouched(false);
+    // editPhoneIds itself isn't set here — the picker's displayed value
+    // (editPhoneIdsValue below) derives it live from `phones` while
+    // untouched, so it's always the freshest snapshot rather than whatever
+    // `phones` happened to hold at the moment Edit was opened.
+  }
+  function closeEdit() {
+    setEditing(null);
+    setEditPhoneIdsTouched(false);
+  }
+
+  // Derived selection for the Edit picker. While untouched, this always
+  // mirrors the credential's currently-linked phones from the freshest
+  // `phones` list — closing the race where opening Edit before the phones
+  // fetch resolves would otherwise snapshot an empty/incomplete set as the
+  // pre-selection. Once the operator touches the picker, editPhoneIdsTouched
+  // flips true and this stops re-deriving, so it never clobbers their
+  // in-progress edit.
+  const editPhoneIdsValue = useMemo(() => {
+    if (!editing || editPhoneIdsTouched) return editPhoneIds;
+    return phones.filter((p) => p.credential_id === editing.id).map((p) => p.id);
+  }, [editing, editPhoneIdsTouched, phones, editPhoneIds]);
+
+  async function handleEditSave() {
+    if (!editing || !editLabel.trim()) return;
+    const patch: { label?: string; brand_id?: number | null; phone_ids?: number[] } = {};
+    if (editLabel.trim() !== editing.label) patch.label = editLabel.trim();
+    const brandId = editBrandId === NONE_BRAND ? null : Number(editBrandId);
+    if (brandId !== editing.brand_id) patch.brand_id = brandId;
+    // phone_ids is the COMPLETE desired set — send it whenever the picker was
+    // touched, even if it round-trips to the same set (we can't cheaply tell
+    // "touched but unchanged" from "matches on reload", and re-sending the
+    // same set is a harmless no-op server-side).
+    if (editPhoneIdsTouched) patch.phone_ids = editPhoneIdsValue;
+
+    if (Object.keys(patch).length === 0) {
+      closeEdit();
+      return;
+    }
+
+    const r = await updateApi.execute(
+      `/api/providers/${providerId}/credentials/${editing.id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      },
+    );
+    if (!r.ok) {
+      toastApiError(r, "Couldn't save account");
+      return;
+    }
+    toast.success("Account saved");
+    closeEdit();
+    setTick((n) => n + 1);
+  }
+
+  // --- Delete ---
   const [deleting, setDeleting] = useState<Cred | null>(null);
+
+  async function handleDelete() {
+    if (!deleting) return;
+    const r = await deleteApi.execute(
+      `/api/providers/${providerId}/credentials/${deleting.id}`,
+      { method: "DELETE" },
+    );
+    if (!r.ok) {
+      toastApiError(r, "Couldn't remove account");
+      return;
+    }
+    toast.success("Account removed");
+    setDeleting(null);
+    setTick((n) => n + 1);
+  }
 
   // Test-send dialog: send one real SMS using a specific stored key to confirm
   // it works + URLs in `text` arrive un-rewritten.
@@ -79,6 +366,22 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
     setTestNumber("");
     setTestText("CamMan self-test https://go.yourbrand.co/r/SELFTEST1 (please ignore)");
     setTestResult(null);
+  }
+
+  async function handleTest() {
+    if (!testing || !testNumber.trim() || !testText.trim()) return;
+    const r = await testApi.execute(`/api/providers/${providerId}/credentials/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credential_id: testing.id, number: testNumber, text: testText }),
+    });
+    if (!r.ok) {
+      toastApiError(r, "Test send failed");
+      return;
+    }
+    setTestResult(r.data);
+    if (r.data.ok) toast.success("Test SMS sent — check the phone");
+    else toast.error("TextHub rejected the test send");
   }
 
   // Register opt-out (STOP) callback: points TextHub at our inbound webhook for
@@ -119,110 +422,20 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
     else toast.error("TextHub didn't accept the registration");
   }
 
-  async function handleTest() {
-    if (!testing || !testNumber.trim() || !testText.trim()) return;
-    const r = await testApi.execute(`/api/providers/${providerId}/credentials/test`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ credential_id: testing.id, number: testNumber, text: testText }),
-    });
-    if (!r.ok) {
-      toastApiError(r, "Test send failed");
-      return;
-    }
-    setTestResult(r.data);
-    if (r.data.ok) toast.success("Test SMS sent — check the phone");
-    else toast.error("TextHub rejected the test send");
-  }
-
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      const r = await listExec(`/api/providers/${providerId}/credentials`);
-      if (active && r.ok) setCreds(r.data.data);
-    })();
-    return () => {
-      active = false;
-    };
-  }, [providerId, tick, listExec]);
-
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      const r = await brandsExec(`/api/brands/list?pageSize=100`);
-      if (active && r.ok) setBrands(r.data.data);
-    })();
-    return () => {
-      active = false;
-    };
-  }, [brandsExec]);
-
-  function openAdd() {
-    setDialog({ mode: "add" });
-    setFormBrandId("default");
-    setApiKey("");
-  }
-  function openRotate(c: Cred) {
-    setDialog({ mode: "rotate", brandId: c.brand_id, label: c.brand_name ?? DEFAULT_LABEL });
-    setApiKey("");
-  }
-
-  async function handleSave() {
-    if (!apiKey.trim()) return;
-    const brand_id =
-      dialog?.mode === "rotate"
-        ? dialog.brandId
-        : formBrandId === "default"
-          ? null
-          : Number(formBrandId);
-    const r = await saveApi.execute(`/api/providers/${providerId}/credentials`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brand_id, api_key: apiKey }),
-    });
-    if (!r.ok) {
-      toastApiError(r, "Couldn't save key");
-      return;
-    }
-    toast.success(dialog?.mode === "rotate" ? "Key rotated" : "Key saved");
-    setDialog(null);
-    setApiKey(""); // don't keep the secret in component state
-    setTick((n) => n + 1);
-  }
-
-  async function handleDelete() {
-    if (!deleting) return;
-    const r = await deleteApi.execute(
-      `/api/providers/${providerId}/credentials/${deleting.id}`,
-      { method: "DELETE" },
-    );
-    if (!r.ok) {
-      toastApiError(r, "Couldn't remove key");
-      return;
-    }
-    toast.success("Key removed");
-    setDeleting(null);
-    setTick((n) => n + 1);
-  }
-
-  // Brands that don't already have their own key (eligible for a new one).
-  const usedBrandIds = new Set((creds ?? []).map((c) => c.brand_id));
-  const hasDefault = usedBrandIds.has(null);
-  const addableBrands = brands.filter((b) => !usedBrandIds.has(b.id));
-
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-medium">API keys</h2>
+          <h2 className="text-lg font-medium">Accounts</h2>
           <p className="text-sm text-muted-foreground">
-            Per-brand TextHub keys (plus an optional default). Keys are stored
-            securely and shown masked.
+            Per-account API keys — key + sending numbers travel together.
           </p>
         </div>
-        <Button onClick={openAdd}>
-          <Plus className="size-4" aria-hidden /> Add key
-        </Button>
+        {canManage ? (
+          <Button onClick={openAdd}>
+            <Plus className="size-4" aria-hidden /> Add account
+          </Button>
+        ) : null}
       </div>
 
       <Card>
@@ -231,27 +444,27 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
             <p className="p-4 text-sm text-muted-foreground">Loading…</p>
           ) : creds.length === 0 ? (
             <p className="p-4 text-sm text-muted-foreground">
-              No API keys yet. Add a default key, or a key per brand.
+              No accounts yet.{canManage ? " Add the first one." : ""}
             </p>
           ) : (
             <table className="w-full text-sm">
               <thead className="border-b text-left text-xs uppercase text-muted-foreground">
                 <tr>
-                  <th className="px-4 py-2 font-medium">Scope</th>
+                  <th className="px-4 py-2 font-medium">Account</th>
                   <th className="px-4 py-2 font-medium">Key</th>
+                  <th className="px-4 py-2 font-medium">Numbers</th>
                   <th className="px-4 py-2 font-medium">Updated</th>
-                  <th className="px-4 py-2" />
+                  {canManage ? <th className="px-4 py-2" /> : null}
                 </tr>
               </thead>
               <tbody>
                 {creds.map((c) => (
                   <tr key={c.id} className="border-b last:border-0">
                     <td className="px-4 py-2">
-                      {c.brand_id === null ? (
-                        <span className="text-muted-foreground">{DEFAULT_LABEL}</span>
-                      ) : (
-                        c.brand_name ?? `Brand #${c.brand_id}`
-                      )}
+                      <div className="font-medium">{c.label}</div>
+                      {c.brand_name ? (
+                        <div className="text-xs text-muted-foreground">{c.brand_name}</div>
+                      ) : null}
                     </td>
                     <td className="px-4 py-2 font-mono">
                       <span className="inline-flex items-center gap-1.5">
@@ -260,29 +473,37 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
                       </span>
                     </td>
                     <td className="px-4 py-2 text-muted-foreground">
+                      {numberWord(c.linked_numbers)}
+                    </td>
+                    <td className="px-4 py-2 text-muted-foreground">
                       {new Date(c.updated_at).toLocaleDateString()}
                     </td>
-                    <td className="px-4 py-2">
-                      <div className="flex justify-end gap-1">
-                        <Button variant="ghost" size="sm" onClick={() => openTest(c)}>
-                          <SendHorizonal className="size-4" aria-hidden /> Send test
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => openRegister(c)}>
-                          <Ban className="size-4" aria-hidden /> STOP callback
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => openRotate(c)}>
-                          <RotateCw className="size-4" aria-hidden /> Rotate
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label="Remove key"
-                          onClick={() => setDeleting(c)}
-                        >
-                          <Trash2 className="size-4" aria-hidden />
-                        </Button>
-                      </div>
-                    </td>
+                    {canManage ? (
+                      <td className="px-4 py-2">
+                        <div className="flex justify-end gap-1">
+                          <Button variant="ghost" size="sm" onClick={() => openTest(c)}>
+                            <SendHorizonal className="size-4" aria-hidden /> Send test
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => openRegister(c)}>
+                            <Ban className="size-4" aria-hidden /> STOP callback
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => openEdit(c)}>
+                            <Pencil className="size-4" aria-hidden /> Edit
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => openRotate(c)}>
+                            <RotateCw className="size-4" aria-hidden /> Rotate
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label="Remove account"
+                            onClick={() => setDeleting(c)}
+                          >
+                            <Trash2 className="size-4" aria-hidden />
+                          </Button>
+                        </div>
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>
@@ -291,89 +512,224 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
         </CardContent>
       </Card>
 
-      {/* Add / rotate dialog */}
+      {/* Add account dialog */}
       <FormDialog
-        open={dialog !== null}
+        open={addOpen}
         onOpenChange={(open) => {
-          if (!open) {
-            setDialog(null);
-            setApiKey("");
-          }
+          if (!open) closeAdd();
         }}
         className="sm:max-w-md"
       >
         <DialogHeader>
-          <DialogTitle>{dialog?.mode === "rotate" ? "Rotate API key" : "Add API key"}</DialogTitle>
+          <DialogTitle>Add account</DialogTitle>
           <DialogDescription>
-            {dialog?.mode === "rotate"
-              ? `Replace the key for ${dialog.label}. The old key is overwritten.`
-              : "The key is write-only — it's stored securely and never shown again."}
+            The key is write-only — it&apos;s stored securely and never shown again.
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-4">
-          {dialog?.mode === "add" ? (
-            <div className="grid gap-1.5">
-              <label className="text-sm font-medium" htmlFor="cred-brand">
-                Scope
-              </label>
-              <select
-                id="cred-brand"
-                value={formBrandId}
-                onChange={(e) => setFormBrandId(e.target.value)}
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              >
-                {!hasDefault ? <option value="default">{DEFAULT_LABEL}</option> : null}
-                {addableBrands.map((b) => (
-                  <option key={b.id} value={String(b.id)}>
-                    {b.name}
-                  </option>
-                ))}
-              </select>
-              {hasDefault && addableBrands.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  Every brand and the default already have a key — rotate an existing one instead.
-                </p>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="add-cred-label">
+              Label
+              <span aria-hidden className="text-destructive ml-0.5">*</span>
+            </label>
+            <Input
+              id="add-cred-label"
+              value={addLabel}
+              onChange={(e) => setAddLabel(e.target.value)}
+              placeholder="e.g. Main account"
+            />
+          </div>
 
           <div className="grid gap-1.5">
-            <label className="text-sm font-medium" htmlFor="cred-key">
+            <label className="text-sm font-medium" htmlFor="add-cred-key">
               API key
               <span aria-hidden className="text-destructive ml-0.5">*</span>
             </label>
             <Input
-              id="cred-key"
+              id="add-cred-key"
               type="password"
               autoComplete="off"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
+              value={addApiKey}
+              onChange={(e) => setAddApiKey(e.target.value)}
               placeholder="Paste the TextHub api_key"
+            />
+          </div>
+
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="add-cred-brand">
+              Brand
+            </label>
+            <select
+              id="add-cred-brand"
+              value={addBrandId}
+              onChange={(e) => setAddBrandId(e.target.value)}
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value={NONE_BRAND}>None</option>
+              {brands.map((b) => (
+                <option key={b.id} value={String(b.id)}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium">Numbers</label>
+            <MultiSelectPicker
+              options={phoneOptions(null)}
+              value={addPhoneIds}
+              onChange={(next) => setAddPhoneIds(next.map(Number))}
+              isLoading={phonesApi.isLoading}
+              disabled={!phonesLoaded}
+              placeholder={phonesLoaded ? "No numbers linked" : "Loading numbers…"}
+              selectedLabel={numberWord}
+              emptyMessage="No numbers on this provider yet."
             />
           </div>
 
           <div className="flex justify-end gap-2">
             <Button
               variant="outline"
-              onClick={() => {
-                setDialog(null);
-                setApiKey("");
-              }}
-              disabled={saveApi.isLoading}
+              onClick={closeAdd}
+              disabled={saveApi.isLoading || updateApi.isLoading}
             >
               Cancel
             </Button>
             <Button
-              onClick={() => void handleSave()}
+              onClick={() => void handleAdd()}
               disabled={
                 saveApi.isLoading ||
-                !apiKey.trim() ||
-                // Add mode with nothing left to scope (default + every brand taken).
-                (dialog?.mode === "add" && hasDefault && addableBrands.length === 0)
+                updateApi.isLoading ||
+                !addLabel.trim() ||
+                !addApiKey.trim()
               }
             >
-              {dialog?.mode === "rotate" ? "Rotate key" : "Save key"}
+              Add account
+            </Button>
+          </div>
+        </div>
+      </FormDialog>
+
+      {/* Rotate key dialog */}
+      <FormDialog
+        open={rotating !== null}
+        onOpenChange={(open) => {
+          if (!open) closeRotate();
+        }}
+        className="sm:max-w-md"
+      >
+        <DialogHeader>
+          <DialogTitle>Rotate API key</DialogTitle>
+          <DialogDescription>
+            {rotating
+              ? `Replace the key for ${rotating.label}. The old key is overwritten; never shown again.`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="rotate-cred-key">
+              New API key
+              <span aria-hidden className="text-destructive ml-0.5">*</span>
+            </label>
+            <Input
+              id="rotate-cred-key"
+              type="password"
+              autoComplete="off"
+              value={rotateApiKey}
+              onChange={(e) => setRotateApiKey(e.target.value)}
+              placeholder="Paste the new TextHub api_key"
+            />
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={closeRotate} disabled={updateApi.isLoading}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleRotate()}
+              disabled={updateApi.isLoading || !rotateApiKey.trim()}
+            >
+              Rotate key
+            </Button>
+          </div>
+        </div>
+      </FormDialog>
+
+      {/* Edit account dialog */}
+      <FormDialog
+        open={editing !== null}
+        onOpenChange={(open) => {
+          if (!open) closeEdit();
+        }}
+        className="sm:max-w-md"
+      >
+        <DialogHeader>
+          <DialogTitle>Edit account</DialogTitle>
+          <DialogDescription>{editing?.label ?? ""}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="edit-cred-label">
+              Label
+              <span aria-hidden className="text-destructive ml-0.5">*</span>
+            </label>
+            <Input
+              id="edit-cred-label"
+              value={editLabel}
+              onChange={(e) => setEditLabel(e.target.value)}
+            />
+          </div>
+
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="edit-cred-brand">
+              Brand
+            </label>
+            <select
+              id="edit-cred-brand"
+              value={editBrandId}
+              onChange={(e) => setEditBrandId(e.target.value)}
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value={NONE_BRAND}>None</option>
+              {brands.map((b) => (
+                <option key={b.id} value={String(b.id)}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium">Numbers</label>
+            <MultiSelectPicker
+              options={editing ? phoneOptions(editing.id) : []}
+              value={editPhoneIdsValue}
+              onChange={(next) => {
+                setEditPhoneIds(next.map(Number));
+                setEditPhoneIdsTouched(true);
+              }}
+              isLoading={phonesApi.isLoading}
+              disabled={!phonesLoaded}
+              placeholder={phonesLoaded ? "No numbers linked" : "Loading numbers…"}
+              selectedLabel={numberWord}
+              emptyMessage="No numbers on this provider yet."
+            />
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={closeEdit} disabled={updateApi.isLoading}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleEditSave()}
+              disabled={updateApi.isLoading || !editLabel.trim()}
+            >
+              Save changes
             </Button>
           </div>
         </div>
@@ -393,8 +749,7 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
         <DialogHeader>
           <DialogTitle>Send a test SMS</DialogTitle>
           <DialogDescription>
-            Sends one real SMS using the{" "}
-            {testing?.brand_id === null ? "default" : testing?.brand_name ?? "brand"} key.
+            Sends one real SMS using the &quot;{testing?.label ?? ""}&quot; account&apos;s key.
             Put your own number and a link you&apos;ll recognize, then check the phone:
             the URL should arrive exactly as typed (no rewriting/shortening).
           </DialogDescription>
@@ -494,10 +849,10 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
         <DialogHeader>
           <DialogTitle>Register STOP callback</DialogTitle>
           <DialogDescription>
-            Tells TextHub to deliver inbound STOP messages for the{" "}
-            {registering?.brand_id === null ? "default" : registering?.brand_name ?? "brand"} key
-            to this app. One-time setup per key. After it succeeds, text STOP from
-            your own phone to confirm what TextHub delivers.
+            Tells TextHub to deliver inbound STOP messages for the &quot;
+            {registering?.label ?? ""}&quot; account&apos;s key to this app. One-time setup
+            per key. After it succeeds, text STOP from your own phone to confirm what
+            TextHub delivers.
           </DialogDescription>
         </DialogHeader>
 
@@ -568,10 +923,24 @@ export function ProviderCredentialsSection({ providerId }: { providerId: number 
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove this API key?</AlertDialogTitle>
+            <AlertDialogTitle>Remove this account?</AlertDialogTitle>
             <AlertDialogDescription>
               {deleting
-                ? `The ${deleting.brand_id === null ? "default" : deleting.brand_name ?? "brand"} key will be removed. Tracked sends that rely on it will fail until a key is set again.`
+                ? (() => {
+                    const numbersClause =
+                      deleting.linked_numbers > 0
+                        ? ` and its ${numberWord(deleting.linked_numbers)} will be unlinked`
+                        : "";
+                    // Numberless/unlinked resolution only ever falls back
+                    // when EXACTLY one account remains — mirrors
+                    // resolveKeyForStage's fallback rule.
+                    const remaining = (creds?.length ?? 1) - 1;
+                    const fallbackClause =
+                      remaining === 1
+                        ? " With one account left on this provider, its unlinked or numberless sends will automatically use that account's key."
+                        : " With no single surviving account, its unlinked or numberless sends will be refused until a number is re-linked.";
+                    return `The "${deleting.label}" account will be removed${numbersClause}.${fallbackClause}`;
+                  })()
                 : ""}
             </AlertDialogDescription>
           </AlertDialogHeader>

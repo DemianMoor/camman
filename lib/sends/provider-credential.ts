@@ -120,8 +120,9 @@ export async function resolveCredentialKeyById(
 // Resolve the api_key to use for (provider, brand): brand-specific first, then
 // the provider-default. Returns null if neither exists. Plaintext — send path
 // only; never logged, never returned to a client.
-// DEPRECATED (pre-multi-account): superseded by resolveKeyForStage. Kept until
-// the drain (Task 5) stops importing it.
+// DEPRECATED (pre-multi-account): superseded by resolveKeyForStage. Kept only
+// for scripts/probe-texthub-status.ts; retired when the plaintext column
+// drops (gated migration 0112).
 export async function resolveProviderApiKey(
   dbc: DbOrTx,
   { orgId, providerId, brandId }: { orgId: string; providerId: number; brandId: number | null },

@@ -64,14 +64,36 @@ export type ProviderFormValues = z.input<typeof providerCreateSchema>;
 export const providerCredentialSetSchema = z.object({
   brand_id: z.number().int().positive().nullable().optional().default(null),
   api_key: z.string().trim().min(1, "API key is required").max(500),
-  // Optional forward-compat: an operator-facing name for this credential row.
-  // Not required — the live (pre-multi-account) UI never sends it, and the
-  // route derives a default (brand name, or "Default") when absent.
-  label: z.string().trim().min(1).max(120).optional(),
+  // Required (Phase 3): POST is create-only now, one row per account, and the
+  // multi-account UI always sends an operator-facing label to distinguish
+  // rows on the same provider. No more derived-default fallback.
+  label: z.string().trim().min(1, "Label is required").max(120),
 });
 
 export type ProviderCredentialSetInput = z.infer<
   typeof providerCredentialSetSchema
+>;
+
+// Update an existing credential (account): label, brand scoping, its linked
+// numbers, and/or rotate the key. `phone_ids`, when present, is the COMPLETE
+// set of provider_phones ids that should belong to this credential — the
+// route links those and unlinks any of this credential's phones not in the
+// set (see lib/providers/credential-phone-links.ts). `api_key`, when
+// present, rotates the stored secret (re-encrypted server-side; never
+// echoed back).
+export const providerCredentialUpdateSchema = z
+  .object({
+    label: z.string().trim().min(1).max(120).optional(),
+    brand_id: z.number().int().positive().nullable().optional(),
+    api_key: z.string().trim().min(1).max(500).optional(),
+    phone_ids: z.array(z.number().int().positive()).max(200).optional(),
+  })
+  .refine((d) => Object.values(d).some((v) => v !== undefined), {
+    message: "At least one field must be provided",
+  });
+
+export type ProviderCredentialUpdateInput = z.infer<
+  typeof providerCredentialUpdateSchema
 >;
 
 // Send a one-off test SMS using a specific stored credential. The key is

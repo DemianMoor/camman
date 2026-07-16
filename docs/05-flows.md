@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-07-15_
+_Last updated: 2026-07-16_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -84,6 +84,8 @@ sequenceDiagram
   Kick->>Mint: per recipient → links + link_destinations
   Kick->>Kick: INSERT stage_sends (rendered_text frozen, send_token=id)
   Op->>Drain: drain (SEND_ENABLED + approved + !paused + breakers)
+  Drain->>Drain: resolve key: stage.provider_phone_id -> provider_phones.credential_id -> provider_credentials
+  Drain->>Drain: decryptCredentialKey (api_key_encrypted else legacy plaintext api_key)
   loop batch
     Drain->>TH: GET send(api_key,text,number)
     TH-->>Drain: {ok,messageId,status}
@@ -95,6 +97,8 @@ sequenceDiagram
   Score->>Score: */15 enrich (MaxMind ASN) + bot_score + classification
 ```
 > The redirect appends `&sub_id1=<send_token>` (= `stage_sends.id`) to the shared destination so a later Keitaro sale attributes back to this recipient (flow H). The operator's stage Full URL is never touched.
+
+> **Key resolution is number → account → key (migration 0110).** A stage with no `provider_phone_id` falls back to the legacy `(provider, brand)`/default lookup, but only while the provider has exactly ONE credential — once a provider has ≥2 accounts a numberless stage refuses (`no_credentials`) rather than guessing. The key is decrypted at this point only (AES-256-GCM `api_key_encrypted`, dual-read against legacy plaintext `api_key`) — never earlier, never returned by any list/GET response. See [07-conventions.md](07-conventions.md).
 
 ## E. Opt-out (STOP) intake
 

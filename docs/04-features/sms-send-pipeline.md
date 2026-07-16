@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-07-15_
+_Last updated: 2026-07-16_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -9,7 +9,7 @@ For **tracked** campaigns, send SMS directly via the TextHub API instead of expo
 
 ## 2. Key concepts / entities
 - `stage_sends` — one row per recipient-message. Its `id uuid` **is** the link idempotency `send_token`. `rendered_text` frozen at materialization. Status `pending → sending → sent | failed | rejected | filtered` (`filtered` = TextHub-suppressed; migration 0065 — see §"Filtered (TextHub-suppressed)" below).
-- `provider_credentials` — brand-scoped TextHub `api_key` (plaintext; see [security-notes.md](../security-notes.md)).
+- `provider_credentials` — one row **is an account** (migration 0110: N accounts per provider, `label`-distinguished); `api_key_encrypted` is AES-256-GCM at rest, resolved number→account→key at send time (see "Key resolution" below and [security-notes.md](../security-notes.md)).
 - `sms_providers` circuit-breaker columns + `send_circuit_events` audit log.
 - Code: [`lib/sends/`](../../lib/sends/) (`kickoff.ts`, `drain.ts`, `texthub.ts`, `circuit-breakers.ts`, `provider-credential.ts`, `scheduled.ts`, `stage-sms.ts`), [`lib/alerts/`](../../lib/alerts/), [`lib/quiet-hours.ts`](../../lib/quiet-hours.ts).
 
@@ -60,7 +60,7 @@ sequenceDiagram
   participant TH as TextHub
   Caller->>Drain: runStageDrain(stageId)
   Drain->>Drain: gate: send_approved && SEND_ENABLED && !send_paused
-  Drain->>Drain: resolve api_key (brand key → default)
+  Drain->>Drain: resolve api_key (number → account → key; decrypt)
   loop until cap / halt
     Drain->>DB: claim batch FOR UPDATE SKIP LOCKED → status=sending
     loop slice of `rate` = max_sends_per_second (default 10)
@@ -75,6 +75,8 @@ sequenceDiagram
     Drain->>Drain: rolling ceilings checked between batches → stop
   end
 ```
+
+**Key resolution — number → account → key (migration 0110).** `resolveKeyForStage` ([lib/sends/provider-credential.ts](../../lib/sends/provider-credential.ts)) resolves the stage's `provider_phone_id` through `provider_phones.credential_id` to its `provider_credentials` row first — this is the only path once a provider has ≥2 accounts. A stage with **no phone** falls back to the legacy `(provider, brand)`/default lookup, but **only while the provider still has exactly ONE credential**; the moment a provider gains a 2nd account the fallback returns `null` (`no_credentials`) rather than guessing which account to bill. Every read dual-reads via `decryptCredentialKey`: prefer the encrypted `api_key_encrypted` blob (AES-256-GCM, decrypted with `PROVIDER_CREDENTIALS_KEY`), fall back to the legacy plaintext `api_key` column (kept for the dual-read window — see [security-notes.md](../security-notes.md)). **Decryption happens in exactly five places — never in a list/GET response:** here (the drain), the opt-out poll (`selectPollableCredentials` in `lib/sends/poll-opt-outs.ts`) and the Ahoi CDR poll (`pollAhoiCdr` in `lib/sends/ahoi-cdr-poll.ts`), and the credential test-send / register-callback actions (both via `resolveCredentialKeyById`). See [07-conventions.md](../07-conventions.md) for the full account model, the `v1.` blob format/rotation story, and the multi-account sequencing guardrail that keeps the single-credential fallback from ever going ambiguous.
 
 **Throughput & per-second pacing.** Within each claimed batch the drain processes **slices of `rate`** — the stage phone's `max_sends_per_second` (`resolveSendsPerSecond`, default 10, clamped ≤1000; injectable via `opts.concurrency`, `1` = effectively serial). Three layers:
 1. **Parallel network sends** — the slice's `sendSms` calls fire together (`Promise.all`); the ~400ms per-recipient TextHub round-trip was the original ~2 sends/sec ceiling.
@@ -190,6 +192,6 @@ Best-effort Telegram alerts on breaker trips / poller failures. If `TELEGRAM_BOT
 ## 7. Extension points / limitations
 - DLR polling, MMS, inbound conversations: out of scope.
 - Rate ceilings are org-wide until provider #2; per-provider accounting is a known follow-up.
-- `api_key` is plaintext at rest — encryption/secret-manager is deferred.
+- `api_key` is now AES-256-GCM-encrypted at rest (migration 0110) — see [security-notes.md](../security-notes.md). The legacy plaintext column is retained only for the dual-read window until a later, separately-gated migration (0112) drops it.
 - See memory notes: live-fire is owner-gated and has not been exercised end-to-end.
 - **Ahoi opt-out intake is complete (Phase 1 Section 4) but Ahoi sending is still gated.** All 3 opt-out layers (inbound webhook, CDR poll, DLR opt-out-error) write `opt_outs`; the go-live harness (`scripts/test-ahoi-optout-golive-harness.ts`) proves suppression end-to-end through the real preflight. `SEND_ENABLED` for Ahoi requires BOTH that harness green AND a one-time manual real-STOP smoke test (documented in the harness script's header) — the flip itself is a separate, gated, out-of-band step, not part of any code change.

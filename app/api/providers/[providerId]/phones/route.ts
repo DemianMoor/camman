@@ -87,6 +87,11 @@ export async function GET(
       org_id: provider_phones.org_id,
       provider_id: provider_phones.provider_id,
       brand_id: provider_phones.brand_id,
+      // Which credential (account) this number is linked to, if any — the
+      // account-shaped credentials UI (components/providers/provider-credentials-section.tsx)
+      // needs this to mark phones already linked to another account in its
+      // numbers picker and to pre-select the Edit dialog's picker.
+      credential_id: provider_phones.credential_id,
       phone_number: provider_phones.phone_number,
       country_code: provider_phones.country_code,
       dial_code: provider_phones.dial_code,

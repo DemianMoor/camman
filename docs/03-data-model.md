@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-07-15_
+_Last updated: 2026-07-16_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -61,6 +61,7 @@ erDiagram
 
   sms_providers ||--o{ provider_phones : has
   sms_providers ||--o{ provider_credentials : "api keys"
+  provider_credentials ||--o{ provider_phones : "credential_id (set null)"
   brands ||--o{ provider_credentials : "brand-scoped key"
   brands ||--o{ provider_phones : "brand_id (set null)"
   brands ||--o{ short_domains : "1 per brand"
@@ -179,10 +180,12 @@ erDiagram
 | `offers` | `offer_id` (text uniq), `network_id` (NOT NULL, **restrict**), `payout_model` cpa/revshare, `payout_cpa`, `payout_revshare`, `sales_pages` jsonb | `payout_cpa` is the **current-rate cache only** — never used to compute historical revenue (that's `keitaro_stage_results.revenue`); rate history lives in `offer_payouts` |
 | `offer_payouts` | `offer_id` (→offers, cascade), `payout_cpa` (NOT NULL), `effective_from`, `effective_to` (NULL=current), partial UNIQUE(offer_id) WHERE effective_to IS NULL | effective-dated CPA history (migration 0083). The offers write path closes the current row (`effective_to=now()`) and opens a new one on every CPA change instead of overwriting. For display/audit of "the rate that applied when" — NOT for recomputing earnings |
 | `sms_providers` | `sms_provider_id` (text uniq), `supports_api_send`, send-window cols, circuit-breaker cols (`send_paused*`, `max_sends_per_run` / `_minute` / `_24h` volume caps) | per-second rate lives on `provider_phones` (0073), not here |
-| `provider_credentials` | `provider_id`, `brand_id` (NULL=default), `api_key` **plaintext**, `inbound_webhook_token` | UNIQUE(provider_id, brand_id); see [security-notes.md](security-notes.md) |
-| `provider_phones` | `provider_id`, `brand_id` (set null), `phone_number`, `number_type` 10dlc/toll_free/short_code, `cost_per_sms`, `max_sends_per_second` (0073 — hard per-second send rate the drain paces to; carrier limit, differs by number type) | UNIQUE(org_id, phone_number) |
+| `provider_credentials` | `provider_id`, `brand_id` (NULL=default), `label`, `api_key` (legacy plaintext, nullable), `api_key_encrypted`, `api_key_last4`, `inbound_webhook_token` | **N accounts per provider** as of migration `0110` — a row IS an account (`label` distinguishes them). Both single-account unique indexes dropped (`provider_credentials_provider_brand_uniq`, `provider_credentials_provider_default_uniq`); `api_key` DROP NOT NULL (encrypted-only writes now allowed). See [security-notes.md](security-notes.md) and [07-conventions.md](07-conventions.md) |
+| `provider_phones` | `provider_id`, `brand_id` (set null), `phone_number`, `number_type` 10dlc/toll_free/short_code, `cost_per_sms`, `max_sends_per_second` (0073 — hard per-second send rate the drain paces to; carrier limit, differs by number type), `credential_id` (→provider_credentials, set null, migration `0110` — which account this number sends through; number→account→key resolution, see [07-conventions.md](07-conventions.md)) | UNIQUE(org_id, phone_number) |
 | `routing_types`, `traffic_types` | `*_id` (text uniq), `name` | campaign metadata dimensions |
 | `utm_tags` | `tag_id` (text uniq), `label`, `value_source`, `affiliate_network_id` | appended to stage Full URLs |
+
+> **Multi-account provider credentials + encryption at rest (migration `0110`, applied 2026-07-16).** `provider_credentials` moved from one key per (provider, brand) to N accounts per provider — a row IS an account (`label`, `api_key_encrypted`, `api_key_last4`). `provider_phones.credential_id` (nullable FK, `ON DELETE SET NULL`) binds a sending number to the account it sends through; send-time key resolution walks number → account → key (`resolveKeyForStage`, [lib/sends/provider-credential.ts](../lib/sends/provider-credential.ts)). `api_key_encrypted` is AES-256-GCM ciphertext (`lib/crypto/secret-box.ts`), blob format `v1.<iv>.<ciphertext>.<authTag>`, keyed by env `PROVIDER_CREDENTIALS_KEY`. Plaintext `api_key` is retained, now nullable, for a **dual-read window** — `decryptCredentialKey` prefers the encrypted blob, falls back to plaintext — until a later, separately-gated migration `0112` drops the column (after `0111` tightens the new columns to `NOT NULL`; neither is applied yet). Backfill (`scripts/backfill-provider-credentials-encryption.ts`, applied 2026-07-16, idempotent) encrypted the 2 existing rows and linked each provider's phones to its sole credential. See [security-notes.md](security-notes.md) and [07-conventions.md](07-conventions.md).
 
 > **Ahoi provider seed (migration `0107`)** — no schema change, a new `sms_providers` row (`sms_provider_id='ahoi'`, `supports_api_send=true`), seeded additively/idempotently via `ON CONFLICT (sms_provider_id) DO NOTHING` against the single `organizations` row. The approved number (`provider_phones`) and provider-default credential (`provider_credentials`, `brand_id IS NULL`) are seeded separately by `scripts/seed-ahoi-number-credential.ts` (reads `AHOI_API_TOKEN`, run after 0107 applies) since they carry env secrets and don't belong in a committed migration. Part of Section 1 of the Ahoi provider build (adapter registry + drain integration); `SEND_ENABLED` stays off and no Ahoi send code ships in this section — see `docs/superpowers/specs/2026-07-14-ahoi-sms-provider-phase-1-design.md`.
 

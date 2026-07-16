@@ -108,9 +108,10 @@ export async function GET(
 // key is never logged and never echoed back (response is masked).
 //
 // Guardrail: adding a 2nd+ account is blocked (409) while the provider has
-// any send-eligible stage with no provider_phone_id — such a stage resolves
-// its key via the single-credential legacy fallback, which is ambiguous once
-// a 2nd account exists. See lib/providers/second-account-guard.ts.
+// any send-eligible stage with no provider_phone_id OR with a
+// provider_phone_id that isn't yet linked to a credential — such a stage
+// resolves its key via the single-credential legacy fallback, which is
+// ambiguous once a 2nd account exists. See lib/providers/second-account-guard.ts.
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ providerId: string }> },
@@ -204,7 +205,7 @@ export async function POST(
   if (blockedCount !== null) {
     return apiError(
       409,
-      "Assign numbers to all existing stages for this provider before adding a second account",
+      "Assign account-linked numbers to all send-eligible stages for this provider before adding a second account",
       API_ERROR_CODES.CONFLICT,
       { reason: "numberless_stages_block_multi_account", count: blockedCount },
     );

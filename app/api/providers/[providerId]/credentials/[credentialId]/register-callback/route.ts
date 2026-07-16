@@ -41,9 +41,10 @@ function resolveOrigin(req: NextRequest): string | null {
 }
 
 // POST — register this credential's inbound opt-out (STOP) callback with
-// TextHub (manager+). Mints a stable per-credential token on first call (reused
-// thereafter, so the callback URL never changes), then asks TextHub to deliver
-// STOPs to /api/webhooks/texthub/opt-out/<token>. Returns TextHub's RAW
+// TextHub. Admin+ (provider_credentials.manage) — resolves and transmits the
+// plaintext key to TextHub. Mints a stable per-credential token on first call
+// (reused thereafter, so the callback URL never changes), then asks TextHub to
+// deliver STOPs to /api/webhooks/texthub/opt-out/<token>. Returns TextHub's RAW
 // response so the operator can confirm it was accepted — the api_key is
 // resolved server-side and never returned.
 export async function POST(
@@ -54,7 +55,7 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "providers.update")) {
+  if (!can(role, "provider_credentials.manage")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

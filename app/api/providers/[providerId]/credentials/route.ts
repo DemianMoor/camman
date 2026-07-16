@@ -36,8 +36,8 @@ export async function GET(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  // Manager+ only — this surface manages secrets, even though it shows them masked.
-  if (!can(role, "providers.update")) {
+  // Manager+ (provider_credentials.view) — read-only access to the masked list.
+  if (!can(role, "provider_credentials.view")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -116,7 +116,9 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "providers.update")) {
+  // Admin+ (provider_credentials.manage) — creating an account is a
+  // secret-holding action, a stricter bar than viewing the masked list.
+  if (!can(role, "provider_credentials.manage")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

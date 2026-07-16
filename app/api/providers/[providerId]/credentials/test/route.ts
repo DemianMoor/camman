@@ -19,7 +19,8 @@ function parseId(idParam: string) {
 
 // Send ONE test SMS using a specific stored credential, to confirm a key works
 // and (the real point) that TextHub delivers URLs in `text` un-rewritten. A
-// real send — so it's gated by the SEND_ENABLED master kill-switch, manager+,
+// real send — so it's gated by the SEND_ENABLED master kill-switch,
+// admin+ (provider_credentials.manage) — sends a real SMS, a spend action —
 // and org scope. It does NOT touch stage_sends / the drain / campaigns. The
 // api_key is resolved server-side and never returned.
 export async function POST(
@@ -30,7 +31,7 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "providers.update")) {
+  if (!can(role, "provider_credentials.manage")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

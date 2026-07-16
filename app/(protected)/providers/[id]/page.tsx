@@ -330,6 +330,8 @@ export default function ProviderDetailPage() {
   const canUpdatePhone = can("provider_phones.update");
   const canArchivePhone = can("provider_phones.archive");
   const canRestorePhone = can("provider_phones.restore");
+  const canViewCredentials = can("provider_credentials.view");
+  const canManageCredentials = can("provider_credentials.manage");
 
   async function handleProviderEdit(values: ProviderFormValues) {
     if (!provider) return;
@@ -838,9 +840,14 @@ export default function ProviderDetailPage() {
         )}
       </section>
 
-      {/* API keys — manager+ only (matches the server-side gate). */}
-      {canUpdateProvider ? (
-        <ProviderCredentialsSection providerId={provider.id} />
+      {/* Accounts (API keys) — manager+ (provider_credentials.view) can see the
+          masked list; admin+ (provider_credentials.manage) gets the mutate
+          buttons, matching the server-side gates on the credentials routes. */}
+      {canViewCredentials ? (
+        <ProviderCredentialsSection
+          providerId={provider.id}
+          canManage={canManageCredentials}
+        />
       ) : null}
 
       {/* Sending circuit breaker — only meaningful for API-send providers. */}

@@ -18,9 +18,9 @@ function parseId(idParam: string) {
 }
 
 // PATCH — edit an existing credential (account): label, brand scoping,
-// linked numbers, and/or rotate the key. Gate stays `providers.update`
-// (manager+) for now — the view/manage permission split lands atomically
-// with the new UI (Task 11), not here. The plaintext key is never echoed
+// linked numbers, and/or rotate the key. Admin+ (provider_credentials.manage)
+// — every field this endpoint touches is secret-adjacent (the key itself, or
+// which numbers/brand a key is scoped to). The plaintext key is never echoed
 // back; the response is always masked.
 export async function PATCH(
   req: NextRequest,
@@ -30,7 +30,7 @@ export async function PATCH(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "providers.update")) {
+  if (!can(role, "provider_credentials.manage")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -182,8 +182,8 @@ export async function PATCH(
   });
 }
 
-// DELETE — remove a stored key (manager+). Org-scoped + tied to the provider in
-// the path so one org can't delete another's credential.
+// DELETE — remove a stored key. Admin+ (provider_credentials.manage). Org-scoped
+// + tied to the provider in the path so one org can't delete another's credential.
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ providerId: string; credentialId: string }> },
@@ -192,7 +192,7 @@ export async function DELETE(
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "providers.update")) {
+  if (!can(role, "provider_credentials.manage")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

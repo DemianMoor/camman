@@ -1,10 +1,11 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { brands, provider_credentials, sms_providers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { encryptSecret } from "@/lib/crypto/secret-box";
 import { maskApiKey } from "@/lib/sends/provider-credential";
 import { can } from "@/lib/permissions";
 import { providerCredentialSetSchema } from "@/lib/validators/providers";
@@ -53,8 +54,13 @@ export async function GET(
       id: provider_credentials.id,
       brand_id: provider_credentials.brand_id,
       brand_name: brands.name,
+      label: provider_credentials.label,
+      api_key_last4: provider_credentials.api_key_last4,
+      // Only used as a pre-backfill fallback to derive last4 below — never
+      // returned to the client.
       api_key: provider_credentials.api_key,
       updated_at: provider_credentials.updated_at,
+      linked_numbers: sql<number>`(SELECT count(*)::int FROM provider_phones ph WHERE ph.credential_id = ${provider_credentials.id})`,
     })
     .from(provider_credentials)
     .leftJoin(brands, eq(brands.id, provider_credentials.brand_id))
@@ -65,15 +71,29 @@ export async function GET(
       ),
     );
 
-  // Mask before serializing — the plaintext api_key never leaves the server.
-  const data = rows.map((r) => ({
-    id: r.id,
-    brand_id: r.brand_id,
-    brand_name: r.brand_name,
-    last4: maskApiKey(r.api_key).last4,
-    masked: maskApiKey(r.api_key).masked,
-    updated_at: r.updated_at,
-  }));
+  // Mask before serializing — the plaintext api_key never leaves the server,
+  // and it is never decrypted here (api_key_last4 is populated at write time;
+  // the plaintext api_key column is only a pre-backfill fallback).
+  const data = rows.map((r) => {
+    let last4 = "";
+    let masked = "";
+    if (r.api_key_last4) {
+      last4 = r.api_key_last4;
+      masked = `••••${last4}`;
+    } else if (r.api_key) {
+      ({ last4, masked } = maskApiKey(r.api_key));
+    }
+    return {
+      id: r.id,
+      brand_id: r.brand_id,
+      brand_name: r.brand_name,
+      label: r.label,
+      linked_numbers: r.linked_numbers,
+      last4,
+      masked,
+      updated_at: r.updated_at,
+    };
+  });
 
   return NextResponse.json({ data });
 }
@@ -111,11 +131,15 @@ export async function POST(
   if (!parsed.success) {
     return apiError(400, parsed.error.issues[0]?.message ?? "Invalid input", API_ERROR_CODES.VALIDATION);
   }
-  const { brand_id, api_key } = parsed.data;
+  const { brand_id, api_key, label } = parsed.data;
 
+  // Derived default label: the owning brand's name, or "Default" for the
+  // provider-wide key. Never overwrites an existing label on rotate (see the
+  // COALESCE below) — only used for brand-new rows / rows with no label yet.
+  let derivedLabel = "Default";
   if (brand_id != null) {
     const b = await db
-      .select({ id: brands.id })
+      .select({ id: brands.id, name: brands.name })
       .from(brands)
       .where(and(eq(brands.id, brand_id), eq(brands.org_id, orgId)))
       .limit(1);
@@ -124,9 +148,15 @@ export async function POST(
         field: "brand_id",
       });
     }
+    derivedLabel = b[0].name;
   }
 
-  const masked = await db.transaction(async (tx) => {
+  // Encrypt once outside the transaction — the plaintext never touches the
+  // DB; only the encrypted blob + last4 (for display) are written.
+  const { last4, masked } = maskApiKey(api_key);
+  const enc = encryptSecret(api_key);
+
+  await db.transaction(async (tx) => {
     const existing = await tx
       .select({ id: provider_credentials.id })
       .from(provider_credentials)
@@ -142,20 +172,29 @@ export async function POST(
       .limit(1);
 
     if (existing[0]) {
+      // Rotate: replace the secret, clear the legacy plaintext column, and
+      // only set a label if one isn't already there.
       await tx
         .update(provider_credentials)
-        .set({ api_key, updated_at: new Date() })
+        .set({
+          api_key_encrypted: enc,
+          api_key_last4: last4,
+          api_key: null,
+          label: sql`COALESCE(${provider_credentials.label}, ${label ?? derivedLabel})`,
+          updated_at: new Date(),
+        })
         .where(eq(provider_credentials.id, existing[0].id));
     } else {
       await tx.insert(provider_credentials).values({
         org_id: orgId,
         provider_id: providerId,
         brand_id: brand_id ?? null,
-        api_key,
+        api_key_encrypted: enc,
+        api_key_last4: last4,
+        label: label ?? derivedLabel,
       });
     }
-    return maskApiKey(api_key);
   });
 
-  return NextResponse.json({ ok: true, brand_id, masked: masked.masked, last4: masked.last4 });
+  return NextResponse.json({ ok: true, brand_id, masked, last4 });
 }

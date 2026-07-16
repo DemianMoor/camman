@@ -6,6 +6,7 @@ import { provider_credentials, sms_providers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { validatePhone } from "@/lib/phone-validation";
+import { resolveCredentialKeyById } from "@/lib/sends/provider-credential";
 import { sendSms } from "@/lib/sends/texthub";
 import { can } from "@/lib/permissions";
 import { providerCredentialTestSchema } from "@/lib/validators/providers";
@@ -68,10 +69,10 @@ export async function POST(
     });
   }
 
-  // Resolve the api_key for this specific credential, scoped to the provider +
-  // org. Confirms ownership and that the credential exists.
+  // Ownership pre-check, scoped to the provider + org — non-secret columns
+  // only. Confirms the credential exists before we bother resolving its key.
   const cred = await db
-    .select({ api_key: provider_credentials.api_key })
+    .select({ id: provider_credentials.id })
     .from(provider_credentials)
     .innerJoin(sms_providers, eq(sms_providers.id, provider_credentials.provider_id))
     .where(
@@ -89,9 +90,17 @@ export async function POST(
     });
   }
 
+  // Dual-read resolve (decrypt if encrypted, else legacy plaintext).
+  const apiKey = await resolveCredentialKeyById(db, { orgId, credentialId: credential_id });
+  if (apiKey === null) {
+    return apiError(404, "Credential not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "provider_credential",
+    });
+  }
+
   // Single recipient; link rides in `text`; never long_url / group.
   const result = await sendSms({
-    apiKey: cred[0].api_key,
+    apiKey,
     text,
     number: phone.normalized,
   });

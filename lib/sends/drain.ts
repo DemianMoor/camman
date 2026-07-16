@@ -18,7 +18,7 @@ import {
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
 import { getOrgSendsEnabled, getOrgSendsPaused } from "@/lib/sends/org-send-flag";
-import { resolveProviderApiKey } from "@/lib/sends/provider-credential";
+import { resolveKeyForStage } from "@/lib/sends/provider-credential";
 import { getAdapter, UnknownProviderError } from "@/lib/sends/providers/registry";
 import type { NormalizedSendParams } from "@/lib/sends/providers/types";
 import { buildSendUrl, type SendSmsResult } from "@/lib/sends/texthub";
@@ -185,6 +185,7 @@ export async function runStageDrain(
            s.send_approved    AS send_approved,
            c.org_id           AS org_id,
            c.brand_id         AS brand_id,
+           s.provider_phone_id AS provider_phone_id,
            p.send_paused           AS send_paused,
            p.max_sends_per_run     AS max_sends_per_run,
            p.max_sends_per_minute  AS max_sends_per_minute,
@@ -205,6 +206,7 @@ export async function runStageDrain(
     send_approved: boolean;
     org_id: string;
     brand_id: number | null;
+    provider_phone_id: number | null;
     send_paused: boolean | null;
     max_sends_per_run: number | null;
     max_sends_per_minute: number | null;
@@ -232,10 +234,11 @@ export async function runStageDrain(
   if (stage.send_paused) return { ok: false, reason: "provider_paused", ...EMPTY };
   if (stage.provider_id == null) return { ok: false, reason: "no_provider", ...EMPTY };
 
-  const apiKey = await resolveProviderApiKey(dbc, {
+  const apiKey = await resolveKeyForStage(dbc, {
     orgId: stage.org_id,
     providerId: stage.provider_id,
     brandId: stage.brand_id,
+    providerPhoneId: stage.provider_phone_id,
   });
   if (!apiKey) return { ok: false, reason: "no_credentials", ...EMPTY };
 

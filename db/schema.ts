@@ -320,11 +320,16 @@ export const sms_providers = pgTable(
   ],
 );
 
-// Per-provider API credentials (TextHub api_key). One key per provider.
+// Per-provider API credentials (TextHub api_key). N accounts per provider
+// (migration 0110) — the old one-key-per-(provider,brand) and
+// one-provider-default uniques were dropped; multiple credential rows can
+// share a provider now, distinguished by `label`.
 // ⚠️ api_key is PLAINTEXT AT REST — a conscious v1 tradeoff (see
 // docs/security-notes.md). Protected by deny-by-default RLS (no policies — only
 // the privileged server connection touches it) + app-layer permission checks;
-// never sent to the browser. Encryption-at-rest / secrets manager is later.
+// never sent to the browser. `api_key_encrypted` + `api_key_last4` (migration
+// 0110) are the encryption-at-rest replacement; `api_key` is nullable and kept
+// only for the dual-read migration window while rows are backfilled.
 export const provider_credentials = pgTable(
   "provider_credentials",
   {
@@ -340,7 +345,19 @@ export const provider_credentials = pgTable(
     brand_id: integer("brand_id").references(() => brands.id, {
       onDelete: "cascade",
     }),
-    api_key: text("api_key").notNull(),
+    // DB column is nullable as of migration 0110 (encrypted-only writes); the
+    // write path now inserts/rotates to NULL and stores the encrypted blob
+    // instead. Retained (nullable) for dual-read during the backfill window.
+    api_key: text("api_key"),
+    // Encrypted-at-rest secret (migration 0110). Replaces plaintext `api_key`
+    // going forward; see docs/security-notes.md for the encryption scheme.
+    api_key_encrypted: text("api_key_encrypted"),
+    // Last 4 characters of the plaintext key, for display/identification
+    // without decrypting (migration 0110).
+    api_key_last4: text("api_key_last4"),
+    // Operator-facing name distinguishing multiple accounts on the same
+    // provider (migration 0110), e.g. "Main account", "Backup account".
+    label: text("label"),
     // Per-credential secret embedded in the registered TextHub opt-out callback
     // URL path. Authenticates the inbound webhook AND resolves it to this
     // (org, provider, brand). NULL until the callback is registered for the key.
@@ -355,12 +372,6 @@ export const provider_credentials = pgTable(
   (table) => [
     index("provider_credentials_org_id_idx").on(table.org_id),
     index("provider_credentials_brand_id_idx").on(table.brand_id),
-    // One key per (provider, brand); a separate partial unique enforces at most
-    // one provider-default (brand_id IS NULL) — see migration 0051.
-    uniqueIndex("provider_credentials_provider_brand_uniq").on(
-      table.provider_id,
-      table.brand_id,
-    ),
     // A separate partial unique enforces globally-unique inbound tokens (so an
     // inbound callback resolves exactly one key) — see migration 0055.
   ],
@@ -572,6 +583,12 @@ export const provider_phones = pgTable(
     // lib/sends/drain.ts). NULL ⇒ DEFAULT_SENDS_PER_SECOND. Distinct from the
     // provider-level per-run/minute/24h VOLUME caps.
     max_sends_per_second: integer("max_sends_per_second"),
+    // Which credential (account) on the provider this number sends through
+    // (migration 0110). NULL until backfilled / assigned.
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "set null" },
+    ),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
@@ -586,6 +603,7 @@ export const provider_phones = pgTable(
     index("provider_phones_provider_id_idx").on(table.provider_id),
     index("provider_phones_brand_id_idx").on(table.brand_id),
     index("provider_phones_org_id_idx").on(table.org_id),
+    index("provider_phones_credential_id_idx").on(table.credential_id),
     check(
       "provider_phones_status_check",
       sql`${table.status} IN ('active', 'suspended', 'blocked', 'archived')`,

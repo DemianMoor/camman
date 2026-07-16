@@ -7,6 +7,7 @@ import { notifyTelegram } from "@/lib/alerts/telegram";
 import { CAMPAIGN_TIMEZONE, campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { processAhoiInboundOptOut } from "@/lib/sends/ahoi-optout";
 import { ahoiBaseUrl } from "@/lib/sends/providers/ahoi";
+import { decryptCredentialKey } from "@/lib/sends/provider-credential";
 
 // Rolling ET window (today + a midnight overlap — CDR timestamps are ET,
 // Phase 0 recon). Reuses the project's single DST-safe day-boundary helper
@@ -100,13 +101,46 @@ export async function pollAhoiCdr(
   const window = computeCdrPollWindow(opts?.now ?? new Date());
   const orgFilter = opts?.orgId ? sql`AND pc.org_id = ${opts.orgId}` : sql``;
 
-  const creds = (await database.execute(sql`
-    SELECT pc.id AS credential_id, pc.org_id AS org_id, pc.provider_id AS provider_id, pc.api_key AS api_key
+  const credRows = (await database.execute(sql`
+    SELECT pc.id AS credential_id, pc.org_id AS org_id, pc.provider_id AS provider_id,
+           pc.api_key AS api_key, pc.api_key_encrypted AS api_key_encrypted
     FROM provider_credentials pc
     JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
     WHERE p.sms_provider_id = 'ahi'
     ${orgFilter}
-  `)) as unknown as { credential_id: number; org_id: string; provider_id: number; api_key: string }[];
+  `)) as unknown as {
+    credential_id: number;
+    org_id: string;
+    provider_id: number;
+    api_key: string;
+    api_key_encrypted: string | null;
+  }[];
+
+  // Dual-read: resolve each row's plaintext key from the encrypted column
+  // (migration 0110) or the legacy plaintext column. A row with neither, OR a
+  // row whose encrypted blob won't decrypt (malformed/wrong version/bad auth
+  // tag/misconfigured PROVIDER_CREDENTIALS_KEY — decryptSecret THROWS), is a
+  // broken credential — skip it (warn, never log the key/error) rather than
+  // crash the whole poll.
+  const creds: { credential_id: number; org_id: string; provider_id: number; api_key: string }[] = [];
+  for (const row of credRows) {
+    let api_key: string | null;
+    try {
+      api_key = decryptCredentialKey(row);
+    } catch {
+      console.warn(
+        `pollAhoiCdr: credential ${row.credential_id} (provider ${row.provider_id}) failed to decrypt, skipping`,
+      );
+      continue;
+    }
+    if (api_key === null) {
+      console.warn(
+        `pollAhoiCdr: credential ${row.credential_id} (provider ${row.provider_id}) has no usable api key, skipping`,
+      );
+      continue;
+    }
+    creds.push({ credential_id: row.credential_id, org_id: row.org_id, provider_id: row.provider_id, api_key });
+  }
 
   let fetched = 0;
   let inbound = 0;

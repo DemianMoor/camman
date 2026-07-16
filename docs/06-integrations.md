@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-07-15_
+_Last updated: 2026-07-16_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -48,6 +48,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | `CLASSIFIER_TIMEOUT_MS` | server | classifier fetch timeout (default 10000) |
 | `MAXMIND_LICENSE_KEY` | server | GeoLite2 download key; unset ⇒ scoring runs on UA only (asn/country/datacenter NULL) |
 | `CRON_SECRET` | server | shared secret for cron endpoints (Bearer). Also gates the send drain. Unset ⇒ click-scoring endpoint returns 503 |
+| `PROVIDER_CREDENTIALS_KEY` | server | 32-byte base64 master key for AES-256-GCM encryption of `provider_credentials.api_key_encrypted` (migration 0110). MUST be byte-identical between Vercel and any local `.env.local` that encrypts (the backfill script) or decrypts (dev drain/pollers) — a mismatch makes existing rows silently fail to decrypt, not error at write time. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. Never commit a value |
 | `SEND_ENABLED` | server | deploy-level **backstop** for the send **drain**; must be exactly `"true"` to send. Left permanently on in Vercel — the day-to-day on/off is the DB flag `org_settings.sends_enabled` (Settings → Sending). The drain requires BOTH. Re-checked between batches mid-drain |
 | `TELEGRAM_BOT_TOKEN` | server | Telegram bot token — best-effort alerts (unset ⇒ silent no-op) **and** the performance report (unset ⇒ report returns 500 when a send is due) |
 | `TELEGRAM_CHAT_ID` | server | numeric chat/group id for alerts + the performance report |
@@ -64,7 +65,7 @@ External services CamMan talks to, their contracts, and every environment variab
 
 ### Secrets handling rules (CLAUDE.md §11)
 - Never commit `.env.local` or any populated secrets; never log secrets or put them in error messages.
-- The TextHub `api_key` is **not** an env var — it's stored per provider in `provider_credentials` (multi-tenant), **plaintext at rest** in v1 (protected by deny-by-default RLS + app-layer checks). See [security-notes.md](security-notes.md). Encryption-at-rest / secret manager is deferred.
+- The TextHub/Ahoi `api_key` is **not** an env var — it's stored per provider, per-account (migration 0110 made `provider_credentials` multi-account: N credentials per provider, each a row) in `provider_credentials`, **AES-256-GCM-encrypted at rest** (`api_key_encrypted`, keyed by `PROVIDER_CREDENTIALS_KEY`; protected by deny-by-default RLS + app-layer permission checks as defense-in-depth). See [security-notes.md](security-notes.md) and [07-conventions.md](07-conventions.md). The legacy plaintext `api_key` column is retained only for a dual-read window until a later, separately-gated migration drops it. The blob's leading `v1.` version segment is the rotation seam for a future master-key rotation (`v2.` alongside `v1.`, no big-bang re-encrypt required).
 - Production env vars are set in the Vercel dashboard (Settings → Environment Variables), not via CLI.
 
 ## Supabase Auth URL configuration (prod)

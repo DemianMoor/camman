@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-16 — Multi-account provider credentials + AES-256-GCM encryption at rest + account-shaped admin UI (migration 0110, backfill applied; 0111/0112 cutover pending) — updated 03-data-model, 04-features/sms-send-pipeline, 05-flows, 06-integrations, 07-conventions, 08-local-setup, security-notes
+
 ## 2026-07-15 — Re-key provider adapter registry to real DB sms_provider_id values (txh/ahi, was texthub/ahoi — would have broken all TextHub sending on deploy) — docs/07-conventions.md
 
 ## 2026-07-15 — Scope TextHub opt-out poller to sms_provider_id='txh' (excludes Ahoi, fixes false "poller FAILED" alert) — docs/06-integrations.md

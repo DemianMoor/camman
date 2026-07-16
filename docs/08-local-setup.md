@@ -1,6 +1,6 @@
 # 08 — Local Setup
 
-_Last updated: 2026-06-12_
+_Last updated: 2026-07-16_
 
 Clone-to-running on Windows (PowerShell). Adapt paths/shell as needed; the repo lives at `c:\AFF\camman`.
 
@@ -25,6 +25,11 @@ Fill at minimum (see [06-integrations.md](06-integrations.md) for every variable
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
 - `DATABASE_URL` — Supabase pooler string with `?prepare=false`. **URL-encode `#`/`&` in the password** or rotate to alphanumerics (a `#` silently truncates the connection string).
 - `NEXT_PUBLIC_SITE_URL` — set to your local dev origin and keep it consistent with the port you run on (the `.env.example` sample uses `http://localhost:3001`; `next dev` defaults to `3000`).
+- `PROVIDER_CREDENTIALS_KEY` — 32-byte base64 master key for provider-credential encryption at rest (migration 0110). Generate one:
+  ```powershell
+  node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+  ```
+  **Must be byte-identical to the value set in Vercel** — a mismatch means anything encrypted in one environment silently fails to decrypt in the other (e.g. the backfill script, run locally, encrypts against your local value; the deployed app decrypts against the Vercel value).
 
 > `.env.local` is gitignored — never commit it. Never commit populated secrets.
 
@@ -84,4 +89,5 @@ npm run build
 - **EMAXCONNSESSION / connection exhaustion** in dev — the `globalThis` pool cache in `db/client.ts` exists to prevent this under HMR. Don't remove it.
 - **CRLF false positives** in `verify-migration-integrity.ts` were resolved via `.gitattributes` (`db/migrations/** eol=lf`). If they recur, check `git ls-files --eol db/migrations` (see project memory).
 - **Click scoring returns 503** — `CRON_SECRET` isn't set. **Scoring `degraded`** — `MAXMIND_LICENSE_KEY` missing/rate-limited (UA-only scoring still runs).
+- **Wrong/missing `PROVIDER_CREDENTIALS_KEY`** — the opt-out/DLR pollers skip every credential (a `console.warn` per row, no crash) and the send drain refuses with `no_credentials`; the backfill script hard-fails at startup if unset.
 - **Keitaro poll `degraded:true`** — `KEITARO_API_KEY` unset or the report fetch failed (logged in `error`); retries next cycle. **`matched:0` with `unmatched_samples`** — the `sub_id_3` values Keitaro returns don't match any `campaign_stages.tracking_id` (inspect the samples to see what's actually coming through).

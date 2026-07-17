@@ -13,17 +13,23 @@ function parseId(idParam: string) {
   return n;
 }
 
-// Recall an ARMED stage (WS2 abort path). Pre-materialization means a
-// future-scheduled, approved stage has live `pending` stage_sends that haven't
-// fired — this discards them so the operator can edit/reschedule. Allowed ONLY
-// while nothing has gone out yet: the stage must be UN-RELEASED (`sent_at` NULL)
-// with no `sent`/`sending` rows. A stage that already started sending can't be
-// recalled here — pause the provider instead.
+// Cancel a materialized stage before send (recall / revert-to-editable). A
+// materialized, approved stage has live `pending` stage_sends that haven't fired
+// — this discards them so the operator can edit and re-materialize. Serves both
+// the armed/future-scheduled "Cancel prepared send" and the materialized
+// send-now "Cancel" UI affordances. Allowed ONLY while nothing has gone out yet:
+// the stage must be UN-RELEASED (`sent_at` NULL) with no `sent`/`sending` rows. A
+// stage that already started sending can't be recalled here — pause the provider
+// instead.
 //
 // Effects: pending rows → 'rejected' (terminal, so the partial unique index frees
-// up for a clean re-materialize), send_approved → false, schedule_missed_at
-// cleared. scheduled_at is kept so the operator can adjust it. The schedule field
-// re-unlocks because the stage is no longer armed (no pending rows).
+// up and recipient re-enumeration re-includes them — see lib/sends/recipients.ts),
+// send_approved → false, schedule_missed_at cleared, AND materialized_at → NULL so
+// a subsequent Prepare re-materializes cleanly instead of short-circuiting as a
+// no-op (see lib/sends/kickoff.ts "already fully materialized" gate). scheduled_at
+// is kept so the operator can adjust it. Because rejected rows are excluded from
+// the panel's `total` count, hasBatch flips false and the stage returns to the
+// editable/Prepare state.
 export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ campaignId: string; stageId: string }> },
@@ -78,7 +84,7 @@ export async function POST(
 
     await tx.execute(sql`
       UPDATE campaign_stages
-      SET send_approved = false, schedule_missed_at = NULL
+      SET send_approved = false, schedule_missed_at = NULL, materialized_at = NULL
       WHERE id = ${stageId} AND org_id = ${orgId}
     `);
 

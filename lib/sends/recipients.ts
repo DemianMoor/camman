@@ -65,9 +65,12 @@ export function stageRecipientsSql(opts: {
   offset?: number;
   eligibility?: StageEligibilityOverlay;
   // Resumable materialization: when set, exclude contacts that ALREADY have a
-  // stage_sends row for this stage (any status), so a windowed/interrupted
-  // kickoff re-run materializes only the REMAINING recipients. Omit for the
-  // export path + preview counts (they want the full qualifying set).
+  // LIVE stage_sends row for this stage (any status EXCEPT 'rejected'), so a
+  // windowed/interrupted kickoff re-run materializes only the REMAINING
+  // recipients. 'rejected' rows are canceled/recalled sends kept for audit — they
+  // must NOT block re-enumeration, otherwise a cancel→edit→re-materialize would
+  // silently produce 0 recipients. Omit for the export path + preview counts
+  // (they want the full qualifying set).
   excludeMaterializedStageId?: number;
 }): SQL {
   const { campaignId, orgId, filters: f } = opts;
@@ -81,6 +84,7 @@ export function stageRecipientsSql(opts: {
         select 1 from stage_sends ss
         where ss.stage_id = ${opts.excludeMaterializedStageId}::int
           and ss.contact_id = p.contact_id
+          and ss.status <> 'rejected'
       )`
       : sql``;
   const limitClause = opts.limit !== undefined ? sql`limit ${opts.limit}` : sql``;

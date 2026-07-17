@@ -292,11 +292,16 @@ export async function GET(
     db.execute(drizzleSql`
       SELECT
         stage_id,
-        count(*)::int AS total,
+        -- 'rejected' = operator-canceled rows kept for audit (see …/send/abort).
+        -- Exclude from total so a canceled stage (materialized_at reset to NULL)
+        -- reads total=0 → deriveStageOperationalStatus lands it in
+        -- scheduled_unprepared/draft, NOT a stuck "materializing". Don't fold
+        -- rejected into 'failed' either — a cancel is not a delivery failure.
+        count(*) FILTER (WHERE status <> 'rejected')::int AS total,
         count(*) FILTER (WHERE status = 'pending')::int AS pending,
         count(*) FILTER (WHERE status = 'sending')::int AS sending,
         count(*) FILTER (WHERE status = 'sent')::int AS sent,
-        count(*) FILTER (WHERE status IN ('failed', 'rejected'))::int AS failed,
+        count(*) FILTER (WHERE status = 'failed')::int AS failed,
         count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate
       FROM stage_sends
       WHERE org_id = ${orgId} AND campaign_id = ${cid}

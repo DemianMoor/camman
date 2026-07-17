@@ -107,6 +107,8 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
     today = `Σ counts.total` of the `GET /api/sends/today` rows, computed
     client-side (no API change). It accumulates as each stage is prepared, and
     since sent ⊆ prepared it pairs with the "Sent today" figure below it.
+    `counts.total` excludes operator-canceled (`rejected`) rows, so a canceled
+    stage drops out of "prepared" and a cancel→re-materialize doesn't double-count.
 - **B5 — send-window indicator.** [components/sends/send-window-indicator.tsx](../../components/sends/send-window-indicator.tsx)
   — "opens 08:00 ET" / "open · closes in 3h 12m" from
   `sendWindowForDay()` ([lib/quiet-hours.ts](../../lib/quiet-hours.ts)). Sender's

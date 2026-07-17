@@ -817,12 +817,8 @@ export const contacts = pgTable(
     // Migration 0096: eligible-partial hot-path indexes. Predicate mirrors the
     // `AND messaging_status = 'eligible'` filter on every audience/segment/send
     // query, so landline rows are physically absent from these structures.
-    index("contacts_org_eligible_idx")
-      .on(table.org_id)
-      .where(sql`${table.messaging_status} = 'eligible'`),
-    index("contacts_org_created_eligible_idx")
-      .on(table.org_id, table.created_at)
-      .where(sql`${table.messaging_status} = 'eligible'`),
+    // NOTE: contacts_org_eligible_idx and contacts_org_created_eligible_idx were
+    // dropped in migration 0113 (W1 Task 2) — unused under the live workload.
     index("contacts_org_carrier_eligible_idx")
       .on(table.org_id, table.carrier_norm)
       .where(sql`${table.messaging_status} = 'eligible'`),

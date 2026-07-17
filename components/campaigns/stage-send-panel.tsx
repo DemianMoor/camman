@@ -133,7 +133,7 @@ export function StageSendPanel({
       toastApiError(r, "Couldn't cancel the prepared send");
       return;
     }
-    toast.success(`Prepared send cancelled — ${r.data.discarded.toLocaleString()} pending message${r.data.discarded === 1 ? "" : "s"} discarded.`);
+    toast.success(`Send cancelled — ${r.data.discarded.toLocaleString()} pending message${r.data.discarded === 1 ? "" : "s"} discarded. The stage is editable again.`);
     refresh();
   }
 
@@ -182,6 +182,17 @@ export function StageSendPanel({
   // Prepared = materialized for a schedule, nothing released/sent yet.
   const prepared =
     pending > 0 && willSchedule && status.sent_at == null && status.counts.sent === 0;
+  // Cancelable = materialized with a pending remainder and NOTHING out yet.
+  // Mirrors the server abort guard exactly (sent_at NULL, no sending/sent rows),
+  // so the button only shows when the recall would actually succeed. Covers the
+  // materialized send-now case the "prepared" branch doesn't (no schedule set,
+  // or the schedule was missed) — its own branch renders the cancel affordance.
+  const canCancel =
+    hasBatch &&
+    pending > 0 &&
+    status.sent_at == null &&
+    status.counts.sending === 0 &&
+    status.counts.sent === 0;
   // Shared Prepare popup target (§A2). Built from live status so arm-vs-now copy
   // matches; the server still makes the authoritative call at commit.
   const prepareTarget: PrepareTarget | null = prepareOpen
@@ -426,6 +437,16 @@ export function StageSendPanel({
                 {retryApi.isLoading ? "Retrying…" : `Retry failed (${status.counts.failed})`}
               </Button>
             ) : null}
+            {canActivate && canCancel ? (
+              <Button
+                variant="outline"
+                onClick={() => setConfirmAbort(true)}
+                disabled={abortApi.isLoading}
+                title="Cancel this materialized send and revert the stage to editable"
+              >
+                <Ban className="size-4" aria-hidden /> Cancel
+              </Button>
+            ) : null}
           </div>
           {drainBlockedReason ? (
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -451,15 +472,15 @@ export function StageSendPanel({
       <AlertDialog open={confirmAbort} onOpenChange={setConfirmAbort}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Cancel the prepared send?</AlertDialogTitle>
+            <AlertDialogTitle>Cancel this send and revert to editable?</AlertDialogTitle>
             <AlertDialogDescription>
               Discards the {pending.toLocaleString()} pending message{pending === 1 ? "" : "s"}{" "}
-              materialized for this stage and un-approves it, so you can edit or reschedule. Nothing
-              has been sent yet.
+              materialized for this stage and un-approves it, so you can edit and re-prepare. Nothing
+              has been sent yet. The schedule is kept.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={abortApi.isLoading}>Keep prepared</AlertDialogCancel>
+            <AlertDialogCancel disabled={abortApi.isLoading}>Keep it</AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();
@@ -467,7 +488,7 @@ export function StageSendPanel({
               }}
               disabled={abortApi.isLoading}
             >
-              Cancel prepared send
+              Cancel send
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -59,7 +59,11 @@ export async function GET(
 
   const counts = (await db.execute(drizzleSql`
     SELECT
-      count(*)::int AS total,
+      -- 'rejected' rows are canceled/recalled sends kept only for audit. They
+      -- must NOT count toward the total, else a fully-canceled stage keeps
+      -- hasBatch=true and the panel stays stuck on the materialized branch
+      -- instead of returning to the editable/Prepare state.
+      count(*) FILTER (WHERE status <> 'rejected')::int AS total,
       count(*) FILTER (WHERE status = 'pending')::int  AS pending,
       count(*) FILTER (WHERE status = 'sending')::int  AS sending,
       count(*) FILTER (WHERE status = 'sent')::int     AS sent,

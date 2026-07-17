@@ -11,6 +11,11 @@ export class UnknownProviderError extends Error {
 
 const ADAPTERS: Record<string, SmsProviderAdapter> = {
   txh: texthubAdapter,
+  // `txh2` is a second TextHub account modeled as its own provider row
+  // ("Texthub - 621637", id 499) rather than a second credential on `txh`.
+  // It talks to the same TextHub API, so it reuses the TextHub adapter — only
+  // the resolved per-credential api_key differs.
+  txh2: texthubAdapter,
   ahi: ahoiAdapter,
 };
 

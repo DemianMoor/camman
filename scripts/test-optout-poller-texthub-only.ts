@@ -46,9 +46,15 @@ async function main() {
       const ahoiProvider = await one<{ id: number }>(
         sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'ahi' AND org_id = ${orgId}`,
       );
+      // 'txh2' = a second TextHub account modeled as its own provider row
+      // (id 499); the poller must include it (same TextHub inbox API).
+      const txh2Provider = await one<{ id: number }>(
+        sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'txh2' AND org_id = ${orgId}`,
+      );
       check("real 'txh' provider row exists", !!txhProvider, JSON.stringify(txhProvider));
       check("real 'ahi' provider row exists", !!ahoiProvider, JSON.stringify(ahoiProvider));
-      if (!txhProvider || !ahoiProvider) throw ROLLBACK;
+      check("real 'txh2' provider row exists", !!txh2Provider, JSON.stringify(txh2Provider));
+      if (!txhProvider || !ahoiProvider || !txh2Provider) throw ROLLBACK;
 
       // Throwaway brand so the credential inserts land under
       // provider_credentials_provider_brand_uniq (provider_id, brand_id)
@@ -71,6 +77,11 @@ async function main() {
         VALUES (${orgId}, ${ahoiProvider.id}, ${brand.id}, ${"test-ahoi-key-" + sfx})
         RETURNING id
       `);
+      const txh2Cred = await one<{ id: number }>(sql`
+        INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key)
+        VALUES (${orgId}, ${txh2Provider.id}, ${brand.id}, ${"test-txh2-key-" + sfx})
+        RETURNING id
+      `);
 
       const rows = await selectPollableCredentials(tx, orgId);
       const ids = rows.map((r) => r.credential_id);
@@ -78,6 +89,11 @@ async function main() {
       check(
         "TextHub test credential IS selected",
         ids.includes(txhCred.id),
+        JSON.stringify(ids),
+      );
+      check(
+        "TextHub-2 (txh2) test credential IS selected",
+        ids.includes(txh2Cred.id),
         JSON.stringify(ids),
       );
       check(

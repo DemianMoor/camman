@@ -59,6 +59,13 @@ async function main() {
   try { ahiFn = resolveSenderForStage("ahi"); } catch (e) { ahiThrew = e; }
   check("resolveSenderForStage('ahi') resolves to a function", typeof ahiFn === "function", ahiThrew ? String(ahiThrew) : "");
 
+  // txh2 = second TextHub account modeled as its own provider row (id 499);
+  // reuses the TextHub adapter, so it must resolve like a real live key.
+  let txh2Threw: unknown = null;
+  let txh2Fn: unknown = null;
+  try { txh2Fn = resolveSenderForStage("txh2"); } catch (e) { txh2Threw = e; }
+  check("resolveSenderForStage('txh2') resolves to a function", typeof txh2Fn === "function", txh2Threw ? String(txh2Threw) : "");
+
   let bogusThrew: unknown = null;
   try { resolveSenderForStage("bogus"); } catch (e) { bogusThrew = e; }
   check("resolveSenderForStage('bogus') throws UnknownProviderError", bogusThrew instanceof UnknownProviderError);

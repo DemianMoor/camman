@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-17 — W1 Task 2: drop two dead partial indexes on `contacts` (migration 0113) — docs/idx-audit-snapshot-2026-07-14T2018Z
+- `0113_drop_dead_indexes.sql` (numbered 0113 — intentionally skips 0111/0112, reserved for the provider-credentials cutover) drops `contacts_org_eligible_idx` + `contacts_org_created_eligible_idx`, both `idx_scan` diff=0 over an ~18h live-workload window. Removed from `db/schema.ts`; exact recreate defs (incl. the kept ones) in `db/rollback-w1-indexes.sql`. KEEP: `contact_contact_groups_group_contact_idx` (4→6, in use) + the carrier/linetype partials (re-audit in W2 Task 1). Applied to prod out-of-band as `DROP INDEX CONCURRENTLY` (no ACCESS EXCLUSIVE lock on the hot table); bookkept + verify-migration-integrity green at 112 rows. ClickUp 869e462k5.
+
 ## 2026-07-17 — Scope drain rolling volume ceilings (`max_sends_per_minute` / `_24h`) PER PROVIDER — `countSentSince` now joins `stage_sends → campaign_stages.sms_provider_id` instead of counting org-wide, so one provider's volume no longer trips another's ceiling (incident: a due Ahoi stage stalled forever on `rate_24h` while ~30k TextHub sends exceeded Ahoi's 10k default; ClickUp 869e659t4). No migration, no new index. Regression test added to `scripts/verify-drain.ts` — updated 04-features/sms-send-pipeline, 04-features/daily-volume-ui
 
 ## 2026-07-17 — Register `txh2` adapter (2nd TextHub account modeled as provider row "Texthub - 621637" id 499); moved phone 621637 off `txh` onto `txh2` + its own account (…684B); extended opt-out poller scope to `sms_provider_id IN ('txh','txh2')` so STOPs on the new account are captured — docs/07-conventions.md, docs/06-integrations.md

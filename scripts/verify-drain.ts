@@ -345,10 +345,10 @@ async function main() {
       assert(violated, "2nd simultaneously-live pending row for same (stage, contact) is rejected");
 
       console.log("Breaker: soft 24h ceiling stops the run WITHOUT pausing:");
-      // Seed the cap from the SAME windowed measure the breaker uses, so older
-      // out-of-window sent rows can't skew the boundary.
-      const c24 = await countSentSince(tx, orgId, 86_400);
-      const capProv = await mkProvider({ max24: c24 + 2, maxMin: 100_000 });
+      // The ceiling is now PER-PROVIDER: this fresh provider has 0 of its own
+      // sends in the window, so a cap of 2 lets exactly 2 of 5 through before the
+      // 24h ceiling trips (independent of any other provider's volume in this org).
+      const capProv = await mkProvider({ max24: 2, maxMin: 100_000 });
       await addCred(capProv);
       const capStage = await mkStage(capProv);
       for (let i = 0; i < 5; i++) await addPending(capStage, await mkContact(), `c${i}`);
@@ -361,14 +361,41 @@ async function main() {
       assert(stillUnpaused.send_paused === false, "provider stays un-paused after a soft ceiling");
 
       console.log("Breaker: soft per-minute ceiling stops the run WITHOUT pausing:");
-      const cMin = await countSentSince(tx, orgId, 60);
-      const minProv = await mkProvider({ maxMin: cMin + 1, max24: 100_000 });
+      // Fresh provider ⇒ 0 of its own sends this minute, so a cap of 1 lets
+      // exactly 1 of 4 through before the per-minute ceiling trips.
+      const minProv = await mkProvider({ maxMin: 1, max24: 100_000 });
       await addCred(minProv);
       const minStage = await mkStage(minProv);
       for (let i = 0; i < 4; i++) await addPending(minStage, await mkContact(), `mn${i}`);
       const mn = await runStageDrain(tx, { stageId: minStage, sendSms: okSender, isEnabled: () => true, batchSize: 1 });
       assert(mn.ok && mn.sent === 1 && mn.stopReason === "rate_minute", "per-minute ceiling stops at the cap");
       assert(mn.halted === false && mn.pausedNow === false, "per-minute soft ceiling does NOT pause");
+
+      // ── Regression (ClickUp 869e659t4): per-provider ceiling isolation ────────
+      // The incident: a due Ahoi stage never drained because the 24h ceiling
+      // counted stage_sends ORG-WIDE (~30k TextHub sends) against Ahoi's own cap.
+      // Assert here that one provider's volume can NEVER trip another provider's
+      // ceiling — this is the test that would have caught stage 1274.
+      console.log("Regression: one provider's volume must NOT trip another provider's ceiling:");
+      // Provider A: high caps, sends a baseline of 6 (the "noisy neighbour").
+      const provA = await mkProvider({ max24: 100_000, maxMin: 100_000 });
+      await addCred(provA);
+      const stageA = await mkStage(provA);
+      for (let i = 0; i < 6; i++) await addPending(stageA, await mkContact(), `ra${i}`);
+      const raDrain = await runStageDrain(tx, { stageId: stageA, sendSms: okSender, isEnabled: () => true });
+      assert(raDrain.ok && raDrain.sent === 6, "provider A sent its 6 (baseline org volume)");
+      // Provider B: a DIFFERENT provider in the SAME org with a 24h cap of 5. The
+      // org-wide 24h count is now 6 (> 5); B's OWN count is 0. Pre-fix this drain
+      // tripped rate_24h immediately and sent 0 — the bug. Now B drains all 3.
+      const provB = await mkProvider({ max24: 5, maxMin: 100_000 });
+      await addCred(provB);
+      assert((await countSentSince(tx, orgId, provA, 86_400)) === 6, "countSentSince scopes to provider A (6)");
+      assert((await countSentSince(tx, orgId, provB, 86_400)) === 0, "countSentSince scopes to provider B (0), NOT the org-wide 6");
+      const stageB = await mkStage(provB);
+      for (let i = 0; i < 3; i++) await addPending(stageB, await mkContact(), `rb${i}`);
+      const rbDrain = await runStageDrain(tx, { stageId: stageB, sendSms: okSender, isEnabled: () => true, batchSize: 1 });
+      assert(rbDrain.ok && rbDrain.sent === 3, "provider B drains all 3 despite org-wide volume exceeding B's cap");
+      assert(rbDrain.stopReason === null, "provider B never soft-stops on another provider's volume");
 
       console.log("Breaker: mid-run pause kill (true mid-invocation):");
       const midProv = await mkProvider();

@@ -106,20 +106,29 @@ export async function isProviderPaused(dbc: DbOrTx, providerId: number): Promise
   return r[0]?.send_paused === true;
 }
 
-// Org-wide successful-send count within the trailing window (seconds). Counts
-// sent_at (real send time) only — failed attempts have no sent_at, so this
-// measures emitted-message rate, not API-call rate. SCOPE LIMITATION: org-wide
-// as a proxy for the provider until provider #2 (see migration 0058).
+// Successful-send count for ONE provider within the trailing window (seconds).
+// Counts sent_at (real send time) only — failed attempts have no sent_at, so
+// this measures emitted-message rate, not API-call rate. Scoped to the stage's
+// provider so one provider's volume can't trip another's ceiling: stage_sends
+// carries no provider_id, so the provider is reached via
+// stage_sends.stage_id -> campaign_stages.sms_provider_id. The org_id filter
+// stays (multi-tenancy invariant). Plan at prod scale: index scan on stage_sends
+// by the sent_at window + hash join the tiny per-provider campaign_stages set
+// (~64ms for a 24h window over ~52k rows; existing indexes suffice).
 export async function countSentSince(
   dbc: DbOrTx,
   orgId: string,
+  providerId: number,
   seconds: number,
 ): Promise<number> {
   const r = (await dbc.execute(sql`
-    SELECT count(*)::int AS n FROM stage_sends
-    WHERE org_id = ${orgId}
-      AND sent_at IS NOT NULL
-      AND sent_at > now() - make_interval(secs => ${seconds})
+    SELECT count(*)::int AS n
+    FROM stage_sends ss
+    JOIN campaign_stages s ON s.id = ss.stage_id
+    WHERE ss.org_id = ${orgId}
+      AND s.sms_provider_id = ${providerId}
+      AND ss.sent_at IS NOT NULL
+      AND ss.sent_at > now() - make_interval(secs => ${seconds})
   `)) as unknown as { n: number }[];
   return Number(r[0]?.n ?? 0);
 }

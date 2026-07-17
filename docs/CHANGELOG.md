@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-17 — Scope drain rolling volume ceilings (`max_sends_per_minute` / `_24h`) PER PROVIDER — `countSentSince` now joins `stage_sends → campaign_stages.sms_provider_id` instead of counting org-wide, so one provider's volume no longer trips another's ceiling (incident: a due Ahoi stage stalled forever on `rate_24h` while ~30k TextHub sends exceeded Ahoi's 10k default; ClickUp 869e659t4). No migration, no new index. Regression test added to `scripts/verify-drain.ts` — updated 04-features/sms-send-pipeline, 04-features/daily-volume-ui
+
 ## 2026-07-17 — Register `txh2` adapter (2nd TextHub account modeled as provider row "Texthub - 621637" id 499); moved phone 621637 off `txh` onto `txh2` + its own account (…684B); extended opt-out poller scope to `sms_provider_id IN ('txh','txh2')` so STOPs on the new account are captured — docs/07-conventions.md, docs/06-integrations.md
 
 ## 2026-07-16 — Multi-account provider credentials + AES-256-GCM encryption at rest + account-shaped admin UI (migration 0110, backfill applied; 0111/0112 cutover pending) — updated 03-data-model, 04-features/sms-send-pipeline, 05-flows, 06-integrations, 07-conventions, 08-local-setup, security-notes

@@ -6,6 +6,7 @@ import {
   ArchiveRestore,
   Archive as ArchiveIcon,
   ArrowLeft,
+  Ban,
   CheckCircle2,
   ChevronDown,
   Copy,
@@ -385,6 +386,7 @@ export default function CampaignDetailPage() {
   const stageArchiveApi = useApiCall<Stage>();
   const stageRestoreApi = useApiCall<Stage>();
   const stageDeleteApi = useApiCall<{ deleted: boolean; id: number; split_reset_stage_id: number | null }>();
+  const stageCancelApi = useApiCall<{ ok: boolean; discarded: number }>();
   const stageDuplicateApi = useApiCall<Stage>();
   const behavioralSplitApi = useApiCall<{
     parent_stage_id: number;
@@ -574,6 +576,7 @@ export default function CampaignDetailPage() {
     stage: Stage;
   } | null>(null);
   const [stageDeleteConfirm, setStageDeleteConfirm] = useState<Stage | null>(null);
+  const [stageCancelConfirm, setStageCancelConfirm] = useState<Stage | null>(null);
   const [behavioralSplitStage, setBehavioralSplitStage] =
     useState<Stage | null>(null);
   const [importStage, setImportStage] = useState<Stage | null>(null);
@@ -704,6 +707,28 @@ export default function CampaignDetailPage() {
     }
     toast.success("Stage deleted");
     setStageDeleteConfirm(null);
+    refetchStages();
+    refetchCampaign();
+  }
+
+  // Cancel a materialized-but-unsent stage: discards the pending rows (kept as
+  // 'rejected' for audit), un-approves, and resets materialized_at so the stage
+  // is editable + re-preparable. Same endpoint the (now-removed) Send-panel
+  // cancel used; guard rejects anything already sent/sending.
+  async function handleStageCancel() {
+    if (!stageCancelConfirm) return;
+    const result = await stageCancelApi.execute(
+      `/api/campaigns/${campaignId}/stages/${stageCancelConfirm.id}/send/abort`,
+      { method: "POST" },
+    );
+    if (!result.ok) {
+      toastApiError(result, "Couldn't cancel the send");
+      return;
+    }
+    toast.success(
+      `Send cancelled — ${result.data.discarded.toLocaleString()} pending message${result.data.discarded === 1 ? "" : "s"} discarded. The stage is editable again.`,
+    );
+    setStageCancelConfirm(null);
     refetchStages();
     refetchCampaign();
   }
@@ -1263,6 +1288,18 @@ export default function CampaignDetailPage() {
                   {canActivate ? (
                     <DropdownMenuItem onSelect={() => setSendStage(s)}>
                       <Send className="size-4" aria-hidden /> Send…
+                    </DropdownMenuItem>
+                  ) : null}
+                  {/* Cancel a materialized-but-unsent stage → revert to editable.
+                      Mirrors the server abort guard: pending rows exist and
+                      nothing has gone out (no sent/sending, not released). */}
+                  {canActivate &&
+                  !s.sent_at &&
+                  s.send_counts.pending > 0 &&
+                  s.send_counts.sending === 0 &&
+                  s.send_counts.sent === 0 ? (
+                    <DropdownMenuItem onSelect={() => setStageCancelConfirm(s)}>
+                      <Ban className="size-4" aria-hidden /> Cancel send
                     </DropdownMenuItem>
                   ) : null}
                   <DropdownMenuSeparator />
@@ -2271,6 +2308,44 @@ export default function CampaignDetailPage() {
               }}
             >
               Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Cancel materialized send → revert to editable. */}
+      <AlertDialog
+        open={stageCancelConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open) setStageCancelConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Cancel send for stage {stageCancelConfirm?.stage_number}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Discards the{" "}
+              {(stageCancelConfirm?.send_counts.pending ?? 0).toLocaleString()} pending
+              message
+              {stageCancelConfirm?.send_counts.pending === 1 ? "" : "s"} materialized for
+              this stage and un-approves it, so you can edit and re-prepare. Nothing has
+              been sent yet. The schedule is kept.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={stageCancelApi.isLoading}>
+              Keep it
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={stageCancelApi.isLoading}
+              onClick={(e) => {
+                e.preventDefault();
+                void handleStageCancel();
+              }}
+            >
+              Cancel send
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

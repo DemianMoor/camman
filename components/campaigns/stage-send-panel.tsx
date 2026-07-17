@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Ban, CheckCircle2, CircleSlash, Download, SendHorizonal } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleSlash, Download, SendHorizonal } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
@@ -86,7 +86,6 @@ export function StageSendPanel({
 }) {
   const { can } = useAuth();
   const statusApi = useApiCall<SendStatus>();
-  const abortApi = useApiCall<{ ok: boolean; discarded: number }>();
   const drainApi = useApiCall<{
     ok: boolean;
     sent: number;
@@ -105,7 +104,6 @@ export function StageSendPanel({
   // Prepare flow now lives in the shared StagePrepareDialog (§A2) — one popup,
   // one handler, identical to the stages-list-row entry point.
   const [prepareOpen, setPrepareOpen] = useState(false);
-  const [confirmAbort, setConfirmAbort] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -122,20 +120,6 @@ export function StageSendPanel({
 
   const canActivate = can("campaigns.activate");
   const canSend = can("campaigns.drain"); // manager+ (the money-spending action)
-
-  async function abortArmed() {
-    const r = await abortApi.execute(
-      `/api/campaigns/${campaignId}/stages/${stageId}/send/abort`,
-      { method: "POST" },
-    );
-    setConfirmAbort(false);
-    if (!r.ok) {
-      toastApiError(r, "Couldn't cancel the prepared send");
-      return;
-    }
-    toast.success(`Send cancelled — ${r.data.discarded.toLocaleString()} pending message${r.data.discarded === 1 ? "" : "s"} discarded. The stage is editable again.`);
-    refresh();
-  }
 
   async function drain() {
     const r = await drainApi.execute(
@@ -182,17 +166,6 @@ export function StageSendPanel({
   // Prepared = materialized for a schedule, nothing released/sent yet.
   const prepared =
     pending > 0 && willSchedule && status.sent_at == null && status.counts.sent === 0;
-  // Cancelable = materialized with a pending remainder and NOTHING out yet.
-  // Mirrors the server abort guard exactly (sent_at NULL, no sending/sent rows),
-  // so the button only shows when the recall would actually succeed. Covers the
-  // materialized send-now case the "prepared" branch doesn't (no schedule set,
-  // or the schedule was missed) — its own branch renders the cancel affordance.
-  const canCancel =
-    hasBatch &&
-    pending > 0 &&
-    status.sent_at == null &&
-    status.counts.sending === 0 &&
-    status.counts.sent === 0;
   // Shared Prepare popup target (§A2). Built from live status so arm-vs-now copy
   // matches; the server still makes the authoritative call at commit.
   const prepareTarget: PrepareTarget | null = prepareOpen
@@ -371,13 +344,8 @@ export function StageSendPanel({
             <CheckCircle2 className="size-3.5 shrink-0" aria-hidden />
             Prepared — {pending.toLocaleString()} message{pending === 1 ? "" : "s"} will send automatically
             {status.scheduled_at ? ` at ${formatCampaignDateTime(status.scheduled_at)}` : ""} once the
-            send window is open. The schedule is locked until you cancel.
+            send window is open. To pull it back, use “Cancel send” in the stage’s ⋯ menu.
           </p>
-          {canActivate ? (
-            <Button variant="outline" onClick={() => setConfirmAbort(true)} disabled={abortApi.isLoading}>
-              <Ban className="size-4" aria-hidden /> Cancel prepared send
-            </Button>
-          ) : null}
         </div>
       ) : !hasBatch ? (
         <div className="space-y-2">
@@ -437,16 +405,6 @@ export function StageSendPanel({
                 {retryApi.isLoading ? "Retrying…" : `Retry failed (${status.counts.failed})`}
               </Button>
             ) : null}
-            {canActivate && canCancel ? (
-              <Button
-                variant="outline"
-                onClick={() => setConfirmAbort(true)}
-                disabled={abortApi.isLoading}
-                title="Cancel this materialized send and revert the stage to editable"
-              >
-                <Ban className="size-4" aria-hidden /> Cancel
-              </Button>
-            ) : null}
           </div>
           {drainBlockedReason ? (
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -467,32 +425,6 @@ export function StageSendPanel({
         onClose={() => setPrepareOpen(false)}
         onPrepared={refresh}
       />
-
-      {/* Cancel prepared send confirmation. */}
-      <AlertDialog open={confirmAbort} onOpenChange={setConfirmAbort}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Cancel this send and revert to editable?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Discards the {pending.toLocaleString()} pending message{pending === 1 ? "" : "s"}{" "}
-              materialized for this stage and un-approves it, so you can edit and re-prepare. Nothing
-              has been sent yet. The schedule is kept.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={abortApi.isLoading}>Keep it</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault();
-                void abortArmed();
-              }}
-              disabled={abortApi.isLoading}
-            >
-              Cancel send
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       {/* Send-now (leftovers / manual drain) confirmation. */}
       <AlertDialog open={confirmDrain} onOpenChange={setConfirmDrain}>

@@ -36,6 +36,7 @@ import {
   enumerateStageRecipients,
   type StageRecipientFilters,
 } from "@/lib/sends/recipients";
+import { deriveStageOperationalStatus } from "@/lib/stages/stage-status";
 
 let pass = 0;
 let fail = 0;
@@ -171,6 +172,33 @@ async function main() {
     // ---- 3. Panel status count excludes rejected ⇒ hasBatch flips false ----
     console.log("3) panel count → editable:");
     check("panel total = 0 (rejected excluded)", (await panelTotal()) === 0, `got ${await panelTotal()}`);
+
+    // ---- 3b. Operational status: a canceled stage must NOT read "materializing" ----
+    // The stages-list/sends-today counts feed deriveStageOperationalStatus. Because
+    // cancel resets materialized_at=NULL while rejected rows remain, an OLD-style
+    // count(*) total would make hasRows true + materializedAt null → a permanent
+    // Indigo "Materializing" spinner. The fixed counts (rejected excluded) read 0.
+    console.log("3b) operational status (tracked-derivation):");
+    const flags = {
+      linkMode: "tracked" as const,
+      scheduledAt: "2020-01-01T00:00:00.000Z", // non-null past ⇒ scheduled
+      sentAt: null,
+      scheduleMissedAt: null,
+      materializedAt: null, // reset by cancel
+    };
+    const nowRejected = (await countBy()).rejected; // = M, all rows canceled here
+    const opFixed = deriveStageOperationalStatus({
+      ...flags,
+      counts: { total: 0, pending: 0, sending: 0, sent: 0, failed: 0, skippedDuplicate: 0 },
+    });
+    check("fixed counts ⇒ NOT 'materializing'", opFixed !== "materializing", `got ${opFixed}`);
+    check("fixed counts ⇒ 'scheduled_unprepared'", opFixed === "scheduled_unprepared", `got ${opFixed}`);
+    const opOld = deriveStageOperationalStatus({
+      ...flags,
+      // OLD counting: total counted rejected, failed folded rejected in.
+      counts: { total: nowRejected, pending: 0, sending: 0, sent: 0, failed: nowRejected, skippedDuplicate: 0 },
+    });
+    check("OLD counting WOULD wrongly read 'materializing' (regression the fix prevents)", opOld === "materializing", `got ${opOld}`);
 
     // ---- 4. Re-enumeration re-includes the canceled contacts ----
     // Raw self-exclusion path (no eligibility overlay): post-cancel every pool

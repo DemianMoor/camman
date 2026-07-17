@@ -325,12 +325,13 @@ export async function runStageDrain(
     }
 
     // SOFT rolling ceilings — stop the run (leave rows pending), do NOT pause.
-    // Counted org-wide incl. this run's own sends, so the rate self-throttles.
-    if (ceilingBreached(await countSentSince(dbc, orgId, 60), minuteCap)) {
+    // Counted per-provider incl. this run's own sends, so the rate self-throttles
+    // without one provider's volume tripping another provider's ceiling.
+    if (ceilingBreached(await countSentSince(dbc, orgId, providerId, 60), minuteCap)) {
       stopReason = "rate_minute";
       break;
     }
-    if (ceilingBreached(await countSentSince(dbc, orgId, 86_400), cap24h)) {
+    if (ceilingBreached(await countSentSince(dbc, orgId, providerId, 86_400), cap24h)) {
       stopReason = "rate_24h";
       break;
     }

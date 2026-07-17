@@ -4,10 +4,13 @@ import { cn } from "@/lib/utils";
 
 // WS4 §B4 — volume-vs-caps meter. Org-wide count of messages sent on the current
 // ET calendar day (a true "what went out today" total) against the aggregate 24h
-// soft ceiling. Lets an operator see "9,200 / 10,000 today" before committing a
-// big batch. Null cap ⇒ no API provider configured to meter against. NOTE: the
-// breaker itself accounts in a rolling trailing-24h window (countSentSince), so
-// near midnight this calendar-day figure can read lower than the breaker's view.
+// soft ceiling (the SUM of each API provider's cap). Lets an operator see
+// "9,200 / 10,000 today" before committing a big batch. Null cap ⇒ no API
+// provider configured to meter against. NOTE: this bar is an org-wide overview —
+// the breaker itself enforces the 24h/minute ceilings PER PROVIDER in a rolling
+// trailing window (countSentSince), so near midnight this calendar-day figure can
+// read lower than the breaker's view, and a single provider can hit its own cap
+// while this aggregate bar still looks under the summed ceiling.
 export function VolumeCapsMeter({
   sent,
   cap,
@@ -49,11 +52,11 @@ export function VolumeCapsMeter({
         </p>
       ) : over ? (
         <p className="text-[11px] font-medium text-red-700 dark:text-red-400">
-          24h ceiling reached — further sends will soft-pause until the window rolls.
+          At the aggregate 24h ceiling — limits are enforced per provider.
         </p>
       ) : near ? (
         <p className="text-[11px] text-amber-700 dark:text-amber-400">
-          Approaching the 24h soft ceiling.
+          Approaching the aggregate 24h soft ceiling (enforced per provider).
         </p>
       ) : null}
     </div>

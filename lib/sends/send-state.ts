@@ -53,10 +53,11 @@ export async function getSendState(orgId: string) {
 
   // Org-wide sent on the CURRENT ET calendar day (not a rolling 24h window) so
   // the meter reads as a true "what went out today" total, matching the stage
-  // list on /sends/today. The breaker still accounts in rolling-24h via
-  // countSentSince() in the drain — this value is display-only. The cap below is
-  // the aggregate effective 24h ceiling across API providers; null ⇒ no API
-  // provider configured, so there's nothing to meter against.
+  // list on /sends/today. The breaker accounts separately in a rolling-24h window
+  // PER PROVIDER via countSentSince() in the drain — this value is display-only.
+  // The cap below is the aggregate effective 24h ceiling summed across API
+  // providers (an org-wide overview, not the per-provider gate the breaker
+  // applies); null ⇒ no API provider configured, so there's nothing to meter.
   // Sargable ET-day range on sent_at (start <= sent_at < end) so the partial
   // index stage_sends_org_sent_at_idx (org_id, sent_at) WHERE sent_at IS NOT NULL
   // serves it as a narrow range scan of just today's rows — instead of the old

@@ -1,6 +1,6 @@
 # Daily-Volume UI (WS4)
 
-_Last updated: 2026-07-10_
+_Last updated: 2026-07-17_
 
 The operating layer that makes running many tracked SMS campaigns a day fast and
 legible. Purely additive UI + read endpoints over the existing send pipeline
@@ -94,11 +94,13 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
   on the stage panel + provider page.
 - **B4 — volume-vs-caps meter.** [components/sends/volume-caps-meter.tsx](../../components/sends/volume-caps-meter.tsx)
   — org-wide count of messages sent on the current **ET calendar day** (label
-  "Sent today (ET)") vs the aggregate effective `max_sends_per_24h`. The displayed
-  count is calendar-day so it reads as a true "what went out today" total and
-  matches the stage list; the breaker itself still accounts in a rolling
-  trailing-24h window (`countSentSince` in the drain), so near midnight the
-  meter can read lower than the breaker's view. `today.sent_today` on
+  "Sent today (ET)") vs the aggregate effective `max_sends_per_24h` (the SUM of
+  each API provider's cap). The displayed count is calendar-day so it reads as a
+  true "what went out today" total and matches the stage list; the breaker itself
+  accounts in a rolling trailing-24h window **per provider** (`countSentSince` in
+  the drain), so this aggregate bar is an org-wide overview, not the actual gate —
+  near midnight it can read lower than the breaker's view, and one provider can
+  hit its own cap while the summed bar still looks under. `today.sent_today` on
   `GET /api/sends/state`.
   - **Prepared for today.** A companion line above the meter (same card) shows
     the total messages **prepared** (materialized) across every stage in play

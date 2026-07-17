@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-07-16_
+_Last updated: 2026-07-17_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -105,15 +105,16 @@ Every statement is a **single query** (never concurrent on one connection), so t
 |---------|-------|------|------------------|----------|
 | `max_sends_per_second` | **phone** (`provider_phones`) | HARD pacing | 10 (clamped ≤1000) | the number's instantaneous rate limit; drain fires ≤ this many in parallel then waits out the second (TextHub: 60/s short code, 3/s toll free) |
 | `max_sends_per_run` | provider | SOFT pacing | 1000 (clamped ≤20000) | rows claimed per invocation; never pauses |
-| `max_sends_per_minute` | provider | SOFT rolling | 100 | org-wide sent count; self-throttles within a run |
-| `max_sends_per_24h` | provider | SOFT rolling | 10000 | org-wide sent count (last 86400s) |
+| `max_sends_per_minute` | provider | SOFT rolling | 100 | per-provider sent count (last 60s); self-throttles within a run |
+| `max_sends_per_24h` | provider | SOFT rolling | 10000 | per-provider sent count (last 86400s) |
 | `send_paused` | provider | HARD latching | false | manual panic + auto-trip; requires a **conscious human resume** |
 
 - **`max_sends_per_second` is per PHONE NUMBER, not per provider** — the per-second ceiling is a carrier limit that depends on the number type, and one provider can own numbers of different types (e.g. TextHub has a short code at 60/s and a toll-free number at 3/s). The drain resolves it from the stage's `provider_phone_id` (`campaign_stages.provider_phone_id` → `provider_phones.max_sends_per_second`). Set per number in Settings → the provider's phone dialog. A stage with no phone (or a phone with no rate) ⇒ the default.
 - **Per-second rate vs the volume caps:** the per-second rate bounds the *burst* (never exceed what the carrier accepts), while the provider-level `max_sends_per_minute` / `_24h` bound *sustained volume*. They compose — a rate of 60/s is 3600/min, so a lower `max_sends_per_minute` will still throttle total throughput.
+- **Volume ceilings count PER PROVIDER (ClickUp 869e659t4).** `countSentSince` scopes the rolling `stage_sends` count to the stage's provider via `stage_sends.stage_id → campaign_stages.sms_provider_id` (keeping the `org_id` filter). This matters the moment a second provider is live (TextHub + Ahoi): before the fix the count was org-wide, so one provider's volume tripped the *other* provider's ceiling — a due Ahoi stage stalled forever with `rate_24h` because ~30k TextHub sends exceeded Ahoi's default 10k cap. Each provider now self-throttles on its own emitted volume.
 
 - Soft stops leave rows `pending` for the next tick. Hard stops latch `send_paused=true` (+ reason/at) and fire a Telegram alert.
-- **Auto-trips:** failure spike (≥10 consecutive failures) and a pacing tripwire (processed > expected — structural-bug guard). Counts are org-wide as a proxy for "this provider" until a second provider exists.
+- **Auto-trips:** failure spike (≥10 consecutive failures) and a pacing tripwire (processed > expected — structural-bug guard). These two counters are per-invocation (this run's own sends), NOT a rolling DB count — distinct from the per-provider volume ceilings above.
 - Every pause/resume is appended to `send_circuit_events` (actor NULL = auto-trip; actor set = manual). Resumes are manager+ audited actions.
 
 **Ahoi DLR reject-rate (Section 3, migration 0109).** A second, independent signal: `send_status='rejected'` DLRs (asynchronous, minutes after a send that looked fine at send time) feed a provider-scoped rolling count (`countAhoiDlrRejectsSince`) — a threshold count (`AHOI_DLR_REJECT_SPIKE_THRESHOLD`, default 10) of rejects within a rolling window (`AHOI_DLR_REJECT_SPIKE_WINDOW_SEC`, default 900) latches the same `sms_providers.send_paused` kill-switch the send-time failure-spike breaker uses. The two signals compose additively (both latch the one pause; neither double-counts — they read disjoint tables). Doc-inferred/defensive (never observed live in Phase 0 recon) — see `docs/07-conventions.md`'s G4 note.
@@ -191,7 +192,7 @@ Best-effort Telegram alerts on breaker trips / poller failures. If `TELEGRAM_BOT
 
 ## 7. Extension points / limitations
 - DLR polling, MMS, inbound conversations: out of scope.
-- Rate ceilings are org-wide until provider #2; per-provider accounting is a known follow-up.
+- Volume rate ceilings (`max_sends_per_minute` / `_24h`) now count **per provider** (ClickUp 869e659t4). Remaining known limitation: the count re-runs every drain batch (a covering index `(org_id, sent_at, stage_id)` is the future optimization if it ever bites — separate perf card, no migration in this PR).
 - `api_key` is now AES-256-GCM-encrypted at rest (migration 0110) — see [security-notes.md](../security-notes.md). The legacy plaintext column is retained only for the dual-read window until a later, separately-gated migration (0112) drops it.
 - See memory notes: live-fire is owner-gated and has not been exercised end-to-end.
 - **Ahoi opt-out intake is complete (Phase 1 Section 4) but Ahoi sending is still gated.** All 3 opt-out layers (inbound webhook, CDR poll, DLR opt-out-error) write `opt_outs`; the go-live harness (`scripts/test-ahoi-optout-golive-harness.ts`) proves suppression end-to-end through the real preflight. `SEND_ENABLED` for Ahoi requires BOTH that harness green AND a one-time manual real-STOP smoke test (documented in the harness script's header) — the flip itself is a separate, gated, out-of-band step, not part of any code change.

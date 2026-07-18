@@ -27,7 +27,7 @@ export const STAGE_TRACKING_PARAM = "sub_id3";
 //
 // The canonical guidekn destination is exactly:
 //   https://www.guidekn.com/lp/<slug>?sub_id3=<tracking_id>
-//   - <slug>: lowercase letters only
+//   - <slug>: lowercase letters and digits (e.g. "orv", "gb1") — no underscore
 //   - exactly one query param, sub_id3, carrying the stage tracking id
 //
 // A string-concatenation bug historically produced malformed destinations (the
@@ -49,7 +49,7 @@ const GUIDEKN_LP_RE = /guidekn\.com\/lp\//i;
 
 // The canonical, well-formed guidekn destination.
 export const GUIDEKN_DEST_RE =
-  /^https:\/\/www\.guidekn\.com\/lp\/[a-z]+\?sub_id3=[A-Za-z0-9_]+$/;
+  /^https:\/\/www\.guidekn\.com\/lp\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$/;
 
 // True when `url` is subject to the guidekn shape rule (a guidekn /lp/ URL).
 export function isGuideknLpUrl(url: string | null | undefined): boolean {
@@ -69,8 +69,12 @@ export function validateDestination(
   // Empty and non-guidekn destinations are out of scope of the shape rule.
   if (!u || !isGuideknLpUrl(u)) return null;
 
-  // Defect A: tracking id concatenated into the path (…/lp/knd8_62_…).
-  if (/\/lp\/[a-z]+[0-9]/i.test(u)) {
+  // Defect A: tracking id concatenated into the path (…/lp/knd8_62_…). The
+  // reliable signature is an UNDERSCORE in the /lp/ path segment — stage tracking
+  // ids always contain them (e.g. 8_62_070826_1_s3_c126) while legit slugs are
+  // plain alphanumerics (e.g. "orv", "gb1"). Keying off a trailing digit here
+  // false-flagged digit-bearing slugs like "gb1".
+  if (/\/lp\/[a-z0-9]*_/i.test(u)) {
     return "Tracking ID is concatenated into the path (…/lp/knd8_62_…). Expected …/lp/knd?sub_id3=8_62_…";
   }
   // Empty tracking value.

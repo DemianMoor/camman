@@ -78,6 +78,23 @@ accept(
   "8_62_070726_2_s4_c126",
   "canonical kcwv destination",
 );
+// slug containing a digit — legit, must NOT be mistaken for id-in-path.
+accept(
+  "https://www.guidekn.com/lp/gb1?sub_id3=8_80_071826_1_s1_c351",
+  "8_80_071826_1_s1_c351",
+  "canonical digit-bearing slug (gb1)",
+);
+accept(
+  "https://www.guidekn.com/lp/gb18?sub_id3=8_80_071826_1_s1_c351",
+  "8_80_071826_1_s1_c351",
+  "canonical multi-digit slug (gb18)",
+);
+// but a digit-bearing slug WITH the id glued on is still the concat bug.
+reject(
+  "https://www.guidekn.com/lp/gb18_80_071826_1_s1_c351",
+  "8_80_071826_1_s1_c351",
+  "id-in-path survives even with a digit-bearing slug",
+);
 // non-guidekn destination — out of scope of the shape rule
 accept(
   "https://clicks2scale.com/click?o=14508&a=1737",

@@ -776,5 +776,7 @@
     }
     ,
     { "idx": 110, "version": "7", "when": 1785888000000, "tag": "0110_provider_credentials_multi_account", "breakpoints": true }
+    ,
+    { "idx": 111, "version": "7", "when": 1785974400000, "tag": "0111_guidekn_url_shape_allow_digit_slug", "breakpoints": true }
   ]
 }

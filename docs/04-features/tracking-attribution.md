@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-07-10_
+_Last updated: 2026-07-18_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -53,7 +53,7 @@ sequenceDiagram
 - `CopyableId` / link mode toggle on the campaign editor.
 
 ## 5b. Destination-URL contract & validation (guidekn shape guard)
-The canonical guidekn destination is exactly `https://www.guidekn.com/lp/<slug>?sub_id3=<stage tracking_id>` — one query param, lowercase-letter slug. A historical string-concatenation bug (the tracking-ID chip appended a **bare value** with no `sub_id3=` key) produced malformed destinations — the id glued into the path (`…/lp/knd8_62_…`), an empty `sub_id3=`, or an unsubstituted `subid3=sub_id3` placeholder — each a 404 that silently loses attribution.
+The canonical guidekn destination is exactly `https://www.guidekn.com/lp/<slug>?sub_id3=<stage tracking_id>` — one query param, lowercase-alphanumeric slug (`[a-z0-9]+`, e.g. `orv`, `gb1`; the concat guard keys off an underscore in the path, not a digit, so digit-bearing slugs pass — migration 0111). A historical string-concatenation bug (the tracking-ID chip appended a **bare value** with no `sub_id3=` key) produced malformed destinations — the id glued into the path (`…/lp/knd8_62_…`), an empty `sub_id3=`, or an unsubstituted `subid3=sub_id3` placeholder — each a 404 that silently loses attribution.
 
 Guard, defense-in-depth (single source of truth: `validateDestination(url, trackingId?)` in [`lib/stage-url.ts`](../../lib/stage-url.ts)):
 1. **Form** — the stage form blocks Save (button disabled + the specific defect named on screen) when a hand-edited (non-auto) Full URL is a malformed guidekn URL. The tracking-ID chip now attaches a proper `sub_id3=<id>` param via `setUrlParam`, so the id can no longer glue onto the path.

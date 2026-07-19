@@ -104,7 +104,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-  participant Cron as */15 opt-outs/poll
+  participant Cron as */5 opt-outs/poll
   participant App
   participant TH as TextHub inbox
   participant DB

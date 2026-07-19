@@ -3,9 +3,9 @@
 _Last updated: 2026-07-19_
 
 Pre-aggregated **hourly-bucket** rollup layer feeding five reports over one shared
-metric set. Phase 1 (this doc) is the **data layer only** — schema, per-send
-snapshots, the maintenance job, and the backfill. The five read views / API /
-UI land in a later phase. Full recon + approved decisions: [`REPORTS-ROLLUP-RECON.md`](../../REPORTS-ROLLUP-RECON.md).
+metric set. **Phase 1** = the data layer (schema, per-send snapshots, maintenance
+cron, backfill). **Phase 2** = the read API + UI (the `/reports` tabs). Both are
+live. Full recon + approved decisions: [`REPORTS-ROLLUP-RECON.md`](../../REPORTS-ROLLUP-RECON.md).
 
 ## The five reports & the metric set
 
@@ -92,10 +92,29 @@ Fact A 302 / Fact B 2,024 (data spans ~46 days). Output is trivial at every
 depth; the cost is the ~967K-row `stage_sends` scan, which fits one transaction
 under 60s.
 
+## Read layer + UI (Phase 2)
+
+The five reports live as **tabs under `/reports`**, alongside the existing Keitaro
+funnel (now the **Overview** tab). Each is a child route so the URL is
+deep-linkable and the tab/sidebar active state is exact:
+
+- `/reports` → Overview (Keitaro funnel — [components/reports/keitaro-report.tsx](../../components/reports/keitaro-report.tsx), moved out of the page verbatim)
+- `/reports/number` · `/reports/offer` · `/reports/sequence` · `/reports/hourly` · `/reports/group` → the rollup reports, all served by [app/(protected)/reports/[dimension]/page.tsx](../../app/(protected)/reports/[dimension]/page.tsx) → [components/reports/performance-report.tsx](../../components/reports/performance-report.tsx)
+
+Shared shell (title + tab bar) in [app/(protected)/reports/layout.tsx](../../app/(protected)/reports/layout.tsx) + [components/reports/reports-tabs.tsx](../../components/reports/reports-tabs.tsx). Nav: a dedicated **Reports** group ([components/protected/nav-config.ts](../../components/protected/nav-config.ts); the sidebar's `isActive` gained an `exact` flag so Overview doesn't light up on sub-routes).
+
+**API:** `GET /api/reports/performance?dimension=<d>&from&to[&provider_phone_id]`
+([app/api/reports/performance/route.ts](../../app/api/reports/performance/route.ts)) — gated on `campaigns.view` (same read perm as the Keitaro tab). Reads the rollup via [lib/reporting/performance-report.ts](../../lib/reporting/performance-report.ts) (`getPerformanceReport` + `getReportProviderOptions`); returns raw counters + display labels + true totals + provider options. Dimension constants are in the client-safe [lib/reporting/report-dimensions.ts](../../lib/reporting/report-dimensions.ts) (no DB import — safe to import from client components).
+
+**UI conventions honored:**
+- **Default range = today (ET);** the hourly tab is a single-day picker. Range persisted via `usePersistedFilters("reports.performance")`.
+- **EPC / profit / percentages derived at read time** in the client (`derive()`), never stored.
+- **Provider/number filter** (a `<Select>` of the numbers present in the rollup) scopes every tab. The **By Number** report renders each row with the shared [`<ProviderPhoneCell>`](../../components/provider-phone-cell.tsx) — extracted from the campaigns list column so both stay identical.
+- **Totals always come from Fact A** even on the group tab; a footnote states group rows fan out and don't sum to the total.
+- **Reconciliation note (approved):** a footnote states sales/revenue are per-recipient attribution (~93% of the Keitaro total on Overview) — the two bases will differ.
+- "Data as of …" freshness stamp from `max(refreshed_at)`.
+
 ## Verification
 
-[`scripts/test-report-rollup.ts`](../../scripts/test-report-rollup.ts) runs the
-exact aggregate SELECTs read-only and asserts totals against the recon baselines
-(rows=302, sent=967,281, sales=295, revenue=$20,982, offer-redirects=2,597, Fact
-B=2,024, fan-out ≈1.34×). `preSnapshot=true` lets it run before the migration is
-applied (the snapshot columns don't change counts).
+- **Data layer:** [`scripts/test-report-rollup.ts`](../../scripts/test-report-rollup.ts) runs the exact aggregate SELECTs read-only and asserts totals against the recon baselines (rows=302, sent=967,281, sales=295, revenue=$20,982, offer-redirects=2,597, Fact B=2,024, fan-out ≈1.34×). `preSnapshot=true` lets it run before the migration is applied.
+- **Read layer:** [`scripts/test-performance-report.ts`](../../scripts/test-performance-report.ts) exercises `getPerformanceReport` for all five dimensions against live data — additive dims sum to the true total, the group dim correctly fans out above it, provider options + ET hour labels resolve. Plus `npx tsc --noEmit` + `next build` (routes compile, client/server boundary clean).

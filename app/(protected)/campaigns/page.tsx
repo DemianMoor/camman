@@ -27,6 +27,7 @@ import {
 } from "@/components/campaigns/status-change-dialog";
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
+import { ProviderPhoneCell } from "@/components/provider-phone-cell";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -59,7 +60,6 @@ import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
-import { formatPhoneInternational } from "@/lib/phone-validation";
 import { cn } from "@/lib/utils";
 
 type Info = { id: number; name: string; color: string | null };
@@ -542,39 +542,7 @@ export default function CampaignsPage() {
         enableSorting: false,
         cell: ({ row }) => {
           const { providers, phones } = row.original;
-          if (providers.length === 0 && phones.length === 0) {
-            return <span className="text-muted-foreground">—</span>;
-          }
-          return (
-            <div className="flex flex-col gap-0.5">
-              {providers.length === 1 ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <span
-                    className="size-2 rounded-full"
-                    style={{ backgroundColor: providers[0].color ?? "#64748B" }}
-                  />
-                  <span className="text-sm">{providers[0].name}</span>
-                </span>
-              ) : providers.length > 1 ? (
-                <span className="text-sm">{providers.length} providers</span>
-              ) : (
-                <span className="text-sm text-muted-foreground">
-                  No provider
-                </span>
-              )}
-              {phones.length === 1 ? (
-                <span className="font-mono text-xs text-muted-foreground">
-                  {phones[0].number_type === "short_code"
-                    ? phones[0].phone_number
-                    : formatPhoneInternational(phones[0].phone_number)}
-                </span>
-              ) : phones.length > 1 ? (
-                <span className="text-xs text-muted-foreground">
-                  {phones.length} numbers
-                </span>
-              ) : null}
-            </div>
-          );
+          return <ProviderPhoneCell providers={providers} phones={phones} />;
         },
       },
       {

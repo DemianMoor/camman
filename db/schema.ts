@@ -15,6 +15,7 @@ import {
   primaryKey,
   real,
   serial,
+  smallint,
   text,
   timestamp,
   unique,
@@ -2385,6 +2386,17 @@ export const stage_sends = pgTable(
     // contact's carrier_norm. Enables future per-carrier delivery/sales analytics;
     // no report reads it yet. NULL for rows sent before enrichment.
     carrier_norm: text("carrier_norm"),
+    // Migration 0112: durable per-send reporting snapshots. Stamped at
+    // materialization (lib/sends/kickoff.ts) from the stage's provider_phone_id
+    // and that number's cost_per_sms, so per-number attribution and per-send cost
+    // survive later edits to the stage's phone / rate. NULL for rows sent before
+    // 0112 — the reports rollup COALESCEs to the stage's live values for that
+    // history (see lib/reporting/rollup.ts).
+    provider_phone_id: integer("provider_phone_id").references(
+      () => provider_phones.id,
+      { onDelete: "set null" },
+    ),
+    cost_per_sms: numeric("cost_per_sms", { precision: 12, scale: 4 }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -3043,3 +3055,159 @@ export const lookup_queue = pgTable(
 
 export type LookupQueueRow = typeof lookup_queue.$inferSelect;
 export type NewLookupQueueRow = typeof lookup_queue.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Reports rollup layer (migration 0112). Two pre-aggregated hourly-bucket fact
+// tables feeding five reports over one shared metric set. Bucketing is by the
+// SEND hour in America/New_York; EPC / profit / rates are derived at READ time,
+// never stored. Maintained by a bounded 14-day rolling-window UPSERT
+// (lib/reporting/rollup.ts). See REPORTS-ROLLUP-RECON.md and
+// docs/04-features/reports-rollup.md.
+//
+// Fact A — one row per (org, stage, ET send-hour). The sending number is
+// functionally determined by the stage, so number/offer/sequence/hourly all
+// derive from this one grain. Grand totals ALWAYS come from here.
+export const report_stage_hour = pgTable(
+  "report_stage_hour",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    // UTC instant of the ET hour start (sargable read key).
+    bucket_start_utc: timestamp("bucket_start_utc", {
+      withTimezone: true,
+    }).notNull(),
+    bucket_date_et: date("bucket_date_et").notNull(),
+    bucket_hour_et: smallint("bucket_hour_et").notNull(),
+    // Denormalized dimension keys (snapshots — deliberately NOT FK'd).
+    offer_id: integer("offer_id"),
+    brand_id: integer("brand_id"),
+    provider_credential_id: integer("provider_credential_id"),
+    provider_phone_id: integer("provider_phone_id"),
+    sms_provider_id: integer("sms_provider_id"),
+    stage_number: integer("stage_number"),
+    behavioral_tier: smallint("behavioral_tier"),
+    funnel_stage: text("funnel_stage"),
+    creative_id: integer("creative_id"),
+    // Additive counters.
+    sent_count: integer("sent_count").notNull().default(0),
+    opt_out_count: integer("opt_out_count").notNull().default(0),
+    click_count: integer("click_count").notNull().default(0),
+    offer_redirect_count: integer("offer_redirect_count").notNull().default(0),
+    sales_count: integer("sales_count").notNull().default(0),
+    revenue: numeric("revenue", { precision: 12, scale: 4 })
+      .notNull()
+      .default("0"),
+    cost: numeric("cost", { precision: 12, scale: 4 }).notNull().default("0"),
+    // Frozen once past the 14-day trickle horizon.
+    settled: boolean("settled").notNull().default(false),
+    refreshed_at: timestamp("refreshed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "report_stage_hour_pk",
+      columns: [table.org_id, table.stage_id, table.bucket_start_utc],
+    }),
+    index("report_stage_hour_org_date_idx").on(
+      table.org_id,
+      table.bucket_date_et,
+    ),
+    index("report_stage_hour_org_offer_idx").on(
+      table.org_id,
+      table.offer_id,
+      table.bucket_start_utc,
+    ),
+    index("report_stage_hour_org_phone_idx").on(
+      table.org_id,
+      table.provider_phone_id,
+      table.bucket_start_utc,
+    ),
+    index("report_stage_hour_unsettled_idx")
+      .on(table.bucket_start_utc)
+      .where(sql`settled = false`),
+  ],
+);
+
+export type ReportStageHour = typeof report_stage_hour.$inferSelect;
+
+// Fact B — one row per (org, contact_group, stage, ET send-hour). Feeds report
+// #5 (by group). Fans out over the many-to-many contact_contact_groups junction
+// (avg 1.34 groups/contact) — per-group numbers are truthful PER GROUP but sum
+// to MORE than the true total by design. Never use this to compute a grand total.
+export const report_group_hour = pgTable(
+  "report_group_hour",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_group_id: integer("contact_group_id")
+      .notNull()
+      .references(() => contact_groups.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    bucket_start_utc: timestamp("bucket_start_utc", {
+      withTimezone: true,
+    }).notNull(),
+    bucket_date_et: date("bucket_date_et").notNull(),
+    bucket_hour_et: smallint("bucket_hour_et").notNull(),
+    offer_id: integer("offer_id"),
+    brand_id: integer("brand_id"),
+    provider_credential_id: integer("provider_credential_id"),
+    provider_phone_id: integer("provider_phone_id"),
+    sms_provider_id: integer("sms_provider_id"),
+    stage_number: integer("stage_number"),
+    behavioral_tier: smallint("behavioral_tier"),
+    funnel_stage: text("funnel_stage"),
+    creative_id: integer("creative_id"),
+    sent_count: integer("sent_count").notNull().default(0),
+    opt_out_count: integer("opt_out_count").notNull().default(0),
+    click_count: integer("click_count").notNull().default(0),
+    offer_redirect_count: integer("offer_redirect_count").notNull().default(0),
+    sales_count: integer("sales_count").notNull().default(0),
+    revenue: numeric("revenue", { precision: 12, scale: 4 })
+      .notNull()
+      .default("0"),
+    cost: numeric("cost", { precision: 12, scale: 4 }).notNull().default("0"),
+    settled: boolean("settled").notNull().default(false),
+    refreshed_at: timestamp("refreshed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "report_group_hour_pk",
+      columns: [
+        table.org_id,
+        table.contact_group_id,
+        table.stage_id,
+        table.bucket_start_utc,
+      ],
+    }),
+    index("report_group_hour_org_group_idx").on(
+      table.org_id,
+      table.contact_group_id,
+      table.bucket_start_utc,
+    ),
+    index("report_group_hour_org_date_idx").on(
+      table.org_id,
+      table.bucket_date_et,
+    ),
+    index("report_group_hour_unsettled_idx")
+      .on(table.bucket_start_utc)
+      .where(sql`settled = false`),
+  ],
+);
+
+export type ReportGroupHour = typeof report_group_hour.$inferSelect;

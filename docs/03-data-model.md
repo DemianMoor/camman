@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-07-18_
+_Last updated: 2026-07-19_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -23,6 +23,7 @@ Every domain table carries `org_id UUID → organizations.id` and an index on it
 > - **`lookup_batches`** (org-scoped, reporting only) + **`lookup_queue`** (worker state, no `org_id`, claimed `FOR UPDATE SKIP LOCKED`).
 > - **`contacts`** gains `line_type`, `carrier_norm` (default `Unidentified` = no `phone_lookups` row yet; migration 0099 split the former `Unknown` into `Unidentified` vs looked-up-but-`Unknown`), and `messaging_status` (`eligible`/`not_applicable`). `messaging_status` is the DB-enforced landline hard stop, derived by trigger `contacts_derive_messaging_status` (`line_type='landline' ⇒ not_applicable`, else `eligible`). Trigger, not a generated column, so `ADD COLUMN` is metadata-only (no rewrite at scale). Four **eligible-partial** indexes `(org_id[, …]) WHERE messaging_status='eligible'` back the hot paths (built concurrently via `scripts/apply-eligible-indexes-concurrent.ts`, 0088 pattern); the pre-existing non-partial indexes stay for the Contacts admin screen (the one place landlines remain visible). Every audience/segment/send query adds `AND messaging_status='eligible'`.
 > - **`stage_sends`** gains `carrier_norm` (stamped at send time; future per-carrier analytics; no report reads it yet).
+> - **`stage_sends`** gains `provider_phone_id` + `cost_per_sms` _(migration 0112)_ — durable reporting snapshots stamped at materialization from the stage's phone/rate, so per-number attribution and per-send cost survive later stage edits. NULL for rows sent before 0112 (the reports rollup COALESCEs to the stage's live values).
 > - **RLS**: `phone_lookups`/`carrier_mappings`/`carrier_patterns`/`carrier_classify_queue`/`lookup_settings`/`lookup_queue` enabled **policy-less** (server-only, no org to scope — geoip_cache/`0066` pattern); `lookup_batches` org-scoped SELECT, no write policies (`0085` pattern).
 
 ```mermaid
@@ -133,6 +134,9 @@ erDiagram
   campaigns ||--o{ keitaro_stage_results : "poll rollup"
   campaign_stages ||--o{ keitaro_stage_results : "sub_id_3 = stage tracking id"
   stage_sends ||--o| stage_sends : "sale stamped by sub_id_1 = id"
+  campaign_stages ||--o{ report_stage_hour : "hourly rollup (send-hour ET)"
+  campaign_stages ||--o{ report_group_hour : "hourly rollup × group"
+  contact_groups ||--o{ report_group_hour : "group dimension"
 
   offers ||--o{ offer_payouts : "effective-dated CPA history"
 
@@ -245,7 +249,7 @@ erDiagram
 | `link_destinations` | UNIQUE(org_id, url_hash), CHECK `link_destinations_guidekn_url_shape` (0094; widened to allow digit slugs in 0111, NOT VALID) | deduped destination URLs; CHECK rejects malformed guidekn `/lp/…?sub_id3=` URLs (slug `[a-z0-9]+`), non-guidekn URLs unaffected |
 | `links` | `id bigserial`, `code` **globally** uniq, UNIQUE(stage_id, contact_id, send_token), tracking-id columns NOT NULL | one minted link per recipient-message |
 | `clicks` | `id bigserial`, `link_id`, `classification`, `asn`/`country`/`is_datacenter`, `bot_score`/`bot_reasons`, `scored_at` (NULL=pending) | append-only click log |
-| `stage_sends` | `id uuid` (= send_token), `stage_id`, `contact_id`, `phone`, `link_id`, `rendered_text`, `status`, `texthub_message_id`, `attempts`, `sale_status`/`sale_revenue`/`converted_at`/`keitaro_conversion_id` | partial UNIQUE(stage_id, contact_id) WHERE status in (pending,sending). `status ∈ (pending,sending,sent,failed,rejected,filtered,skipped_duplicate)`; `filtered` = TextHub-suppressed rejection (migration 0065, label-only — not opted out, not skipped). `skipped_duplicate` (migration 0090) = excluded by the global 1-hour send-dedup gate (phone already messaged within 1h, any campaign) — terminal, not sent, not opted-out, not auto-retried; backed by partial index `stage_sends(org_id, phone, sent_at) WHERE status='sent'`. **Sale attribution (migration 0067):** `sale_status ∈ (lead,sale,rejected)` stamped per recipient by the Keitaro conversions poll when a conversion's `sub_id_1` matches `id`; `keitaro_conversion_id` (Keitaro `event_id`) is the dedup key. One sale per recipient, latest wins (NOT cumulative). NULL for manual-mode rows and recipients with no conversion |
+| `stage_sends` | `id uuid` (= send_token), `stage_id`, `contact_id`, `phone`, `link_id`, `rendered_text`, `status`, `texthub_message_id`, `attempts`, `sale_status`/`sale_revenue`/`converted_at`/`keitaro_conversion_id`, `provider_phone_id`/`cost_per_sms` (0112 reporting snapshots) | partial UNIQUE(stage_id, contact_id) WHERE status in (pending,sending). `status ∈ (pending,sending,sent,failed,rejected,filtered,skipped_duplicate)`; `filtered` = TextHub-suppressed rejection (migration 0065, label-only — not opted out, not skipped). `skipped_duplicate` (migration 0090) = excluded by the global 1-hour send-dedup gate (phone already messaged within 1h, any campaign) — terminal, not sent, not opted-out, not auto-retried; backed by partial index `stage_sends(org_id, phone, sent_at) WHERE status='sent'`. **Sale attribution (migration 0067):** `sale_status ∈ (lead,sale,rejected)` stamped per recipient by the Keitaro conversions poll when a conversion's `sub_id_1` matches `id`; `keitaro_conversion_id` (Keitaro `event_id`) is the dedup key. One sale per recipient, latest wins (NOT cumulative). NULL for manual-mode rows and recipients with no conversion |
 | `send_circuit_events` | `provider_id`, `event` paused/resumed, `reason`, `actor_user_id` | append-only breaker audit |
 | `send_attempts` | `stage_send_id`, `attempt_number`, `request_redacted`, `http_status`, `raw_body`, `ok`, `message_id`, `classification` | append-only per-attempt evidence (migration 0064). Verbatim TextHub body + classification (`accepted`/`mine_transport`/`theirs_rejected`/`indeterminate`); api_key never stored. `stage_sends` is current state, this is immutable history |
 | `campaign_events` | `campaign_id`, `stage_id?`, `event_type` (free-text), `actor_user_id?` (NULL=system), `summary`, `metadata jsonb` | append-only campaign activity log (Activity tab timeline); migration 0060 |
@@ -278,6 +282,19 @@ erDiagram
 > **Matviews carry no RLS.** Postgres materialized views cannot have row-level security policies. `offer_group_report_mv` and `offer_report_org_summary_mv` are read only through the server-side helper [`lib/reporting/offer-group-report.ts`](../lib/reporting/offer-group-report.ts), which explicitly filters `WHERE org_id = ${orgId}`; the API route (`GET /api/offers/[id]/report`) never exposes them directly. Same primary-defense posture as CLAUDE.md §3 — here there is simply no RLS layer to add, so the application-level filter is the *only* defense (not defense-in-depth-plus-RLS as with base tables).
 
 > **New indexes (migration 0093):** `stage_sends (sent_at, contact_id)` and `contact_contact_groups (contact_group_id, contact_id)` — support the twice-daily refresh's list-pressure/fresh-pool joins. The pre-existing `contact_contact_groups` PK is `(contact_id, contact_group_id)`, the wrong column order for "all contacts in a group."
+
+### Reports rollup (migration 0112)
+
+Two pre-aggregated **hourly-bucket** fact tables feeding five reports (by number / offer / sequence message / hourly / group) over one shared metric set. Unlike the `0093` matviews (full `REFRESH CONCURRENTLY`), these are plain tables maintained by a **bounded 14-day rolling-window UPSERT** ([`lib/reporting/rollup.ts`](../lib/reporting/rollup.ts)). All bucketing is by the **SEND hour in America/New_York**; EPC / profit / rates are derived at READ time, never stored. See [04-features/reports-rollup.md](04-features/reports-rollup.md).
+
+| Table | Grain / keys | Notes |
+|---|---|---|
+| `report_stage_hour` (Fact A) | PK(`org_id`, `stage_id`, `bucket_start_utc`) | one row per (org, stage, ET send-hour). Denormalized dims (`offer_id`, `brand_id`, `provider_credential_id`, `provider_phone_id`, `sms_provider_id`, `stage_number`, `behavioral_tier`, `funnel_stage`, `creative_id`) + counters (`sent_count`, `opt_out_count`, `click_count`, `offer_redirect_count`, `sales_count`, `revenue`, `cost`) + `settled`/`refreshed_at`. Feeds reports #1–#4; **grand totals always come from here.** ~302 rows all-time |
+| `report_group_hour` (Fact B) | PK(`org_id`, `contact_group_id`, `stage_id`, `bucket_start_utc`) | same shape + `contact_group_id`. Feeds report #5. **Fans out** over `contact_contact_groups` (avg 1.34 groups/contact) — per-group numbers are truthful per group but sum to MORE than the true total by design (matches `offer_group_report_mv`). Never sum groups for a total. ~2,024 rows all-time |
+
+> **Metric sources** (bucketed by the send's hour): sent = `stage_sends` (`status='sent'`); opt-outs = `opt_out_attributions` (via `stage_send_id`); clickers = clean human `clicks` (`classification='human' AND scored_at IS NOT NULL`, via `stage_sends.link_id`) — a DIFFERENT population than the Keitaro visit counter on `campaign_stages.click_count`; offer redirects = `stage_sends.offer_reached_at`; sales/revenue = **per-recipient** `stage_sends.converted_at`/`sale_revenue` (~93% of the authoritative `keitaro_stage_results` daily aggregate — the read layer surfaces the reconciliation delta); cost = `cost_per_sms × (sent + optouts)` per bucket. Number/cost resolve `COALESCE(stage_sends snapshot, stage live value)` for pre-0112 history.
+
+> **Identity FKs only** (`org_id`/`stage_id`/`campaign_id`/`contact_group_id`, all `ON DELETE CASCADE`). Denormalized dimension keys are snapshots — deliberately NOT FK'd (same as `stage_sends.carrier_norm` and the `0093` matviews). No RLS on the fact tables; reads go through a server-side helper that filters `org_id` (same posture as the `0093` matviews). Partial index `(bucket_start_utc) WHERE settled=false` keeps the rolling-window settle sweep cheap at scale.
 
 ## Triggers & DB-side logic (in migrations, not Drizzle)
 - **`handle_new_user()`** (`0001`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row.

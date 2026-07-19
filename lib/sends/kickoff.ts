@@ -103,6 +103,9 @@ interface MainRow {
   utm_tag_ids: number[];
   sms_provider_id: number | null;
   provider_phone_id: number | null;
+  // Migration 0112: the send-from number's per-SMS rate, snapshotted onto each
+  // stage_sends row so reporting cost survives later edits to the phone/rate.
+  provider_cost_per_sms: string | null;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -144,6 +147,7 @@ export async function kickoffStageSend(
       s.utm_tag_ids              AS utm_tag_ids,
       s.sms_provider_id          AS sms_provider_id,
       s.provider_phone_id        AS provider_phone_id,
+      pp.cost_per_sms            AS provider_cost_per_sms,
       s.include_no_status        AS include_no_status,
       s.include_clickers         AS include_clickers,
       s.exclude_clickers         AS exclude_clickers,
@@ -158,6 +162,7 @@ export async function kickoffStageSend(
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
     LEFT JOIN brands b ON b.id = c.brand_id
     LEFT JOIN creatives cr ON cr.id = s.creative_id
+    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
     WHERE c.id = ${campaignId} AND c.org_id = ${orgId}
     LIMIT 1
   `)) as unknown as MainRow[];
@@ -368,6 +373,8 @@ export async function kickoffStageSend(
             renderedText: manualText,
             leadId: id,
             carrierNorm: r.carrier_norm ?? null,
+            providerPhoneId: row.provider_phone_id,
+            costPerSms: row.provider_cost_per_sms,
           };
         });
       } else {
@@ -410,6 +417,8 @@ export async function kickoffStageSend(
             }),
             leadId: t.sendToken,
             carrierNorm: t.carrierNorm,
+            providerPhoneId: row.provider_phone_id,
+            costPerSms: row.provider_cost_per_sms,
           };
         });
       }
@@ -453,6 +462,9 @@ interface StageSendInsertRow {
   renderedText: string;
   leadId: string;
   carrierNorm: string | null;
+  // Migration 0112: reporting snapshots, constant across the stage's rows.
+  providerPhoneId: number | null;
+  costPerSms: string | null;
 }
 
 const STAGE_SENDS_CHUNK = 1000;
@@ -472,13 +484,14 @@ async function bulkInsertStageSends(
     const values = chunk.map(
       (r) => sql`(
         ${r.id}, ${r.orgId}, ${r.campaignId}, ${r.stageId}, ${r.contactId},
-        ${r.phone}, ${r.linkId}, ${r.renderedText}, 'pending', ${r.leadId}, ${r.carrierNorm}
+        ${r.phone}, ${r.linkId}, ${r.renderedText}, 'pending', ${r.leadId}, ${r.carrierNorm},
+        ${r.providerPhoneId}, ${r.costPerSms}
       )`,
     );
     const res = (await tx.execute(sql`
       INSERT INTO stage_sends
         (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
-         rendered_text, status, lead_id, carrier_norm)
+         rendered_text, status, lead_id, carrier_norm, provider_phone_id, cost_per_sms)
       VALUES ${sql.join(values, sql`, `)}
       ON CONFLICT (stage_id, contact_id) WHERE status IN ('pending', 'sending')
       DO NOTHING

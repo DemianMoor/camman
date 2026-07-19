@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-07-18_
+_Last updated: 2026-07-19_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -172,6 +172,13 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - **A campaign that targets multiple contact groups (`campaigns.audience_contact_group_ids`) is counted FULLY in every targeted group**, not split proportionally. `offer_group_report_mv` rows can therefore sum to MORE than `offer_report_org_summary_mv`'s de-duplicated (each campaign counted once) org-wide benchmark row. Footnoted in the UI — don't treat the mismatch as a bug.
 - **The twice-daily refresh cron is fixed-UTC (`0 5,20 * * *`) and drifts ~1h across DST**: 00:00 & 15:00 ET in winter (EST), 01:00 & 16:00 ET in summer (EDT). Acceptable for a historical, twice-daily report — the same fixed-UTC tradeoff CamMan already accepts for `telegram-report`'s Warsaw-time schedule; documented, not corrected.
 - **Per-contact columns (`Sent 7d/30d/90d`, `Fresh pool`) count every in-app per-recipient `stage_sends` row regardless of `link_mode`** — tracked AND manual in-app sends both write these rows. Only a send performed **entirely outside the app** (an operator hand-entering `campaign_stages.sms_count` with no corresponding `stage_sends` row) is invisible to these four columns. The economics columns (Sends/Revenue/Sales/Cost/Clicks/Opt-outs) are unaffected — they include external sends via `sms_count`.
+
+## Reports rollup (migration 0112, see [04-features/reports-rollup.md](04-features/reports-rollup.md))
+- **Bucketed by the SEND hour in ET, not the event hour.** Every metric (opt-outs, clicks, redirects, sales, cost) is attributed to the hour the message was SENT, so each rate is a batch rate ("of messages sent in hour H, X% opted out"). `date_trunc('hour', sent_at AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'` → the stored `bucket_start_utc`. Only ever done inside the bounded rolling-window build, never in a hot read.
+- **Sales/revenue use the PER-RECIPIENT `stage_sends` attribution** (`converted_at`/`sale_revenue`), NOT the `keitaro_stage_results` daily aggregate — that's the only source that can be split by hour and group. It recovers ~93% of the authoritative aggregate (295 vs 319 sales; $20,982 vs $22,324); the read layer surfaces the delta so the structural gap isn't mistaken for a bug. This is a DIFFERENT sales basis than `/reports` and the offer-group report (which use the aggregate).
+- **"Clickers" = internal clean clicks** (`clicks.classification='human' AND scored_at IS NOT NULL`, joined via `stage_sends.link_id`), NOT the Keitaro visit counter (`campaign_stages.click_count`). Different populations — the two numbers will differ.
+- **Grand totals come from `report_stage_hour` (Fact A) only.** `report_group_hour` (Fact B) fans out over the many-to-many `contact_contact_groups` (avg 1.34 groups/contact), so summing its group rows OVERCOUNTS the true total by design — same caveat as the offer-group report's group unnest.
+- **`stage_sends.provider_phone_id` / `cost_per_sms` are durable send-time snapshots** (stamped at materialization). The rollup resolves `COALESCE(send snapshot, stage live value)` so pre-0112 history still attributes to a number/rate via the (mutable) stage. Cost inherits the flat-rate limitation of `campaign_stages.total_cost` (multi-segment messages under-costed) — a separate future card.
 
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.

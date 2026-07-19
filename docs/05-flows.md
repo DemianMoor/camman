@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-07-16_
+_Last updated: 2026-07-19_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -257,3 +257,20 @@ sequenceDiagram
 ```
 
 > Same id chain as sales (`sub_id_1` = `stage_sends.id`), but the SOURCE is clicks, classified by campaign name: `gk-lp-visits` ⇒ landing (Level 1, dropped); any other ⇒ offer (Level 2). The `reached_offer*` segment rules read `offer_reached_at`. "Reached but didn't buy" = `reached_offer` is + `made_purchase` is_not. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md) §8b.
+
+## J. Reports rollup maintenance (every 15 min)
+
+```mermaid
+sequenceDiagram
+  participant Cron as report-rollup (14,29,44,59)
+  participant Fn as refreshReportRollup
+  participant DB
+  Cron->>Fn: GET /api/cron/report-rollup (Bearer CRON_SECRET)
+  Fn->>DB: withCronLease("report-rollup") — claim cron_locks row
+  Fn->>DB: UPSERT report_stage_hour + report_group_hour<br/>for buckets with SEND hour ≥ now()−14d
+  Fn->>DB: settle (freeze) buckets older than now()−14d
+  Fn->>DB: stamp cron_locks.watermark = now()
+  Note over Fn,DB: bounded rolling-window — recomputes only the unsettled 14d,<br/>idempotent UPSERT re-clobbers as clicks/opt-outs/sales trickle in
+```
+
+> Runs just after the opt-out / conversions / offer-reach pollers each quarter-hour so it folds in freshly-attributed engagement. All bucketing is by the SEND hour in ET; sales/revenue use the per-recipient `stage_sends` attribution (not the Keitaro daily aggregate) so they're hour- and group-splittable. Grand totals come from `report_stage_hour`; `report_group_hour` fans out over contact groups and is non-additive. See [04-features/reports-rollup.md](04-features/reports-rollup.md).

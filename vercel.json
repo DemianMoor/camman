@@ -47,6 +47,10 @@
     {
       "path": "/api/cron/ahoi-cdr-poll",
       "schedule": "13,28,43,58 * * * *"
+    },
+    {
+      "path": "/api/cron/report-rollup",
+      "schedule": "14,29,44,59 * * * *"
     }
   ]
 }

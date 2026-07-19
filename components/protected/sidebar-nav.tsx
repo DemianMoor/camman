@@ -7,7 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { navGroups, type NavItem } from "./nav-config";
 
-function isActive(pathname: string, href: string) {
+function isActive(pathname: string, href: string, exact?: boolean) {
+  if (exact) return pathname === href;
   return pathname === href || pathname.startsWith(href + "/");
 }
 
@@ -73,7 +74,7 @@ export function SidebarNav() {
             <NavRow
               key={item.href}
               item={item}
-              active={!item.disabled && isActive(pathname, item.href)}
+              active={!item.disabled && isActive(pathname, item.href, item.exact)}
             />
           ))}
         </div>

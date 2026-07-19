@@ -28,6 +28,11 @@ export type NavItem = {
   href: string;
   icon: LucideIcon;
   disabled?: boolean;
+  // Match the active state exactly (===) instead of the default prefix match.
+  // Needed for a parent route that has child routes under the same path, e.g.
+  // /reports (Overview) vs /reports/number — otherwise Overview would light up
+  // on every sub-route.
+  exact?: boolean;
 };
 
 export type NavGroup = {
@@ -67,8 +72,20 @@ export const navGroups: NavGroup[] = [
         icon: MessageSquare,
         disabled: !isEntityAvailable("creatives"),
       },
-      // Reports is a feature (Keitaro funnel), not an entity — always enabled.
-      { label: "Reports", href: "/reports", icon: BarChart3 },
+    ],
+  },
+  {
+    // Reports are a feature (Keitaro funnel + performance rollup), not entities —
+    // always enabled. Overview is the Keitaro funnel; the rest are the five
+    // rollup dimensions (each a /reports/<dimension> tab route).
+    label: "Reports",
+    items: [
+      { label: "Overview", href: "/reports", icon: BarChart3, exact: true },
+      { label: "By Number", href: "/reports/number", icon: Phone },
+      { label: "By Offer", href: "/reports/offer", icon: ShoppingBag },
+      { label: "By Sequence", href: "/reports/sequence", icon: Layers },
+      { label: "Hourly", href: "/reports/hourly", icon: CalendarClock },
+      { label: "By Group", href: "/reports/group", icon: FolderTree },
     ],
   },
   {

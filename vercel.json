@@ -18,7 +18,7 @@
     },
     {
       "path": "/api/opt-outs/poll",
-      "schedule": "6,21,36,51 * * * *"
+      "schedule": "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
     },
     {
       "path": "/api/keitaro/poll-conversions",

@@ -10,6 +10,9 @@
 // Success is signaled by body.status === 200 (TextHub's HTTP codes are
 // unreliable — registration returns 404 on a failure envelope), so we key off
 // the body, not the HTTP status alone.
+// EMPTY inbox is a DIFFERENT healthy shape: HTTP 200 {"response":"No new
+// messages"} with NO status field (probed live 2026-07-20). fetchInbox treats
+// it as a successful poll with messages:[], not a failure — see below.
 
 const TEXTHUB_BASE_URL = "https://api.texthub.com/v2";
 const DEFAULT_TIMEOUT_MS = 20000;
@@ -72,14 +75,28 @@ export async function fetchInbox(opts: {
       signal: controller.signal,
     });
 
-    let body: { status?: unknown; data?: unknown } = {};
+    let body: { status?: unknown; data?: unknown; response?: unknown } = {};
     try {
       body = (await res.json()) as typeof body;
     } catch {
       body = {};
     }
     const bodyStatus = typeof body.status === "number" ? body.status : null;
-    const ok = res.ok && bodyStatus === 200;
+
+    // When messages exist TextHub returns {status:200, data:[...]}. When the
+    // inbox is EMPTY it returns a bare {"response":"No new messages"} (HTTP 200,
+    // NO status field) — a healthy poll with nothing to ingest, not a failure.
+    // Without this branch the empty response fell through to ok:false and fired
+    // the "Opt-out poller FAILED" alert on every quiet poll (false positive).
+    // Treat it as a successful empty poll (messages:[]). Genuine failures
+    // (non-2xx, network, a status:0 error envelope) still return ok:false.
+    const emptyInbox =
+      res.ok &&
+      bodyStatus === null &&
+      typeof body.response === "string" &&
+      body.response.toLowerCase().includes("no new messages");
+
+    const ok = (res.ok && bodyStatus === 200) || emptyInbox;
 
     return {
       ok,

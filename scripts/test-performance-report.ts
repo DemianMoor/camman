@@ -35,7 +35,7 @@ async function main() {
   }
 
   // hourly: single day, activity-time
-  const h = await getPerformanceReport(orgId, "hourly", { from: "2026-07-18", to: "2026-07-18", providerPhoneId: null });
+  const h = await getPerformanceReport(orgId, "hourly", { from: "2026-07-15", to: "2026-07-19", providerPhoneId: null });
   console.log(`hourly rows=${h.rows.length} totals{clk:${h.totals.clickers},sales:${h.totals.sales},opt:${h.totals.opt_outs}}`);
   console.log("  hours:", h.rows.map((r: any) => `${r.label}${r.pinned?"*":""}:clk${r.clickers}/opt${r.opt_outs}`).join("  "));
 

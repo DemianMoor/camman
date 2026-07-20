@@ -145,7 +145,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
     const params = new URLSearchParams({
       dimension,
       from: filters.from,
-      to: isHourly ? filters.from : filters.to,
+      to: filters.to,
     });
     if (filters.providerPhoneId != null) {
       params.set("provider_phone_id", String(filters.providerPhoneId));
@@ -215,29 +215,27 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
     <div className="space-y-6">
       <div className="flex flex-wrap items-end gap-3">
         <div className="grid gap-1.5">
-          <Label htmlFor="perf-from">{isHourly ? "Day" : "From"}</Label>
+          <Label htmlFor="perf-from">From</Label>
           <Input
             id="perf-from"
             type="date"
             value={filters.from}
-            max={isHourly ? undefined : filters.to}
+            max={filters.to}
             onChange={(e) => updateFilters({ from: e.target.value })}
             className="h-9 w-[160px]"
           />
         </div>
-        {!isHourly ? (
-          <div className="grid gap-1.5">
-            <Label htmlFor="perf-to">To</Label>
-            <Input
-              id="perf-to"
-              type="date"
-              value={filters.to}
-              min={filters.from}
-              onChange={(e) => updateFilters({ to: e.target.value })}
-              className="h-9 w-[160px]"
-            />
-          </div>
-        ) : null}
+        <div className="grid gap-1.5">
+          <Label htmlFor="perf-to">To</Label>
+          <Input
+            id="perf-to"
+            type="date"
+            value={filters.to}
+            min={filters.from}
+            onChange={(e) => updateFilters({ to: e.target.value })}
+            className="h-9 w-[160px]"
+          />
+        </div>
         <div className="grid gap-1.5">
           <Label>Provider / number</Label>
           <Select
@@ -293,10 +291,10 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
       <p className="text-xs text-muted-foreground">
         {isHourly ? (
           <>
-            Bucketed by <span className="font-medium">user-activity time</span> in {CAMPAIGN_TIMEZONE_LABEL} — clicks by
-            click time, sales by conversion time, opt-outs by receipt time (internal event data; clicks won&apos;t equal
-            the Keitaro count on Overview). Manual-campaign results have no per-event time and roll up into the pinned
-            <span className="font-medium"> Manual</span> row.
+            Each hour is summed by <span className="font-medium">user-activity time</span> across the selected date
+            range in {CAMPAIGN_TIMEZONE_LABEL} — clicks by click time, sales by conversion time, opt-outs by receipt
+            time (internal event data; clicks won&apos;t equal the Keitaro count on Overview). Manual-campaign results
+            have no per-event time and roll up into the pinned <span className="font-medium">Manual</span> row.
           </>
         ) : (
           <>
@@ -320,7 +318,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           <div className="space-y-1">
             <p className="text-sm font-medium">No activity in this range</p>
             <p className="text-sm text-muted-foreground">
-              Try a wider date range{isHourly ? " — the hourly view is one ET day at a time" : ""}.
+              Try a wider date range.
             </p>
           </div>
         </div>

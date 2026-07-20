@@ -201,6 +201,11 @@ export interface StageFormProps {
   // Create-mode only: the stage_number this new stage will be assigned
   // (max existing + 1). Powers the tracking-ID preview.
   nextStageNumber?: number;
+  // Edit-mode only: this stage's OWN stage_number. Powers a LIVE tracking-ID
+  // preview when the stage has no stored tracking_id yet (e.g. a draft-split
+  // variant created without a creative) — so picking a creative shows the ID
+  // the server will finalize on save, and the tag chip becomes usable.
+  stageNumber?: number;
   // Edit-mode only: existing split assignment (NULL when the stage isn't
   // part of a split). Controls whether the "Split for A/B" action is
   // shown and renders a "Split X of Y" badge in the audience block.
@@ -327,6 +332,7 @@ export function StageForm({
   trackingId,
   campaignTrackingId,
   nextStageNumber,
+  stageNumber,
   splitIndex,
   splitTotal,
   behavioralTier,
@@ -722,15 +728,17 @@ export function StageForm({
   // in create mode (campaign tracking ID + predicted stage number + creative)
   // so the operator can copy it before saving.
   const effectiveTrackingId = useMemo(() => {
-    if (isEdit) return trackingId ?? null;
-    if (
-      campaignTrackingId &&
-      watchedCreativeId != null &&
-      nextStageNumber != null
-    ) {
+    // A finalized (stored) tracking_id is immutable — always show it verbatim.
+    if (isEdit && trackingId) return trackingId;
+    // Otherwise compute the SAME id the server generates on save, so the
+    // operator sees it live and can attach the tag before saving. Edit mode
+    // uses this stage's own number (e.g. a draft-split variant that only now
+    // gets a creative); create mode uses the predicted next number.
+    const sn = isEdit ? stageNumber : nextStageNumber;
+    if (campaignTrackingId && watchedCreativeId != null && sn != null) {
       return formatStageTrackingId({
         campaignTrackingId,
-        stageNumber: nextStageNumber,
+        stageNumber: sn,
         creativeId: watchedCreativeId,
       });
     }
@@ -741,6 +749,7 @@ export function StageForm({
     campaignTrackingId,
     watchedCreativeId,
     nextStageNumber,
+    stageNumber,
   ]);
 
   const generatedFullUrl = useMemo(() => {
@@ -1084,20 +1093,18 @@ export function StageForm({
                   value={effectiveTrackingId}
                   inputClassName="text-xs md:text-xs"
                   placeholder={
-                    isEdit
-                      ? "Pick a creative & save to generate"
-                      : campaignTrackingId
-                        ? "Pick a creative to generate"
-                        : "Set brand & offer on the campaign"
+                    campaignTrackingId
+                      ? "Pick a creative to generate"
+                      : "Set brand & offer on the campaign"
                   }
                   helperText={
-                    isEdit
-                      ? effectiveTrackingId
+                    effectiveTrackingId
+                      ? isEdit && trackingId
                         ? "Auto-generated. Used in analytics URLs."
-                        : "Auto-generated when the campaign and creative are set."
-                      : effectiveTrackingId
-                        ? "Preview — finalized on save. Copy it now for tracking."
-                        : "Auto-generated on save once a creative is picked."
+                        : "Preview — finalized on save. Copy it, or click the tracking_id tag below to add it to the URL."
+                      : campaignTrackingId
+                        ? "Auto-generated once a creative is picked."
+                        : "Set the campaign's brand & offer to generate tracking IDs."
                   }
                   copiedMessage="Tracking ID copied"
                 />

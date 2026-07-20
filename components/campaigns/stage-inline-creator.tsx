@@ -220,6 +220,7 @@ export function StageInlineEditor({
           trackingId={isEdit ? stage!.tracking_id : null}
           campaignTrackingId={campaignTrackingId ?? null}
           nextStageNumber={nextStageNumber}
+          stageNumber={isEdit ? stage!.stage_number : undefined}
           splitIndex={isEdit ? stage!.split_index : null}
           splitTotal={isEdit ? stage!.split_total : null}
           behavioralTier={isEdit ? stage!.behavioral_tier : null}

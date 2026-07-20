@@ -33,14 +33,13 @@ interface PerfResponse {
   range: { from: string; to: string; timezone: string };
 }
 
-// A row with the read-time-derived ratios attached.
 interface DerivedRow extends PerfRow {
-  opt_out_rate: number;
-  click_rate: number;
-  redirect_rate: number;
-  sales_rate: number;
-  epc: number;
-  profit: number;
+  opt_out_rate: number; // opt_outs / sent
+  click_rate: number; // clickers / sent (CR)
+  redirect_rate: number; // redirects / clickers
+  sales_cr: number; // sales / redirects
+  epc: number; // revenue / redirects
+  profit: number; // revenue - cost
 }
 
 type PerfFilters = {
@@ -64,6 +63,9 @@ function etDate(offsetDays: number): string {
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const fmtUsd = (n: number) => usd.format(n);
 const fmtInt = (n: number) => n.toLocaleString();
+// Group rows carry fractional splits — show up to 2 decimals, trimming zeros.
+const fmtNum = (n: number) =>
+  Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
 const rate = (num: number, denom: number) => (denom > 0 ? num / denom : 0);
 
@@ -71,10 +73,10 @@ function derive(r: PerfRow): DerivedRow {
   return {
     ...r,
     opt_out_rate: rate(r.opt_outs, r.sent),
-    click_rate: rate(r.clicks, r.sent),
-    redirect_rate: rate(r.redirects, r.sent),
-    sales_rate: rate(r.sales, r.sent),
-    epc: rate(r.revenue, r.clicks),
+    click_rate: rate(r.clickers, r.sent),
+    redirect_rate: rate(r.redirects, r.clickers),
+    sales_cr: rate(r.sales, r.redirects),
+    epc: rate(r.revenue, r.redirects),
     profit: r.revenue - r.cost,
   };
 }
@@ -88,48 +90,50 @@ function StatCard({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Metric column config (right-aligned numerics). The label column is rendered
-// separately (dimension-specific).
-type NumericCol = {
+type Col = {
   id: keyof DerivedRow;
   header: string;
-  kind: "int" | "pct" | "usd" | "profit";
+  kind: "count" | "pct" | "usd" | "profit";
   muted?: boolean;
 };
-const NUMERIC_COLS: NumericCol[] = [
-  { id: "sent", header: "Sent", kind: "int" },
-  { id: "opt_outs", header: "Opt-outs", kind: "int", muted: true },
+// Full metric set for number/offer/sequence/group — mirrors the Overview tab.
+const FULL_COLS: Col[] = [
+  { id: "sent", header: "Sent", kind: "count" },
+  { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
   { id: "opt_out_rate", header: "OptOut %", kind: "pct", muted: true },
-  { id: "clicks", header: "Clickers", kind: "int" },
+  { id: "clickers", header: "Clickers", kind: "count" },
   { id: "click_rate", header: "CR %", kind: "pct", muted: true },
-  { id: "redirects", header: "Redirects", kind: "int" },
+  { id: "redirects", header: "Redirects", kind: "count" },
   { id: "redirect_rate", header: "Redir %", kind: "pct", muted: true },
-  { id: "sales", header: "Sales", kind: "int" },
-  { id: "sales_rate", header: "Sales %", kind: "pct", muted: true },
+  { id: "sales", header: "Sales", kind: "count" },
+  { id: "sales_cr", header: "Sales CR", kind: "pct", muted: true },
   { id: "revenue", header: "Revenue", kind: "usd" },
   { id: "cost", header: "Cost", kind: "usd", muted: true },
   { id: "epc", header: "EPC", kind: "usd" },
   { id: "profit", header: "Profit", kind: "profit" },
 ];
+// Hourly is activity-time engagement — no send-time metrics (sent/cost/rates).
+const HOURLY_COLS: Col[] = [
+  { id: "clickers", header: "Clickers", kind: "count" },
+  { id: "redirects", header: "Redirects", kind: "count" },
+  { id: "sales", header: "Sales", kind: "count" },
+  { id: "revenue", header: "Revenue", kind: "usd" },
+  { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
+];
 
-function fmtCell(v: number, kind: NumericCol["kind"]): string {
-  if (kind === "int") return fmtInt(v);
+function fmtCell(v: number, kind: Col["kind"]): string {
+  if (kind === "count") return fmtNum(v);
   if (kind === "pct") return fmtPct(v);
   return fmtUsd(v);
 }
 
 export function PerformanceReport({ dimension }: { dimension: ReportDimension }) {
   const isHourly = dimension === "hourly";
+  const cols = isHourly ? HOURLY_COLS : FULL_COLS;
 
   const [filters, updateFilters, resetFilters] = usePersistedFilters<PerfFilters>(
     "reports.performance",
-    {
-      from: etDate(0),
-      to: etDate(0),
-      providerPhoneId: null,
-      sortBy: "sent",
-      sortDir: "desc",
-    },
+    { from: etDate(0), to: etDate(0), providerPhoneId: null, sortBy: "sent", sortDir: "desc" },
   );
 
   const api = useApiCall<PerfResponse>();
@@ -166,6 +170,9 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
     const dir = filters.sortDir === "asc" ? 1 : -1;
     const key = filters.sortBy as keyof DerivedRow;
     return [...derived].sort((a, b) => {
+      // Pinned rows (hourly "Manual") always sort to the top.
+      if (a.pinned && !b.pinned) return -1;
+      if (b.pinned && !a.pinned) return 1;
       const av = a[key];
       const bv = b[key];
       if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
@@ -177,37 +184,26 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
   const providers = resp?.providers ?? [];
 
   function toggleSort(id: string) {
-    if (filters.sortBy === id) {
-      updateFilters({ sortDir: filters.sortDir === "asc" ? "desc" : "asc" });
-    } else {
-      updateFilters({ sortBy: id, sortDir: "desc" });
-    }
+    if (filters.sortBy === id) updateFilters({ sortDir: filters.sortDir === "asc" ? "desc" : "asc" });
+    else updateFilters({ sortBy: id, sortDir: "desc" });
   }
   const sortIndicator = (id: string) =>
     filters.sortBy === id ? (filters.sortDir === "asc" ? " ▲" : " ▼") : "";
 
   function renderLabel(r: DerivedRow) {
+    if (r.pinned) return <span className="text-sm font-medium">{r.label}</span>;
     if (dimension === "number") {
       return (
         <ProviderPhoneCell
-          providers={
-            r.provider_name ? [{ name: r.provider_name, color: r.provider_color }] : []
-          }
-          phones={
-            r.phone_number
-              ? [{ phone_number: r.phone_number, number_type: r.number_type ?? undefined }]
-              : []
-          }
+          providers={r.provider_name ? [{ name: r.provider_name, color: r.provider_color }] : []}
+          phones={r.phone_number ? [{ phone_number: r.phone_number, number_type: r.number_type ?? undefined }] : []}
         />
       );
     }
     if (dimension === "group") {
       return (
         <span className="inline-flex items-center gap-1.5">
-          <span
-            className="size-2 rounded-full"
-            style={{ backgroundColor: r.group_color ?? "#64748B" }}
-          />
+          <span className="size-2 rounded-full" style={{ backgroundColor: r.group_color ?? "#64748B" }} />
           <span className="text-sm">{r.label}</span>
         </span>
       );
@@ -246,9 +242,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           <Label>Provider / number</Label>
           <Select
             value={filters.providerPhoneId == null ? "all" : String(filters.providerPhoneId)}
-            onValueChange={(v) =>
-              updateFilters({ providerPhoneId: v === "all" ? null : Number(v) })
-            }
+            onValueChange={(v) => updateFilters({ providerPhoneId: v === "all" ? null : Number(v) })}
           >
             <SelectTrigger className="h-9 w-[220px]">
               <SelectValue placeholder="All numbers" />
@@ -274,26 +268,46 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
       </div>
 
       {totals ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
-          <StatCard label="Sent" value={fmtInt(totals.sent)} />
-          <StatCard label="Opt-out %" value={fmtPct(rate(totals.opt_outs, totals.sent))} />
-          <StatCard label="Clickers" value={fmtInt(totals.clicks)} />
-          <StatCard label="Redirects" value={fmtInt(totals.redirects)} />
-          <StatCard label="Sales" value={fmtInt(totals.sales)} />
-          <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
-          <StatCard label="Cost" value={fmtUsd(totals.cost)} />
-          <StatCard label="Profit" value={fmtUsd(totals.revenue - totals.cost)} />
-        </div>
+        isHourly ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
+            <StatCard label="Redirects" value={fmtInt(totals.redirects)} />
+            <StatCard label="Sales" value={fmtInt(totals.sales)} />
+            <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
+            <StatCard label="Opt-outs" value={fmtInt(totals.opt_outs)} />
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+            <StatCard label="Sent" value={fmtInt(totals.sent)} />
+            <StatCard label="Opt-out %" value={fmtPct(rate(totals.opt_outs, totals.sent))} />
+            <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
+            <StatCard label="Redirects" value={fmtInt(totals.redirects)} />
+            <StatCard label="Sales" value={fmtInt(totals.sales)} />
+            <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
+            <StatCard label="Cost" value={fmtUsd(totals.cost)} />
+            <StatCard label="Profit" value={fmtUsd(totals.revenue - totals.cost)} />
+          </div>
+        )
       ) : null}
 
       <p className="text-xs text-muted-foreground">
-        Grouped by <span className="font-medium">{DIMENSION_LABEL[dimension].toLowerCase()}</span>,
-        bucketed by the send hour in {CAMPAIGN_TIMEZONE_LABEL}. Sales &amp; revenue are
-        per-recipient attribution (~93% of the Keitaro total on the Overview tab); EPC = revenue ÷
-        clickers.
-        {dimension === "group"
-          ? " A contact in multiple groups is counted in each — group rows can sum to more than the true total (shown in the totals above, which never double-count)."
-          : ""}
+        {isHourly ? (
+          <>
+            Bucketed by <span className="font-medium">user-activity time</span> in {CAMPAIGN_TIMEZONE_LABEL} — clicks by
+            click time, sales by conversion time, opt-outs by receipt time (internal event data; clicks won&apos;t equal
+            the Keitaro count on Overview). Manual-campaign results have no per-event time and roll up into the pinned
+            <span className="font-medium"> Manual</span> row.
+          </>
+        ) : (
+          <>
+            Sourced from the same Keitaro data as Overview, grouped by{" "}
+            <span className="font-medium">{DIMENSION_LABEL[dimension].toLowerCase()}</span> — totals reconcile to the
+            Overview tab. EPC = revenue ÷ offer redirects.
+            {dimension === "group"
+              ? " Each stage's totals are split across its contact groups (tracked: per contact across the groups used in the campaign; manual: by each group's audience share), so group rows sum back to the stage total. Values may show 2 decimals."
+              : ""}
+          </>
+        )}
       </p>
 
       {fetchError ? (
@@ -304,7 +318,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
         <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed py-16 text-center">
           <BarChart3 className="size-12 text-muted-foreground/40" aria-hidden />
           <div className="space-y-1">
-            <p className="text-sm font-medium">No sends in this range</p>
+            <p className="text-sm font-medium">No activity in this range</p>
             <p className="text-sm text-muted-foreground">
               Try a wider date range{isHourly ? " — the hourly view is one ET day at a time" : ""}.
             </p>
@@ -315,8 +329,8 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/40 text-left">
-                <th className="px-3 py-2 font-medium">{DIMENSION_LABEL[dimension]}</th>
-                {NUMERIC_COLS.map((c) => (
+                <th className="px-3 py-2 font-medium">{isHourly ? "Hour" : DIMENSION_LABEL[dimension]}</th>
+                {cols.map((c) => (
                   <th
                     key={c.id}
                     className="cursor-pointer select-none whitespace-nowrap px-3 py-2 text-right font-medium hover:text-foreground"
@@ -332,7 +346,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
               {rows.map((r) => (
                 <tr key={r.key} className="border-b last:border-0 hover:bg-muted/30">
                   <td className="px-3 py-2">{renderLabel(r)}</td>
-                  {NUMERIC_COLS.map((c) => {
+                  {cols.map((c) => {
                     const v = r[c.id] as number;
                     const cls =
                       c.kind === "profit"
@@ -343,10 +357,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
                           ? "text-muted-foreground"
                           : "";
                     return (
-                      <td
-                        key={c.id}
-                        className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${cls}`}
-                      >
+                      <td key={c.id} className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${cls}`}>
                         {fmtCell(v, c.kind)}
                       </td>
                     );

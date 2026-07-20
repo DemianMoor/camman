@@ -1,41 +1,44 @@
 import { config } from "dotenv"; import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
-import { fromZonedTime } from "date-fns-tz";
-
-const TZ = "America/New_York";
-const boundsUtc = (from: string, toExclusive: string) => ({
-  fromUtc: fromZonedTime(`${from}T00:00:00`, TZ).toISOString(),
-  toUtc: fromZonedTime(`${toExclusive}T00:00:00`, TZ).toISOString(),
-  providerPhoneId: null as number | null,
-});
 
 async function main() {
-  // dynamic import AFTER env is loaded so @/db/client picks up DATABASE_URL
   const { db } = await import("@/db/client");
   const { sql } = await import("drizzle-orm");
-  const { getPerformanceReport, getReportProviderOptions } =
-    await import("@/lib/reporting/performance-report");
-  const { REPORT_DIMENSIONS } = await import("@/lib/reporting/report-dimensions");
+  const { getPerformanceReport } = await import("@/lib/reporting/performance-report");
+  const { getStageMetricsInRange } = await import("@/lib/reporting/stage-funnel");
+  const orgId = ((await db.execute(sql`select org_id from campaigns limit 1`)) as any[])[0].org_id as string;
 
-  const orgRows = (await db.execute(sql`select org_id from report_stage_hour limit 1`)) as any[];
-  const orgId = orgRows[0].org_id as string;
-  const b = boundsUtc("2026-06-01", "2026-07-20");
+  const from = "2026-07-18", to = "2026-07-19";
+  const { grand, grandTotalSent, grandOptOuts } = await getStageMetricsInRange(orgId, from, to);
+  const ref = { sent: grandTotalSent, opt: grandOptOuts, clickers: grand.visit_clicks_clean, redirects: grand.redirect_clicks_clean, sales: grand.sales, revenue: Math.round(grand.revenue) };
+  console.log("Overview grand:", JSON.stringify(ref));
+
   let fail = 0;
-  for (const dim of REPORT_DIMENSIONS) {
-    const r = await getPerformanceReport(orgId, dim, b);
-    const sumRows = r.rows.reduce((a: number, x: any) => a + x.sent, 0);
-    console.log(`${dim.padEnd(9)} rows=${String(r.rows.length).padStart(3)} totals.sent=${r.totals.sent} totals.rev=$${r.totals.revenue.toFixed(0)} rowSent=${sumRows} refreshed=${r.refreshedAt ? "yes" : "no"}`);
-    if (r.totals.sent < 967000) { console.log(`  x ${dim} totals.sent too low`); fail++; }
-    if (dim !== "group" && sumRows !== r.totals.sent) { console.log(`  x ${dim} rows dont sum to total (${sumRows} vs ${r.totals.sent})`); fail++; }
-    if (dim === "group" && sumRows <= r.totals.sent) { console.log(`  x group should fan out above total`); fail++; }
+  const near = (a: number, b: number, eps = 0.5) => Math.abs(a - b) <= eps;
+
+  for (const dim of ["number", "offer", "sequence", "group"] as const) {
+    const r = await getPerformanceReport(orgId, dim, { from, to, providerPhoneId: null });
+    const sum = r.rows.reduce((a: any, x: any) => ({
+      sent: a.sent + x.sent, opt: a.opt + x.opt_outs, clickers: a.clickers + x.clickers,
+      redirects: a.redirects + x.redirects, sales: a.sales + x.sales, revenue: a.revenue + x.revenue,
+    }), { sent: 0, opt: 0, clickers: 0, redirects: 0, sales: 0, revenue: 0 });
+    // totals must equal Overview grand
+    const tOK = r.totals.sent === ref.sent && r.totals.clickers === ref.clickers && r.totals.sales === ref.sales && Math.round(r.totals.revenue) === ref.revenue;
+    console.log(`${dim.padEnd(9)} rows=${r.rows.length} totals{sent:${r.totals.sent},clk:${r.totals.clickers},sales:${r.totals.sales},rev:${Math.round(r.totals.revenue)}} sumRows{sent:${sum.sent.toFixed(1)},clk:${sum.clickers.toFixed(1)},sales:${sum.sales.toFixed(1)}}`);
+    if (!tOK) { console.log(`  x ${dim} totals != Overview grand`); fail++; }
+    // rows reconcile to totals (exact for stage dims, ~ for group due to rounding)
+    const eps = dim === "group" ? 2 : 0.001;
+    if (!near(sum.sent, ref.sent, eps) || !near(sum.clickers, ref.clickers, eps) || !near(sum.sales, ref.sales, eps)) {
+      console.log(`  x ${dim} rows don't reconcile to grand (sent ${sum.sent} vs ${ref.sent}, clk ${sum.clickers} vs ${ref.clickers}, sales ${sum.sales} vs ${ref.sales})`); fail++;
+    }
     if (r.rows.length === 0) { console.log(`  x ${dim} no rows`); fail++; }
   }
-  const provs = await getReportProviderOptions(orgId);
-  console.log(`providers: ${provs.length} -> ${provs.map((p: any) => `${p.provider_name}:${p.phone_number}`).join(", ")}`);
-  const num = await getPerformanceReport(orgId, "number", b);
-  console.log("sample number row:", JSON.stringify({ label: num.rows[0].label, provider: num.rows[0].provider_name, color: num.rows[0].provider_color, sent: num.rows[0].sent }));
-  const hourly = await getPerformanceReport(orgId, "hourly", boundsUtc("2026-07-01", "2026-07-02"));
-  console.log("hourly (Jul 1):", hourly.rows.map((r: any) => `${r.label}:${r.sent}`).join(", ") || "(none)");
+
+  // hourly: single day, activity-time
+  const h = await getPerformanceReport(orgId, "hourly", { from: "2026-07-18", to: "2026-07-18", providerPhoneId: null });
+  console.log(`hourly rows=${h.rows.length} totals{clk:${h.totals.clickers},sales:${h.totals.sales},opt:${h.totals.opt_outs}}`);
+  console.log("  hours:", h.rows.map((r: any) => `${r.label}${r.pinned?"*":""}:clk${r.clickers}/opt${r.opt_outs}`).join("  "));
+
   console.log(fail === 0 ? "\nAll checks passed." : `\nFAILED: ${fail}`);
   process.exit(fail === 0 ? 0 : 1);
 }

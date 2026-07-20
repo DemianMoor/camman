@@ -1,4 +1,3 @@
-import { fromZonedTime } from "date-fns-tz";
 import { type NextRequest, NextResponse } from "next/server";
 
 import { requireApiMembership } from "@/lib/api/helpers";
@@ -13,22 +12,13 @@ import {
   type ReportDimension,
 } from "@/lib/reporting/report-dimensions";
 
-// Read API for the five performance reports (Phase 2). Reads the pre-aggregated
-// rollup fact tables (never a live scan of the base tables). Gated on
-// campaigns.view — same read permission as the existing /reports (Keitaro) tab.
+// Read API for the five performance reports. Number/offer/sequence/group source
+// from the shared per-stage Keitaro funnel (matches the Overview tab); hourly
+// buckets by user-activity time. Gated on campaigns.view (same as Overview).
 export const dynamic = "force-dynamic";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_RANGE_DAYS = 92;
-
-function addOneDay(d: string): string {
-  return new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
-}
-
-// ET wall-clock day start → UTC instant (DST-safe, mirrors the Keitaro route).
-function etDayStartUtc(d: string): string {
-  return fromZonedTime(`${d}T00:00:00`, CAMPAIGN_TIMEZONE).toISOString();
-}
 
 export async function GET(req: NextRequest) {
   const auth = await requireApiMembership();
@@ -75,14 +65,8 @@ export async function GET(req: NextRequest) {
   const providerPhoneId =
     providerRaw && /^\d+$/.test(providerRaw) ? Number(providerRaw) : null;
 
-  const bounds = {
-    fromUtc: etDayStartUtc(from),
-    toUtc: etDayStartUtc(addOneDay(to)), // exclusive upper bound
-    providerPhoneId,
-  };
-
   const [report, providers] = await Promise.all([
-    getPerformanceReport(auth.orgId, dimension, bounds),
+    getPerformanceReport(auth.orgId, dimension, { from, to, providerPhoneId }),
     getReportProviderOptions(auth.orgId),
   ]);
 

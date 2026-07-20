@@ -410,13 +410,13 @@ async function manualAllocationWeights(
 // ---- hourly: user-activity time from internal per-event tables --------------
 async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceReport> {
   const provFilter = b.providerPhoneId != null;
-  // Tracked events for the single ET day, bucketed by the EVENT's ET hour. The
+  // Tracked events across the ET date range, bucketed by the EVENT's ET hour-of-day (summed over all days in the range). The
   // provider filter (if set) restricts to sends from that number (via the stage).
   const provJoin = provFilter
     ? sql`JOIN campaign_stages cs ON cs.id = ss.stage_id AND cs.provider_phone_id = ${b.providerPhoneId}`
     : sql``;
-  const dayStart = sql`(${b.from} || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
-  const dayEnd = sql`((${b.from}::date + 1) || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
+  const rangeStart = sql`(${b.from} || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
+  const rangeEnd = sql`((${b.to}::date + 1) || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
   const hourExpr = (col: string) =>
     sql`EXTRACT(HOUR FROM ${sql.raw(col)} AT TIME ZONE 'America/New_York')::int`;
 
@@ -430,7 +430,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       SELECT ${hourExpr(tsCol)} AS hour, ${valueExpr} AS v
       FROM stage_sends ss ${join}
       WHERE ss.org_id = ${orgId}::uuid
-        AND ${sql.raw(tsCol)} >= ${dayStart} AND ${sql.raw(tsCol)} < ${dayEnd}
+        AND ${sql.raw(tsCol)} >= ${rangeStart} AND ${sql.raw(tsCol)} < ${rangeEnd}
         AND ${where}
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[];
@@ -443,7 +443,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       JOIN stage_sends ss ON ss.link_id = ck.link_id ${provJoin}
       WHERE ck.org_id = ${orgId}::uuid
         AND ck.classification = 'human' AND ck.scored_at IS NOT NULL
-        AND ck.clicked_at >= ${dayStart} AND ck.clicked_at < ${dayEnd}
+        AND ck.clicked_at >= ${rangeStart} AND ck.clicked_at < ${rangeEnd}
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[],
     eventAgg("ss.offer_reached_at", provJoin, sql`ss.offer_reached_at IS NOT NULL`, sql`count(*)::int`),
@@ -457,7 +457,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       JOIN campaign_stages cs2 ON cs2.id = ss.stage_id
       JOIN campaigns c ON c.id = cs2.campaign_id AND c.link_mode = 'tracked'
       WHERE oa.org_id = ${orgId}::uuid
-        AND oa.created_at >= ${dayStart} AND oa.created_at < ${dayEnd}
+        AND oa.created_at >= ${rangeStart} AND oa.created_at < ${rangeEnd}
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[],
   ]);
@@ -478,8 +478,8 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
     .map(([h, m]) => ({ key: String(h), label: formatEtHour(h), ...m }));
 
   // Manual row (pinned first): all results from MANUAL campaigns mapped to the
-  // day — manual sales by ledger entry date, plus manual-campaign opt-outs.
-  const manual = await manualDayRow(orgId, b);
+  // range — manual sales by ledger entry date, plus manual-campaign opt-outs.
+  const manual = await manualRangeRow(orgId, b);
   if (manual.sales > 0 || manual.opt_outs > 0 || manual.revenue > 0) {
     rows.unshift({ key: "manual", label: "Manual", pinned: true, ...manual });
   }
@@ -488,9 +488,9 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
   return { dimension: "hourly", rows, totals, refreshedAt: await maxSyncedAt(orgId) };
 }
 
-async function manualDayRow(orgId: string, b: Bounds): Promise<PerfMetrics> {
-  const dayStart = sql`(${b.from} || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
-  const dayEnd = sql`((${b.from}::date + 1) || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
+async function manualRangeRow(orgId: string, b: Bounds): Promise<PerfMetrics> {
+  const rangeStart = sql`(${b.from} || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
+  const rangeEnd = sql`((${b.to}::date + 1) || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
   const rows = (await db.execute(sql`
     SELECT
       coalesce((
@@ -498,14 +498,14 @@ async function manualDayRow(orgId: string, b: Bounds): Promise<PerfMetrics> {
         JOIN campaign_stages cs ON cs.id = sms.stage_id
         JOIN campaigns c ON c.id = cs.campaign_id AND c.link_mode = 'manual'
         WHERE sms.org_id = ${orgId}::uuid
-          AND sms.created_at >= ${dayStart} AND sms.created_at < ${dayEnd}
+          AND sms.created_at >= ${rangeStart} AND sms.created_at < ${rangeEnd}
       ), 0) AS sales,
       coalesce((
         SELECT count(*)::int FROM opt_out_attributions oa
         JOIN campaign_stages cs ON cs.id = oa.stage_id
         JOIN campaigns c ON c.id = cs.campaign_id AND c.link_mode = 'manual'
         WHERE oa.org_id = ${orgId}::uuid
-          AND oa.created_at >= ${dayStart} AND oa.created_at < ${dayEnd}
+          AND oa.created_at >= ${rangeStart} AND oa.created_at < ${rangeEnd}
       ), 0) AS opt_outs
   `)) as unknown as { sales: number; opt_outs: number }[];
   const r = rows[0] ?? { sales: 0, opt_outs: 0 };

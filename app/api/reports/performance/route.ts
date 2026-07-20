@@ -42,9 +42,9 @@ export async function GET(req: NextRequest) {
   const fromRaw = sp.get("from");
   const toRaw = sp.get("to");
   const from = fromRaw && DATE_RE.test(fromRaw) ? fromRaw : todayEt;
-  // The hourly report is single-day by definition — clamp `to` to `from`.
-  let to = toRaw && DATE_RE.test(toRaw) ? toRaw : todayEt;
-  if (dimension === "hourly") to = from;
+  // Hourly buckets by hour-of-day across the whole range (each hour summed over
+  // all days), so it takes a from/to range like every other dimension.
+  const to = toRaw && DATE_RE.test(toRaw) ? toRaw : todayEt;
 
   if (from > to) {
     return NextResponse.json(

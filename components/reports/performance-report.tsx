@@ -112,13 +112,20 @@ const FULL_COLS: Col[] = [
   { id: "epc", header: "EPC", kind: "usd" },
   { id: "profit", header: "Profit", kind: "profit" },
 ];
-// Hourly is activity-time engagement — no send-time metrics (sent/cost/rates).
+// Hourly: Sent (by send hour) + activity-time engagement with % rates. Rates use
+// the same formulas as the other tabs (÷ sent, redirect ÷ clickers, sales ÷
+// redirects). No cost/EPC/profit (cost is a per-stage lump, not hour-bucketable).
 const HOURLY_COLS: Col[] = [
-  { id: "clickers", header: "Clickers", kind: "count" },
-  { id: "redirects", header: "Redirects", kind: "count" },
-  { id: "sales", header: "Sales", kind: "count" },
-  { id: "revenue", header: "Revenue", kind: "usd" },
+  { id: "sent", header: "Sent", kind: "count" },
   { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
+  { id: "opt_out_rate", header: "OptOut %", kind: "pct", muted: true },
+  { id: "clickers", header: "Clickers", kind: "count" },
+  { id: "click_rate", header: "CR %", kind: "pct", muted: true },
+  { id: "redirects", header: "Redirects", kind: "count" },
+  { id: "redirect_rate", header: "Redir %", kind: "pct", muted: true },
+  { id: "sales", header: "Sales", kind: "count" },
+  { id: "sales_cr", header: "Sales CR", kind: "pct", muted: true },
+  { id: "revenue", header: "Revenue", kind: "usd" },
 ];
 
 function fmtCell(v: number, kind: Col["kind"]): string {
@@ -267,12 +274,13 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
 
       {totals ? (
         isHourly ? (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <StatCard label="Sent" value={fmtInt(totals.sent)} />
+            <StatCard label="Opt-out %" value={fmtPct(rate(totals.opt_outs, totals.sent))} />
             <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
             <StatCard label="Redirects" value={fmtInt(totals.redirects)} />
             <StatCard label="Sales" value={fmtInt(totals.sales)} />
             <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
-            <StatCard label="Opt-outs" value={fmtInt(totals.opt_outs)} />
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
@@ -291,10 +299,12 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
       <p className="text-xs text-muted-foreground">
         {isHourly ? (
           <>
-            Each hour is summed by <span className="font-medium">user-activity time</span> across the selected date
-            range in {CAMPAIGN_TIMEZONE_LABEL} — clicks by click time, sales by conversion time, opt-outs by receipt
-            time (internal event data; clicks won&apos;t equal the Keitaro count on Overview). Manual-campaign results
-            have no per-event time and roll up into the pinned <span className="font-medium">Manual</span> row.
+            Each hour is summed across the selected date range in {CAMPAIGN_TIMEZONE_LABEL}. <span className="font-medium">Sent</span> is
+            by send hour; engagement is by <span className="font-medium">user-activity time</span> — clicks by click
+            time, sales by conversion time, opt-outs by receipt time (internal event data; clicks won&apos;t equal the
+            Keitaro count on Overview). Rates are each action ÷ sent (redirect ÷ clickers, sales ÷ redirects).
+            Manual-campaign results have no per-event time and roll up into the pinned{" "}
+            <span className="font-medium">Manual</span> row.
           </>
         ) : (
           <>

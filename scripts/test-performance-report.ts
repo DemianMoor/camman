@@ -36,8 +36,8 @@ async function main() {
 
   // hourly: single day, activity-time
   const h = await getPerformanceReport(orgId, "hourly", { from: "2026-07-15", to: "2026-07-19", providerPhoneId: null });
-  console.log(`hourly rows=${h.rows.length} totals{clk:${h.totals.clickers},sales:${h.totals.sales},opt:${h.totals.opt_outs}}`);
-  console.log("  hours:", h.rows.map((r: any) => `${r.label}${r.pinned?"*":""}:clk${r.clickers}/opt${r.opt_outs}`).join("  "));
+  console.log(`hourly rows=${h.rows.length} totals{sent:${h.totals.sent},clk:${h.totals.clickers},sales:${h.totals.sales},opt:${h.totals.opt_outs}} CR=${h.totals.sent?(h.totals.clickers/h.totals.sent*100).toFixed(1):0}%`);
+  console.log("  hours:", h.rows.map((r: any) => `${r.label}${r.pinned?"*":""}:sent${r.sent}/clk${r.clickers}/opt${r.opt_outs}`).join("  "));
 
   console.log(fail === 0 ? "\nAll checks passed." : `\nFAILED: ${fail}`);
   process.exit(fail === 0 ? 0 : 1);

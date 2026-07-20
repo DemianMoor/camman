@@ -435,7 +435,17 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[];
 
-  const [clicks, redirects, sales, revenue, optouts] = await Promise.all([
+  const [sentRows, clicks, redirects, sales, revenue, optouts] = await Promise.all([
+    // Sent messages by SEND hour (tracked stage_sends; manual-campaign sends have
+    // no per-message time and roll up into the Manual row). This is the one column
+    // bucketed by send time, not activity time — it's the denominator for the rates.
+    (await db.execute(sql`
+      SELECT ${hourExpr("ss.sent_at")} AS hour, count(*)::int AS v
+      FROM stage_sends ss ${provJoin}
+      WHERE ss.org_id = ${orgId}::uuid AND ss.status = 'sent'
+        AND ss.sent_at >= ${rangeStart} AND ss.sent_at < ${rangeEnd}
+      GROUP BY 1
+    `)) as unknown as { hour: number; v: number }[],
     // clean internal clicks by click time
     (await db.execute(sql`
       SELECT ${hourExpr("ck.clicked_at")} AS hour, count(*)::int AS v
@@ -467,6 +477,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
     if (!hours.has(h)) hours.set(h, { ...ZERO });
     (hours.get(h)![field] as number) += v;
   };
+  for (const r of sentRows) bump(r.hour, "sent", Number(r.v));
   for (const r of clicks) bump(r.hour, "clickers", Number(r.v));
   for (const r of redirects) bump(r.hour, "redirects", Number(r.v));
   for (const r of sales) bump(r.hour, "sales", Number(r.v));
@@ -480,7 +491,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
   // Manual row (pinned first): all results from MANUAL campaigns mapped to the
   // range — manual sales by ledger entry date, plus manual-campaign opt-outs.
   const manual = await manualRangeRow(orgId, b);
-  if (manual.sales > 0 || manual.opt_outs > 0 || manual.revenue > 0) {
+  if (manual.sent > 0 || manual.sales > 0 || manual.opt_outs > 0 || manual.revenue > 0) {
     rows.unshift({ key: "manual", label: "Manual", pinned: true, ...manual });
   }
 
@@ -506,10 +517,21 @@ async function manualRangeRow(orgId: string, b: Bounds): Promise<PerfMetrics> {
         JOIN campaigns c ON c.id = cs.campaign_id AND c.link_mode = 'manual'
         WHERE oa.org_id = ${orgId}::uuid
           AND oa.created_at >= ${rangeStart} AND oa.created_at < ${rangeEnd}
-      ), 0) AS opt_outs
-  `)) as unknown as { sales: number; opt_outs: number }[];
-  const r = rows[0] ?? { sales: 0, opt_outs: 0 };
-  return { ...ZERO, sales: Number(r.sales) || 0, opt_outs: Number(r.opt_outs) || 0 };
+      ), 0) AS opt_outs,
+      coalesce((
+        SELECT sum(cs.sms_count)::int FROM campaign_stages cs
+        JOIN campaigns c ON c.id = cs.campaign_id AND c.link_mode = 'manual'
+        WHERE cs.org_id = ${orgId}::uuid AND cs.archived_at IS NULL
+          AND cs.sent_at >= ${rangeStart} AND cs.sent_at < ${rangeEnd}
+      ), 0) AS sent
+  `)) as unknown as { sales: number; opt_outs: number; sent: number }[];
+  const r = rows[0] ?? { sales: 0, opt_outs: 0, sent: 0 };
+  return {
+    ...ZERO,
+    sent: Number(r.sent) || 0,
+    sales: Number(r.sales) || 0,
+    opt_outs: Number(r.opt_outs) || 0,
+  };
 }
 
 // ---- label + freshness helpers ---------------------------------------------

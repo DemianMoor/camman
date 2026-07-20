@@ -177,16 +177,64 @@ export async function POST(
         .where(eq(campaigns.id, cid));
     }
 
+    // Resolve the URL-rebuild context ONCE, shared by the source AND every
+    // sibling so variant A and B..N come out identically shaped. A guidekn (or
+    // empty/auto) source is rebuilt CANONICALLY from its sales page + each
+    // stage's OWN tracking id (…/lp/<slug>?sub_id3=<id>); a custom non-guidekn
+    // URL is preserved with only its sub_id3 rewritten. The old approach that
+    // inherited-and-patched propagated a malformed base (id-in-path) verbatim.
+    const srcFull = (source.full_url ?? "").trim();
+    const rebuildFromSalesPage = srcFull === "" || isGuideknLpUrl(srcFull);
+    let salesPageUrl: string | null = null;
+    if (parentTrackingId != null && rebuildFromSalesPage) {
+      const ctx = await loadStageUrlContext({
+        orgId,
+        offerId: campaignRow[0].offer_id,
+        salesPageLabel: source.sales_page_label,
+        utmTagIds: [],
+        dbc: tx,
+      });
+      if (ctx.ok) salesPageUrl = ctx.ctx.salesPageUrl;
+    }
+
+    // Attach `stageTrackingId` to a stage's inherited/base full_url the same way
+    // for the source and every sibling. Returns the input unchanged when there's
+    // nothing to build from (no sales page and no existing URL).
+    function attachStageTracking(
+      currentFullUrl: string | null,
+      stageTrackingId: string,
+    ): string | null {
+      if (rebuildFromSalesPage && salesPageUrl) {
+        return (
+          buildStageFullUrl({ salesPageUrl, trackingId: stageTrackingId }) ||
+          currentFullUrl
+        );
+      }
+      if (currentFullUrl) {
+        return setUrlParam(currentFullUrl, STAGE_TRACKING_PARAM, stageTrackingId);
+      }
+      return currentFullUrl;
+    }
+
     // Source stage becomes split 1 of N. Its tracking_id stays — the
-    // creative_id and stage_number didn't change, so the historical
-    // reference is preserved.
+    // creative_id and stage_number didn't change, so the historical reference
+    // is preserved. Its full_url IS refreshed to carry that tracking id as
+    // sub_id3, so variant A matches B..N instead of being left as the bare
+    // sales-page URL (which forced a manual reopen to attach the tag).
+    const sourceUpdate: Partial<typeof campaign_stages.$inferInsert> = {
+      split_index: 1,
+      split_total: count,
+      label: `${baseLabel} (A)`,
+    };
+    if (parentTrackingId != null && source.tracking_id != null) {
+      sourceUpdate.full_url = attachStageTracking(
+        source.full_url,
+        source.tracking_id,
+      );
+    }
     await tx
       .update(campaign_stages)
-      .set({
-        split_index: 1,
-        split_total: count,
-        label: `${baseLabel} (A)`,
-      })
+      .set(sourceUpdate)
       .where(eq(campaign_stages.id, source.id));
 
     // Letters A, B, C, … for human-readable labels on the new siblings.
@@ -245,28 +293,10 @@ export async function POST(
         full_url: campaign_stages.full_url,
       });
 
-    // Each new sibling gets its own tracking_id. Skip stages without a
+    // Each new sibling gets its own tracking_id + a full_url rebuilt from it
+    // (via the shared attachStageTracking above). Skip stages without a
     // creative_id (mirrors stage POST behavior).
     if (parentTrackingId != null) {
-      // For guidekn (or empty/auto) sources, rebuild each sibling's full_url
-      // CANONICALLY from its OWN tracking id (…/lp/<slug>?sub_id3=<id>) instead
-      // of inheriting the source's URL and patching sub_id3 — the old approach
-      // propagated a malformed base (id-in-path) verbatim. Custom non-guidekn
-      // URLs are preserved (best-effort sub_id3 rewrite). Resolve the source's
-      // sales page ONCE; all siblings share it.
-      const srcFull = (source.full_url ?? "").trim();
-      const rebuildFromSalesPage = srcFull === "" || isGuideknLpUrl(srcFull);
-      let salesPageUrl: string | null = null;
-      if (rebuildFromSalesPage) {
-        const ctx = await loadStageUrlContext({
-          orgId,
-          offerId: campaignRow[0].offer_id,
-          salesPageLabel: source.sales_page_label,
-          utmTagIds: [],
-          dbc: tx,
-        });
-        if (ctx.ok) salesPageUrl = ctx.ctx.salesPageUrl;
-      }
       for (const s of insertedStages) {
         if (s.creative_id == null) continue;
         const stageTrackingId = generateStageTrackingId({
@@ -274,21 +304,12 @@ export async function POST(
           stageNumber: s.stage_number,
           creativeId: s.creative_id,
         });
-        let rewrittenFullUrl: string | null = s.full_url;
-        if (rebuildFromSalesPage && salesPageUrl) {
-          rewrittenFullUrl =
-            buildStageFullUrl({ salesPageUrl, trackingId: stageTrackingId }) ||
-            s.full_url;
-        } else if (s.full_url) {
-          rewrittenFullUrl = setUrlParam(
-            s.full_url,
-            STAGE_TRACKING_PARAM,
-            stageTrackingId,
-          );
-        }
         await tx
           .update(campaign_stages)
-          .set({ tracking_id: stageTrackingId, full_url: rewrittenFullUrl })
+          .set({
+            tracking_id: stageTrackingId,
+            full_url: attachStageTracking(s.full_url, stageTrackingId),
+          })
           .where(eq(campaign_stages.id, s.id));
       }
     }

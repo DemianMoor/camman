@@ -100,6 +100,43 @@ console.log("\nEmpty source + sales page → sibling gets a canonical URL:");
   );
 }
 
+// The source stage (variant A) runs through the SAME rebuild as the siblings,
+// using its OWN (unchanged) tracking id — so it comes out with sub_id3 attached
+// instead of staying the bare sales-page URL. `rebuildSiblingUrl` is the exact
+// shared decision (attachStageTracking) the route now applies to the source too.
+console.log("\nVariant A (source) — bare auto URL gets its own tracking id attached:");
+{
+  // Create-then-split: the source was saved in auto mode as the bare sales page.
+  const out = rebuildSiblingUrl(
+    "https://www.guidekn.com/lp/knd",
+    "https://www.guidekn.com/lp/knd",
+    "8_62_061226_2_s3_c174",
+  );
+  eq(
+    out ?? "",
+    "https://www.guidekn.com/lp/knd?sub_id3=8_62_061226_2_s3_c174",
+    "bare source URL gains sub_id3 (no more manual reopen)",
+  );
+  ok(
+    validateDestination(out, "8_62_061226_2_s3_c174") === null,
+    "variant A URL is canonical + matches its own id",
+  );
+}
+
+console.log("\nVariant A (source) — custom non-guidekn URL keeps base, gains sub_id3:");
+{
+  const out = rebuildSiblingUrl(
+    "https://clicks2scale.com/click?o=14508&a=1737",
+    "https://www.guidekn.com/lp/knd",
+    "8_62_061226_2_s3_c174",
+  );
+  eq(
+    out ?? "",
+    "https://clicks2scale.com/click?o=14508&a=1737&sub_id3=8_62_061226_2_s3_c174",
+    "non-guidekn source preserved, sub_id3 appended",
+  );
+}
+
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) FAILED`);
   process.exit(1);

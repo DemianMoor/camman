@@ -1,6 +1,6 @@
 # Feature — Audience Snapshot (freeze-at-activation)
 
-_Last updated: 2026-07-09_
+_Last updated: 2026-07-21_
 
 ## 1. Purpose
 A campaign's audience is **computed and frozen** the moment it transitions `draft → active`, into `campaign_audience_pool`. The whole point: adding a contact to a referenced segment later does **not** retroactively expand a live campaign's reach. Drafts carry only the *recipe* (segment ids, group ids, filters, cap); the *contacts* are materialized once.
@@ -17,14 +17,15 @@ A campaign's audience is **computed and frozen** the moment it transitions `draf
 2. Each candidate is LEFT JOINed against `opt_ins` / `clickers` to compute status flags, and `audience_filters` (`include_no_status`, `include_opt_in`, `include_clickers`, `include_not_clicked`) select which status buckets qualify (OR logic — any matching include flag keeps the contact).
 3. Contacts with **any** `opt_outs` row are excluded (live exclusion).
 4. **`exclude_in_use_contacts` (campaign-level, default true):** drops any contact already snapshotted into another `status='active'` campaign's pool — applied to the **whole** candidate pool (i.e. the segment∩group intersection, or the single populated side), which the per-segment flag can't reach for a group-only audience. Both flags compose (idempotent — they EXCEPT the same active-pool set).
-5. **`audience_cap`:** random-sample (`ORDER BY RANDOM() LIMIT cap`) from the remaining pool. `min(cap, available)` — a cap larger than the pool is a no-op; with exclusion on, it samples from the unused pool only.
+4b. **`exclude_prior_offer_contacts` (content-dedup LAYER 3, default false; as of 2026-07-21):** when on AND the campaign has an offer, drops contacts already in `offer_exposures` for that offer (they received it in a previous campaign). Baked into the frozen pool here — the same exclusion `previewAudience` shows — so the pool equals the previewed will-send and the stage doesn't surprise-filter at materialization. Re-checked at send time as a live safety net (post-activation exposures + pre-2026-07-21 pools). See [content-dedup.md §6b](content-dedup.md).
+5. **`audience_cap`:** random-sample (`ORDER BY RANDOM() LIMIT cap`) from the remaining pool. `min(cap, available)` — a cap larger than the pool is a no-op; with exclusion(s) on, it samples from the already-narrowed (unused / non-prior-offer) pool only.
 
 ### Key functions
 | Function | Role |
 |----------|------|
 | `previewAudience(input)` | SELECT-only; returns counts: `count` (post-cap), `total_matching` (the **intersected** audience when both dimensions are selected), `from_segments` / `from_groups` (each side's eligible pool — see the perf note: when both dimensions are selected `from_segments` is evaluated **within** the group set, so it equals `overlap`/`total_matching`), `overlap`, `excluded_for_optout`, `in_use_in_other_campaigns`, `got_offer_in_prior_campaign` (content-dedup LAYER 3 — in-audience leads who already received the campaign's offer; subtracted from `total_matching` only when `exclude_prior_offer_contacts` is on, and a point-in-time estimate — see [content-dedup.md §6b](content-dedup.md)). Powers the editor preview & "N excluded" UI. |
 | `buildAudienceSourceSql(input)` | composes the raw candidate set (segment ∩ group, before status filters). |
-| `buildQualifierFromRelation(input, rel)` | wraps a candidate relation with the status-flag joins + filter WHERE, projecting the snapshot booleans. |
+| `buildQualifierFromRelation(input, rel)` | wraps a candidate relation with the status-flag joins + filter WHERE, projecting the snapshot booleans. Also applies content-dedup LAYER 3 (`exclude_prior_offer_contacts` + `offerId`) so the frozen pool matches `previewAudience`. |
 | `snapshotAudience(input, tx?)` | materializes the candidate set into a temp table, ANALYZEs it, then INSERTs the frozen rows into `campaign_audience_pool`; returns `{ count, total_matching }`. **Must** run inside a transaction (uses `ON COMMIT DROP` temp tables). |
 | `computeStageAudienceCount(campaignId, orgId, filters)` | reads the **frozen** pool for an active campaign + applies stage-level filters + live opt-out exclusion. One stage. Used by the audience-count / audience-preview routes. |
 | `computeStageAudienceCountForDraft(campaign, filters)` | recomputes live from the recipe for draft-stage previews (no frozen pool yet). One stage. |

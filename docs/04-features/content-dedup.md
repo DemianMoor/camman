@@ -1,6 +1,6 @@
 # Feature — Content Deduplication & Offer Exposure
 
-_Last updated: 2026-07-09_
+_Last updated: 2026-07-21_
 
 > **Status: LIVE (Phase 1 + Phase 2 shipped).** Phase 1 (migration `0086`):
 > ledgers, triggers, RLS, backfill. Phase 2 (migration `0087`): the send-time
@@ -21,7 +21,11 @@ separate:
    shows "N distinct leads already used for this offer."
 3. **Include/exclude filter (manual, per-campaign, at creation):** the operator
    chooses whether to exclude or include leads already touched by this offer in
-   **previous** campaigns. Even when "include" is chosen, layer 1 still applies.
+   **previous** campaigns. When "exclude" is chosen the exclusion is **baked into
+   the frozen audience at activation** (as of 2026-07-21), so the pool the stages
+   send from already omits those leads — matching what the creation-time preview
+   showed. The same exclusion is also re-checked at send time as a live safety net
+   (see §6b). Even when "include" is chosen, layer 1 still applies.
 
 Send-time eligibility (Phase 2):
 ```
@@ -143,20 +147,39 @@ The three layers:
   gained an `excluded_dedup` bucket — `pool = attempted + excluded(opt_out |
   filter | split | dedup) + gap`. Without it, every deduped campaign would show a
   false materialization-gap alarm.
-- **Stages-list `audience_count`** is intentionally LEFT as the pre-dedup
-  *addressable* pool size (the perf-tuned batched query is untouched). The
-  post-dedup *will-send* number lives in the Prepare popup (preflight) and the §5
-  preview.
+- **Stages-list `audience_count`** reads the frozen `campaign_audience_pool`
+  (opt-outs + stage toggles + split, no dedup). Because LAYER 3 is now baked into
+  the pool at snapshot (see below), for a campaign created after 2026-07-21 this
+  number already reflects the offer exclusion — it no longer overstates a will-send
+  that the send-time anti-join later shrinks. The always-on creative rule (LAYER 1)
+  and post-activation offer exposures are still applied at send, so the Prepare
+  popup (preflight) remains the authoritative will-send.
+- **LAYER 3 is baked into the frozen snapshot (changed 2026-07-21).**
+  [`snapshotAudience`](../../lib/audience-snapshot.ts) → `buildQualifierFromRelation`
+  applies the SAME offer-exposure exclusion as `previewAudience` (shared
+  `flagSetCtes`/`flagJoins` `oe_set`, identical `is_eligible` predicate), so the
+  **frozen pool equals the previewed will-send** — the exclusion the operator
+  configured at creation is honored in the pool itself, not re-derived as a
+  surprise second filter at materialization. Wired from both snapshot callers
+  (campaign create + draft→active) which pass `excludePriorOffer` + `offerId`. The
+  random-sample **cap now draws from the correctly-narrowed pool** (previously it
+  sampled the un-narrowed set, then send-time dedup stripped most of the sample).
+  Regression + parity proven by [`scripts/test-snapshot-prior-offer.ts`](../../scripts/test-snapshot-prior-offer.ts)
+  (snapshot ON == preview ON, snapshot OFF == preview OFF, ON < OFF by exactly
+  `got_offer_in_prior_campaign`).
+  - **Why keep the send-time layer too:** it is a live safety net — it catches
+    contacts exposed to the offer by ANOTHER campaign *between* activation and
+    send (the `offer_exposures` ledger keeps growing), and it protects pools frozen
+    *before* this change (e.g. in-flight active campaigns) from suddenly sending to
+    leads their snapshot never excluded. For a fresh pool it removes ~nobody.
 - **Campaign audience preview** ([`lib/audience-snapshot.ts`](../../lib/audience-snapshot.ts)
   `previewAudience`, feeding the campaign-form right rail): when
   `exclude_prior_offer_contacts` is on AND an offer is set, the preview subtracts
   LAYER 3 from `total_matching` and reports `got_offer_in_prior_campaign` (the
-  "N leads excluded — already received this offer" line). This is **preview
-  visibility only** — the frozen `campaign_audience_pool` snapshot is NOT
-  narrowed by LAYER 3 (the send-time anti-join stays the gate), so the pool can
-  exceed the previewed will-send. The count is a **point-in-time estimate**: the
-  `offer_exposures` ledger grows as other campaigns send, so the real send-time
-  exclusion can be larger. **Perf:** the `oe_set` CTE + LEFT JOIN are added only
+  "N leads excluded — already received this offer" line). The count is a
+  **point-in-time estimate**: the `offer_exposures` ledger grows as other campaigns
+  send, so the real send-time exclusion can still be marginally larger than what
+  was frozen. **Perf:** the `oe_set` CTE + LEFT JOIN are added only
   when the toggle is on. With it off there is **no `oe_set` CTE, no join, and no
   `offer_exposures` table access** — the only difference from before is a couple
   of constant `false` literals that Postgres folds away at planning, so runtime

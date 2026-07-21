@@ -5,7 +5,11 @@ config({ path: resolve(process.cwd(), ".env.local") });
 import postgres from "postgres";
 
 import { isOptOutKeyword } from "../lib/sends/opt-out-keywords";
-import { buildInboxUrl, fetchInbox } from "../lib/sends/texthub-inbox";
+import {
+  buildInboxUrl,
+  fetchInbox,
+  shouldFetchNextInboxPage,
+} from "../lib/sends/texthub-inbox";
 
 // Verifies the opt-out poll building blocks WITHOUT calling TextHub and WITHOUT
 // leaving any rows behind (the DB portion runs in a rolled-back transaction).
@@ -33,6 +37,25 @@ async function main() {
   check("url targets api.texthub.com/v2", url.startsWith("https://api.texthub.com/v2/"));
   check("url has inbox=true", url.includes("inbox=true"));
   check("url carries api_key", url.includes("api_key=ABC123"));
+  check("page 1 omits the page param", !url.includes("page="));
+  check("page 3 adds page=3", buildInboxUrl("ABC123", 3).includes("page=3"));
+
+  console.log("\n--- pagination control (shouldFetchNextInboxPage) ---");
+  const cont = (a: Partial<Parameters<typeof shouldFetchNextInboxPage>[0]>) =>
+    shouldFetchNextInboxPage({
+      page: 1,
+      newlyClaimedThisPage: 5,
+      totalPages: 8,
+      maxPages: 10,
+      elapsedMs: 0,
+      budgetMs: 35_000,
+      ...a,
+    });
+  check("continues when new msgs + pages remain", cont({}) === true);
+  check("STOPS when a page is fully already-claimed (caught up)", cont({ newlyClaimedThisPage: 0 }) === false);
+  check("STOPS at the last page", cont({ page: 8, totalPages: 8 }) === false);
+  check("STOPS at the per-tick page cap", cont({ page: 10, maxPages: 10 }) === false);
+  check("STOPS when the time budget is spent", cont({ elapsedMs: 40_000 }) === false);
 
   console.log("\n--- inbox response classification (stubbed fetch) ---");
   // Stub global fetch so we exercise the REAL fetchInbox classification without
@@ -51,11 +74,14 @@ async function main() {
 
     stub(true, 200, {
       status: 200,
+      page: 2,
+      total_pages: 8,
       data: [{ id: "1", message: "STOP", phone: "+15551234567", received_at: null }],
     });
-    r = await fetchInbox({ apiKey: "X" });
+    r = await fetchInbox({ apiKey: "X", page: 2 });
     check("messages present → ok:true", r.ok === true);
     check("messages present → 1 message parsed", r.messages.length === 1);
+    check("pagination meta parsed (page=2, totalPages=8)", r.page === 2 && r.totalPages === 8);
 
     stub(true, 200, { status: 0, error: "bad key" });
     r = await fetchInbox({ apiKey: "X" });

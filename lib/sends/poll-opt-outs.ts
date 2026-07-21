@@ -5,7 +5,11 @@ import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { isOptOutKeyword } from "@/lib/sends/opt-out-keywords";
 import { decryptCredentialKey } from "@/lib/sends/provider-credential";
-import { fetchInbox as realFetchInbox, type FetchInboxResult } from "@/lib/sends/texthub-inbox";
+import {
+  fetchInbox as realFetchInbox,
+  shouldFetchNextInboxPage,
+  type FetchInboxResult,
+} from "@/lib/sends/texthub-inbox";
 import { validatePhone } from "@/lib/phone-validation";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 
@@ -60,7 +64,9 @@ export const TEXTHUB_RECEIVED_AT_TIMEZONE = "America/Denver";
 // offset) are honored as-is.
 export function parseProviderReceivedAt(raw: string | null): Date | null {
   if (!raw) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(raw.trim());
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(
+    raw.trim(),
+  );
   if (m) {
     const [, Y, Mo, D, H, Mi, S] = m;
     const d = fromZonedTime(
@@ -76,7 +82,8 @@ export function parseProviderReceivedAt(raw: string | null): Date | null {
 export type Database = typeof db;
 
 // Any drizzle executor — the top-level client or a transaction handle.
-export type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type Executor =
+  typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export interface AttributionMatch {
   stage_send_id: string;
@@ -117,7 +124,22 @@ export async function latestSendForAttribution(
   return rows[0] ?? null;
 }
 
-export type InboxFetcher = (opts: { apiKey: string }) => Promise<FetchInboxResult>;
+export type InboxFetcher = (opts: {
+  apiKey: string;
+  page?: number;
+}) => Promise<FetchInboxResult>;
+
+// Per-tick pagination bounds for one credential. TextHub's inbox is a retained,
+// newest-first, paginated ~1,500-message window (≈8 pages of 200). Normally the
+// poller walks 1–2 pages and stops on the first fully-already-claimed page
+// (caught up). MAX_INBOX_PAGES caps a catch-up walk so a single tick can't blow
+// the route's maxDuration; PER_CREDENTIAL_BUDGET_MS is the fairness valve — it
+// stops one high-volume account from consuming the whole cron and starving the
+// next credential (the incident this fixes). A credential that hits either bound
+// resumes next tick; a genuine deep backlog is drained with
+// scripts/drain-texthub-inbox.ts.
+const MAX_INBOX_PAGES = 10;
+const PER_CREDENTIAL_BUDGET_MS = 35_000;
 
 export interface CredentialRow {
   credential_id: number;
@@ -173,20 +195,12 @@ async function pollCredential(
   cred: CredentialRow,
   fetchInbox: InboxFetcher,
 ): Promise<CredentialPollSummary> {
-  const base = { credential_id: cred.credential_id, org_id: cred.org_id, ...EMPTY };
-
-  const inbox = await fetchInbox({ apiKey: cred.api_key });
-  if (!inbox.ok) {
-    // Compliance-critical: a failing opt-out poll means inbound STOPs aren't
-    // being ingested. This used to fail silently. Best-effort alert; never
-    // throws or blocks the rest of the poll (other credentials still run).
-    await notifyTelegram(
-      `⚠️ Opt-out poller FAILED (inbound STOPs not ingested)\n` +
-        `error: ${inbox.error ?? "unknown"}\n` +
-        `credential: ${cred.credential_id} · provider: ${cred.provider_id} (org ${cred.org_id})`,
-    );
-    return { ...base, error: inbox.error };
-  }
+  const base = {
+    credential_id: cred.credential_id,
+    org_id: cred.org_id,
+    ...EMPTY,
+  };
+  const startedAt = Date.now();
 
   let neu = 0;
   let suppressed = 0;
@@ -195,17 +209,43 @@ async function pollCredential(
   let ignored = 0;
   let invalid = 0;
   let errored = 0;
+  let fetched = 0;
 
-  for (const m of inbox.messages) {
-    const isStop = isOptOutKeyword(m.message);
-    const parsed = isStop ? validatePhone(m.phone) : null;
-    const phone = parsed?.valid ? parsed.normalized : null;
+  // Walk pages newest-first until caught up (a page with 0 newly-claimed
+  // messages), the window is exhausted, or a per-tick bound (page cap / time
+  // budget) is hit. Reading only page 1 (the old behavior) stranded any backlog
+  // on pages 2..N — the txh starvation incident (2026-07-21).
+  let page = 1;
+  while (true) {
+    const inbox = await fetchInbox({ apiKey: cred.api_key, page });
+    if (!inbox.ok) {
+      // Compliance-critical: a failing opt-out poll means inbound STOPs aren't
+      // being ingested. This used to fail silently. Best-effort alert; never
+      // throws or blocks the rest of the poll (other credentials still run).
+      await notifyTelegram(
+        `⚠️ Opt-out poller FAILED (inbound STOPs not ingested)\n` +
+          `error: ${inbox.error ?? "unknown"}\n` +
+          `credential: ${cred.credential_id} · provider: ${cred.provider_id} (org ${cred.org_id}) · page ${page}`,
+      );
+      // Page 1 failing means nothing was ingested for this credential. A later
+      // page failing mid-walk keeps what earlier pages already committed.
+      if (page === 1) return { ...base, error: inbox.error };
+      break;
+    }
 
-    let outcome: Outcome;
-    try {
-      outcome = await database.transaction(async (tx) => {
-        // Claim the message (dedupe). No row back => already processed.
-        const claimed = (await tx.execute(sql`
+    fetched += inbox.messages.length;
+    let newlyClaimedThisPage = 0;
+
+    for (const m of inbox.messages) {
+      const isStop = isOptOutKeyword(m.message);
+      const parsed = isStop ? validatePhone(m.phone) : null;
+      const phone = parsed?.valid ? parsed.normalized : null;
+
+      let outcome: Outcome;
+      try {
+        outcome = await database.transaction(async (tx) => {
+          // Claim the message (dedupe). No row back => already processed.
+          const claimed = (await tx.execute(sql`
           INSERT INTO texthub_inbound_events
             (org_id, credential_id, provider_id, method, raw_body,
              provider_message_id, result)
@@ -215,74 +255,79 @@ async function pollCredential(
             WHERE provider_message_id IS NOT NULL DO NOTHING
           RETURNING id
         `)) as unknown as { id: string }[];
-        if (claimed.length === 0) return { kind: "dupe" } as const;
-        const eventId = claimed[0].id;
+          if (claimed.length === 0) return { kind: "dupe" } as const;
+          const eventId = claimed[0].id;
 
-        // TextHub's own receipt time anchors the attribution window; fall back
-        // to the poll time when the payload's timestamp won't parse.
-        const receivedAt = parseProviderReceivedAt(m.received_at);
-        const anchorIso = (receivedAt ?? new Date()).toISOString();
+          // TextHub's own receipt time anchors the attribution window; fall back
+          // to the poll time when the payload's timestamp won't parse.
+          const receivedAt = parseProviderReceivedAt(m.received_at);
+          const anchorIso = (receivedAt ?? new Date()).toISOString();
 
-        if (!isStop) {
-          await tx.execute(sql`
+          if (!isStop) {
+            await tx.execute(sql`
             UPDATE texthub_inbound_events
             SET result = 'ignored', processed_at = now(),
                 provider_received_at = ${receivedAt?.toISOString() ?? null}
             WHERE id = ${eventId}
           `);
-          return { kind: "ignored" } as const;
-        }
-        if (!phone) {
-          await tx.execute(sql`
+            return { kind: "ignored" } as const;
+          }
+          if (!phone) {
+            await tx.execute(sql`
             UPDATE texthub_inbound_events
             SET result = 'invalid_phone', processed_at = now(),
                 provider_received_at = ${receivedAt?.toISOString() ?? null}
             WHERE id = ${eventId}
           `);
-          return { kind: "invalid" } as const;
-        }
+            return { kind: "invalid" } as const;
+          }
 
-        // Upsert the contact (create if unknown — a STOP must suppress the
-        // number even if it isn't an existing contact yet; mirrors the opt-out
-        // CSV flow). Then insert the org-wide opt_out (no brand junction =
-        // universal suppression, which the audience enumeration already honors).
-        const c = (await tx.execute(sql`
+          // Upsert the contact (create if unknown — a STOP must suppress the
+          // number even if it isn't an existing contact yet; mirrors the opt-out
+          // CSV flow). Then insert the org-wide opt_out (no brand junction =
+          // universal suppression, which the audience enumeration already honors).
+          const c = (await tx.execute(sql`
           INSERT INTO contacts (org_id, phone_number)
           VALUES (${cred.org_id}, ${phone})
           ON CONFLICT (org_id, phone_number) DO UPDATE SET updated_at = now()
           RETURNING id
         `)) as unknown as { id: string }[];
-        const contactId = c[0]?.id;
+          const contactId = c[0]?.id;
 
-        // created_at = the STOP's real receipt time (anchorIso), NOT the poll
-        // time (now()). Poll time can cross an ET-midnight boundary vs the reply,
-        // landing the opt-out on the wrong report day; the parsed provider time
-        // is the true moment. Falls back to now() only when unparseable (anchorIso
-        // already encodes that fallback). Keeps opt_outs.created_at ==
-        // opt_out_attributions.created_at so the Reports page (which buckets by the
-        // attribution date) and the opt-outs list agree on the day it happened.
-        const oo = (await tx.execute(sql`
+          // created_at = the STOP's real receipt time (anchorIso), NOT the poll
+          // time (now()). Poll time can cross an ET-midnight boundary vs the reply,
+          // landing the opt-out on the wrong report day; the parsed provider time
+          // is the true moment. Falls back to now() only when unparseable (anchorIso
+          // already encodes that fallback). Keeps opt_outs.created_at ==
+          // opt_out_attributions.created_at so the Reports page (which buckets by the
+          // attribution date) and the opt-outs list agree on the day it happened.
+          const oo = (await tx.execute(sql`
           INSERT INTO opt_outs (org_id, contact_id, phone_number, source, created_at)
           VALUES (${cred.org_id}, ${contactId}, ${phone}, 'sms_inbound',
                   ${anchorIso}::timestamptz)
           RETURNING id
         `)) as unknown as { id: number }[];
-        const optOutId = oo[0]?.id;
+          const optOutId = oo[0]?.id;
 
-        // Attribution: the SINGLE most-recent send to this number across all
-        // stages in the trailing window (one STOP ⇒ one stage). null when no
-        // in-window send exists ⇒ org-wide opt-out only, counted `unattributed`.
-        const match = await latestSendForAttribution(tx, cred.org_id, phone, anchorIso);
+          // Attribution: the SINGLE most-recent send to this number across all
+          // stages in the trailing window (one STOP ⇒ one stage). null when no
+          // in-window send exists ⇒ org-wide opt-out only, counted `unattributed`.
+          const match = await latestSendForAttribution(
+            tx,
+            cred.org_id,
+            phone,
+            anchorIso,
+          );
 
-        let attributed: 0 | 1 = 0;
-        if (match) {
-          // ON CONFLICT guards the idempotent re-run case; the per-message claim
-          // already makes this run once, so RETURNING is the increment gate.
-          // created_at = the STOP's real receipt time (anchorIso), matching the
-          // opt_out above. The Reports page (app/api/keitaro/reports) buckets
-          // per-stage opt-outs by THIS column, so it must be the day the reply
-          // arrived, not the poll time.
-          const ins = (await tx.execute(sql`
+          let attributed: 0 | 1 = 0;
+          if (match) {
+            // ON CONFLICT guards the idempotent re-run case; the per-message claim
+            // already makes this run once, so RETURNING is the increment gate.
+            // created_at = the STOP's real receipt time (anchorIso), matching the
+            // opt_out above. The Reports page (app/api/keitaro/reports) buckets
+            // per-stage opt-outs by THIS column, so it must be the day the reply
+            // arrived, not the poll time.
+            const ins = (await tx.execute(sql`
             INSERT INTO opt_out_attributions
               (org_id, opt_out_id, stage_send_id, stage_id, campaign_id, created_at)
             VALUES (${cred.org_id}, ${optOutId}, ${match.stage_send_id},
@@ -290,26 +335,26 @@ async function pollCredential(
             ON CONFLICT (opt_out_id, stage_id) DO NOTHING
             RETURNING id
           `)) as unknown as { id: number }[];
-          if (ins.length > 0) {
-            attributed = 1;
-            // Bump the attribution counter AND mirror it into opt_out_count so the
-            // per-stage Results panel (which reads opt_out_count) reflects live
-            // TextHub STOPs automatically. Both RHS references read the pre-UPDATE
-            // value, so the two columns stay in lock-step.
-            await tx.execute(sql`
+            if (ins.length > 0) {
+              attributed = 1;
+              // Bump the attribution counter AND mirror it into opt_out_count so the
+              // per-stage Results panel (which reads opt_out_count) reflects live
+              // TextHub STOPs automatically. Both RHS references read the pre-UPDATE
+              // value, so the two columns stay in lock-step.
+              await tx.execute(sql`
               UPDATE campaign_stages
               SET inbound_opt_out_count = inbound_opt_out_count + 1,
                   opt_out_count = inbound_opt_out_count + 1
               WHERE id = ${match.stage_id}
             `);
-            // Opt-outs are billed like sends, so a new STOP changes the auto
-            // Total Cost. Recompute from the (now bumped) counters + phone cost;
-            // a no-op for manually-overridden / CSV-imported stages.
-            await recomputeStageTotalCost(tx, match.stage_id);
+              // Opt-outs are billed like sends, so a new STOP changes the auto
+              // Total Cost. Recompute from the (now bumped) counters + phone cost;
+              // a no-op for manually-overridden / CSV-imported stages.
+              await recomputeStageTotalCost(tx, match.stage_id);
+            }
           }
-        }
 
-        await tx.execute(sql`
+          await tx.execute(sql`
           UPDATE texthub_inbound_events
           SET result = 'suppressed', matched_contact_id = ${contactId},
               matched_stage_send_id = ${match?.stage_send_id ?? null},
@@ -317,28 +362,44 @@ async function pollCredential(
               processed_at = now()
           WHERE id = ${eventId}
         `);
-        return { kind: "suppressed", attributed } as const;
-      });
-    } catch {
-      // Transaction rolled back (claim + suppression both undone) — the message
-      // stays unclaimed and is retried on the next poll.
-      errored++;
-      continue;
+          return { kind: "suppressed", attributed } as const;
+        });
+      } catch {
+        // Transaction rolled back (claim + suppression both undone) — the message
+        // stays unclaimed and is retried on the next poll.
+        errored++;
+        continue;
+      }
+
+      if (outcome.kind === "dupe") continue;
+      neu++;
+      newlyClaimedThisPage++;
+      if (outcome.kind === "suppressed") {
+        suppressed++;
+        attributed += outcome.attributed;
+        if (outcome.attributed === 0) unattributed++;
+      } else if (outcome.kind === "ignored") ignored++;
+      else if (outcome.kind === "invalid") invalid++;
     }
 
-    if (outcome.kind === "dupe") continue;
-    neu++;
-    if (outcome.kind === "suppressed") {
-      suppressed++;
-      attributed += outcome.attributed;
-      if (outcome.attributed === 0) unattributed++;
-    } else if (outcome.kind === "ignored") ignored++;
-    else if (outcome.kind === "invalid") invalid++;
+    if (
+      !shouldFetchNextInboxPage({
+        page,
+        newlyClaimedThisPage,
+        totalPages: inbox.totalPages,
+        maxPages: MAX_INBOX_PAGES,
+        elapsedMs: Date.now() - startedAt,
+        budgetMs: PER_CREDENTIAL_BUDGET_MS,
+      })
+    ) {
+      break;
+    }
+    page++;
   }
 
   return {
     ...base,
-    fetched: inbox.messages.length,
+    fetched,
     new: neu,
     suppressed,
     attributed,

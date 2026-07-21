@@ -16,7 +16,10 @@ import { pollOptOuts } from "@/lib/sends/poll-opt-outs";
 // Neither => 401/403. The browser uses its session cookie, so CRON_SECRET is
 // never exposed to the client.
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Raised from 60s: the poller now walks multiple inbox pages per credential to
+// drain TextHub's retained paginated window (see pollCredential). Per-credential
+// time budgets (PER_CREDENTIAL_BUDGET_MS) keep the total under this ceiling.
+export const maxDuration = 120;
 // Pin to Frankfurt (eu-central-1), co-located with Supabase, so the thousands
 // of sequential DB round-trips this job makes don't cross the Atlantic (~90ms
 // each). Per-route only — do NOT set a global region; US-facing routes such as

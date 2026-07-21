@@ -10,8 +10,8 @@
 //   1. Earliest-timestamp wins when the file lists a number twice.
 //   2. A number that already has an opt_out is skipped (no new opt_out, no
 //      re-attribution).
-//   3. A number sent within 72h is mapped to the latest stage; the stage's
-//      opt_out counters bump.
+//   3. A number sent within 72h is mapped to the latest stage (set-based
+//      DISTINCT ON, same window/tie-break as the poller); counters bump.
 //   4. A number with no in-window send is suppressed but unattributed.
 //   5. parseReplyTime honors the timezone for naive stamps + ISO offsets.
 

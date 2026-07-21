@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 
 import { validatePhone } from "@/lib/phone-validation";
 import {
-  latestSendForAttribution,
+  OPT_OUT_ATTRIBUTION_WINDOW_HOURS,
   type Executor,
 } from "@/lib/sends/poll-opt-outs";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
@@ -264,24 +264,39 @@ export async function importOptOutsWithAttribution(
     }
   }
 
-  // 5. Attribute each new opt_out to the single most-recent in-window send.
+  // 5. Attribute in ONE set-based pass per chunk. `DISTINCT ON (oo.id)` picks the
+  //    single most-recent in-window send per opt_out — the SAME 72h window,
+  //    ordering, and tie-break as `latestSendForAttribution` (and the proven
+  //    scripts/import-texthub-optouts.ts), but without a per-number round-trip.
+  //    The per-row loop this replaced fired one query per number and timed out
+  //    the 60s route at a few hundred rows. `created_at = oo.created_at` (the
+  //    reply time) keeps opt_outs.created_at == opt_out_attributions.created_at.
   let attributed = 0;
   const affected = new Set<number>();
-  for (const oo of newOptOuts) {
-    const match = await latestSendForAttribution(exec, orgId, oo.phone, oo.created_at);
-    if (!match) continue;
-    const ins = (await exec.execute(sql`
+  const newIds = newOptOuts.map((o) => o.id);
+  for (let i = 0; i < newIds.length; i += INSERT_CHUNK) {
+    const idChunk = newIds.slice(i, i + INSERT_CHUNK);
+    const rows = (await exec.execute(sql`
       INSERT INTO opt_out_attributions
         (org_id, opt_out_id, stage_send_id, stage_id, campaign_id, created_at)
-      VALUES (${orgId}, ${oo.id}, ${match.stage_send_id},
-              ${match.stage_id}, ${match.campaign_id}, ${oo.created_at}::timestamptz)
+      SELECT DISTINCT ON (oo.id)
+             oo.org_id, oo.id, ss.id, ss.stage_id, ss.campaign_id, oo.created_at
+      FROM opt_outs oo
+      JOIN stage_sends ss
+        ON ss.org_id = oo.org_id
+       AND ss.phone = oo.phone_number
+       AND ss.status = 'sent'
+       AND ss.sent_at IS NOT NULL
+       AND ss.sent_at >= oo.created_at
+                         - (${OPT_OUT_ATTRIBUTION_WINDOW_HOURS} * interval '1 hour')
+       AND ss.sent_at <= oo.created_at + interval '5 minutes'
+      WHERE oo.id IN (${inList(idChunk)})
+      ORDER BY oo.id, ss.sent_at DESC, ss.stage_id DESC, ss.id DESC
       ON CONFLICT (opt_out_id, stage_id) DO NOTHING
-      RETURNING id
-    `)) as unknown as { id: number }[];
-    if (ins.length > 0) {
-      attributed++;
-      affected.add(match.stage_id);
-    }
+      RETURNING stage_id
+    `)) as unknown as { stage_id: number }[];
+    attributed += rows.length;
+    for (const r of rows) affected.add(r.stage_id);
   }
 
   // 6. Recompute the affected stages' opt-out counters from the full junction

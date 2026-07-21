@@ -189,12 +189,15 @@ export interface AudiencePreviewInput {
   // cap then samples from the remaining unused pool only. Campaign-level
   // counterpart to the per-segment segments.exclude_in_use_contacts flag.
   excludeInUse?: boolean;
-  // Content-dedup LAYER 3 (preview only). When true AND offerId is set, the
-  // preview drops contacts who already received this offer in a previous
-  // campaign, and reports got_offer_in_prior_campaign. Mirrors the send-time
-  // exclusion in lib/sends/eligibility.ts so the previewed will-send count
-  // matches what actually sends. The frozen snapshot is NOT narrowed by this
-  // (Level A: preview visibility only) — the send-time layer stays the gate.
+  // Content-dedup LAYER 3. When true AND offerId is set, contacts who already
+  // received this offer in a previous campaign are dropped, and the preview
+  // reports got_offer_in_prior_campaign. Applied by BOTH previewAudience AND the
+  // frozen snapshot (buildQualifierFromRelation), so the frozen pool equals the
+  // previewed will-send — no surprise re-filter when the stage materializes
+  // (changed 2026-07-21; the snapshot was formerly NOT narrowed by this). The
+  // send-time layer in lib/sends/eligibility.ts stays on as a live safety net —
+  // it catches anyone exposed AFTER activation and protects pools frozen before
+  // this change; for a fresh pool it removes ~nobody.
   excludePriorOffer?: boolean;
   // The campaign's offer. Only consumed when excludePriorOffer is true.
   offerId?: number | null;
@@ -301,18 +304,36 @@ function buildQualifierFromRelation(
   const includeClickers = filters.include_clickers === true;
   const includeNotClicked = filters.include_not_clicked === true;
   const excludeInUse = input.excludeInUse === true;
+  // Content-dedup LAYER 3, baked into the FROZEN pool (not just the preview).
+  // When the campaign opts into offer exclusion AND has an offer, contacts who
+  // already received this offer in a previous campaign are dropped at snapshot
+  // time, so the frozen pool equals the previewed will-send — no second, surprise
+  // filtering when the stage materializes. Mirrors previewAudience's is_eligible
+  // predicate EXACTLY (same flagSetCtes/flagJoins + oe_set) so the two counts
+  // agree. Off (or no offer) ⇒ offerExposureId is null and the emitted SQL is
+  // byte-for-byte the pre-LAYER-3 qualifier (no oe_set CTE, no extra join). The
+  // send-time layer (lib/sends/eligibility.ts) stays on as a live safety net —
+  // it catches anyone exposed AFTER activation and protects pools frozen before
+  // this change; for a fresh pool it now removes ~nobody.
+  const excludePriorOffer = input.excludePriorOffer === true;
+  const offerExposureId =
+    excludePriorOffer && input.offerId != null ? input.offerId : null;
+  const useOfferExposure = offerExposureId != null;
 
   return drizzleSql`
-    with ${flagSetCtes(orgId)},
+    with ${flagSetCtes(orgId, offerExposureId)},
     flagged as (
       select
         cand.contact_id,
         (oo_set.contact_id is not null) as has_opt_out,
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
-        (iu_set.contact_id is not null) as is_in_use_elsewhere
+        (iu_set.contact_id is not null) as is_in_use_elsewhere,
+        ${useOfferExposure
+          ? drizzleSql`(oe_set.contact_id is not null)`
+          : drizzleSql`false`} as is_offer_exposed
       from ${candidateRelation} cand
-      ${flagJoins("cand")}
+      ${flagJoins("cand", useOfferExposure)}
     )
     select
       contact_id,
@@ -328,6 +349,7 @@ function buildQualifierFromRelation(
         or (${includeNotClicked}::boolean and not has_clicker)
       )
       and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
+      and (not ${excludePriorOffer}::boolean or not is_offer_exposed)
   `;
 }
 

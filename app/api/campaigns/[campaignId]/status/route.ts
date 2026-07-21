@@ -89,6 +89,7 @@ export async function POST(
       audience_filters: campaigns.audience_filters,
       audience_cap: campaigns.audience_cap,
       exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
+      exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
@@ -162,6 +163,10 @@ export async function POST(
               filters: c.audience_filters ?? {},
               cap: c.audience_cap ?? null,
               excludeInUse: c.exclude_in_use_contacts,
+              // Bake the prior-offer exclusion into the frozen pool so the pool
+              // equals the previewed will-send (no surprise re-filter at send).
+              excludePriorOffer: c.exclude_prior_offer_contacts,
+              offerId: c.offer_id,
             },
             tx,
           );

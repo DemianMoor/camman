@@ -278,6 +278,10 @@ export async function POST(req: NextRequest) {
               filters,
               cap: audienceCap,
               excludeInUse,
+              // Bake the prior-offer exclusion into the frozen pool so the pool
+              // equals the previewed will-send (no surprise re-filter at send).
+              excludePriorOffer,
+              offerId: inserted.offer_id,
             },
             tx,
           );

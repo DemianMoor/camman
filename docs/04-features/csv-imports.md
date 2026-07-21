@@ -1,6 +1,6 @@
 # Feature — CSV Result Imports & Phone Uploads
 
-_Last updated: 2026-06-20_
+_Last updated: 2026-07-21_
 
 ## 1. Purpose
 After a manual send, the provider exports a results CSV. This module imports it, derives a per-row **outcome**, propagates opt-outs and clickers into the suppression/engagement tables, and updates the stage's result counters — all transactionally and **revertibly**. A separate, simpler path handles bulk phone uploads.
@@ -65,6 +65,35 @@ Within one CSV, per-phone duplicates collapse to the highest-priority outcome. P
 
 ### Phone uploads (separate path)
 Four entry points — contacts / opt-outs / opt-ins / clickers — share `processAudienceUpload()`: dedupe by E.164, upsert `contacts`, insert entity rows, apply `assign_to_group_ids` (idempotent). See [contacts-and-groups.md](contacts-and-groups.md).
+
+#### Opt-out import with campaign/stage attribution (timestamped)
+The **Add Opt-Outs** dialog accepts a CSV that pairs each number with the time it
+replied STOP (a `received` / `received_at` / `time` column auto-detected next to
+the phone column). When such a column is present the upload takes an attribution
+path (`importOptOutsWithAttribution` in [lib/sends/import-optout-attribution.ts](../../lib/sends/import-optout-attribution.ts))
+instead of the plain phone-list path: each opt-out is stored with `created_at =`
+the reply time and reverse-matched to the campaign/stage that sent to the number,
+using the **same rule as the live poller** (`latestSendForAttribution` — the single
+most-recent `status='sent'` send within `OPT_OUT_ATTRIBUTION_WINDOW_HOURS` (72h),
+one STOP ⇒ one stage). A match inserts an `opt_out_attributions` row and bumps the
+stage's `inbound_opt_out_count`/`opt_out_count` + recomputes stage cost; no match ⇒
+the opt-out is created for suppression only (`unattributed`).
+
+- **Timezone:** naive timestamps (no offset) are interpreted in the operator-chosen
+  zone (ET default; **Mountain** for TextHub exports; UTC). ISO-8601 values with an
+  offset are honored as-is.
+- **Dedup rule 1 — skip already-opted-out:** a number that already has *any*
+  `opt_outs` row in the org is skipped entirely — no new opt-out, no re-attribution
+  to a different campaign/stage (numbers stay credited to the stage that first
+  suppressed them).
+- **Dedup rule 2 — earliest wins:** when the file lists a number more than once,
+  only the earliest reply time is kept.
+- Opt-outs stay **brand-scoped** (the dialog's required brand(s) + optional
+  providers/groups apply); attribution is layered on top. The whole import commits
+  or rolls back in one transaction; re-running is idempotent (rule 1 skips everything
+  already present). Verified by `scripts/test-optout-import-attribution.ts`.
+- The plain phone-list path (Paste tab, or a CSV with no time column) is unchanged —
+  append-only suppression with no attribution.
 
 ## 4. Data it reads/writes
 - Writes `stage_results_imports`, `stage_result_rows`, `opt_outs`(+`opt_out_brands`), `clickers`, `contacts`, `campaign_stages` counters.

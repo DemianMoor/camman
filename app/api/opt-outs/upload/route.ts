@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import {
   affiliate_networks as _networksMarker,
   brands,
+  contact_groups,
   opt_out_brands,
   opt_out_providers,
   opt_outs,
@@ -13,6 +14,7 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { importOptOutsWithAttribution } from "@/lib/sends/import-optout-attribution";
 import {
   processAudienceUpload,
   type ResolvedContact,
@@ -23,6 +25,10 @@ import { optOutUploadSchema } from "@/lib/validators/opt-outs";
 void _networksMarker;
 
 const INSERT_CHUNK = 1000;
+
+// The timestamped attribution path upserts contacts, inserts opt_outs, and runs
+// a per-number reverse-match against stage_sends — heavier than the plain path.
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   const auth = await requireApiMembership();
@@ -86,9 +92,49 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Timestamped attribution import: map each number to the campaign/stage that
+  // sent to it, else suppress. Everything commits or rolls back in one tx.
+  if (parsed.data.entries && parsed.data.entries.length > 0) {
+    // This path applies groups directly, so verify ownership here. (The plain
+    // path below re-checks inside processAudienceUpload.)
+    const groupIds = parsed.data.assign_to_group_ids ?? [];
+    if (groupIds.length > 0) {
+      const ownedGroups = await db
+        .select({ id: contact_groups.id })
+        .from(contact_groups)
+        .where(
+          and(
+            eq(contact_groups.org_id, orgId),
+            inArray(contact_groups.id, groupIds),
+          ),
+        );
+      if (ownedGroups.length !== groupIds.length) {
+        return apiError(
+          400,
+          "One or more contact groups don't belong to your organization",
+          API_ERROR_CODES.VALIDATION,
+          { field: "assign_to_group_ids" },
+        );
+      }
+    }
+
+    const result = await db.transaction((tx) =>
+      importOptOutsWithAttribution(tx, {
+        orgId,
+        entries: parsed.data.entries!,
+        timezone: parsed.data.timezone!,
+        brandIds: parsed.data.brand_ids,
+        providerIds: parsed.data.provider_ids,
+        source: parsed.data.source ?? null,
+        assignToGroupIds: groupIds,
+      }),
+    );
+    return NextResponse.json(result, { status: 201 });
+  }
+
   const summary = await processAudienceUpload({
     orgId,
-    rawPhones: parsed.data.phones,
+    rawPhones: parsed.data.phones!,
     assignToGroupIds: parsed.data.assign_to_group_ids,
     insertEntities: async (rows: ResolvedContact[]) => {
       if (rows.length === 0) return 0;

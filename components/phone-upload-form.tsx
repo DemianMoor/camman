@@ -9,6 +9,13 @@ import { FileDropZone } from "@/components/file-drop-zone";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
@@ -59,6 +66,13 @@ export type UploadResultSummary = {
   // Optional: distinct count of *already-existing* contacts that gained
   // at least one new group membership. Same endpoints as `groups_applied`.
   updated_contacts?: number;
+  // Optional: present on the opt-outs timestamped attribution import.
+  // `attributed` opt-outs were mapped to a campaign/stage; `unattributed`
+  // had no in-window send (suppression only); `skipped_already_opted_out`
+  // numbers already had an opt-out and were left untouched.
+  attributed?: number;
+  unattributed?: number;
+  skipped_already_opted_out?: number;
 };
 
 type ContactGroupOption = {
@@ -92,22 +106,47 @@ export interface PhoneUploadFormProps {
   // lookup for the numbers. Never set this on the opt-outs path — those
   // numbers are never messaged.
   enableLookup?: boolean;
+  // When true, a CSV that includes a reply-time column (received / received_at /
+  // time / …) is uploaded as timestamped `entries` + `timezone` so the endpoint
+  // can map each number to the campaign/stage that sent to it. Files without a
+  // time column, and the Paste tab, fall back to the plain phone-list upload.
+  // Used by the opt-outs "Add Opt-Outs" dialog.
+  captureReplyTime?: boolean;
 }
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
 const PREVIEW_COUNT = 5;
-const PHONE_COLUMN_CANDIDATES = ["phone", "phone_number", "number"];
+const PHONE_COLUMN_CANDIDATES = ["phone", "phone_number", "number", "from"];
+const TIME_COLUMN_CANDIDATES = [
+  "received",
+  "received_at",
+  "time",
+  "timestamp",
+  "date",
+  "replied_at",
+];
 
-function detectPhoneColumn(
+// Timezone options for interpreting naive reply timestamps in the attribution
+// import. TextHub STOP exports stamp their `Received` column in Mountain time.
+const REPLY_TIME_ZONES = [
+  { value: "America/New_York", label: "Eastern (ET)" },
+  { value: "America/Denver", label: "Mountain — TextHub exports" },
+  { value: "UTC", label: "UTC" },
+] as const;
+
+function detectColumn(
   headerRow: string[] | null | undefined,
+  candidates: string[],
 ): number | null {
   if (!headerRow) return null;
   for (let i = 0; i < headerRow.length; i++) {
     const key = String(headerRow[i] ?? "").trim().toLowerCase();
-    if (PHONE_COLUMN_CANDIDATES.includes(key)) return i;
+    if (candidates.includes(key)) return i;
   }
   return null;
 }
+
+export type ReplyEntry = { phone: string; received_at: string };
 
 export function PhoneUploadForm({
   endpoint,
@@ -120,6 +159,7 @@ export function PhoneUploadForm({
   enableContactGroups = false,
   requireContactGroups = false,
   enableLookup = false,
+  captureReplyTime = false,
 }: PhoneUploadFormProps) {
   const uploadApi = useApiCall<UploadResultSummary>();
   const previewApi = useApiCall<LookupPreview>();
@@ -127,6 +167,12 @@ export function PhoneUploadForm({
   const contactGroupsApi = useApiCall<{ data: ContactGroupOption[] }>();
   const [pasteValue, setPasteValue] = useState("");
   const [csvLines, setCsvLines] = useState<string[]>([]);
+  // Timestamped rows parsed from the CSV when captureReplyTime is on and the
+  // file has a reply-time column. Drives the attribution upload path.
+  const [csvEntries, setCsvEntries] = useState<ReplyEntry[]>([]);
+  const [replyTimezone, setReplyTimezone] = useState<string>(
+    REPLY_TIME_ZONES[0].value,
+  );
   const [csvSourceName, setCsvSourceName] = useState<string | null>(null);
   const [csvPreview, setCsvPreview] = useState<string[]>([]);
   const [csvError, setCsvError] = useState<string | null>(null);
@@ -162,6 +208,7 @@ export function PhoneUploadForm({
   function reset() {
     setPasteValue("");
     setCsvLines([]);
+    setCsvEntries([]);
     setCsvSourceName(null);
     setCsvPreview([]);
     setCsvError(null);
@@ -176,6 +223,7 @@ export function PhoneUploadForm({
   function handleFileSelect(file: File) {
     setCsvError(null);
     setCsvLines([]);
+    setCsvEntries([]);
     setCsvPreview([]);
     setCsvSourceName(file.name);
 
@@ -194,9 +242,10 @@ export function PhoneUploadForm({
           setCsvError("File is empty.");
           return;
         }
-        const headerIdx = detectPhoneColumn(rows[0]);
-        const dataRows = headerIdx !== null ? rows.slice(1) : rows;
-        const col = headerIdx !== null ? headerIdx : 0;
+        const phoneIdx = detectColumn(rows[0], PHONE_COLUMN_CANDIDATES);
+        const hasHeader = phoneIdx !== null;
+        const dataRows = hasHeader ? rows.slice(1) : rows;
+        const col = phoneIdx !== null ? phoneIdx : 0;
         const values = dataRows
           .map((r) => (r[col] ?? "").trim())
           .filter((s) => s.length > 0);
@@ -206,6 +255,21 @@ export function PhoneUploadForm({
         }
         setCsvLines(values);
         setCsvPreview(values.slice(0, PREVIEW_COUNT));
+
+        // Attribution mode: if a reply-time column is present, pair each phone
+        // with its timestamp. A time column requires a header row to locate it.
+        if (captureReplyTime && hasHeader) {
+          const timeIdx = detectColumn(rows[0], TIME_COLUMN_CANDIDATES);
+          if (timeIdx !== null) {
+            const entries = dataRows
+              .map((r) => ({
+                phone: (r[col] ?? "").trim(),
+                received_at: (r[timeIdx] ?? "").trim(),
+              }))
+              .filter((e) => e.phone.length > 0 && e.received_at.length > 0);
+            setCsvEntries(entries);
+          }
+        }
       },
       error: (err) => {
         setCsvError(err.message || "Couldn't parse the file.");
@@ -228,13 +292,24 @@ export function PhoneUploadForm({
 
   // The real upload against the caller's endpoint. Returns true on success.
   async function runUpload(phones: string): Promise<boolean> {
+    // Attribution mode: a CSV with a reply-time column uploads timestamped
+    // `entries` + `timezone` so the endpoint maps numbers to their stage.
+    // Otherwise fall back to the plain phone-list payload.
+    const useEntries =
+      captureReplyTime && activeTab === "csv" && csvEntries.length > 0;
+    const body: Record<string, unknown> = useEntries
+      ? {
+          entries: csvEntries,
+          timezone: replyTimezone,
+          ...(additionalFields ?? {}),
+        }
+      : {
+          phones,
+          ...(additionalFields ?? {}),
+        };
     // Include assign_to_group_ids when the user selected at least one
     // group. Omit the field entirely when empty so the endpoint can keep
     // its no-group fast path.
-    const body: Record<string, unknown> = {
-      phones,
-      ...(additionalFields ?? {}),
-    };
     if (enableContactGroups && selectedGroupIds.length > 0) {
       body.assign_to_group_ids = selectedGroupIds;
     }
@@ -361,6 +436,28 @@ export function PhoneUploadForm({
               label="New group tags"
               value={result.groups_applied}
               tone="success"
+            />
+          ) : null}
+          {typeof result.attributed === "number" ? (
+            <Stat
+              label="Mapped to a stage"
+              value={result.attributed}
+              tone="success"
+            />
+          ) : null}
+          {typeof result.unattributed === "number" ? (
+            <Stat
+              label="Suppressed only"
+              value={result.unattributed}
+              tone="muted"
+            />
+          ) : null}
+          {typeof result.skipped_already_opted_out === "number" &&
+          result.skipped_already_opted_out > 0 ? (
+            <Stat
+              label="Already opted out"
+              value={result.skipped_already_opted_out}
+              tone="muted"
             />
           ) : null}
         </div>
@@ -624,7 +721,56 @@ export function PhoneUploadForm({
               First column or a column named <code>phone</code>,{" "}
               <code>phone_number</code>, or <code>number</code> is used. Header
               row is auto-detected.
+              {captureReplyTime ? (
+                <>
+                  {" "}
+                  Add a <code>received</code> / <code>time</code> column to map
+                  each number to the campaign &amp; stage it replied to.
+                </>
+              ) : null}
             </p>
+
+            {captureReplyTime && csvLines.length > 0 ? (
+              csvEntries.length > 0 ? (
+                <div className="grid gap-2 rounded-md border bg-muted/30 p-3">
+                  <p className="text-xs text-emerald-700 dark:text-emerald-400">
+                    Reply-time column detected — {csvEntries.length}{" "}
+                    {csvEntries.length === 1 ? "row" : "rows"} will be mapped to
+                    the campaign/stage that sent to each number within 72h.
+                    Numbers already opted out are skipped; unmatched numbers are
+                    suppressed.
+                  </p>
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="reply-tz" className="text-xs">
+                      Reply-time timezone
+                    </Label>
+                    <Select
+                      value={replyTimezone}
+                      onValueChange={setReplyTimezone}
+                    >
+                      <SelectTrigger id="reply-tz" className="h-8 w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {REPLY_TIME_ZONES.map((z) => (
+                          <SelectItem key={z.value} value={z.value}>
+                            {z.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Used to read timestamps that have no timezone offset.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-amber-700 dark:text-amber-400">
+                  No reply-time column found — numbers will be suppressed
+                  without campaign/stage mapping.
+                </p>
+              )
+            ) : null}
           </TabsContent>
         ) : null}
       </Tabs>

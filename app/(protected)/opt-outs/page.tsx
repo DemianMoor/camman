@@ -292,8 +292,12 @@ export default function OptOutsPage() {
   }
 
   async function handleUploadSuccess(summary: UploadResultSummary) {
+    const attributed =
+      typeof summary.attributed === "number" && summary.attributed > 0
+        ? `, mapped ${summary.attributed.toLocaleString()} to a stage`
+        : "";
     toast.success(
-      `Added ${summary.inserted.toLocaleString()} opt-out${summary.inserted === 1 ? "" : "s"}`,
+      `Added ${summary.inserted.toLocaleString()} opt-out${summary.inserted === 1 ? "" : "s"}${attributed}`,
     );
     refetch();
   }
@@ -728,7 +732,9 @@ export default function OptOutsPage() {
           <DialogHeader>
             <DialogTitle>Add opt-outs</DialogTitle>
             <DialogDescription>
-              Required: at least one brand. Optional: providers, source.
+              Required: at least one brand. Optional: providers, source. Upload a
+              CSV with a reply-time column to map each number to the
+              campaign/stage it opted out from.
             </DialogDescription>
           </DialogHeader>
 
@@ -831,6 +837,7 @@ export default function OptOutsPage() {
                 submitLabel="Add opt-outs"
                 successLabel="Opt-outs added"
                 enableContactGroups
+                captureReplyTime
               />
             )}
           </div>

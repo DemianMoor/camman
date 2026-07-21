@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-19_
+_Last updated: 2026-07-21_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -64,7 +64,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 
 ### `/api/cron/telegram-report` (performance report)
 - **One external trigger fires it every hour on the hour (UTC)**; the handler decides internally what to do based on the **current Warsaw time**, computed with `Intl`-backed `formatInTimeZone` (never offset arithmetic — the Warsaw/ET offsets shift on DST weeks).
-  - Warsaw hour **11** → **daily** report for the **previous ET day** (final).
+  - Warsaw hour **10** → **daily** report for the **previous ET day** (final).
   - Warsaw hour **16–23** (not Sunday) → **hourly** update (today-so-far, ET).
   - Warsaw hour **0–1** (not Monday) → **hourly** update (belongs to the previous day's window; Mon 00/01 is Sunday's window, excluded).
   - otherwise → `200 { skipped: true }`.

@@ -24,8 +24,9 @@ check("Warsaw Sunday 01:00 → hourly (Saturday's window)", 1, 7, false, "hourly
 check("Warsaw Monday 00:00 → skip", 0, 1, false, null);
 check("Warsaw Monday 01:00 → skip", 1, 1, false, null);
 check("Warsaw Monday 16:00 → hourly", 16, 1, false, "hourly");
-check("Warsaw 11:00 Mon → daily", 11, 1, false, "daily");
-check("Warsaw 11:00 Sun → daily", 11, 7, false, "daily");
+check("Warsaw 10:00 Mon → daily", 10, 1, false, "daily");
+check("Warsaw 10:00 Sun → daily", 10, 7, false, "daily");
+check("Warsaw 11:00 Wed → skip (no longer daily)", 11, 3, false, null);
 
 // Extra coverage.
 check("Warsaw Saturday 23:00 → hourly", 23, 6, false, "hourly");
@@ -33,7 +34,8 @@ check("Warsaw Sunday 00:00 → hourly (Saturday's window)", 0, 7, false, "hourly
 check("Warsaw Sunday 23:00 → skip", 23, 7, false, null);
 check("Warsaw Wed 15:00 → skip (before window)", 15, 3, false, null);
 check("Warsaw Wed 02:00 → skip (after window)", 2, 3, false, null);
-check("Warsaw Wed 12:00 → skip (not 11)", 12, 3, false, null);
+check("Warsaw Wed 12:00 → skip (not 10)", 12, 3, false, null);
+check("Warsaw Wed 09:00 → skip (before daily)", 9, 3, false, null);
 
 // test=1 forces a send regardless of day/skip rules.
 check("test=1 at 15:00 → daily", 15, 3, true, "daily");

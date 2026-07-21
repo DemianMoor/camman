@@ -22,7 +22,7 @@ import {
 // DST weeks, so every wall-clock decision goes through Intl-backed
 // formatInTimeZone (date-fns-tz), never offset arithmetic.
 //
-//   • Warsaw hour == 11            → daily report for the PREVIOUS ET day (final).
+//   • Warsaw hour == 10            → daily report for the PREVIOUS ET day (final).
 //   • Warsaw hour 16..23, !Sunday  → hourly update (today-so-far, ET).
 //   • Warsaw hour 0..1,  !Monday   → hourly update (belongs to the previous
 //                                    day's window; Mon 00/01 is Sunday's, excluded).

@@ -73,7 +73,7 @@ export function decideFormat(
       (warsawHour >= 16 && warsawHour <= 23);
     return inHourlyShape ? "hourly" : "daily";
   }
-  if (warsawHour === 11) return "daily";
+  if (warsawHour === 10) return "daily";
   if (warsawHour >= 16 && warsawHour <= 23 && warsawIsoDow !== 7) return "hourly"; // Sun excluded
   if ((warsawHour === 0 || warsawHour === 1) && warsawIsoDow !== 1) return "hourly"; // Mon 00/01 = Sunday's window, excluded
   return null;

@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-22 — Campaign default send-from number: two-step provider → phone picker — docs: 04-features/campaigns-stages-creatives
+- The campaign form's "Default send-from number" field is now a two-step **provider → phone** pick mirroring the stage form (pick a provider with its color dot, then a phone filtered to it; auto-selects a single phone). Still stores only `default_provider_phone_id`; the provider is UI-only, derived from the stored phone on load. `GET /api/provider-phones/list` now also returns `provider_color` for the dot. No schema/API-contract change. ([components/campaigns/campaign-editor-page.tsx](../components/campaigns/campaign-editor-page.tsx))
+
 ## 2026-07-22 — TextHub sender selection (sender param from the stage's phone; campaign default sender prefill; API-send stages now require a sending number) — docs: 03-data-model, 04-features/sms-send-pipeline, 04-features/campaigns-stages-creatives, 06-integrations, 07-conventions
 - **Sender param.** TextHub's `sender` = the send-from number as national digits, no country code, derived from the stage's `provider_phone_id` via `toTexthubSender()` ([lib/sends/texthub.ts](../lib/sends/texthub.ts)); the adapter ([lib/sends/providers/texthub.ts](../lib/sends/providers/texthub.ts)) refuses cleanly on a null sender, never falling back to TextHub's account default.
 - **Kickoff + preflight gate.** Generalized the existing Ahoi-only `no_sender_number` kickoff guard ([lib/sends/kickoff.ts](../lib/sends/kickoff.ts)) to every API-send (tracked) stage — TextHub included — and added the matching "Sending number assigned" blocker to the read-only preflight checklist ([lib/sends/preflight.ts](../lib/sends/preflight.ts)). Pre-deploy audit: [scripts/audit-stages-missing-sender.ts](../scripts/audit-stages-missing-sender.ts).

@@ -21,6 +21,7 @@ export type ActivePhone = {
   provider_id: number;
   provider_name: string;
   provider_key: string;
+  provider_color: string | null;
   supports_api_send: boolean;
 };
 export type Offer = Info & { payout_model: string; payout_cpa: string | null };

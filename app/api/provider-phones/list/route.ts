@@ -27,6 +27,7 @@ export async function GET() {
       provider_id: sms_providers.id,
       provider_name: sms_providers.name,
       provider_key: sms_providers.sms_provider_id,
+      provider_color: sms_providers.color,
       supports_api_send: sms_providers.supports_api_send,
     })
     .from(provider_phones)

@@ -504,6 +504,31 @@ function SetupCard({
     dateError,
   } = state;
 
+  // Default send-from number is a two-step pick that mirrors the stage form:
+  // choose a provider, then a phone belonging to it. Only the phone is stored
+  // (`default_provider_phone_id`); the provider is a UI-only filter. It's
+  // derived during render from the stored phone (so an edit-loaded default shows
+  // its provider with no effect/setState), and an explicit user pick overrides.
+  const watchedDefaultPhoneId = form.watch("default_provider_phone_id");
+  const [providerOverride, setProviderOverride] = useState<number | null>(null);
+
+  // Distinct providers that have at least one active phone (dedupe by id).
+  const phoneProviders = Array.from(
+    new Map(
+      activePhones.map((p) => [
+        p.provider_id,
+        { id: p.provider_id, name: p.provider_name, color: p.provider_color },
+      ]),
+    ).values(),
+  );
+  const defaultProviderId =
+    providerOverride ??
+    activePhones.find((p) => p.id === watchedDefaultPhoneId)?.provider_id ??
+    null;
+  const phonesForDefaultProvider = activePhones.filter(
+    (p) => p.provider_id === defaultProviderId,
+  );
+
   return (
     <Card>
       <CardHeader className="border-b py-2">
@@ -712,35 +737,96 @@ function SetupCard({
             render={({ field }) => (
               <FormItem>
                 <FormLabel>Default send-from number</FormLabel>
-                <Select
-                  value={field.value === null ? NONE : String(field.value)}
-                  onValueChange={(v) =>
-                    field.onChange(v === NONE ? null : Number(v))
-                  }
-                  disabled={anySubmitting}
-                >
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue placeholder="No default" />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    <SelectItem value={NONE}>No default</SelectItem>
-                    {activePhones.map((p) => (
-                      <SelectItem key={p.id} value={String(p.id)}>
-                        <span className="font-mono text-xs">
-                          {formatPhoneInternational(p.phone_number)}
-                        </span>
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          {p.provider_name}
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {/* Step 1 — provider (UI-only filter, not stored) */}
+                  <Select
+                    value={
+                      defaultProviderId === null
+                        ? NONE
+                        : String(defaultProviderId)
+                    }
+                    onValueChange={(v) => {
+                      const pid = v === NONE ? null : Number(v);
+                      setProviderOverride(pid);
+                      // Drop the stored phone if it no longer belongs to the
+                      // chosen provider; auto-select when the provider exposes
+                      // exactly one phone (mirrors the stage form).
+                      const forProvider = activePhones.filter(
+                        (p) => p.provider_id === pid,
+                      );
+                      const cur = form.getValues("default_provider_phone_id");
+                      if (
+                        cur != null &&
+                        !forProvider.some((p) => p.id === cur)
+                      ) {
+                        field.onChange(null);
+                      }
+                      if (pid !== null && forProvider.length === 1) {
+                        field.onChange(forProvider[0].id);
+                      }
+                    }}
+                    disabled={anySubmitting}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="No default" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value={NONE}>No default</SelectItem>
+                      {phoneProviders.map((p) => (
+                        <SelectItem key={p.id} value={String(p.id)}>
+                          <span className="inline-flex items-center gap-2">
+                            <span
+                              className="size-2 rounded-full"
+                              style={{ backgroundColor: p.color ?? "#64748B" }}
+                            />
+                            {p.name}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {/* Step 2 — phone, filtered to the chosen provider (stored) */}
+                  <Select
+                    value={field.value === null ? NONE : String(field.value)}
+                    onValueChange={(v) =>
+                      field.onChange(v === NONE ? null : Number(v))
+                    }
+                    disabled={
+                      anySubmitting ||
+                      defaultProviderId === null ||
+                      phonesForDefaultProvider.length === 0
+                    }
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue
+                          placeholder={
+                            defaultProviderId === null
+                              ? "Pick a provider first"
+                              : phonesForDefaultProvider.length === 0
+                                ? "No active phones"
+                                : "No default"
+                          }
+                        />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value={NONE}>No default</SelectItem>
+                      {phonesForDefaultProvider.map((p) => (
+                        <SelectItem key={p.id} value={String(p.id)}>
+                          <span className="font-mono text-xs">
+                            {formatPhoneInternational(p.phone_number)}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <FormDescription className="text-xs">
-                  New stages start from this number. Optional; each stage can
-                  override.
+                  New stages start from this provider and number. Optional; each
+                  stage can override.
                 </FormDescription>
                 <FormMessage />
               </FormItem>

@@ -17,6 +17,7 @@ export type PreflightBlocker =
   | "stage_not_ready" // tracking ids not generated yet
   | "no_provider"
   | "provider_not_api_capable"
+  | "no_sender_number" // API-send stage has no provider_phone_id assigned
   | "no_credentials"
   | "no_short_domain";
 
@@ -159,6 +160,12 @@ export async function preflightStageSend(
       hasProvider && row.supports_api_send === true,
       "Provider supports API send",
       "provider_not_api_capable",
+    );
+    add(
+      "sender",
+      row.provider_phone_id != null,
+      "Sending number assigned",
+      "no_sender_number",
     );
 
     const hasCred = hasProvider

@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-07-19_
+_Last updated: 2026-07-22_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -8,7 +8,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Every domain table has `org_id`; **every query filters by it** in app code. A missing filter is a data-leak bug.
 - One org-resolution helper per surface (`requireOrgMembership` for pages, `requireApiMembership` for API). Don't invent alternates.
 - RLS is defense-in-depth; app-level filtering is primary.
-- **Every `public` table must have RLS enabled** (Supabase advisor `rls_disabled_in_public`) — without it the anon key (shipped in the frontend bundle) can read/write it directly via PostgREST. Server-only infra tables with no client caller (e.g. `geoip_cache`, migration `0066`) enable RLS **with no policies**: the direct postgres-js connection (`DATABASE_URL`) and `service_role` bypass RLS, so server code keeps working while anon/authenticated access is default-denied. Tenant tables (those with an `org_id`) need an `org_id = current_org_id()`-scoped policy instead, even when only the server writes them — e.g. `stage_manual_sales` + `opt_out_attributions` (migration `0085`) get a SELECT-only org policy mirroring `stage_sends` (`0050`).
+- **Every `public` table must have RLS enabled** (Supabase advisor `rls_disabled_in_public`) — without it the anon key (shipped in the frontend bundle) can read/write it directly via PostgREST. Server-only infra tables with no client caller (e.g. `geoip_cache`, migration `0066`) enable RLS **with no policies**: the direct postgres-js connection (`DATABASE_URL`) and `service_role` bypass RLS, so server code keeps working while anon/authenticated access is default-denied. Tenant tables (those with an `org_id`) need an `org_id = current_org_id()`-scoped policy instead, even when only the server writes them — e.g. `stage_manual_sales` + `opt_out_attributions` (migration `0085`) get a SELECT-only org policy mirroring `stage_sends` (`0050`). Migration `0113` closed the last five stragglers that had shipped with RLS off (`cron_locks`, `report_stage_hour`, `report_group_hour`, `report_refresh_log`, `carrier_norm_backfill_snapshot` — all org-less infra, so no-policy deny-by-default) and switched the `offer_report_campaign_econ` view to `security_invoker = true`. **Run the security advisor (`get_advisors type=security`) after any DDL and drive its ERRORs to zero — see [security-notes.md](security-notes.md).**
 
 ## IDs & naming
 - **DB id vs business id vs human_id vs tracking_id** are four distinct things:

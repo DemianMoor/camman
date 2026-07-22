@@ -61,3 +61,39 @@ migration 0110); [lib/crypto/secret-box.ts](../lib/crypto/secret-box.ts)
 (encrypt/decrypt); [lib/sends/provider-credential.ts](../lib/sends/provider-credential.ts)
 (resolution + dual-read); [scripts/backfill-provider-credentials-encryption.ts](../scripts/backfill-provider-credentials-encryption.ts)
 (one-time backfill, applied 2026-07-16).
+
+## Data-API exposure on internal tables closed (migration 0113, applied 2026-07-22)
+
+**Trigger:** a Supabase security-advisor email flagged `rls_disabled_in_public`
+on the `camman` project. Running the full advisor surfaced six ERROR-level
+lints: five internal tables with RLS disabled entirely, plus one
+`SECURITY DEFINER` report view — all reachable through the public Data API
+(`/rest/v1/*`) with the anon key shipped in the frontend bundle.
+
+**Fixed in [db/migrations/0113_enable_rls_system_tables.sql](../db/migrations/0113_enable_rls_system_tables.sql):**
+- `ENABLE ROW LEVEL SECURITY` (no policy — deny-by-default, same pattern as
+  `geoip_cache`/`provider_credentials`) on `cron_locks`, `report_stage_hour`,
+  `report_group_hour`, `report_refresh_log`, `carrier_norm_backfill_snapshot`.
+  None carry an `org_id`, so no scoped policy is needed — nothing should reach
+  them over the API at all.
+- `offer_report_campaign_econ` switched to `security_invoker = true` so it
+  enforces the querying role's RLS instead of the (postgres) creator's.
+
+**Why it was safe:** the app never uses PostgREST — zero
+`supabase.from('<table>')` data calls exist; the supabase-js client is
+Auth-only. All five tables are touched exclusively by server raw SQL over the
+direct Drizzle connection (`DATABASE_URL`), which bypasses RLS. Verified: post-
+migration advisor shows **zero ERRORs**; the five tables now report
+`rls_enabled_no_policy` (INFO — the intended end-state).
+
+**Hardening still open (advisor WARNs, not addressed here):**
+- Two report matviews (`offer_report_org_summary_mv`, `offer_group_report_mv`)
+  are still `SELECT`-able by anon/authenticated (`materialized_view_in_api`) —
+  revoke those grants.
+- Seven `SECURITY DEFINER` functions are callable as public RPCs
+  (`handle_new_user`, `assign_stage_number`, `current_org_id`, …) — revoke
+  `EXECUTE` from anon/authenticated (check `current_org_id` isn't relied on by
+  a future RLS policy first).
+- `contacts_derive_messaging_status` has a mutable `search_path` — pin it.
+- Supabase Auth leaked-password protection (HaveIBeenPwned) is off — a
+  dashboard toggle (Auth → Password settings).

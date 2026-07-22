@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-07-17_
+_Last updated: 2026-07-22_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -43,7 +43,7 @@ The underlying primitives (Step 1 kickoff, Step 2 drain) are unchanged and still
   - Backfill: migration `0089` marks every pre-existing stage that already had `stage_sends` rows as complete (they were atomic before), so the new drain gate doesn't strand in-flight sends.
 - Refuses with explicit reasons: `not_found`, `no_creative`, `no_schedule`, `already_pending`, `no_recipients`, `stage_not_ready`, `no_provider`, `provider_not_api_capable`, `no_credentials`, `no_short_domain`, `no_destination`, `multi_segment_not_allowed`, `segment_ceiling_exceeded`, `no_sender_number`.
 - **`no_schedule` is the hard null-date guard.** `kickoffStageSend` refuses any stage with a NULL `scheduled_at` before materializing — the shared chokepoint for every entry point (cron Phase A never selects NULLs anyway; the manual kickoff route; Approve-Send). A null date is **never** treated as "send now"; an explicit Send now stamps `scheduled_at = now()` upstream so it passes. This guards the copied-stage auto-fire bug at the pipeline level, not just the UI.
-- **No-sender-number guard (`no_sender_number`, Section 3).** A provider whose adapter requires a per-stage sending number (currently only Ahoi — TextHub's number is bound to the api_key account-side) is refused at kickoff, before any recipient materialization, when the stage has no `provider_phone_id`. Closes a gap where such a stage previously materialized every recipient and only failed at drain.
+- **No-sender-number guard (`no_sender_number`).** Any tracked/API-send stage (TextHub `txh`/`txh2`, Ahoi `ahi`, any future `supports_api_send` provider) is refused at kickoff, before any recipient materialization, when the stage has no `provider_phone_id`. Originally Ahoi-only (Section 3); generalized 2026-07-22 alongside TextHub sender selection (dropped the `provider_key === "ahi"` clause in `lib/sends/kickoff.ts`) once TextHub's adapter also started consuming the stage's phone (see "TextHub contract" below). Closes a gap where such a stage previously materialized every recipient and only failed at drain. The read-only preflight checklist (`lib/sends/preflight.ts`) surfaces the same condition as a **"Sending number assigned"** blocker before the operator even opens Approve Send. A pre-deploy read-only audit, [`scripts/audit-stages-missing-sender.ts`](../../scripts/audit-stages-missing-sender.ts), lists any currently-active tracked stage missing a phone so nothing in-flight is stranded by a newly-generalized gate.
 
 ### Segment policy preflight (G8, Ahoi Phase 1 Section 2)
 Before any recipient is enumerated or materialized, `kickoffStageSend` builds one **representative** rendered SMS — creative text + brand prefix + a fixed-width tracked link (`CODE_LENGTH`-character placeholder code, [lib/links/mint-link.ts](../../lib/links/mint-link.ts)) or the pasted `short_url` in manual mode + stop text, i.e. exactly what `buildStageSms` produces for a real recipient — and runs it through `countSegments()` ([lib/sends/segments.ts](../../lib/sends/segments.ts)). This is accurate for the **whole stage**, not just one recipient: within a stage the rendered text is recipient-invariant (same creative text, same brand name, same stop text, and every minted link is the same length since `mintLinksBatch` always generates a `CODE_LENGTH`-char code under one `shortDomain` resolved once for the stage).
@@ -97,9 +97,10 @@ Every statement is a **single query** (never concurrent on one connection), so t
 4. Provider `send_paused = false` (latching breaker).
 
 ### TextHub contract (`texthub.ts`)
-- `GET https://api.texthub.com/v2/?api_key=…&text=…&number=…&lead_id=…` (timeout default 15s).
+- `GET https://api.texthub.com/v2/?api_key=…&text=…&number=…&lead_id=…&sender=…` (timeout default 15s).
 - **Never** set `long_url` (TextHub's own rewriter — would clobber our tracked link) or `group` (share link — destroys per-recipient uniqueness).
 - Response normalized to `{ ok, messageId, error, status, providerStatus, suppressed }`. Stores `messageId` for possible future DLR (not polled). `providerStatus` = TextHub's structured `status` envelope field (verbatim); `suppressed` = `isSuppressedStatus(status)`, true only when that field equals `"suppressed"` (case-insensitive).
+- **`sender` = the send-from number (2026-07-22).** TextHub's `sender` param picks which of the account's numbers the message goes out from; the value is **national digits, no country code** (10 digits for 10DLC/TFN, short codes 5–6 digits as-is). `toTexthubSender(e164)` ([lib/sends/texthub.ts](../../lib/sends/texthub.ts)) derives it from the stage's `provider_phone_id` (hand-rolled digit-stripping, US-only assumption — no `libphonenumber`, which throws under `tsx`). The adapter ([lib/sends/providers/texthub.ts](../../lib/sends/providers/texthub.ts)) refuses (`ok:false`, no network call) when the stage has no sender number — **no fallback to TextHub's account-default sender**; the redacted `send_attempts` audit string includes the same `sender` so the evidence reflects the real request. See the no-sender-number guard above and [06-integrations.md](../06-integrations.md).
 
 ### Circuit breakers (`circuit-breakers.ts`, migration 0058; `max_sends_per_second` migration 0073)
 | Breaker | Scope | Type | Default (NULL ⇒) | Behavior |

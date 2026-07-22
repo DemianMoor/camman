@@ -6,7 +6,7 @@ export type NormalizedSendParams = {
   apiKey: string;
   text: string;
   recipientE164: string;      // drain speaks E.164; adapter converts inward
-  senderNumber: string | null; // provider_phone (Ahoi needs it; TextHub ignores)
+  senderNumber: string | null; // provider_phone as send-from number: Ahoi's source, TextHub's sender
   leadId?: string | null;
 };
 

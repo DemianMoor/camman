@@ -94,6 +94,7 @@ erDiagram
   campaigns ||--o{ campaign_audience_pool : "frozen audience"
   contacts ||--o{ campaign_audience_pool : ""
   campaign_tracking_counters ||--o{ campaigns : "seq source"
+  provider_phones ||--o{ campaigns : "default_provider_phone_id (set null, prefill only)"
 
   creatives ||--o{ campaign_stages : "creative_id (set null)"
   sms_providers ||--o{ campaign_stages : ""
@@ -229,10 +230,12 @@ erDiagram
 ### Campaigns & stages
 | Table | Key columns | Notes |
 |-------|------------|-------|
-| `campaigns` | `slug` (uniq per org), `human_id`, `brand_id`/`offer_id` (**restrict**), `audience_segment_ids[]` (**include** set), `audience_exclude_segment_ids[]` (migration 0114 — **exclude** set, disjoint from include; subtracted from the base), `audience_contact_group_ids[]`, `audience_filters` jsonb, `audience_cap`, `exclude_in_use_contacts` (default **true**), `status` draft/active/paused/completed/archived, `tracking_id`, `link_mode` manual/tracked | audience frozen at activation |
+| `campaigns` | `slug` (uniq per org), `human_id`, `brand_id`/`offer_id` (**restrict**), `audience_segment_ids[]` (**include** set), `audience_exclude_segment_ids[]` (migration 0114 — **exclude** set, disjoint from include; subtracted from the base), `audience_contact_group_ids[]`, `audience_filters` jsonb, `audience_cap`, `exclude_in_use_contacts` (default **true**), `default_provider_phone_id` (migration 0115, nullable FK → `provider_phones`, **ON DELETE SET NULL**), `status` draft/active/paused/completed/archived, `tracking_id`, `link_mode` manual/tracked | audience frozen at activation |
 | `campaign_stages` | `stage_number` (trigger-assigned), `creative_id`, `sms_provider_id`, `provider_phone_id`, `short_url`/`full_url`/`utm_tag_ids`, `stop_text`, `scheduled_at`/`sent_at`/`materialized_at`/`schedule_missed_at`, `send_approved`, `split_index`/`split_total`, `behavioral_tier`/`parent_stage_id` (behavioral lane), `tracking_id`, result counters, `materialized_at` (0089 — set only when EVERY recipient row exists; the completeness signal for windowed/resumable materialization: the scheduler resumes stages with it NULL and drains only stages with it set, so a half-built audience can't be sent), `total_cost`/`total_cost_manual` (0081 — `total_cost` auto-derives as `cost_per_sms × (sends + opt_out_count)` from the assigned provider phone, where `sends = GREATEST(sms_count, accepted stage_sends)`, **only once the stage is sent** (`sent_at` set or hand-entered `sms_count > 0`; $0 before), unless `total_cost_manual` is set; see [conventions](07-conventions.md)) | UNIQUE(campaign_id, stage_number); behavioral-lane CHECK: both NULL (ordinary) or `behavioral_tier IN (0,1,2)` + `parent_stage_id` set; self-FK `parent_stage_id → campaign_stages.id` ON DELETE CASCADE |
 | `campaign_tracking_counters` | PK(org_id, brand_id, offer_id, date_et), `next_seq` | atomic seq for campaign tracking IDs |
 | `campaign_audience_pool` | PK(campaign_id, contact_id), `was_clicker/opt_in/no_status_at_snapshot` | the frozen snapshot |
+
+> **Campaign default send-from number (migration `0115`).** `campaigns.default_provider_phone_id` is a **prefill convenience only** — there is no campaign-level provider (provider + phone both live on each stage), so this cannot be "the campaign's sender." When a NEW stage is created under a campaign with this set, the stage's `sms_provider_id`/`provider_phone_id` are pre-filled from it (operator can override). Send-time resolution stays **stage-only**: the drain always reads `campaign_stages.provider_phone_id`, never the campaign default. See [04-features/campaigns-stages-creatives.md](04-features/campaigns-stages-creatives.md) and [04-features/sms-send-pipeline.md](04-features/sms-send-pipeline.md).
 
 ### Result imports
 | Table | Key columns | Notes |

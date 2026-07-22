@@ -179,6 +179,10 @@ type CampaignDetail = {
   status_changed_at: string;
   tracking_id: string | null;
   link_mode: "manual" | "tracked";
+  // Default send-from phone for new stages (Task 7/9, migration 0115). NULL
+  // when the campaign has no default — new stages then fall back to
+  // StageForm's own null defaults.
+  default_provider_phone_id: number | null;
   archived_at: string | null;
   created_at: string;
   brand: (Info & { short_domain: string | null }) | null;

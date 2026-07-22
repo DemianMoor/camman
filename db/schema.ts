@@ -1525,6 +1525,14 @@ export const campaigns = pgTable(
     // A campaign may only be set to 'tracked' when its brand has an active
     // short_domains row (guarded in the API). Per-campaign, not per-stage.
     link_mode: text("link_mode").notNull().default("manual"),
+    // Campaign-level default send-from number (migration 0115). PREFILL ONLY:
+    // a new stage inherits this as its provider_phone_id; send-time resolution
+    // stays stage-only. NULL = no default. See docs/superpowers/specs/
+    // 2026-07-22-texthub-sender-id-design.md.
+    default_provider_phone_id: integer("default_provider_phone_id").references(
+      () => provider_phones.id,
+      { onDelete: "set null" },
+    ),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()

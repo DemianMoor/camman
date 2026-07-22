@@ -63,6 +63,7 @@ type CampaignDetail = {
   traffic_type_id: number | null;
   assigned_to_user_id: string | null;
   audience_segment_ids: number[];
+  audience_exclude_segment_ids: number[];
   audience_contact_group_ids: number[];
   audience_filters: AudienceFilters;
   audience_cap: number | null;
@@ -188,6 +189,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
     traffic_type_id: data.traffic_type_id,
     assigned_to_user_id: data.assigned_to_user_id,
     audience_segment_ids: data.audience_segment_ids ?? [],
+    audience_exclude_segment_ids: data.audience_exclude_segment_ids ?? [],
     audience_contact_group_ids: data.audience_contact_group_ids ?? [],
     audience_filters: {
       include_no_status: data.audience_filters?.include_no_status ?? true,
@@ -287,6 +289,7 @@ function Inner({
     const body = buildPatchBody(values);
     if (currentStatus && currentStatus !== "draft") {
       delete body.audience_segment_ids;
+      delete body.audience_exclude_segment_ids;
       delete body.audience_contact_group_ids;
       delete body.audience_filters;
       delete body.audience_cap;
@@ -787,7 +790,11 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
     contactGroupsLoading,
     audienceLocked,
     anySubmitting,
-    watchedSegments,
+    watchedExcludeSegments,
+    segmentPickerValue,
+    segmentModes,
+    onSegmentSelectionChange,
+    onToggleSegmentMode,
     watchedContactGroups,
     watchedFilters,
     watchedExcludeInUse,
@@ -822,14 +829,24 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
             <Label>Segments</Label>
             <SegmentPicker
               segments={segments}
-              value={watchedSegments}
-              onChange={(next) =>
-                form.setValue("audience_segment_ids", next, {
-                  shouldDirty: true,
-                })
-              }
+              value={segmentPickerValue}
+              onChange={onSegmentSelectionChange}
+              segmentModes={segmentModes}
+              onToggleMode={onToggleSegmentMode}
               disabled={audienceLocked || anySubmitting}
             />
+            {watchedExcludeSegments.length > 0 ? (
+              <p className="text-xs text-muted-foreground">
+                Excluded segments are subtracted from the group / included-segment
+                audience.
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Toggle a selected segment to{" "}
+                <span className="font-medium">Excl</span> to remove its contacts
+                from the audience.
+              </p>
+            )}
           </div>
           <div className="grid gap-1.5">
             <Label>
@@ -1040,6 +1057,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     previewFromSegments,
     previewFromGroups,
     previewOverlap,
+    previewExcludedBySegments,
     previewExcludedOptOut,
     previewInUseElsewhere,
     previewOfferExposed,
@@ -1047,6 +1065,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     previewError,
     previewLoading,
     watchedSegments,
+    watchedExcludeSegments,
     watchedContactGroups,
     watchedCap,
     watchedExcludeInUse,
@@ -1253,6 +1272,15 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                   muted
                 />
               ) : null}
+              {watchedExcludeSegments.length > 0 &&
+              previewExcludedBySegments !== null &&
+              previewExcludedBySegments > 0 ? (
+                <BreakdownRow
+                  label="Excluded by segment"
+                  value={previewExcludedBySegments}
+                  muted
+                />
+              ) : null}
               {previewExcludedOptOut !== null &&
               previewExcludedOptOut > 0 ? (
                 <BreakdownRow
@@ -1399,6 +1427,7 @@ function buildCreateBody(
     traffic_type_id: values.traffic_type_id,
     assigned_to_user_id: values.assigned_to_user_id,
     audience_segment_ids: values.audience_segment_ids,
+    audience_exclude_segment_ids: values.audience_exclude_segment_ids,
     audience_contact_group_ids: values.audience_contact_group_ids,
     audience_filters: values.audience_filters,
     audience_cap: values.audience_cap,
@@ -1422,6 +1451,7 @@ function buildPatchBody(values: CampaignFormValues): Record<string, unknown> {
     traffic_type_id: values.traffic_type_id,
     assigned_to_user_id: values.assigned_to_user_id,
     audience_segment_ids: values.audience_segment_ids,
+    audience_exclude_segment_ids: values.audience_exclude_segment_ids,
     audience_contact_group_ids: values.audience_contact_group_ids,
     audience_filters: values.audience_filters,
     audience_cap: values.audience_cap,

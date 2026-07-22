@@ -159,13 +159,20 @@ export async function POST(req: NextRequest) {
     }
   }
   const segmentIds = input.audience_segment_ids ?? [];
+  const excludeSegmentIds = input.audience_exclude_segment_ids ?? [];
   const contactGroupIds = input.audience_contact_group_ids ?? [];
-  if (segmentIds.length > 0) {
+  // Verify ownership over the union of include + exclude segments in one query.
+  const allSegmentIds = Array.from(
+    new Set([...segmentIds, ...excludeSegmentIds]),
+  );
+  if (allSegmentIds.length > 0) {
     const found = await db
       .select({ id: segments.id })
       .from(segments)
-      .where(and(eq(segments.org_id, orgId), inArray(segments.id, segmentIds)));
-    if (found.length !== segmentIds.length) {
+      .where(
+        and(eq(segments.org_id, orgId), inArray(segments.id, allSegmentIds)),
+      );
+    if (found.length !== allSegmentIds.length) {
       return apiError(
         400,
         "One or more audience_segment_ids don't belong to your organization",
@@ -235,6 +242,7 @@ export async function POST(req: NextRequest) {
             assigned_to_user_id: input.assigned_to_user_id ?? user.id,
             created_by_user_id: user.id,
             audience_segment_ids: segmentIds,
+            audience_exclude_segment_ids: excludeSegmentIds,
             audience_contact_group_ids: contactGroupIds,
             audience_filters: filters,
             audience_snapshot_count: 0,
@@ -274,6 +282,7 @@ export async function POST(req: NextRequest) {
               campaignId: inserted.id,
               orgId,
               segmentIds,
+              excludeSegmentIds,
               contactGroupIds,
               filters,
               cap: audienceCap,

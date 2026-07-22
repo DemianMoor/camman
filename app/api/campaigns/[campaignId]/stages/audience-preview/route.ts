@@ -76,6 +76,7 @@ export async function POST(
       status: campaigns.status,
       audience_snapshot_count: campaigns.audience_snapshot_count,
       audience_segment_ids: campaigns.audience_segment_ids,
+      audience_exclude_segment_ids: campaigns.audience_exclude_segment_ids,
       audience_contact_group_ids: campaigns.audience_contact_group_ids,
       audience_filters: campaigns.audience_filters,
       audience_cap: campaigns.audience_cap,
@@ -118,6 +119,8 @@ export async function POST(
           id: cid,
           orgId,
           segmentIds: campaignRow[0].audience_segment_ids ?? [],
+          excludeSegmentIds:
+            campaignRow[0].audience_exclude_segment_ids ?? [],
           contactGroupIds:
             campaignRow[0].audience_contact_group_ids ?? [],
           filters: campaignRow[0].audience_filters ?? {},
@@ -151,6 +154,8 @@ export async function POST(
     draft: isDraft
       ? {
           segmentIds: campaignRow[0].audience_segment_ids ?? [],
+          excludeSegmentIds:
+            campaignRow[0].audience_exclude_segment_ids ?? [],
           contactGroupIds: campaignRow[0].audience_contact_group_ids ?? [],
           filters: campaignRow[0].audience_filters ?? {},
           excludeInUse: campaignRow[0].exclude_in_use_contacts,

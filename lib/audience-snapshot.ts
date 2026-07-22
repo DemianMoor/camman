@@ -30,6 +30,7 @@ import { buildSegmentAudienceClause } from "./segment-rules-eval";
 function buildAudienceSourceClause(
   segmentBranches: SQL[],
   groupClause: SQL | null,
+  excludeUnion: SQL | null = null,
 ): SQL {
   const segmentUnion =
     segmentBranches.length > 0
@@ -37,11 +38,40 @@ function buildAudienceSourceClause(
           i === 0 ? branch : drizzleSql`${acc} UNION ${branch}`,
         )
       : null;
-  if (segmentUnion && groupClause) {
-    return drizzleSql`(${segmentUnion}) INTERSECT (${groupClause})`;
-  }
+  // Positive base P: include ∩ group when both, else whichever side is present.
   // hasAnySource guards the callers, so at least one side is non-null here.
-  return (segmentUnion ?? groupClause) as SQL;
+  const positive =
+    segmentUnion && groupClause
+      ? drizzleSql`(${segmentUnion}) INTERSECT (${groupClause})`
+      : ((segmentUnion ?? groupClause) as SQL);
+  // Subtract the exclude-mode segments (migration 0114). No-op when none.
+  if (excludeUnion) {
+    return drizzleSql`(${positive}) EXCEPT (${excludeUnion})`;
+  }
+  return positive;
+}
+
+// Build the UNION of exclude-mode segments' audiences (contact_ids), or null
+// when there are none. When a group is present the final audience is a subset
+// of the group, so evaluate the exclude segments against the group universe —
+// this preserves the same is_not perf lever the include side uses.
+async function buildExcludeSegmentUnion(
+  orgId: string,
+  excludeSegmentIds: number[],
+  restrictUniverse: SQL | undefined,
+): Promise<SQL | null> {
+  if (excludeSegmentIds.length === 0) return null;
+  const clauses = await Promise.all(
+    excludeSegmentIds.map((id) =>
+      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+    ),
+  );
+  const branches = clauses.map(
+    (clause) => drizzleSql`SELECT contact_id FROM (${clause}) exc_inner`,
+  );
+  return branches.reduce((acc, branch, i) =>
+    i === 0 ? branch : drizzleSql`${acc} UNION ${branch}`,
+  );
 }
 
 // The raw contact-group membership clause (`SELECT contact_id …`) for the
@@ -177,7 +207,12 @@ function applyCarrierFilter(
 
 export interface AudiencePreviewInput {
   orgId: string;
+  // The INCLUDE segment set (intersected with groups when both present).
   segmentIds: number[];
+  // The EXCLUDE segment set (migration 0114). Members are subtracted from the
+  // positive base: audience = (include ∩ group) EXCEPT exclude. Empty = no
+  // excludes (current behavior). Disjoint from segmentIds.
+  excludeSegmentIds?: number[];
   contactGroupIds?: number[];
   filters: AudienceFilters;
   // Optional cap. When set, the preview returns BOTH the total matching
@@ -222,6 +257,11 @@ export interface AudiencePreviewResult {
   from_segments: number;
   from_groups: number;
   overlap: number;
+  // Count of contacts in the positive base (include ∩ group) who were dropped
+  // because they belong to an exclude-mode segment (migration 0114). Zero when
+  // no exclude segments are selected. Reported so the UI can show "N excluded
+  // by segment".
+  excluded_by_segments: number;
   // Count of contacts in the union (across all selected sources) who
   // have an opt_out record and were therefore dropped. Independent of
   // the include_* filter toggles.
@@ -263,13 +303,15 @@ export interface AudienceSnapshotResult {
 async function buildAudienceSourceSql(
   input: AudiencePreviewInput,
 ): Promise<SQL> {
-  const { orgId, segmentIds, contactGroupIds = [] } = input;
+  const { orgId, segmentIds, contactGroupIds = [], excludeSegmentIds = [] } =
+    input;
 
   // Contact-group clause: every contact tagged with any of the selected
   // groups. Built first so it can double as the universe restriction for the
   // segment evaluation (see below).
   const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
   const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
+  const hasGroup = contactGroupIds.length > 0;
 
   // Per-segment rule-filtered clauses. Each yields a set of contact_ids
   // honoring that segment's rules + manual membership UNION. Subquery-wrap
@@ -285,7 +327,15 @@ async function buildAudienceSourceSql(
     (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
   );
 
-  return buildAudienceSourceClause(segmentBranches, groupClause);
+  // Exclude-mode segments (migration 0114): subtracted from the positive base.
+  // Restricted to the group universe when a group is present (final ⊆ group).
+  const excludeUnion = await buildExcludeSegmentUnion(
+    orgId,
+    excludeSegmentIds,
+    hasGroup ? groupClause! : undefined,
+  );
+
+  return buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion);
 }
 
 // Build the SQL that yields one row per qualifying contact_id, with the
@@ -488,6 +538,7 @@ export async function computeStageAudienceCountForDraft(
     id: number;
     orgId: string;
     segmentIds: number[];
+    excludeSegmentIds?: number[];
     contactGroupIds: number[];
     filters: AudienceFilters;
     cap: number | null;
@@ -496,6 +547,7 @@ export async function computeStageAudienceCountForDraft(
   stageFilters: StageAudienceFilters,
 ): Promise<StageAudienceCountResult> {
   const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
+  const excludeSegmentIds = campaign.excludeSegmentIds ?? [];
   const excludeInUse = campaign.excludeInUse === true;
   // No audience source on the parent campaign → trivially zero.
   if (segmentIds.length === 0 && contactGroupIds.length === 0) {
@@ -530,8 +582,14 @@ export async function computeStageAudienceCountForDraft(
   const segmentBranches = perSegmentClauses.map(
     (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
   );
+  // Exclude-mode segments subtracted from the base (migration 0114).
+  const excludeUnion = await buildExcludeSegmentUnion(
+    orgId,
+    excludeSegmentIds,
+    contactGroupIds.length > 0 ? groupClause! : undefined,
+  );
   const source = applyCarrierFilter(
-    buildAudienceSourceClause(segmentBranches, groupClause),
+    buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion),
     orgId,
     filters.carrier_filter,
   );
@@ -725,6 +783,7 @@ export async function computeStageAudienceCountsBatchForDraft(
     id: number;
     orgId: string;
     segmentIds: number[];
+    excludeSegmentIds?: number[];
     contactGroupIds: number[];
     filters: AudienceFilters;
     cap: number | null;
@@ -751,6 +810,7 @@ export async function computeStageAudienceCountsBatchForDraft(
   const source = await buildAudienceSourceSql({
     orgId,
     segmentIds,
+    excludeSegmentIds: campaign.excludeSegmentIds ?? [],
     contactGroupIds,
     filters,
     excludeInUse,
@@ -960,6 +1020,7 @@ export async function previewAudience(
       from_segments: 0,
       from_groups: 0,
       overlap: 0,
+      excluded_by_segments: 0,
       excluded_for_optout: 0,
       in_use_in_other_campaigns: 0,
       got_offer_in_prior_campaign: 0,
@@ -967,7 +1028,13 @@ export async function previewAudience(
     };
   }
 
-  const { orgId, segmentIds, contactGroupIds = [], filters } = input;
+  const {
+    orgId,
+    segmentIds,
+    excludeSegmentIds = [],
+    contactGroupIds = [],
+    filters,
+  } = input;
   const includeNoStatus = filters.include_no_status === true;
   const includeOptIn = filters.include_opt_in === true;
   const includeClickers = filters.include_clickers === true;
@@ -1006,31 +1073,62 @@ export async function previewAudience(
   const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
   const restrictUniverse = bothSides ? groupClause! : undefined;
 
-  // Per-segment clauses tagged with a from_segment=true / from_group=false
-  // marker so the aggregate query can attribute each contact to a source.
-  // We use UNION ALL because the GROUP BY downstream dedupes via BOOL_OR.
+  // Per-source clauses tagged with from_segment / from_group / from_exclude_segment
+  // markers so the aggregate query can attribute each contact to a source and
+  // apply the include/exclude membership rule. UNION ALL because the GROUP BY
+  // downstream dedupes via BOOL_OR.
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) => buildSegmentAudienceClause(id, orgId, restrictUniverse)),
   );
   const segmentBranches = perSegmentClauses.map(
     (clause) => drizzleSql`
-      SELECT contact_id, true::boolean AS from_segment, false::boolean AS from_group
+      SELECT contact_id, true::boolean AS from_segment, false::boolean AS from_group, false::boolean AS from_exclude_segment
       FROM (${clause}) seg_inner
     `,
   );
   const groupBranches = groupClause
     ? [
         drizzleSql`
-          SELECT contact_id, false::boolean AS from_segment, true::boolean AS from_group
+          SELECT contact_id, false::boolean AS from_segment, true::boolean AS from_group, false::boolean AS from_exclude_segment
           FROM (${groupClause}) grp_inner
         `,
       ]
     : [];
-  const allBranches = [...segmentBranches, ...groupBranches];
+  // Exclude-mode segments (migration 0114). Restricted to the group universe
+  // when a group is present (final ⊆ group). Tagged from_exclude_segment=true.
+  const perExcludeClauses = await Promise.all(
+    excludeSegmentIds.map((id) =>
+      buildSegmentAudienceClause(
+        id,
+        orgId,
+        contactGroupIds.length > 0 ? groupClause! : undefined,
+      ),
+    ),
+  );
+  const excludeBranches = perExcludeClauses.map(
+    (clause) => drizzleSql`
+      SELECT contact_id, false::boolean AS from_segment, false::boolean AS from_group, true::boolean AS from_exclude_segment
+      FROM (${clause}) exc_inner
+    `,
+  );
+  const allBranches = [...segmentBranches, ...groupBranches, ...excludeBranches];
   const unionedWithSources = allBranches.reduce(
     (acc, branch, i) =>
       i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
   );
+
+  // Positive-base membership expression, resolved from which dimensions are
+  // populated: include ∩ group when both, else whichever side is present.
+  const hasInc = segmentIds.length > 0;
+  const hasGrp = contactGroupIds.length > 0;
+  const positiveExpr =
+    hasInc && hasGrp
+      ? drizzleSql`(q.from_segment and q.from_group)`
+      : hasInc
+        ? drizzleSql`q.from_segment`
+        : hasGrp
+          ? drizzleSql`q.from_group`
+          : drizzleSql`false`;
 
   const rows = (await db.execute(drizzleSql`
     with unionized as (${unionedWithSources}),
@@ -1038,7 +1136,8 @@ export async function previewAudience(
       select
         contact_id,
         bool_or(from_segment) as from_segment,
-        bool_or(from_group) as from_group
+        bool_or(from_group) as from_group,
+        bool_or(from_exclude_segment) as from_exclude_segment
       from unionized
       group by contact_id
     ),
@@ -1048,6 +1147,7 @@ export async function previewAudience(
         s.contact_id,
         s.from_segment,
         s.from_group,
+        s.from_exclude_segment,
         (oo_set.contact_id is not null) as has_opt_out,
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
@@ -1075,9 +1175,11 @@ export async function previewAudience(
     eligible as (
       -- The actual pool the cap samples from. When the campaign-level
       -- exclude_in_use flag is on, in-use contacts are dropped here so
-      -- total_matching reflects the unused pool. membership_ok applies the
-      -- cross-dimension intersection: when both a segment and a group are
-      -- selected, a contact must appear in both sides.
+      -- total_matching reflects the unused pool.
+      --   membership_positive = the positive base (include ∩ group, or the
+      --     single populated dimension).
+      --   membership_ok = positive base MINUS exclude-mode segments (0114).
+      -- A contact only sends when in the positive base and not excluded.
       select
         q.*,
         (
@@ -1085,7 +1187,8 @@ export async function previewAudience(
           and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
           and (not ${excludePriorOffer}::boolean or not q.is_offer_exposed)
         ) as is_eligible,
-        (not ${bothSides}::boolean or (q.from_segment and q.from_group)) as membership_ok
+        (${positiveExpr}) as membership_positive,
+        ((${positiveExpr}) and not q.from_exclude_segment) as membership_ok
       from qualified q
     )
     select
@@ -1112,6 +1215,9 @@ export async function previewAudience(
       count(*) filter (where is_eligible and from_segment)::int as from_segments,
       count(*) filter (where is_eligible and from_group)::int as from_groups,
       count(*) filter (where is_eligible and from_segment and from_group)::int as overlap,
+      -- Contacts in the positive base dropped because they belong to an
+      -- exclude-mode segment (migration 0114). Zero when no exclude segments.
+      count(*) filter (where is_eligible and membership_positive and from_exclude_segment)::int as excluded_by_segments,
       count(*) filter (where has_opt_out)::int as excluded_for_optout,
       -- Reported on the in-audience set (post-intersection, pre in-use
       -- exclusion) so the UI's "N excluded" reflects the real audience.
@@ -1125,6 +1231,7 @@ export async function previewAudience(
     from_segments: number;
     from_groups: number;
     overlap: number;
+    excluded_by_segments: number;
     excluded_for_optout: number;
     in_use_in_other_campaigns: number;
     got_offer_in_prior_campaign: number;
@@ -1141,6 +1248,7 @@ export async function previewAudience(
     from_segments: row?.from_segments ?? 0,
     from_groups: row?.from_groups ?? 0,
     overlap: row?.overlap ?? 0,
+    excluded_by_segments: row?.excluded_by_segments ?? 0,
     excluded_for_optout: row?.excluded_for_optout ?? 0,
     in_use_in_other_campaigns: row?.in_use_in_other_campaigns ?? 0,
     got_offer_in_prior_campaign: row?.got_offer_in_prior_campaign ?? 0,
@@ -1271,6 +1379,7 @@ export interface StageEligibilityPreviewInput {
   // Draft mode needs the campaign's planned audience recipe (no frozen pool yet).
   draft?: {
     segmentIds: number[];
+    excludeSegmentIds?: number[];
     contactGroupIds: number[];
     filters: AudienceFilters;
     excludeInUse?: boolean;
@@ -1326,6 +1435,7 @@ export async function computeStageEligibilityPreview(
     const source = await buildAudienceSourceSql({
       orgId,
       segmentIds: draft.segmentIds,
+      excludeSegmentIds: draft.excludeSegmentIds ?? [],
       contactGroupIds: draft.contactGroupIds,
       filters: draft.filters,
       excludeInUse: draft.excludeInUse,

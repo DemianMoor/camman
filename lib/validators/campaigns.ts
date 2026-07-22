@@ -75,6 +75,13 @@ const campaignCreateBaseSchema = z.object({
   // a missing field means "no change" not "set to null". Same for filters
   // and contact_group_ids.
   audience_segment_ids: z.array(z.number().int().positive()).optional(),
+  // Per-segment exclude set (migration 0114). Members of these segments are
+  // subtracted from the positive base. NOT NULL DEFAULT '{}' in the DB, so a
+  // missing field means "no change" (PATCH) / "no excludes" (create). Must be
+  // disjoint from audience_segment_ids (a segment is include XOR exclude).
+  audience_exclude_segment_ids: z
+    .array(z.number().int().positive())
+    .optional(),
   audience_contact_group_ids: z
     .array(z.number().int().positive())
     .optional(),
@@ -108,8 +115,30 @@ const campaignCreateBaseSchema = z.object({
 // optional (they widen the audience when present). The same checks run
 // again in the status endpoint at draft → active so a stale draft can't
 // slip through with missing fields.
+// A segment can't be both an include and an exclude on the same campaign.
+function assertSegmentsDisjoint(
+  include: number[] | undefined,
+  exclude: number[] | undefined,
+  ctx: z.RefinementCtx,
+) {
+  if (!include || !exclude || exclude.length === 0) return;
+  const inc = new Set(include);
+  if (exclude.some((id) => inc.has(id))) {
+    ctx.addIssue({
+      path: ["audience_exclude_segment_ids"],
+      code: z.ZodIssueCode.custom,
+      message: "A segment can't be both included and excluded",
+    });
+  }
+}
+
 export const campaignCreateSchema = campaignCreateBaseSchema.superRefine(
   (data, ctx) => {
+    assertSegmentsDisjoint(
+      data.audience_segment_ids,
+      data.audience_exclude_segment_ids,
+      ctx,
+    );
     if (data.save_as_draft) return;
     if (!data.name || data.name.trim().length === 0) {
       ctx.addIssue({
@@ -159,6 +188,11 @@ export const campaignUpdateSchema = campaignCreateBaseSchema
     tracking_id: z.unknown().optional(),
   })
   .superRefine((d, ctx) => {
+    assertSegmentsDisjoint(
+      d.audience_segment_ids,
+      d.audience_exclude_segment_ids,
+      ctx,
+    );
     if (d.tracking_id !== undefined) {
       ctx.addIssue({
         path: ["tracking_id"],
@@ -187,6 +221,9 @@ export const campaignStatusChangeSchema = z.object({
 export const audiencePreviewSchema = z
   .object({
     audience_segment_ids: z.array(z.number().int().positive()).default([]),
+    audience_exclude_segment_ids: z
+      .array(z.number().int().positive())
+      .default([]),
     audience_contact_group_ids: z
       .array(z.number().int().positive())
       .default([]),
@@ -199,6 +236,9 @@ export const audiencePreviewSchema = z
     offer_id: z.number().int().positive().nullable().optional(),
   })
   .refine(
+    // A positive base is required: include segments or groups. An exclude-only
+    // selection has nothing to subtract from (see design). The caller
+    // short-circuits the empty case anyway.
     (d) =>
       d.audience_segment_ids.length > 0 ||
       d.audience_contact_group_ids.length > 0,
@@ -206,6 +246,13 @@ export const audiencePreviewSchema = z
       path: ["audience_segment_ids"],
       message: "Provide at least one segment or contact group",
     },
+  )
+  .superRefine((d, ctx) =>
+    assertSegmentsDisjoint(
+      d.audience_segment_ids,
+      d.audience_exclude_segment_ids,
+      ctx,
+    ),
   );
 
 export type CampaignCreateInput = z.infer<typeof campaignCreateSchema>;

@@ -47,6 +47,9 @@ export interface CampaignFormValues {
   traffic_type_id: number | null;
   assigned_to_user_id: string | null;
   audience_segment_ids: number[];
+  // Per-segment exclude set (migration 0114). Disjoint from audience_segment_ids
+  // (the include set). Members are subtracted from the positive base.
+  audience_exclude_segment_ids: number[];
   audience_contact_group_ids: number[];
   audience_filters: AudienceFilters;
   // Null = no cap. The form represents an empty input as null.
@@ -190,6 +193,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
       assigned_to_user_id:
         initialValues?.assigned_to_user_id ?? auth?.user.id ?? null,
       audience_segment_ids: initialValues?.audience_segment_ids ?? [],
+      audience_exclude_segment_ids:
+        initialValues?.audience_exclude_segment_ids ?? [],
       audience_contact_group_ids:
         initialValues?.audience_contact_group_ids ?? [],
       audience_filters: initialValues?.audience_filters ?? DEFAULT_FILTERS,
@@ -211,6 +216,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const watchedLinkMode = form.watch("link_mode");
   const watchedOfferId = form.watch("offer_id");
   const watchedSegments = form.watch("audience_segment_ids");
+  const watchedExcludeSegments = form.watch("audience_exclude_segment_ids");
   const watchedContactGroups = form.watch("audience_contact_group_ids");
   const watchedFilters = form.watch("audience_filters");
   const watchedCap = form.watch("audience_cap");
@@ -307,6 +313,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     from_segments: number;
     from_groups: number;
     overlap: number;
+    excluded_by_segments: number;
     excluded_for_optout: number;
     in_use_in_other_campaigns: number;
     got_offer_in_prior_campaign: number;
@@ -323,6 +330,9 @@ export function useCampaignFormState(props: CampaignFormProps) {
     null,
   );
   const [previewOverlap, setPreviewOverlap] = useState<number | null>(null);
+  const [previewExcludedBySegments, setPreviewExcludedBySegments] = useState<
+    number | null
+  >(null);
   const [previewExcludedOptOut, setPreviewExcludedOptOut] = useState<
     number | null
   >(null);
@@ -344,6 +354,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const [previewLoading, setPreviewLoading] = useState(false);
 
   const segmentsKey = watchedSegments.join(",");
+  const excludeSegmentsKey = watchedExcludeSegments.join(",");
   const groupsKey = watchedContactGroups.join(",");
   const filtersKey = JSON.stringify(watchedFilters);
   const capKey = watchedCap ?? "";
@@ -361,6 +372,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
       setPreviewFromSegments(null);
       setPreviewFromGroups(null);
       setPreviewOverlap(null);
+      setPreviewExcludedBySegments(null);
       setPreviewExcludedOptOut(null);
       setPreviewInUseElsewhere(null);
       setPreviewOfferExposed(null);
@@ -378,6 +390,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             audience_segment_ids: watchedSegments,
+            audience_exclude_segment_ids: watchedExcludeSegments,
             audience_contact_group_ids: watchedContactGroups,
             audience_filters: watchedFilters,
             audience_cap: watchedCap,
@@ -395,6 +408,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
         setPreviewFromSegments(result.data.from_segments);
         setPreviewFromGroups(result.data.from_groups);
         setPreviewOverlap(result.data.overlap);
+        setPreviewExcludedBySegments(result.data.excluded_by_segments);
         setPreviewExcludedOptOut(result.data.excluded_for_optout);
         setPreviewInUseElsewhere(result.data.in_use_in_other_campaigns);
         setPreviewOfferExposed(result.data.got_offer_in_prior_campaign);
@@ -407,6 +421,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
         setPreviewFromSegments(null);
         setPreviewFromGroups(null);
         setPreviewOverlap(null);
+        setPreviewExcludedBySegments(null);
         setPreviewExcludedOptOut(null);
         setPreviewInUseElsewhere(null);
         setPreviewOfferExposed(null);
@@ -423,6 +438,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     segmentsKey,
+    excludeSegmentsKey,
     groupsKey,
     filtersKey,
     capKey,
@@ -480,6 +496,63 @@ export function useCampaignFormState(props: CampaignFormProps) {
       );
     } else {
       form.setValue("audience_segment_ids", [...current, id], {
+        shouldDirty: true,
+      });
+    }
+  }
+
+  // The SegmentPicker's value is the UNION of include + exclude ids; the mode
+  // map (migration 0114) tells it how to render each chip. New selections
+  // default to include.
+  const segmentPickerValue = useMemo(
+    () => [...watchedSegments, ...watchedExcludeSegments],
+    [watchedSegments, watchedExcludeSegments],
+  );
+  const segmentModes = useMemo(() => {
+    const m: Record<number, "include" | "exclude"> = {};
+    for (const id of watchedSegments) m[id] = "include";
+    for (const id of watchedExcludeSegments) m[id] = "exclude";
+    return m;
+  }, [watchedSegments, watchedExcludeSegments]);
+
+  // Selection changed in the picker: keep each still-selected id's current
+  // mode; brand-new ids join the include set; dropped ids leave both.
+  function onSegmentSelectionChange(next: number[]) {
+    const nextSet = new Set(next);
+    const include = form
+      .getValues("audience_segment_ids")
+      .filter((id) => nextSet.has(id));
+    const exclude = form
+      .getValues("audience_exclude_segment_ids")
+      .filter((id) => nextSet.has(id));
+    const known = new Set([...include, ...exclude]);
+    for (const id of next) if (!known.has(id)) include.push(id);
+    form.setValue("audience_segment_ids", include, { shouldDirty: true });
+    form.setValue("audience_exclude_segment_ids", exclude, {
+      shouldDirty: true,
+    });
+  }
+
+  // Flip a selected segment between include and exclude.
+  function onToggleSegmentMode(id: number) {
+    const include = form.getValues("audience_segment_ids");
+    const exclude = form.getValues("audience_exclude_segment_ids");
+    if (include.includes(id)) {
+      form.setValue(
+        "audience_segment_ids",
+        include.filter((x) => x !== id),
+        { shouldDirty: true },
+      );
+      form.setValue("audience_exclude_segment_ids", [...exclude, id], {
+        shouldDirty: true,
+      });
+    } else if (exclude.includes(id)) {
+      form.setValue(
+        "audience_exclude_segment_ids",
+        exclude.filter((x) => x !== id),
+        { shouldDirty: true },
+      );
+      form.setValue("audience_segment_ids", [...include, id], {
         shouldDirty: true,
       });
     }
@@ -563,6 +636,11 @@ export function useCampaignFormState(props: CampaignFormProps) {
     members,
     watchedFilters,
     watchedSegments,
+    watchedExcludeSegments,
+    segmentPickerValue,
+    segmentModes,
+    onSegmentSelectionChange,
+    onToggleSegmentMode,
     watchedContactGroups,
     watchedCap,
     watchedExcludeInUse,
@@ -575,6 +653,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     previewFromSegments,
     previewFromGroups,
     previewOverlap,
+    previewExcludedBySegments,
     previewExcludedOptOut,
     previewInUseElsewhere,
     previewOfferExposed,

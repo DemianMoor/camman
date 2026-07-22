@@ -38,6 +38,11 @@ export interface SegmentPickerProps {
   isLoading?: boolean;
   disabled?: boolean;
   className?: string;
+  // Per-segment include/exclude mode (migration 0114). When provided, each
+  // selected chip shows an Include/Exclude toggle. A selected id missing from
+  // the map is treated as "include". Omit both props for a plain multi-select.
+  segmentModes?: Record<number, "include" | "exclude">;
+  onToggleMode?: (id: number) => void;
 }
 
 type FilterTab = "all" | "rules" | "static" | "recent" | "pinned";
@@ -57,7 +62,10 @@ export function SegmentPicker({
   isLoading = false,
   disabled = false,
   className,
+  segmentModes,
+  onToggleMode,
 }: SegmentPickerProps) {
+  const modesEnabled = segmentModes !== undefined && onToggleMode !== undefined;
   const [open, setOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
   const [tab, setTab] = React.useState<FilterTab>("all");
@@ -284,23 +292,55 @@ export function SegmentPicker({
 
       {chipSegments.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
-          {chipSegments.map((s) => (
-            <span
-              key={s.id}
-              className="inline-flex items-center gap-1.5 rounded-full border bg-background px-2 py-0.5 text-xs"
-            >
-              <span className="max-w-[12rem] truncate">{s.name}</span>
-              <button
-                type="button"
-                aria-label={`Remove ${s.name}`}
-                disabled={disabled || isLoading}
-                onClick={() => toggleSelect(s.id)}
-                className="text-muted-foreground hover:text-foreground"
+          {chipSegments.map((s) => {
+            const mode = segmentModes?.[s.id] ?? "include";
+            const isExclude = modesEnabled && mode === "exclude";
+            return (
+              <span
+                key={s.id}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full border bg-background px-2 py-0.5 text-xs",
+                  isExclude &&
+                    "border-destructive/40 bg-destructive/5 text-destructive dark:bg-destructive/10",
+                )}
               >
-                <X className="size-3" aria-hidden />
-              </button>
-            </span>
-          ))}
+                {modesEnabled ? (
+                  <button
+                    type="button"
+                    disabled={disabled || isLoading}
+                    onClick={() => onToggleMode!(s.id)}
+                    title={
+                      mode === "exclude"
+                        ? "Excluding — click to include"
+                        : "Including — click to exclude"
+                    }
+                    aria-label={`${s.name}: ${mode}. Toggle include/exclude`}
+                    className={cn(
+                      "rounded-full px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide",
+                      mode === "exclude"
+                        ? "bg-destructive/15 text-destructive"
+                        : "bg-muted text-muted-foreground hover:bg-muted/80",
+                    )}
+                  >
+                    {mode === "exclude" ? "Excl" : "Incl"}
+                  </button>
+                ) : null}
+                <span className="max-w-[12rem] truncate">{s.name}</span>
+                <button
+                  type="button"
+                  aria-label={`Remove ${s.name}`}
+                  disabled={disabled || isLoading}
+                  onClick={() => toggleSelect(s.id)}
+                  className={cn(
+                    "hover:text-foreground",
+                    isExclude ? "text-destructive/70" : "text-muted-foreground",
+                  )}
+                >
+                  <X className="size-3" aria-hidden />
+                </button>
+              </span>
+            );
+          })}
         </div>
       ) : null}
     </div>

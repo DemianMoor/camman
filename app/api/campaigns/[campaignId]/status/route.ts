@@ -85,6 +85,7 @@ export async function POST(
       brand_id: campaigns.brand_id,
       offer_id: campaigns.offer_id,
       audience_segment_ids: campaigns.audience_segment_ids,
+      audience_exclude_segment_ids: campaigns.audience_exclude_segment_ids,
       audience_contact_group_ids: campaigns.audience_contact_group_ids,
       audience_filters: campaigns.audience_filters,
       audience_cap: campaigns.audience_cap,
@@ -128,6 +129,7 @@ export async function POST(
     if (c.brand_id == null) missing.push("brand_id");
     if (c.offer_id == null) missing.push("offer_id");
     const segmentIds = c.audience_segment_ids ?? [];
+    const excludeSegmentIds = c.audience_exclude_segment_ids ?? [];
     const contactGroupIds = c.audience_contact_group_ids ?? [];
     if (contactGroupIds.length === 0) {
       missing.push("audience_contact_group_ids");
@@ -159,6 +161,7 @@ export async function POST(
               campaignId,
               orgId,
               segmentIds,
+              excludeSegmentIds,
               contactGroupIds,
               filters: c.audience_filters ?? {},
               cap: c.audience_cap ?? null,

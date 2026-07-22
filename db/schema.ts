@@ -1453,6 +1453,13 @@ export const campaigns = pgTable(
       .array()
       .notNull()
       .default(sql`'{}'::integer[]`),
+    // Per-segment exclude set (migration 0114). Members of these segments are
+    // subtracted from the positive base (include segments ∩ groups). Disjoint
+    // from audience_segment_ids (the include set). Default '{}' = no excludes.
+    audience_exclude_segment_ids: integer("audience_exclude_segment_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::integer[]`),
     audience_contact_group_ids: integer("audience_contact_group_ids")
       .array()
       .notNull()

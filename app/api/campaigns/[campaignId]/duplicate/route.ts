@@ -114,6 +114,7 @@ export async function POST(
             assigned_to_user_id: source.assigned_to_user_id ?? user.id,
             created_by_user_id: user.id,
             audience_segment_ids: source.audience_segment_ids,
+            audience_exclude_segment_ids: source.audience_exclude_segment_ids,
             audience_contact_group_ids: source.audience_contact_group_ids,
             audience_filters: source.audience_filters,
             audience_snapshot_count: 0,

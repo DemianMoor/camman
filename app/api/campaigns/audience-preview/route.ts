@@ -42,16 +42,24 @@ export async function POST(req: NextRequest) {
     );
   }
   const segmentIds = Array.from(new Set(parsed.data.audience_segment_ids));
+  const excludeSegmentIds = Array.from(
+    new Set(parsed.data.audience_exclude_segment_ids),
+  );
   const groupIds = Array.from(
     new Set(parsed.data.audience_contact_group_ids),
   );
 
-  if (segmentIds.length > 0) {
+  const allSegmentIds = Array.from(
+    new Set([...segmentIds, ...excludeSegmentIds]),
+  );
+  if (allSegmentIds.length > 0) {
     const found = await db
       .select({ id: segments.id })
       .from(segments)
-      .where(and(eq(segments.org_id, orgId), inArray(segments.id, segmentIds)));
-    if (found.length !== segmentIds.length) {
+      .where(
+        and(eq(segments.org_id, orgId), inArray(segments.id, allSegmentIds)),
+      );
+    if (found.length !== allSegmentIds.length) {
       return apiError(
         400,
         "One or more audience_segment_ids don't belong to your organization",
@@ -83,6 +91,7 @@ export async function POST(req: NextRequest) {
   const result = await previewAudience({
     orgId,
     segmentIds,
+    excludeSegmentIds,
     contactGroupIds: groupIds,
     filters: parsed.data.audience_filters ?? {},
     cap: parsed.data.audience_cap ?? null,

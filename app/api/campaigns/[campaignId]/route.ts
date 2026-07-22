@@ -9,6 +9,7 @@ import {
   contact_groups,
   offers,
   routing_types,
+  segments,
   traffic_types,
 } from "@/db/schema";
 import {
@@ -84,6 +85,7 @@ export async function GET(
       assigned_to_user_id: campaigns.assigned_to_user_id,
       created_by_user_id: campaigns.created_by_user_id,
       audience_segment_ids: campaigns.audience_segment_ids,
+      audience_exclude_segment_ids: campaigns.audience_exclude_segment_ids,
       audience_contact_group_ids: campaigns.audience_contact_group_ids,
       audience_filters: campaigns.audience_filters,
       audience_snapshot_count: campaigns.audience_snapshot_count,
@@ -256,6 +258,7 @@ export async function PATCH(
   const rawBody = (json ?? {}) as Record<string, unknown>;
   const touchesAudience =
     "audience_segment_ids" in rawBody ||
+    "audience_exclude_segment_ids" in rawBody ||
     "audience_contact_group_ids" in rawBody ||
     "audience_filters" in rawBody ||
     "audience_cap" in rawBody ||
@@ -268,6 +271,31 @@ export async function PATCH(
       API_ERROR_CODES.VALIDATION,
       { reason: "audience_locked_after_draft" },
     );
+  }
+
+  // Verify org ownership of segment ids (include + exclude) when present.
+  // RLS is defense-in-depth; Drizzle bypasses it.
+  const patchSegmentIds = Array.from(
+    new Set([
+      ...(input.audience_segment_ids ?? []),
+      ...(input.audience_exclude_segment_ids ?? []),
+    ]),
+  );
+  if (patchSegmentIds.length > 0) {
+    const found = await db
+      .select({ id: segments.id })
+      .from(segments)
+      .where(
+        and(eq(segments.org_id, orgId), inArray(segments.id, patchSegmentIds)),
+      );
+    if (found.length !== patchSegmentIds.length) {
+      return apiError(
+        400,
+        "One or more audience_segment_ids don't belong to your organization",
+        API_ERROR_CODES.VALIDATION,
+        { field: "audience_segment_ids" },
+      );
+    }
   }
 
   // Verify org ownership of contact_group_ids when present. Same pattern

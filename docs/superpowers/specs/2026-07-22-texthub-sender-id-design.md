@@ -64,11 +64,15 @@ Three parts. Only Part 2 needs a migration.
 
 **`lib/sends/providers/texthub.ts`:**
 
-- In `send()` and `buildRedactedRequest()`, compute
-  `sender = p.senderNumber ? toTexthubSender(p.senderNumber) : undefined` and pass
-  it to `rawSendSms` / `buildSendUrl`.
-- Include `sender` in the redacted audit string too, so `send_attempts` reflects
-  the real request (same audit-accuracy principle as the Ahoi fix).
+- **Refuse on a null sender, mirroring Ahoi.** Because the user chose to *block*
+  rather than fall back to TextHub's account default, `send()` returns a clean
+  `ok: false` (no network call, `status: 0`, `timedOut: false`) when
+  `p.senderNumber` is null — the same shape `ahoiAdapter.send` already returns.
+  This is the deepest backstop; the kickoff gate (Part 3) blocks earlier.
+- When a sender is present, compute `sender = toTexthubSender(p.senderNumber)` and
+  pass it to `rawSendSms` / `buildSendUrl` in both `send()` and
+  `buildRedactedRequest()`. Include `sender` in the redacted audit string too, so
+  `send_attempts` reflects the real request (audit-accuracy principle from Ahoi).
 
 No drain change (senderNumber already threaded). No schema change for Part 1.
 
@@ -98,22 +102,29 @@ each stage — a campaign default cannot *be* "the campaign's sender." It is a
 
 ### Part 3 — Block sends with no sender
 
-Uniform rule: **any stage reaching the send drain must have a phone assigned.**
-The drain *is* the API-send path, so this needs no provider-capability lookup.
-It extends to TextHub the guarantee Ahoi already enforces, instead of silently
-using TextHub's account default.
+Uniform rule: **any API-send (tracked) stage must have a phone assigned.** The
+mechanism **already exists** — the kickoff gate refuses with `no_sender_number`,
+but is currently narrowed to Ahoi. We generalize it.
 
-- **New refusal reason `no_sender`** added to the `DrainRefusal` union in
-  `lib/sends/drain.ts`.
-- **Gate placement:** immediately after the existing `no_provider` check
-  (`drain.ts:235`), before credential resolution and any send attempt:
-  `if (stage.provider_phone_id == null) return { ok: false, reason: "no_sender", ...EMPTY };`
-  `provider_phone_id` is already selected by the drain's ctx query — no query
-  change.
-- **UI:** surface the refusal so operators know to assign a phone. (Existing
-  refusal-surfacing path; wording is a plan detail.)
-- **No Ahoi regression:** Ahoi already refuses without a sender; this just moves
-  the guarantee one step earlier and makes it uniform.
+- **`lib/sends/kickoff.ts` (~line 227):** the existing guard reads
+  `if (provider[0].provider_key === "ahi" && row.provider_phone_id == null)`.
+  This check sits *after* the `supports_api_send` gate (line 219), so it only ever
+  runs for API-capable providers. **Drop the `provider_key === "ahi"` clause** →
+  `if (row.provider_phone_id == null) return { ok: false, reason: "no_sender_number" };`
+  Now every API-send stage (TextHub `txh`/`txh2`, Ahoi `ahi`, any future) is
+  blocked without a phone. The operator message already exists in
+  `lib/sends/kickoff-refusals.ts` (`no_sender_number`). This gate only applies to
+  `link_mode='tracked'` stages — manual stages don't call a provider API, so they
+  are correctly untouched.
+- **`lib/sends/preflight.ts`:** the read-only UI checklist has **no** sender check
+  today. Add `"no_sender_number"` to `PreflightBlocker` and, in the tracked
+  branch, `add("sender", row.provider_phone_id != null, "Sending number assigned",
+  "no_sender_number")`. `provider_phone_id` is already selected by preflight's
+  query. This makes the blocker show red in the Prepare/readiness UI before send.
+- **Adapter backstop:** the TextHub adapter's refuse-on-null (Part 1) is the last
+  line of defense for the rare "phone cleared after materialization" window.
+- **No Ahoi regression:** Ahoi already hit this gate; generalizing the condition
+  leaves its behavior identical.
 
 ## 4. Pre-deploy safety (live sends)
 
@@ -129,27 +140,37 @@ stranded by the new block:
 
 ## 5. Testing / verification
 
-- **`scripts/test-texthub-send.ts`** (new, tsx): asserts
+- **`scripts/test-texthub-send.ts`** (new, tsx, plain `check()` harness like
+  `scripts/test-ahoi-send.ts`): asserts
   - `+19175551234` → URL contains `sender=9175551234`;
   - a short code (e.g. `12345`) passes through as `sender=12345`;
-  - `sender` is **omitted** from the URL when `senderNumber` is null;
-  - the redacted audit string includes the same `sender`.
-- **`scripts/verify-drain.ts`** re-run: proves the new `no_sender` refusal and the
-  optional `sender` field cause no regression in the injected-seam path.
+  - `senderNumber: null` → `send()` returns `ok:false` with **no** network call
+    (refuse-on-null, mirroring Ahoi);
+  - the redacted audit string includes the same `sender` and never the raw key.
+- **`scripts/verify-drain.ts`** re-run: proves the optional `sender` field and the
+  adapter change cause no regression in the injected-seam path.
 - Typecheck / lint clean.
 
 ## 6. Files touched
 
 - `lib/sends/texthub.ts` — `sender` on `SendSmsParams` + `buildSendUrl`; new
   `toTexthubSender`.
-- `lib/sends/providers/texthub.ts` — thread `sender` through `send` + redaction.
-- `lib/sends/drain.ts` — `no_sender` refusal + gate.
-- `db/schema.ts` + `db/migrations/0115_*.sql` + snapshot + journal —
-  `campaigns.default_provider_phone_id`.
-- `components/campaigns/campaign-form.*` (+ its API/validators) — default picker.
-- `components/campaigns/stage-form.tsx` (+ possibly `stage-inline-creator.tsx`) —
-  prefill from campaign default.
-- Active-phones list endpoint (new or reused) for the campaign picker.
+- `lib/sends/providers/texthub.ts` — refuse-on-null + thread `sender` through
+  `send` + redaction.
+- `lib/sends/kickoff.ts` — generalize the `no_sender_number` guard (drop the
+  `=== "ahi"` clause).
+- `lib/sends/preflight.ts` — add the `no_sender_number` blocker + checklist item.
+- `db/schema.ts` + `db/migrations/0115_*.sql` + `meta/0115_snapshot.json` +
+  `meta/_journal.json` — `campaigns.default_provider_phone_id`.
+- `lib/validators/campaigns.ts` — `default_provider_phone_id` on create/update.
+- `app/api/campaigns/route.ts` + `app/api/campaigns/[campaignId]/route.ts` —
+  insert/select/FK-verify the new column.
+- New `app/api/provider-phones/list/route.ts` — org-wide active phones (labeled by
+  provider) for the campaign picker (gated `provider_phones.view`).
+- `components/campaigns/campaign-form-state.ts` + `campaign-form-fields.tsx` —
+  default-sender picker + phones fetch + form value/default.
+- `components/campaigns/stage-form.tsx` — prefill provider+phone from the
+  campaign default on new-stage create.
 - `scripts/test-texthub-send.ts` (new).
 - Docs: `03-data-model.md` (+ ERD), `04-features/` (campaigns / sends),
   `06-integrations.md` (TextHub `sender` param), `07-conventions.md`
@@ -170,6 +191,7 @@ stranded by the new block:
 - `sender` value = the phone number **without country code** (10 digits for
   TFN/10DLC; short code as-is).
 - Campaign default = **prefill new stages** (not send-time inheritance).
-- Missing sender = **blocked** at **send-time preflight** (plus pre-deploy audit),
-  not activation.
+- Missing sender = **blocked** at the **kickoff send gate** (generalizing the
+  existing `no_sender_number` guard) + shown in the read-only preflight checklist,
+  plus a pre-deploy audit. Not at draft→active activation.
 - Stage "Phone number" label left unchanged (no copy change).

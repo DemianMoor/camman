@@ -63,10 +63,23 @@ export const providerPhoneUpdateSchema = z
       .optional(),
     brand_id: z.number().int().positive().nullable().optional(),
     max_sends_per_second: z.number().int().min(1).max(1000).nullable().optional(),
+    // Move the number to a different provider (reassigns provider_id in place;
+    // clears the number's account link). When it differs from the current
+    // provider and not-yet-sent stages reference the number, the route returns
+    // 409 MOVE_NEEDS_CONFIRMATION unless `confirm_move` is true.
+    provider_id: z.number().int().positive().optional(),
+    confirm_move: z.boolean().optional(),
   })
-  .refine((data) => Object.values(data).some((v) => v !== undefined), {
-    message: "At least one field must be provided",
-  });
+  // `confirm_move` is a control flag, not an edit — a body carrying only it
+  // (no real field change and no provider move) is a no-op, so exclude it here.
+  .refine(
+    (data) =>
+      data.cost_per_sms !== undefined ||
+      data.brand_id !== undefined ||
+      data.max_sends_per_second !== undefined ||
+      data.provider_id !== undefined,
+    { message: "At least one field must be provided" },
+  );
 
 export const providerPhoneStatusChangeSchema = z.object({
   status: z.enum(PHONE_STATUSES),

@@ -48,7 +48,12 @@ type Brand = {
 };
 type BrandsListResponse = { data: Brand[]; totalCount: number };
 
+type ProviderOption = { id: number; name: string };
+
 const UNASSIGNED = "__unassigned__";
+
+/** Edit submit may carry a move target (`provider_id`) alongside the field edits. */
+export type PhoneSubmitValues = PhoneFormValues & { provider_id?: number };
 
 export interface PhoneFormProps {
   mode: "create" | "edit";
@@ -57,7 +62,11 @@ export interface PhoneFormProps {
   initialValues?: Partial<PhoneFormValues>;
   /** Required in edit mode for the read-only display. */
   existingPhoneNumber?: string;
-  onSubmit: (values: PhoneFormValues) => Promise<void>;
+  /** edit mode: the number's current provider — the picker's default value. */
+  currentProviderId?: number;
+  /** edit mode: providers the picker lists — INCLUDES the current one (its default label). */
+  providers?: ProviderOption[];
+  onSubmit: (values: PhoneSubmitValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
 }
@@ -66,11 +75,19 @@ export function PhoneForm({
   mode,
   initialValues,
   existingPhoneNumber,
+  currentProviderId,
+  providers,
   onSubmit,
   onCancel,
   isSubmitting,
 }: PhoneFormProps) {
   const isEdit = mode === "edit";
+
+  // Move target — defaults to the current provider (no move). Local state, not
+  // part of the zod-resolved form (which would strip an unknown key on submit).
+  const [targetProviderId, setTargetProviderId] = useState<number | undefined>(
+    currentProviderId,
+  );
 
   // In edit mode we hide phone_number/number_type from validation by using the
   // update schema (which omits them). In create mode we use the create schema.
@@ -113,7 +130,11 @@ export function PhoneForm({
   return (
     <Form {...form}>
       <form
-        onSubmit={form.handleSubmit(onSubmit)}
+        onSubmit={form.handleSubmit((values) =>
+          onSubmit(
+            isEdit ? { ...values, provider_id: targetProviderId } : values,
+          ),
+        )}
         className="grid gap-4"
         noValidate
       >
@@ -240,6 +261,40 @@ export function PhoneForm({
             )}
           />
         )}
+
+        {/* Provider — edit mode only. Changing it moves the number to another
+            provider (reassigns in place). */}
+        {isEdit && providers && providers.length > 1 ? (
+          <FormItem>
+            <FormLabel>Provider</FormLabel>
+            <Select
+              value={
+                targetProviderId != null ? String(targetProviderId) : undefined
+              }
+              onValueChange={(v) => setTargetProviderId(Number(v))}
+              disabled={isSubmitting}
+            >
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select provider" />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                {providers.map((p) => (
+                  <SelectItem key={p.id} value={String(p.id)}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {targetProviderId !== currentProviderId ? (
+              <FormDescription>
+                Moving clears this number&apos;s account link and re-attributes
+                its past sends to the new provider in number-level reports.
+              </FormDescription>
+            ) : null}
+          </FormItem>
+        ) : null}
 
         <FormField
           control={form.control}

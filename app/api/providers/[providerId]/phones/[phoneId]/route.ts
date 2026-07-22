@@ -1,8 +1,14 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { brands, provider_phones } from "@/db/schema";
+import {
+  brands,
+  campaign_stages,
+  campaigns,
+  provider_phones,
+  sms_providers,
+} from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
@@ -128,8 +134,13 @@ export async function PATCH(
     );
   }
 
+  // `provider_id` (move target) and `confirm_move` (control flag) are handled
+  // specially below; the rest map straight to columns.
+  const { provider_id: targetProviderId, confirm_move, ...editable } =
+    parsed.data;
+
   const updates: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(parsed.data)) {
+  for (const [k, v] of Object.entries(editable)) {
     if (v === undefined) continue;
     if (k === "brand_id") {
       updates[k] = v ?? null;
@@ -138,6 +149,91 @@ export async function PATCH(
     } else {
       updates[k] = v;
     }
+  }
+
+  // Move to another provider: reassign provider_id in place (the row's
+  // (org_id, phone_number) is unchanged, so the unique constraint is never
+  // re-triggered) and clear the account link, which belonged to the old
+  // provider. Number-level reports resolve a send's provider from the phone's
+  // current provider_id, so past sends re-attribute to the new provider — the
+  // move confirmation surfaces this in the UI.
+  if (targetProviderId !== undefined && targetProviderId !== pid) {
+    const target = await db
+      .select({ id: sms_providers.id, name: sms_providers.name })
+      .from(sms_providers)
+      .where(
+        and(
+          eq(sms_providers.id, targetProviderId),
+          eq(sms_providers.org_id, orgId),
+        ),
+      )
+      .limit(1);
+    if (!target[0]) {
+      return apiError(
+        404,
+        "Target provider not found",
+        API_ERROR_CODES.NOT_FOUND,
+        { field: "provider_id", entity: "provider" },
+      );
+    }
+
+    // Warn (but allow) when not-yet-sent stages reference this number — moving
+    // mid-flight leaves them pointing at a number now registered elsewhere.
+    // Already-sent/terminal stages are unaffected beyond reporting.
+    if (!confirm_move) {
+      const liveStages = await db
+        .select({
+          campaign_id: campaign_stages.campaign_id,
+          stage_number: campaign_stages.stage_number,
+          status: campaign_stages.status,
+          campaign_name: campaigns.name,
+          campaign_human_id: campaigns.human_id,
+        })
+        .from(campaign_stages)
+        .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
+        .where(
+          and(
+            eq(campaign_stages.org_id, orgId),
+            eq(campaign_stages.provider_phone_id, phid),
+            inArray(campaign_stages.status, ["draft", "pending"]),
+          ),
+        )
+        .orderBy(campaign_stages.campaign_id, campaign_stages.stage_number)
+        .limit(50);
+
+      if (liveStages.length > 0) {
+        return apiError(409, "This number is used by stages that haven't sent yet.", API_ERROR_CODES.CONFLICT, {
+          reason: "move_needs_confirmation",
+          target_provider_name: target[0].name,
+          stages: liveStages,
+        });
+      }
+    }
+
+    updates.provider_id = targetProviderId;
+    updates.credential_id = null;
+  }
+
+  // Nothing to change (e.g. provider_id equals the current provider and no
+  // other fields) — return the current row rather than issue an empty UPDATE.
+  if (Object.keys(updates).length === 0) {
+    const current = await db
+      .select()
+      .from(provider_phones)
+      .where(
+        and(
+          eq(provider_phones.id, phid),
+          eq(provider_phones.provider_id, pid),
+          eq(provider_phones.org_id, orgId),
+        ),
+      )
+      .limit(1);
+    if (!current[0]) {
+      return apiError(404, "Phone not found", API_ERROR_CODES.NOT_FOUND, {
+        entity: "provider_phone",
+      });
+    }
+    return NextResponse.json(current[0]);
   }
 
   const updated = await db

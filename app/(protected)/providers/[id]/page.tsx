@@ -22,6 +22,7 @@ import { LiveSendingBanner } from "@/components/sends/live-sending-banner";
 import {
   PhoneForm,
   type PhoneFormValues,
+  type PhoneSubmitValues,
 } from "@/components/providers/phone-form";
 import { ProviderCredentialsSection } from "@/components/providers/provider-credentials-section";
 import {
@@ -229,6 +230,9 @@ export default function ProviderDetailPage() {
   const statusPhoneApi = useApiCall<Phone>();
   const archivePhoneApi = useApiCall<Phone>();
   const restorePhoneApi = useApiCall<Phone>();
+  const providersListApi = useApiCall<{
+    data: { id: number; name: string; status: string }[];
+  }>();
 
   const [provider, setProvider] = useState<Provider | null>(null);
   const [providerError, setProviderError] = useState<string | null>(null);
@@ -309,10 +313,41 @@ export default function ProviderDetailPage() {
     phonesApi.execute,
   ]);
 
+  // Providers the Edit dialog can move a number to. Active providers plus the
+  // number's current one (so its default label resolves even if archived).
+  const [allProviders, setAllProviders] = useState<
+    { id: number; name: string; status: string }[]
+  >([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = await providersListApi.execute(
+        "/api/providers/list?pageSize=100&showArchived=true",
+      );
+      if (cancelled) return;
+      if (result.ok) setAllProviders(result.data.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [providersListApi.execute]);
+
   // Dialog state
   const [editProviderOpen, setEditProviderOpen] = useState(false);
   const [addPhoneOpen, setAddPhoneOpen] = useState(false);
   const [editingPhone, setEditingPhone] = useState<Phone | null>(null);
+  // Move-confirmation handshake: set when a move hits not-yet-sent stages.
+  const [moveConfirm, setMoveConfirm] = useState<{
+    values: PhoneSubmitValues;
+    targetProviderName: string;
+    stages: {
+      campaign_id: number;
+      stage_number: number;
+      status: string;
+      campaign_name: string | null;
+      campaign_human_id: string | null;
+    }[];
+  } | null>(null);
   const [confirmingProvider, setConfirmingProvider] = useState<
     "archive" | "restore" | null
   >(null);
@@ -408,12 +443,22 @@ export default function ProviderDetailPage() {
     refetchPhones();
   }
 
-  async function handleEditPhone(values: PhoneFormValues) {
+  async function submitPhonePatch(
+    values: PhoneSubmitValues,
+    confirmMove: boolean,
+  ) {
     if (!editingPhone || !provider) return;
-    const patch = {
+    const isMove =
+      values.provider_id !== undefined &&
+      values.provider_id !== editingPhone.provider_id;
+    const patch: Record<string, unknown> = {
       cost_per_sms: values.cost_per_sms,
       brand_id: values.brand_id,
     };
+    if (isMove) {
+      patch.provider_id = values.provider_id;
+      if (confirmMove) patch.confirm_move = true;
+    }
     const result = await updatePhoneApi.execute(
       `/api/providers/${provider.id}/phones/${editingPhone.id}`,
       {
@@ -423,12 +468,49 @@ export default function ProviderDetailPage() {
       },
     );
     if (!result.ok) {
+      // Move-confirmation handshake: not-yet-sent stages reference this number.
+      const details = result.details as
+        | {
+            reason?: string;
+            target_provider_name?: string;
+            stages?: {
+              campaign_id: number;
+              stage_number: number;
+              status: string;
+              campaign_name: string | null;
+              campaign_human_id: string | null;
+            }[];
+          }
+        | undefined;
+      if (
+        result.status === 409 &&
+        details?.reason === "move_needs_confirmation"
+      ) {
+        setMoveConfirm({
+          values,
+          targetProviderName: details.target_provider_name ?? "the provider",
+          stages: details.stages ?? [],
+        });
+        return;
+      }
       toastApiError(result, "Couldn't save phone");
       return;
     }
-    toast.success("Phone saved");
+    if (isMove) {
+      const name =
+        allProviders.find((p) => p.id === values.provider_id)?.name ??
+        "the new provider";
+      toast.success(`Number moved to ${name}`);
+    } else {
+      toast.success("Phone saved");
+    }
+    setMoveConfirm(null);
     setEditingPhone(null);
     refetchPhones();
+  }
+
+  async function handleEditPhone(values: PhoneSubmitValues) {
+    await submitPhonePatch(values, false);
   }
 
   async function handlePhoneStatusChange(
@@ -984,6 +1066,13 @@ export default function ProviderDetailPage() {
             key={`edit-phone-${editingPhone.id}`}
             mode="edit"
             existingPhoneNumber={editingPhone.phone_number}
+            currentProviderId={editingPhone.provider_id}
+            providers={allProviders
+              .filter(
+                (p) =>
+                  p.status === "active" || p.id === editingPhone.provider_id,
+              )
+              .map((p) => ({ id: p.id, name: p.name }))}
             initialValues={{
               phone_number: editingPhone.phone_number,
               number_type: editingPhone.number_type,
@@ -996,6 +1085,62 @@ export default function ProviderDetailPage() {
           />
         ) : null}
       </FormDialog>
+
+      {/* Move-to-provider confirm — the number is used by not-yet-sent stages */}
+      <AlertDialog
+        open={moveConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open) setMoveConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Move this number to {moveConfirm?.targetProviderName}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This number is used by {moveConfirm?.stages.length ?? 0} stage
+              {(moveConfirm?.stages.length ?? 0) === 1 ? "" : "s"} that
+              haven&apos;t sent yet. Moving it now means those stages will send
+              through {moveConfirm?.targetProviderName} instead. Moving also
+              clears the number&apos;s account link.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {moveConfirm && moveConfirm.stages.length > 0 ? (
+            <ul className="max-h-40 overflow-y-auto rounded-md border bg-muted/40 p-2 text-sm">
+              {moveConfirm.stages.map((s) => (
+                <li
+                  key={`${s.campaign_id}-${s.stage_number}`}
+                  className="flex items-center justify-between gap-2 px-1 py-0.5"
+                >
+                  <span className="truncate">
+                    {s.campaign_name ?? s.campaign_human_id ?? `Campaign #${s.campaign_id}`}
+                    {" — stage "}
+                    {s.stage_number}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {s.status}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={updatePhoneApi.isLoading}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                if (moveConfirm) void submitPhonePatch(moveConfirm.values, true);
+              }}
+              disabled={updatePhoneApi.isLoading}
+            >
+              Move anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Provider archive/restore confirm */}
       <AlertDialog

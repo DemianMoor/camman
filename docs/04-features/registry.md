@@ -1,6 +1,6 @@
 # Feature — Registry (brands, offers, networks, providers, …)
 
-_Last updated: 2026-06-24_
+_Last updated: 2026-07-22_
 
 ## 1. Purpose
 The registry is the set of lookup/reference entities a campaign is composed from: who the campaign is for (brand/offer/network), how it's sent (provider/phone), and how it's classified (routing type, traffic type, UTM tags). They share one CRUD pattern, cloned from the original **Brands** implementation (CLAUDE.md §11).
@@ -36,6 +36,7 @@ The registry is the set of lookup/reference entities a campaign is composed from
 ## 6. Rules & edge cases
 - `offers.network_id` is **required** (migration `0032`) — an offer must belong to a network.
 - `provider_phones`: `short_code` numbers leave geo columns NULL; `10dlc`/`toll_free` are E.164.
+- **Move a number to another provider.** The Edit-phone dialog has a **Provider** picker; changing it reassigns `provider_phones.provider_id` **in place** (same row, so the `(org_id, phone_number)` unique constraint is never re-triggered — this is how you shift a number between vendors without the "already exists" error). Handled by `PATCH /api/providers/[providerId]/phones/[phoneId]` with a `provider_id` (target) field. The move also **clears `credential_id`** (the account link belonged to the old provider) and, because number-level reports resolve a send's provider from the phone's current `provider_id`, **re-attributes the number's past sends to the new provider** in those reports. If not-yet-sent stages (`status IN ('draft','pending')`) reference the number, the API returns `409` with `details.reason = 'move_needs_confirmation'` (+ the affected stages); the UI shows a confirm dialog and the client re-submits with `confirm_move: true`. Permission: `provider_phones.update` (operator+). No schema change — the column and all `provider_phones.id` FKs (`ON DELETE SET NULL`) already support it.
 - Provider circuit-breaker + send-window columns live on `sms_providers` but are consumed by the [send pipeline](sms-send-pipeline.md), not the registry CRUD.
 
 ## 7. Extension points / limitations

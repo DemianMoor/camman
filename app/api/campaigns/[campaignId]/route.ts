@@ -8,6 +8,7 @@ import {
   campaigns,
   contact_groups,
   offers,
+  provider_phones,
   routing_types,
   segments,
   traffic_types,
@@ -99,6 +100,7 @@ export async function GET(
       status_changed_at: campaigns.status_changed_at,
       tracking_id: campaigns.tracking_id,
       link_mode: campaigns.link_mode,
+      default_provider_phone_id: campaigns.default_provider_phone_id,
       archived_at: campaigns.archived_at,
       created_at: campaigns.created_at,
       brand: {
@@ -319,6 +321,29 @@ export async function PATCH(
         "One or more audience_contact_group_ids don't belong to your organization",
         API_ERROR_CODES.VALIDATION,
         { field: "audience_contact_group_ids" },
+      );
+    }
+  }
+
+  // Verify org ownership of the default sender phone when present (RLS is
+  // defense-in-depth). null is allowed (clears the default).
+  if (input.default_provider_phone_id != null) {
+    const found = await db
+      .select({ id: provider_phones.id })
+      .from(provider_phones)
+      .where(
+        and(
+          eq(provider_phones.id, input.default_provider_phone_id),
+          eq(provider_phones.org_id, orgId),
+        ),
+      )
+      .limit(1);
+    if (!found[0]) {
+      return apiError(
+        400,
+        "default_provider_phone_id doesn't belong to your organization",
+        API_ERROR_CODES.VALIDATION,
+        { field: "default_provider_phone_id" },
       );
     }
   }

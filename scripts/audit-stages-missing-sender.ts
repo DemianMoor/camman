@@ -2,6 +2,8 @@
 // provider_phone_id — these would now be blocked by the generalized kickoff
 // no_sender_number gate (Task 3). Run BEFORE deploying that change so nothing
 // in-flight is stranded. Run: npx tsx scripts/audit-stages-missing-sender.ts
+import "./_env-preload";
+
 import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 

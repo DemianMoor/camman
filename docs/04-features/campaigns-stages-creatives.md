@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-07-20_
+_Last updated: 2026-07-22_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -100,6 +100,7 @@ Auto-generated, **immutable**, separate from `id` and `human_id`.
 ## 6. Rules & edge cases
 - Activation gate: name + brand + offer + ≥1 **contact group** (code-authoritative; segments optional).
 - Audience locked after activation (`audience_locked_after_draft`).
+- **Create-mode form defaults** (`components/campaigns/campaign-form-state.ts`, edit mode loads the saved record instead): Offer uses the pin/recent `OfferPicker`; **Send method auto-selects `tracked` (API Send)** once a brand with an active short domain is chosen — unless the operator has manually touched the field (override respected); brand with no short domain forces back to `manual`. **Routing defaults to the `Preland` routing type** when one exists (else None). Audience filters default to No-status + **Clickers** + Not-clicked on (`DEFAULT_FILTERS`).
 - `creative_id` on a stage is `ON DELETE SET NULL` — deleting a creative nulls the stage link but keeps the stage (and any minted links keep working — link `creative_id` is also SET NULL).
 
 ## 7. Extension points / limitations

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 
 import { useAuth } from "@/components/protected/auth-context";
@@ -85,7 +85,8 @@ export const NONE = "__none__";
 export const DEFAULT_FILTERS: AudienceFilters = {
   include_no_status: true,
   include_opt_in: false,
-  include_clickers: false,
+  // Clickers pre-selected on new campaigns (product decision 2026-07-22).
+  include_clickers: true,
   include_not_clicked: true,
   carrier_filter: [],
 };
@@ -244,6 +245,21 @@ export function useCampaignFormState(props: CampaignFormProps) {
       form.setValue("routing_type_id", routingTypes[0].id, {
         shouldDirty: false,
       });
+    }
+  }, [isEdit, routingTypes, form]);
+  // Default new campaigns to the "Preland" routing type when it exists.
+  // Guarded on null so it composes with the single-option auto-select above
+  // and never overrides an existing draft's saved value. Falls back to None
+  // (null) if no such type is configured.
+  useEffect(() => {
+    if (isEdit) return;
+    if (routingTypes.length === 0) return;
+    if (form.getValues("routing_type_id") !== null) return;
+    const preland = routingTypes.find(
+      (r) => r.name.trim().toLowerCase() === "preland",
+    );
+    if (preland) {
+      form.setValue("routing_type_id", preland.id, { shouldDirty: false });
     }
   }, [isEdit, routingTypes, form]);
   useEffect(() => {
@@ -475,9 +491,26 @@ export function useCampaignFormState(props: CampaignFormProps) {
     [brands, watchedBrandId],
   );
 
+  // Tracks whether the operator has manually picked a send method. Once they
+  // have, we stop auto-selecting API Send on brand changes (respect the
+  // override). Stays false for auto-fills so brand switching keeps working.
+  const linkModeTouchedRef = useRef(false);
+
   function setLinkMode(mode: "manual" | "tracked") {
+    linkModeTouchedRef.current = true;
     form.setValue("link_mode", mode, { shouldDirty: true });
   }
+
+  // Auto-select API Send once a brand with an active short domain is chosen
+  // (create mode only). Skipped after the operator manually touches the field.
+  // shouldDirty:false so the auto-fill doesn't trip the discard prompt.
+  useEffect(() => {
+    if (isEdit) return;
+    if (linkModeTouchedRef.current) return;
+    if (selectedBrandShortDomain && watchedLinkMode !== "tracked") {
+      form.setValue("link_mode", "tracked", { shouldDirty: false });
+    }
+  }, [isEdit, selectedBrandShortDomain, watchedLinkMode, form]);
 
   // Keep API Send valid: if the (selected) brand has no active short domain,
   // force back to Manual so a tracked campaign can't be submitted without a

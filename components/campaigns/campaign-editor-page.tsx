@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { MultiSelectPicker } from "@/components/multi-select-picker";
+import { OfferPicker } from "@/components/offers/offer-picker";
 import { SegmentPicker } from "@/components/segments/segment-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -576,32 +577,14 @@ function SetupCard({
             render={({ field }) => (
               <FormItem>
                 <FormLabel required>Offer</FormLabel>
-                <Select
-                  value={field.value === null ? "" : String(field.value)}
-                  onValueChange={(v) => field.onChange(Number(v))}
-                  disabled={anySubmitting}
-                >
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select" />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    {offers.map((o) => (
-                      <SelectItem key={o.id} value={String(o.id)}>
-                        <span className="inline-flex items-center gap-2">
-                          <span
-                            className="size-2 rounded-full"
-                            style={{
-                              backgroundColor: o.color ?? "#64748B",
-                            }}
-                          />
-                          <span>{o.name}</span>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <FormControl>
+                  <OfferPicker
+                    offers={offers}
+                    value={field.value}
+                    onChange={field.onChange}
+                    disabled={anySubmitting}
+                  />
+                </FormControl>
                 <FormMessage />
               </FormItem>
             )}

@@ -1,6 +1,6 @@
 # Feature — UI System
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-07-22_
 
 ## 1. Purpose
 A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shadcn/ui. Reusable wrappers enforce the project's interaction conventions (dialog dismissal, required-field markers, file uploads, multi-select) so individual screens stay thin.
@@ -15,7 +15,8 @@ A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shad
 | Component | File | Role |
 |-----------|------|------|
 | `DataTable` | `components/data-table.tsx` | TanStack wrapper: manual pagination/sort/selection, loading skeletons, empty state, row-click |
-| `MultiSelectPicker` | `components/multi-select-picker.tsx` | popover searchable checkbox list for >10 options (segments, offers, UTM tags, groups); scales to hundreds. Pill-toggles reserved for ≤5 fixed enums |
+| `MultiSelectPicker` | `components/multi-select-picker.tsx` | popover searchable checkbox list for >10 options (UTM tags, groups); scales to hundreds. Pill-toggles reserved for ≤5 fixed enums |
+| `SegmentPicker` / `OfferPicker` | `components/segments/segment-picker.tsx`, `components/offers/offer-picker.tsx` | popover searchable pickers with **pin (star) + recently-used** ordering (Pinned → Recent → All). SegmentPicker is multi-select; OfferPicker is single-select. Both back their prefs with `usePickerPrefs(namespace)` (`lib/hooks/use-picker-prefs.ts`), a per-browser localStorage store keyed `segments.*` / `offers.*`. `useSegmentPrefs` is a thin wrapper over it |
 | `FileDropZone` | `components/file-drop-zone.tsx` | click + drag-drop file input (CSV imports). The only file-picker shape — extend it, don't roll a new `<input type=file>` |
 | `FormDialog` | `components/ui/form-dialog.tsx` | dialog that **blocks** backdrop-click + Escape dismissal (protects in-progress form data); X / Cancel still close |
 | `CopyableId` | `components/ui/copyable-id.tsx` | read-only input + copy button + toast for system-generated ids (tracking IDs) |

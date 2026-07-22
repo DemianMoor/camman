@@ -17,6 +17,10 @@ export interface SendSmsParams {
   text: string;
   number: string; // exactly one recipient, international format
   leadId?: string | null;
+  // Send-from number as TextHub wants it: national digits, no country code
+  // (10 digits for 10DLC/TFN, short code as-is). Optional — the adapter refuses
+  // when it can't supply one, so in practice buildSendUrl always receives it.
+  sender?: string | null;
   timeoutMs?: number;
 }
 
@@ -43,6 +47,16 @@ export function isSuppressedStatus(status: unknown): boolean {
   return typeof status === "string" && status.trim().toLowerCase() === "suppressed";
 }
 
+// E.164 US number -> TextHub `sender` (national digits, no country code):
+// "+19175551234" -> "9175551234". Short codes (5-6 digits, no country code) pass
+// through unchanged. Hand-rolled on purpose — libphonenumber throws under tsx
+// (see lib/sends/providers/ahoi.ts toAhoiRecipient); US-only assumption.
+export function toTexthubSender(e164: string): string {
+  const digits = (e164 ?? "").replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits;
+}
+
 // Pure URL builder — exported so the URL contract (text + number + api_key, and
 // crucially NO long_url / NO group) is testable without hitting the network.
 export function buildSendUrl(params: SendSmsParams): string {
@@ -51,6 +65,7 @@ export function buildSendUrl(params: SendSmsParams): string {
   url.searchParams.set("text", params.text);
   url.searchParams.set("number", params.number);
   if (params.leadId) url.searchParams.set("lead_id", params.leadId);
+  if (params.sender) url.searchParams.set("sender", params.sender);
   // Intentionally never set `long_url` or `group`.
   return url.toString();
 }

@@ -35,6 +35,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { formatPhoneInternational } from "@/lib/phone-validation";
 import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
 
@@ -61,6 +62,7 @@ type CampaignDetail = {
   offer_id: number;
   routing_type_id: number | null;
   traffic_type_id: number | null;
+  default_provider_phone_id: number | null;
   assigned_to_user_id: string | null;
   audience_segment_ids: number[];
   audience_exclude_segment_ids: number[];
@@ -187,6 +189,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
     offer_id: data.offer_id,
     routing_type_id: data.routing_type_id,
     traffic_type_id: data.traffic_type_id,
+    default_provider_phone_id: data.default_provider_phone_id ?? null,
     assigned_to_user_id: data.assigned_to_user_id,
     audience_segment_ids: data.audience_segment_ids ?? [],
     audience_exclude_segment_ids: data.audience_exclude_segment_ids ?? [],
@@ -492,6 +495,7 @@ function SetupCard({
     offers,
     routingTypes,
     trafficTypes,
+    activePhones,
     members,
     anySubmitting,
     watchedLinkMode,
@@ -698,6 +702,46 @@ function SetupCard({
                     ))}
                   </SelectContent>
                 </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="default_provider_phone_id"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Default send-from number</FormLabel>
+                <Select
+                  value={field.value === null ? NONE : String(field.value)}
+                  onValueChange={(v) =>
+                    field.onChange(v === NONE ? null : Number(v))
+                  }
+                  disabled={anySubmitting}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue placeholder="No default" />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value={NONE}>No default</SelectItem>
+                    {activePhones.map((p) => (
+                      <SelectItem key={p.id} value={String(p.id)}>
+                        <span className="font-mono text-xs">
+                          {formatPhoneInternational(p.phone_number)}
+                        </span>
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          {p.provider_name}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormDescription className="text-xs">
+                  New stages start from this number. Optional; each stage can
+                  override.
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}
@@ -1425,6 +1469,7 @@ function buildCreateBody(
     offer_id: values.offer_id,
     routing_type_id: values.routing_type_id,
     traffic_type_id: values.traffic_type_id,
+    default_provider_phone_id: values.default_provider_phone_id,
     assigned_to_user_id: values.assigned_to_user_id,
     audience_segment_ids: values.audience_segment_ids,
     audience_exclude_segment_ids: values.audience_exclude_segment_ids,
@@ -1449,6 +1494,7 @@ function buildPatchBody(values: CampaignFormValues): Record<string, unknown> {
     offer_id: values.offer_id,
     routing_type_id: values.routing_type_id,
     traffic_type_id: values.traffic_type_id,
+    default_provider_phone_id: values.default_provider_phone_id,
     assigned_to_user_id: values.assigned_to_user_id,
     audience_segment_ids: values.audience_segment_ids,
     audience_exclude_segment_ids: values.audience_exclude_segment_ids,

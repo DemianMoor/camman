@@ -25,6 +25,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { formatPhoneInternational } from "@/lib/phone-validation";
 import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
 
@@ -56,6 +57,7 @@ export function CampaignFormFields({
     contactGroups,
     contactGroupsLoading,
     members,
+    activePhones,
     audienceLocked,
     anySubmitting,
     segmentSearch,
@@ -314,6 +316,46 @@ export function CampaignFormFields({
             )}
           />
         </div>
+        <FormField
+          control={form.control}
+          name="default_provider_phone_id"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Default send-from number</FormLabel>
+              <Select
+                value={field.value === null ? NONE : String(field.value)}
+                onValueChange={(v) =>
+                  field.onChange(v === NONE ? null : Number(v))
+                }
+                disabled={anySubmitting}
+              >
+                <FormControl>
+                  <SelectTrigger>
+                    <SelectValue placeholder="No default" />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  <SelectItem value={NONE}>No default</SelectItem>
+                  {activePhones.map((p) => (
+                    <SelectItem key={p.id} value={String(p.id)}>
+                      <span className="font-mono text-xs">
+                        {formatPhoneInternational(p.phone_number)}
+                      </span>
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        {p.provider_name}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                New stages start from this number. Optional; each stage can
+                override.
+              </p>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
         <FormField
           control={form.control}
           name="assigned_to_user_id"

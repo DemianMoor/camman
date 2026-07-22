@@ -220,11 +220,13 @@ export async function kickoffStageSend(
       return { ok: false, reason: "provider_not_api_capable" };
     }
 
-    // No-sender-number guard (Section 3 Task 8; carried from Section 2's
-    // final review). Only Ahoi needs a provider_phone_id — see the design
-    // note in the Section 3 plan for why this is a plain key check rather
-    // than a new adapter capability flag.
-    if (provider[0].provider_key === "ahi" && row.provider_phone_id == null) {
+    // No-sender-number guard. Every API-send provider now selects its send-from
+    // number via the stage's provider_phone_id: Ahoi as the `source`, TextHub as
+    // the `sender` param (2026-07-22). This sits after the supports_api_send gate
+    // above, so it only fires for API-capable providers. Blocking here (rather
+    // than falling back to a provider account default) is the deliberate product
+    // rule — a deliberate sender is required.
+    if (row.provider_phone_id == null) {
       return { ok: false, reason: "no_sender_number" };
     }
 

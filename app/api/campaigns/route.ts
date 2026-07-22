@@ -8,6 +8,7 @@ import {
   campaigns,
   contact_groups,
   offers,
+  provider_phones,
   routing_types,
   segments,
   traffic_types,
@@ -158,6 +159,26 @@ export async function POST(req: NextRequest) {
       );
     }
   }
+  if (input.default_provider_phone_id != null) {
+    const r = await db
+      .select({ id: provider_phones.id })
+      .from(provider_phones)
+      .where(
+        and(
+          eq(provider_phones.id, input.default_provider_phone_id),
+          eq(provider_phones.org_id, orgId),
+        ),
+      )
+      .limit(1);
+    if (!r[0]) {
+      return apiError(
+        400,
+        "default_provider_phone_id doesn't belong to your organization",
+        API_ERROR_CODES.VALIDATION,
+        { field: "default_provider_phone_id" },
+      );
+    }
+  }
   const segmentIds = input.audience_segment_ids ?? [];
   const excludeSegmentIds = input.audience_exclude_segment_ids ?? [];
   const contactGroupIds = input.audience_contact_group_ids ?? [];
@@ -250,6 +271,7 @@ export async function POST(req: NextRequest) {
             exclude_in_use_contacts: excludeInUse,
             exclude_prior_offer_contacts: excludePriorOffer,
             link_mode: input.link_mode ?? "manual",
+            default_provider_phone_id: input.default_provider_phone_id ?? null,
             start_date: input.start_date ?? null,
             end_date: input.end_date ?? null,
             status: "draft",

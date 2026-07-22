@@ -69,6 +69,10 @@ const campaignCreateBaseSchema = z.object({
   offer_id: z.number().int().positive().nullable().optional(),
   routing_type_id: z.number().int().positive().nullable().optional(),
   traffic_type_id: z.number().int().positive().nullable().optional(),
+  // Campaign-level default send-from number (migration 0115). Prefill only —
+  // the send path never reads it. Null clears the default. Ownership re-verified
+  // in the route against provider_phones for this org.
+  default_provider_phone_id: z.number().int().positive().nullable().optional(),
   assigned_to_user_id: z.string().uuid().nullable().optional(),
   // audience_segment_ids stays .optional() (NOT nullable) because its DB
   // column is NOT NULL with default '{}'. The form always ships an array;

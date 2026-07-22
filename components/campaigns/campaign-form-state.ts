@@ -12,6 +12,17 @@ export type Info = { id: number; name: string; color: string | null };
 // Brands carry their active short domain (from /api/brands/list) so the form
 // can gate "API Send" without an extra fetch.
 export type BrandOption = Info & { short_domain: string | null };
+// Active provider phones across all providers (org-wide, per /api/provider-phones/list).
+// Powers the campaign form's "Default send-from number" picker.
+export type ActivePhone = {
+  id: number;
+  phone_number: string;
+  number_type: string;
+  provider_id: number;
+  provider_name: string;
+  provider_key: string;
+  supports_api_send: boolean;
+};
 export type Offer = Info & { payout_model: string; payout_cpa: string | null };
 export type SegmentInfo = {
   id: number;
@@ -45,6 +56,9 @@ export interface CampaignFormValues {
   offer_id: number | null;
   routing_type_id: number | null;
   traffic_type_id: number | null;
+  // Prefill for new stages' provider_phone_id (migration 0115). Null = no
+  // default; each stage can still pick its own / override.
+  default_provider_phone_id: number | null;
   assigned_to_user_id: string | null;
   audience_segment_ids: number[];
   // Per-segment exclude set (migration 0114). Disjoint from audience_segment_ids
@@ -121,6 +135,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const segmentsApi = useApiCall<{ data: SegmentInfo[] }>();
   const contactGroupsApi = useApiCall<{ data: Info[] }>();
   const membersApi = useApiCall<{ data: Member[] }>();
+  const phonesApi = useApiCall<{ data: ActivePhone[] }>();
   const [brands, setBrands] = useState<BrandOption[]>([]);
   const [offers, setOffers] = useState<Offer[]>([]);
   const [routingTypes, setRoutingTypes] = useState<Info[]>([]);
@@ -128,6 +143,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const [segments, setSegments] = useState<SegmentInfo[]>([]);
   const [contactGroups, setContactGroups] = useState<Info[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+  const [activePhones, setActivePhones] = useState<ActivePhone[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -179,6 +195,12 @@ export function useCampaignFormState(props: CampaignFormProps) {
       if (r.ok) setMembers(r.data.data);
     })();
   }, [membersApi.execute]);
+  useEffect(() => {
+    (async () => {
+      const r = await phonesApi.execute("/api/provider-phones/list");
+      if (r.ok) setActivePhones(r.data.data);
+    })();
+  }, [phonesApi.execute]);
 
   // RHF setup
   const form = useForm<CampaignFormValues>({
@@ -190,6 +212,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
       offer_id: initialValues?.offer_id ?? null,
       routing_type_id: initialValues?.routing_type_id ?? null,
       traffic_type_id: initialValues?.traffic_type_id ?? null,
+      default_provider_phone_id:
+        initialValues?.default_provider_phone_id ?? null,
       assigned_to_user_id:
         initialValues?.assigned_to_user_id ?? auth?.user.id ?? null,
       audience_segment_ids: initialValues?.audience_segment_ids ?? [],
@@ -634,6 +658,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     contactGroups,
     contactGroupsLoading: contactGroupsApi.isLoading,
     members,
+    activePhones,
     watchedFilters,
     watchedSegments,
     watchedExcludeSegments,

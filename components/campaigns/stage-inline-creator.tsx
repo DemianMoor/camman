@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { toast } from "sonner";
 
+import type { ActivePhone } from "@/components/campaigns/campaign-form-state";
 import {
   buildStageCreateBody,
   StageForm,
@@ -35,6 +37,9 @@ interface CampaignLite {
     postfix?: string | null;
   } | null;
   audience_snapshot_count: number;
+  // Default send-from phone (Task 7, migration 0115). NULL = no default;
+  // new stages fall back to StageForm's own null defaults.
+  default_provider_phone_id: number | null;
 }
 
 export interface EditableStage {
@@ -121,9 +126,66 @@ export function StageInlineEditor({
 }: StageInlineEditorProps) {
   const createApi = useApiCall<{ id: number; stage_number: number }>();
   const updateApi = useApiCall<{ id: number }>();
+  const defaultPhoneApi = useApiCall<{ data: ActivePhone[] }>();
 
   const isEdit = stage !== null;
   const isSubmitting = isEdit ? updateApi.isLoading : createApi.isLoading;
+
+  // Create-mode prefill from the campaign's default send-from phone (Task 9).
+  // The default is stored as a provider_phone_id only; StageForm's defaultValues
+  // (applied once at mount via RHF) need BOTH sms_provider_id and
+  // provider_phone_id, so the provider must be resolved via the org-wide
+  // provider-phones list BEFORE <StageForm> mounts. Resolution runs once per
+  // "New stage" session and is cached on this instance (the editor stays
+  // mounted across opens/closes at the page level).
+  const [resolvedDefault, setResolvedDefault] = useState<{
+    sms_provider_id: number;
+    provider_phone_id: number;
+  } | null>(null);
+  const [defaultResolutionAttempted, setDefaultResolutionAttempted] =
+    useState(false);
+
+  const needsDefaultResolution =
+    isOpen &&
+    !isEdit &&
+    campaign.default_provider_phone_id != null &&
+    !defaultResolutionAttempted;
+
+  useEffect(() => {
+    if (!needsDefaultResolution) return;
+    let cancelled = false;
+    (async () => {
+      const r = await defaultPhoneApi.execute("/api/provider-phones/list");
+      if (cancelled) return;
+      if (r.ok) {
+        const match = r.data.data.find(
+          (p) => p.id === campaign.default_provider_phone_id,
+        );
+        if (match) {
+          setResolvedDefault({
+            sms_provider_id: match.provider_id,
+            provider_phone_id: match.id,
+          });
+        }
+      }
+      setDefaultResolutionAttempted(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    needsDefaultResolution,
+    defaultPhoneApi.execute,
+    campaign.default_provider_phone_id,
+  ]);
+
+  // Gate the StageForm mount in create mode while a default exists but hasn't
+  // resolved yet — RHF's defaultValues only apply at mount, so mounting early
+  // would miss the seeded provider/phone.
+  const showDefaultResolutionPlaceholder =
+    !isEdit &&
+    campaign.default_provider_phone_id != null &&
+    !defaultResolutionAttempted;
 
   async function handleSubmit(values: StageFormValues) {
     if (isEdit && stage) {
@@ -163,6 +225,12 @@ export function StageInlineEditor({
   // omitted so it defaults to true; the form reconciles once UTM tags load —
   // if the stored full_url matches the generated value it keeps re-deriving,
   // otherwise it treats the URL as hand-customized and preserves it.
+  //
+  // Create mode: undefined unless the campaign has a default send-from phone
+  // AND it resolved successfully — then seed sms_provider_id + provider_phone_id
+  // only, leaving every other field to StageForm's own defaults. If resolution
+  // fails (network error, or the phone id no longer matches any org phone) the
+  // form still opens, just without the prefill — never blocks stage creation.
   const initialValues: Partial<StageFormValues> | undefined = stage
     ? {
         label: stage.label ?? "",
@@ -180,7 +248,12 @@ export function StageInlineEditor({
         scheduled_at: utcToCampaignLocalInput(stage.scheduled_at),
         notes: stage.notes ?? "",
       }
-    : undefined;
+    : resolvedDefault
+      ? {
+          sms_provider_id: resolvedDefault.sms_provider_id,
+          provider_phone_id: resolvedDefault.provider_phone_id,
+        }
+      : undefined;
 
   if (!isOpen) {
     return (
@@ -212,55 +285,59 @@ export function StageInlineEditor({
         </Button>
       </CardHeader>
       <CardContent className="p-4">
-        <StageForm
-          key={isEdit ? `stage-${stage!.id}` : "stage-new"}
-          mode={isEdit ? "edit" : "create"}
-          campaignId={campaignId}
-          stageId={isEdit ? stage!.id : undefined}
-          trackingId={isEdit ? stage!.tracking_id : null}
-          campaignTrackingId={campaignTrackingId ?? null}
-          nextStageNumber={nextStageNumber}
-          stageNumber={isEdit ? stage!.stage_number : undefined}
-          splitIndex={isEdit ? stage!.split_index : null}
-          splitTotal={isEdit ? stage!.split_total : null}
-          behavioralTier={isEdit ? stage!.behavioral_tier : null}
-          sentAt={isEdit ? stage!.sent_at : null}
-          armed={
-            isEdit &&
-            !!stage!.send_approved &&
-            stage!.sent_at == null &&
-            stage!.scheduled_at != null &&
-            stage!.schedule_missed_at == null
-          }
-          onSplit={() => {
-            onOpenChange(false);
-            onSaved();
-          }}
-          onBehavioralSplit={isEdit ? onBehavioralSplit : undefined}
-          campaign={campaign}
-          resultsCounters={
-            isEdit
-              ? {
-                  sms_count: stage!.sms_count,
-                  delivered_count: stage!.delivered_count,
-                  opt_out_count: stage!.opt_out_count,
-                  click_count: stage!.click_count,
-                  scrubbed_count: stage!.scrubbed_count,
-                  bounced_count: stage!.bounced_count,
-                  checkout_click_count: stage!.checkout_click_count,
-                  sales_count: stage!.sales_count,
-                  total_cost: stage!.total_cost,
-                }
-              : undefined
-          }
-          onImportResults={isEdit ? onImportResults : undefined}
-          onManualResults={isEdit ? onManualResults : undefined}
-          onViewImportHistory={isEdit ? onViewImportHistory : undefined}
-          initialValues={initialValues}
-          onSubmit={handleSubmit}
-          onCancel={() => onOpenChange(false)}
-          isSubmitting={isSubmitting}
-        />
+        {showDefaultResolutionPlaceholder ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : (
+          <StageForm
+            key={isEdit ? `stage-${stage!.id}` : "stage-new"}
+            mode={isEdit ? "edit" : "create"}
+            campaignId={campaignId}
+            stageId={isEdit ? stage!.id : undefined}
+            trackingId={isEdit ? stage!.tracking_id : null}
+            campaignTrackingId={campaignTrackingId ?? null}
+            nextStageNumber={nextStageNumber}
+            stageNumber={isEdit ? stage!.stage_number : undefined}
+            splitIndex={isEdit ? stage!.split_index : null}
+            splitTotal={isEdit ? stage!.split_total : null}
+            behavioralTier={isEdit ? stage!.behavioral_tier : null}
+            sentAt={isEdit ? stage!.sent_at : null}
+            armed={
+              isEdit &&
+              !!stage!.send_approved &&
+              stage!.sent_at == null &&
+              stage!.scheduled_at != null &&
+              stage!.schedule_missed_at == null
+            }
+            onSplit={() => {
+              onOpenChange(false);
+              onSaved();
+            }}
+            onBehavioralSplit={isEdit ? onBehavioralSplit : undefined}
+            campaign={campaign}
+            resultsCounters={
+              isEdit
+                ? {
+                    sms_count: stage!.sms_count,
+                    delivered_count: stage!.delivered_count,
+                    opt_out_count: stage!.opt_out_count,
+                    click_count: stage!.click_count,
+                    scrubbed_count: stage!.scrubbed_count,
+                    bounced_count: stage!.bounced_count,
+                    checkout_click_count: stage!.checkout_click_count,
+                    sales_count: stage!.sales_count,
+                    total_cost: stage!.total_cost,
+                  }
+                : undefined
+            }
+            onImportResults={isEdit ? onImportResults : undefined}
+            onManualResults={isEdit ? onManualResults : undefined}
+            onViewImportHistory={isEdit ? onViewImportHistory : undefined}
+            initialValues={initialValues}
+            onSubmit={handleSubmit}
+            onCancel={() => onOpenChange(false)}
+            isSubmitting={isSubmitting}
+          />
+        )}
       </CardContent>
     </Card>
   );

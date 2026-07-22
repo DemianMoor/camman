@@ -9,7 +9,7 @@ function check(name: string, cond: boolean, detail = "") {
   console.log(`${cond ? "✓" : "✗"} ${name}${cond ? "" : `  ${detail}`}`);
 }
 
-function main() {
+async function main() {
   // Transform: 10DLC/TFN E.164 -> 10 national digits.
   check("toTexthubSender strips +1", toTexthubSender("+19175551234") === "9175551234");
   check("toTexthubSender strips bare leading 1", toTexthubSender("19175551234") === "9175551234");
@@ -33,7 +33,28 @@ function main() {
   check("URL never sets long_url", !withSender.includes("long_url="));
   check("URL never sets group", !withSender.includes("group="));
 
+  // Adapter: refuse-on-null (mirrors Ahoi) — ok:false, no network call.
+  let fetchCalled = false;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    fetchCalled = true;
+    throw new Error("should not be called");
+  }) as unknown as typeof fetch;
+  const { texthubAdapter } = await import("@/lib/sends/providers/texthub");
+  const noSenderSend = await texthubAdapter.send({
+    apiKey: "k", text: "hi", recipientE164: "+15642155963", senderNumber: null,
+  });
+  check("no senderNumber -> ok:false with no network call", noSenderSend.ok === false && !fetchCalled);
+  check("no senderNumber -> status 0 (our config issue)", noSenderSend.status === 0);
+
+  // Adapter: with a sender, the redacted request carries sender + placeholder key.
+  const redacted = texthubAdapter.buildRedactedRequest({
+    apiKey: "redacted_1234", text: "hi", recipientE164: "+15642155963",
+    senderNumber: "+19175551234",
+  });
+  check("redacted carries sender=9175551234", redacted.includes("sender=9175551234"), redacted);
+  check("redacted carries the placeholder key", redacted.includes("redacted_1234"));
+
   console.log(failed === 0 ? "\nALL PASS" : `\n${failed} FAILED`);
   process.exit(failed === 0 ? 0 : 1);
 }
-main();
+void main();

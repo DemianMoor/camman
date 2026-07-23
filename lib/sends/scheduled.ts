@@ -1,11 +1,15 @@
 import { sql } from "drizzle-orm";
+import { formatInTimeZone } from "date-fns-tz";
 
 import type { db } from "@/db/client";
+import { notifyTelegram } from "@/lib/alerts/telegram";
+import { CAMPAIGN_TIMEZONE, CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
 import {
   decideScheduledSend,
   isOutsideSendWindow,
   type ProviderSendWindow,
 } from "@/lib/quiet-hours";
+import { decideChildSlip } from "@/lib/sends/child-slip";
 import { isProviderPaused, resolvePacingCap } from "@/lib/sends/circuit-breakers";
 import { runStageDrain, type DrainResult, type Sender } from "@/lib/sends/drain";
 import { kickoffStageSend, type KickoffRefusal } from "@/lib/sends/kickoff";
@@ -38,6 +42,10 @@ export interface DueRow {
   org_id: string;
   provider_id: number | null;
   scheduled_at: string;
+  // P4 lane-child gate: parent + slip state (NULL/0 for non-lane stages).
+  parent_stage_id: number | null;
+  slip_original_scheduled_at: string | null;
+  slip_count: number;
   send_window_weekday_start: number | null;
   send_window_weekday_end: number | null;
   send_window_weekend_start: number | null;
@@ -66,6 +74,9 @@ export async function selectDueScheduledStages(
            c.org_id          AS org_id,
            s.sms_provider_id AS provider_id,
            s.scheduled_at    AS scheduled_at,
+           s.parent_stage_id AS parent_stage_id,
+           s.slip_original_scheduled_at AS slip_original_scheduled_at,
+           s.slip_count      AS slip_count,
            p.send_window_weekday_start AS send_window_weekday_start,
            p.send_window_weekday_end   AS send_window_weekday_end,
            p.send_window_weekend_start AS send_window_weekend_start,
@@ -80,6 +91,8 @@ export async function selectDueScheduledStages(
       AND s.scheduled_at <= ${nowIso}
       AND s.sent_at IS NULL
       AND s.schedule_missed_at IS NULL
+      -- P4: a lane child parked at the 24h slip cap must not be reselected.
+      AND s.slip_hold_at IS NULL
       AND s.archived_at IS NULL
       -- A paused provider holds ALL its scheduled stages: don't even consider
       -- them, so they materialize once a human resumes.
@@ -170,6 +183,9 @@ export interface ScheduledRunResult {
   budget_held: number; // provider's per-tick send budget exhausted -> not drained
   paused_skipped: number; // provider paused -> skipped
   send_disabled: boolean; // global kill-switch off -> whole run no-op'd
+  slip_slipped: number; // lane children re-dated this tick (parent not yet complete)
+  slip_waiting: number; // lane children still waiting on their parent (within 24h cap)
+  slip_held: number; // lane children parked at the 24h slip cap (hold + alert)
   sent: number; // total messages sent across stages
   failed: number; // total messages failed across stages
   skipped_duplicate: number; // numbers excluded by the global 1-hour dedup gate
@@ -188,6 +204,9 @@ const BASE: ScheduledRunResult = {
   budget_held: 0,
   paused_skipped: 0,
   send_disabled: false,
+  slip_slipped: 0,
+  slip_waiting: 0,
+  slip_held: 0,
   sent: 0,
   failed: 0,
   skipped_duplicate: 0,
@@ -221,6 +240,105 @@ const PERMANENT_REFUSALS: ReadonlySet<KickoffRefusal> = new Set([
 
 function envSendEnabled(): boolean {
   return process.env.SEND_ENABLED === "true";
+}
+
+// P4 parent-completeness: a parent lane-parent is COMPLETE once it has released
+// (sent_at set) AND has no non-terminal stage_sends rows left. 'sending' counts
+// as non-terminal so a child never materializes against a parent still mid-flight
+// or with rows stranded by a mid-drain pause (reconcileStuckStages later resolves
+// stranded 'sending' → 'failed', at which point completeness can hold). 'failed'
+// and 'skipped_*' are terminal and do NOT block — one failed number never stalls
+// the child (and the lane aliveness filter excludes it, since it matches on
+// status='sent' only).
+export async function getParentState(
+  dbc: typeof db,
+  parentStageId: number,
+): Promise<{ scheduledAt: Date | null; complete: boolean }> {
+  const rows = (await dbc.execute(sql`
+    SELECT s.scheduled_at AS scheduled_at,
+           s.sent_at      AS sent_at,
+           NOT EXISTS (
+             SELECT 1 FROM stage_sends ss
+             WHERE ss.stage_id = s.id AND ss.status IN ('pending', 'sending')
+           ) AS no_open
+    FROM campaign_stages s
+    WHERE s.id = ${parentStageId}
+    LIMIT 1
+  `)) as unknown as { scheduled_at: string | null; sent_at: string | null; no_open: boolean }[];
+  const r = rows[0];
+  return {
+    scheduledAt: r?.scheduled_at ? new Date(r.scheduled_at) : null,
+    complete: !!r && r.sent_at != null && r.no_open === true,
+  };
+}
+
+// Human-readable identity for a slip/hold Telegram alert (fetched only when we
+// actually slip or hold a lane child — rare, so a small extra query is fine).
+async function getStageAlertContext(
+  dbc: typeof db,
+  stageId: number,
+): Promise<{ campaign: string; stageNumber: number | null; label: string | null; trackingId: string | null }> {
+  const rows = (await dbc.execute(sql`
+    SELECT c.name AS campaign, s.stage_number AS stage_number,
+           s.label AS label, s.tracking_id AS tracking_id
+    FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
+    WHERE s.id = ${stageId} LIMIT 1
+  `)) as unknown as {
+    campaign: string | null; stage_number: number | null; label: string | null; tracking_id: string | null;
+  }[];
+  const r = rows[0];
+  return {
+    campaign: r?.campaign ?? "(unknown campaign)",
+    stageNumber: r?.stage_number ?? null,
+    label: r?.label ?? null,
+    trackingId: r?.tracking_id ?? null,
+  };
+}
+
+function fmtEt(d: Date): string {
+  return `${formatInTimeZone(d, CAMPAIGN_TIMEZONE, "yyyy-MM-dd HH:mm")} ${CAMPAIGN_TIMEZONE_LABEL}`;
+}
+
+function stageLine(
+  ctx: Awaited<ReturnType<typeof getStageAlertContext>>,
+  row: DueRow,
+): string {
+  const stageBit = ctx.stageNumber != null ? `stage ${ctx.stageNumber}` : `stage id ${row.stage_id}`;
+  const labelBit = ctx.label ? ` "${ctx.label}"` : "";
+  const trackBit = ctx.trackingId ? ` [${ctx.trackingId}]` : "";
+  return `campaign "${ctx.campaign}" · ${stageBit}${labelBit}${trackBit} (id ${row.stage_id})`;
+}
+
+// Slip alert — MUST include the new fire time (spec requirement).
+async function notifySlip(dbc: typeof db, row: DueRow, newFireAt: Date): Promise<void> {
+  const ctx = await getStageAlertContext(dbc, row.stage_id);
+  await notifyTelegram(
+    `🕒 Lane stage SLIPPED — waiting on its parent to finish sending.\n` +
+      `${stageLine(ctx, row)}\n` +
+      `New fire time: ${fmtEt(newFireAt)}\n` +
+      `The parent hasn't fully sent yet; the child was re-dated to preserve its intended gap.`,
+  );
+}
+
+// Hold alert — self-sufficient (campaign, stage, original time, reason, action).
+async function notifyHold(
+  dbc: typeof db,
+  row: DueRow,
+  reason: "slip_cap_exceeded" | "parent_incomplete_24h",
+  originalScheduledAt: Date,
+): Promise<void> {
+  const ctx = await getStageAlertContext(dbc, row.stage_id);
+  const why =
+    reason === "parent_incomplete_24h"
+      ? "its parent stage has NOT finished sending 24h+ after the child's scheduled time (e.g. a paused/stalled provider freezing the parent's remaining sends)"
+      : "re-dating the child to preserve its parent→child gap would push it more than 24h past its original scheduled time";
+  await notifyTelegram(
+    `⏸️ Lane stage HELD — will NOT auto-send (24h slip cap reached).\n` +
+      `${stageLine(ctx, row)}\n` +
+      `Originally scheduled: ${fmtEt(originalScheduledAt)}\n` +
+      `Reason: ${why}.\n` +
+      `Action needed: resolve the parent (resume its provider / let it finish), then re-date this lane manually, or cancel it. It stays parked until a human acts.`,
+  );
 }
 
 export async function runScheduledSends(
@@ -274,6 +392,68 @@ export async function runScheduledSends(
       send_window_weekend_start: row.send_window_weekend_start,
       send_window_weekend_end: row.send_window_weekend_end,
     };
+
+    // ─── P4: parent-complete gate for lane children ────────────────────────
+    // A due lane child (parent_stage_id set) must not materialize until its
+    // parent has fully sent. While the parent is incomplete the child is slipped
+    // (re-dated) / waited / held; only a 'fire' falls through to the normal
+    // window decision below. Non-lane stages skip this entirely.
+    if (row.parent_stage_id != null) {
+      const parent = await getParentState(dbc, row.parent_stage_id);
+      const action = decideChildSlip({
+        now,
+        childScheduledAt: new Date(row.scheduled_at),
+        slipOriginalScheduledAt: row.slip_original_scheduled_at
+          ? new Date(row.slip_original_scheduled_at)
+          : null,
+        slipCount: row.slip_count,
+        parentScheduledAt: parent.scheduledAt,
+        parentComplete: parent.complete,
+        window: cfg,
+      });
+      if (action.kind === "wait") {
+        // Mark the child "engaged" on its first wait so a later parent-completion
+        // is treated as regime a (slip to now+offset), not regime b (fire).
+        if (action.engage) {
+          await dbc.execute(sql`
+            UPDATE campaign_stages
+            SET slip_original_scheduled_at = COALESCE(slip_original_scheduled_at, ${action.originalScheduledAt.toISOString()})
+            WHERE id = ${row.stage_id} AND sent_at IS NULL AND slip_hold_at IS NULL
+          `);
+        }
+        result.slip_waiting++;
+        continue;
+      }
+      if (action.kind === "slip") {
+        // Re-date + preserve the original intent (COALESCE keeps it stable if it
+        // was somehow already set). slip_count is observability.
+        await dbc.execute(sql`
+          UPDATE campaign_stages
+          SET scheduled_at = ${action.newScheduledAt.toISOString()},
+              slip_original_scheduled_at = COALESCE(slip_original_scheduled_at, ${action.originalScheduledAt.toISOString()}),
+              slip_count = slip_count + 1
+          WHERE id = ${row.stage_id} AND sent_at IS NULL AND slip_hold_at IS NULL
+        `);
+        result.slip_slipped++;
+        await notifySlip(dbc, row, action.newScheduledAt);
+        continue;
+      }
+      if (action.kind === "hold") {
+        await dbc.execute(sql`
+          UPDATE campaign_stages
+          SET slip_hold_at = ${nowIso},
+              slip_hold_reason = ${action.reason},
+              slip_original_scheduled_at = COALESCE(slip_original_scheduled_at, ${action.originalScheduledAt.toISOString()})
+          WHERE id = ${row.stage_id} AND sent_at IS NULL AND slip_hold_at IS NULL
+        `);
+        result.slip_held++;
+        await notifyHold(dbc, row, action.reason, action.originalScheduledAt);
+        continue;
+      }
+      // action.kind === "fire": parent is complete — fall through and let the
+      // normal window decision run against the child's (placed) scheduled_at.
+    }
+
     const decision = decideScheduledSend(cfg, new Date(row.scheduled_at), now);
 
     if (decision === "hold") {

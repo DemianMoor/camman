@@ -117,6 +117,29 @@ export function decideScheduledSend(
   return "fire";
 }
 
+// The earliest instant AT OR AFTER `candidate` that falls inside an allowed send
+// window. Unlike `decideScheduledSend` (which is same-ET-day only and returns
+// 'missed' once a day's window closes), this DELIBERATELY rolls to the next ET
+// day's open when `candidate` lands in quiet hours — it's the placement helper
+// for the P4 lane-child slip ([lib/sends/child-slip.ts]), where a re-dated child
+// must land on a real future window, crossing midnight if need be.
+//   candidate before its day's open  → that day's open
+//   candidate inside its day's window → candidate itself
+//   candidate at/after its day's close → NEXT ET day's open
+export function nextWindowOpenAtOrAfter(
+  cfg: ProviderSendWindow,
+  candidate: Date,
+): Date {
+  const { open, close } = windowInstants(cfg, candidate);
+  if (candidate < open) return open;
+  if (candidate < close) return candidate;
+  // At/after close: probe ~12h past close (lands safely in the next ET calendar
+  // day, DST-proof) and take that day's open. `candidate` after today's close is
+  // always < tomorrow's open, so this is the earliest valid instant ≥ candidate.
+  const nextDayProbe = new Date(close.getTime() + 12 * 60 * 60 * 1000);
+  return windowInstants(cfg, nextDayProbe).open;
+}
+
 // True when a scheduled time falls OUTSIDE its ET day's allowed window — used to
 // warn (non-blocking) on the stage form that the message won't auto-send then.
 // Pure function of the scheduled instant (no `now`).

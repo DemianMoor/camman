@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-07-22_
+_Last updated: 2026-07-23_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -96,7 +96,7 @@ Auto-generated, **immutable**, separate from `id` and `human_id`.
 - `app/(protected)/campaigns/[id]/page.tsx` — detail page with the inline stage table; draft-only "Upload contacts" button → `PhoneUploadForm` in a `FormDialog`.
 - `app/(protected)/campaigns/[id]/edit/page.tsx` + `components/campaigns/campaign-editor-page.tsx` — setup/audience/notes editor with live audience preview.
 - `components/campaigns/stage-inline-creator.tsx` + `stage-form.tsx` — inline stage create/edit with live SMS preview. Compact two-column body (left = fields, right = SMS/audience/results rail) with a **sticky top Save/Cancel bar** plus the bottom bar (both driven by one shared action context). Notes sits at the bottom of the left column. Layout note: the body grid uses `items-start` + `content-start` so the taller right rail doesn't stretch the main column into `align-content:stretch` inter-section voids; the editor `<Card>` is `overflow-visible` so the sticky bar isn't clipped.
-- `<CopyableId>` surfaces tracking IDs; campaigns list hides the tracking-ID column behind a per-browser toggle.
+- `<CopyableId>` surfaces tracking IDs; campaigns list hides the tracking-ID column behind a per-browser toggle. The list's free-text search (`/api/campaigns/list`) matches `name` ∪ `human_id` ∪ `slug` ∪ `tracking_id` (case-insensitive `ILIKE`), so a campaign can be found by its tracking ID (e.g. `8_58_072026_1`).
 
 ## 6. Rules & edge cases
 - Activation gate: name + brand + offer + ≥1 **contact group** (code-authoritative; segments optional).

@@ -797,7 +797,7 @@ export default function CampaignsPage() {
         <Input
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
-          placeholder="Search by name, human ID, or slug…"
+          placeholder="Search by name, human ID, slug, or tracking ID…"
           className="h-9 w-full max-w-sm"
         />
         <div className="flex flex-wrap items-center gap-1.5">

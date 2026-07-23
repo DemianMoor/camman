@@ -68,6 +68,7 @@ export async function GET(req: NextRequest) {
         ilike(campaigns.name, pattern),
         ilike(campaigns.human_id, pattern),
         ilike(campaigns.slug, pattern),
+        ilike(campaigns.tracking_id, pattern),
       )!,
     );
   }

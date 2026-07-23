@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-23 — Campaigns list search now matches tracking ID — docs: 04-features/campaigns-stages-creatives
+- `/api/campaigns/list` free-text search ([app/api/campaigns/list/route.ts](../app/api/campaigns/list/route.ts)) added `tracking_id` to the `ILIKE` `or()` clause (was `name`/`human_id`/`slug` only), so campaigns are findable by their tracking ID (e.g. `8_58_072026_1`). Search-box placeholder updated on `app/(protected)/campaigns/page.tsx`.
+
 ## 2026-07-22 — Provider "Send test" SMS: choose the send-from number — docs: CHANGELOG only (no live feature doc covers the test tool)
 - The per-account "Send a test SMS" dialog ([components/providers/provider-credentials-section.tsx](../components/providers/provider-credentials-section.tsx)) gained a **"Send from"** dropdown listing the account's active linked numbers (plus "Account default"). The route ([app/api/providers/[providerId]/credentials/test/route.ts](../app/api/providers/%5BproviderId%5D/credentials/test/route.ts)) resolves the chosen phone (verified active + linked to the account) to TextHub's `sender` via `toTexthubSender()`; omitting it keeps the prior account-default behavior. The result echoes which number it sent `from`. Optional field on `providerCredentialTestSchema`; no schema change.
 

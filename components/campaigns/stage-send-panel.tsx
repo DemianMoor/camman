@@ -38,7 +38,10 @@ type SendStatus = {
   scheduled_at: string | null;
   sent_at: string | null;
   schedule_missed_at: string | null;
-  counts: { total: number; pending: number; sending: number; sent: number; failed: number };
+  counts: {
+    total: number; pending: number; sending: number; sent: number; failed: number;
+    skipped_duplicate: number; skipped_opted_out: number;
+  };
   // The real frozen message of one materialized row (null before kickoff).
   sample_rendered_text: string | null;
   // Reconciliation (WS3 G1): pool partitions into attempted + excluded; gap>0 is our bug.
@@ -259,6 +262,23 @@ export function StageSendPanel({
           </div>
         ))}
       </div>
+
+      {/* Suppression buckets — terminal, never sent. Shown only when present so
+          they don't clutter a clean send. STOP-cancel = opted out after
+          materialization (distinct from a delivery failure or a manual recall). */}
+      {status.counts.skipped_opted_out > 0 || status.counts.skipped_duplicate > 0 ? (
+        <div className="text-xs tabular-nums text-muted-foreground">
+          {status.counts.skipped_opted_out > 0 ? (
+            <span className="text-amber-600">
+              {status.counts.skipped_opted_out} opted-out (STOP)
+            </span>
+          ) : null}
+          {status.counts.skipped_opted_out > 0 && status.counts.skipped_duplicate > 0 ? " · " : null}
+          {status.counts.skipped_duplicate > 0 ? (
+            <span>{status.counts.skipped_duplicate} skipped (1h dedup)</span>
+          ) : null}
+        </div>
+      ) : null}
 
       {status.counts.sending > 0 ? (
         <p className="flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">

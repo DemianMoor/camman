@@ -53,6 +53,7 @@ async function main() {
       failed: 0,
       filtered: 0,
       skippedDuplicate: 0,
+      skippedOptedOut: 0,
       processed,
       halted: false,
       stuck: 0,

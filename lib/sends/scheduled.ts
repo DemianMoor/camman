@@ -173,6 +173,7 @@ export interface ScheduledRunResult {
   sent: number; // total messages sent across stages
   failed: number; // total messages failed across stages
   skipped_duplicate: number; // numbers excluded by the global 1-hour dedup gate
+  skipped_opted_out: number; // recipients suppressed at dispatch (STOP after materialization)
   paused_now: number; // stages whose drain latched a circuit-breaker pause
 }
 
@@ -190,6 +191,7 @@ const BASE: ScheduledRunResult = {
   sent: 0,
   failed: 0,
   skipped_duplicate: 0,
+  skipped_opted_out: 0,
   paused_now: 0,
 };
 
@@ -400,6 +402,7 @@ export async function runScheduledSends(
     result.sent += drain.sent;
     result.failed += drain.failed;
     result.skipped_duplicate += drain.skippedDuplicate;
+    result.skipped_opted_out += drain.skippedOptedOut;
     if (drain.pausedNow) result.paused_now++;
     if (providerId != null) {
       spentByProvider.set(

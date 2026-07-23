@@ -105,7 +105,11 @@ export async function GET() {
       count(*) FILTER (WHERE status = 'sending')::int AS sending,
       count(*) FILTER (WHERE status = 'sent')::int AS sent,
       count(*) FILTER (WHERE status = 'failed')::int AS failed,
-      count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate
+      count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate,
+      -- STOP-cancels: opted out after materialization, suppressed at dispatch or
+      -- by the opt-out ingester. Own bucket — not a delivery failure, not a
+      -- manual recall ('rejected'), not a dedup skip.
+      count(*) FILTER (WHERE status = 'skipped_opted_out')::int AS skipped_opted_out
     FROM stage_sends
     WHERE org_id = ${orgId} AND ${inArray(stage_sends.stage_id, stageIds)}
     GROUP BY stage_id
@@ -117,6 +121,7 @@ export async function GET() {
     sent: number;
     failed: number;
     skipped_duplicate: number;
+    skipped_opted_out: number;
   }[];
   const countsByStage = new Map(
     countRows.map((r) => [
@@ -128,6 +133,7 @@ export async function GET() {
         sent: Number(r.sent),
         failed: Number(r.failed),
         skippedDuplicate: Number(r.skipped_duplicate),
+        skippedOptedOut: Number(r.skipped_opted_out),
       },
     ]),
   );
@@ -140,6 +146,7 @@ export async function GET() {
       sent: 0,
       failed: 0,
       skippedDuplicate: 0,
+      skippedOptedOut: 0,
     };
     const op =
       deriveStageOperationalStatus({

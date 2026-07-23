@@ -60,3 +60,6 @@ next-env.d.ts
 
 # Local recovery / backup scratch (never commit)
 /_restore/
+
+# Local PII scratch (opt-out CSVs, etc.) — never commit
+/tmp/

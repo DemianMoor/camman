@@ -2,12 +2,12 @@ import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { provider_credentials, sms_providers } from "@/db/schema";
+import { provider_credentials, provider_phones, sms_providers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { validatePhone } from "@/lib/phone-validation";
 import { resolveCredentialKeyById } from "@/lib/sends/provider-credential";
-import { sendSms } from "@/lib/sends/texthub";
+import { sendSms, toTexthubSender } from "@/lib/sends/texthub";
 import { can } from "@/lib/permissions";
 import { providerCredentialTestSchema } from "@/lib/validators/providers";
 
@@ -61,7 +61,7 @@ export async function POST(
   if (!parsed.success) {
     return apiError(400, parsed.error.issues[0]?.message ?? "Invalid input", API_ERROR_CODES.VALIDATION);
   }
-  const { credential_id, number, text } = parsed.data;
+  const { credential_id, number, text, provider_phone_id } = parsed.data;
 
   const phone = validatePhone(number);
   if (!phone.valid || !phone.normalized) {
@@ -99,18 +99,52 @@ export async function POST(
     });
   }
 
-  // Single recipient; link rides in `text`; never long_url / group.
+  // Optional send-from number. Must be an ACTIVE phone on this provider/org that
+  // is linked to THIS account (credential) — TextHub only accepts a `sender`
+  // provisioned on the sending account. Null/omitted → no `sender` (account
+  // default), preserving the prior behavior.
+  let fromNumber: string | null = null;
+  if (provider_phone_id != null) {
+    const ph = await db
+      .select({ phone_number: provider_phones.phone_number })
+      .from(provider_phones)
+      .where(
+        and(
+          eq(provider_phones.id, provider_phone_id),
+          eq(provider_phones.provider_id, providerId),
+          eq(provider_phones.org_id, orgId),
+          eq(provider_phones.credential_id, credential_id),
+          eq(provider_phones.status, "active"),
+        ),
+      )
+      .limit(1);
+    if (!ph[0]) {
+      return apiError(
+        400,
+        "That send-from number isn't an active number linked to this account",
+        API_ERROR_CODES.VALIDATION,
+        { field: "provider_phone_id" },
+      );
+    }
+    fromNumber = ph[0].phone_number;
+  }
+
+  // Single recipient; link rides in `text`; never long_url / group. `sender` is
+  // the send-from number as national digits (omitted when none was chosen).
   const result = await sendSms({
     apiKey,
     text,
     number: phone.normalized,
+    sender: fromNumber ? toTexthubSender(fromNumber) : undefined,
   });
 
   // Echo what was sent (NOT the api_key) so the operator can eyeball the exact
-  // text + compare the URL that arrives on the phone.
+  // text + compare the URL that arrives on the phone. `from` is the E.164
+  // send-from number (null when the account default was used).
   return NextResponse.json({
     ok: result.ok,
     to: phone.normalized,
+    from: fromNumber,
     sentText: text,
     messageId: result.messageId,
     response: result.response,

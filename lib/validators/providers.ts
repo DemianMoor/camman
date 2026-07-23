@@ -103,6 +103,9 @@ export const providerCredentialTestSchema = z.object({
   credential_id: z.number().int().positive(),
   number: z.string().trim().min(1, "Recipient number is required").max(40),
   text: z.string().trim().min(1, "Message text is required").max(1000),
+  // Optional send-from number (must be a phone linked to this account). Null /
+  // omitted → send with no `sender`, letting TextHub use the account default.
+  provider_phone_id: z.number().int().positive().nullable().optional(),
 });
 
 export type ProviderCredentialTestInput = z.infer<

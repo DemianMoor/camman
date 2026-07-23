@@ -350,6 +350,7 @@ export function ProviderCredentialsSection({
   const testApi = useApiCall<{
     ok: boolean;
     to: string;
+    from: string | null;
     sentText: string;
     messageId: string | null;
     error: string | null;
@@ -357,14 +358,24 @@ export function ProviderCredentialsSection({
   const [testing, setTesting] = useState<Cred | null>(null);
   const [testNumber, setTestNumber] = useState("");
   const [testText, setTestText] = useState("");
+  // Send-from number (a phone linked to the account being tested). null = let
+  // TextHub use the account default sender.
+  const [testFromPhoneId, setTestFromPhoneId] = useState<number | null>(null);
   const [testResult, setTestResult] = useState<
-    { ok: boolean; to: string; sentText: string; messageId: string | null; error: string | null } | null
+    { ok: boolean; to: string; from: string | null; sentText: string; messageId: string | null; error: string | null } | null
   >(null);
+
+  // Active numbers linked to the account being tested — the only numbers TextHub
+  // will accept as a `sender` for this account's key.
+  const testFromPhones = testing
+    ? phones.filter((p) => p.credential_id === testing.id && p.status === "active")
+    : [];
 
   function openTest(c: Cred) {
     setTesting(c);
     setTestNumber("");
     setTestText("CamMan self-test https://go.yourbrand.co/r/SELFTEST1 (please ignore)");
+    setTestFromPhoneId(null);
     setTestResult(null);
   }
 
@@ -373,7 +384,12 @@ export function ProviderCredentialsSection({
     const r = await testApi.execute(`/api/providers/${providerId}/credentials/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ credential_id: testing.id, number: testNumber, text: testText }),
+      body: JSON.stringify({
+        credential_id: testing.id,
+        number: testNumber,
+        text: testText,
+        provider_phone_id: testFromPhoneId,
+      }),
     });
     if (!r.ok) {
       toastApiError(r, "Test send failed");
@@ -757,6 +773,32 @@ export function ProviderCredentialsSection({
 
         <div className="grid gap-4">
           <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="test-from">
+              Send from
+            </label>
+            <select
+              id="test-from"
+              value={testFromPhoneId === null ? "" : String(testFromPhoneId)}
+              onChange={(e) =>
+                setTestFromPhoneId(e.target.value === "" ? null : Number(e.target.value))
+              }
+              disabled={!phonesLoaded}
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="">Account default</option>
+              {testFromPhones.map((p) => (
+                <option key={p.id} value={String(p.id)}>
+                  {p.phone_number}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              {testFromPhones.length === 0
+                ? "No numbers linked to this account — using the account default sender."
+                : "Pick one of this account's numbers, or send from the account default."}
+            </p>
+          </div>
+          <div className="grid gap-1.5">
             <label className="text-sm font-medium" htmlFor="test-number">
               Recipient number
               <span aria-hidden className="text-destructive ml-0.5">*</span>
@@ -797,7 +839,13 @@ export function ProviderCredentialsSection({
             >
               {testResult.ok ? (
                 <>
-                  <p className="font-medium">Sent to {testResult.to}.</p>
+                  <p className="font-medium">
+                    Sent to {testResult.to}
+                    {testResult.from
+                      ? ` from ${testResult.from}`
+                      : " from the account default"}
+                    .
+                  </p>
                   <p className="mt-1">
                     Now open the SMS and confirm this URL arrived unchanged:
                   </p>

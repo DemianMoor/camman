@@ -84,6 +84,13 @@ export interface DrainResult {
   // 1-hour dedup window (lib/sends/dedup-window.ts). Marked 'skipped_duplicate' —
   // terminal, not sent, not opted-out, not auto-retried.
   skippedDuplicate: number;
+  // Rows NOT sent because the contact opted out (STOP) AFTER the stage was
+  // materialized. The frozen stage_sends set is filtered for opt-outs only at
+  // materialization; this is the send-time re-check that honors a STOP landing in
+  // the materialize→dispatch window. Marked 'skipped_opted_out' — terminal, and
+  // DISTINCT from provider rejects (failed/filtered) and manual aborts (rejected)
+  // so stage stats can count STOP-cancels on their own.
+  skippedOptedOut: number;
   processed: number;
   halted: boolean; // stopped early (kill-switch off, pause, or a breaker trip)
   stuck: number; // rows left in 'sending' (crashed mid-send — manual review)
@@ -128,6 +135,7 @@ const EMPTY = {
   failed: 0,
   filtered: 0,
   skippedDuplicate: 0,
+  skippedOptedOut: 0,
   processed: 0,
   halted: false,
   stuck: 0,
@@ -141,6 +149,7 @@ interface ClaimedRow {
   phone: string;
   rendered_text: string;
   lead_id: string | null;
+  contact_id: string;
 }
 
 // Drain one stage's pending sends. Gates: send_approved (per-stage) + the
@@ -284,6 +293,7 @@ export async function runStageDrain(
   let failed = 0;
   let filtered = 0;
   let skippedDuplicate = 0;
+  let skippedOptedOut = 0;
   let processed = 0;
   let halted = false;
   let stopReason: DrainStopReason | null = null;
@@ -346,10 +356,46 @@ export async function runStageDrain(
         FOR UPDATE SKIP LOCKED
         LIMIT ${limit}
       )
-      RETURNING id, phone, rendered_text, lead_id
+      RETURNING id, phone, rendered_text, lead_id, contact_id
     `)) as unknown as ClaimedRow[];
 
     if (claimed.length === 0) break;
+
+    // ── SEND-TIME OPT-OUT INVARIANT (global, org-wide) ──────────────────────
+    // Opt-outs are filtered into the frozen stage_sends set at MATERIALIZATION
+    // time only. A recipient can STOP at any point in the (possibly hours-long,
+    // pacing-limited) window between materialization and this dispatch: the
+    // ingesters record it in opt_outs, but the already-'pending' row would still
+    // fire. Re-check opt_outs at the moment of claim so a post-materialization
+    // STOP is honored. Violators are marked 'skipped_opted_out' — terminal, and
+    // DISTINCT from provider rejects (failed/filtered) and manual aborts
+    // (rejected) so stage stats can count STOP-cancels separately — and never
+    // dispatched. Structurally mirrors the 1-hour dedup gate below.
+    const claimedContactIds = [...new Set(claimed.map((c) => c.contact_id))];
+    const optedOutRows = (await dbc.execute(sql`
+      SELECT DISTINCT contact_id FROM opt_outs
+      WHERE org_id = ${orgId}
+        AND contact_id IN (${sql.join(claimedContactIds.map((id) => sql`${id}::uuid`), sql`, `)})
+    `)) as unknown as { contact_id: string }[];
+    const optedOut = new Set(optedOutRows.map((r) => r.contact_id));
+    const notOptedOut: ClaimedRow[] = [];
+    const optOutIds: string[] = [];
+    for (const c of claimed) {
+      if (optedOut.has(c.contact_id)) optOutIds.push(c.id);
+      else notOptedOut.push(c);
+    }
+    if (optOutIds.length > 0) {
+      await dbc.execute(sql`
+        UPDATE stage_sends
+        SET status = 'skipped_opted_out',
+            last_error = 'opt_out_cancel'
+        WHERE id IN (${sql.join(optOutIds.map((id) => sql`${id}::uuid`), sql`, `)})
+      `);
+      skippedOptedOut += optOutIds.length;
+    }
+    // Whole batch had opted out — claim the next batch (these rows left the
+    // 'pending' set, so we still make progress and can't loop forever).
+    if (notOptedOut.length === 0) continue;
 
     // ── HARD 1-hour send-dedup gate (global, org-wide) ──────────────────────
     // Before sending, drop any claimed row whose phone already received a message
@@ -360,7 +406,7 @@ export async function runStageDrain(
     //   (a) already-'sent' rows in the DB within the window (incl. this run's
     //       earlier slices, which committed sent_at per slice), and
     //   (b) a phone appearing more than once WITHIN this batch (kept once).
-    const batchPhones = [...new Set(claimed.map((c) => c.phone))];
+    const batchPhones = [...new Set(notOptedOut.map((c) => c.phone))];
     const recentRows = (await dbc.execute(sql`
       SELECT DISTINCT phone FROM stage_sends
       WHERE org_id = ${orgId}
@@ -372,7 +418,7 @@ export async function runStageDrain(
     const seenThisBatch = new Set<string>();
     const toSend: ClaimedRow[] = [];
     const skipIds: string[] = [];
-    for (const c of claimed) {
+    for (const c of notOptedOut) {
       if (recentPhones.has(c.phone) || seenThisBatch.has(c.phone)) {
         skipIds.push(c.id);
       } else {
@@ -594,6 +640,7 @@ export async function runStageDrain(
     failed,
     filtered,
     skippedDuplicate,
+    skippedOptedOut,
     processed,
     halted,
     stuck,

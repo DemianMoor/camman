@@ -67,7 +67,11 @@ export async function GET(
       count(*) FILTER (WHERE status = 'pending')::int  AS pending,
       count(*) FILTER (WHERE status = 'sending')::int  AS sending,
       count(*) FILTER (WHERE status = 'sent')::int     AS sent,
-      count(*) FILTER (WHERE status = 'failed')::int   AS failed
+      count(*) FILTER (WHERE status = 'failed')::int   AS failed,
+      -- STOP-cancels: recipients who opted out after materialization, suppressed
+      -- at dispatch (drain) or proactively by the opt-out ingester. A distinct
+      -- bucket — NOT a delivery failure and NOT a manual recall ('rejected').
+      count(*) FILTER (WHERE status = 'skipped_opted_out')::int AS skipped_opted_out
     FROM stage_sends WHERE stage_id = ${stageId} AND org_id = ${orgId}
   `)) as unknown as {
     total: number;
@@ -75,9 +79,12 @@ export async function GET(
     sending: number;
     sent: number;
     failed: number;
+    skipped_opted_out: number;
   }[];
 
-  const c = counts[0] ?? { total: 0, pending: 0, sending: 0, sent: 0, failed: 0 };
+  const c = counts[0] ?? {
+    total: 0, pending: 0, sending: 0, sent: 0, failed: 0, skipped_opted_out: 0,
+  };
 
   // The drain gate is a conjunction (Workstream 1): the env SEND_ENABLED backstop
   // AND the DB master switch. Expose the effective value plus each input so the
@@ -129,6 +136,7 @@ export async function GET(
       sending: Number(c.sending),
       sent: Number(c.sent),
       failed: Number(c.failed),
+      skipped_opted_out: Number(c.skipped_opted_out),
     },
     sample_rendered_text: sample[0]?.rendered_text ?? null,
   });

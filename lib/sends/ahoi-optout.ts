@@ -225,6 +225,19 @@ export async function processAhoiInboundOptOut(
   `)) as unknown as { id: number }[];
   const optOutId = oo[0]!.id;
 
+  // Cascade-cancel: proactively suppress any not-yet-sent (pending) rows for this
+  // contact so a STOP arriving before the stage drains is honored at once, rather
+  // than waiting for the drain's send-time re-check. Terminal 'skipped_opted_out'
+  // (+ 'opt_out_cancel' reason) — the SAME distinct bucket the drain guard and
+  // TextHub's poller use, so STOP-cancels stay countable apart from provider
+  // rejects and manual aborts. Mirrors poll-opt-outs.ts.
+  await dbc.execute(sql`
+    UPDATE stage_sends
+    SET status = 'skipped_opted_out', last_error = 'opt_out_cancel'
+    WHERE org_id = ${o.orgId} AND contact_id = ${contactId}
+      AND status = 'pending'
+  `);
+
   // Attribution: the SAME cross-provider helper TextHub's poller uses — one
   // STOP credits the single most-recent matching send across ALL stages
   // (any provider) in the trailing window. null -> unattributed, org-wide

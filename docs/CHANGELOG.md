@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-07-23 — Send-time opt-out invariant + `skipped_opted_out` status (migration 0116) — docs: 04-features/sms-send-pipeline, 03-data-model, 07-conventions, CHANGELOG
+- The drain now re-checks `opt_outs` for each claimed batch immediately before the 1-hour dedup gate ([lib/sends/drain.ts](../lib/sends/drain.ts)), marking any contact who opted out AFTER materialization as the new terminal status **`skipped_opted_out`** (`last_error='opt_out_cancel'`) — never sent. Closes the materialize→dispatch window that let a pre-built/scheduled stage text a number that STOPped after the stage was materialized. The opt-out ingesters ([poll-opt-outs.ts](../lib/sends/poll-opt-outs.ts), [ahoi-optout.ts](../lib/sends/ahoi-optout.ts)) also cascade-cancel still-`pending` rows for the contact on intake. Applies identically to scheduled + manual sends (shared `runStageDrain`). Distinct bucket surfaced in the stage-panel + Today endpoints + scheduled-run result; migration 0116 extends the `stage_sends_status_check` CHECK. Verified by [scripts/test-send-optout-invariant.ts](../scripts/test-send-optout-invariant.ts). (P2 of the week-ahead pre-build work; ClickUp 869e8rwx4.)
+
 ## 2026-07-23 — Campaigns list search now matches tracking ID — docs: 04-features/campaigns-stages-creatives
 - `/api/campaigns/list` free-text search ([app/api/campaigns/list/route.ts](../app/api/campaigns/list/route.ts)) added `tracking_id` to the `ILIKE` `or()` clause (was `name`/`human_id`/`slug` only), so campaigns are findable by their tracking ID (e.g. `8_58_072026_1`). Search-box placeholder updated on `app/(protected)/campaigns/page.tsx`.
 

@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-07-22_
+_Last updated: 2026-07-23_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -155,6 +155,12 @@ A HARD gate in the drain: before dispatching a claimed batch, any row whose **ph
 - **Where.** Send-time (the drain) is the only place the prior message's actual `sent_at` is known and the single chokepoint every send passes; backed by partial index `stage_sends(org_id, phone, sent_at) WHERE status='sent'`.
 - **Surfaced.** The drain returns a `skippedDuplicate` count (separate from `sent`/`failed`/`filtered`); a **Telegram** alert fires per stage when > 0; the `send_drain` activity event + audit metadata report it; the **Activity** tab shows an orange **"Skipped (1h)"** summary tile + a `skipped_duplicate` status filter/badge. A stage fully drained with nothing sent but rows skipped reads **"Needs attention"**, not green.
 - **Behavior note:** an intentional back-to-back drip (stage 1 at 11:00, stage 2 at 11:30 to the same people) will skip the overlap in stage 2 — the strict global rule. Change the window in one place (`SEND_DEDUP_WINDOW_MS`).
+
+### Send-time opt-out invariant (migration 0116)
+Opt-outs are subtracted from a stage's audience at **materialization** (baked into the frozen `stage_sends` set), but a recipient can STOP at any point in the (pacing-limited, possibly hours-long) window between materialization and dispatch. Without a re-check, a stage materialized on day 1 and drained on day 5 would still text a number that opted out on day 3. Two mechanisms close that window:
+- **Drain re-check (authoritative).** Before dispatching a claimed batch, the drain re-checks `opt_outs` for the batch's `contact_id`s (immediately before the 1-hour dedup gate) and marks any opted-out row **`stage_sends.status = 'skipped_opted_out'`** (`last_error = 'opt_out_cancel'`) — terminal, never sent. This is the hard invariant: no message reaches a number that opted out after materialization, on **any** path (scheduled cron or manual drain, since both share `runStageDrain`).
+- **Ingester cascade-cancel (proactive).** The opt-out ingesters ([poll-opt-outs.ts](../../lib/sends/poll-opt-outs.ts) for TextHub, [ahoi-optout.ts](../../lib/sends/ahoi-optout.ts) for Ahoi) cancel any still-`pending` `stage_sends` rows for the contact in the SAME transaction that records the `opt_out`, so a STOP clears queued rows at once rather than waiting for the next drain tick.
+- **Distinct bucket.** `skipped_opted_out` is separate from `filtered` (provider-suppressed), `failed` (delivery failure), and `rejected` (manual recall), so stage stats count STOP-cancels on their own: a `skippedOptedOut` drain count, a `skipped_opted_out` column on the stage-panel (`…/send`) and Today endpoints, and `skipped_opted_out` in the scheduled-run result. The opt-out re-check runs **before** the 1-hour dedup gate, so an opted-out contact that would also be a dedup duplicate lands in `skipped_opted_out`. Verified by [scripts/test-send-optout-invariant.ts](../../scripts/test-send-optout-invariant.ts).
 
 ### Scheduling & quiet hours (`scheduled.ts` + `lib/quiet-hours.ts`)
 - `scheduled_at` on a stage drives the `*/5` `send-scheduled` cron ([crons.md](crons.md)).

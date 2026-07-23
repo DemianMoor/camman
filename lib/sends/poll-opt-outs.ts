@@ -309,6 +309,19 @@ async function pollCredential(
         `)) as unknown as { id: number }[];
           const optOutId = oo[0]?.id;
 
+          // Cascade-cancel: proactively suppress any not-yet-sent (pending) rows
+          // for this contact so a STOP arriving before the stage drains is
+          // honored at once, rather than waiting for the drain's send-time
+          // re-check. Terminal 'skipped_opted_out' (+ 'opt_out_cancel' reason) —
+          // the SAME distinct bucket the drain guard uses, so STOP-cancels stay
+          // countable apart from provider rejects and manual aborts.
+          await tx.execute(sql`
+          UPDATE stage_sends
+          SET status = 'skipped_opted_out', last_error = 'opt_out_cancel'
+          WHERE org_id = ${cred.org_id} AND contact_id = ${contactId}
+            AND status = 'pending'
+        `);
+
           // Attribution: the SINGLE most-recent send to this number across all
           // stages in the trailing window (one STOP ⇒ one stage). null when no
           // in-window send exists ⇒ org-wide opt-out only, counted `unattributed`.

@@ -1707,6 +1707,30 @@ export const campaign_stages = pgTable(
       (): AnyPgColumn => campaign_stages.id,
       { onDelete: "cascade" },
     ),
+    // ─── Parent-complete gate + bounded slip (migration 0117, P4) ───────────
+    // Lane children (parent_stage_id set) must not fire until the parent stage
+    // has FULLY sent (sent_at set AND no pending/sending rows). While the parent
+    // is incomplete the scheduler re-dates the child to `parent_complete +
+    // original_offset` (quiet-hours-aware, lib/sends/child-slip.ts). These
+    // columns are NULL/0 for every non-lane stage and untouched by normal sends.
+    //
+    // The child's ORIGINAL operator-set scheduled_at, captured the first time it
+    // is slipped. Non-null = "has been slipped": the offset + 24h-cap are always
+    // measured from THIS value, and a slipped child is not re-slipped. Preserves
+    // operator intent after scheduled_at is overwritten (audit + autopilot view).
+    slip_original_scheduled_at: timestamp("slip_original_scheduled_at", {
+      withTimezone: true,
+    }),
+    // Number of times the child's fire time was re-dated waiting on its parent.
+    slip_count: integer("slip_count").notNull().default(0),
+    // Set when the child is HELD: the slip cap (24h past the original scheduled
+    // time) was hit — either the parent finished so late the offset placement
+    // overshoots, or the parent never completed within 24h. A held child does
+    // NOT fire and is NOT burned as `schedule_missed_at`; it parks for a human.
+    slip_hold_at: timestamp("slip_hold_at", { withTimezone: true }),
+    // Why the child is held: 'slip_cap_exceeded' (placement > original + 24h) or
+    // 'parent_incomplete_24h' (parent still unfinished 24h past original).
+    slip_hold_reason: text("slip_hold_reason"),
     // Auto-generated, immutable tracking ID. Format:
     // `<campaign_tracking_id>_s<stage_number>_c<creative_id>`. NULL until
     // the parent campaign has a tracking_id AND the stage has a

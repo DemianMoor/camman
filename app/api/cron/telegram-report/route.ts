@@ -2,9 +2,11 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { formatInTimeZone } from "date-fns-tz";
 
+import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { notifyTelegram, sendTelegramHtml } from "@/lib/alerts/telegram";
 import { carrierTriageSummary } from "@/lib/carrier/queue-stats";
+import { findStalledStages, formatStallAlert } from "@/lib/sends/stall-detector";
 import {
   computeReportMetrics,
   etDayRange,
@@ -121,6 +123,28 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([p, guard]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
+// Minutes without a send (while in-window, provider not paused) before a stage
+// with pending rows is flagged stalled. With the concurrent + time-boxed drain a
+// healthy stage always shows recent sends; 30m of silence is a genuine stall.
+const STALL_THRESHOLD_MINUTES = 30;
+
+// Best-effort backlog-stall check. Never throws (own try/catch) so it can't break
+// the report. No-ops when global sending is off.
+async function checkStalledQueue(now: Date): Promise<void> {
+  if (process.env.SEND_ENABLED !== "true") return;
+  try {
+    const stalled = await findStalledStages(db, {
+      now,
+      thresholdMinutes: STALL_THRESHOLD_MINUTES,
+    });
+    if (stalled.length > 0) {
+      await notifyTelegram(formatStallAlert(stalled, now, STALL_THRESHOLD_MINUTES));
+    }
+  } catch (err) {
+    console.error("[telegram-report] stall check failed:", err);
+  }
+}
+
 // ── handler ─────────────────────────────────────────────────────────────────
 async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;
@@ -134,6 +158,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const warsawHour = Number(formatInTimeZone(now, WARSAW, "H"));
   const warsawIsoDow = Number(formatInTimeZone(now, WARSAW, "i")); // 1=Mon..7=Sun
   const test = req.nextUrl.searchParams.get("test") === "1";
+
+  // Phase 3 — backlog-stall safety net. Runs EVERY hourly tick (independent of the
+  // report window below), so a queue that silently stops draining is caught within
+  // ~an hour regardless of the specific cause. Best-effort: never break the report.
+  // Skipped when global sending is off (env SEND_ENABLED) — then nothing is
+  // expected to drain and every due stage would look "stalled".
+  await checkStalledQueue(now);
 
   const format = decideFormat(warsawHour, warsawIsoDow, test);
 

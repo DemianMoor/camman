@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-21_
+_Last updated: 2026-07-24_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -72,6 +72,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
   - Warsaw hour **0–1** (not Monday) → **hourly** update (belongs to the previous day's window; Mon 00/01 is Sunday's window, excluded).
   - otherwise → `200 { skipped: true }`.
 - `?test=1` (still secret-protected) forces an immediate send regardless of time: hourly format if the current Warsaw hour is inside an hourly window shape, else daily. Response says which format was sent.
+- **Backlog-stall safety net (runs EVERY hourly tick, before the report-window decision).** Calls `findStalledStages` ([lib/sends/stall-detector.ts](../../lib/sends/stall-detector.ts)) and Telegrams if any stage that *should* be draining has sent nothing for 30 min (in-window, provider not paused, org sending on). Best-effort (own try/catch, never breaks the report); skipped when `SEND_ENABLED` is off. This is the catch-all so any future drain stall — not just head-of-line blocking — surfaces within ~an hour. See [sms-send-pipeline.md](sms-send-pipeline.md).
 - **Five metrics**, aggregated across **all orgs** (this tool is single-org in practice; the cron has no session to scope by), for one ET calendar day — the same day-attribution basis the `/reports` page uses so the numbers reconcile:
   - **Sales / Revenue** → `salesRevenueTotals()` ([`lib/reporting/attribution.ts`](../../lib/reporting/attribution.ts)), conversion-dated (Keitaro `stat_date` ∨ manual-tally entry date, max-deduped per stage).
   - **Spend** → Σ `campaign_stages.total_cost` attributed to the stage's send moment (`sent_at`).

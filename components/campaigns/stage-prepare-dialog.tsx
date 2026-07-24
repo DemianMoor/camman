@@ -44,6 +44,10 @@ type PreflightResult = {
   blockers: string[];
   checks: { key: string; ok: boolean; label: string }[];
   preview_text: string | null;
+  // Phase 4 throughput guardrail: advisory warnings (e.g. a large audience on a
+  // low-rate sending number). Non-blocking — shown, not enforced.
+  warnings?: string[];
+  estimated_drain_seconds?: number | null;
 };
 
 export function StagePrepareDialog({
@@ -265,6 +269,18 @@ export function StagePrepareDialog({
                 </li>
               ))}
             </ul>
+
+            {/* Throughput guardrail — a slow sending number for a big audience. */}
+            {preflight.warnings && preflight.warnings.length > 0 ? (
+              <div className="space-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5">
+                {preflight.warnings.map((w, i) => (
+                  <div key={i} className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                    <span>{w}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
 
             {/* Message preview + segment count (link added per recipient). */}
             {preflight.preview_text ? (

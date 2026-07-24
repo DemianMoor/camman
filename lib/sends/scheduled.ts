@@ -93,6 +93,8 @@ export async function selectDueScheduledStages(
       AND s.schedule_missed_at IS NULL
       -- P4: a lane child parked at the 24h slip cap must not be reselected.
       AND s.slip_hold_at IS NULL
+      -- P5: an operator abort during the preflight window holds the stage.
+      AND s.preflight_aborted_at IS NULL
       AND s.archived_at IS NULL
       -- A paused provider holds ALL its scheduled stages: don't even consider
       -- them, so they materialize once a human resumes.

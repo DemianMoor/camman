@@ -5,6 +5,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/send-preflight",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/keitaro/poll",
       "schedule": "*/5 * * * *"
     },

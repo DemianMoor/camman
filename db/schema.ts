@@ -1731,6 +1731,23 @@ export const campaign_stages = pgTable(
     // Why the child is held: 'slip_cap_exceeded' (placement > original + 24h) or
     // 'parent_incomplete_24h' (parent still unfinished 24h past original).
     slip_hold_reason: text("slip_hold_reason"),
+    // ─── Preflight + abort (migration 0118, P5/P6) ──────────────────────────
+    // The send-preflight cron computes a stage's resolved audience + exclusion
+    // breakdown ~15 min before it materializes, posts a Telegram digest, and
+    // persists the result here for the /sends/autopilot view. NULL until the
+    // stage enters its preflight window (or for non-scheduled stages).
+    // Shape (jsonb): { will_send, excluded: { opt_out, content_dedup, split,
+    //   lane, dedup_1h_predicted }, estimated_drain_seconds, blockers[] }.
+    preflight_result: jsonb("preflight_result"),
+    // When the persisted preflight_result was computed.
+    preflight_computed_at: timestamp("preflight_computed_at", { withTimezone: true }),
+    // Set once when the Telegram preflight digest included this stage — the
+    // "posted once" dedup so the cron never re-notifies for the same fire.
+    preflight_notified_at: timestamp("preflight_notified_at", { withTimezone: true }),
+    // Operator abort during the preflight window: Phase A's due-selection
+    // excludes stages with this set (mirrors slip_hold_at/schedule_missed_at).
+    // Cleared to re-arm the stage for its next fire.
+    preflight_aborted_at: timestamp("preflight_aborted_at", { withTimezone: true }),
     // Auto-generated, immutable tracking ID. Format:
     // `<campaign_tracking_id>_s<stage_number>_c<creative_id>`. NULL until
     // the parent campaign has a tracking_id AND the stage has a

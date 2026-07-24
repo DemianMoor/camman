@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { resolveSendsPerSecond } from "@/lib/sends/circuit-breakers";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
 
@@ -37,6 +38,31 @@ export interface PreflightResult {
   // popup show a message preview + segment count BEFORE materialization, when no
   // per-recipient frozen text exists yet. Null when no creative is attached.
   preview_text: string | null;
+  // Phase 4 throughput guardrail (tracked mode). The chosen sending number's HARD
+  // per-second rate and the resulting estimated drain time, so the operator sees
+  // BEFORE approving that a large audience on a low-rate number (e.g. a 3/s toll-
+  // free) will take a long time — the operational trigger behind the 2026-07-24
+  // head-of-line incident. Null when no sender number is assigned / manual mode.
+  sender_sends_per_second: number | null;
+  estimated_drain_seconds: number | null;
+  // Non-blocking advisories (does NOT set ok=false). Currently the slow-number
+  // warning; rendered next to the recipient count in the confirm UI.
+  warnings: string[];
+}
+
+// Estimated drain time above which the slow-number warning fires (15 min). At a
+// short code's 60/s that's ~54K messages; at a 3/s toll-free it's just ~2,700 —
+// which is exactly the mismatch we want to surface at build time.
+const SLOW_DRAIN_WARNING_SECONDS = 15 * 60;
+
+// Human "≈ 2h 5m" / "≈ 45m" / "≈ 30s" from seconds.
+export function formatDrainEstimate(seconds: number): string {
+  if (seconds < 60) return `≈ ${Math.max(1, Math.round(seconds))}s`;
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `≈ ${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m === 0 ? `≈ ${h}h` : `≈ ${h}h ${m}m`;
 }
 
 interface MainRow {
@@ -58,6 +84,7 @@ interface MainRow {
   split_total: number | null;
   behavioral_tier: number | null;
   parent_stage_id: number | null;
+  sender_max_sends_per_second: number | null;
 }
 
 export async function preflightStageSend(
@@ -83,11 +110,13 @@ export async function preflightStageSend(
       s.split_index       AS split_index,
       s.split_total       AS split_total,
       s.behavioral_tier   AS behavioral_tier,
-      s.parent_stage_id   AS parent_stage_id
+      s.parent_stage_id   AS parent_stage_id,
+      pp.max_sends_per_second AS sender_max_sends_per_second
     FROM campaigns c
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
     LEFT JOIN creatives cr ON cr.id = s.creative_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id AND p.org_id = ${orgId}
+    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id AND pp.org_id = ${orgId}
     WHERE c.id = ${campaignId} AND c.org_id = ${orgId}
     LIMIT 1
   `)) as unknown as MainRow[];
@@ -104,6 +133,9 @@ export async function preflightStageSend(
       blockers: ["no_creative"],
       checks: [{ key: "stage", ok: false, label: "Stage not found" }],
       preview_text: null,
+      sender_sends_per_second: null,
+      estimated_drain_seconds: null,
+      warnings: [],
     };
   }
 
@@ -186,6 +218,25 @@ export async function preflightStageSend(
     add("short_domain", sd.length > 0, "Active short domain", "no_short_domain");
   }
 
+  // Phase 4 throughput guardrail (tracked, sender assigned). Estimate the drain
+  // time at the number's HARD per-second rate and warn when it's long, so a large
+  // audience on a low-rate number is caught at build time, not at send time.
+  let senderRate: number | null = null;
+  let estimatedDrainSeconds: number | null = null;
+  const warnings: string[] = [];
+  if (mode === "tracked" && row.provider_phone_id != null) {
+    senderRate = resolveSendsPerSecond(row.sender_max_sends_per_second);
+    if (recipientCount > 0) {
+      estimatedDrainSeconds = Math.ceil(recipientCount / senderRate);
+      if (estimatedDrainSeconds > SLOW_DRAIN_WARNING_SECONDS) {
+        warnings.push(
+          `At ${senderRate}/s, this number takes ${formatDrainEstimate(estimatedDrainSeconds)} to send ` +
+            `${recipientCount.toLocaleString()} messages. Consider a faster sending number for large audiences.`,
+        );
+      }
+    }
+  }
+
   return {
     ok: blockers.length === 0,
     mode,
@@ -193,5 +244,8 @@ export async function preflightStageSend(
     blockers,
     checks,
     preview_text: row.creative_text ?? null,
+    sender_sends_per_second: senderRate,
+    estimated_drain_seconds: estimatedDrainSeconds,
+    warnings,
   };
 }

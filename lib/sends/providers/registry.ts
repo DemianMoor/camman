@@ -1,6 +1,7 @@
 import type { SmsProviderAdapter } from "./types";
 import { texthubAdapter } from "./texthub";
 import { ahoiAdapter } from "./ahoi";
+import { textrequestAdapter } from "./textrequest";
 
 export class UnknownProviderError extends Error {
   constructor(public readonly key: string) {
@@ -17,6 +18,12 @@ const ADAPTERS: Record<string, SmsProviderAdapter> = {
   // the resolved per-credential api_key differs.
   txh2: texthubAdapter,
   ahi: ahoiAdapter,
+  // Text Request (Phase 1 skeleton). Registered so the drain's provider seam
+  // and getAdapter() recognize the key; send() is a not-implemented stub and
+  // the txr provider row keeps supports_api_send=false until Phase 2 go-live.
+  // The key MUST equal the sms_providers.sms_provider_id value seeded by the
+  // migration ('txr') — getAdapter throws UnknownProviderError otherwise.
+  txr: textrequestAdapter,
 };
 
 export function getAdapter(key: string): SmsProviderAdapter {

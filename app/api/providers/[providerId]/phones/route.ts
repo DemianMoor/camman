@@ -98,6 +98,8 @@ export async function GET(
       local_number: provider_phones.local_number,
       cost_per_sms: provider_phones.cost_per_sms,
       number_type: provider_phones.number_type,
+      max_sends_per_second: provider_phones.max_sends_per_second,
+      dashboard_id: provider_phones.dashboard_id,
       status: provider_phones.status,
       archived_at: provider_phones.archived_at,
       created_at: provider_phones.created_at,
@@ -211,6 +213,7 @@ export async function POST(
         cost_per_sms: String(parsed.data.cost_per_sms),
         number_type: parsed.data.number_type,
         max_sends_per_second: parsed.data.max_sends_per_second ?? null,
+        dashboard_id: parsed.data.dashboard_id ?? null,
         status: "active",
       })
       .returning();

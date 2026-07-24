@@ -590,6 +590,13 @@ export const provider_phones = pgTable(
       () => provider_credentials.id,
       { onDelete: "set null" },
     ),
+    // Text Request only (migration 0120): the TR dashboard this number sends
+    // through. TR is entirely dashboard-scoped (one dashboard per sending
+    // number by API design), so the drain resolves stage -> provider_phone ->
+    // dashboard_id at send time. Stored as TEXT because TR's dashboard id type
+    // is unconfirmed in Phase 0 (integer vs GUID) and TEXT holds either without
+    // a wrong-type migration. NULL for every other provider.
+    dashboard_id: text("dashboard_id"),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })

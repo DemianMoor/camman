@@ -220,6 +220,28 @@ const BASE: ScheduledRunResult = {
 // stage can't starve the whole tick — the rest resume next tick.
 const MATERIALIZE_BUDGET_MS = 120_000;
 
+// ─── Phase B fairness time-boxing (head-of-line-blocking fix) ────────────────
+// Phase B drains stages sequentially (ORDER BY scheduled_at, id). Without a cap,
+// the FIRST stage drains its ENTIRE per-tick provider budget before the loop
+// advances — so a stage pinned to a slow phone number (e.g. a 3-sends/sec
+// toll-free) consumes the whole ~300s invocation at that number's rate and
+// starves every stage behind it, even stages on other providers with idle
+// capacity. Observed live: one 3/s stage held ~60K messages on 60/s short codes
+// hostage for 41 minutes.
+//
+// The fix bounds BOTH how long one stage may drain (PER_STAGE_DRAIN_MS) and how
+// long the whole phase may run (PHASE_B_DEADLINE_MS, with margin under the
+// route's 300s maxDuration). Each stage paces by ITS OWN phone's per-second
+// threshold (unchanged); the time-box only decides when to yield to the next
+// stage. Yielded stages keep their 'pending' rows and resume next tick, so no
+// message is lost — a slow stage just takes more ticks instead of blocking fast
+// ones. Smaller PER_STAGE_DRAIN_MS ⇒ more stages serviced per tick (fairer) and,
+// when a slow phone is present, higher total throughput (less wall-clock spent
+// at the slow rate). Kept modest so a fast 60/s stage still drains a healthy
+// slice (~20s ≈ up to 1,200 rows) before yielding, then resumes next tick.
+const PER_STAGE_DRAIN_MS = 20_000;
+const PHASE_B_DEADLINE_MS = 240_000;
+
 // Kickoff refusals that won't self-resolve within the scheduled window — mark
 // the stage missed so it stops retrying every tick and surfaces for a human.
 const PERMANENT_REFUSALS: ReadonlySet<KickoffRefusal> = new Set([
@@ -353,11 +375,17 @@ export async function runScheduledSends(
     sendSms?: Sender;
     maxStages?: number;
     // Injectable for tests; defaults to the real per-stage drain. maxRows is the
-    // stage's remaining slice of its provider's per-tick send budget.
-    runDrain?: (stageId: number, maxRows: number) => Promise<DrainResult>;
+    // stage's remaining slice of its provider's per-tick send budget; maxDurationMs
+    // is its wall-clock fairness slice (see PER_STAGE_DRAIN_MS).
+    runDrain?: (stageId: number, maxRows: number, maxDurationMs?: number) => Promise<DrainResult>;
   },
 ): Promise<ScheduledRunResult> {
   const now = opts?.now ?? new Date();
+  // Real wall-clock anchor for Phase B fairness time-boxing. Separate from `now`
+  // (logical/injectable time used for scheduling decisions) — this measures how
+  // long the invocation has actually run so the phase can stop with margin under
+  // the route's 300s ceiling.
+  const runStartedAt = Date.now();
   const isEnabled = opts?.isEnabled ?? envSendEnabled;
   const isOrgEnabled = opts?.isOrgEnabled;
   const sendSms = opts?.sendSms;
@@ -365,8 +393,8 @@ export async function runScheduledSends(
   const orgId = opts?.orgId;
   const runDrain =
     opts?.runDrain ??
-    ((stageId: number, maxRows: number) =>
-      runStageDrain(dbc, { stageId, sendSms, isEnabled, isOrgEnabled, maxRows }));
+    ((stageId: number, maxRows: number, maxDurationMs?: number) =>
+      runStageDrain(dbc, { stageId, sendSms, isEnabled, isOrgEnabled, maxRows, maxDurationMs }));
 
   // Master kill-switch: with global sending off, no-op entirely — don't
   // materialize, don't drain, don't mark missed. Everything waits for the next
@@ -518,6 +546,14 @@ export async function runScheduledSends(
   const drainable = await selectDrainableStages(dbc, { now, orgId, maxStages });
 
   for (const row of drainable) {
+    // FAIRNESS: stop the phase with margin under the route's 300s ceiling. Stages
+    // not reached this tick keep their 'pending' rows and are reselected next
+    // tick (ORDER BY scheduled_at gives earliest-scheduled first crack), so
+    // nothing is lost — the phase just spreads work across ticks instead of
+    // letting the head of the queue consume the whole invocation.
+    const elapsedMs = Date.now() - runStartedAt;
+    if (elapsedMs >= PHASE_B_DEADLINE_MS) break;
+
     if (row.provider_id != null && (await isProviderPaused(dbc, row.provider_id))) {
       result.paused_skipped++;
       continue;
@@ -577,7 +613,14 @@ export async function runScheduledSends(
       continue;
     }
 
-    const drain = await runDrain(row.stage_id, budget);
+    // Fairness slice: this stage may drain for at most PER_STAGE_DRAIN_MS, and
+    // never past the phase deadline. Whichever is smaller bounds the wall-clock,
+    // so no single stage (however slow its phone) monopolizes the invocation.
+    const stageMaxDurationMs = Math.min(
+      PER_STAGE_DRAIN_MS,
+      PHASE_B_DEADLINE_MS - (Date.now() - runStartedAt),
+    );
+    const drain = await runDrain(row.stage_id, budget, stageMaxDurationMs);
     result.drained++;
     result.sent += drain.sent;
     result.failed += drain.failed;

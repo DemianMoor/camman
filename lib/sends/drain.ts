@@ -175,6 +175,16 @@ export async function runStageDrain(
     isOrgPaused?: (orgId: string) => Promise<boolean>;
     batchSize?: number;
     maxRows?: number;
+    // FAIRNESS TIME-BOX: max wall-clock this drain may spend before yielding.
+    // Checked between batches (never mid-batch — at-most-once is preserved): once
+    // exceeded, the drain stops claiming and returns with rows left 'pending', to
+    // be resumed next tick — the SAME soft-stop semantics as reaching the pacing
+    // cap. This is what stops a slow-phone stage (e.g. a 3/s number) from
+    // monopolizing the whole cron invocation and starving every stage behind it
+    // (head-of-line blocking). NULL ⇒ no time limit (the maxRows cap still bounds
+    // the run). Distinct from maxRows so a fast phone can still drain many rows
+    // within its slice while a slow one simply yields sooner.
+    maxDurationMs?: number;
     // Overrides the provider's per-second send `rate` (parallel slice size +
     // pacing target). Production resolves it from max_sends_per_second; this is
     // the test injection point (1 = effectively serial).
@@ -299,8 +309,19 @@ export async function runStageDrain(
   let stopReason: DrainStopReason | null = null;
   let pausedNow = false;
   let consecutiveFailures = 0;
+  // Wall-clock anchor for the fairness time-box (opts.maxDurationMs). Real time,
+  // NOT the logical `now` used elsewhere — this measures how long THIS drain has
+  // actually run so it can yield its slice to the next stage.
+  const drainStartedAt = Date.now();
 
   while (processed < effectiveMaxRows) {
+    // FAIRNESS TIME-BOX: yield BEFORE claiming the next batch once this stage has
+    // used its wall-clock slice. Leaves remaining rows 'pending' (soft stop, like
+    // the pacing cap) so they resume next tick — never abandons a claimed batch.
+    if (opts.maxDurationMs != null && Date.now() - drainStartedAt >= opts.maxDurationMs) {
+      break;
+    }
+
     // Re-check the kill-switch BEFORE each batch so flipping it off stops the
     // drain (subject to the env-immutability caveat above).
     if (!isEnabled()) {

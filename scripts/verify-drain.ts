@@ -470,6 +470,35 @@ async function main() {
       assert(pc.ok && pc.sent === 6, "all 6 sent under pacing");
       assert(elapsed >= 1600, `paced to ~3/sec — 6 sends took ${elapsed}ms (≥1600ms = ≤3/sec)`);
 
+      console.log("Fairness time-box: a stage yields mid-drain when its wall-clock slice expires:");
+      // The head-of-line-blocking fix. A slow-phone stage must NOT drain its whole
+      // backlog in one invocation — it yields after maxDurationMs so the next stage
+      // gets a turn. Control: no time-box ⇒ all rows drain. Test: a short time-box
+      // with paced (rate=10 ⇒ ~100ms/batch, batchSize 1) sends ⇒ yields early with
+      // rows left pending. Yielding is a SOFT stop: ok, not halted, no stopReason,
+      // remaining>0 — identical to the pacing-cap semantics the drain already has.
+      const tbProv = await mkProvider();
+      await addCred(tbProv);
+      // Control — generous time-box drains all 6.
+      const tbControl = await mkStage(tbProv);
+      for (let i = 0; i < 6; i++) await addPending(tbControl, await mkContact(), `tc${i}`);
+      const ctl = await runStageDrain(tx, {
+        stageId: tbControl, sendSms: okSender, isEnabled: () => true,
+        batchSize: 1, concurrency: 10, maxDurationMs: 60_000,
+      });
+      assert(ctl.ok && ctl.sent === 6 && ctl.remaining === 0, "generous time-box drains all 6 (control)");
+      // Test — a 250ms slice at ~100ms/batch yields after a few sends.
+      const tbStage = await mkStage(tbProv);
+      for (let i = 0; i < 10; i++) await addPending(tbStage, await mkContact(), `tb${i}`);
+      const tb = await runStageDrain(tx, {
+        stageId: tbStage, sendSms: okSender, isEnabled: () => true,
+        batchSize: 1, concurrency: 10, maxDurationMs: 250,
+      });
+      assert(tb.ok && tb.sent >= 1 && tb.sent < 10, `yielded mid-drain — sent ${tb.sent} of 10 (progress, not all)`);
+      assert(tb.remaining >= 1, `left ${tb.remaining} rows pending for the next tick`);
+      assert(tb.halted === false && tb.stopReason == null, "time-box is a SOFT yield (not halted, no stopReason)");
+      assert((await statusOf(tbStage, "pending")) === tb.remaining, "yielded rows stay 'pending' (resume next tick)");
+
       console.log("\nAll assertions passed. Rolling back (no data persisted).");
       throw new Rollback();
     });

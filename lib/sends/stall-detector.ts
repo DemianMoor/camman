@@ -69,6 +69,8 @@ export async function findStalledStages(
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
     WHERE c.link_mode = 'tracked'
       AND c.status = 'active'
+      -- P7/P8: don't flag a campaign-paused stage as "stalled" (it's intentionally held).
+      AND (c.send_paused IS NOT TRUE)
       AND s.send_approved = true
       AND s.archived_at IS NULL
       AND s.materialized_at IS NOT NULL

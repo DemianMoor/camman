@@ -4,6 +4,11 @@ import { sql } from "drizzle-orm";
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { isOptOutKeyword } from "@/lib/sends/opt-out-keywords";
+import {
+  checkOptOutRateBreaker,
+  optOutBreakerAlertText,
+  type OptOutRateCheckResult,
+} from "@/lib/sends/optout-rate-breaker";
 import { decryptCredentialKey } from "@/lib/sends/provider-credential";
 import {
   fetchInbox as realFetchInbox,
@@ -188,7 +193,12 @@ const EMPTY = {
 // without re-querying. One STOP credits at most one stage.
 type Outcome =
   | { kind: "dupe" | "ignored" | "invalid" }
-  | { kind: "suppressed"; attributed: 0 | 1 };
+  | {
+      kind: "suppressed";
+      attributed: 0 | 1;
+      // P7: set when this STOP tripped the campaign opt-out-rate breaker.
+      breakerTrip: { campaignId: number; result: OptOutRateCheckResult } | null;
+    };
 
 async function pollCredential(
   database: Database,
@@ -333,6 +343,7 @@ async function pollCredential(
           );
 
           let attributed: 0 | 1 = 0;
+          let breakerTrip: { campaignId: number; result: OptOutRateCheckResult } | null = null;
           if (match) {
             // ON CONFLICT guards the idempotent re-run case; the per-message claim
             // already makes this run once, so RETURNING is the increment gate.
@@ -364,6 +375,13 @@ async function pollCredential(
               // Total Cost. Recompute from the (now bumped) counters + phone cost;
               // a no-op for manually-overridden / CSV-imported stages.
               await recomputeStageTotalCost(tx, match.stage_id);
+              // P7: re-evaluate the campaign's rolling opt-out rate; latch the
+              // per-campaign pause in-tx if it spiked. Telegram fires post-commit.
+              const breaker = await checkOptOutRateBreaker(tx, {
+                orgId: cred.org_id,
+                campaignId: match.campaign_id,
+              });
+              if (breaker.tripped) breakerTrip = { campaignId: match.campaign_id, result: breaker };
             }
           }
 
@@ -375,7 +393,7 @@ async function pollCredential(
               processed_at = now()
           WHERE id = ${eventId}
         `);
-          return { kind: "suppressed", attributed } as const;
+          return { kind: "suppressed", attributed, breakerTrip } as const;
         });
       } catch {
         // Transaction rolled back (claim + suppression both undone) — the message
@@ -391,6 +409,13 @@ async function pollCredential(
         suppressed++;
         attributed += outcome.attributed;
         if (outcome.attributed === 0) unattributed++;
+        // Post-commit: fire the breaker alert (best-effort) so a tx rollback
+        // can't send a false "paused" and no HTTP is held inside the tx.
+        if (outcome.breakerTrip) {
+          await notifyTelegram(
+            optOutBreakerAlertText(outcome.breakerTrip.campaignId, null, outcome.breakerTrip.result),
+          );
+        }
       } else if (outcome.kind === "ignored") ignored++;
       else if (outcome.kind === "invalid") invalid++;
     }

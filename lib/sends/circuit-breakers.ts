@@ -198,3 +198,89 @@ export async function countAhoiDlrRejectsSince(
   `)) as unknown as { n: number }[];
   return Number(r[0]?.n ?? 0);
 }
+
+// ── P7/P8: rolling opt-out-rate breaker (per-CAMPAIGN) ───────────────────────
+// A high STOP rate is a content/audience signal, not a provider-transport fault,
+// so this breaker pauses ONE campaign (campaigns.send_paused) rather than the
+// whole provider. Env-tunable like the Ahoi DLR breaker — read through helpers so
+// a redeploy isn't needed to change sensitivity. Defaults are backed by live data
+// (330 stages ≥50 sends: p95 7.4%, p99 8.4%, max 13.8% opt-out rate).
+export function optOutRateSpikeThreshold(): number {
+  const v = Number(process.env.OPTOUT_RATE_SPIKE_THRESHOLD);
+  return Number.isFinite(v) && v > 0 && v < 1 ? v : 0.1; // 10%
+}
+export function optOutRateMinSends(): number {
+  const v = Number(process.env.OPTOUT_RATE_MIN_SENDS);
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 200;
+}
+export function optOutRateWindowSeconds(): number {
+  const v = Number(process.env.OPTOUT_RATE_WINDOW_SEC);
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 24 * 60 * 60; // 24h trailing
+}
+
+// Numerator: attributed opt-outs credited to a campaign in the trailing window
+// (opt_out_attributions is already de-duped one-per-STOP-per-stage, so a
+// multi-message sequence can't inflate the rate). Bucketed by oa.created_at =
+// the STOP receipt time the ingesters stamp.
+export async function countOptOutAttributionsSince(
+  dbc: DbOrTx,
+  orgId: string,
+  campaignId: number,
+  seconds: number,
+): Promise<number> {
+  const r = (await dbc.execute(sql`
+    SELECT count(*)::int AS n FROM opt_out_attributions
+    WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
+      AND created_at > now() - make_interval(secs => ${seconds})
+  `)) as unknown as { n: number }[];
+  return Number(r[0]?.n ?? 0);
+}
+
+// Denominator: successful sends for a campaign in the SAME trailing window.
+export async function countSentSinceForCampaign(
+  dbc: DbOrTx,
+  orgId: string,
+  campaignId: number,
+  seconds: number,
+): Promise<number> {
+  const r = (await dbc.execute(sql`
+    SELECT count(*)::int AS n FROM stage_sends
+    WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
+      AND status = 'sent'
+      AND sent_at > now() - make_interval(secs => ${seconds})
+  `)) as unknown as { n: number }[];
+  return Number(r[0]?.n ?? 0);
+}
+
+// Fresh read of the per-campaign latch (mirror of isProviderPaused) for the
+// drain's mid-invocation kill.
+export async function isCampaignPaused(dbc: DbOrTx, campaignId: number): Promise<boolean> {
+  const r = (await dbc.execute(sql`
+    SELECT send_paused FROM campaigns WHERE id = ${campaignId} LIMIT 1
+  `)) as unknown as { send_paused: boolean }[];
+  return r[0]?.send_paused === true;
+}
+
+// Latch the per-campaign pause + append a campaign_circuit_events audit row.
+// Idempotent (WHERE send_paused = false), so a re-trip is a no-op. Mirrors
+// latchPause exactly, on the campaign row + its own audit table. actorUserId
+// NULL ⇒ system auto-trip (the opt-out-rate breaker); a session user on manual.
+export async function latchCampaignPause(
+  dbc: DbOrTx,
+  opts: { campaignId: number; orgId: string; reason: string; actorUserId?: string | null },
+): Promise<boolean> {
+  const updated = (await dbc.execute(sql`
+    UPDATE campaigns
+    SET send_paused = true,
+        send_paused_reason = ${opts.reason},
+        send_paused_at = now()
+    WHERE id = ${opts.campaignId} AND send_paused = false
+    RETURNING id
+  `)) as unknown as { id: number }[];
+  if (updated.length === 0) return false; // already paused — don't double-log
+  await dbc.execute(sql`
+    INSERT INTO campaign_circuit_events (org_id, campaign_id, event, reason, actor_user_id)
+    VALUES (${opts.orgId}, ${opts.campaignId}, 'paused', ${opts.reason}, ${opts.actorUserId ?? null})
+  `);
+  return true;
+}

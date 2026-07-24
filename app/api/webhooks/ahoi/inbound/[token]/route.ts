@@ -4,6 +4,7 @@ import { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { captureAhoiInboundEvent } from "@/lib/sends/ahoi-inbound";
 import { processAhoiInboundOptOut } from "@/lib/sends/ahoi-optout";
+import { optOutBreakerAlertText } from "@/lib/sends/optout-rate-breaker";
 import {
   extractClientIp,
   headersToObject,
@@ -85,7 +86,7 @@ export async function POST(
   // several writes commit or roll back atomically (see the header comment).
   if (parsed) {
     try {
-      await db.transaction((tx) =>
+      const res = await db.transaction((tx) =>
         processAhoiInboundOptOut(tx, {
           eventId: captured.id,
           orgId: cred.org_id,
@@ -95,6 +96,12 @@ export async function POST(
           receivedAt: new Date(),
         }),
       );
+      // P7: fire the opt-out-rate breaker alert post-commit (best-effort).
+      if (res.kind === "suppressed" && res.breakerTrip) {
+        await notifyTelegram(
+          optOutBreakerAlertText(res.breakerTrip.campaignId, null, res.breakerTrip.result),
+        ).catch(() => {});
+      }
     } catch (e) {
       console.error("[ahoi-inbound-webhook] opt-out processing failed:", e);
       // Best-effort loud alert — never throws back to Ahoi (we still 200 below).

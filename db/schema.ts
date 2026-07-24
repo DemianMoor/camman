@@ -590,7 +590,7 @@ export const provider_phones = pgTable(
       () => provider_credentials.id,
       { onDelete: "set null" },
     ),
-    // Text Request only (migration 0119): the TR dashboard this number sends
+    // Text Request only (migration 0120): the TR dashboard this number sends
     // through. TR is entirely dashboard-scoped (one dashboard per sending
     // number by API design), so the drain resolves stage -> provider_phone ->
     // dashboard_id at send time. Stored as TEXT because TR's dashboard id type
@@ -1518,6 +1518,16 @@ export const campaigns = pgTable(
     status_changed_at: timestamp("status_changed_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // ─── Per-campaign send breaker (migration 0119, P7/P8) ──────────────────
+    // LATCHING kill-switch scoped to ONE campaign — mirrors sms_providers.send_paused
+    // but a strict subset: the scheduler ANDs both, so a paused provider still
+    // freezes everything, while this only freezes THIS campaign's stages. Auto-
+    // tripped by the rolling opt-out-rate breaker (P7) and manually via the
+    // campaign send-circuit route. Orthogonal to `status` (which is a lifecycle
+    // state entangled with the in-use-audience exclusion) — keep them separate.
+    send_paused: boolean("send_paused").notNull().default(false),
+    send_paused_reason: text("send_paused_reason"),
+    send_paused_at: timestamp("send_paused_at", { withTimezone: true }),
     // Auto-generated, immutable, structured ID for external analytics
     // (e.g. `5_14296_051526_1` = brand_5, offer_14296, May 15 2026 ET,
     // first of the day). NULL until both brand_id and offer_id are set.
@@ -2594,6 +2604,38 @@ export const send_circuit_events = pgTable(
     index("send_circuit_events_org_id_idx").on(table.org_id),
     check(
       "send_circuit_events_event_check",
+      sql`${table.event} IN ('paused', 'resumed')`,
+    ),
+  ],
+);
+
+// Per-CAMPAIGN circuit-breaker audit (migration 0119, P7/P8). A separate table
+// from send_circuit_events (which is provider-FK-only) so the provider audit's
+// constraints stay untouched. Mirrors its shape: append-only, actor_user_id NULL
+// = a system auto-trip (the opt-out-rate breaker), a session user on manual
+// pause/resume.
+export const campaign_circuit_events = pgTable(
+  "campaign_circuit_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    event: text("event").notNull(),
+    reason: text("reason"),
+    actor_user_id: uuid("actor_user_id"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("campaign_circuit_events_campaign_idx").on(table.campaign_id, table.created_at),
+    index("campaign_circuit_events_org_id_idx").on(table.org_id),
+    check(
+      "campaign_circuit_events_event_check",
       sql`${table.event} IN ('paused', 'resumed')`,
     ),
   ],

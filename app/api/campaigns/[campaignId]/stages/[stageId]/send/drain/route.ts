@@ -40,6 +40,10 @@ const REFUSAL: Record<DrainRefusal, { status: number; message: string }> = {
     status: 409,
     message: "Sending is paused for this provider (circuit breaker engaged)",
   },
+  campaign_paused: {
+    status: 409,
+    message: "Sending is paused for this campaign (opt-out-rate breaker or manual pause)",
+  },
   no_provider: { status: 400, message: "Stage has no SMS provider" },
   unknown_provider: {
     status: 400,

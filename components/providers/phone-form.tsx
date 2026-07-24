@@ -57,6 +57,9 @@ export type PhoneSubmitValues = PhoneFormValues & { provider_id?: number };
 
 export interface PhoneFormProps {
   mode: "create" | "edit";
+  /** The parent provider's sms_provider_id. Gates provider-specific fields —
+   *  the Text Request ("txr") dashboard binding only shows for that provider. */
+  providerKey?: string;
   /** create mode: only `cost_per_sms` / `brand_id` are used.
    *  edit mode: `phone_number` / `number_type` are used for read-only display. */
   initialValues?: Partial<PhoneFormValues>;
@@ -73,6 +76,7 @@ export interface PhoneFormProps {
 
 export function PhoneForm({
   mode,
+  providerKey,
   initialValues,
   existingPhoneNumber,
   currentProviderId,
@@ -82,6 +86,9 @@ export function PhoneForm({
   isSubmitting,
 }: PhoneFormProps) {
   const isEdit = mode === "edit";
+  // Text Request is dashboard-scoped (one dashboard per number) — only that
+  // provider surfaces the dashboard binding field.
+  const isTextRequest = providerKey === "txr";
 
   // Move target — defaults to the current provider (no move). Local state, not
   // part of the zod-resolved form (which would strip an unknown key on submit).
@@ -103,6 +110,7 @@ export function PhoneForm({
       cost_per_sms: initialValues?.cost_per_sms ?? 0,
       brand_id: initialValues?.brand_id ?? null,
       max_sends_per_second: initialValues?.max_sends_per_second ?? null,
+      dashboard_id: initialValues?.dashboard_id ?? null,
     },
   });
 
@@ -357,6 +365,39 @@ export function PhoneForm({
             </FormItem>
           )}
         />
+
+        {/* Text Request only: the dashboard this number sends through. TR is
+            dashboard-scoped (one dashboard per number). Use "Check connection"
+            on the account to list the dashboard ids. */}
+        {isTextRequest ? (
+          <FormField
+            control={form.control}
+            name="dashboard_id"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Text Request dashboard ID</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder="e.g. 12345"
+                    disabled={isSubmitting}
+                    value={field.value ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value.trim();
+                      field.onChange(v === "" ? null : v);
+                    }}
+                  />
+                </FormControl>
+                <FormDescription>
+                  Text Request is dashboard-scoped — each sending number lives
+                  under one dashboard. Sends through this number are routed to
+                  this dashboard. Use &quot;Check connection&quot; on the account
+                  to list your dashboard IDs.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        ) : null}
 
         <FormField
           control={form.control}

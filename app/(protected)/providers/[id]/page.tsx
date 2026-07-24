@@ -108,6 +108,8 @@ type Phone = {
   local_number: string | null;
   cost_per_sms: string;
   number_type: NumberType;
+  max_sends_per_second: number | null;
+  dashboard_id: string | null;
   status: PhoneStatus;
   archived_at: string | null;
   created_at: string;
@@ -928,6 +930,7 @@ export default function ProviderDetailPage() {
       {canViewCredentials ? (
         <ProviderCredentialsSection
           providerId={provider.id}
+          providerKey={provider.sms_provider_id}
           canManage={canManageCredentials}
         />
       ) : null}
@@ -1039,6 +1042,7 @@ export default function ProviderDetailPage() {
         <PhoneForm
           key="add"
           mode="create"
+          providerKey={provider.sms_provider_id}
           onSubmit={handleAddPhone}
           onCancel={() => setAddPhoneOpen(false)}
           isSubmitting={createPhoneApi.isLoading}
@@ -1065,6 +1069,7 @@ export default function ProviderDetailPage() {
           <PhoneForm
             key={`edit-phone-${editingPhone.id}`}
             mode="edit"
+            providerKey={provider.sms_provider_id}
             existingPhoneNumber={editingPhone.phone_number}
             currentProviderId={editingPhone.provider_id}
             providers={allProviders
@@ -1078,6 +1083,8 @@ export default function ProviderDetailPage() {
               number_type: editingPhone.number_type,
               cost_per_sms: Number(editingPhone.cost_per_sms),
               brand_id: editingPhone.brand_id,
+              max_sends_per_second: editingPhone.max_sends_per_second,
+              dashboard_id: editingPhone.dashboard_id,
             }}
             onSubmit={handleEditPhone}
             onCancel={() => setEditingPhone(null)}

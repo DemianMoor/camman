@@ -5,6 +5,7 @@ import {
   Ban,
   KeyRound,
   Pencil,
+  PlugZap,
   Plus,
   RotateCw,
   SendHorizonal,
@@ -58,17 +59,31 @@ type Phone = {
 
 const NONE_BRAND = "none";
 
+// TextHub-family provider keys (txh + the second-account txh2 both reuse the
+// TextHub adapter). The "Send test" action posts to a route that hardcodes
+// TextHub's sendSms + the STOP-callback registers a TextHub callback, so both
+// are only valid — and only shown — for these keys. (Gating Send test here also
+// hides the TextHub-hardcoded button for Ahoi, where it would have fired via the
+// wrong provider.)
+const TEXTHUB_KEYS = new Set(["txh", "txh2"]);
+// Text Request: the only provider with a non-sending connection check today.
+const TEXTREQUEST_KEY = "txr";
+
 function numberWord(n: number) {
   return `${n} number${n === 1 ? "" : "s"}`;
 }
 
 export function ProviderCredentialsSection({
   providerId,
+  providerKey,
   canManage,
 }: {
   providerId: number;
+  providerKey: string;
   canManage: boolean;
 }) {
+  const isTextHub = TEXTHUB_KEYS.has(providerKey);
+  const isTextRequest = providerKey === TEXTREQUEST_KEY;
   const listApi = useApiCall<{ data: Cred[] }>();
   const brandsApi = useApiCall<{ data: Brand[] }>();
   const phonesApi = useApiCall<{ data: Phone[] }>();
@@ -438,6 +453,40 @@ export function ProviderCredentialsSection({
     else toast.error("TextHub didn't accept the registration");
   }
 
+  // Check connection (Text Request only): non-sending healthcheck that calls
+  // Text Request's GET /dashboards with the stored key to confirm it
+  // authenticates and to list the account's dashboards (the ids an operator
+  // binds to a sending number). No SMS, no spend.
+  const healthApi = useApiCall<{
+    ok: boolean;
+    status: number;
+    dashboards: { id: string; name: string }[];
+    error: string | null;
+  }>();
+  const [checking, setChecking] = useState<Cred | null>(null);
+  const [healthResult, setHealthResult] = useState<
+    { ok: boolean; status: number; dashboards: { id: string; name: string }[]; error: string | null } | null
+  >(null);
+
+  function openCheck(c: Cred) {
+    setChecking(c);
+    setHealthResult(null);
+  }
+
+  async function handleCheck() {
+    if (!checking) return;
+    const r = await healthApi.execute(
+      `/api/providers/${providerId}/credentials/${checking.id}/healthcheck`,
+    );
+    if (!r.ok) {
+      toastApiError(r, "Connection check failed");
+      return;
+    }
+    setHealthResult(r.data);
+    if (r.data.ok) toast.success("Connected — Text Request accepted the key");
+    else toast.error("Text Request rejected the key");
+  }
+
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -497,9 +546,19 @@ export function ProviderCredentialsSection({
                     {canManage ? (
                       <td className="px-4 py-2">
                         <div className="flex justify-end gap-1">
-                          <Button variant="ghost" size="sm" onClick={() => openTest(c)}>
-                            <SendHorizonal className="size-4" aria-hidden /> Send test
-                          </Button>
+                          {/* Send test is TextHub-only: the route hardcodes
+                              TextHub's sendSms and would fire a real SMS via the
+                              wrong provider for any other key. */}
+                          {isTextHub ? (
+                            <Button variant="ghost" size="sm" onClick={() => openTest(c)}>
+                              <SendHorizonal className="size-4" aria-hidden /> Send test
+                            </Button>
+                          ) : null}
+                          {isTextRequest ? (
+                            <Button variant="ghost" size="sm" onClick={() => openCheck(c)}>
+                              <PlugZap className="size-4" aria-hidden /> Check connection
+                            </Button>
+                          ) : null}
                           <Button variant="ghost" size="sm" onClick={() => openRegister(c)}>
                             <Ban className="size-4" aria-hidden /> STOP callback
                           </Button>
@@ -878,6 +937,93 @@ export function ProviderCredentialsSection({
               disabled={testApi.isLoading || !testNumber.trim() || !testText.trim()}
             >
               {testApi.isLoading ? "Sending…" : "Send test"}
+            </Button>
+          </div>
+        </div>
+      </FormDialog>
+
+      {/* Check connection dialog (Text Request) */}
+      <FormDialog
+        open={checking !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setChecking(null);
+            setHealthResult(null);
+          }
+        }}
+        className="sm:max-w-md"
+      >
+        <DialogHeader>
+          <DialogTitle>Check connection</DialogTitle>
+          <DialogDescription>
+            Verifies the &quot;{checking?.label ?? ""}&quot; account&apos;s API key with
+            Text Request and lists its dashboards. Each dashboard is 1:1 with a
+            sending number — use a dashboard ID on the number&apos;s form. No SMS is sent.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          {healthResult ? (
+            <div
+              className={
+                "rounded-md border p-3 text-sm " +
+                (healthResult.ok
+                  ? "border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950"
+                  : "border-destructive/40 bg-destructive/5")
+              }
+            >
+              {healthResult.ok ? (
+                <>
+                  <p className="font-medium">Connected — key accepted.</p>
+                  {healthResult.dashboards.length > 0 ? (
+                    <>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        Dashboards (ID — name):
+                      </p>
+                      <ul className="mt-1 font-mono text-xs">
+                        {healthResult.dashboards.map((d) => (
+                          <li key={d.id}>
+                            {d.id} — {d.name}
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      No dashboards returned.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p>
+                  Text Request rejected it{healthResult.status ? ` (HTTP ${healthResult.status})` : ""}
+                  : {healthResult.error ?? "unknown error"}
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              This calls Text Request once to confirm the key works. No SMS is sent.
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setChecking(null);
+                setHealthResult(null);
+              }}
+              disabled={healthApi.isLoading}
+            >
+              Close
+            </Button>
+            <Button onClick={() => void handleCheck()} disabled={healthApi.isLoading}>
+              {healthApi.isLoading
+                ? "Checking…"
+                : healthResult
+                  ? "Check again"
+                  : "Check connection"}
             </Button>
           </div>
         </div>

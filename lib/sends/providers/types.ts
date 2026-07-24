@@ -8,6 +8,13 @@ export type NormalizedSendParams = {
   recipientE164: string;      // drain speaks E.164; adapter converts inward
   senderNumber: string | null; // provider_phone as send-from number: Ahoi's source, TextHub's sender
   leadId?: string | null;
+  // Optional per-message delivery callback URL. Text Request sets `status_callback`
+  // PER SEND (not just per account), letting the drain embed the stage_send token
+  // in the path for direct attribution. Built by the drain (origin + the stable
+  // per-credential inbound_webhook_token + the stage_send id); adapters that have
+  // no per-message callback (TextHub, Ahoi) ignore it. Additive + optional so
+  // those adapters are untouched. Populated by the drain in Phase 2.
+  statusCallbackUrl?: string;
 };
 
 export type RawWebhook = {
@@ -35,7 +42,7 @@ export type InboundEvent = {
 
 import type { SendSmsResult } from "@/lib/sends/texthub";
 export interface SmsProviderAdapter {
-  key: "txh" | "ahi";
+  key: "txh" | "ahi" | "txr";
   send(p: NormalizedSendParams): Promise<SendSmsResult>;
   buildRedactedRequest(p: NormalizedSendParams): string;
   toProviderRecipient(e164: string): string;

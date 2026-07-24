@@ -38,6 +38,11 @@ export const providerPhoneCreateSchema = z
     // number type — e.g. 60/s short code, 3/s toll free). Null = built-in
     // default. The drain paces parallel sends to never exceed it.
     max_sends_per_second: z.number().int().min(1).max(1000).nullable().optional(),
+    // Text Request only: the TR dashboard this number sends through (one
+    // dashboard per number by API design). Stored as TEXT (integer or GUID).
+    // The UI only surfaces this field for the txr provider; other providers
+    // never send it. Null when unset.
+    dashboard_id: z.string().trim().min(1).max(128).nullable().optional(),
   })
   .superRefine((data, ctx) => {
     // Short codes have a fixed numeric shape; phone numbers are validated
@@ -63,6 +68,9 @@ export const providerPhoneUpdateSchema = z
       .optional(),
     brand_id: z.number().int().positive().nullable().optional(),
     max_sends_per_second: z.number().int().min(1).max(1000).nullable().optional(),
+    // Text Request only (see create schema). Editable so a number's dashboard
+    // binding can be corrected; null clears it.
+    dashboard_id: z.string().trim().min(1).max(128).nullable().optional(),
     // Move the number to a different provider (reassigns provider_id in place;
     // clears the number's account link). When it differs from the current
     // provider and not-yet-sent stages reference the number, the route returns
@@ -77,6 +85,7 @@ export const providerPhoneUpdateSchema = z
       data.cost_per_sms !== undefined ||
       data.brand_id !== undefined ||
       data.max_sends_per_second !== undefined ||
+      data.dashboard_id !== undefined ||
       data.provider_id !== undefined,
     { message: "At least one field must be provided" },
   );

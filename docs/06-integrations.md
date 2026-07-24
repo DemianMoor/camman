@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-07-22_
+_Last updated: 2026-07-25_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -61,6 +61,9 @@ External services CamMan talks to, their contracts, and every environment variab
 | `AHOI_API_TOKEN` | **local only** | one-time seed input for `scripts/seed-ahoi-number-credential.ts`; not read at runtime after seeding |
 | `AHOI_DLR_REJECT_SPIKE_THRESHOLD` | server | rejected-DLR count that latches the Ahoi provider pause (default 10) |
 | `AHOI_DLR_REJECT_SPIKE_WINDOW_SEC` | server | rolling window (seconds) for the DLR reject-rate breaker (default 900) |
+| `OPTOUT_RATE_SPIKE_THRESHOLD` | server | per-campaign opt-out rate (0–1) that latches `campaigns.send_paused` (default 0.10; migration 0119) |
+| `OPTOUT_RATE_MIN_SENDS` | server | min sent-in-window floor before the opt-out-rate breaker can trip (default 200) |
+| `OPTOUT_RATE_WINDOW_SEC` | server | trailing window (seconds) for both the opt-out and sent counts (default 86400) |
 | `TEST_USER_EMAIL` / `TEST_USER_PASSWORD` | **local only** | credentials for `scripts/test-*-api.ts`; remove after use |
 
 ### Secrets handling rules (CLAUDE.md §11)

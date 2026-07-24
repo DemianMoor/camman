@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 
+import { notifyTelegram } from "@/lib/alerts/telegram";
 import type { db } from "@/db/client";
 import {
   ahoiDlrRejectSpikeThreshold,
@@ -104,6 +105,17 @@ export async function reconcileAhoiDlrEvent(
         orgId: o.orgId,
         reason: `dlr_reject_spike: ${n} rejected DLRs in ${windowSec}s`,
       });
+      // Thread the trip to Telegram (previously the webhook discarded pausedNow,
+      // so this breaker latched SILENTLY). Best-effort; reconcile runs on `db`
+      // (not a tx), so the latch is already committed when this fires.
+      if (pausedNow) {
+        await notifyTelegram(
+          `🛑 Ahoi DLR reject-spike breaker TRIPPED — provider send PAUSED\n` +
+            `provider ${o.providerId} (org ${o.orgId})\n` +
+            `${n} rejected DLRs in ${windowSec}s (threshold ${ahoiDlrRejectSpikeThreshold()}).\n` +
+            `Resume manually in the provider send-circuit UI.`,
+        ).catch(() => {});
+      }
     }
   } else if (o.sendStatus && o.sendStatus !== "carrier_sent" && o.sendStatus !== "delivered") {
     // G4: any send_status outside the three known values gets a DISTINCT log

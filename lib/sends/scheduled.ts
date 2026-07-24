@@ -86,6 +86,10 @@ export async function selectDueScheduledStages(
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
     WHERE c.link_mode = 'tracked'
       AND c.status = 'active'
+      -- P7/P8: per-campaign opt-out-rate breaker. Additive next to the per-provider
+      -- latch (p.send_paused) — a paused provider still freezes all its campaigns;
+      -- this only ever ADDS freezes within a still-live provider.
+      AND (c.send_paused IS NOT TRUE)
       AND s.send_approved = true
       AND s.scheduled_at IS NOT NULL
       AND s.scheduled_at <= ${nowIso}
@@ -158,6 +162,10 @@ export async function selectDrainableStages(
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
     WHERE c.link_mode = 'tracked'
       AND c.status = 'active'
+      -- P7/P8: per-campaign opt-out-rate breaker. Additive next to the per-provider
+      -- latch (p.send_paused) — a paused provider still freezes all its campaigns;
+      -- this only ever ADDS freezes within a still-live provider.
+      AND (c.send_paused IS NOT TRUE)
       AND s.send_approved = true
       AND s.archived_at IS NULL
       AND (p.send_paused IS NOT TRUE)

@@ -6,6 +6,7 @@ import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { CAMPAIGN_TIMEZONE, campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { processAhoiInboundOptOut } from "@/lib/sends/ahoi-optout";
+import { optOutBreakerAlertText } from "@/lib/sends/optout-rate-breaker";
 import { ahoiBaseUrl } from "@/lib/sends/providers/ahoi";
 import { decryptCredentialKey } from "@/lib/sends/provider-credential";
 
@@ -182,11 +183,11 @@ export async function pollAhoiCdr(
             ON CONFLICT (provider_id, provider_uuid) WHERE provider_uuid IS NOT NULL DO NOTHING
             RETURNING id
           `)) as unknown as { id: string }[];
-          if (inserted.length === 0) return "dupe" as const;
+          if (inserted.length === 0) return { kind: "dupe" as const, breakerTrip: null };
 
           // Layer 2 (spec §6): same processing core Layer 1 uses, tagged
           // ahoi_cdr. CARRY 1's cross-channel dedup lives inside this call.
-          await processAhoiInboundOptOut(tx, {
+          const res = await processAhoiInboundOptOut(tx, {
             eventId: inserted[0]!.id,
             orgId: cred.org_id,
             sourceNumber: r.src,
@@ -194,9 +195,18 @@ export async function pollAhoiCdr(
             optOutSource: "ahoi_cdr",
             receivedAt: new Date(),
           });
-          return "new" as const;
+          return {
+            kind: "new" as const,
+            breakerTrip: res.kind === "suppressed" ? res.breakerTrip : null,
+          };
         });
-        if (outcome === "dupe") dupe++; else neu++;
+        if (outcome.kind === "dupe") dupe++; else neu++;
+        // P7: fire the opt-out-rate breaker alert post-commit (best-effort).
+        if (outcome.breakerTrip) {
+          await notifyTelegram(
+            optOutBreakerAlertText(outcome.breakerTrip.campaignId, null, outcome.breakerTrip.result),
+          ).catch(() => {});
+        }
       } catch (e) {
         console.error("[ahoi-cdr-poll] row processing failed, will retry next poll:", e);
       }

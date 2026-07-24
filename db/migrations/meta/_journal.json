@@ -792,5 +792,7 @@
     { "idx": 117, "version": "7", "when": 1786492800000, "tag": "0117_campaign_stages_slip", "breakpoints": true }
     ,
     { "idx": 118, "version": "7", "when": 1786579200000, "tag": "0118_campaign_stages_preflight", "breakpoints": true }
+    ,
+    { "idx": 119, "version": "7", "when": 1786665600000, "tag": "0119_campaign_send_breaker", "breakpoints": true }
   ]
 }

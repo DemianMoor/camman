@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-07-24_
+_Last updated: 2026-07-25_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -119,7 +119,13 @@ Every statement is a **single query** (never concurrent on one connection), so t
 - **Auto-trips:** failure spike (≥10 consecutive failures) and a pacing tripwire (processed > expected — structural-bug guard). These two counters are per-invocation (this run's own sends), NOT a rolling DB count — distinct from the per-provider volume ceilings above.
 - Every pause/resume is appended to `send_circuit_events` (actor NULL = auto-trip; actor set = manual). Resumes are manager+ audited actions.
 
-**Ahoi DLR reject-rate (Section 3, migration 0109).** A second, independent signal: `send_status='rejected'` DLRs (asynchronous, minutes after a send that looked fine at send time) feed a provider-scoped rolling count (`countAhoiDlrRejectsSince`) — a threshold count (`AHOI_DLR_REJECT_SPIKE_THRESHOLD`, default 10) of rejects within a rolling window (`AHOI_DLR_REJECT_SPIKE_WINDOW_SEC`, default 900) latches the same `sms_providers.send_paused` kill-switch the send-time failure-spike breaker uses. The two signals compose additively (both latch the one pause; neither double-counts — they read disjoint tables). Doc-inferred/defensive (never observed live in Phase 0 recon) — see `docs/07-conventions.md`'s G4 note.
+**Ahoi DLR reject-rate (Section 3, migration 0109).** A second, independent signal: `send_status='rejected'` DLRs (asynchronous, minutes after a send that looked fine at send time) feed a provider-scoped rolling count (`countAhoiDlrRejectsSince`) — a threshold count (`AHOI_DLR_REJECT_SPIKE_THRESHOLD`, default 10) of rejects within a rolling window (`AHOI_DLR_REJECT_SPIKE_WINDOW_SEC`, default 900) latches the same `sms_providers.send_paused` kill-switch the send-time failure-spike breaker uses. The two signals compose additively (both latch the one pause; neither double-counts — they read disjoint tables). Doc-inferred/defensive (never observed live in Phase 0 recon) — see `docs/07-conventions.md`'s G4 note. **Now alerts on trip** (previously latched silently) — fires the same Telegram body pattern as the other breakers.
+
+**Per-campaign opt-out-rate breaker (P7/P8, migration 0119).** A **third scope** of latch, orthogonal to the per-provider ones above and living on the `campaigns` row (`send_paused` / `send_paused_reason` / `send_paused_at`) with its own `campaign_circuit_events` audit table (mirror of `send_circuit_events`, keyed on `campaign_id`). Driven by inbound STOPs, not send outcomes: every opt-out ingestion path (TextHub `poll-opt-outs`, Ahoi `ahoi-optout` / `ahoi-cdr-poll`) that attributes a STOP to a stage computes, for that stage's campaign, the trailing-window opt-out **rate** = `opt_out_attributions ÷ stage_sends(status='sent')`, both counted over the **same** trailing window (`OPTOUT_RATE_WINDOW_SEC`, default 86400 = 24h). When `sent ≥ OPTOUT_RATE_MIN_SENDS` (floor, default 200) **and** `rate ≥ OPTOUT_RATE_SPIKE_THRESHOLD` (default 0.10), it latches `campaigns.send_paused` (`checkOptOutRateBreaker` / `latchCampaignPause` in [lib/sends/optout-rate-breaker.ts](../../lib/sends/optout-rate-breaker.ts) + [lib/sends/circuit-breakers.ts](../../lib/sends/circuit-breakers.ts)). The floor stops a 1-of-8-STOPs blip from tripping a barely-started campaign. Historical basis: across 330 stages with ≥50 sends the opt-out rate ran median 2.7% / p95 7.4% / max 13.8% — 10% sits above the normal tail.
+- **Latch in-tx, alert post-commit.** The latch runs inside the ingestion transaction (atomic with the attribution); the Telegram alert (`optOutBreakerAlertText` — actual rate + STOP/sent counts + a `…/campaigns/{id}` link) fires **after commit** so a rolled-back tx can't emit a false alarm. Idempotent: `latchCampaignPause` no-ops (`WHERE send_paused = false`) and appends exactly one `paused` event.
+- **ANDed with the provider latch — a strict superset.** The scheduler and drain gate on **both** `c.send_paused IS NOT TRUE` **and** `p.send_paused IS NOT TRUE`; a campaign pause holds only that campaign's stages (siblings on the same provider keep sending), and it never touches `sms_providers.send_paused`. Enforced in `selectDueScheduledStages` / `selectDrainableStages` ([scheduled.ts](../../lib/sends/scheduled.ts)), the drain pre-claim + mid-run kill ([drain.ts](../../lib/sends/drain.ts), refusal reason `campaign_paused`), and the stall detector ([stall-detector.ts](../../lib/sends/stall-detector.ts)) — a campaign-paused stage is intentionally held, not flagged as stalled.
+- **Manual-only resume**, mirroring provider-latch discipline: `POST /api/campaigns/[campaignId]/send-circuit` `{action:"pause"|"resume"}` (perm `campaigns.pause`), each transition audited in `campaign_circuit_events` with the acting user. The opt-out-rate breaker only ever auto-*trips*; clearing it is a conscious human action.
+- **Per-creative scope is future** (noted on the ClickUp card) — v1 is per-campaign only.
 
 ### Submission integrity, evidence & classification (Workstream 3, migration 0064)
 The responsibility boundary: everything up to and including TextHub's response envelope is ours to prove clean; everything after is theirs. UI copy says **"Submitted" / "Accepted by TextHub", never "Delivered"** — there is no DLR.
@@ -213,7 +219,7 @@ The **preflight** ([lib/sends/preflight.ts](../../lib/sends/preflight.ts)) now r
 Best-effort Telegram alerts on breaker trips / poller failures. If `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are unset, the alerter is a silent no-op and the drain/poller run unaffected.
 
 ## 4. Data it reads/writes
-- Writes `stage_sends`, `send_attempts`, `links`, `send_circuit_events`, `sms_providers.send_paused*`.
+- Writes `stage_sends`, `send_attempts`, `links`, `send_circuit_events`, `sms_providers.send_paused*`, `campaigns.send_paused*`, `campaign_circuit_events`.
 - Reads `provider_credentials`, `org_settings`, `campaign_audience_pool`, `campaign_stages`, `short_domains`.
 
 ## 5. UI surface

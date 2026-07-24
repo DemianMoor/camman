@@ -7,6 +7,7 @@ import {
   ceilingBreached,
   countSentSince,
   type DrainStopReason,
+  isCampaignPaused,
   isProviderPaused,
   latchPause,
   resolve24hCap,
@@ -66,6 +67,7 @@ export type DrainRefusal =
   | "send_disabled_org" // DB org_settings.sends_enabled off (daily operational switch)
   | "send_paused_org" // org_settings.sends_paused — the emergency hard-stop
   | "provider_paused" // the latching circuit breaker is engaged for this provider
+  | "campaign_paused" // the per-campaign latch (opt-out-rate breaker / manual)
   | "no_provider"
   | "unknown_provider" // provider row's sms_provider_id has no registered adapter (G3)
   | "no_credentials";
@@ -202,8 +204,10 @@ export async function runStageDrain(
     SELECT s.sms_provider_id AS provider_id,
            p.sms_provider_id AS provider_key,
            s.send_approved    AS send_approved,
+           c.id               AS campaign_id,
            c.org_id           AS org_id,
            c.brand_id         AS brand_id,
+           c.send_paused      AS campaign_send_paused,
            s.provider_phone_id AS provider_phone_id,
            p.send_paused           AS send_paused,
            p.max_sends_per_run     AS max_sends_per_run,
@@ -223,8 +227,10 @@ export async function runStageDrain(
     provider_id: number | null;
     provider_key: string | null;
     send_approved: boolean;
+    campaign_id: number;
     org_id: string;
     brand_id: number | null;
+    campaign_send_paused: boolean | null;
     provider_phone_id: number | null;
     send_paused: boolean | null;
     max_sends_per_run: number | null;
@@ -251,6 +257,9 @@ export async function runStageDrain(
   // Latching circuit breaker: refuse before claiming anything. A human must
   // resume via the provider UI; nothing here clears it.
   if (stage.send_paused) return { ok: false, reason: "provider_paused", ...EMPTY };
+  // P7/P8: per-campaign latch (opt-out-rate breaker or manual). Independent of the
+  // provider latch — this refuses only THIS campaign; siblings keep sending.
+  if (stage.campaign_send_paused) return { ok: false, reason: "campaign_paused", ...EMPTY };
   if (stage.provider_id == null) return { ok: false, reason: "no_provider", ...EMPTY };
 
   const apiKey = await resolveKeyForStage(dbc, {
@@ -350,6 +359,13 @@ export async function runStageDrain(
     // True mid-run kill: a concurrent pause (auto-trip or manual panic) halts
     // the in-flight drain at the next batch boundary, before any new claim.
     if (await isProviderPaused(dbc, providerId)) {
+      halted = true;
+      stopReason = "paused";
+      break;
+    }
+    // P7/P8: same mid-run kill for the per-campaign latch — a breaker trip or
+    // manual campaign pause halts THIS stage at the next batch boundary.
+    if (await isCampaignPaused(dbc, stage.campaign_id)) {
       halted = true;
       stopReason = "paused";
       break;

@@ -3,6 +3,10 @@ import { sql } from "drizzle-orm";
 import type { DbOrTx } from "@/lib/sends/ahoi-dlr";
 import { ahoiSourceToE164 } from "@/lib/sends/providers/ahoi";
 import { isOptOutKeyword } from "@/lib/sends/opt-out-keywords";
+import {
+  checkOptOutRateBreaker,
+  type OptOutRateCheckResult,
+} from "@/lib/sends/optout-rate-breaker";
 import { latestSendForAttribution } from "@/lib/sends/poll-opt-outs";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 
@@ -132,7 +136,14 @@ export type ProcessAhoiInboundOptOutOutcome =
   | { kind: "ignored" }
   | { kind: "invalid_phone" }
   | { kind: "duplicate"; contactId: string }
-  | { kind: "suppressed"; contactId: string; attributed: boolean };
+  | {
+      kind: "suppressed";
+      contactId: string;
+      attributed: boolean;
+      // P7: set when this STOP tripped the campaign opt-out-rate breaker — the
+      // caller fires the Telegram alert post-commit.
+      breakerTrip: { campaignId: number; result: OptOutRateCheckResult } | null;
+    };
 
 // Layer 1 (inbound webhook) + Layer 2 (CDR poll) shared core (spec §6). Both
 // channels observe the same kind of signal — "someone replied with a
@@ -245,6 +256,7 @@ export async function processAhoiInboundOptOut(
   const match = await latestSendForAttribution(dbc, o.orgId, phone, anchorIso);
   let attributed = false;
   let matchedStageSendId: string | null = null;
+  let breakerTrip: { campaignId: number; result: OptOutRateCheckResult } | null = null;
   if (match) {
     matchedStageSendId = match.stage_send_id;
     const ins = (await dbc.execute(sql`
@@ -262,6 +274,13 @@ export async function processAhoiInboundOptOut(
         WHERE id = ${match.stage_id}
       `);
       await recomputeStageTotalCost(dbc, match.stage_id);
+      // P7: re-evaluate the campaign opt-out rate; latch the per-campaign pause
+      // in-tx if it spiked. Telegram fires post-commit in the caller.
+      const breaker = await checkOptOutRateBreaker(dbc, {
+        orgId: o.orgId,
+        campaignId: match.campaign_id,
+      });
+      if (breaker.tripped) breakerTrip = { campaignId: match.campaign_id, result: breaker };
     }
   }
 
@@ -272,5 +291,5 @@ export async function processAhoiInboundOptOut(
     WHERE id = ${o.eventId} AND org_id = ${o.orgId}
   `);
 
-  return { kind: "suppressed", contactId, attributed };
+  return { kind: "suppressed", contactId, attributed, breakerTrip };
 }

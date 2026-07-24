@@ -790,5 +790,7 @@
     { "idx": 116, "version": "7", "when": 1786406400000, "tag": "0116_stage_sends_skipped_opted_out", "breakpoints": true }
     ,
     { "idx": 117, "version": "7", "when": 1786492800000, "tag": "0117_campaign_stages_slip", "breakpoints": true }
+    ,
+    { "idx": 118, "version": "7", "when": 1786579200000, "tag": "0118_campaign_stages_preflight", "breakpoints": true }
   ]
 }

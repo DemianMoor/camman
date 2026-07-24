@@ -19,6 +19,7 @@
 export type StageOperationalStatus =
   | "draft"
   | "scheduled_unprepared"
+  | "held"
   | "materializing"
   | "prepared"
   | "sending_sent"
@@ -109,6 +110,19 @@ export const STAGE_STATUS_META: Record<StageOperationalStatus, StageStatusMeta> 
     rowClass: "border-l-emerald-500 dark:border-l-emerald-600",
     swatchClass: "bg-emerald-500",
   },
+  held: {
+    key: "held",
+    label: "Held (awaiting action)",
+    meaning:
+      "A lane child parked at the 24h slip cap — its parent didn't finish in time. Will NOT send until you re-date or cancel it.",
+    willSend: "attention",
+    sortWeight: 0,
+    badgeClass:
+      "border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
+    dotClass: "bg-amber-500",
+    rowClass: "border-l-amber-500 bg-amber-50/50 dark:bg-amber-950/25",
+    swatchClass: "bg-amber-500",
+  },
   missed_failed: {
     key: "missed_failed",
     label: "Missed / Failed",
@@ -128,6 +142,7 @@ export const STAGE_STATUS_META: Record<StageOperationalStatus, StageStatusMeta> 
 export const STAGE_STATUS_ORDER: StageOperationalStatus[] = [
   "draft",
   "scheduled_unprepared",
+  "held",
   "materializing",
   "prepared",
   "sending_sent",
@@ -153,6 +168,9 @@ export interface DeriveStageStatusInput {
   scheduledAt: string | Date | null;
   sentAt: string | Date | null;
   scheduleMissedAt: string | Date | null;
+  /** campaign_stages.slip_hold_at (migration 0117) — a lane child parked at the
+   *  24h slip cap. Takes precedence over the scheduled/unprepared reading. */
+  slipHoldAt?: string | Date | null;
   /** campaign_stages.materialized_at — set only when EVERY recipient row exists.
    *  NULL while windowed materialization is in progress (some rows may exist). */
   materializedAt: string | Date | null;
@@ -197,6 +215,12 @@ export function deriveStageOperationalStatus(
   // 1. A missed scheduled window is always "needs attention" — must never read
   //    Green/Sent (Bug 1 makes schedule_missed_at trustworthy).
   if (input.scheduleMissedAt != null) return "missed_failed";
+
+  // 1a. A slip-held lane child (24h cap) is parked awaiting a human — it will NOT
+  //     fire (the cron's `slip_hold_at IS NULL` gate excludes it). Must not read as
+  //     Orange "scheduled" (it won't self-resolve). Precedence over everything but
+  //     a genuine missed window.
+  if (input.slipHoldAt != null) return "held";
 
   // 1b. Materialization in progress: rows are being written in committed windows
   //     but materialized_at isn't set yet, so the audience is INCOMPLETE and must

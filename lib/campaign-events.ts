@@ -18,6 +18,9 @@ export type CampaignEventType =
   | "send_kickoff"
   | "send_drain"
   | "send_aborted"
+  | "slip_hold_released"
+  | "preflight_aborted"
+  | "preflight_rearmed"
   | "results_imported"
   | "results_reverted"
   | "stage_deleted";

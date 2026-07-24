@@ -45,6 +45,8 @@ type FleetStage = {
     sending: number;
     sent: number;
     failed: number;
+    skippedDuplicate: number;
+    skippedOptedOut: number;
   };
   window_opens_at: string | null;
   window_closes_at: string | null;
@@ -326,6 +328,15 @@ export default function FleetTodayPage() {
                       ) : null}
                       {s.counts.pending > 0 ? (
                         <span> · {s.counts.pending} pending</span>
+                      ) : null}
+                      {s.counts.skippedOptedOut > 0 ? (
+                        <span className="text-amber-600">
+                          {" "}
+                          · {s.counts.skippedOptedOut} STOP-cancel
+                        </span>
+                      ) : null}
+                      {s.counts.skippedDuplicate > 0 ? (
+                        <span> · {s.counts.skippedDuplicate} skipped (1h)</span>
                       ) : null}
                     </span>
                   ) : (

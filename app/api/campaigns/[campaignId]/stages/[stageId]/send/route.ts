@@ -68,6 +68,8 @@ export async function GET(
       count(*) FILTER (WHERE status = 'sending')::int  AS sending,
       count(*) FILTER (WHERE status = 'sent')::int     AS sent,
       count(*) FILTER (WHERE status = 'failed')::int   AS failed,
+      -- Excluded by the global 1-hour phone dedup gate — terminal, not sent.
+      count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate,
       -- STOP-cancels: recipients who opted out after materialization, suppressed
       -- at dispatch (drain) or proactively by the opt-out ingester. A distinct
       -- bucket — NOT a delivery failure and NOT a manual recall ('rejected').
@@ -79,11 +81,12 @@ export async function GET(
     sending: number;
     sent: number;
     failed: number;
+    skipped_duplicate: number;
     skipped_opted_out: number;
   }[];
 
   const c = counts[0] ?? {
-    total: 0, pending: 0, sending: 0, sent: 0, failed: 0, skipped_opted_out: 0,
+    total: 0, pending: 0, sending: 0, sent: 0, failed: 0, skipped_duplicate: 0, skipped_opted_out: 0,
   };
 
   // The drain gate is a conjunction (Workstream 1): the env SEND_ENABLED backstop
@@ -136,6 +139,7 @@ export async function GET(
       sending: Number(c.sending),
       sent: Number(c.sent),
       failed: Number(c.failed),
+      skipped_duplicate: Number(c.skipped_duplicate),
       skipped_opted_out: Number(c.skipped_opted_out),
     },
     sample_rendered_text: sample[0]?.rendered_text ?? null,

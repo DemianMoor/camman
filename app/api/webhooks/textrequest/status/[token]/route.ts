@@ -1,11 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
+import { notifyTelegram } from "@/lib/alerts/telegram";
+import { optOutBreakerAlertText } from "@/lib/sends/optout-rate-breaker";
 import {
   captureTxrDlrEvent,
   parseTxrStatusCallback,
   reconcileTxrDlrEvent,
 } from "@/lib/sends/textrequest-dlr";
+import { recordTxrDlrOptOut } from "@/lib/sends/textrequest-dlr-optout";
 import {
   headersToObject,
   queryToObject,
@@ -61,15 +64,29 @@ export async function POST(
     parsed,
   });
 
-  await reconcileTxrDlrEvent(db, {
+  const rec = await reconcileTxrDlrEvent(db, {
     eventId: captured.id,
     orgId: cred.org_id,
     stageSendId,
     messageId: parsed.messageId,
   });
 
-  // Opt-out drive on parsed.errorCode (2100/30050) is wired in Phase 4 alongside
-  // the other opt-out signals; capture above already records the code.
+  // Phase 4 signal 4: errorCode 2100 on a delivery status means "contact has
+  // previously opted out" — i.e. our suppression list is behind Text Request's.
+  // Record the opt-out against the reconciled send's recipient. Never throws.
+  const trip = await recordTxrDlrOptOut(db, {
+    orgId: cred.org_id,
+    credentialId: cred.id,
+    providerId: cred.provider_id,
+    errorCode: parsed.errorCode,
+    matchedStageSendId: rec.matchedStageSendId,
+    messageId: parsed.messageId,
+    rawBody: rawBody || null,
+    receivedAt: new Date(),
+  });
+  if (trip) {
+    await notifyTelegram(optOutBreakerAlertText(trip.campaignId, null, trip.result)).catch(() => {});
+  }
 
   return NextResponse.json({ ok: true });
 }

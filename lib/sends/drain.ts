@@ -19,7 +19,9 @@ import {
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
 import { getOrgSendsEnabled, getOrgSendsPaused } from "@/lib/sends/org-send-flag";
+import { optOutBreakerAlertText } from "@/lib/sends/optout-rate-breaker";
 import { resolveKeyForStage } from "@/lib/sends/provider-credential";
+import { recordTxrSendRejectOptOuts } from "@/lib/sends/textrequest-dlr-optout";
 import { getAdapter, UnknownProviderError } from "@/lib/sends/providers/registry";
 import type { NormalizedSendParams } from "@/lib/sends/providers/types";
 import { buildSendUrl, type SendSmsResult } from "@/lib/sends/texthub";
@@ -342,6 +344,10 @@ export async function runStageDrain(
   let stopReason: DrainStopReason | null = null;
   let pausedNow = false;
   let consecutiveFailures = 0;
+  // Recipients Text Request refused as already-opted-out (errorCode 30050),
+  // collected during the paced loop and recorded as opt-outs once the run ends
+  // (Phase 4 signal 4b). Stays empty for every other provider.
+  const txrSuppressedPhones: string[] = [];
   // Wall-clock anchor for the fairness time-box (opts.maxDurationMs). Real time,
   // NOT the logical `now` used elsewhere — this measures how long THIS drain has
   // actually run so it can yield its slice to the next stage.
@@ -616,8 +622,16 @@ export async function runStageDrain(
           sent++;
           consecutiveFailures = 0;
         } else {
-          if (res.suppressed) filtered++;
-          else failed++;
+          if (res.suppressed) {
+            filtered++;
+            // Text Request rejects a send with errorCode 30050 ("contact has
+            // previously opted out") — i.e. TR knows about a suppression we
+            // don't. Collect the recipient so it can be recorded as an opt-out
+            // after the run (Phase 4 signal 4b, lib/sends/textrequest-dlr-optout.ts).
+            // Collected here rather than written inline: this loop is the paced
+            // hot path, and an opt-out write is several statements.
+            if (stage.provider_key === "txr") txrSuppressedPhones.push(slice[k].phone);
+          } else failed++;
           // A non-OK send still feeds the failure-spike breaker regardless of the
           // suppression flag — unchanged from prior behavior.
           consecutiveFailures++;
@@ -685,6 +699,35 @@ export async function runStageDrain(
         `stage: ${opts.stageId} · sent ${sent}, failed ${failed}, filtered ${filtered}, stuck ${stuck}, remaining ${remaining}\n` +
         `Sending is now PAUSED for this provider — resume manually after fixing the cause.`,
     );
+  }
+
+  // Phase 4 signal 4b: record opt-outs for recipients Text Request refused as
+  // already-opted-out. Runs AFTER the paced send loop (never inside it) and is
+  // best-effort — this closes a suppression gap on OUR side and must never fail
+  // the run that already happened. The polls would catch these numbers anyway;
+  // doing it here makes it immediate.
+  if (txrSuppressedPhones.length > 0) {
+    try {
+      // dbc is the db singleton in production; when a test passes a tx, the
+      // per-phone transactions inside become savepoints, which is fine.
+      const rec = await recordTxrSendRejectOptOuts(dbc as unknown as typeof db, {
+        orgId,
+        credentialId: null,
+        providerId,
+        phones: txrSuppressedPhones,
+      });
+      if (rec.suppressed > 0) {
+        console.warn(
+          `[textrequest-send-reject] recorded ${rec.suppressed} opt-out(s) from send-time rejections ` +
+            `(${rec.already} already known) — stage ${opts.stageId}. Text Request's suppression list was ahead of ours.`,
+        );
+      }
+      for (const trip of rec.trips) {
+        await notifyTelegram(optOutBreakerAlertText(trip.campaignId, null, trip.result)).catch(() => {});
+      }
+    } catch (e) {
+      console.error("[textrequest-send-reject] failed to record send-time opt-outs:", e);
+    }
   }
 
   // Dedup warning: numbers excluded because they were already messaged within the

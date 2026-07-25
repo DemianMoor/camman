@@ -58,6 +58,10 @@ export type Sender = (opts: {
   // (scripts/verify-drain.ts) that don't destructure it keep compiling
   // unchanged. TextHub's adapter ignores it.
   senderNumber?: string | null;
+  // Per-message delivery callback URL (Text Request's status_callback, carrying
+  // ?ss=<stage_send_id>). OPTIONAL — only the drain's txr path sets it; other
+  // adapters and injected test fakes ignore it.
+  statusCallbackUrl?: string;
 }) => Promise<SendSmsResult>;
 
 export type DrainRefusal =
@@ -128,8 +132,8 @@ function sleep(ms: number): Promise<void> {
 export function resolveSenderForStage(providerKey: string, injected?: Sender): Sender {
   if (injected) return injected;
   const adapter = getAdapter(providerKey);
-  return ({ apiKey, text, number, leadId, senderNumber }) =>
-    adapter.send({ apiKey, text, recipientE164: number, senderNumber: senderNumber ?? null, leadId });
+  return ({ apiKey, text, number, leadId, senderNumber, statusCallbackUrl }) =>
+    adapter.send({ apiKey, text, recipientE164: number, senderNumber: senderNumber ?? null, leadId, statusCallbackUrl });
 }
 
 const EMPTY = {
@@ -269,6 +273,26 @@ export async function runStageDrain(
     providerPhoneId: stage.provider_phone_id,
   });
   if (!apiKey) return { ok: false, reason: "no_credentials", ...EMPTY };
+
+  // Text Request per-message status_callback: resolve the sending number's
+  // credential webhook token + the app origin ONCE, so the slice loop can build
+  // a per-recipient callback URL (…/status/<token>?ss=<stage_send_id>). Only for
+  // txr; other providers leave this null and pass no callback. Missing token or
+  // origin ⇒ no callback (graceful — the messages-poll backstop still reconciles
+  // delivery). Never throws.
+  let txrCallbackBase: string | null = null;
+  if (stage.provider_key === "txr") {
+    const origin = (process.env.NEXT_PUBLIC_SITE_URL ?? "").trim().replace(/\/+$/, "");
+    const tokRow = (await dbc.execute(sql`
+      SELECT pc.inbound_webhook_token AS token
+      FROM provider_phones ph
+      JOIN provider_credentials pc ON pc.id = ph.credential_id
+      WHERE ph.id = ${stage.provider_phone_id} AND ph.org_id = ${stage.org_id} AND pc.org_id = ${stage.org_id}
+      LIMIT 1
+    `)) as unknown as { token: string | null }[];
+    const token = tokRow[0]?.token ?? null;
+    if (origin && token) txrCallbackBase = `${origin}/api/webhooks/textrequest/status/${token}`;
+  }
 
   let sendSms: Sender;
   // Resolved alongside sendSms, once, and reused for the per-attempt redaction
@@ -503,6 +527,7 @@ export async function runStageDrain(
           sendSms({
             apiKey, text: c.rendered_text, number: c.phone, leadId: c.lead_id,
             senderNumber: stage.sender_number,
+            statusCallbackUrl: txrCallbackBase ? `${txrCallbackBase}?ss=${c.id}` : undefined,
           }),
         ),
       );

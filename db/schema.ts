@@ -494,6 +494,59 @@ export const ahoi_dlr_events = pgTable(
 export type AhoiDlrEvent = typeof ahoi_dlr_events.$inferSelect;
 export type NewAhoiDlrEvent = typeof ahoi_dlr_events.$inferInsert;
 
+// Text Request per-message status_callback capture + reconcile (migration 0122).
+// Mirrors ahoi_dlr_events for TR's JSON callback shape: message_id/status/
+// error_code instead of smpp_* fields, plus stage_send_id captured directly
+// from the callback URL's ?ss= param (TR's direct-reconcile advantage).
+export const textrequest_dlr_events = pgTable(
+  "textrequest_dlr_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "set null" },
+    ),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    received_at: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    method: text("method").notNull(),
+    query: jsonb("query"),
+    headers: jsonb("headers"),
+    raw_body: text("raw_body"),
+    message_id: text("message_id"),
+    status: text("status"),
+    error_code: text("error_code"),
+    // From the callback URL ?ss= param — the direct reconcile key.
+    stage_send_id: uuid("stage_send_id").references(() => stage_sends.id, {
+      onDelete: "set null",
+    }),
+    matched_stage_send_id: uuid("matched_stage_send_id").references(
+      () => stage_sends.id,
+      { onDelete: "set null" },
+    ),
+    result: text("result"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("textrequest_dlr_events_org_id_idx").on(table.org_id),
+    index("textrequest_dlr_events_received_at_idx").on(table.received_at),
+    index("textrequest_dlr_events_provider_status_idx").on(
+      table.provider_id,
+      table.status,
+      table.received_at,
+    ),
+  ],
+);
+
+export type TextrequestDlrEvent = typeof textrequest_dlr_events.$inferSelect;
+export type NewTextrequestDlrEvent = typeof textrequest_dlr_events.$inferInsert;
+
 export const ahoi_inbound_events = pgTable(
   "ahoi_inbound_events",
   {

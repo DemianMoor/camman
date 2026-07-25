@@ -855,6 +855,13 @@
       "when": 1786838400000,
       "tag": "0121_send_attempts_segments_count",
       "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1786924800000,
+      "tag": "0122_textrequest_dlr_events",
+      "breakpoints": true
     }
   ]
 }

@@ -567,13 +567,16 @@ export async function runStageDrain(
           leadId: c.lead_id,
         });
         const attemptNumber = attemptsById.get(c.id) ?? 1;
+        // segments_count is provider-reported (Text Request); null for TextHub/
+        // Ahoi and for network/timeout attempts.
+        const segments = res.segmentsCount ?? null;
         return sql`(${orgId}, ${c.id}, ${attemptNumber}, ${requestRedacted}, ${res.status},
-                    ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification})`;
+                    ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification}, ${segments})`;
       });
       await dbc.execute(sql`
         INSERT INTO send_attempts
           (org_id, stage_send_id, attempt_number, request_redacted, http_status,
-           raw_body, ok, message_id, error, classification)
+           raw_body, ok, message_id, error, classification, segments_count)
         VALUES ${sql.join(attVals, sql`, `)}
       `);
 

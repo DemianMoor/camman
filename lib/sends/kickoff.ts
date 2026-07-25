@@ -6,7 +6,7 @@ import type { db } from "@/db/client";
 import { CODE_LENGTH, mintLinksBatch } from "@/lib/links/mint-link";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
-import { countSegments, MAX_SEGMENTS } from "@/lib/sends/segments";
+import { countSegments, MAX_SEGMENTS, withProviderFooter } from "@/lib/sends/segments";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   buildStageFullUrl,
@@ -196,6 +196,9 @@ export async function kickoffStageSend(
   let shortDomain: { id: number; domain: string } | null = null;
   let destinationUrl = "";
   let manualText = "";
+  // Provider key (resolved in the tracked branch) — needed by the segment gate
+  // to account for a provider that appends its own footer (Text Request).
+  let providerKey: string | null = null;
 
   if (mode === "manual") {
     // Freeze the pasted short_url into every row, no minting.
@@ -219,6 +222,7 @@ export async function kickoffStageSend(
     if (!provider[0]?.supports_api_send) {
       return { ok: false, reason: "provider_not_api_capable" };
     }
+    providerKey = provider[0].provider_key;
 
     // No-sender-number guard. Every API-send provider now selects its send-from
     // number via the stage's provider_phone_id: Ahoi as the `source`, TextHub as
@@ -304,7 +308,9 @@ export async function kickoffStageSend(
           linkUrl: `https://${shortDomain!.domain}/r/${"X".repeat(CODE_LENGTH)}`,
           stopText: row.stop_text,
         });
-  const segCheck = countSegments(representativeText);
+  // txr appends its own opt-out footer server-side (Phase 0) — count the
+  // effective on-wire text so the ceiling reflects what actually sends.
+  const segCheck = countSegments(withProviderFooter(representativeText, providerKey));
   if (segCheck.segments > MAX_SEGMENTS) {
     return { ok: false, reason: "segment_ceiling_exceeded" };
   }

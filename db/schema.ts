@@ -2560,6 +2560,11 @@ export const send_attempts = pgTable(
     message_id: text("message_id"),
     error: text("error"),
     classification: text("classification").notNull(),
+    // Provider-reported segment count for this send, when the provider returns
+    // it (Text Request's `segments_count`; migration 0121). NULL for providers
+    // that don't report it (TextHub, Ahoi) and for attempts that never reached
+    // the provider (network/timeout).
+    segments_count: integer("segments_count"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

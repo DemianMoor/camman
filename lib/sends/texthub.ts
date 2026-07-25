@@ -34,6 +34,11 @@ export interface SendSmsResult {
   error: string | null;
   status: number; // HTTP status (0 = network/timeout)
   timedOut: boolean; // true ⇒ aborted (may have landed) vs a connection failure
+  // Provider-reported segment count for THIS send, when the provider returns it
+  // on the send response (Text Request's `segments_count`). Optional/additive:
+  // TextHub and Ahoi don't return it and leave it undefined. Persisted to
+  // send_attempts.segments_count by the drain when present.
+  segmentsCount?: number | null;
 }
 
 // Strict suppression gate. TextHub rejects a number it considers

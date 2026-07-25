@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-07-19_
+_Last updated: 2026-07-25_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -190,6 +190,55 @@ sequenceDiagram
 ```
 
 Layer 3 ships with an intentionally EMPTY known-opt-out-code allowlist (`AHOI_KNOWN_OPTOUT_DLR_CODES`, `lib/sends/ahoi-dlr-optout.ts`) — no real Ahoi opt-out DLR signature has been observed live (O1). It is fully wired and tested but will not classify anything as an opt-out in production until a human adds a real code after seeing one in the `[ahoi-dlr-optout]` distinct-log lines. See [07-conventions.md](07-conventions.md).
+
+## E6. Text Request delivery status — per-message callback + poll backstop
+
+```mermaid
+sequenceDiagram
+  participant Drain as Send drain
+  participant TR as Text Request
+  participant Hook as /api/webhooks/textrequest/status/[token]?ss=
+  participant Cron as /api/cron/textrequest-poll (4,19,34,49)
+  participant DB
+  Drain->>TR: POST /messages {from,to,body,status_callback=…/status/<token>?ss=<stage_send_id>}
+  TR-->>Drain: {message_id, status:"sending", segments_count}
+  Drain->>DB: stage_sends.texthub_message_id = message_id · send_attempts.segments_count
+  TR->>Hook: POST {message_id, status, errorCode}
+  Hook->>DB: INSERT textrequest_dlr_events (method='POST')
+  Hook->>DB: reconcile — ?ss= DIRECTLY (else message_id -> stage_sends.texthub_message_id)
+  Hook->>Hook: errorCode 2100 ⇒ opt-out (E7 signal 4a)
+  Hook-->>TR: 200 ALWAYS (a non-2XX counts toward TR's 10-strike hook disconnect)
+  Note over Drain,Hook: no inbound_webhook_token or no origin ⇒ NO status_callback is requested at all; the poll is then the only reconciler
+  Cron->>TR: GET /dashboards/{id}/messages?start_date&end_date&page&page_size
+  TR-->>Cron: {items (oldest→newest), meta{total_items}}
+  Cron->>Cron: read page 0 for total_items, then walk pages BACKWARDS (newest first)
+  Cron->>DB: INSERT textrequest_dlr_events (method='poll') ON CONFLICT (provider_id,message_id,status) DO NOTHING
+```
+
+## E7. Text Request opt-out intake — 4 signals converge on `opt_outs`
+
+```mermaid
+sequenceDiagram
+  participant S1 as 1. msg_received hook (real-time STOP)
+  participant S2 as 2. contact_updated hook (TR's own opt-out flag)
+  participant S3 as 3. polls (messages R rows / contacts has_opted_out)
+  participant S4 as 4. errorCode 2100 (DLR) / 30050 (send reject)
+  participant App as processTextrequestOptOut
+  participant DB
+  S1->>App: conversation.consumerPhoneNumber + conversation.message (direction 'R' only)
+  S2->>App: phone_number + opted_out_utc / is_suppressed
+  S3->>App: same facts, polled (backstop for a disconnected hook)
+  S4->>App: recipient resolved from the reconciled stage_send (DLR body has no phone)
+  App->>App: message-shaped ⇒ isOptOutKeyword gate · state-shaped ⇒ authoritative, acts ONCE per number
+  App->>App: capture idempotency: UNIQUE(provider_id, provider_uuid) — webhook + poll share TR's message GUID
+  App->>App: findDuplicateTxrInbound (45-min window) — cross-SHAPE duplicates (STOP vs contact flag)
+  App->>DB: upsert contacts · INSERT opt_outs (source: textrequest_inbound_webhook | _messages_poll | _contact_webhook | _contacts_poll | _dlr_optout | _send_reject)
+  App->>DB: cascade-cancel pending stage_sends -> skipped_opted_out / opt_out_cancel
+  App->>DB: latestSendForAttribution -> opt_out_attributions + campaign_stages counters + recomputeStageTotalCost
+  App->>DB: checkOptOutRateBreaker (latch in-tx; Telegram post-commit)
+```
+
+Unlike Ahoi's Layer 3, Text Request's opt-out error codes are **documented and live from day one** (2100 on a delivery status, 30050 on a send response). A hit means our suppression list is behind Text Request's. An UNMATCHED 2100 DLR carries no recipient (the body is only `{message_id,status,errorCode}`) and is logged rather than guessed at — the contacts poll is the backstop for that number.
 
 ## F. Segment rule audience resolution
 See [04-features/audience-segments.md](04-features/audience-segments.md) — `buildSegmentAudienceClause` compiles rules to UNION/INTERSECT/EXCEPT set arithmetic and UNIONs the result with manual membership.

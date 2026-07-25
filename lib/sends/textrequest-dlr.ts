@@ -55,9 +55,11 @@ export interface CaptureTxrDlrOpts {
   parsed: TxrStatusCallback;
 }
 
-// Append-only raw+parsed capture. Never throws on a malformed payload.
-export async function captureTxrDlrEvent(dbc: DbOrTx, o: CaptureTxrDlrOpts): Promise<{ id: string }> {
-  const rows = (await dbc.execute(sql`
+// Shared INSERT for both capture entry points below, so the column list can
+// never drift between the webhook and poll channels. `conflict` is appended
+// verbatim (empty for the webhook path, an ON CONFLICT DO NOTHING for the poll).
+function insertTxrDlrEvent(dbc: DbOrTx, o: CaptureTxrDlrOpts, conflict: ReturnType<typeof sql>) {
+  return dbc.execute(sql`
     INSERT INTO textrequest_dlr_events
       (org_id, credential_id, provider_id, method, query, headers, raw_body,
        message_id, status, error_code, stage_send_id)
@@ -65,9 +67,42 @@ export async function captureTxrDlrEvent(dbc: DbOrTx, o: CaptureTxrDlrOpts): Pro
             ${JSON.stringify(o.query)}::jsonb, ${JSON.stringify(o.headers)}::jsonb, ${o.rawBody},
             ${o.parsed.messageId}, ${o.parsed.status}, ${o.parsed.errorCode},
             ${o.stageSendId ? sql`${o.stageSendId}::uuid` : sql`NULL`})
+    ${conflict}
     RETURNING id
-  `)) as unknown as { id: string }[];
+  `) as unknown as Promise<{ id: string }[]>;
+}
+
+// Append-only raw+parsed capture (webhook channel). Never throws on a malformed
+// payload. Deliberately UNCONSTRAINED: TR may POST several callbacks for one
+// message as it transitions states, and every one is a legitimate row.
+export async function captureTxrDlrEvent(dbc: DbOrTx, o: CaptureTxrDlrOpts): Promise<{ id: string }> {
+  const rows = await insertTxrDlrEvent(dbc, o, sql``);
   return { id: rows[0].id };
+}
+
+// Poll channel (Phase 3b, method='poll'): the SAME message re-appears in every
+// messages-poll tick whose window covers it, so capture must be idempotent or
+// the table grows by one duplicate row per message per tick. Keyed on
+// (provider_id, message_id, status) among method='poll' rows only — the partial
+// unique index from migration 0123 — so a genuine state CHANGE (sent ->
+// delivered) still lands as its own row while a re-read of the same state is
+// dropped. Returns null when the row already existed (caller counts it as a
+// dupe and skips reconcile).
+//
+// Callers MUST NOT pass a null parsed.status here: NULLs are distinct in a
+// Postgres unique index, so a null-status row would defeat the dedup and insert
+// every tick. The poll filters those out before calling (a message with no
+// delivery status carries no DLR information to reconcile anyway).
+export async function captureTxrPollDlrEvent(
+  dbc: DbOrTx,
+  o: CaptureTxrDlrOpts,
+): Promise<{ id: string } | null> {
+  const rows = await insertTxrDlrEvent(
+    dbc,
+    o,
+    sql`ON CONFLICT (provider_id, message_id, status) WHERE method = 'poll' DO NOTHING`,
+  );
+  return rows[0] ? { id: rows[0].id } : null;
 }
 
 export interface ReconcileTxrDlrOpts {

@@ -41,6 +41,20 @@ export function toTextrequestRecipient(e164: string): string {
   return digits; // leave as-is for anything non-NANP-shaped (validated upstream)
 }
 
+// Inverse of toTextrequestRecipient: Text Request's wire format (11-digit
+// `1XXXXXXXXXX`, no '+') -> our storage format (E.164 `+1XXXXXXXXXX`). The single
+// entry point for "TR wire format -> contacts.phone_number", used by every
+// opt-out signal in Phase 4 (a STOP must suppress the number even if the contact
+// doesn't exist yet, so this runs before the contact upsert). Mirrors
+// ahoiSourceToE164. Returns null for anything not NANP-shaped rather than
+// guessing — a bad number must never become a bogus contact row.
+export function textrequestPhoneToE164(raw: string | null | undefined): string | null {
+  const digits = (raw ?? "").replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return null;
+}
+
 // Text Request send-time error codes that mean "this number is opted out"
 // (spec §1 error vocabularies): 2100 (status webhook) / 30050 (conversation) /
 // 2001 unreachable is NOT opt-out. A send rejected for one of these is recorded
@@ -227,18 +241,24 @@ export interface TextrequestHealthResult {
   timedOut: boolean;
 }
 
-// Tolerant extractor: Text Request's exact GET /dashboards response shape is
-// confirmed against a live key during Phase 1 verification. Until then we accept
-// the common shapes — a bare array, or a { data | content | dashboards } wrapper
-// — and pick an id + name off each item. `id` is coerced to a string so an
-// integer or GUID id both render (dashboard_id is stored as TEXT for exactly
-// this reason). If nothing parses, `dashboards` is empty but `ok` (did the key
-// authenticate?) is still the real signal the healthcheck exists to report.
+// CONFIRMED live (recon 2026-07-25, scripts/probe-textrequest-api.ts): every
+// Text Request collection response is the `items` + `meta` envelope documented
+// in their OpenAPI spec —
+//   {"items":[{"phone":"18449903688","name":"18449903688","timeZoneId":null,
+//              "id":68093}],
+//    "meta":{"page":0,"page_size":100,"total_items":2}}
+// Phase 1 guessed `data`/`content`/`dashboards` and so parsed ZERO dashboards
+// off a perfectly healthy 200 (the auth signal was right, the list was always
+// empty). `items` is the real key and is listed FIRST; the guessed aliases are
+// kept only as harmless fallbacks. `id` is coerced to a string so an integer or
+// GUID id both render (dashboard_id is stored as TEXT for exactly this reason).
+// `name` can be the bare number, so the phone is a better label when present.
 function extractDashboards(parsed: unknown): TextrequestDashboard[] {
   const arr = Array.isArray(parsed)
     ? parsed
     : parsed && typeof parsed === "object"
-      ? ((parsed as Record<string, unknown>).data ??
+      ? ((parsed as Record<string, unknown>).items ??
+         (parsed as Record<string, unknown>).data ??
          (parsed as Record<string, unknown>).content ??
          (parsed as Record<string, unknown>).dashboards)
       : null;
@@ -251,7 +271,11 @@ function extractDashboards(parsed: unknown): TextrequestDashboard[] {
     if (typeof rawId !== "string" && typeof rawId !== "number") continue;
     const id = String(rawId);
     const nameVal = o.name ?? o.title ?? o.label;
-    const name = typeof nameVal === "string" && nameVal.trim() ? nameVal : id;
+    const label = typeof nameVal === "string" && nameVal.trim() ? nameVal : id;
+    // Surface the sending number alongside the label — that's what the operator
+    // matches against a provider_phone when binding dashboard_id.
+    const phone = typeof o.phone === "string" && o.phone.trim() ? o.phone : null;
+    const name = phone && phone !== label ? `${label} (${phone})` : label;
     out.push({ id, name });
   }
   return out;

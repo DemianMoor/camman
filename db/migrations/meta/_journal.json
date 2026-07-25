@@ -862,6 +862,20 @@
       "when": 1786924800000,
       "tag": "0122_textrequest_dlr_events",
       "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1787011200000,
+      "tag": "0123_textrequest_dlr_poll_idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1787097600000,
+      "tag": "0124_textrequest_inbound_events",
+      "breakpoints": true
     }
   ]
 }

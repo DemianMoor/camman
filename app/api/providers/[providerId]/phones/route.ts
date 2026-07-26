@@ -24,6 +24,10 @@ const SORT_COLUMNS = {
   cost_per_sms: provider_phones.cost_per_sms,
   created_at: provider_phones.created_at,
   status: provider_phones.status,
+  // Sortable so an operator can scan which numbers are still on the built-in
+  // default. Unlisted keys silently fall back to created_at below, so a column
+  // marked sortable in the table MUST appear here or its control does nothing.
+  max_sends_per_second: provider_phones.max_sends_per_second,
 } as const;
 
 const VALID_STATUSES = new Set([

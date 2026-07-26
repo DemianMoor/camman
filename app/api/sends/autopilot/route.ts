@@ -7,6 +7,7 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { sendWindowForDay } from "@/lib/quiet-hours";
+import { summarizePausedCampaigns } from "@/lib/sends/paused-campaigns";
 import { deriveStageOperationalStatus } from "@/lib/stages/stage-status";
 
 // P6 — Autopilot weekly view. One cross-campaign screen of every tracked stage
@@ -50,6 +51,10 @@ export async function GET() {
       c.id              AS campaign_id,
       c.name            AS campaign_name,
       c.link_mode       AS link_mode,
+      -- P7/P8 per-campaign send circuit (already-joined table — no extra query).
+      c.send_paused        AS campaign_paused,
+      c.send_paused_reason AS campaign_paused_reason,
+      c.send_paused_at     AS campaign_paused_at,
       p.name            AS provider_name,
       p.color           AS provider_color,
       p.send_paused     AS provider_paused,
@@ -81,7 +86,9 @@ export async function GET() {
     ORDER BY s.scheduled_at ASC NULLS LAST, s.id ASC
   `)) as unknown as AutopilotRow[];
 
-  if (rows.length === 0) return NextResponse.json({ data: [], counts: {} });
+  if (rows.length === 0) {
+    return NextResponse.json({ data: [], counts: {}, paused_campaigns: [] });
+  }
 
   const stageIds = rows.map((r) => Number(r.stage_id));
   const countRows = (await db.execute(sql`
@@ -123,6 +130,7 @@ export async function GET() {
         scheduledAt: r.scheduled_at,
         sentAt: r.sent_at,
         scheduleMissedAt: r.schedule_missed_at,
+        campaignSendPaused: r.campaign_paused === true,
         slipHoldAt: r.slip_hold_at,
         materializedAt: r.materialized_at,
         counts,
@@ -157,6 +165,9 @@ export async function GET() {
       provider_name: r.provider_name,
       provider_color: r.provider_color,
       provider_paused: r.provider_paused === true,
+      campaign_paused: r.campaign_paused === true,
+      campaign_paused_reason: r.campaign_paused_reason,
+      campaign_paused_at: r.campaign_paused_at,
       operational_status: op,
       counts,
       window_opens_at: windowOpensAt,
@@ -181,7 +192,11 @@ export async function GET() {
   const counts: Record<string, number> = {};
   for (const d of data) counts[d.operational_status] = (counts[d.operational_status] ?? 0) + 1;
 
-  return NextResponse.json({ data, counts });
+  return NextResponse.json({
+    data,
+    counts,
+    paused_campaigns: summarizePausedCampaigns(data),
+  });
 }
 
 interface AutopilotRow {
@@ -207,6 +222,9 @@ interface AutopilotRow {
   campaign_id: number;
   campaign_name: string;
   link_mode: string;
+  campaign_paused: boolean | null;
+  campaign_paused_reason: string | null;
+  campaign_paused_at: string | null;
   provider_name: string | null;
   provider_color: string | null;
   provider_paused: boolean | null;

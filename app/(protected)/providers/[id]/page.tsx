@@ -151,6 +151,11 @@ const PHONE_STATUS_OPTIONS: StatusOption<"active" | "suspended" | "blocked">[] =
 ];
 
 const SEARCH_DEBOUNCE_MS = 300;
+// Mirrors DEFAULT_SENDS_PER_SECOND in lib/sends/circuit-breakers.ts — the rate
+// the drain paces a number at when max_sends_per_second is NULL. Duplicated
+// rather than imported because this is a client component and that module
+// value-imports drizzle-orm, which would land the ORM in the client bundle.
+const UI_DEFAULT_SENDS_PER_SECOND = 10;
 
 function PhoneNumberCell({ phone }: { phone: Phone }) {
   const [copied, setCopied] = useState(false);
@@ -453,9 +458,18 @@ export default function ProviderDetailPage() {
     const isMove =
       values.provider_id !== undefined &&
       values.provider_id !== editingPhone.provider_id;
+    // Every editable field the update schema accepts must be listed here. This
+    // object used to carry only cost_per_sms + brand_id, so max_sends_per_second
+    // and dashboard_id were collected by the form, validated, and then silently
+    // dropped before the fetch — the PATCH returned 200 and the toast fired while
+    // the column never changed. `?? null` rather than passing `undefined`
+    // through: JSON.stringify omits undefined keys, so clearing an input has to
+    // send an explicit null for the route's update loop to clear the column.
     const patch: Record<string, unknown> = {
       cost_per_sms: values.cost_per_sms,
       brand_id: values.brand_id,
+      max_sends_per_second: values.max_sends_per_second ?? null,
+      dashboard_id: values.dashboard_id ?? null,
     };
     if (isMove) {
       patch.provider_id = values.provider_id;
@@ -594,6 +608,22 @@ export default function ProviderDetailPage() {
         cell: ({ row }) => {
           const v = Number(row.original.cost_per_sms);
           return <span className="font-mono text-sm">${v.toFixed(4)}</span>;
+        },
+      },
+      {
+        id: "max_sends_per_second",
+        header: "Max / sec",
+        enableSorting: true,
+        cell: ({ row }) => {
+          const v = row.original.max_sends_per_second;
+          if (v == null) {
+            return (
+              <span className="text-xs text-muted-foreground">
+                {UI_DEFAULT_SENDS_PER_SECOND} (default)
+              </span>
+            );
+          }
+          return <span className="font-mono text-sm">{v}/s</span>;
         },
       },
       {

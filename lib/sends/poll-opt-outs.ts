@@ -375,11 +375,13 @@ async function pollCredential(
               // Total Cost. Recompute from the (now bumped) counters + phone cost;
               // a no-op for manually-overridden / CSV-imported stages.
               await recomputeStageTotalCost(tx, match.stage_id);
-              // P7: re-evaluate the campaign's rolling opt-out rate; latch the
-              // per-campaign pause in-tx if it spiked. Telegram fires post-commit.
+              // P7: re-evaluate the ATTRIBUTED STAGE's rolling opt-out rate;
+              // latch the per-campaign pause in-tx if it spiked. Telegram fires
+              // post-commit.
               const breaker = await checkOptOutRateBreaker(tx, {
                 orgId: cred.org_id,
                 campaignId: match.campaign_id,
+                stageId: match.stage_id,
               });
               if (breaker.tripped) breakerTrip = { campaignId: match.campaign_id, result: breaker };
             }

@@ -20,6 +20,7 @@ export type StageOperationalStatus =
   | "draft"
   | "scheduled_unprepared"
   | "held"
+  | "blocked"
   | "materializing"
   | "prepared"
   | "sending_sent"
@@ -123,6 +124,19 @@ export const STAGE_STATUS_META: Record<StageOperationalStatus, StageStatusMeta> 
     rowClass: "border-l-amber-500 bg-amber-50/50 dark:bg-amber-950/25",
     swatchClass: "bg-amber-500",
   },
+  blocked: {
+    key: "blocked",
+    label: "Blocked — campaign send paused",
+    meaning:
+      "The campaign's send circuit is latched (opt-out-rate breaker, or a manual pause). Nothing on this campaign sends until a human resumes it.",
+    willSend: "attention",
+    sortWeight: 0,
+    badgeClass:
+      "border-rose-300 bg-rose-100 text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200",
+    dotClass: "bg-rose-500",
+    rowClass: "border-l-rose-500 bg-rose-50/50 dark:bg-rose-950/25",
+    swatchClass: "bg-rose-500",
+  },
   missed_failed: {
     key: "missed_failed",
     label: "Missed / Failed",
@@ -143,6 +157,7 @@ export const STAGE_STATUS_ORDER: StageOperationalStatus[] = [
   "draft",
   "scheduled_unprepared",
   "held",
+  "blocked",
   "materializing",
   "prepared",
   "sending_sent",
@@ -171,6 +186,9 @@ export interface DeriveStageStatusInput {
   /** campaign_stages.slip_hold_at (migration 0117) — a lane child parked at the
    *  24h slip cap. Takes precedence over the scheduled/unprepared reading. */
   slipHoldAt?: string | Date | null;
+  /** campaigns.send_paused (migration 0119) — the per-campaign send circuit is
+   *  latched, so BOTH scheduler phases skip every stage on this campaign. */
+  campaignSendPaused?: boolean | null;
   /** campaign_stages.materialized_at — set only when EVERY recipient row exists.
    *  NULL while windowed materialization is in progress (some rows may exist). */
   materializedAt: string | Date | null;
@@ -194,6 +212,8 @@ const EMPTY_COUNTS: StageSendCounts = {
  *
  * Precedence (tracked stages):
  *  1. schedule_missed_at set                  → missed_failed (Red)
+ *  1a. campaign send circuit latched, work left → blocked      (Rose)
+ *  1b. slip-held lane child                   → held          (Amber)
  *  2. materialized, drain done with failures  → missed_failed (Red)
  *  3. some sent / actively sending            → sending_sent  (Green)
  *  4. materialized, nothing sent yet          → prepared      (Blue)
@@ -223,13 +243,34 @@ export function deriveStageOperationalStatus(
   //    Green/Sent (Bug 1 makes schedule_missed_at trustworthy).
   if (input.scheduleMissedAt != null) return "missed_failed";
 
-  // 1a. A slip-held lane child (24h cap) is parked awaiting a human — it will NOT
+  // 1a. The CAMPAIGN's send circuit is latched (campaigns.send_paused — the P7
+  //     opt-out-rate breaker or a manual pause). Both scheduler phases filter on
+  //     `c.send_paused IS NOT TRUE`, so nothing on this campaign materializes or
+  //     drains — and, because the pause gate sits UPSTREAM of the code that
+  //     stamps schedule_missed_at, a due stage doesn't even go Red. Without this
+  //     state it renders as an ordinary Blue "Prepared" card and the pause is
+  //     invisible (the 2026-07-25 incident presented exactly that way).
+  //     Precedence: below a genuinely missed window (the louder, less
+  //     recoverable fact), above the lane slip-hold (while the campaign is
+  //     paused, releasing a hold changes nothing — the campaign latch is the
+  //     binding constraint).
+  //     Only stages with OUTSTANDING work are blocked. A stage that already
+  //     finished sending is unaffected by a later pause; calling it "Blocked"
+  //     would mis-state history and inflate the dashboards' held-message counts.
+  if (
+    input.campaignSendPaused === true &&
+    (c.pending > 0 || c.sending > 0 || (!hasRows && input.scheduledAt != null))
+  ) {
+    return "blocked";
+  }
+
+  // 1b. A slip-held lane child (24h cap) is parked awaiting a human — it will NOT
   //     fire (the cron's `slip_hold_at IS NULL` gate excludes it). Must not read as
   //     Orange "scheduled" (it won't self-resolve). Precedence over everything but
-  //     a genuine missed window.
+  //     a genuine missed window and a campaign-level pause.
   if (input.slipHoldAt != null) return "held";
 
-  // 1b. Materialization in progress: rows are being written in committed windows
+  // 1c. Materialization in progress: rows are being written in committed windows
   //     but materialized_at isn't set yet, so the audience is INCOMPLETE and must
   //     NOT read "Prepared" (it can't send until complete). Distinct Indigo state
   //     so the operator sees steady progress instead of a stalled/timed-out spinner.

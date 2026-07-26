@@ -306,12 +306,37 @@ export async function countAhoiDlrRejectsSince(
   return Number(r[0]?.n ?? 0);
 }
 
-// ── P7/P8: rolling opt-out-rate breaker (per-CAMPAIGN) ───────────────────────
+// ── P7/P8: rolling opt-out-rate breaker (per-STAGE metric, per-CAMPAIGN latch) ─
 // A high STOP rate is a content/audience signal, not a provider-transport fault,
 // so this breaker pauses ONE campaign (campaigns.send_paused) rather than the
 // whole provider. Env-tunable like the Ahoi DLR breaker — read through helpers so
-// a redeploy isn't needed to change sensitivity. Defaults are backed by live data
-// (330 stages ≥50 sends: p95 7.4%, p99 8.4%, max 13.8% opt-out rate).
+// a redeploy isn't needed to change sensitivity.
+//
+// THE METRIC IS AN ALIGNED PER-STAGE SEND COHORT: "of the messages this stage
+// sent in the trailing window, what fraction has produced a STOP so far".
+// Numerator and denominator describe the SAME messages — both are bucketed by
+// stage_sends.sent_at, never by the STOP's arrival time. Bucketing the numerator
+// by receipt time is what produced the 2026-07-25 false trips (a blast's STOPs
+// outlived the blast's own messages in the window and were divided by whatever
+// small volume happened to be left). See
+// docs/optout-rate-breaker-false-trip-2026-07-25.md.
+//
+// CALIBRATION (re-derived 2026-07-26 on the aligned per-stage cohort, live data,
+// 318 stages with >= 200 sends):
+//   24h cohort — p95 7.19%, p99 8.03%, max 8.41%  ⇒ threshold 10%
+//    2h cohort — p95 5.23%, p99 5.92%, max 6.12%  ⇒ threshold  8%
+// Each threshold sits above the observed maximum, so a healthy stage cannot trip.
+// (The figures the previous comment cited — "330 stages >=50 sends: p95 7.4%,
+// p99 8.4%, max 13.8%" — were per-stage LIFETIME aligned rates, i.e. already a
+// different metric from the receipt-time one the runtime then evaluated. That
+// mismatch is the bug this calibration note now closes.)
+//
+// TWO WINDOWS, one metric. The long (24h) window is the primary judgement; the
+// short (2h) twin exists because a cohort rate necessarily under-reads right
+// after a blast (the STOPs haven't arrived yet), which would make a genuinely
+// toxic creative slow to catch. The short window is a strict SUBSET of the long
+// one, so both are computed in ONE pass per side with FILTER — the per-STOP
+// query count stays at 2.
 export function optOutRateSpikeThreshold(): number {
   const v = Number(process.env.OPTOUT_RATE_SPIKE_THRESHOLD);
   return Number.isFinite(v) && v > 0 && v < 1 ? v : 0.1; // 10%
@@ -324,39 +349,77 @@ export function optOutRateWindowSeconds(): number {
   const v = Number(process.env.OPTOUT_RATE_WINDOW_SEC);
   return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 24 * 60 * 60; // 24h trailing
 }
-
-// Numerator: attributed opt-outs credited to a campaign in the trailing window
-// (opt_out_attributions is already de-duped one-per-STOP-per-stage, so a
-// multi-message sequence can't inflate the rate). Bucketed by oa.created_at =
-// the STOP receipt time the ingesters stamp.
-export async function countOptOutAttributionsSince(
-  dbc: DbOrTx,
-  orgId: string,
-  campaignId: number,
-  seconds: number,
-): Promise<number> {
-  const r = (await dbc.execute(sql`
-    SELECT count(*)::int AS n FROM opt_out_attributions
-    WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
-      AND created_at > now() - make_interval(secs => ${seconds})
-  `)) as unknown as { n: number }[];
-  return Number(r[0]?.n ?? 0);
+export function optOutRateSpikeThresholdShort(): number {
+  const v = Number(process.env.OPTOUT_RATE_SPIKE_THRESHOLD_SHORT);
+  return Number.isFinite(v) && v > 0 && v < 1 ? v : 0.08; // 8%
+}
+export function optOutRateMinSendsShort(): number {
+  const v = Number(process.env.OPTOUT_RATE_MIN_SENDS_SHORT);
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 200;
+}
+export function optOutRateShortWindowSeconds(): number {
+  const v = Number(process.env.OPTOUT_RATE_WINDOW_SHORT_SEC);
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 2 * 60 * 60; // 2h trailing
 }
 
-// Denominator: successful sends for a campaign in the SAME trailing window.
-export async function countSentSinceForCampaign(
+/** Counts for the long window and its short subset, from one query. */
+export interface WindowPairCounts {
+  long: number;
+  short: number;
+}
+
+// Denominator: this STAGE's successful sends, bucketed by sent_at, for both
+// windows at once. Served by stage_sends_stage_id_idx.
+export async function countSentInWindowsForStage(
   dbc: DbOrTx,
   orgId: string,
-  campaignId: number,
-  seconds: number,
-): Promise<number> {
+  stageId: number,
+  longSeconds: number,
+  shortSeconds: number,
+): Promise<WindowPairCounts> {
   const r = (await dbc.execute(sql`
-    SELECT count(*)::int AS n FROM stage_sends
-    WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
-      AND status = 'sent'
-      AND sent_at > now() - make_interval(secs => ${seconds})
-  `)) as unknown as { n: number }[];
-  return Number(r[0]?.n ?? 0);
+    SELECT count(*) FILTER (WHERE sent_at > now() - make_interval(secs => ${longSeconds}))::int  AS n_long,
+           count(*) FILTER (WHERE sent_at > now() - make_interval(secs => ${shortSeconds}))::int AS n_short
+    FROM stage_sends
+    WHERE org_id = ${orgId} AND stage_id = ${stageId} AND status = 'sent'
+      AND sent_at > now() - make_interval(secs => ${longSeconds})
+  `)) as unknown as { n_long: number; n_short: number }[];
+  return { long: Number(r[0]?.n_long ?? 0), short: Number(r[0]?.n_short ?? 0) };
+}
+
+// Numerator: STOPs attributed to this STAGE, bucketed by the ORIGINATING SEND's
+// sent_at — the same messages the denominator counts. opt_out_attributions is
+// already de-duped one-per-STOP-per-stage, so a multi-message sequence can't
+// inflate the rate.
+//
+// Rows with a NULL stage_send_id are EXCLUDED (the inner join drops them). There
+// is deliberately NO fallback to oa.stage_id + oa.created_at: that would
+// reintroduce receipt-time bucketing for exactly the rows we can't align, which
+// is the defect. The blind spot is watched instead by the hourly
+// findUnjoinableOptOutAttributions check (lib/sends/unjoinable-attributions.ts).
+//
+// Scoped by oa.stage_id (opt_out_attributions_stage_id_idx) and joined to
+// stage_sends by primary key — a few hundred rows at most per stage. The
+// ingesters always write oa.stage_id = the matched send's stage_id, so scoping on
+// either column selects the same set; oa.stage_id is the indexed one.
+// `status = 'sent'` keeps the numerator a strict subset of the denominator's
+// population, so the rate can never exceed 1.
+export async function countAlignedOptOutsInWindowsForStage(
+  dbc: DbOrTx,
+  orgId: string,
+  stageId: number,
+  longSeconds: number,
+  shortSeconds: number,
+): Promise<WindowPairCounts> {
+  const r = (await dbc.execute(sql`
+    SELECT count(*) FILTER (WHERE ss.sent_at > now() - make_interval(secs => ${longSeconds}))::int  AS n_long,
+           count(*) FILTER (WHERE ss.sent_at > now() - make_interval(secs => ${shortSeconds}))::int AS n_short
+    FROM opt_out_attributions oa
+    JOIN stage_sends ss ON ss.id = oa.stage_send_id
+    WHERE oa.org_id = ${orgId} AND oa.stage_id = ${stageId} AND ss.status = 'sent'
+      AND ss.sent_at > now() - make_interval(secs => ${longSeconds})
+  `)) as unknown as { n_long: number; n_short: number }[];
+  return { long: Number(r[0]?.n_long ?? 0), short: Number(r[0]?.n_short ?? 0) };
 }
 
 // Fresh read of the per-campaign latch (mirror of isProviderPaused) for the

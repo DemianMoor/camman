@@ -11,6 +11,10 @@ import {
 } from "@/components/campaigns/stage-prepare-dialog";
 import { StageStatusLegend } from "@/components/campaigns/stage-status-legend";
 import { useAuth } from "@/components/protected/auth-context";
+import {
+  CampaignResumeDialog,
+  type ResumeTarget,
+} from "@/components/sends/campaign-resume-dialog";
 import { SendWindowIndicator } from "@/components/sends/send-window-indicator";
 import { VolumeCapsMeter } from "@/components/sends/volume-caps-meter";
 import { Button } from "@/components/ui/button";
@@ -38,6 +42,9 @@ type FleetStage = {
   provider_name: string | null;
   provider_color: string | null;
   provider_paused: boolean;
+  campaign_paused: boolean;
+  campaign_paused_reason: string | null;
+  campaign_paused_at: string | null;
   operational_status: StageOperationalStatus;
   counts: {
     total: number;
@@ -52,9 +59,19 @@ type FleetStage = {
   window_closes_at: string | null;
 };
 
+type PausedCampaign = {
+  campaign_id: number;
+  campaign_name: string;
+  reason: string | null;
+  paused_at: string | null;
+  held_stages: number;
+  held_messages: number;
+};
+
 type FleetResponse = {
   data: FleetStage[];
   counts: Partial<Record<StageOperationalStatus, number>>;
+  paused_campaigns: PausedCampaign[];
 };
 
 type SendState = {
@@ -75,6 +92,7 @@ export default function FleetTodayPage() {
   const [sendState, setSendState] = useState<SendState | null>(null);
   const [tick, setTick] = useState(0);
   const [prepareTarget, setPrepareTarget] = useState<PrepareTarget | null>(null);
+  const [resumeTarget, setResumeTarget] = useState<ResumeTarget | null>(null);
   const refresh = useCallback(() => setTick((n) => n + 1), []);
 
   // Emergency hard-stop toggle (org_settings.sends_paused). Engaging it halts any
@@ -117,7 +135,14 @@ export default function FleetTodayPage() {
   }, [fleetExec, stateExec, tick]);
 
   const canActivate = can("campaigns.activate");
+  const canPause = can("campaigns.pause");
   const loading = fleet === null;
+
+  // P7/P8 — campaigns whose own send circuit is latched. Distinct from the
+  // org-wide hard stop above and from a paused PROVIDER: only these campaigns
+  // are frozen, and only a human can clear them.
+  const pausedCampaigns = fleet?.paused_campaigns ?? [];
+  const heldMessages = pausedCampaigns.reduce((n, c) => n + c.held_messages, 0);
 
   // Total messages materialized ("prepared") across every stage in play today.
   // Accumulates as each stage is prepared; sent ⊆ prepared, so this pairs with
@@ -177,6 +202,68 @@ export default function FleetTodayPage() {
               <Play className="size-3.5" aria-hidden /> Proceed (resume sending)
             </Button>
           ) : null}
+        </div>
+      ) : null}
+
+      {/* Per-campaign send-circuit banner (P7/P8). The pause is otherwise
+          invisible here: a latched campaign's stages render as ordinary cards,
+          and because the scheduler's pause gate sits upstream of the code that
+          stamps schedule_missed_at, they never go Red either. */}
+      {pausedCampaigns.length > 0 ? (
+        <div className="space-y-2 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-100">
+          <div className="flex items-center gap-2">
+            <Ban className="size-4 shrink-0" aria-hidden />
+            <span>
+              <span className="font-medium">
+                {pausedCampaigns.length} campaign
+                {pausedCampaigns.length === 1 ? "" : "s"} send-paused
+              </span>{" "}
+              — {heldMessages.toLocaleString()} message
+              {heldMessages === 1 ? "" : "s"} held. These stay frozen until someone
+              resumes them.
+            </span>
+          </div>
+          {pausedCampaigns.map((c) => (
+            <div
+              key={c.campaign_id}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-rose-200 bg-background/60 p-2 dark:border-rose-900"
+            >
+              <Link
+                href={`/campaigns/${c.campaign_id}`}
+                className="text-sm font-medium hover:underline"
+              >
+                {c.campaign_name}
+              </Link>
+              <span className="text-xs tabular-nums">
+                {c.held_messages.toLocaleString()} held across {c.held_stages} stage
+                {c.held_stages === 1 ? "" : "s"}
+              </span>
+              {c.reason ? (
+                <span className="font-mono text-[11px] opacity-80">{c.reason}</span>
+              ) : null}
+              {c.paused_at ? (
+                <span className="text-[11px] opacity-70">
+                  since {formatCampaignDateTime(c.paused_at)}
+                </span>
+              ) : null}
+              {canPause ? (
+                <Button
+                  size="sm"
+                  className="ml-auto h-7 bg-green-600 hover:bg-green-700"
+                  onClick={() =>
+                    setResumeTarget({
+                      campaign_id: c.campaign_id,
+                      campaign_name: c.campaign_name,
+                      reason: c.reason,
+                      paused_at: c.paused_at,
+                    })
+                  }
+                >
+                  <Play className="size-3" aria-hidden /> Resume
+                </Button>
+              ) : null}
+            </div>
+          ))}
         </div>
       ) : null}
 
@@ -306,6 +393,14 @@ export default function FleetTodayPage() {
                         ) : null}
                       </span>
                     ) : null}
+                    {s.campaign_paused ? (
+                      <span
+                        className="inline-flex items-center gap-1 rounded border border-rose-300 bg-rose-100 px-1.5 py-0.5 text-[11px] font-medium text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200"
+                        title={s.campaign_paused_reason ?? "Campaign send paused"}
+                      >
+                        <Ban className="size-3" aria-hidden /> campaign paused
+                      </span>
+                    ) : null}
                     {s.scheduled_at ? (
                       <span>{formatCampaignDateTime(s.scheduled_at)}</span>
                     ) : null}
@@ -327,7 +422,16 @@ export default function FleetTodayPage() {
                         </span>
                       ) : null}
                       {s.counts.pending > 0 ? (
-                        <span> · {s.counts.pending} pending</span>
+                        <span>
+                          {" "}
+                          · {s.counts.pending.toLocaleString()} pending
+                          {s.campaign_paused ? (
+                            <span className="text-rose-600">
+                              {" "}
+                              · held by campaign pause
+                            </span>
+                          ) : null}
+                        </span>
                       ) : null}
                       {s.counts.skippedOptedOut > 0 ? (
                         <span className="text-amber-600">
@@ -374,6 +478,12 @@ export default function FleetTodayPage() {
         target={prepareTarget}
         onClose={() => setPrepareTarget(null)}
         onPrepared={refresh}
+      />
+
+      <CampaignResumeDialog
+        target={resumeTarget}
+        onClose={() => setResumeTarget(null)}
+        onResumed={refresh}
       />
     </div>
   );

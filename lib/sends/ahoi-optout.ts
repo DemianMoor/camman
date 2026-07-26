@@ -274,11 +274,13 @@ export async function processAhoiInboundOptOut(
         WHERE id = ${match.stage_id}
       `);
       await recomputeStageTotalCost(dbc, match.stage_id);
-      // P7: re-evaluate the campaign opt-out rate; latch the per-campaign pause
-      // in-tx if it spiked. Telegram fires post-commit in the caller.
+      // P7: re-evaluate the ATTRIBUTED STAGE's opt-out rate; latch the
+      // per-campaign pause in-tx if it spiked. Telegram fires post-commit in the
+      // caller.
       const breaker = await checkOptOutRateBreaker(dbc, {
         orgId: o.orgId,
         campaignId: match.campaign_id,
+        stageId: match.stage_id,
       });
       if (breaker.tripped) breakerTrip = { campaignId: match.campaign_id, result: breaker };
     }

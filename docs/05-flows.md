@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-07-19_
+_Last updated: 2026-07-26_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -116,7 +116,14 @@ sequenceDiagram
   DB-->>App: every stage that sent to the number in the window
   App->>DB: INSERT opt_out_attributions (1/stage) + bump campaign_stages.inbound_opt_out_count
   Note over App,DB: org-wide opt-out excludes the contact from all future snapshots;<br/>attribution is additive analytics (Reports + campaign "Inbound STOPs"), never a gate
+  App->>DB: checkOptOutRateBreaker(ATTRIBUTED STAGE) — 2 queries, 24h + 2h in one FILTER pass
+  Note over App,DB: numerator JOINs stage_sends ON id = stage_send_id ⇒ BOTH sides<br/>bucket by sent_at (one aligned send cohort, never STOP receipt time)
+  DB-->>App: sent{24h,2h} + aligned opt_outs{24h,2h}
+  App->>DB: breach ⇒ UPDATE campaigns SET send_paused (SAME tx) + campaign_circuit_events
+  App-->>App: post-commit: Telegram alert (rate, counts, stage, campaign link)
 ```
+
+**Breaker step (P7/P8, cohort re-cut 2026-07-26).** The rate is judged on the **attributed stage** and the latch applied to its **campaign**. Both counts bucket by `stage_sends.sent_at`, so the metric is "of what this stage sent in the window, what fraction has STOPped so far" — bucketing the numerator by `oa.created_at` makes it unbounded and auto-paused four campaigns on false signals (see [the diagnostic](optout-rate-breaker-false-trip-2026-07-25.md)). A long (24h @ 10%) and a short (2h @ 8%) window are evaluated from the same pair of queries; either can latch. Attributions with a NULL `stage_send_id` are excluded, and the hourly Telegram cron alerts if that share exceeds 5%.
 
 Attribution rule (migration 0075): TextHub's inbox has no campaign reference, so a STOP is credited to **every** stage that sent to the number within a 72h trailing window (`OPT_OUT_ATTRIBUTION_WINDOW_HOURS`). One `opt_out_attributions` row per (opt_out, stage); the per-stage `inbound_opt_out_count` counter drives the Reports "Opt-outs" column, and the campaign page shows DISTINCT attributed contacts. No match ⇒ org-wide opt-out only. See [lib/sends/poll-opt-outs.ts](../lib/sends/poll-opt-outs.ts).
 

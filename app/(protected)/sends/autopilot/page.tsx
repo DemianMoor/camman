@@ -2,9 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { RefreshCw } from "lucide-react";
+import { Ban, Play, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAuth } from "@/components/protected/auth-context";
+import {
+  CampaignResumeDialog,
+  type ResumeTarget,
+} from "@/components/sends/campaign-resume-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { toastApiError } from "@/lib/api/toast-error";
@@ -39,6 +44,9 @@ interface AutopilotStage {
   sent_at: string | null;
   provider_name: string | null;
   provider_paused: boolean;
+  campaign_paused: boolean;
+  campaign_paused_reason: string | null;
+  campaign_paused_at: string | null;
   operational_status: StageOperationalStatus;
   is_lane_child: boolean;
   behavioral_tier: number | null;
@@ -57,8 +65,10 @@ interface AutopilotResponse {
 }
 
 export default function AutopilotPage() {
+  const { can } = useAuth();
   const [data, setData] = useState<AutopilotStage[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [resumeTarget, setResumeTarget] = useState<ResumeTarget | null>(null);
   const [tick, setTick] = useState(0);
   const fleetApi = useApiCall<AutopilotResponse>();
   const { execute } = useApiCall();
@@ -135,10 +145,22 @@ export default function AutopilotPage() {
       ) : (
         <div className="space-y-2">
           {data.map((s) => (
-            <StageRow key={s.stage_id} s={s} act={act} />
+            <StageRow
+              key={s.stage_id}
+              s={s}
+              act={act}
+              canPause={can("campaigns.pause")}
+              onResume={setResumeTarget}
+            />
           ))}
         </div>
       )}
+
+      <CampaignResumeDialog
+        target={resumeTarget}
+        onClose={() => setResumeTarget(null)}
+        onResumed={refresh}
+      />
     </div>
   );
 }
@@ -146,9 +168,13 @@ export default function AutopilotPage() {
 function StageRow({
   s,
   act,
+  canPause,
+  onResume,
 }: {
   s: AutopilotStage;
   act: (url: string, body: unknown, ok: string) => Promise<void>;
+  canPause: boolean;
+  onResume: (t: ResumeTarget) => void;
 }) {
   const meta = STAGE_STATUS_META[s.operational_status];
   const pf = s.preflight_result;
@@ -173,6 +199,14 @@ function StageRow({
             {s.label ? ` "${s.label}"` : ""}
             {s.is_lane_child ? ` · lane ${s.behavioral_tier}` : ""}
           </span>
+          {s.campaign_paused ? (
+            <span
+              className="ml-1.5 inline-flex items-center gap-1 rounded border border-rose-300 bg-rose-100 px-1.5 py-0.5 text-[11px] font-medium text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200"
+              title={s.campaign_paused_reason ?? "Campaign send paused"}
+            >
+              <Ban className="size-3" aria-hidden /> campaign paused
+            </span>
+          ) : null}
         </div>
 
         {/* Schedule + slip */}
@@ -210,6 +244,26 @@ function StageRow({
 
         {/* Actions */}
         <div className="ml-auto flex items-center gap-1.5">
+          {/* A campaign pause outranks every per-stage action here — releasing a
+              hold or clearing an abort changes nothing while the circuit is
+              latched, so Resume is the only useful control. */}
+          {s.campaign_paused && canPause ? (
+            <Button
+              size="sm"
+              className="bg-green-600 hover:bg-green-700"
+              onClick={() =>
+                onResume({
+                  campaign_id: s.campaign_id,
+                  campaign_name: s.campaign_name,
+                  reason: s.campaign_paused_reason,
+                  paused_at: s.campaign_paused_at,
+                })
+              }
+            >
+              <Play className="size-3" aria-hidden /> Resume
+            </Button>
+          ) : null}
+
           {s.operational_status === "held" ? (
             <>
               <input

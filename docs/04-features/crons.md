@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-24_
+_Last updated: 2026-07-26_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -74,6 +74,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
   - otherwise → `200 { skipped: true }`.
 - `?test=1` (still secret-protected) forces an immediate send regardless of time: hourly format if the current Warsaw hour is inside an hourly window shape, else daily. Response says which format was sent.
 - **Backlog-stall safety net (runs EVERY hourly tick, before the report-window decision).** Calls `findStalledStages` ([lib/sends/stall-detector.ts](../../lib/sends/stall-detector.ts)) and Telegrams if any stage that *should* be draining has sent nothing for 30 min (in-window, provider not paused, org sending on). Best-effort (own try/catch, never breaks the report); skipped when `SEND_ENABLED` is off. This is the catch-all so any future drain stall — not just head-of-line blocking — surfaces within ~an hour. See [sms-send-pipeline.md](sms-send-pipeline.md).
+- **Unjoinable-attribution watch (runs EVERY hourly tick, alongside the stall check).** Calls `findUnjoinableOptOutAttributions` ([lib/sends/unjoinable-attributions.ts](../../lib/sends/unjoinable-attributions.ts)) and Telegrams when >5% of the last 24h of `opt_out_attributions` (on a sample of ≥20) have a NULL `stage_send_id`. Those STOPs can't be joined back to the send that produced them, so the opt-out-rate breaker's aligned numerator silently drops them — a breaker that stops seeing STOPs is worse than one that trips wrongly. `stage_send_id` is `ON DELETE SET NULL`, so a future prune of `stage_sends` is the realistic way this starts. Best-effort (own try/catch), one cheap aggregate. Deliberately NOT in `checkOptOutRateBreaker`: that would add a query to every STOP and, once breached, alert on every STOP with no dedup. Live share today: 0/37,661 over 30 days. See [sms-send-pipeline.md](sms-send-pipeline.md).
 - **Five metrics**, aggregated across **all orgs** (this tool is single-org in practice; the cron has no session to scope by), for one ET calendar day — the same day-attribution basis the `/reports` page uses so the numbers reconcile:
   - **Sales / Revenue** → `salesRevenueTotals()` ([`lib/reporting/attribution.ts`](../../lib/reporting/attribution.ts)), conversion-dated (Keitaro `stat_date` ∨ manual-tally entry date, max-deduped per stage).
   - **Spend** → Σ `campaign_stages.total_cost` attributed to the stage's send moment (`sent_at`).

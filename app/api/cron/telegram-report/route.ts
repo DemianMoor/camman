@@ -8,6 +8,11 @@ import { notifyTelegram, sendTelegramHtml } from "@/lib/alerts/telegram";
 import { carrierTriageSummary } from "@/lib/carrier/queue-stats";
 import { findStalledStages, formatStallAlert } from "@/lib/sends/stall-detector";
 import {
+  findUnjoinableOptOutAttributions,
+  formatUnjoinableAlert,
+  shouldAlertUnjoinable,
+} from "@/lib/sends/unjoinable-attributions";
+import {
   computeReportMetrics,
   etDayRange,
   spendInRange,
@@ -145,6 +150,27 @@ async function checkStalledQueue(now: Date): Promise<void> {
   }
 }
 
+// Window for the unjoinable-attribution watch. A day of STOPs is a big enough
+// sample to be meaningful and small enough that a NEW breakage shows up fast.
+const UNJOINABLE_WINDOW_HOURS = 24;
+
+// Best-effort blind-spot watch for the opt-out-rate breaker's numerator: STOPs
+// whose stage_send_id is NULL can't be aligned to a send and are dropped from
+// the rate, so a rising share silently blinds the breaker. Never throws (own
+// try/catch) so it can't break the report. One cheap aggregate per hour.
+async function checkUnjoinableAttributions(): Promise<void> {
+  try {
+    const stats = await findUnjoinableOptOutAttributions(db, {
+      windowHours: UNJOINABLE_WINDOW_HOURS,
+    });
+    if (shouldAlertUnjoinable(stats)) {
+      await notifyTelegram(formatUnjoinableAlert(stats));
+    }
+  } catch (err) {
+    console.error("[telegram-report] unjoinable-attribution check failed:", err);
+  }
+}
+
 // ── handler ─────────────────────────────────────────────────────────────────
 async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;
@@ -165,6 +191,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // Skipped when global sending is off (env SEND_ENABLED) — then nothing is
   // expected to drain and every due stage would look "stalled".
   await checkStalledQueue(now);
+  // Same cadence, same best-effort contract: watch the opt-out-rate breaker's
+  // numerator for attributions it can no longer align to a send.
+  await checkUnjoinableAttributions();
 
   const format = decideFormat(warsawHour, warsawIsoDow, test);
 

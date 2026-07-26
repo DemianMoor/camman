@@ -114,17 +114,22 @@ async function main() {
           SELECT
             count(*) FILTER (WHERE status = 'pending')::int  AS pending,
             count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+            count(*) FILTER (WHERE status = 'skipped_opted_out')::int AS skipped_opted_out,
             count(*)::int AS all_rows
           FROM stage_sends WHERE stage_id = ${stageId}`)) as unknown as {
-          pending: number; rejected: number; all_rows: number;
+          pending: number; rejected: number; skipped_opted_out: number; all_rows: number;
         }[]
       )[0];
-    // The panel's status-count query (with the new FILTER excluding rejected).
+    // The panel's status-count query. Excludes BOTH audit-only buckets:
+    // 'rejected' (operator-canceled) and 'skipped_opted_out' (suppressed at
+    // materialization time, migration 0116). Excluding only 'rejected' left an
+    // aborted stage with total>0 via its opt-out rows, which pinned it at
+    // "Materializing" with no Prepare button.
     const panelTotal = async () =>
       Number(
         (
           (await db.execute(sql`
-            SELECT count(*) FILTER (WHERE status <> 'rejected')::int AS total
+            SELECT count(*) FILTER (WHERE status NOT IN ('rejected', 'skipped_opted_out'))::int AS total
             FROM stage_sends WHERE stage_id = ${stageId} AND org_id = ${orgId}`)) as unknown as {
             total: number;
           }[]
@@ -152,6 +157,26 @@ async function main() {
     check("materialized_at stamped", (await stageFlags()).materialized_at != null);
     check(`${M} pending rows`, (await countBy()).pending === M);
 
+    // ---- 1b. Opt-out suppression rows (what a REAL materialize leaves behind) ----
+    // Migration 0116: recipients already opted out at materialization time are
+    // written as 'skipped_opted_out' rather than 'pending'. Every production
+    // stage carries some. The original version of this test materialized only
+    // 'pending' rows, so after cancel the stage had literally zero non-rejected
+    // rows and the bug was invisible — this step makes the fixture match reality.
+    const SUPPRESSED = 2;
+    await db.execute(sql`
+      UPDATE stage_sends SET status = 'skipped_opted_out'
+      WHERE id IN (
+        SELECT id FROM stage_sends
+        WHERE stage_id = ${stageId} AND org_id = ${orgId} AND status = 'pending'
+        LIMIT ${SUPPRESSED}
+      )`);
+    check(
+      `${SUPPRESSED} rows suppressed as 'skipped_opted_out' (realistic fixture)`,
+      (await countBy()).skipped_opted_out === SUPPRESSED,
+      `got ${(await countBy()).skipped_opted_out}`,
+    );
+
     // ---- 2. Cancel (the exact abort-route SQL) ----
     console.log("2) cancel (recall):");
     await db.transaction(async (tx) => {
@@ -164,14 +189,39 @@ async function main() {
         WHERE id = ${stageId} AND org_id = ${orgId}`);
     });
     const afterCancel = await countBy();
-    check(`${M} rows now 'rejected'`, afterCancel.rejected === M, `got ${afterCancel.rejected}`);
+    check(
+      `${M - SUPPRESSED} rows now 'rejected' (abort cancels pending only)`,
+      afterCancel.rejected === M - SUPPRESSED,
+      `got ${afterCancel.rejected}`,
+    );
     check("0 pending", afterCancel.pending === 0);
+    check(
+      `${SUPPRESSED} 'skipped_opted_out' rows SURVIVE the abort (audit preserved)`,
+      afterCancel.skipped_opted_out === SUPPRESSED,
+      `got ${afterCancel.skipped_opted_out}`,
+    );
     check("materialized_at reset to NULL", (await stageFlags()).materialized_at == null);
     check("send_approved false", (await stageFlags()).send_approved === false);
 
     // ---- 3. Panel status count excludes rejected ⇒ hasBatch flips false ----
     console.log("3) panel count → editable:");
-    check("panel total = 0 (rejected excluded)", (await panelTotal()) === 0, `got ${await panelTotal()}`);
+    // THE REGRESSION: with opt-out rows present, excluding only 'rejected' left
+    // total = SUPPRESSED (>0) ⇒ hasBatch stayed true ⇒ Prepare stayed hidden.
+    check("panel total = 0 (rejected AND skipped_opted_out excluded)", (await panelTotal()) === 0, `got ${await panelTotal()}`);
+    const oldPanelTotal = Number(
+      (
+        (await db.execute(sql`
+          SELECT count(*) FILTER (WHERE status <> 'rejected')::int AS total
+          FROM stage_sends WHERE stage_id = ${stageId} AND org_id = ${orgId}`)) as unknown as {
+          total: number;
+        }[]
+      )[0].total,
+    );
+    check(
+      `OLD count (rejected-only filter) WOULD have read ${SUPPRESSED} → the stranding bug`,
+      oldPanelTotal === SUPPRESSED,
+      `got ${oldPanelTotal}`,
+    );
 
     // ---- 3b. Operational status: a canceled stage must NOT read "materializing" ----
     // The stages-list/sends-today counts feed deriveStageOperationalStatus. Because
@@ -193,26 +243,50 @@ async function main() {
     });
     check("fixed counts ⇒ NOT 'materializing'", opFixed !== "materializing", `got ${opFixed}`);
     check("fixed counts ⇒ 'scheduled_unprepared'", opFixed === "scheduled_unprepared", `got ${opFixed}`);
-    const opOld = deriveStageOperationalStatus({
+    // Defence in depth: even fed a total that still folds in audit rows, the
+    // derivation must refuse to report work in flight — it keys on live
+    // (pending/sending/sent) rows, not row count. So a future audit-only status
+    // cannot re-strand a stage the way 'skipped_opted_out' just did.
+    const opResidueOnly = deriveStageOperationalStatus({
       ...flags,
-      // OLD counting: total counted rejected, failed folded rejected in.
-      counts: { total: nowRejected, pending: 0, sending: 0, sent: 0, failed: nowRejected, skippedDuplicate: 0 },
+      counts: { total: nowRejected + SUPPRESSED, pending: 0, sending: 0, sent: 0, failed: 0, skippedDuplicate: 0 },
     });
-    check("OLD counting WOULD wrongly read 'materializing' (regression the fix prevents)", opOld === "materializing", `got ${opOld}`);
+    check(
+      "audit-only counts ⇒ still NOT 'materializing' (derivation backstop)",
+      opResidueOnly !== "materializing",
+      `got ${opResidueOnly}`,
+    );
+    check(
+      "audit-only counts ⇒ 'scheduled_unprepared' (Prepare offered)",
+      opResidueOnly === "scheduled_unprepared",
+      `got ${opResidueOnly}`,
+    );
+    // …but a resumed materialization producing real rows still reports progress.
+    const opResumed = deriveStageOperationalStatus({
+      ...flags,
+      counts: { total: nowRejected + SUPPRESSED + 5, pending: 5, sending: 0, sent: 0, failed: 0, skippedDuplicate: 0 },
+    });
+    check("live pending rows ⇒ 'materializing' still works", opResumed === "materializing", `got ${opResumed}`);
 
     // ---- 4. Re-enumeration re-includes the canceled contacts ----
-    // Raw self-exclusion path (no eligibility overlay): post-cancel every pool
+    // Raw self-exclusion path (no eligibility overlay): post-cancel a canceled
     // contact's only stage_sends row is 'rejected', so the `status <> 'rejected'`
-    // fix makes ALL N re-enumerable. THIS is the load-bearing proof — pre-fix the
-    // any-status NOT EXISTS would exclude all M canceled contacts (→ 0 remaining).
+    // resumability filter makes it re-enumerable. THIS is the load-bearing proof —
+    // pre-fix the any-status NOT EXISTS would exclude all canceled contacts (→ 0).
+    //
+    // The SUPPRESSED contacts are the deliberate exception: their surviving
+    // 'skipped_opted_out' row is NOT 'rejected', so the same filter keeps them
+    // out. That is correct — they are opted out, and re-adding them on a
+    // re-Prepare would re-target someone who asked to stop. So a re-prepared
+    // stage is legitimately SMALLER than the original by the suppressed count.
     // The eligibility-filtered round-trip is proven by the real kickoff in step 5.
     console.log("4) re-enumeration:");
     const remaining = await enumerateStageRecipients(dbc, {
       campaignId, orgId, filters, excludeMaterializedStageId: stageId,
     });
     check(
-      `all ${N} pool contacts re-enumerable after cancel`,
-      remaining.length === N,
+      `${N - SUPPRESSED} of ${N} pool contacts re-enumerable (opted-out stay excluded)`,
+      remaining.length === N - SUPPRESSED,
       `got ${remaining.length} (pre-fix this would be 0)`,
     );
 
@@ -220,13 +294,24 @@ async function main() {
     console.log("5) re-materialize:");
     const r2 = await kickoffStageSend(dbc, { orgId, campaignId, stageId });
     check("ok + complete", r2.ok && r2.complete === true, JSON.stringify(r2));
-    check(`re-materialized ${M} new`, r2.ok && r2.materialized === M);
+    // Re-prepare reproduces the audience MINUS the opted-out contacts (§4).
+    const R = M - SUPPRESSED;
+    check(`re-materialized ${R} new (${M} original − ${SUPPRESSED} opted-out)`, r2.ok && r2.materialized === R, JSON.stringify(r2));
     check("materialized_at re-stamped", (await stageFlags()).materialized_at != null);
     const afterRemat = await countBy();
-    check(`${M} pending again`, afterRemat.pending === M, `got ${afterRemat.pending}`);
-    check(`${M} rejected rows kept for audit`, afterRemat.rejected === M, `got ${afterRemat.rejected}`);
-    check(`${2 * M} total rows (new pending + audit rejected)`, afterRemat.all_rows === 2 * M, `got ${afterRemat.all_rows}`);
-    check("panel total = M (still editable count correct)", (await panelTotal()) === M, `got ${await panelTotal()}`);
+    check(`${R} pending again`, afterRemat.pending === R, `got ${afterRemat.pending}`);
+    check(`${R} rejected rows kept for audit`, afterRemat.rejected === R, `got ${afterRemat.rejected}`);
+    check(
+      `${SUPPRESSED} 'skipped_opted_out' rows still preserved across re-prepare`,
+      afterRemat.skipped_opted_out === SUPPRESSED,
+      `got ${afterRemat.skipped_opted_out}`,
+    );
+    check(
+      `${2 * R + SUPPRESSED} total rows (new pending + audit rejected + audit opted-out)`,
+      afterRemat.all_rows === 2 * R + SUPPRESSED,
+      `got ${afterRemat.all_rows}`,
+    );
+    check("panel total = R (editable count excludes BOTH audit buckets)", (await panelTotal()) === R, `got ${await panelTotal()}`);
 
     // ---- 6. Guard: a stage with a 'sent' row is refused ----
     console.log("6) guard rejects when already sent:");

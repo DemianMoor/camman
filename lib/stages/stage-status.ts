@@ -219,6 +219,13 @@ const EMPTY_COUNTS: StageSendCounts = {
  *  4. materialized, nothing sent yet          → prepared      (Blue)
  *  5. scheduled but nothing materialized      → scheduled_unprepared (Orange)
  *  6. otherwise                               → draft         (Grey)
+ *
+ * NOT-PREPARED IS DECIDED BY LIVE ROWS, NOT ROW COUNT. With materialized_at NULL
+ * and no pending/sending/sent row, a stage is unprepared no matter how many
+ * 'rejected' or 'skipped_opted_out' audit rows it carries — those record what
+ * will never be sent, not work in flight. Aborting a stage leaves exactly that
+ * signature, and reading the residue as "materializing" stranded the stage with
+ * no Prepare action and no way back without data surgery.
  */
 export function deriveStageOperationalStatus(
   input: DeriveStageStatusInput,
@@ -267,7 +274,20 @@ export function deriveStageOperationalStatus(
   //     but materialized_at isn't set yet, so the audience is INCOMPLETE and must
   //     NOT read "Prepared" (it can't send until complete). Distinct Indigo state
   //     so the operator sees steady progress instead of a stalled/timed-out spinner.
-  if (input.materializedAt == null && hasRows) return "materializing";
+  //
+  //     "In progress" requires at least one row that could still ACT. An aborted
+  //     stage (…/send/abort) resets materialized_at to NULL and cancels its
+  //     pending rows to 'rejected', but deliberately keeps the opt-out audit rows
+  //     — so residue alone must never read as in-flight work. Callers already
+  //     exclude both audit buckets from `total`; this predicate is the structural
+  //     backstop, so a future audit-only status can't re-strand a stage here.
+  //     With no live rows and nothing materialized the stage IS unprepared, and
+  //     falls through to scheduled_unprepared/draft below where Prepare is offered.
+  if (input.materializedAt == null) {
+    const liveRows = c.pending + c.sending + c.sent;
+    if (liveRows > 0) return "materializing";
+    return input.scheduledAt != null ? "scheduled_unprepared" : "draft";
+  }
 
   if (hasRows) {
     // 2. The bulk went out. As long as ANY message was sent (or is actively being

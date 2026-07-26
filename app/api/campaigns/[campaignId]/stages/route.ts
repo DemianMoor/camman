@@ -295,11 +295,16 @@ export async function GET(
       SELECT
         stage_id,
         -- 'rejected' = operator-canceled rows kept for audit (see …/send/abort).
-        -- Exclude from total so a canceled stage (materialized_at reset to NULL)
-        -- reads total=0 → deriveStageOperationalStatus lands it in
-        -- scheduled_unprepared/draft, NOT a stuck "materializing". Don't fold
-        -- rejected into 'failed' either — a cancel is not a delivery failure.
-        count(*) FILTER (WHERE status <> 'rejected')::int AS total,
+        -- 'skipped_opted_out' = recipients suppressed at materialization time
+        -- (migration 0116), also kept for audit and never sendable.
+        -- Exclude BOTH from total so a canceled stage (materialized_at reset to
+        -- NULL) reads total=0 → deriveStageOperationalStatus lands it in
+        -- scheduled_unprepared/draft, NOT a stuck "materializing". Excluding only
+        -- 'rejected' was not enough: abort cancels the pending rows but leaves the
+        -- opt-out audit rows behind, so total stayed >0 and the stage was pinned
+        -- at "Materializing" with the Prepare button hidden. Don't fold either
+        -- bucket into 'failed' — neither is a delivery failure.
+        count(*) FILTER (WHERE status NOT IN ('rejected', 'skipped_opted_out'))::int AS total,
         count(*) FILTER (WHERE status = 'pending')::int AS pending,
         count(*) FILTER (WHERE status = 'sending')::int AS sending,
         count(*) FILTER (WHERE status = 'sent')::int AS sent,

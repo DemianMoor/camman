@@ -76,6 +76,17 @@ export async function POST(
       return { blocked: true as const };
     }
 
+    // Abort must leave the stage indistinguishable from never-prepared, so the
+    // operator can simply Prepare again. Two audit buckets deliberately SURVIVE
+    // this: the rows cancelled to 'rejected' just below, and any
+    // 'skipped_opted_out' rows recorded at materialization time (migration 0116).
+    // Keeping them is the point — they are the record of what was discarded and
+    // who was suppressed. The invariant is therefore on the READ side: nothing
+    // may treat those rows as an audience. Concretely, every stage_sends count
+    // query excludes BOTH from `total`, and deriveStageOperationalStatus decides
+    // "materializing" on live (pending/sending/sent) rows rather than row count.
+    // Leaving the rows behind while a reader counted them is exactly what pinned
+    // aborted stages at "Materializing" with the Prepare button hidden.
     const rejected = (await tx.execute(sql`
       UPDATE stage_sends SET status = 'rejected'
       WHERE stage_id = ${stageId} AND org_id = ${orgId} AND status = 'pending'

@@ -55,6 +55,16 @@ materialization. Counting those made Indigo permanent and hid the Prepare button
 be sent; they are not work in flight, so a stage with none of the live statuses and
 nothing materialized reads `scheduled_unprepared`/`draft` and offers Prepare again.
 
+The Prepare dialog's live "Materializing N…" bar polls
+`GET …/send/materialize-progress`, which counts `stage_sends` rows **excluding
+`rejected`**. Same invariant, one layer down: re-preparing an aborted stage would
+otherwise count the prior run's cancelled rows as progress for the current one
+(stage 1710 read 8,843 against 4,445 real recipients before this was fixed).
+`skipped_opted_out` is deliberately still counted — those rows are created *by*
+the run in progress, so they are real progress against the preflight target, just
+not sendable ones. `complete` continues to come from `materialized_at`, never
+from the count.
+
 `deriveStageOperationalStatus()` returns `null` for stages off the pipeline
 (manual-mode campaigns, archived stages) — callers fall back to the manual-status
 color. The model applies only to `link_mode = 'tracked'` campaigns.

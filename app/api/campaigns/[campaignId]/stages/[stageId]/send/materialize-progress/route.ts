@@ -35,10 +35,24 @@ export async function GET(
     return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION);
   }
 
+  // Exclude 'rejected' — rows cancelled by a previous …/send/abort, kept for
+  // audit. Re-preparing an aborted stage leaves them in place, so an unfiltered
+  // count reported the PRIOR run's residue as progress for the current one:
+  // stage 1710 read 8,843 against 4,445 real recipients (~2x) and the bar started
+  // near-full before a single new row existed. 'rejected' is written ONLY by the
+  // abort path, so it is unambiguously prior-run.
+  //
+  // 'skipped_opted_out' is deliberately NOT excluded: those rows are legitimately
+  // created BY the run in progress (recipients suppressed at materialization
+  // time, migration 0116) and counting them keeps the bar tracking real progress
+  // against the preflight target. The only residue that survives here is any
+  // skipped_opted_out row from the earlier run — 2 rows on stage 1710, 10 on
+  // 1713 — which is a rounding error next to the 4,396/9,179 this filter removes.
   const rows = (await db.execute(sql`
     SELECT
       (SELECT count(*)::int FROM stage_sends ss
-        WHERE ss.stage_id = ${stageId} AND ss.org_id = ${orgId}) AS materialized,
+        WHERE ss.stage_id = ${stageId} AND ss.org_id = ${orgId}
+          AND ss.status <> 'rejected') AS materialized,
       (s.materialized_at IS NOT NULL) AS complete
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id

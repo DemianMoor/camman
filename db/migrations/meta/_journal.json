@@ -848,6 +848,13 @@
       "when": 1786752000000,
       "tag": "0120_textrequest_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1787011200000,
+      "tag": "0125_send_attempts_latency",
+      "breakpoints": true
     }
   ]
 }

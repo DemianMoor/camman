@@ -88,6 +88,10 @@ function buildSendBody(p: AhoiSendParams): URLSearchParams {
 async function ahoiSendSms(p: AhoiSendParams): Promise<SendSmsResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), p.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  // Provider round-trip clock -> send_attempts.latency_ms. Ahoi ALWAYS returns
+  // HTTP 200, so latency is the only send-time signal that can distinguish a
+  // healthy route from a degrading one before the DLRs arrive minutes later.
+  const startedAt = Date.now();
   try {
     const res = await fetch(`${ahoiBaseUrl()}/sms/send`, {
       method: "POST",
@@ -125,6 +129,7 @@ async function ahoiSendSms(p: AhoiSendParams): Promise<SendSmsResult> {
         error: null,
         status: res.status,
         timedOut: false,
+        latencyMs: Date.now() - startedAt,
       };
     }
     return {
@@ -137,6 +142,7 @@ async function ahoiSendSms(p: AhoiSendParams): Promise<SendSmsResult> {
       error: errorMsg ?? `Ahoi returned status="${bodyStatus ?? "unknown"}"`,
       status: res.status,
       timedOut: false,
+      latencyMs: Date.now() - startedAt,
     };
   } catch (err) {
     const aborted = err instanceof Error && err.name === "AbortError";
@@ -150,6 +156,7 @@ async function ahoiSendSms(p: AhoiSendParams): Promise<SendSmsResult> {
       error: aborted ? "Ahoi request timed out" : "Ahoi network error",
       status: 0,
       timedOut: aborted,
+      latencyMs: Date.now() - startedAt,
     };
   } finally {
     clearTimeout(timer);

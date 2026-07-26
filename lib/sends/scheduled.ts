@@ -11,9 +11,16 @@ import {
   type ProviderSendWindow,
 } from "@/lib/quiet-hours";
 import { decideChildSlip } from "@/lib/sends/child-slip";
-import { isProviderPaused, resolvePacingCap } from "@/lib/sends/circuit-breakers";
+import {
+  isProviderPaused,
+  makeSentSinceMemo,
+  resolvePacingCap,
+  resolveSendsPerSecond,
+  type SentSinceMemo,
+} from "@/lib/sends/circuit-breakers";
 import { runStageDrain, type DrainResult, type Sender } from "@/lib/sends/drain";
 import { kickoffStageSend, type KickoffRefusal } from "@/lib/sends/kickoff";
+import { makeTokenBucket, type TokenBucket } from "@/lib/sends/token-bucket";
 
 // The send-scheduled cron. Two phases per tick, both bounded by the SAME
 // per-provider per-tick send budget:
@@ -121,6 +128,10 @@ export interface DrainableRow {
   // The send-from phone. Phase B partitions the drain by this so stages on
   // different numbers drain CONCURRENTLY (a slow phone never blocks a fast one).
   provider_phone_id: number | null;
+  // The PHONE's carrier rate. Selected here (not just inside runStageDrain) so
+  // Phase B can build ONE shared token bucket per phone group and size the
+  // provider-budget reservation proportionally.
+  max_sends_per_second: number | null;
   max_sends_per_run: number | null;
   scheduled_at: string | null;
   sent_at: string | null;
@@ -151,6 +162,7 @@ export async function selectDrainableStages(
            c.org_id          AS org_id,
            s.sms_provider_id AS provider_id,
            s.provider_phone_id AS provider_phone_id,
+           pp.max_sends_per_second AS max_sends_per_second,
            p.max_sends_per_run AS max_sends_per_run,
            s.scheduled_at    AS scheduled_at,
            s.sent_at         AS sent_at,
@@ -161,6 +173,7 @@ export async function selectDrainableStages(
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
+    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
     WHERE c.link_mode = 'tracked'
       AND c.status = 'active'
       -- P7/P8: per-campaign opt-out-rate breaker. Additive next to the per-provider
@@ -237,27 +250,44 @@ const BASE: ScheduledRunResult = {
 // stage can't starve the whole tick — the rest resume next tick.
 const MATERIALIZE_BUDGET_MS = 120_000;
 
-// ─── Phase B fairness time-boxing (head-of-line-blocking fix) ────────────────
-// Phase B drains stages sequentially (ORDER BY scheduled_at, id). Without a cap,
-// the FIRST stage drains its ENTIRE per-tick provider budget before the loop
-// advances — so a stage pinned to a slow phone number (e.g. a 3-sends/sec
-// toll-free) consumes the whole ~300s invocation at that number's rate and
-// starves every stage behind it, even stages on other providers with idle
-// capacity. Observed live: one 3/s stage held ~60K messages on 60/s short codes
-// hostage for 41 minutes.
+// ─── Phase B fairness (head-of-line-blocking fix, then the starvation fix) ───
+// Phase B originally drained stages sequentially (ORDER BY scheduled_at, id), so
+// the FIRST stage consumed the whole ~300s invocation at its own number's rate
+// and starved every stage behind it — one 3/s stage held ~60K messages on 60/s
+// short codes hostage for 41 minutes (live 2026-07-24). That was fixed by
+// partitioning by PHONE and draining the groups concurrently, plus round-robining
+// same-phone stages in PER_STAGE_DRAIN_MS (20s) slices.
 //
-// The fix bounds BOTH how long one stage may drain (PER_STAGE_DRAIN_MS) and how
-// long the whole phase may run (PHASE_B_DEADLINE_MS, with margin under the
-// route's 300s maxDuration). Each stage paces by ITS OWN phone's per-second
-// threshold (unchanged); the time-box only decides when to yield to the next
-// stage. Yielded stages keep their 'pending' rows and resume next tick, so no
-// message is lost — a slow stage just takes more ticks instead of blocking fast
-// ones. Smaller PER_STAGE_DRAIN_MS ⇒ more stages serviced per tick (fairer) and,
-// when a slow phone is present, higher total throughput (less wall-clock spent
-// at the slow rate). Kept modest so a fast 60/s stage still drains a healthy
-// slice (~20s ≈ up to 1,200 rows) before yielding, then resumes next tick.
-const PER_STAGE_DRAIN_MS = 20_000;
-const PHASE_B_DEADLINE_MS = 240_000;
+// The round-robin fixed *ordering* but not *rate*: within one phone group only
+// ONE stage ran at a time, so a phone shared by several stages could never
+// exceed one stage's throughput no matter how many were waiting — measured, a
+// same-phone stage starved to 3.02 msg/s (24 drain sessions of ~18s separated by
+// 68–282s gaps). Same-phone stages now drain CONCURRENTLY too, sharing ONE
+// per-phone token bucket: the carrier rate is enforced by the bucket (where the
+// limit actually lives — the number), not by serializing stages. So the 20s
+// round-robin slice is gone; a stage's only wall-clock bound is the phase
+// deadline.
+//
+// PHASE_B_DEADLINE_MS is the whole phase's budget, measured from run start.
+// Raised 240s → 270s: with the job now leased per phone (an overrun tick can no
+// longer double-send on a number), the old 60s of head-room under the route's
+// 300s maxDuration is no longer buying safety, it is just idle time. The live
+// 14-day histogram showed exactly that — sends by minute-of-cycle ran +0m
+// 136,647 / +1m 169,011 / +2m 169,922 / +3m 163,018 / +4m 127,294: minute +4
+// collapses because the phase stops at 240s. 270s recovers half of it while
+// still reserving ~30s for reconcileStuckStages (which runs AFTER this in the
+// same route) plus the JSON response. The cron stays `*/5`: a 300s period with a
+// 270s phase leaves a 30s settling gap, and shortening the period would only
+// multiply cold starts + preamble work for the same fixed send rate.
+const PHASE_B_DEADLINE_MS = 270_000;
+
+// Max stages drained CONCURRENTLY within ONE phone group. They share the phone's
+// single token bucket, so this does NOT raise the number's emitted rate — it
+// only stops one stage from monopolizing the number while its siblings idle.
+// Bounded because each concurrent stage is a live drain loop holding DB
+// statements; 3 is enough to interleave a small set of same-phone stages without
+// multiplying the pooler load (see db/client.ts `max`).
+const STAGE_CONCURRENCY_PER_PHONE = 3;
 
 // Max phone-groups drained CONCURRENTLY (Phase 1: phone-partitioned drain). Each
 // group is internally sequential (one connection at a time) so this bounds the
@@ -307,11 +337,27 @@ export function phoneDrainLeaseKey(providerPhoneId: number | null, stageId: numb
 }
 
 // Per-reservation slice of a provider's per-tick send budget (max_sends_per_run).
-// The time-box caps a stage's real work per slice to rate×PER_STAGE_DRAIN_MS
-// (≤1,200 for a 60/s phone), so this comfortably covers one slice; the unused
-// remainder is released immediately so concurrent same-provider phone groups
-// share the provider cap fairly instead of one grabbing it all.
-const BUDGET_RESERVE_SLICE = 5_000;
+//
+// RE-DERIVED. The old flat 5,000 was sized against the retired 20s round-robin
+// slice: a stage could only do rate×20s ≈ 1,200 rows per turn, so 5,000 was a
+// comfortable over-grant. With the round-robin gone a single drain call now runs
+// until the PHASE deadline, i.e. up to rate×270s ≈ 16,200 rows on a 60/s phone —
+// a flat 5,000 would be re-reserved constantly at high rates and would still be
+// a wild over-grant at 3/s (5,000 rows is ~28 minutes of a toll-free's output,
+// so ONE slow stage would reserve a provider's whole per-tick cap and starve its
+// siblings). Sizing the reservation as ~BUDGET_RESERVE_SECONDS of the phone's
+// OWN sending makes it proportional at every rate: ~8 reservations across a
+// 270s phase, frequent enough that concurrent same-provider groups interleave,
+// rare enough that the in-memory reserve/release is noise. Clamped so a
+// pathological rate can't produce a degenerate grant.
+const BUDGET_RESERVE_SECONDS = 30;
+const MIN_BUDGET_RESERVE = 200;
+const MAX_BUDGET_RESERVE = 5_000;
+
+function budgetReserveFor(sendsPerSecond: number): number {
+  const wanted = Math.floor(sendsPerSecond * BUDGET_RESERVE_SECONDS);
+  return Math.min(MAX_BUDGET_RESERVE, Math.max(MIN_BUDGET_RESERVE, wanted));
+}
 
 // Per-provider per-tick send budget as a SHARED, ATOMIC reservation. reserve()
 // and release() are synchronous (no await between read and write), so concurrent
@@ -486,9 +532,15 @@ export async function runScheduledSends(
     sendSms?: Sender;
     maxStages?: number;
     // Injectable for tests; defaults to the real per-stage drain. maxRows is the
-    // stage's remaining slice of its provider's per-tick send budget; maxDurationMs
-    // is its wall-clock fairness slice (see PER_STAGE_DRAIN_MS).
-    runDrain?: (stageId: number, maxRows: number, maxDurationMs?: number) => Promise<DrainResult>;
+    // stage's remaining slice of its provider's per-tick send budget;
+    // maxDurationMs is the wall-clock left in the phase; `shared` carries the
+    // per-phone pacer + the invocation-wide dedup set and 24h-count memo.
+    runDrain?: (
+      stageId: number,
+      maxRows: number,
+      maxDurationMs?: number,
+      shared?: { bucket: TokenBucket; seenPhones: Set<string>; sentSinceMemo: SentSinceMemo },
+    ) => Promise<DrainResult>;
   },
 ): Promise<ScheduledRunResult> {
   const now = opts?.now ?? new Date();
@@ -504,8 +556,26 @@ export async function runScheduledSends(
   const orgId = opts?.orgId;
   const runDrain =
     opts?.runDrain ??
-    ((stageId: number, maxRows: number, maxDurationMs?: number) =>
-      runStageDrain(dbc, { stageId, sendSms, isEnabled, isOrgEnabled, maxRows, maxDurationMs }));
+    ((
+      stageId: number,
+      maxRows: number,
+      maxDurationMs?: number,
+      shared?: { bucket: TokenBucket; seenPhones: Set<string>; sentSinceMemo: SentSinceMemo },
+    ) =>
+      runStageDrain(dbc, {
+        stageId, sendSms, isEnabled, isOrgEnabled, maxRows, maxDurationMs,
+        bucket: shared?.bucket,
+        seenPhones: shared?.seenPhones,
+        sentSinceMemo: shared?.sentSinceMemo,
+      }));
+  // INVOCATION-WIDE, shared by every stage on every phone in this tick:
+  //  • seenPhones — org-scoped in-flight dedup set. The 1-hour gate's committed
+  //    'sent' probe can't see a sibling slice's not-yet-committed dispatch, and
+  //    slices are now genuinely concurrent both within a phone and across
+  //    phones, so the set has to outlive a single batch (and a single stage).
+  //  • sentSinceMemo — the 24h rolling count (the drain's slowest statement).
+  const seenPhones = new Set<string>();
+  const sentSinceMemo = makeSentSinceMemo();
 
   // Master kill-switch: with global sending off, no-op entirely — don't
   // materialize, don't drain, don't mark missed. Everything waits for the next
@@ -649,43 +719,47 @@ export async function runScheduledSends(
   }
 
   // ─── Phase B: drain stages with pending rows (incl. just-materialized) ──────
-  // PHASE 1+2 (phone-partitioned concurrent + round-robin fairness). Stages are
-  // grouped by their send-from PHONE and the groups drain CONCURRENTLY, so a slow
-  // phone (e.g. a 3/s toll-free) never blocks a fast one (a 60/s short code) on a
-  // different number — the head-of-line collapse of 2026-07-24. Within a group
-  // (one phone, one shared carrier rate) stages round-robin in PER_STAGE_DRAIN_MS
-  // slices so no stage starves a same-phone sibling. Each stage still paces to its
-  // OWN phone's max_sends_per_second inside runStageDrain; the partitioning only
-  // decides what runs in parallel. The per-provider per-tick budget is a shared,
-  // atomic reservation so concurrent same-provider groups can't overshoot it.
-  // Each group additionally runs under a PER-PHONE `cron_locks` lease so an
-  // OVERLAPPING invocation (an overrun tick meeting the next one) can never put
-  // two drain loops on the same NUMBER at once — see PHONE_DRAIN_LEASE_MS.
+  // Stages are grouped by their send-from PHONE. Groups drain CONCURRENTLY, so a
+  // slow phone (a 3/s toll-free) never blocks a fast one (a 60/s short code) on a
+  // different number — the head-of-line collapse of 2026-07-24. WITHIN a group
+  // the stages ALSO drain concurrently (≤ STAGE_CONCURRENCY_PER_PHONE) sharing a
+  // single per-phone TOKEN BUCKET, so the number's carrier rate is enforced by
+  // the bucket rather than by serializing stages — the fix for same-phone
+  // starvation (a stage held to 3.02 msg/s by its siblings' turn-taking). The
+  // per-provider per-tick budget stays a shared, atomic reservation so concurrent
+  // same-provider groups can't overshoot it. Each group runs under a PER-PHONE
+  // `cron_locks` lease so an OVERLAPPING invocation (an overrun tick meeting the
+  // next one) can never put two drain loops on the same NUMBER — see
+  // PHONE_DRAIN_LEASE_MS.
   const drainable = await selectDrainableStages(dbc, { now, orgId, maxStages });
 
   const budget = makeProviderBudget();
   const drainedStageIds = new Set<number>();
   const phaseDeadlinePassed = () => Date.now() - runStartedAt >= PHASE_B_DEADLINE_MS;
 
-  // Drain ONE stage for at most one fairness slice. Mutates `result` + the shared
-  // budget; returns true iff the stage yielded on the time-box with pending rows
-  // left (so the round-robin should revisit it THIS tick). All per-stage gates
-  // (pause / budget / window / sent_at stamp) are unchanged from the sequential
-  // version — only the surrounding control flow changed.
-  const drainStageSlice = async (row: DrainableRow): Promise<boolean> => {
+  // Drain ONE stage for one budget reservation. Mutates `result` + the shared
+  // budget; returns true iff the drain soft-yielded with pending rows left (so
+  // the caller should come back to it THIS tick). All per-stage gates (pause /
+  // budget / window / sent_at stamp) are unchanged — only the surrounding
+  // control flow and the pacer did.
+  const drainStageSlice = async (
+    row: DrainableRow,
+    shared: { bucket: TokenBucket; seenPhones: Set<string>; sentSinceMemo: SentSinceMemo },
+  ): Promise<boolean> => {
     if (row.provider_id != null && (await isProviderPaused(dbc, row.provider_id))) {
       result.paused_skipped++;
       return false;
     }
 
-    // Per-provider per-tick budget gate. Reserve a bounded slice atomically; the
-    // time-box caps real work well under it, and the unused part is released after
-    // the drain so concurrent same-provider groups share the cap.
+    // Per-provider per-tick budget gate. Reserve a bounded slice atomically,
+    // sized as ~BUDGET_RESERVE_SECONDS of THIS phone's own sending; the unused
+    // part is released after the drain so concurrent same-provider groups share
+    // the cap instead of one grabbing it all.
     let budgetGranted = Number.POSITIVE_INFINITY;
     const providerId = row.provider_id;
     if (providerId != null) {
       const cap = resolvePacingCap(row.max_sends_per_run);
-      budgetGranted = budget.reserve(providerId, cap, BUDGET_RESERVE_SLICE);
+      budgetGranted = budget.reserve(providerId, cap, budgetReserveFor(shared.bucket.rate));
       if (budgetGranted <= 0) {
         result.budget_held++;
         return false;
@@ -736,12 +810,13 @@ export async function runScheduledSends(
       return false;
     }
 
-    // Fairness slice: at most PER_STAGE_DRAIN_MS, never past the phase deadline.
-    const stageMaxDurationMs = Math.min(
-      PER_STAGE_DRAIN_MS,
-      PHASE_B_DEADLINE_MS - (Date.now() - runStartedAt),
-    );
-    const drain = await runDrain(row.stage_id, budgetGranted, stageMaxDurationMs);
+    // Wall-clock left in the phase. No per-stage sub-slice any more: same-phone
+    // stages now run CONCURRENTLY under one token bucket, so a long-running stage
+    // no longer blocks a sibling and doesn't need to be interrupted for it. The
+    // drain checks this at SLICE boundaries and hands any claimed-but-undispatched
+    // rows back to 'pending' before it yields.
+    const stageMaxDurationMs = PHASE_B_DEADLINE_MS - (Date.now() - runStartedAt);
+    const drain = await runDrain(row.stage_id, budgetGranted, stageMaxDurationMs, shared);
     drainedStageIds.add(row.stage_id);
     result.sent += drain.sent;
     result.failed += drain.failed;
@@ -771,10 +846,12 @@ export async function runScheduledSends(
     return drain.ok && !drain.halted && drain.remaining > 0;
   };
 
-  // One phone's stages, round-robin: each round gives every still-active stage one
-  // slice; stages with pending rows left carry to the next round until the phase
-  // deadline or they all drain. Sequential WITHIN the group so the shared carrier
-  // rate is respected; groups run concurrently via mapWithConcurrency below.
+  // One phone's stages. They drain CONCURRENTLY (bounded by
+  // STAGE_CONCURRENCY_PER_PHONE) sharing ONE token bucket, so the number's
+  // carrier rate is enforced by the bucket rather than by serializing stages —
+  // this is what fixes the same-phone starvation (a stage held to 3.02 msg/s by
+  // its siblings' 20s round-robin turns). Each worker keeps re-draining its stage
+  // until it has no pending rows left, it hard-stops, or the phase deadline hits.
   //
   // The whole group runs under a PER-PHONE lease so a still-running (overrun)
   // invocation's drain of this number is never doubled by the next tick. A phone
@@ -783,15 +860,16 @@ export async function runScheduledSends(
   const drainPhoneGroup = async (stages: DrainableRow[]): Promise<void> => {
     const leaseKey = phoneDrainLeaseKey(stages[0].provider_phone_id, stages[0].stage_id);
     const leased = await withKeyedLease(dbc, leaseKey, PHONE_DRAIN_LEASE_MS, async () => {
-      let active = stages;
-      while (active.length > 0 && !phaseDeadlinePassed()) {
-        const next: DrainableRow[] = [];
-        for (const row of active) {
-          if (phaseDeadlinePassed()) break;
-          if (await drainStageSlice(row)) next.push(row);
+      const shared = {
+        bucket: makeTokenBucket(resolveSendsPerSecond(stages[0].max_sends_per_second)),
+        seenPhones,
+        sentSinceMemo,
+      };
+      await mapWithConcurrency(stages, STAGE_CONCURRENCY_PER_PHONE, async (row) => {
+        while (!phaseDeadlinePassed()) {
+          if (!(await drainStageSlice(row, shared))) break;
         }
-        active = next;
-      }
+      });
     });
     if (!leased.ran) result.phone_lease_skipped++;
   };

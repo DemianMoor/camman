@@ -58,6 +58,10 @@ export const textrequestAdapter: SmsProviderAdapter = {
       error: "textrequest: send not implemented (Phase 1 skeleton)",
       status: 0,
       timedOut: false,
+      // No request is issued, so there is no round-trip to time. Phase 2 must
+      // set this from a clock around its POST /messages fetch — the drain
+      // persists it to send_attempts.latency_ms (see lib/sends/texthub.ts).
+      latencyMs: null,
     };
   },
   buildRedactedRequest(p: NormalizedSendParams): string {

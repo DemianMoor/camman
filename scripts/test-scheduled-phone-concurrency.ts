@@ -1,8 +1,11 @@
-// Phase 1+2 verification for the send-scheduled cron's Phase B:
+// Verification for the send-scheduled cron's Phase B orchestration:
 //   • phone-PARTITIONED CONCURRENT drain — stages on DIFFERENT phones drain in
 //     parallel (a slow phone never blocks a fast one on another number),
-//   • round-robin WITHIN a phone — a stage with more pending than one fairness
-//     slice is revisited in the same tick, sharing the phone with its siblings,
+//   • SAME-PHONE stages ALSO drain concurrently — they share one per-phone token
+//     bucket, so the carrier rate is enforced by the bucket instead of by
+//     serializing stages (the same-phone starvation fix; this case previously
+//     asserted the OPPOSITE — see Case 2),
+//   • a stage with rows left is revisited in the same tick until it drains,
 //   • per-provider per-tick budget stays a hard ceiling under concurrency.
 //
 // Everything runs inside ONE transaction that is ALWAYS rolled back (throwaway
@@ -166,24 +169,31 @@ async function main() {
         check("drains OVERLAPPED — maxInFlight 2 (concurrent by phone)", bf.max() === 2, `maxInFlight=${bf.max()}`);
       }
 
-      // ── Case 2: two stages on the SAME phone drain SEQUENTIALLY ───────────────
-      console.log("Case 2: stages on one phone drain sequentially (shared carrier rate)");
+      // ── Case 2: two stages on the SAME phone drain CONCURRENTLY ──────────────
+      // CHANGED BEHAVIOR. This case used to assert maxInFlight 1: same-phone
+      // stages took turns in 20s round-robin slices, which fixed *ordering* but
+      // capped a shared number at ONE stage's throughput — live, a same-phone
+      // stage starved to 3.02 msg/s. They now overlap and share a single
+      // per-phone token bucket, so the carrier rate is enforced where the limit
+      // actually lives (the number) instead of by serializing stages. The rate
+      // itself is asserted in scripts/test-drain-throughput.ts.
+      console.log("Case 2: stages on one phone drain CONCURRENTLY (shared token bucket)");
       {
         const f = await mkFixture();
         const prov = await f.mkProvider(100_000);
         const ph = await f.mkPhone(prov, 60);
         const s1 = await f.mkStage(prov, ph, 1);
         const s2 = await f.mkStage(prov, ph, 1);
-        // parties=2 can NEVER be met (one phone group = one drain at a time), so the
-        // first call times out (300ms) then the second releases — maxInFlight 1.
-        const bf = makeBarrierFake(new Map([[s1, 1], [s2, 1]]), 2, 300);
+        // parties=2 IS reachable now — both same-phone drains are in flight at
+        // once, so the barrier releases instead of timing out.
+        const bf = makeBarrierFake(new Map([[s1, 1], [s2, 1]]), 2, 2000);
         const res = await runTick(f.orgId, bf.fake);
         check("both same-phone stages drained", res.drained === 2, JSON.stringify(res));
-        check("drains did NOT overlap — maxInFlight 1 (sequential within phone)", bf.max() === 1, `maxInFlight=${bf.max()}`);
+        check("drains OVERLAPPED — maxInFlight 2 (no same-phone starvation)", bf.max() === 2, `maxInFlight=${bf.max()}`);
       }
 
-      // ── Case 3: round-robin WITHIN a phone (revisit until drained) ────────────
-      console.log("Case 3: a big stage is revisited in-tick (round-robin), not drained in one shot");
+      // ── Case 3: a stage with rows left is revisited until drained ────────────
+      console.log("Case 3: a big stage is revisited in-tick, not drained in one shot");
       {
         const f = await mkFixture();
         const prov = await f.mkProvider(100_000);
@@ -203,7 +213,7 @@ async function main() {
         const res = await runTick(f.orgId, fake);
         check("stage fully drained across slices (sent 8)", res.sent === 8, JSON.stringify(res));
         check("drained counts the stage ONCE (distinct)", res.drained === 1, JSON.stringify(res));
-        check("round-robin revisited the stage 3× (ceil 8/3)", callsByStage.get(s1) === 3, `calls=${callsByStage.get(s1)}`);
+        check("revisited the stage 3× until drained (ceil 8/3)", callsByStage.get(s1) === 3, `calls=${callsByStage.get(s1)}`);
       }
 
       // ── Case 4: per-provider per-tick budget is a hard ceiling ────────────────

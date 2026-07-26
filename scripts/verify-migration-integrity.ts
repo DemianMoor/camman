@@ -76,7 +76,28 @@ async function main() {
       console.log(`  ✓ Record counts match (${rows.length})`);
     }
 
-    for (const entry of journal.entries) {
+    // `idx` must be strictly increasing (it is the apply order), but it is NOT
+    // required to be dense: a migration authored on a branch that must land
+    // AFTER an unmerged branch's migrations deliberately leaves a gap (e.g.
+    // 0125 while 0121–0124 live on feat/textrequest-send). Index by ARRAY
+    // POSITION below — the journal array is the apply order — and only assert
+    // monotonicity here. Using `idx` as an array subscript crashed on any gap.
+    for (let i = 1; i < journal.entries.length; i++) {
+      if (journal.entries[i].idx <= journal.entries[i - 1].idx) {
+        console.log(
+          `  ✗ journal idx not increasing: ${journal.entries[i - 1].tag} (idx ${journal.entries[i - 1].idx}) → ${journal.entries[i].tag} (idx ${journal.entries[i].idx})`,
+        );
+        issues++;
+      }
+    }
+    const gapped = journal.entries.some((e, i) => e.idx !== i);
+    if (gapped) {
+      console.log(
+        "  ⚠ journal idx has a GAP (reserved for an unmerged branch's migrations) — cross-check runs by apply order",
+      );
+    }
+
+    for (const [i, entry] of journal.entries.entries()) {
       const sqlPath = resolve(
         process.cwd(),
         `db/migrations/${entry.tag}.sql`,
@@ -104,7 +125,7 @@ async function main() {
       // Drizzle hashes the migration SQL content. We compute SHA-256 here as a
       // sanity check against the recorded hash.
       const computedHash = createHash("sha256").update(sqlContent).digest("hex");
-      const recordHash = rows[entry.idx]?.hash;
+      const recordHash = rows[i]?.hash;
       const hashMatches = recordHash === computedHash;
 
       const snapshot = JSON.parse(
@@ -112,10 +133,10 @@ async function main() {
       ) as SnapshotMeta;
 
       const previousSnapshotPath =
-        entry.idx > 0
+        i > 0
           ? resolve(
               process.cwd(),
-              `db/migrations/meta/${journal.entries[entry.idx - 1].tag.split("_")[0]}_snapshot.json`,
+              `db/migrations/meta/${journal.entries[i - 1].tag.split("_")[0]}_snapshot.json`,
             )
           : null;
       const expectedPrevId = previousSnapshotPath
@@ -125,8 +146,7 @@ async function main() {
             ) as SnapshotMeta
           ).id
         : undefined;
-      const prevIdMatches =
-        entry.idx === 0 || snapshot.prevId === expectedPrevId;
+      const prevIdMatches = i === 0 || snapshot.prevId === expectedPrevId;
 
       console.log(
         `  ${entry.tag}: ` +

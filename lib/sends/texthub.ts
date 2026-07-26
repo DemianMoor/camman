@@ -34,6 +34,14 @@ export interface SendSmsResult {
   error: string | null;
   status: number; // HTTP status (0 = network/timeout)
   timedOut: boolean; // true ⇒ aborted (may have landed) vs a connection failure
+  // Wall-clock ms for the provider round-trip (request issued → body read),
+  // persisted to `send_attempts.latency_ms`. This is the ONE number the drain
+  // could not previously observe: `send_attempts` records what the provider
+  // said but never how long it took, so "is the provider slow or are we?" was
+  // unanswerable from stored data. Optional so existing injected test senders
+  // (scripts/verify-drain.ts et al.) and the not-yet-implemented adapters keep
+  // compiling; null ⇒ not measured, never 0.
+  latencyMs?: number | null;
 }
 
 // Strict suppression gate. TextHub rejects a number it considers
@@ -77,6 +85,10 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
     () => controller.abort(),
     params.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
+  // Provider round-trip clock. Measured around the fetch + body read (that's the
+  // real time the drain's slice is blocked on), captured on EVERY exit path
+  // including timeouts/network errors — a slow failure is the case worth seeing.
+  const startedAt = Date.now();
   try {
     const res = await fetch(buildSendUrl(params), {
       method: "GET",
@@ -115,6 +127,7 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
         error: response ?? `TextHub HTTP ${res.status}`,
         status: res.status,
         timedOut: false,
+        latencyMs: Date.now() - startedAt,
       };
     }
     return {
@@ -127,6 +140,7 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
       error: null,
       status: res.status,
       timedOut: false,
+      latencyMs: Date.now() - startedAt,
     };
   } catch (err) {
     const aborted = err instanceof Error && err.name === "AbortError";
@@ -140,6 +154,7 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
       error: aborted ? "TextHub request timed out" : "TextHub network error",
       status: 0,
       timedOut: aborted,
+      latencyMs: Date.now() - startedAt,
     };
   } finally {
     clearTimeout(timer);

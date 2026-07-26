@@ -4,6 +4,7 @@ import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { can, type Role } from "@/lib/permissions";
 import {
+  ATTEMPTS_INSERT_CHUNK,
   ceilingBreached,
   countSentSince,
   type DrainStopReason,
@@ -11,9 +12,11 @@ import {
   isProviderPaused,
   latchPause,
   resolve24hCap,
+  resolveDrainBatchSize,
   resolveMinuteCap,
   resolvePacingCap,
   resolveSendsPerSecond,
+  type SentSinceMemo,
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
@@ -23,6 +26,7 @@ import { resolveKeyForStage } from "@/lib/sends/provider-credential";
 import { getAdapter, UnknownProviderError } from "@/lib/sends/providers/registry";
 import type { NormalizedSendParams } from "@/lib/sends/providers/types";
 import { buildSendUrl, type SendSmsResult } from "@/lib/sends/texthub";
+import { makeTokenBucket, type TokenBucket } from "@/lib/sends/token-bucket";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -114,11 +118,42 @@ function envSendEnabled(): boolean {
   return process.env.SEND_ENABLED === "true";
 }
 
-// Pacing sleep for the per-second rate limiter (see runStageDrain). Plain
-// setTimeout — the drain runs in a serverless invocation, so a sub-second sleep
-// just yields wall-clock against the 300s budget.
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Split an array into fixed-size chunks (used to bound the multi-row
+// `send_attempts` INSERT — see ATTEMPTS_INSERT_CHUNK).
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+// `send_attempts.latency_ms` ships in migration 0125, which CANNOT be applied
+// until 0121–0124 (unmerged, another branch) land first. Rather than couple this
+// code to a migration it can't control, the attempt INSERT omits the column when
+// it isn't there yet: sending keeps working on either schema, and latency starts
+// being recorded the moment the migration applies — no deploy ordering to get
+// wrong, and no window where a send fails because a column is missing.
+//
+// Probed ONCE per process (serverless instances are short-lived, so a `false`
+// memoized just before the migration lands is corrected within minutes by the
+// next cold start) and never on the per-batch hot path.
+let latencyColumnProbe: Promise<boolean> | null = null;
+function hasLatencyColumn(dbc: DbOrTx): Promise<boolean> {
+  latencyColumnProbe ??= dbc
+    .execute(sql`
+      SELECT 1 AS present FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'send_attempts'
+        AND column_name = 'latency_ms'
+      LIMIT 1
+    `)
+    .then((rows) => (rows as unknown as unknown[]).length > 0)
+    .catch(() => false);
+  return latencyColumnProbe;
+}
+
+// Test seam — lets a harness assert both schema shapes without a process restart.
+export function __resetLatencyColumnProbe(): void {
+  latencyColumnProbe = null;
 }
 
 // Resolve the send function for a stage's provider. Injected fake (verify-drain)
@@ -191,6 +226,22 @@ export async function runStageDrain(
     // pacing target). Production resolves it from max_sends_per_second; this is
     // the test injection point (1 = effectively serial).
     concurrency?: number;
+    // PER-PHONE pacer, shared by every stage on the same sending number. The
+    // carrier's `max_sends_per_second` is a limit on the NUMBER, and same-phone
+    // stages now drain CONCURRENTLY, so a pacer private to one drain would let N
+    // concurrent stages emit N × rate. The scheduler builds one bucket per phone
+    // group and passes it here. Omitted ⇒ a private bucket at this stage's own
+    // rate (the manual/single-stage path, and every existing test).
+    bucket?: TokenBucket;
+    // ORG-WIDE in-flight dedup set, shared across the whole invocation. The
+    // 1-hour gate below reads COMMITTED 'sent' rows plus this set; without a
+    // shared set two concurrent slices (same phone or different phones) could
+    // both pass the same number in the window between dispatch and commit.
+    // Keyed `${orgId}:${phone}`. Omitted ⇒ a private set (per-drain scope).
+    seenPhones?: Set<string>;
+    // Per-invocation memo for the 24h rolling count (the drain's slowest
+    // preamble statement). Omitted ⇒ the un-memoized read, unchanged.
+    sentSinceMemo?: SentSinceMemo;
   },
 ): Promise<DrainResult> {
   const isEnabled = opts.isEnabled ?? envSendEnabled;
@@ -198,7 +249,6 @@ export async function runStageDrain(
     opts.isOrgEnabled ?? ((orgId: string) => getOrgSendsEnabled(dbc, orgId));
   const isOrgPaused =
     opts.isOrgPaused ?? ((orgId: string) => getOrgSendsPaused(dbc, orgId));
-  const batchSize = opts.batchSize ?? 50;
 
   const ctx = (await dbc.execute(sql`
     SELECT s.sms_provider_id AS provider_id,
@@ -307,6 +357,18 @@ export async function runStageDrain(
   // number's instantaneous limit. NULL phone/rate ⇒ default. opts.concurrency
   // overrides for tests.
   const rate = Math.max(1, opts.concurrency ?? resolveSendsPerSecond(stage.max_sends_per_second));
+  // Pacing now lives in a bucket instead of a trailing per-slice sleep. Shared
+  // (per-phone, injected) whenever several stages sit on one number; private
+  // otherwise. See lib/sends/token-bucket.ts for why the old sleep was dead code
+  // on any phone above 50/s.
+  const bucket = opts.bucket ?? makeTokenBucket(rate);
+  // Resolved once per drain (memoized process-wide) — see hasLatencyColumn.
+  const withLatency = await hasLatencyColumn(dbc);
+  // Rows per claimed batch, sized as ~BATCH_SECONDS of THIS phone's sending so
+  // the fixed ~2.3s preamble is amortized at any rate. Explicit opts.batchSize
+  // still wins (tests pin it).
+  const batchSize = opts.batchSize ?? resolveDrainBatchSize(rate);
+  const seenPhones = opts.seenPhones ?? new Set<string>();
 
   let sent = 0;
   let failed = 0;
@@ -374,11 +436,21 @@ export async function runStageDrain(
     // SOFT rolling ceilings — stop the run (leave rows pending), do NOT pause.
     // Counted per-provider incl. this run's own sends, so the rate self-throttles
     // without one provider's volume tripping another provider's ceiling.
+    //
+    // The 60s count stays a FRESH read (1.5ms server-side, and a one-minute
+    // window genuinely moves within a tick). The 24h count is the drain's single
+    // slowest statement (59.29ms) and the only one that scales with history, so
+    // it goes through the per-invocation memo when one is supplied — which still
+    // folds in this run's own sends and reads through near the cap, so the
+    // ceiling behaves identically. See makeSentSinceMemo.
     if (ceilingBreached(await countSentSince(dbc, orgId, providerId, 60), minuteCap)) {
       stopReason = "rate_minute";
       break;
     }
-    if (ceilingBreached(await countSentSince(dbc, orgId, providerId, 86_400), cap24h)) {
+    const count24h = opts.sentSinceMemo
+      ? await opts.sentSinceMemo.count(dbc, orgId, providerId, 86_400, cap24h)
+      : await countSentSince(dbc, orgId, providerId, 86_400);
+    if (ceilingBreached(count24h, cap24h)) {
       stopReason = "rate_24h";
       break;
     }
@@ -442,7 +514,18 @@ export async function runStageDrain(
     // marked 'skipped_duplicate' (terminal) and never dispatched. Two sources:
     //   (a) already-'sent' rows in the DB within the window (incl. this run's
     //       earlier slices, which committed sent_at per slice), and
-    //   (b) a phone appearing more than once WITHIN this batch (kept once).
+    //   (b) a phone this INVOCATION has already dispatched to — tracked in
+    //       `seenPhones`, keyed `${orgId}:${phone}`.
+    //
+    // (b) used to be a set scoped to ONE batch. That closed the intra-batch case
+    // only: two in-flight slices (now genuinely concurrent — same-phone stages
+    // drain in parallel, and phone groups always did) could both read the
+    // committed-'sent' probe BEFORE either slice's UPDATE landed and both pass
+    // the same number. Promoting the set to the whole invocation closes that race
+    // on the dispatch side; the CROSS-invocation case is closed by the per-phone
+    // lease (lib/sends/scheduled.ts). Direction of error is conservative: a phone
+    // attempted earlier in the run is skipped even if that attempt failed —
+    // never a double-text.
     const batchPhones = [...new Set(notOptedOut.map((c) => c.phone))];
     const recentRows = (await dbc.execute(sql`
       SELECT DISTINCT phone FROM stage_sends
@@ -452,14 +535,14 @@ export async function runStageDrain(
         AND phone IN (${sql.join(batchPhones.map((p) => sql`${p}`), sql`, `)})
     `)) as unknown as { phone: string }[];
     const recentPhones = new Set(recentRows.map((r) => r.phone));
-    const seenThisBatch = new Set<string>();
     const toSend: ClaimedRow[] = [];
     const skipIds: string[] = [];
     for (const c of notOptedOut) {
-      if (recentPhones.has(c.phone) || seenThisBatch.has(c.phone)) {
+      const seenKey = `${orgId}:${c.phone}`;
+      if (recentPhones.has(c.phone) || seenPhones.has(seenKey)) {
         skipIds.push(c.id);
       } else {
-        seenThisBatch.add(c.phone);
+        seenPhones.add(seenKey);
         toSend.push(c);
       }
     }
@@ -493,11 +576,37 @@ export async function runStageDrain(
     // breaker fold the results IN CLAIMED ORDER afterward (JS only), so
     // consecutive-failure semantics are unchanged; a slice's sends have all
     // already fired/persisted by the time the breaker trips (≤ `rate`-1 sends
-    // past the threshold — an acceptable widening of a heuristic stop). After each
-    // slice we PACE to the provider's per-second `rate` (see below the fold).
+    // past the threshold — an acceptable widening of a heuristic stop). BEFORE
+    // each slice we take its budget from the per-phone token bucket, which is
+    // what actually enforces `max_sends_per_second` across every stage on the
+    // number (the old trailing sleep could not — see lib/sends/token-bucket.ts).
+    // How far into `toSend` we have actually DISPATCHED (and persisted). Anything
+    // past this that we claimed must be returned to 'pending' before we leave.
+    let dispatchedUpTo = 0;
+    let timedOutSlice = false;
     for (let off = 0; off < toSend.length && !stopReason; off += rate) {
-      const sliceStart = Date.now();
+      // FAIRNESS TIME-BOX at SLICE granularity. Checked between batches only, a
+      // batch now sized at ~BATCH_SECONDS of sending would overshoot the slice's
+      // wall-clock budget by most of a batch. Checking here is safe because it
+      // is POST-PERSIST (the previous slice is fully written) and the rows we
+      // have claimed but not yet dispatched are handed straight back to
+      // 'pending' below — they were never sent, so at-most-once holds.
+      //
+      // `off > 0` — a claimed batch ALWAYS dispatches at least one slice. Without
+      // it, a time-box shorter than the batch preamble would claim rows, send
+      // none, release them, and repeat forever: zero forward progress on every
+      // tick. Overshoot is therefore bounded to one slice (≤ `rate` messages ≈ 1s
+      // of the phone's output), not a whole batch.
+      if (off > 0 && opts.maxDurationMs != null && Date.now() - drainStartedAt >= opts.maxDurationMs) {
+        timedOutSlice = true;
+        break;
+      }
       const slice = toSend.slice(off, off + rate);
+      // Take the slice's budget from the PER-PHONE bucket, then fire it. The
+      // burst shape is deliberately UNCHANGED from the sleep this replaced (up to
+      // `rate` in parallel, then wait out the second) — see the "emission shape"
+      // note in lib/sends/token-bucket.ts for why smoothing it is not free here.
+      await bucket.take(slice.length);
       const results = await Promise.all(
         slice.map((c) =>
           sendSms({
@@ -567,15 +676,24 @@ export async function runStageDrain(
           leadId: c.lead_id,
         });
         const attemptNumber = attemptsById.get(c.id) ?? 1;
-        return sql`(${orgId}, ${c.id}, ${attemptNumber}, ${requestRedacted}, ${res.status},
-                    ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification})`;
+        const base = sql`${orgId}, ${c.id}, ${attemptNumber}, ${requestRedacted}, ${res.status},
+                    ${res.rawBody}, ${res.ok}, ${res.messageId}, ${res.error}, ${classification}`;
+        return withLatency
+          ? sql`(${base}, ${res.latencyMs ?? null})`
+          : sql`(${base})`;
       });
-      await dbc.execute(sql`
-        INSERT INTO send_attempts
-          (org_id, stage_send_id, attempt_number, request_redacted, http_status,
-           raw_body, ok, message_id, error, classification)
-        VALUES ${sql.join(attVals, sql`, `)}
-      `);
+      // CHUNKED: a slice can be up to ABSOLUTE_MAX_SENDS_PER_SECOND rows wide and
+      // every row carries a verbatim provider body, so one statement per slice
+      // could become enormous. Each chunk is still ONE round-trip, so this costs
+      // nothing at real rates (60/s ⇒ 1 chunk).
+      for (const part of chunk(attVals, ATTEMPTS_INSERT_CHUNK)) {
+        await dbc.execute(sql`
+          INSERT INTO send_attempts
+            (org_id, stage_send_id, attempt_number, request_redacted, http_status,
+             raw_body, ok, message_id, error, classification${withLatency ? sql`, latency_ms` : sql``})
+          VALUES ${sql.join(part, sql`, `)}
+        `);
+      }
 
       // Count + failure-spike breaker, folded IN CLAIMED ORDER (JS only). The
       // whole slice's rows are already persisted above, so we count every fired
@@ -607,20 +725,31 @@ export async function runStageDrain(
         }
       }
 
-      // PACE to the per-second rate: a slice of N sends must occupy ≥ N/rate
-      // seconds, so sustained throughput never bursts above `rate`/sec (the
-      // provider's hard limit). Sleep only the shortfall — when real send latency
-      // already filled the window, no sleep. Skipped once we're stopping
-      // (stopReason) since no further slices follow. Proportional to slice size,
-      // so a partial tail slice (or a batchSize-1 test) waits a tiny fraction,
-      // not a full second.
-      if (!stopReason) {
-        const targetMs = (slice.length / rate) * 1000;
-        const elapsed = Date.now() - sliceStart;
-        if (elapsed < targetMs) await sleep(targetMs - elapsed);
-      }
+      // Fold this slice's sends into the 24h memo so its cached value keeps
+      // self-throttling exactly like the un-memoized read did.
+      opts.sentSinceMemo?.addSent(orgId, providerId, slice.length);
+      dispatchedUpTo = off + slice.length;
     }
-    if (stopReason) break;
+
+    // RELEASE THE UNDISPATCHED REMAINDER. A slice-boundary yield (or a hard stop
+    // latched mid-batch) leaves the tail of this claim in 'sending' with NO send
+    // attempted. Hand those rows straight back to 'pending' so they resume next
+    // tick instead of stranding until reconcileStuckStages marks them 'failed'.
+    // At-most-once is untouched: only rows we provably never dispatched are
+    // reverted (`AND status = 'sending'` — anything already resolved is skipped).
+    const undispatched = toSend.slice(dispatchedUpTo);
+    if (undispatched.length > 0) {
+      await dbc.execute(sql`
+        UPDATE stage_sends SET status = 'pending'
+        WHERE status = 'sending'
+          AND id IN (${sql.join(undispatched.map((c) => sql`${c.id}::uuid`), sql`, `)})
+      `);
+      // These numbers were never messaged — take them back out of the in-flight
+      // dedup set so the next tick isn't told they already got one.
+      for (const c of undispatched) seenPhones.delete(`${orgId}:${c.phone}`);
+    }
+
+    if (timedOutSlice || stopReason) break;
   }
 
   // Structural tripwire: under correct code `processed` can never exceed the

@@ -39,6 +39,49 @@ export const DEFAULT_SENDS_PER_SECOND = 10;
 // thousands of simultaneous connections. Above any real provider limit.
 export const ABSOLUTE_MAX_SENDS_PER_SECOND = 1000;
 
+// ── Batch sizing (throughput) ────────────────────────────────────────────────
+// A drain batch pays a fixed PREAMBLE of sequential DB round-trips before it can
+// send anything: 4 kill-switch reads + 2 rolling-ceiling counts + the claim +
+// the opt-out re-check + the dedup probe. Measured on prod: server-side
+// execution of the whole preamble is ~78 ms, but each statement costs a ~278 ms
+// pooler round-trip, so the preamble is ~2.3 s of pure latency. With the old
+// `batchSize = 50` that fixed cost was amortized over 50 messages and capped the
+// drain at 20.14 msg/s no matter how high `max_sends_per_second` was set — the
+// batch size, NOT the rate, was the throughput knob.
+//
+// Sizing the batch as ~`BATCH_SECONDS` of the phone's OWN sending amortizes the
+// preamble to a roughly fixed ~19% overhead at any rate, instead of a fixed row
+// count that is generous at 3/s and crippling at 60/s. The floor keeps slow
+// numbers from paying the preamble every few seconds; the ceiling bounds the
+// blast radius of one claim (see the stranded-rows note below).
+//
+// TRADE-OFFS this constant controls — turn it DOWN to tighten them:
+//   • BREAKER REACTION. All kill switches are re-read between batches, so the
+//     worst-case delay before a pause/kill takes effect is one batch ≈
+//     BATCH_SECONDS + preamble (~12 s at 60/s, vs ~2.5 s when batches were 50
+//     rows). The failure-spike bound is unchanged (≤ rate−1 past the threshold)
+//     because it latches inside the slice fold, not at the batch boundary.
+//   • STRANDED ROWS. A crash mid-batch leaves the claimed-but-unsent rows in
+//     'sending'; they are NEVER auto-retried (at-most-once) and are finalized as
+//     'failed' by reconcileStuckStages. That worst case scales with the batch
+//     size. A CLEAN yield (time-box) is not affected — it returns its unsent
+//     claimed rows to 'pending' before exiting.
+export const BATCH_SECONDS = 10;
+export const MIN_DRAIN_BATCH = 50;
+export const MAX_DRAIN_BATCH = 2000;
+
+// Rows claimed per batch, derived from the phone's per-second rate.
+export function resolveDrainBatchSize(ratePerSecond: number): number {
+  const wanted = Math.floor(ratePerSecond * BATCH_SECONDS);
+  return Math.min(MAX_DRAIN_BATCH, Math.max(MIN_DRAIN_BATCH, wanted));
+}
+
+// One multi-row `send_attempts` INSERT per slice would be up to
+// ABSOLUTE_MAX_SENDS_PER_SECOND (1000) rows × 10 columns of bind params, each
+// carrying a verbatim provider body. Chunk it so the statement stays a
+// reasonable size regardless of the configured rate.
+export const ATTEMPTS_INSERT_CHUNK = 200;
+
 // Why a drain invocation stopped before draining the stage. Hard stops latch a
 // pause (human must resume); soft stops just leave rows pending for next tick.
 export type DrainStopReason =
@@ -131,6 +174,70 @@ export async function countSentSince(
       AND ss.sent_at > now() - make_interval(secs => ${seconds})
   `)) as unknown as { n: number }[];
   return Number(r[0]?.n ?? 0);
+}
+
+// ── Per-invocation memo for the 24h rolling count ────────────────────────────
+// `countSentSince(…, 86400)` is by far the slowest statement in the drain's
+// per-batch preamble — 59.29 ms server-side (EXPLAIN ANALYZE, prod) against
+// ~1.5 ms for everything else — and it is the ONLY one that grows with send
+// history. Re-running it for every batch of every stage of every phone is pure
+// waste: the 24h window barely moves in the ~4 minutes a cron tick lives.
+//
+// The memo is created ONCE per `runScheduledSends` invocation and shared by all
+// stages/phones in that tick. Three properties keep the ceiling honest:
+//   1. PER-PROVIDER SCOPING IS PRESERVED (ClickUp 869e659t4 — a regression here
+//      re-creates the incident where TextHub's volume stalled an Ahoi stage
+//      forever). The key includes providerId; a miss calls the real, unchanged
+//      `countSentSince`.
+//   2. SELF-THROTTLING IS PRESERVED. The un-memoized read counted this run's own
+//      sends because the drain stamps `sent_at` as it goes, so the ceiling could
+//      trip MID-run. `addSent()` folds every locally-emitted send into the memo,
+//      so it still does.
+//   3. STALENESS IS BOUNDED TWICE — a short TTL (other invocations' sends land
+//      within it), AND a hard bypass once the memo is within `NEAR_CAP_FRACTION`
+//      of the cap, so any decision actually close to the ceiling is made on a
+//      fresh read. Far from the cap (the normal case) an off-by-a-few count
+//      cannot change the outcome.
+export const SENT_SINCE_MEMO_TTL_MS = 30_000;
+const NEAR_CAP_FRACTION = 0.9;
+
+export interface SentSinceMemo {
+  count(
+    dbc: DbOrTx,
+    orgId: string,
+    providerId: number,
+    seconds: number,
+    cap: number,
+  ): Promise<number>;
+  /** Fold locally-emitted sends in so the memo still self-throttles mid-run. */
+  addSent(orgId: string, providerId: number, n: number): void;
+}
+
+export function makeSentSinceMemo(
+  ttlMs: number = SENT_SINCE_MEMO_TTL_MS,
+  now: () => number = Date.now,
+): SentSinceMemo {
+  const cache = new Map<string, { value: number; at: number }>();
+  const keyOf = (orgId: string, providerId: number, seconds: number) =>
+    `${orgId}:${providerId}:${seconds}`;
+  return {
+    async count(dbc, orgId, providerId, seconds, cap) {
+      const key = keyOf(orgId, providerId, seconds);
+      const hit = cache.get(key);
+      const fresh = hit != null && now() - hit.at < ttlMs;
+      // Near the ceiling, never trust the memo — read through.
+      if (fresh && hit.value < cap * NEAR_CAP_FRACTION) return hit.value;
+      const value = await countSentSince(dbc, orgId, providerId, seconds);
+      cache.set(key, { value, at: now() });
+      return value;
+    },
+    addSent(orgId, providerId, n) {
+      if (n <= 0) return;
+      for (const [key, entry] of cache) {
+        if (key.startsWith(`${orgId}:${providerId}:`)) entry.value += n;
+      }
+    },
+  };
 }
 
 // Latch the provider pause + append an audit event. Idempotent: only the FIRST

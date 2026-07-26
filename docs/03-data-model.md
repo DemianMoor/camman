@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-07-25_
+_Last updated: 2026-07-26_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -118,7 +118,7 @@ erDiagram
 
   sms_providers ||--o{ send_circuit_events : "pause/resume audit"
   campaigns ||--o{ campaign_circuit_events : "campaign pause/resume audit"
-  stage_sends ||--o{ send_attempts : "per-attempt evidence"
+  stage_sends ||--o{ send_attempts : "per-attempt evidence (+ latency_ms)"
   provider_credentials ||--o{ texthub_inbound_events : "STOP intake"
   provider_credentials ||--o{ ahoi_dlr_events : "DLR capture"
   provider_credentials ||--o{ ahoi_inbound_events : "inbound capture"
@@ -258,7 +258,7 @@ erDiagram
 | `stage_sends` | `id uuid` (= send_token), `stage_id`, `contact_id`, `phone`, `link_id`, `rendered_text`, `status`, `texthub_message_id`, `attempts`, `sale_status`/`sale_revenue`/`converted_at`/`keitaro_conversion_id`, `provider_phone_id`/`cost_per_sms` (0112 reporting snapshots) | partial UNIQUE(stage_id, contact_id) WHERE status in (pending,sending). `status ∈ (pending,sending,sent,failed,rejected,filtered,skipped_duplicate,skipped_opted_out)`; `filtered` = TextHub-suppressed rejection (migration 0065, label-only — not opted out, not skipped). `skipped_duplicate` (migration 0090) = excluded by the global 1-hour send-dedup gate (phone already messaged within 1h, any campaign) — terminal, not sent, not opted-out, not auto-retried; backed by partial index `stage_sends(org_id, phone, sent_at) WHERE status='sent'`. `skipped_opted_out` (migration 0116) = contact opted out AFTER materialization; suppressed at dispatch by the drain's send-time opt_outs re-check, or proactively by the opt-out ingester cascade-cancel — terminal, `last_error='opt_out_cancel'`, a distinct bucket from provider rejects and manual recalls. **Sale attribution (migration 0067):** `sale_status ∈ (lead,sale,rejected)` stamped per recipient by the Keitaro conversions poll when a conversion's `sub_id_1` matches `id`; `keitaro_conversion_id` (Keitaro `event_id`) is the dedup key. One sale per recipient, latest wins (NOT cumulative). NULL for manual-mode rows and recipients with no conversion |
 | `send_circuit_events` | `provider_id`, `event` paused/resumed, `reason`, `actor_user_id` | append-only breaker audit |
 | `campaign_circuit_events` | `campaign_id`, `event` paused/resumed, `reason`, `actor_user_id` | append-only per-campaign breaker audit (migration 0119; mirror of `send_circuit_events` at campaign scope) |
-| `send_attempts` | `stage_send_id`, `attempt_number`, `request_redacted`, `http_status`, `raw_body`, `ok`, `message_id`, `classification` | append-only per-attempt evidence (migration 0064). Verbatim TextHub body + classification (`accepted`/`mine_transport`/`theirs_rejected`/`indeterminate`); api_key never stored. `stage_sends` is current state, this is immutable history |
+| `send_attempts` | `stage_send_id`, `attempt_number`, `request_redacted`, `http_status`, `raw_body`, `ok`, `message_id`, `classification`, `latency_ms` | append-only per-attempt evidence (migration 0064). Verbatim TextHub body + classification (`accepted`/`mine_transport`/`theirs_rejected`/`indeterminate`); api_key never stored. `stage_sends` is current state, this is immutable history. **`latency_ms integer NULL`** (migration **0125**) = the provider round-trip in ms, clocked by the sending adapter around its `fetch` on every exit path incl. timeouts; NULL = not measured (historical rows, or an adapter that issues no request). No index — analytical, aggregated over a `created_at` range. ⚠️ **0125 is authored but NOT applied, and must be applied only AFTER 0121–0124** (unmerged `feat/textrequest-send`); the drain writes the column only when it exists (memoized `information_schema` probe), so the code runs on either schema |
 | `campaign_events` | `campaign_id`, `stage_id?`, `event_type` (free-text), `actor_user_id?` (NULL=system), `summary`, `metadata jsonb` | append-only campaign activity log (Activity tab timeline); migration 0060 |
 | `texthub_inbound_events` | `credential_id`, `provider_message_id`, `matched_contact_id`, `matched_stage_send_id`, `provider_received_at`, `result` | raw inbound STOP capture. `matched_stage_send_id`/`provider_received_at` added migration 0075 (attribution debugging + window anchor) |
 | `ahoi_dlr_events` | `provider_id`, `provider_uuid`, `send_status`, `status`, `smpp_status`, `smpp_code`, `matched_stage_send_id`, `result` | append-only DLR capture + reconcile (migration 0109). NAMING DEBT: reconciles against `stage_sends.texthub_message_id`, which also holds Ahoi's send-time uuid (see `docs/07-conventions.md`) |

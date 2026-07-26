@@ -4,6 +4,7 @@ import { formatInTimeZone } from "date-fns-tz";
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { CAMPAIGN_TIMEZONE, CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
+import { withKeyedLease } from "@/lib/cron/keyed-lease";
 import {
   decideScheduledSend,
   isOutsideSendWindow,
@@ -205,6 +206,7 @@ export interface ScheduledRunResult {
   skipped_duplicate: number; // numbers excluded by the global 1-hour dedup gate
   skipped_opted_out: number; // recipients suppressed at dispatch (STOP after materialization)
   paused_now: number; // stages whose drain latched a circuit-breaker pause
+  phone_lease_skipped: number; // phone groups skipped — another invocation is draining that number
 }
 
 const BASE: ScheduledRunResult = {
@@ -226,6 +228,7 @@ const BASE: ScheduledRunResult = {
   skipped_duplicate: 0,
   skipped_opted_out: 0,
   paused_now: 0,
+  phone_lease_skipped: 0,
 };
 
 // Per-stage materialization budget for a cron tick. Windowed materialization
@@ -262,6 +265,46 @@ const PHASE_B_DEADLINE_MS = 240_000;
 // distinct phones have pending work at once, so this cap rarely binds — it's a
 // safety bound, not a target.
 const GROUP_CONCURRENCY = 8;
+
+// ─── Per-phone drain lease (overlapping-invocation guard) ────────────────────
+// The send-scheduled cron took NO lease, so a tick that overran its 300s
+// maxDuration overlapped the next one and TWO drain loops sent on the SAME
+// number simultaneously — the per-phone `max_sends_per_second` pacing is
+// per-invocation, so N overlapping invocations multiply the effective MPS by N.
+// That is a carrier-compliance exposure, safe today only by arithmetic accident
+// (measured 2 × ~20/s = ~40/s against a 60/s configured number).
+//
+// The guard is PER PHONE, not per job: two invocations must never drain the same
+// NUMBER concurrently, but different numbers must still proceed in parallel
+// (that concurrency is the 2026-07-24 head-of-line fix and must not regress).
+//
+// Mechanism: a `cron_locks` lease ROW (lib/cron/lease.ts), NOT a Postgres
+// advisory lock. `DATABASE_URL` targets Supavisor's TRANSACTION pooler (:6543,
+// prepare=false), where a session advisory lock can be lost or stranded when the
+// pooler reassigns the backend between statements — the same reasoning already
+// documented on `withCronLease` and the Telnyx worker lease. A transaction-scoped
+// advisory lock would be pooler-safe but would force the whole multi-minute drain
+// into ONE long transaction holding one connection, which is exactly what the
+// per-window-commit resumable design avoids. The lease row also gives free
+// observability (`skipped_count` / `last_skipped_at` per phone).
+//
+// TTL SAFETY (a stuck lease that blocks all sending is worse than the bug):
+// expiry is absolute (`lease_until < now()`), so a crashed/killed invocation's
+// lease self-clears — no heartbeat, no manual cleanup. The value is
+// PHASE_B_DEADLINE_MS, which is provably ≥ the work it protects: the deadline is
+// measured from RUN start while the lease starts at GROUP start (always ≥ run
+// start), so `groupStart + TTL ≥ runStart + PHASE_B_DEADLINE_MS` = the last
+// instant any group can still be draining. A clean exit releases it immediately
+// in `finally`; the TTL only ever matters after a hard kill, and one cron period
+// (300s) > TTL (240s) guarantees the very next tick can reclaim the phone.
+const PHONE_DRAIN_LEASE_MS = PHASE_B_DEADLINE_MS;
+
+// Lease key for a Phase-B drain group. Stages on a phone share one key; a stage
+// with NO phone gets its own (nothing else can contend for a number it doesn't
+// have). Exported so tests can pre-seed / inspect the lease row.
+export function phoneDrainLeaseKey(providerPhoneId: number | null, stageId: number): string {
+  return providerPhoneId != null ? `send-drain:p${providerPhoneId}` : `send-drain:s${stageId}`;
+}
 
 // Per-reservation slice of a provider's per-tick send budget (max_sends_per_run).
 // The time-box caps a stage's real work per slice to rate×PER_STAGE_DRAIN_MS
@@ -615,6 +658,9 @@ export async function runScheduledSends(
   // OWN phone's max_sends_per_second inside runStageDrain; the partitioning only
   // decides what runs in parallel. The per-provider per-tick budget is a shared,
   // atomic reservation so concurrent same-provider groups can't overshoot it.
+  // Each group additionally runs under a PER-PHONE `cron_locks` lease so an
+  // OVERLAPPING invocation (an overrun tick meeting the next one) can never put
+  // two drain loops on the same NUMBER at once — see PHONE_DRAIN_LEASE_MS.
   const drainable = await selectDrainableStages(dbc, { now, orgId, maxStages });
 
   const budget = makeProviderBudget();
@@ -729,22 +775,31 @@ export async function runScheduledSends(
   // slice; stages with pending rows left carry to the next round until the phase
   // deadline or they all drain. Sequential WITHIN the group so the shared carrier
   // rate is respected; groups run concurrently via mapWithConcurrency below.
+  //
+  // The whole group runs under a PER-PHONE lease so a still-running (overrun)
+  // invocation's drain of this number is never doubled by the next tick. A phone
+  // whose lease is held is SKIPPED CLEANLY: its rows stay 'pending', nothing is
+  // marked missed, no error escapes, and the next tick picks it up.
   const drainPhoneGroup = async (stages: DrainableRow[]): Promise<void> => {
-    let active = stages;
-    while (active.length > 0 && !phaseDeadlinePassed()) {
-      const next: DrainableRow[] = [];
-      for (const row of active) {
-        if (phaseDeadlinePassed()) break;
-        if (await drainStageSlice(row)) next.push(row);
+    const leaseKey = phoneDrainLeaseKey(stages[0].provider_phone_id, stages[0].stage_id);
+    const leased = await withKeyedLease(dbc, leaseKey, PHONE_DRAIN_LEASE_MS, async () => {
+      let active = stages;
+      while (active.length > 0 && !phaseDeadlinePassed()) {
+        const next: DrainableRow[] = [];
+        for (const row of active) {
+          if (phaseDeadlinePassed()) break;
+          if (await drainStageSlice(row)) next.push(row);
+        }
+        active = next;
       }
-      active = next;
-    }
+    });
+    if (!leased.ran) result.phone_lease_skipped++;
   };
 
   // Partition by send-from phone; null-phone stages each form a singleton group.
   const groups = new Map<string, DrainableRow[]>();
   for (const row of drainable) {
-    const key = row.provider_phone_id != null ? `p${row.provider_phone_id}` : `s${row.stage_id}`;
+    const key = phoneDrainLeaseKey(row.provider_phone_id, row.stage_id);
     const g = groups.get(key);
     if (g) g.push(row);
     else groups.set(key, [row]);

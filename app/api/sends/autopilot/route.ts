@@ -86,7 +86,11 @@ export async function GET() {
   const stageIds = rows.map((r) => Number(r.stage_id));
   const countRows = (await db.execute(sql`
     SELECT stage_id,
-      count(*) FILTER (WHERE status <> 'rejected')::int AS total,
+      -- 'rejected' (operator-canceled, see …/send/abort) and 'skipped_opted_out'
+      -- (suppressed at materialization time, migration 0116) are both audit-only
+      -- and never sendable, so neither counts toward the real send batch. See the
+      -- fuller note in app/api/sends/today/route.ts.
+      count(*) FILTER (WHERE status NOT IN ('rejected', 'skipped_opted_out'))::int AS total,
       count(*) FILTER (WHERE status = 'pending')::int AS pending,
       count(*) FILTER (WHERE status = 'sending')::int AS sending,
       count(*) FILTER (WHERE status = 'sent')::int AS sent,

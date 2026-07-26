@@ -59,11 +59,14 @@ export async function GET(
 
   const counts = (await db.execute(drizzleSql`
     SELECT
-      -- 'rejected' rows are canceled/recalled sends kept only for audit. They
-      -- must NOT count toward the total, else a fully-canceled stage keeps
+      -- 'rejected' rows are canceled/recalled sends kept only for audit, and
+      -- 'skipped_opted_out' rows are recipients suppressed at materialization
+      -- time (migration 0116) — likewise audit-only and never sendable. Neither
+      -- may count toward the total, else a fully-canceled stage keeps
       -- hasBatch=true and the panel stays stuck on the materialized branch
-      -- instead of returning to the editable/Prepare state.
-      count(*) FILTER (WHERE status <> 'rejected')::int AS total,
+      -- instead of returning to the editable/Prepare state. Excluding only
+      -- 'rejected' left aborted stages pinned there via their opt-out rows.
+      count(*) FILTER (WHERE status NOT IN ('rejected', 'skipped_opted_out'))::int AS total,
       count(*) FILTER (WHERE status = 'pending')::int  AS pending,
       count(*) FILTER (WHERE status = 'sending')::int  AS sending,
       count(*) FILTER (WHERE status = 'sent')::int     AS sent,

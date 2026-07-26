@@ -96,11 +96,15 @@ export async function GET() {
   const countRows = (await db.execute(sql`
     SELECT
       stage_id,
-      -- 'rejected' = operator-canceled rows kept for audit (see …/send/abort).
-      -- Excluded from total (so "Prepared for today" + sent/total denominators
-      -- don't count canceled rows or double-count after re-materialize) and NOT
-      -- folded into 'failed' (a cancel is not a delivery failure).
-      count(*) FILTER (WHERE status <> 'rejected')::int AS total,
+      -- 'rejected' = operator-canceled rows kept for audit (see …/send/abort);
+      -- 'skipped_opted_out' = recipients suppressed at materialization time
+      -- (migration 0116). Both are audit-only and never sendable, so both are
+      -- excluded from total (so "Prepared for today" + sent/total denominators
+      -- don't count canceled or unsendable rows, or double-count after a
+      -- re-materialize) and NEITHER is folded into 'failed' (neither is a
+      -- delivery failure). Excluding only 'rejected' left aborted stages with a
+      -- non-zero total, pinning them at "Materializing".
+      count(*) FILTER (WHERE status NOT IN ('rejected', 'skipped_opted_out'))::int AS total,
       count(*) FILTER (WHERE status = 'pending')::int AS pending,
       count(*) FILTER (WHERE status = 'sending')::int AS sending,
       count(*) FILTER (WHERE status = 'sent')::int AS sent,

@@ -1,6 +1,6 @@
 # Daily-Volume UI (WS4)
 
-_Last updated: 2026-07-17_
+_Last updated: 2026-07-26_
 
 The operating layer that makes running many tracked SMS campaigns a day fast and
 legible. Purely additive UI + read endpoints over the existing send pipeline
@@ -45,6 +45,15 @@ Bug 1 (false `sent_at`) being fixed so a missed send reads Red, not Green.
 in-between state reads Indigo — the audience is incomplete and **cannot send yet**
 (the cron finishes it, then it flips to Blue). The deriver keys off `materializedAt`,
 not row existence, precisely so a half-built batch never reads "Prepared".
+
+Indigo additionally requires at least one **live** row (`pending + sending + sent`),
+not merely a non-zero count. An aborted stage (`…/send/abort`) resets
+`materialized_at` to NULL and cancels its pending rows to `rejected` while keeping
+the `skipped_opted_out` audit rows — the same "NULL + rows exist" shape as a live
+materialization. Counting those made Indigo permanent and hid the Prepare button
+(production stages 1713/1710, fixed 2026-07-26). Audit rows record what will never
+be sent; they are not work in flight, so a stage with none of the live statuses and
+nothing materialized reads `scheduled_unprepared`/`draft` and offers Prepare again.
 
 `deriveStageOperationalStatus()` returns `null` for stages off the pipeline
 (manual-mode campaigns, archived stages) — callers fall back to the manual-status
@@ -107,8 +116,10 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
     today = `Σ counts.total` of the `GET /api/sends/today` rows, computed
     client-side (no API change). It accumulates as each stage is prepared, and
     since sent ⊆ prepared it pairs with the "Sent today" figure below it.
-    `counts.total` excludes operator-canceled (`rejected`) rows, so a canceled
-    stage drops out of "prepared" and a cancel→re-materialize doesn't double-count.
+    `counts.total` excludes operator-canceled (`rejected`) rows **and**
+    materialization-time opt-out rows (`skipped_opted_out`), so a canceled stage
+    drops out of "prepared", a cancel→re-materialize doesn't double-count, and
+    the figure counts only messages that could actually be sent.
 - **B5 — send-window indicator.** [components/sends/send-window-indicator.tsx](../../components/sends/send-window-indicator.tsx)
   — "opens 08:00 ET" / "open · closes in 3h 12m" from
   `sendWindowForDay()` ([lib/quiet-hours.ts](../../lib/quiet-hours.ts)). Sender's

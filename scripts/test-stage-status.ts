@@ -67,6 +67,62 @@ check(
   deriveStageOperationalStatus({ ...base, sentAt: null, counts: counts({ pending: 100, sending: 50 }) }) === "sending_sent",
 );
 
+// ---------------------------------------------------------------------------
+// Materialization in progress vs. an ABORTED stage's audit residue.
+//
+// Abort (…/send/abort) resets materialized_at to NULL, cancels the pending rows
+// to 'rejected', and deliberately KEEPS the 'skipped_opted_out' rows recorded at
+// materialization time. That leaves "materialized_at NULL + rows exist" — the
+// same shape as a live materialization — so a row-count predicate pinned the
+// stage at Indigo "Materializing" forever with no Prepare action.
+// ---------------------------------------------------------------------------
+const unmat = { linkMode: "tracked", scheduledAt: "2026-07-26T22:00:00Z", scheduleMissedAt: null, materializedAt: null };
+
+// Genuine in-flight materialization: rows are landing as 'pending'.
+check(
+  "materializedAt NULL + 900 pending → materializing (genuine, unchanged)",
+  deriveStageOperationalStatus({ ...unmat, sentAt: null, counts: counts({ pending: 900 }) }) === "materializing",
+);
+
+// THE BUG: audit-only residue must not read as work in flight. `total` is set
+// directly here (not via the counts() helper) to model a caller whose total
+// still folds in audit rows.
+const auditResidue: StageSendCounts = { total: 9, pending: 0, sending: 0, sent: 0, failed: 0, skippedDuplicate: 0 };
+check(
+  "aborted stage (materializedAt NULL, 0 live rows, audit residue) → NOT materializing",
+  deriveStageOperationalStatus({ ...unmat, sentAt: null, counts: auditResidue }) !== "materializing",
+  String(deriveStageOperationalStatus({ ...unmat, sentAt: null, counts: auditResidue })),
+);
+check(
+  "…and reads scheduled_unprepared, so Prepare is offered again",
+  deriveStageOperationalStatus({ ...unmat, sentAt: null, counts: auditResidue }) === "scheduled_unprepared",
+  String(deriveStageOperationalStatus({ ...unmat, sentAt: null, counts: auditResidue })),
+);
+// Same signature with no schedule ⇒ back to draft, not a stuck spinner.
+check(
+  "aborted + unscheduled → draft",
+  deriveStageOperationalStatus({ ...unmat, scheduledAt: null, sentAt: null, counts: auditResidue }) === "draft",
+  String(deriveStageOperationalStatus({ ...unmat, scheduledAt: null, sentAt: null, counts: auditResidue })),
+);
+// Even a large residue can't strand it — the predicate is live rows, not volume.
+check(
+  "9,188 audit rows, 0 live → still scheduled_unprepared",
+  deriveStageOperationalStatus({
+    ...unmat,
+    sentAt: null,
+    counts: { total: 9188, pending: 0, sending: 0, sent: 0, failed: 0, skippedDuplicate: 0 },
+  }) === "scheduled_unprepared",
+);
+// A resumed materialization that has produced live rows again still reports progress.
+check(
+  "residue + 50 pending (materialization resumed) → materializing",
+  deriveStageOperationalStatus({
+    ...unmat,
+    sentAt: null,
+    counts: { total: 9238, pending: 50, sending: 0, sent: 0, failed: 0, skippedDuplicate: 0 },
+  }) === "materializing",
+);
+
 // Warning count = failed + sending + skippedDuplicate.
 check(
   "stageSendWarningCount sums failed+sending+skippedDuplicate",

@@ -34,13 +34,23 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { buildCreativeListWhere } from "@/lib/creatives/list-filters";
 import { can } from "@/lib/permissions";
 
-// Co-located with the eu-central-1 Supabase DB. This route makes ~5 SEQUENTIAL
-// round-trips per request (auth, membership, rows+count, offers, spam cache);
-// from the default US region each one crosses the Atlantic at ~90ms. Same
-// per-route pattern as /api/clicks/score-pending and /api/opt-outs/poll — NOT a
-// global `regions` field in vercel.json, which would also drag /r/[code] (the
-// SMS click redirect, hit by US handsets) away from its users.
-export const preferredRegion = "fra1";
+// NOTE: there is deliberately NO `preferredRegion` export here.
+//
+// This route would benefit from running next to the eu-central-1 Supabase DB —
+// it makes ~5 sequential round-trips per request (auth, membership, rows+count,
+// offers, spam cache), each ~90ms from the US. A `preferredRegion = "fra1"` was
+// added on 2026-07-30 and then removed the same day after measuring that it does
+// nothing on this project: **Fluid Compute is enabled** (`defaultResourceConfig
+// .fluid: true`), so function placement comes from the PROJECT-level
+// `functionDefaultRegions` (currently `["iad1"]`) and per-route segment exports
+// are ignored. Verified against prod by reading the compute region out of
+// `x-vercel-id` (`<edge-pop>::<compute-region>::<id>`): /api/clicks/score-pending
+// and /api/opt-outs/poll — pinned to fra1 since 2026-07-13 — also report `iad1`.
+//
+// The only lever that actually moves this is the project-level region setting,
+// which affects EVERY function including /r/[code] (the SMS click redirect, hit
+// by US handsets and carrier prefetchers). That's an infra decision, not a code
+// one. Don't re-add a per-route pin here expecting it to work.
 
 const SORT_COLUMNS = {
   created_at: creatives.created_at,
@@ -57,11 +67,17 @@ const SORT_COLUMNS = {
 } as const;
 
 export async function GET(req: NextRequest) {
-  // Server-Timing marks: Vercel does not retain runtime logs without a log
-  // drain, so per-request server-side attribution is otherwise unrecoverable
-  // after the fact. These surface in Chrome DevTools (Network -> Timing) right
-  // next to the total, which is what separates "the DB is slow" from "the
-  // function/round-trip overhead is slow" without any extra tooling.
+  // Timing marks: Vercel does not retain runtime logs without a log drain, so
+  // per-request server-side attribution is otherwise unrecoverable after the
+  // fact. These separate "the DB is slow" from "the function/round-trip
+  // overhead is slow" with no extra tooling — read them in DevTools -> Network
+  // -> Headers on the `x-camman-timing` response header.
+  //
+  // NOT the standard `Server-Timing` header: that was tried first and is
+  // STRIPPED by Vercel's edge before it reaches the client (present locally,
+  // absent in prod — confirmed by dumping response headers against
+  // camman.vercel.app). A custom `x-…` header passes through untouched. The
+  // trade-off is losing DevTools' native Timing-tab rendering.
   const t0 = performance.now();
   let tAuth = 0;
   let tRows = 0;
@@ -439,7 +455,7 @@ export async function GET(req: NextRequest) {
         // `enrich` = the offers + spam-cache round-trips; `total` minus the
         // parts is serialization. metrics=1/0 records which mode ran, so a slow
         // sample can be attributed without guessing at the query string.
-        "Server-Timing": [
+        "x-camman-timing": [
           `auth;dur=${tAuth.toFixed(1)}`,
           `rows;dur=${tRows.toFixed(1)}`,
           `enrich;dur=${(total - tAuth - tRows).toFixed(1)}`,

@@ -79,7 +79,7 @@ async function main() {
     return {
       body: (await res.json()) as ListResponse,
       elapsed,
-      serverTiming: res.headers.get("server-timing"),
+      serverTiming: res.headers.get("x-camman-timing"),
     };
   }
 
@@ -183,7 +183,7 @@ async function main() {
     `returned ${withM.body.data.length} of ${withM.body.totalCount}`,
   );
 
-  console.log("\n[6] Server-Timing attribution header");
+  console.log("\n[6] x-camman-timing attribution header");
   check(
     "header present",
     withM.serverTiming !== null,

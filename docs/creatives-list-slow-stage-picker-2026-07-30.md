@@ -79,11 +79,15 @@ than assuming.
 ### Phase 0 — attribution that survives
 
 Vercel does not retain runtime logs without a log drain, so historical
-per-request timings are unrecoverable. The list route now emits a
-**`Server-Timing`** header (`auth`, `rows`, `enrich`, `total`, and a
-`metrics;desc="1|0"` mode marker), rendered natively in Chrome DevTools →
-Network → Timing. DB time vs. function/round-trip overhead is now readable per
-request, permanently, with no extra tooling.
+per-request timings are unrecoverable. The list route now emits an
+**`x-camman-timing`** header (`auth`, `rows`, `enrich`, `total`, and a
+`metrics;desc="1|0"` mode marker), readable in DevTools → Network → Headers. DB
+time vs. function/round-trip overhead is now readable per request, permanently,
+with no extra tooling.
+
+**Not `Server-Timing`.** That was shipped first and found to be **stripped by
+Vercel's edge** — present locally, absent in prod. A custom `x-` header passes
+through. Cost: no native DevTools Timing-tab rendering.
 
 First local samples (dev machine → eu-central-1, so absolute values include
 local latency; the split is the point):
@@ -109,11 +113,29 @@ When off, the `metrics` key is **omitted entirely** rather than zero-filled — 
 
 Measured: `rows` **1,997 ms → 57 ms**; end-to-end **2,835 ms → 316 ms**.
 
-Also bundled: `export const preferredRegion = "fra1"` on this route. Note this is
-the established **per-route** pattern, **not** a global `regions` field in
-`vercel.json` — a global pin would also drag [`/r/[code]`](../app/r/[code]) (the
-SMS click redirect, hit by US handsets) away from its users. See
-[06-integrations.md](06-integrations.md).
+### Region pin — attempted, measured, reverted
+
+`export const preferredRegion = "fra1"` was bundled in, then **removed the same
+day after measuring that it does nothing on this project.** Fluid Compute is
+enabled (`defaultResourceConfig.fluid: true`), so placement comes from the
+project-level `functionDefaultRegions` (`["iad1"]`) and per-route segment
+exports are ignored.
+
+Proof, no deploy needed — `x-vercel-id` is `<edge-pop>::<compute-region>::<id>`,
+and an unauthenticated 401 still executes the function:
+
+```
+/api/clicks/score-pending   401  arn1::iad1::…   (pinned fra1 since 2026-07-13)
+/api/opt-outs/poll          401  arn1::iad1::…   (pinned fra1 since 2026-07-13)
+/api/creatives/list         401  arn1::iad1::…
+/api/brands/list            401  arn1::iad1::…   (never pinned — control)
+```
+
+**The five existing fra1 pins have never taken effect either**, including the
+2026-07-13 change made specifically to stop two cron routes timing out at the
+60s cap. The only lever is the project-level region setting, which moves *every*
+function including [`/r/[code]`](../app/r/[code]) — an infra decision, not a code
+one. See [06-integrations.md](06-integrations.md).
 
 ### Phase 3 — retire the dead rollup cron
 

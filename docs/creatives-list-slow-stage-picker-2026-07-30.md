@@ -133,9 +133,41 @@ and an unauthenticated 401 still executes the function:
 
 **The five existing fra1 pins have never taken effect either**, including the
 2026-07-13 change made specifically to stop two cron routes timing out at the
-60s cap. The only lever is the project-level region setting, which moves *every*
-function including [`/r/[code]`](../app/r/[code]) — an infra decision, not a code
-one. See [06-integrations.md](06-integrations.md).
+60s cap. The only lever is the project-level region setting.
+
+### The project-level move to fra1 — DONE, same day
+
+The project setting was changed (`serverlessFunctionRegion` /
+`functionDefaultRegions` → `fra1`) and a redeploy issued; the setting applies to
+**new deployments only**, so the redeploy is required.
+
+Measured with identical probes before and after:
+
+| | iad1 | **fra1** | |
+|---|---|---|---|
+| **RTT_db per sequential query** | 187 ms | **2.1 ms** | **89×** |
+| `auth` (2 trips) | 344 ms | 28 ms | 12× |
+| `rows`, metrics off (1 trip) | 190 ms | 5.1 ms | 37× |
+| `enrich` (2 trips) | 377 ms | 10.0 ms | 38× |
+| **list call total** | **917 ms** | **43 ms** | **21×** |
+| picker total | 2,200 ms | 1,047 ms | 2.1× |
+| `/r/` probe wall (from Poland) | 352 ms | 76 ms | 4.6× |
+
+**`/r/[code]` was the reason this looked risky, and it turned out to be the
+strongest argument FOR the move.** The redirect makes **2 sequential DB round
+trips** — link lookup, then click insert (strictly dependent, both awaited) — for
+**0.861 ms** of actual DB work (`0.469` + `0.392`, over 423K calls each). From
+`iad1` that was ~374 ms of pure network per click. Nothing is cached or deferred:
+`force-dynamic`, `/r/` is excluded from the proxy matcher (so no auth trip), and
+`classifyClick` is pure UA/prefetch heuristics with real scoring deferred to a
+cron.
+
+TLS terminates at the **edge PoP**, not the function region — measured TCP
+connect 14 ms / TLS 68 ms from Poland, which would be ~110 ms / ~330 ms if the
+handshake had to reach `iad1`. So the region move does **not** change handshake
+cost; only the PoP→function hop moves. For a US handset that trades two
+transatlantic DB crossings (~374 ms) for one PoP→fra1 hop (~90 ms):
+**~400 ms → ~115 ms**.
 
 ### Phase 3 — retire the dead rollup cron
 
@@ -166,18 +198,64 @@ active creatives in this org share a `created_at` to the microsecond**. Without
 a tiebreaker Postgres may order within a tie group differently per plan — so a
 paginated list could show one creative twice and skip another. One-line fix.
 
-## 4. Held — Phase 2
+## 4. Phase 2 — the metrics cache (ClickUp 869ebvkr4)
 
-A precomputed `creative_metrics_30d` cache (the aggregate is only 109 rows) or
-an index on `links(creative_id)`, or denormalising `creative_id` onto `clicks`.
+**Why it was still needed after the region move.** Colocation removed the
+round-trip tax but not the work: on `fra1` the picker's `rows` segment was
+**990 ms of which only ~2 ms was network**. The aggregate is CPU/IO-bound inside
+Postgres, so no amount of proximity helps.
 
-**Deliberately not built yet.** With Phase 1 in, the only remaining metrics
-consumer is the picker, on explicit user action. Adding a cache table + refresh
-cron to stabilise a path that may already be fast enough would repeat the
-pattern Phase 3 just cleaned up. Decide from the Phase 0 `Server-Timing` data.
+### Indexing was evaluated first and rejected ON MEASUREMENT
+
+Candidate indexes built inside a transaction and rolled back, against live prod:
+
+| Candidate | Execution |
+|---|---|
+| Baseline (no new index) | 1,394 ms |
+| `links(creative_id)` — the card's literal suggestion | **1,592 ms — worse** |
+| `links(id) INCLUDE (creative_id) WHERE creative_id IS NOT NULL` | 1,488 ms — worse |
+| `links(creative_id, id) WHERE creative_id IS NOT NULL` | 990 ms — 1.4×, for a 58 MB index |
+
+**No index can help**: the query has no selective predicate. It must touch every
+click in the 30-day window and map each one to a creative, so it is an inherently
+full-scan aggregate. Indexes buy selectivity; there is none to buy. The best
+variant still leaves the picker at ~1 s while adding 58 MB of index for every
+link insert to maintain.
+
+### Shape: in-memory, read-driven — [lib/creatives/metrics-cache.ts](../lib/creatives/metrics-cache.ts)
+
+A module-level cache keyed by `org_id`, 15-minute TTL, with single-flight so N
+concurrent requests on one instance trigger one query. On a miss it computes both
+aggregates in a **single** round trip (`FULL OUTER JOIN`, because a creative can
+have stage activity with no tracked clicks or vice versa) and the route injects
+the result as a literal `VALUES` relation. That keeps the SQL shape identical —
+the four ratios are still computed and **sorted server-side across the whole
+filtered set**, so ordering and pagination are unchanged; only the *source* of
+the counters moved.
+
+**Deliberately NOT a cache table + refresh cron.** A timer-driven refresh burns
+DB time whether or not anyone is looking — precisely how `report_stage_hour`
+became the #1 consumer of DB time in this database with zero readers (§3). This
+cache is refreshed **by reads**: if nothing asks for metrics, nothing is ever
+computed, so it structurally cannot become a dead rollup. It also needs no
+migration, which matters because the unmerged `feat/textrequest-send` branch
+already claims `0121`–`0124`, and `verify-migration-integrity` validates
+`snapshot.prevId` by journal index — a second migration chained off `0120` would
+break that chain on merge.
+
+Trade-off accepted: the cache is per-instance and does not survive a deploy or an
+instance recycle, so a cold instance pays one recompute. Strictly better than
+before, where *every* request paid it.
 
 ## 5. Verification
 
-`npx tsx scripts/test-creatives-list-metrics.ts` — 16/16.
-`npx tsx scripts/test-creatives-api.ts` — 49/49 (no regressions).
-`npx tsc --noEmit` clean; `eslint` 0 errors, 8 warnings all pre-existing on `main`.
+- `scripts/test-creative-metrics-cache.ts` (new) — **10/10**. The load-bearing
+  assertion is #1: every creative's served metrics are compared against a **live
+  recomputation of the original inline aggregate**, so a silent numeric
+  regression can't hide. Also asserts ratios derive from their own base counts,
+  `mcache;dur` is ~0 ms on a warm hit (proving the cache is *consulted*, not
+  recomputed per request), ratio sort is still server-side and monotonic with
+  nulls last, and paginating a ratio sort produces no duplicates or skips.
+- `scripts/test-creatives-list-metrics.ts` — 16/16.
+- `scripts/test-creatives-api.ts` — 49/49 (no regressions).
+- `npx tsc --noEmit` clean; `eslint` 0 errors.

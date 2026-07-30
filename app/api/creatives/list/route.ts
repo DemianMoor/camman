@@ -1,28 +1,10 @@
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  gte,
-  inArray,
-  isNotNull,
-  sql as drizzleSql,
-} from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql as drizzleSql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import {
-  campaign_stages,
-  campaigns,
-  clicks,
-  creative_offers,
-  creatives,
-  keitaro_stage_results,
-  links,
-  offers,
-  spam_scores,
-} from "@/db/schema";
+import { creative_offers, creatives, offers, spam_scores } from "@/db/schema";
+import { getCreativeMetrics } from "@/lib/creatives/metrics-cache";
 import { hashText } from "@/lib/spam/normalize";
 import { deriveVerdict } from "@/lib/spam/types";
 import {
@@ -81,6 +63,7 @@ export async function GET(req: NextRequest) {
   const t0 = performance.now();
   let tAuth = 0;
   let tRows = 0;
+  let tMetrics = 0;
 
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -118,85 +101,51 @@ export async function GET(req: NextRequest) {
   });
 
   // ---- 30-day performance metrics (per creative) ----
-  // Two aggregates joined into the main query so the four derived ratios are
-  // sortable server-side across the whole filtered set, not just one page.
-  // Stage counters are anchored on the stage's created_at; tracked clean
-  // clicks are anchored on the click's clicked_at (two distinct time bases,
-  // by design). Clean clicks = manual-mode stage clicks (click_count) +
-  // tracked-mode clean clicks (human + unknown, i.e. bot/prefetch/suspect
-  // excluded — same definition as the click report).
-  const WINDOW = drizzleSql`now() - interval '30 days'`;
+  // These used to be two aggregate subqueries LEFT JOINed inline, which meant a
+  // full org-wide scan of `links` (~1.8M rows / 319MB) on EVERY request — see
+  // lib/creatives/metrics-cache.ts for why no index fixes that.
+  //
+  // Now the numbers come from a read-driven in-memory cache and are injected as
+  // a literal VALUES relation. That keeps the shape of everything below
+  // IDENTICAL — the four ratios are still computed in SQL and still sortable
+  // server-side across the whole filtered set, so ordering and pagination are
+  // unchanged. Only the SOURCE of the per-creative counters moved.
+  //
+  // Stage counters are anchored on the stage's created_at; tracked clean clicks
+  // on the click's clicked_at (two distinct time bases, by design). Clean clicks
+  // = manual-mode stage clicks (click_count) + tracked-mode clean clicks
+  // (bot/prefetch/suspect excluded — same definition as the click report).
+  const tMetricsStart = performance.now();
+  const metricsRows = includeMetrics ? await getCreativeMetrics(orgId) : [];
+  // Its own Server-Timing segment: on a cache HIT this is ~0ms, on a MISS it is
+  // the full aggregate. Without splitting it out the miss cost would be charged
+  // to `enrich` and look like a slow offers/spam lookup.
+  tMetrics = performance.now() - tMetricsStart;
 
-  const stageAgg = db
-    .select({
-      creative_id: campaign_stages.creative_id,
-      delivered:
-        drizzleSql<number>`coalesce(sum(${campaign_stages.delivered_count}), 0)::int`.as(
-          "delivered",
-        ),
-      checkouts:
-        drizzleSql<number>`coalesce(sum(${campaign_stages.checkout_click_count}), 0)::int`.as(
-          "checkouts",
-        ),
-      sales:
-        drizzleSql<number>`coalesce(sum(${campaign_stages.sales_count}), 0)::int`.as(
-          "sales",
-        ),
-      // Revenue is the real per-conversion payout from Keitaro
-      // (keitaro_stage_results.revenue), NOT sales × the offer's current CPA —
-      // a mid-flight CPA change would retro-misprice prior sales. Powers EPC.
-      payout:
-        drizzleSql<string>`coalesce(sum(
-          (SELECT coalesce(sum(ksr.revenue), 0)
-             FROM ${keitaro_stage_results} ksr
-            WHERE ksr.stage_id = ${campaign_stages.id})
-        ), 0)`.as("payout"),
-      manual_clean:
-        drizzleSql<number>`coalesce(sum(${campaign_stages.click_count}) filter (where ${campaigns.link_mode} = 'manual'), 0)::int`.as(
-          "manual_clean",
-        ),
-    })
-    .from(campaign_stages)
-    .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
-    .where(
-      and(
-        eq(campaign_stages.org_id, orgId),
-        isNotNull(campaign_stages.creative_id),
-        gte(campaign_stages.created_at, WINDOW),
-      ),
-    )
-    .groupBy(campaign_stages.creative_id)
-    .as("stage_agg");
+  // A VALUES list needs at least one row and needs its column types pinned, so
+  // the empty case uses a typed sentinel row that can never match a real id.
+  const metricsValues =
+    metricsRows.length > 0
+      ? drizzleSql.join(
+          metricsRows.map(
+            (m) =>
+              drizzleSql`(${m.creative_id}::int, ${m.delivered}::int, ${m.checkouts}::int, ${m.sales}::int, ${m.payout}::numeric, ${m.manual_clean}::int, ${m.tracked_clean}::int)`,
+          ),
+          drizzleSql`, `,
+        )
+      : drizzleSql`(-1::int, 0::int, 0::int, 0::int, 0::numeric, 0::int, 0::int)`;
 
-  const clickAgg = db
-    .select({
-      creative_id: links.creative_id,
-      tracked_clean:
-        drizzleSql<number>`count(${clicks.id}) filter (where ${clicks.classification} not in ('bot', 'prefetch', 'suspect'))::int`.as(
-          "tracked_clean",
-        ),
-    })
-    .from(clicks)
-    .innerJoin(links, eq(links.id, clicks.link_id))
-    .where(
-      and(
-        eq(clicks.org_id, orgId),
-        isNotNull(links.creative_id),
-        gte(clicks.clicked_at, WINDOW),
-      ),
-    )
-    .groupBy(links.creative_id)
-    .as("click_agg");
+  const metricsAgg = drizzleSql`(VALUES ${metricsValues}) AS metrics_agg(creative_id, delivered, checkouts, sales, payout, manual_clean, tracked_clean)`;
 
-  const cleanExpr = drizzleSql`(coalesce(${stageAgg.manual_clean}, 0) + coalesce(${clickAgg.tracked_clean}, 0))`;
-  const deliveredExpr = drizzleSql`coalesce(${stageAgg.delivered}, 0)`;
+  const cleanExpr = drizzleSql`(coalesce(metrics_agg.manual_clean, 0) + coalesce(metrics_agg.tracked_clean, 0))`;
+  const deliveredExpr = drizzleSql`coalesce(metrics_agg.delivered, 0)`;
   // CASE without ELSE yields NULL when the denominator is 0, so "no data"
   // sorts/renders as "—" rather than a misleading 0%.
   const RATIO_SQL = {
     ctr: drizzleSql`CASE WHEN ${deliveredExpr} > 0 THEN ${cleanExpr}::numeric / ${deliveredExpr} END`,
-    checkout_rate: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(${stageAgg.checkouts}, 0)::numeric / ${cleanExpr} END`,
-    sales_cr: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(${stageAgg.sales}, 0)::numeric / ${cleanExpr} END`,
-    epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(${stageAgg.payout}, 0)::numeric / ${cleanExpr} END`,
+    checkout_rate: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.checkouts, 0)::numeric / ${cleanExpr} END`,
+    sales_cr: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.sales, 0)::numeric / ${cleanExpr} END`,
+    epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.payout, 0)::numeric / ${cleanExpr} END`,
   } as const;
 
   const sortBy = params.sortBy ?? "created_at";
@@ -259,16 +208,17 @@ export async function GET(req: NextRequest) {
     ? db
         .select({
           ...baseColumns,
-          m_delivered: stageAgg.delivered,
-          m_checkouts: stageAgg.checkouts,
-          m_sales: stageAgg.sales,
-          m_payout: stageAgg.payout,
-          m_manual_clean: stageAgg.manual_clean,
-          m_tracked_clean: clickAgg.tracked_clean,
+          m_delivered: drizzleSql<number>`metrics_agg.delivered`.as("m_delivered"),
+          m_checkouts: drizzleSql<number>`metrics_agg.checkouts`.as("m_checkouts"),
+          m_sales: drizzleSql<number>`metrics_agg.sales`.as("m_sales"),
+          m_payout: drizzleSql<string>`metrics_agg.payout`.as("m_payout"),
+          m_manual_clean: drizzleSql<number>`metrics_agg.manual_clean`.as("m_manual_clean"),
+          m_tracked_clean: drizzleSql<number>`metrics_agg.tracked_clean`.as("m_tracked_clean"),
         })
         .from(creatives)
-        .leftJoin(stageAgg, eq(stageAgg.creative_id, creatives.id))
-        .leftJoin(clickAgg, eq(clickAgg.creative_id, creatives.id))
+        // LEFT JOIN so a creative with no activity in the window still returns
+        // (with NULL counters -> "—"), exactly as the old subquery join did.
+        .leftJoin(metricsAgg, drizzleSql`metrics_agg.creative_id = ${creatives.id}`)
         .where(where)
         .orderBy(...orderByClause)
         .limit(params.pageSize)
@@ -457,8 +407,9 @@ export async function GET(req: NextRequest) {
         // sample can be attributed without guessing at the query string.
         "x-camman-timing": [
           `auth;dur=${tAuth.toFixed(1)}`,
+          `mcache;dur=${tMetrics.toFixed(1)}`,
           `rows;dur=${tRows.toFixed(1)}`,
-          `enrich;dur=${(total - tAuth - tRows).toFixed(1)}`,
+          `enrich;dur=${(total - tAuth - tRows - tMetrics).toFixed(1)}`,
           `total;dur=${total.toFixed(1)}`,
           `metrics;desc="${includeMetrics ? 1 : 0}"`,
         ].join(", "),

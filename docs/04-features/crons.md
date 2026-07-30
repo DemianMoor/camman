@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-26_
+_Last updated: 2026-07-30_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -20,7 +20,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 | `/api/cron/refresh-offer-group-report` | `0 5,20 * * *` | rebuild the offer group report matviews (`offer_group_report_mv`, `offer_report_org_summary_mv`) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 | `/api/cron/lookup-worker` | `*/2 * * * *` | drain the Telnyx number-lookup queue (`lib/telnyx/worker.ts`); single-runner lease | CRON_SECRET only (503 if unset, 401 otherwise) |
 | `/api/cron/carrier-triage` | `17,47 * * * *` | drain `carrier_classify_queue` — batch unresolved carrier strings to `claude-haiku-4-5`, write confident buckets to `carrier_mappings` (`lib/carrier/ai-triage.ts`); `withCronLease` single-runner; per-run API-call cap | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
-| `/api/cron/report-rollup` | `14,29,44,59 * * * *` | recompute the 14-day rolling window of the reports rollup facts (`report_stage_hour`, `report_group_hour`) + settle older buckets (`lib/reporting/rollup.ts`); `withCronLease` single-runner sharing the `report-rollup` `cron_locks` row | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
+| ~~`/api/cron/report-rollup`~~ | **UNSCHEDULED 2026-07-30** | Route still exists and is still callable manually, but is **no longer in `vercel.json`**. `report_stage_hour` / `report_group_hour` have no readers (`/reports` and Overview both source `lib/reporting/stage-funnel.ts`; the Telegram report uses its own queries), yet at `14,29,44,59` this was the **#1 and #2 query by total DB time in the whole database** — 3.75 hours cumulative, ~355 MB read per burst — re-upserting ~3,900 live rows 1.7M times. See [creatives-list-slow-stage-picker-2026-07-30.md](../creatives-list-slow-stage-picker-2026-07-30.md) §3 for the four-way "nothing reads them" verification. Re-add the entry here if reporting ever needs the facts. | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 
 > **Schedules are staggered on purpose.** Previously the four `*/15` jobs all fired at `:00/:15/:30/:45` alongside the two `*/5` jobs — up to **5–6 crons at once**, each cold-starting and each grabbing pooler connections (the pool caps at `max:5` per instance against Supavisor's ~15-client ceiling). The `*/15` jobs now sit at distinct off-5 minute offsets (`3/6/8/9/12`, plus `carrier-triage` at `17/47`), so they never coincide with the `*/5` jobs or each other — peak concurrency drops from ~6 to ~2. `propagate-clickers` at `8` runs alone at that minute. `send-scheduled` and `keitaro/poll` stay on `*/5` (both latency-sensitive; two concurrent is fine).
 >

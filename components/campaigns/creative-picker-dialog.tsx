@@ -39,7 +39,7 @@ export type PickerCreative = {
 
 type OfferOption = { id: number; name: string; color: string | null };
 
-type ListResponse = { data: PickerCreative[] };
+type ListResponse = { data: PickerCreative[]; totalCount: number };
 type OffersResponse = { data: OfferOption[] };
 
 // The sequence positions the operator actually filters on.
@@ -158,6 +158,10 @@ export function CreativePickerDialog({
   // are hidden until the operator opts in. ON ⇒ they're added to the list.
   const [includeAllOffers, setIncludeAllOffers] = useState(false);
   const [creatives, setCreatives] = useState<PickerCreative[]>([]);
+  // How many matched server-side. When it exceeds what we received, the list is
+  // clipped and the operator is told — a picker that silently omits creatives
+  // is worse than a slow one.
+  const [totalCount, setTotalCount] = useState(0);
   // Highlighted (preview) row — seeded from the stage's current selection. The
   // dialog is mounted fresh each time it opens (parent gates on `open`), so
   // this initializer is the reset; no reset-on-open effect needed.
@@ -188,8 +192,11 @@ export function CreativePickerDialog({
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // 500 = the endpoint's cap. Previously this asked for 200 while
+      // parseListParams silently clamped to 100, so an org with more eligible
+      // active creatives than that lost the tail with no indication.
       const sp = new URLSearchParams({
-        pageSize: "200",
+        pageSize: "500",
         status: "active",
         sortBy: "epc",
         sortDir: "desc",
@@ -197,7 +204,10 @@ export function CreativePickerDialog({
       });
       if (offerIds.length > 0) sp.set("offer_ids", offerIds.join(","));
       const r = await creativesApi.execute(`/api/creatives/list?${sp.toString()}`);
-      if (!cancelled && r.ok) setCreatives(r.data.data);
+      if (!cancelled && r.ok) {
+        setCreatives(r.data.data);
+        setTotalCount(r.data.totalCount);
+      }
     })();
     return () => {
       cancelled = true;
@@ -353,6 +363,16 @@ export function CreativePickerDialog({
                 </table>
               </div>
             </div>
+
+            {creatives.length < totalCount ? (
+              <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                <span>
+                  Showing {creatives.length} of {totalCount} matching creatives.
+                  Narrow the offer selection to see the rest.
+                </span>
+              </p>
+            ) : null}
 
             <div>
               <div className="mb-1.5 text-xs font-medium text-muted-foreground">

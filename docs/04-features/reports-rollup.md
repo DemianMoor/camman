@@ -1,6 +1,6 @@
 # Reports Rollup
 
-_Last updated: 2026-07-20_
+_Last updated: 2026-07-30_
 
 > **⚠️ SOURCE CHANGE (2026-07-20) — read this first.** The five `/reports` tabs
 > were re-sourced to **match the Overview (Keitaro) tab exactly**. On first live
@@ -84,10 +84,30 @@ every trickle window (opt-out attribution 72h, offer-reach / Keitaro conversion
 engagement trickles in) nor a full matview refresh (which re-scans all history
 forever).
 
-- **Cron:** [`app/api/cron/report-rollup/route.ts`](../../app/api/cron/report-rollup/route.ts),
-  schedule `14,29,44,59 * * * *` ([vercel.json](../../vercel.json)),
-  `maxDuration=60`, `preferredRegion=fra1`. Runs just after the opt-out /
-  conversions / offer-reach pollers each quarter-hour so it picks up fresh data.
+- **Cron: UNSCHEDULED as of 2026-07-30.**
+  [`app/api/cron/report-rollup/route.ts`](../../app/api/cron/report-rollup/route.ts)
+  still exists and is still callable by hand (`maxDuration=60`,
+  `preferredRegion=fra1`), but its entry was **removed from
+  [vercel.json](../../vercel.json)**, so nothing invokes it automatically and
+  **these fact tables are no longer being maintained.**
+
+  Both facts are **write-only** — nothing reads `report_stage_hour` or
+  `report_group_hour`. The `/reports` tabs and the Overview route both source
+  [`lib/reporting/stage-funnel.ts`](../../lib/reporting/stage-funnel.ts)
+  `getStageMetricsInRange()`, and the Telegram report builds from its own
+  queries. Meanwhile at `14,29,44,59` this was the **#1 and #2 query by total DB
+  time across the entire database** (7,159 s + 6,358 s ≈ 3.75 hours), reading
+  ~355 MB per burst to re-upsert ~3,900 live rows 1.7M times — I/O that competed
+  with interactive requests. Full four-way verification in
+  [creatives-list-slow-stage-picker-2026-07-30.md](../creatives-list-slow-stage-picker-2026-07-30.md) §3.
+
+  **If reporting ever needs these facts, re-add the `vercel.json` entry** (and
+  expect a large first catch-up run) rather than building a second copy of this
+  logic. Retiring the tables themselves needs a migration + a ClickUp card.
+
+  Previous schedule, for reference: `14,29,44,59 * * * *` — just after the
+  opt-out / conversions / offer-reach pollers each quarter-hour so it picked up
+  fresh data.
 - **Single-runner:** `withCronLease("report-rollup", …)`. The shared `cron_locks`
   row's `watermark` column stores the last-successful-refresh time (lease and
   watermark compose — distinct columns, same row, same as `propagate-clickers`).

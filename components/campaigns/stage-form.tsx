@@ -406,8 +406,13 @@ export function StageForm({
   const refetchCreatives = useMemo(
     () => async () => {
       if (!campaign.offer?.id) return [] as Creative[];
+      // include_metrics=false: this dropdown renders id/text/status/spam only
+      // (see the Creative type above — it has no metrics field). Asking for the
+      // 30-day aggregate here cost ~2.5s and ~240MB of disk reads per open for
+      // numbers that were then thrown away. The picker dialog, which DOES show
+      // EPC/CTR, requests them.
       const r = await creativesApi.execute(
-        `/api/creatives/list?pageSize=200&offer_id=${campaign.offer.id}&status=active`,
+        `/api/creatives/list?pageSize=200&offer_id=${campaign.offer.id}&status=active&include_metrics=false`,
       );
       if (r.ok) {
         setCreatives(r.data.data);

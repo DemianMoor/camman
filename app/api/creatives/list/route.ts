@@ -34,6 +34,14 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { buildCreativeListWhere } from "@/lib/creatives/list-filters";
 import { can } from "@/lib/permissions";
 
+// Co-located with the eu-central-1 Supabase DB. This route makes ~5 SEQUENTIAL
+// round-trips per request (auth, membership, rows+count, offers, spam cache);
+// from the default US region each one crosses the Atlantic at ~90ms. Same
+// per-route pattern as /api/clicks/score-pending and /api/opt-outs/poll — NOT a
+// global `regions` field in vercel.json, which would also drag /r/[code] (the
+// SMS click redirect, hit by US handsets) away from its users.
+export const preferredRegion = "fra1";
+
 const SORT_COLUMNS = {
   created_at: creatives.created_at,
   status: creatives.status,
@@ -49,16 +57,42 @@ const SORT_COLUMNS = {
 } as const;
 
 export async function GET(req: NextRequest) {
+  // Server-Timing marks: Vercel does not retain runtime logs without a log
+  // drain, so per-request server-side attribution is otherwise unrecoverable
+  // after the fact. These surface in Chrome DevTools (Network -> Timing) right
+  // next to the total, which is what separates "the DB is slow" from "the
+  // function/round-trip overhead is slow" without any extra tooling.
+  const t0 = performance.now();
+  let tAuth = 0;
+  let tRows = 0;
+
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
+  tAuth = performance.now() - t0;
 
   if (!can(role, "creatives.view")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
-  const params = parseListParams(req);
+  // The stage creative picker fetches every eligible creative for the selected
+  // offers and filters client-side, so it needs more than the default 100 cap.
+  // The set is small and bounded (low hundreds per org) and the rows are tiny —
+  // all active creatives in this org total ~15kB of text.
+  const params = parseListParams(req, { maxPageSize: 500 });
   const sp = req.nextUrl.searchParams;
+
+  // The 30-day metrics below cost an org-wide aggregate over the whole `links`
+  // table (~1.8M rows / 319MB heap, seq-scanned because `links.creative_id` has
+  // no index) plus 30 days of `clicks`. That is ~2.5s and ~240MB of physical
+  // reads on EVERY call, independent of how many creatives come back — the
+  // aggregate is not restricted to the result page, so LIMIT can't help it.
+  //
+  // Consumers that only need id/text/status/spam (the stage form's creative
+  // dropdown) pass include_metrics=false and skip it entirely (~2.5s -> ~3ms).
+  // Defaults to TRUE so the creatives list page and the picker — which sort and
+  // render EPC/CTR — are unaffected.
+  const includeMetrics = sp.get("include_metrics") !== "false";
 
   const where = buildCreativeListWhere({
     orgId,
@@ -156,7 +190,10 @@ export async function GET(req: NextRequest) {
   // spam_score and the metric ratios we always want empty rows at the end.
   // Tiebreaker on id keeps pagination deterministic.
   let orderByClause;
-  if (sortBy in RATIO_SQL) {
+  // A ratio sort needs the aggregates joined in. When the caller opted out of
+  // metrics there is nothing to sort on, so fall through to the default
+  // created_at ordering rather than emitting a reference to an absent join.
+  if (includeMetrics && sortBy in RATIO_SQL) {
     orderByClause = [
       drizzleSql`${RATIO_SQL[sortBy as keyof typeof RATIO_SQL]} ${drizzleSql.raw(sortDirSql)} NULLS LAST`,
       asc(creatives.id),
@@ -169,53 +206,74 @@ export async function GET(req: NextRequest) {
   } else {
     const sortColumn =
       SORT_COLUMNS[sortBy as keyof typeof SORT_COLUMNS] ?? creatives.created_at;
-    orderByClause = [orderFn(sortColumn)];
+    // Same id tiebreaker as the two branches above — it was missing here, which
+    // made the DEFAULT ordering non-deterministic. Bulk-create commits a whole
+    // batch in one transaction, so up to 7 active creatives in this org share a
+    // created_at to the microsecond; without a tiebreaker Postgres is free to
+    // order within a tie group differently per plan, and a paginated list can
+    // then show the same creative on two pages or skip one entirely.
+    orderByClause = [orderFn(sortColumn), asc(creatives.id)];
   }
 
+  // Direct spam columns: filled in by the scoring step on save. The cache
+  // lookup below is the legacy path; we still consult it so pre-migration
+  // creatives (which have NULLs in the columns) still surface their score.
+  const baseColumns = {
+    id: creatives.id,
+    creative_id: creatives.creative_id,
+    slug: creatives.slug,
+    org_id: creatives.org_id,
+    text: creatives.text,
+    quality: creatives.quality,
+    sequence_placement: creatives.sequence_placement,
+    funnel_stage: creatives.funnel_stage,
+    applies_to_all_offers: creatives.applies_to_all_offers,
+    allow_multi_segment: creatives.allow_multi_segment,
+    row_spam_score: creatives.spam_score,
+    row_spam_label: creatives.spam_label,
+    row_spam_scored_at: creatives.spam_scored_at,
+    row_spam_model_id: creatives.spam_model_id,
+    row_spam_score_error: creatives.spam_score_error,
+    status: creatives.status,
+    archived_at: creatives.archived_at,
+    created_at: creatives.created_at,
+  } as const;
+
+  const rowsQuery = includeMetrics
+    ? db
+        .select({
+          ...baseColumns,
+          m_delivered: stageAgg.delivered,
+          m_checkouts: stageAgg.checkouts,
+          m_sales: stageAgg.sales,
+          m_payout: stageAgg.payout,
+          m_manual_clean: stageAgg.manual_clean,
+          m_tracked_clean: clickAgg.tracked_clean,
+        })
+        .from(creatives)
+        .leftJoin(stageAgg, eq(stageAgg.creative_id, creatives.id))
+        .leftJoin(clickAgg, eq(clickAgg.creative_id, creatives.id))
+        .where(where)
+        .orderBy(...orderByClause)
+        .limit(params.pageSize)
+        .offset(params.page * params.pageSize)
+    : db
+        .select(baseColumns)
+        .from(creatives)
+        .where(where)
+        .orderBy(...orderByClause)
+        .limit(params.pageSize)
+        .offset(params.page * params.pageSize);
+
+  const tRowsStart = performance.now();
   const [rows, countRows] = await Promise.all([
-    db
-      .select({
-        id: creatives.id,
-        creative_id: creatives.creative_id,
-        slug: creatives.slug,
-        org_id: creatives.org_id,
-        text: creatives.text,
-        quality: creatives.quality,
-        sequence_placement: creatives.sequence_placement,
-        funnel_stage: creatives.funnel_stage,
-        applies_to_all_offers: creatives.applies_to_all_offers,
-        allow_multi_segment: creatives.allow_multi_segment,
-        // Direct columns: filled in by the scoring step on save. The
-        // cache lookup below is the legacy path; we still consult it so
-        // pre-migration creatives (which have NULLs in the columns)
-        // still surface their cached score.
-        row_spam_score: creatives.spam_score,
-        row_spam_label: creatives.spam_label,
-        row_spam_scored_at: creatives.spam_scored_at,
-        row_spam_model_id: creatives.spam_model_id,
-        row_spam_score_error: creatives.spam_score_error,
-        status: creatives.status,
-        archived_at: creatives.archived_at,
-        created_at: creatives.created_at,
-        m_delivered: stageAgg.delivered,
-        m_checkouts: stageAgg.checkouts,
-        m_sales: stageAgg.sales,
-        m_payout: stageAgg.payout,
-        m_manual_clean: stageAgg.manual_clean,
-        m_tracked_clean: clickAgg.tracked_clean,
-      })
-      .from(creatives)
-      .leftJoin(stageAgg, eq(stageAgg.creative_id, creatives.id))
-      .leftJoin(clickAgg, eq(clickAgg.creative_id, creatives.id))
-      .where(where)
-      .orderBy(...orderByClause)
-      .limit(params.pageSize)
-      .offset(params.page * params.pageSize),
+    rowsQuery,
     db
       .select({ count: drizzleSql<number>`count(*)::int` })
       .from(creatives)
       .where(where),
   ]);
+  tRows = performance.now() - tRowsStart;
 
   // Bulk-fetch associated offers (one round-trip via inArray).
   const ids = rows.map((r) => r.id);
@@ -307,13 +365,40 @@ export async function GET(req: NextRequest) {
       ? r.row_spam_label
       : spam?.label ?? null;
     // 30-day performance metrics. Base counts power the ratio columns (and
-    // their tooltips); ratios are NULL when their denominator is 0.
-    const delivered = Number(r.m_delivered ?? 0);
-    const checkouts = Number(r.m_checkouts ?? 0);
-    const sales = Number(r.m_sales ?? 0);
-    const payout = Number(r.m_payout ?? 0);
-    const cleanClicks =
-      Number(r.m_manual_clean ?? 0) + Number(r.m_tracked_clean ?? 0);
+    // their tooltips); ratios are NULL when their denominator is 0. When the
+    // caller opted out, the `metrics` key is omitted entirely rather than
+    // zero-filled — a 0% CTR is a claim, "absent" is the truth.
+    const m = includeMetrics
+      ? (() => {
+          const row = r as typeof r & {
+            m_delivered: number | null;
+            m_checkouts: number | null;
+            m_sales: number | null;
+            m_payout: string | null;
+            m_manual_clean: number | null;
+            m_tracked_clean: number | null;
+          };
+          const delivered = Number(row.m_delivered ?? 0);
+          const checkouts = Number(row.m_checkouts ?? 0);
+          const sales = Number(row.m_sales ?? 0);
+          const payout = Number(row.m_payout ?? 0);
+          const cleanClicks =
+            Number(row.m_manual_clean ?? 0) + Number(row.m_tracked_clean ?? 0);
+          return {
+            metrics: {
+              delivered,
+              clean_clicks: cleanClicks,
+              checkouts,
+              sales,
+              payout,
+              ctr: delivered > 0 ? cleanClicks / delivered : null,
+              checkout_rate: cleanClicks > 0 ? checkouts / cleanClicks : null,
+              sales_cr: cleanClicks > 0 ? sales / cleanClicks : null,
+              epc: cleanClicks > 0 ? payout / cleanClicks : null,
+            },
+          };
+        })()
+      : {};
     return {
       id: r.id,
       creative_id: r.creative_id,
@@ -329,17 +414,7 @@ export async function GET(req: NextRequest) {
       archived_at: r.archived_at,
       created_at: r.created_at,
       offers: offersByCreative.get(r.id) ?? [],
-      metrics: {
-        delivered,
-        clean_clicks: cleanClicks,
-        checkouts,
-        sales,
-        payout,
-        ctr: delivered > 0 ? cleanClicks / delivered : null,
-        checkout_rate: cleanClicks > 0 ? checkouts / cleanClicks : null,
-        sales_cr: cleanClicks > 0 ? sales / cleanClicks : null,
-        epc: cleanClicks > 0 ? payout / cleanClicks : null,
-      },
+      ...m,
       spam_score: score,
       spam_label: label,
       spam_verdict:
@@ -351,10 +426,27 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  return NextResponse.json({
-    data,
-    totalCount: countRows[0]?.count ?? 0,
-    page: params.page,
-    pageSize: params.pageSize,
-  });
+  const total = performance.now() - t0;
+  return NextResponse.json(
+    {
+      data,
+      totalCount: countRows[0]?.count ?? 0,
+      page: params.page,
+      pageSize: params.pageSize,
+    },
+    {
+      headers: {
+        // `enrich` = the offers + spam-cache round-trips; `total` minus the
+        // parts is serialization. metrics=1/0 records which mode ran, so a slow
+        // sample can be attributed without guessing at the query string.
+        "Server-Timing": [
+          `auth;dur=${tAuth.toFixed(1)}`,
+          `rows;dur=${tRows.toFixed(1)}`,
+          `enrich;dur=${(total - tAuth - tRows).toFixed(1)}`,
+          `total;dur=${total.toFixed(1)}`,
+          `metrics;desc="${includeMetrics ? 1 : 0}"`,
+        ].join(", "),
+      },
+    },
+  );
 }

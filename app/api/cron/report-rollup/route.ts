@@ -15,9 +15,30 @@ import { refreshReportRollup } from "@/lib/reporting/rollup";
 // row — they compose because they touch distinct columns. Same pattern as
 // /api/cron/propagate-clickers.
 //
-// Scheduled at 14,29,44,59 — just after the opt-out (…6/21…), conversions
-// (…9/24…) and offer-reach (…12/27…) pollers each quarter-hour, so the rollup
-// picks up freshly-polled engagement.
+// UNSCHEDULED as of 2026-07-30 — removed from vercel.json's `crons`. The route
+// is kept callable (manual/curl) but nothing invokes it automatically.
+//
+// Why: `report_stage_hour` / `report_group_hour` have no readers. The /reports
+// tabs and the Overview route both source from lib/reporting/stage-funnel.ts
+// (`getStageMetricsInRange`), and the Telegram report builds from its own
+// queries — neither touches these tables. Verified four ways: repo-wide grep
+// (only writes here + scripts/test-report-rollup.ts), no SELECT/FROM/JOIN
+// against either table anywhere in app/ or lib/, and pg_stat_user_tables showing
+// idx_scan (1,492,814) ≈ n_tup_upd (1,491,062) — i.e. the "reads" were the
+// upsert's own ON CONFLICT probes, not consumers.
+//
+// Cost of keeping it: at 14,29,44,59 it was the #1 and #2 query by total DB time
+// across the whole database — 7,159s + 6,358s = 3.75 HOURS — re-upserting the
+// same ~3,900 live rows 1.7M times and reading ~355MB per burst, four times an
+// hour. That I/O was competing with interactive requests.
+//
+// If reporting ever needs these tables, re-add the cron entry rather than
+// reviving a second copy of this logic. Retiring the tables themselves needs a
+// migration (and a ClickUp card) — deliberately not done here.
+//
+// Previous schedule, for reference: "14,29,44,59 * * * *" — just after the
+// opt-out (…6/21…), conversions (…9/24…) and offer-reach (…12/27…) pollers each
+// quarter-hour, so the rollup picked up freshly-polled engagement.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 export const preferredRegion = "fra1"; // co-located with Supabase; pure DB work.

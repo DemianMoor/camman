@@ -119,8 +119,19 @@ export type ListParams = {
   sortDir: "asc" | "desc";
 };
 
-export function parseListParams(req: NextRequest): ListParams {
+export const DEFAULT_MAX_PAGE_SIZE = 100;
+
+// `maxPageSize` raises the cap for endpoints whose callers legitimately need a
+// whole (small, bounded) set in one shot — e.g. the stage creative picker,
+// which filters client-side over every eligible creative. Callers that exceed
+// the cap are TRUNCATED SILENTLY at the API layer, so any endpoint raising this
+// should also surface `totalCount` so the client can tell it was clipped.
+export function parseListParams(
+  req: NextRequest,
+  opts?: { maxPageSize?: number },
+): ListParams {
   const sp = req.nextUrl.searchParams;
+  const maxPageSize = opts?.maxPageSize ?? DEFAULT_MAX_PAGE_SIZE;
 
   const pageRaw = Number(sp.get("page"));
   const page =
@@ -129,7 +140,7 @@ export function parseListParams(req: NextRequest): ListParams {
   const pageSizeRaw = Number(sp.get("pageSize"));
   const pageSize =
     Number.isFinite(pageSizeRaw) && pageSizeRaw > 0
-      ? Math.min(100, Math.floor(pageSizeRaw))
+      ? Math.min(maxPageSize, Math.floor(pageSizeRaw))
       : 20;
 
   const searchRaw = sp.get("search")?.trim();

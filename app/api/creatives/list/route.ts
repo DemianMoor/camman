@@ -122,20 +122,18 @@ export async function GET(req: NextRequest) {
   // to `enrich` and look like a slow offers/spam lookup.
   tMetrics = performance.now() - tMetricsStart;
 
-  // A VALUES list needs at least one row and needs its column types pinned, so
-  // the empty case uses a typed sentinel row that can never match a real id.
-  const metricsValues =
-    metricsRows.length > 0
-      ? drizzleSql.join(
-          metricsRows.map(
-            (m) =>
-              drizzleSql`(${m.creative_id}::int, ${m.delivered}::int, ${m.checkouts}::int, ${m.sales}::int, ${m.payout}::numeric, ${m.manual_clean}::int, ${m.tracked_clean}::int)`,
-          ),
-          drizzleSql`, `,
-        )
-      : drizzleSql`(-1::int, 0::int, 0::int, 0::int, 0::numeric, 0::int, 0::int)`;
-
-  const metricsAgg = drizzleSql`(VALUES ${metricsValues}) AS metrics_agg(creative_id, delivered, checkouts, sales, payout, manual_clean, tracked_clean)`;
+  // Injected as ONE jsonb bind parameter via jsonb_to_recordset, not a VALUES
+  // list. A VALUES list would bind 7 parameters per row and Postgres caps a
+  // statement at 65,535 of them — a cliff at ~9,400 creatives-with-activity that
+  // would surface as a confusing bind error rather than a slow query. This form
+  // is a single parameter regardless of row count, and it handles the empty case
+  // natively (an empty array yields zero rows, so the LEFT JOIN just returns
+  // NULL counters) without needing a sentinel row.
+  const metricsAgg = drizzleSql`(
+    SELECT * FROM jsonb_to_recordset(${JSON.stringify(metricsRows)}::jsonb)
+      AS m(creative_id int, delivered int, checkouts int, sales int,
+           payout numeric, manual_clean int, tracked_clean int)
+  ) AS metrics_agg`;
 
   const cleanExpr = drizzleSql`(coalesce(metrics_agg.manual_clean, 0) + coalesce(metrics_agg.tracked_clean, 0))`;
   const deliveredExpr = drizzleSql`coalesce(metrics_agg.delivered, 0)`;

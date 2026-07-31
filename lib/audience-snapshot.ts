@@ -1304,13 +1304,41 @@ export async function snapshotAudience(
   // rather than re-running the qualifier for both the count and the insert —
   // means the (now correctly-planned) flag hash-joins evaluate a single time;
   // the count is then a trivial read and the insert just samples this set.
+  //
+  // The prior-offer exclusion is deliberately NOT part of this statement — it
+  // runs below, against the materialized+ANALYZEd result. See the comment there.
   const qualifying = buildQualifierFromRelation(
-    input,
+    { ...input, excludePriorOffer: false },
     drizzleSql`audience_candidates`,
   );
   await runner.execute(drizzleSql`
     create temp table audience_qualified on commit drop as ${qualifying}
   `);
+
+  // Prior-offer exclusion (content-dedup LAYER 3) as a SEPARATE statement, for
+  // the same reason the candidate set is materialized above: planner stats.
+  // Folded into the qualifier it is an anti-join whose outer estimate collapses
+  // to rows=1 (a chain of anti-joins over a temp table), while `offer_id` for a
+  // newer/small offer is absent from the column's MCV list so `offer_exposures`
+  // is estimated at 1 row too. Both wrong in the same direction ⇒ the planner
+  // picks a Nested Loop Anti Join and re-scans offer_exposures ONCE PER
+  // CANDIDATE — measured at 23K loops × 5K rows = 115.7M heap fetches, 84s,
+  // past the route's 60s limit (campaign create timed out, transaction rolled
+  // back). Splitting it out lets ANALYZE give the planner the real cardinality
+  // of the qualified set, so it hash-anti-joins instead: 67.5s → 4.2s on the
+  // same recipe, byte-identical rows out.
+  if (input.excludePriorOffer === true && input.offerId != null) {
+    await runner.execute(drizzleSql`analyze audience_qualified`);
+    await runner.execute(drizzleSql`
+      delete from audience_qualified q
+      where exists (
+        select 1 from offer_exposures oe
+        where oe.org_id = ${input.orgId}::uuid
+          and oe.offer_id = ${input.offerId}::int
+          and oe.contact_id = q.contact_id
+      )
+    `);
+  }
 
   const totalRows = (await runner.execute(drizzleSql`
     select count(*)::int as count from audience_qualified

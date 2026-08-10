@@ -1,4 +1,8 @@
+import type { Metadata } from "next";
+
 import { SendToggle } from "@/components/settings/send-toggle";
+
+export const metadata: Metadata = { title: "Sending Settings" };
 
 export default function SendingSettingsPage() {
   return (

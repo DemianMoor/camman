@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-07-30_
+_Last updated: 2026-08-10_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -163,6 +163,31 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - `<FormDialog>` for input dialogs (blocks accidental dismissal); `<AlertDialog>` for confirmations; bare `<Dialog>` read-only.
 - Required fields → red asterisk via `<FormLabel required>`; no "(optional)" text.
 - `<FileDropZone>` for all file pickers; `<MultiSelectPicker>` for >10-option selection; `<CopyableId>` for system ids.
+
+### Browser tab titles (page metadata)
+Every route sets its own `<title>`. The root layout ([app/layout.tsx](../app/layout.tsx)) owns the shape:
+
+```ts
+title: { template: "%s - Camman", default: "Camman" }
+```
+
+so a segment exports only its own bare name (`"Campaigns"`) and the suffix is appended. `default` is the fallback for any route that sets nothing. The two strings live in [lib/page-title.ts](../lib/page-title.ts) — change the brand there, not in 35 files.
+
+⚠️ **A plain-string `title` nulls the inherited template for every segment below it.** A layout that titles itself with `title: "Campaigns"` leaves `/campaigns/[id]` rendering a bare `Campaign` with no ` - Camman`. So any segment that has **titled descendants** must re-declare the template, via the `sectionTitle()` helper:
+
+```ts
+export const metadata: Metadata = { title: sectionTitle("Campaigns") };
+// → { default: "Campaigns", template: "%s - Camman" }
+```
+
+The template is applied to `default` as well, so pass the bare name — baking the suffix in yields `Segments - Camman - Camman`. Six segments need this today (`campaigns`, `campaigns/[id]`, `segments`, `contact-groups`, `providers`, `offers`); every other segment is a leaf and a plain string is enough. A **page**'s metadata never cascades, only a **layout**'s — which is why `reports/page.tsx` can hold a plain `"Overview"` while `reports/[dimension]` still gets the suffix. **When you add a page under an already-titled segment, switch that segment's layout to `sectionTitle()`.**
+
+How a segment sets its title depends on what the page is:
+- **Server page** → `export const metadata: Metadata = { title: "…" }` in `page.tsx`.
+- **Client page** (`"use client"`) → metadata **cannot** be exported from a client module. Add a sibling `layout.tsx` in that segment that exports `metadata` and returns `children` unchanged. **Do not convert a client page to a server component just to give it a title.** 29 of the 36 pages use this pattern; copy any of them (e.g. [app/(protected)/brands/layout.tsx](<../app/(protected)/brands/layout.tsx>)).
+- **Dynamic segment** → `generateMetadata({ params })`, and `params` is a **Promise** (Next 15+) — `await` it. Only worth doing when the name is already available for free: [reports/[dimension]](<../app/(protected)/reports/[dimension]/page.tsx>) reads the pure constant `DIMENSION_TAB_LABEL`. **Never add a DB query just to name a tab** — the entity detail pages (`campaigns/[id]`, `segments/[id]`, `contact-groups/[id]`, `providers/[id]`, `offers/[id]/report`) are client components with no server-side `React.cache`'d fetcher to reuse, so they take static titles ("Campaign", "Segment", …). If a cached server fetcher is added for one of them later, `generateMetadata` can reuse it and show the real name at no extra query cost.
+
+Titles track the sidebar labels in [components/protected/nav-config.ts](../components/protected/nav-config.ts) and each page's `<h1>`, so the tab matches what's on screen. `app/page.tsx` sets no title — it always `redirect()`s and never paints.
 
 ---
 

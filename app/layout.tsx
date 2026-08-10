@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
+import { TITLE_DEFAULT, TITLE_TEMPLATE } from "@/lib/page-title";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -13,8 +14,16 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// `template` applies to every descendant segment that sets its own title;
+// `default` is the fallback for any route that doesn't. Client pages can't
+// export metadata, so those segments carry a sibling layout.tsx that does, and
+// a segment with titled descendants must re-declare the template via
+// sectionTitle() — see docs/07-conventions.md.
 export const metadata: Metadata = {
-  title: "Campaign Manager",
+  title: {
+    template: TITLE_TEMPLATE,
+    default: TITLE_DEFAULT,
+  },
   description: "Internal CRM for SMS affiliate marketing campaigns.",
 };
 

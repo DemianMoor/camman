@@ -185,9 +185,33 @@ The template is applied to `default` as well, so pass the bare name — baking t
 How a segment sets its title depends on what the page is:
 - **Server page** → `export const metadata: Metadata = { title: "…" }` in `page.tsx`.
 - **Client page** (`"use client"`) → metadata **cannot** be exported from a client module. Add a sibling `layout.tsx` in that segment that exports `metadata` and returns `children` unchanged. **Do not convert a client page to a server component just to give it a title.** 29 of the 36 pages use this pattern; copy any of them (e.g. [app/(protected)/brands/layout.tsx](<../app/(protected)/brands/layout.tsx>)).
-- **Dynamic segment** → `generateMetadata({ params })`, and `params` is a **Promise** (Next 15+) — `await` it. Only worth doing when the name is already available for free: [reports/[dimension]](<../app/(protected)/reports/[dimension]/page.tsx>) reads the pure constant `DIMENSION_TAB_LABEL`. **Never add a DB query just to name a tab** — the entity detail pages (`campaigns/[id]`, `segments/[id]`, `contact-groups/[id]`, `providers/[id]`, `offers/[id]/report`) are client components with no server-side `React.cache`'d fetcher to reuse, so they take static titles ("Campaign", "Segment", …). If a cached server fetcher is added for one of them later, `generateMetadata` can reuse it and show the real name at no extra query cost.
+- **Dynamic segment** → `generateMetadata({ params })`, and `params` is a **Promise** (Next 15+) — `await` it. [reports/[dimension]](<../app/(protected)/reports/[dimension]/page.tsx>) needs no I/O at all — it reads the pure constant `DIMENSION_TAB_LABEL`.
 
 Titles track the sidebar labels in [components/protected/nav-config.ts](../components/protected/nav-config.ts) and each page's `<h1>`, so the tab matches what's on screen. `app/page.tsx` sets no title — it always `redirect()`s and never paints.
+
+#### Entity detail pages show the record's name
+
+The five entity detail routes put the real name in the tab — `Summer Promo - Camman`, not `Campaign - Camman`:
+
+| Route | Title | Fallback |
+|---|---|---|
+| `/campaigns/[id]` | `campaigns.name` | `Campaign` |
+| `/campaigns/[id]/edit` | `Edit <campaigns.name>` | `Edit Campaign` |
+| `/segments/[id]` | `segments.name` | `Segment` |
+| `/contact-groups/[id]` | `contact_groups.name` | `Contact Group` |
+| `/providers/[id]` | `sms_providers.name` | `SMS Provider` |
+| `/offers/[id]/report` | `offers.name` | `Offer Report` |
+
+Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/entity-title.ts) → `getEntityName()` in [lib/entity-name.ts](../lib/entity-name.ts). Rules that must hold:
+
+- 🔒 **The lookup is org-scoped: `WHERE id = ? AND org_id = <caller's org>`.** This is load-bearing, not defence-in-depth — without the `org_id` predicate anyone could read another tenant's entity name out of their own browser tab by guessing a sequential id. There is exactly **one** function with this SQL so there's no per-route query to get wrong; do not inline a second one. [scripts/test-entity-title-tenancy.ts](../scripts/test-entity-title-tenancy.ts) asserts both directions (owning org → name, non-owning org → null) for all five entities and is read-only. `getEntityName` deliberately imports no auth/Next code so that test can run under `tsx`.
+- **One indexed single-row select of the name column.** No joins, no aggregates. `id` is the PK on all five tables, so no extra index is needed.
+- **`generateMetadata` must never throw or redirect.** `entityTitle()` uses `getUser()`/`getOrgMembership()` — *not* `requireOrgMembership()`, which calls `redirect()`. Malformed id, missing row, blank name, no session, or wrong org all return the static fallback. (`campaigns.name` is **nullable** — a row existing is not a guarantee of a usable title.)
+- **Resolving the org costs nothing extra**: both auth helpers are already `React.cache`'d and already called by the protected layout on every request.
+- **A parent layout's `generateMetadata` runs on descendant routes too**, even when the child overrides the title — verified, not assumed. So `campaigns/[id]`'s lookup also fires on `/campaigns/[id]/edit`; `/edit` therefore uses the name as well (`Edit Summer Promo`) so the query isn't wasted, and because `getEntityName` is `React.cache`'d the two `generateMetadata` calls share **one** query. Measured with `pg_stat_statements`: +1 per detail route, +1 on `/edit`, **+0** on `/dashboard`, `/campaigns`, `/segments`, `/contacts`, `/reports`.
+- Renaming an entity in-page does **not** update the tab until reload. That's accepted — no client-side title syncing.
+
+[scripts/test-entity-title-render.ts](../scripts/test-entity-title-render.ts) checks the *rendered* `<title>` against a running app as the signed-in `TEST_USER_EMAIL`, plus the fallbacks and the query counts. Source review alone is not sufficient here — that is how the template-nulling bug above reached production.
 
 ---
 

@@ -1,11 +1,20 @@
 import type { Metadata } from "next";
 
 import { CampaignEditorPage } from "@/components/campaigns/campaign-editor-page";
+import { entityTitle } from "@/lib/entity-title";
 
-// Static — the campaign name is fetched client-side by CampaignEditorPage, and
-// there is no server-side cached fetcher to reuse, so naming the campaign here
-// would mean a second DB round trip per render.
-export const metadata: Metadata = { title: "Edit Campaign" };
+// Shares the React.cache'd lookup with the parent campaigns/[id] layout, whose
+// generateMetadata also runs on this route — so naming the campaign here costs
+// no extra query, and the parent's lookup isn't wasted on a title we discard.
+// entityTitle's fallback composes: a miss yields plain "Edit Campaign".
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  return { title: `Edit ${await entityTitle("campaign", id, "Campaign")}` };
+}
 
 export default async function EditCampaignPage({
   params,

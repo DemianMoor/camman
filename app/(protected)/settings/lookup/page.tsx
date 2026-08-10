@@ -1,4 +1,8 @@
+import type { Metadata } from "next";
+
 import { LookupAdmin } from "@/components/settings/lookup-admin";
+
+export const metadata: Metadata = { title: "Carrier Lookup" };
 
 export default function LookupSettingsPage() {
   return (

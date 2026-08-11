@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-07-18_
+_Last updated: 2026-08-11_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -40,6 +40,8 @@ sequenceDiagram
 ### Deferred scoring (`/api/clicks/score-pending`, cron `*/15`)
 - Modes: `pending` (rows where `scored_at IS NULL`, default) or `rescore` (all rows, idempotent — after retuning weights). `maxRows` default 2000 (≤20000).
 - Enrichment via MaxMind GeoLite2 ASN/Country `.mmdb` (`geoip.ts`): fills `asn`, `asn_org`, `country`, and `is_datacenter` (from a hosting-ASN list, `datacenter-asns.ts` — GeoLite has no hosting flag).
+- **`is_datacenter` matches on the exact ASN NUMBER only.** A substring fallback over the ASN *organization name* was removed 2026-08-11 (see §7a). Never reintroduce name matching — add the ASN number instead.
+- **Consumer-relay carve-out** (`CONSUMER_RELAY_ASNS`): Fastly `54113`, Cloudflare `13335`, Akamai `36183` and Google Fiber `16591` are explicitly **not** datacenter. The first three are Apple iCloud Private Relay egress partners (default-on for iCloud+ subscribers); the fourth is a residential ISP. This set wins over `DATACENTER_ASNS`, so mistakenly re-adding one of those numbers cannot resurrect the bug.
 - Scoring (`scoring.ts`): weighted `bot_score` (e.g. datacenter ASN, scanner/headless UA, missing UA) → final `classification` (`human` / `suspect` / `bot`) + `bot_reasons[]` (recorded on **every** scored row, including humans, so near-misses are visible when retuning).
 - **Fail-safe:** if enrichment is unavailable (no MaxMind key, rate-limited), **no rows are scored** — they stay `pending` for the next tick (self-healing). With the key unset, scoring still runs on UA signals only (asn/country/datacenter stay NULL).
 - GeoIP DB caching: L1 `/tmp` per-instance copy, L2 `geoip_cache` Postgres table (cross-instance), 24h freshness, ≤1 refresh/6h, advisory xact-lock to coordinate cold starts.
@@ -69,7 +71,34 @@ Scope: only guidekn `/lp/` URLs are shape-checked; empty URLs (drafts/auto mode)
 - `links.creative_id` is `ON DELETE SET NULL` so a deleted creative doesn't orphan click history.
 - Attribution is link-click based: a click proves the recipient opened the link, not that they converted (checkout/sales are manual stage counters).
 
+## 7a. ⚠️ Datacenter-ASN false positives + the 2026-08-11 rescore backfill
+
+**Backfill date: 2026-08-11.** `clicks.classification` was rewritten for **4,382 historical rows**. Any comparison spanning that date is not like-for-like — a step change in Hourly Clickers or By-Group weights around 2026-08-11 is this backfill, not a traffic change.
+
+**What was wrong.** `isDatacenterAsn` fell back to substring matching on the ASN organization name (`"hosting"`, `"cloud"`, `"colo"`, `"google"`, …). Substring matching free text is unsound in a way that fails silently — a false positive looks exactly like successful bot filtering:
+
+- `"colo"` matched **"NE COLORADO CELLULAR"**, **"COLORADO VALLEY COMMUNICATIONS"** and **"University of Colorado Hospital"** — a mobile carrier, a rural telco and a hospital.
+- `"google"` matched **"Google Fiber Inc."** — a residential ISP.
+- Fastly/Cloudflare/Akamai were listed as datacenter, but they are Apple's three **iCloud Private Relay** egress partners.
+
+Every affected click scored +60 (datacenter) → `suspect` → dropped from every click metric.
+
+**How it was found.** 89 converted recipients (**$6,212, 12.1% of attributed revenue**) were in the revenue numerator but absent from the click denominator. Bots do not buy. Conversion rate by ASN group among excluded clickers, versus a 0.9703% benchmark for clickers scored `human`:
+
+| ASN group | clickers | buyers | conv % |
+|---|---|---|---|
+| relay/CDN + plausible UA | 3,664 | 82 | **2.2380%** |
+| relay/CDN + missing/scanner UA | 31 | 0 | 0.0000% |
+| AWS | 3,124 | 7 | 0.2241% |
+| Google AS15169 (SMS link scanners) | 510,679 | 1 | 0.0002% |
+
+Relay traffic converts at **2.3× the human rate**; the Google AS15169 mass (91% of all taps) converts at effectively zero and is correctly excluded. The UA split is why the carve-out is relay-ASN **and** plausible-UA.
+
+**What changed.** Name matching deleted; the 19 genuine hosting providers it was catching were audited against production traffic and enumerated as explicit ASN numbers; the four relay ASNs carved out. Backfill: `scripts/backfill-rescore-datacenter.ts` — deterministic and offline (recomputes from the stored `asn`, re-runs the same pure `scoreClick()`, no MaxMind call), dry-run by default, idempotent, and it aborts unless the new rule is strictly narrower. Result: 4,312 `suspect → human`, 70 `bot → suspect`. Excluded buyers **89 → 8** ($6,212 → $562). Pre-backfill state is snapshotted on the ClickUp card via `scripts/snapshot-click-classifications.ts`.
+
+**Standing risk.** ~91% of taps ride on a single signal (datacenter ASN, weight 60). If Google shifts ASN, or a scanner appears from residential-looking IPs, every click metric moves platform-wide with no other warning. Monitors are specified on the EPC-unification card: monthly human share of taps, excluded-clicker conversion rate (alert ~0.1% — would have caught this on day one), and the Rule-F rescue count.
+
 ## 7. Extension points / limitations
 - Re-score pass (`mode=rescore`) lets you retune weights and re-grade history.
-- Add hosting ASNs to `datacenter-asns.ts` to improve datacenter detection.
+- Add hosting **ASN numbers** to `datacenter-asns.ts` to improve datacenter detection. Do **not** add org-name keywords — see §7a.
 - Origin-lock to Cloudflare is a prerequisite for fully trusting IP-based signals.

@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-10_
+_Last updated: 2026-08-11_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -245,6 +245,13 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - **"Clickers" = internal clean clicks** (`clicks.classification='human' AND scored_at IS NOT NULL`, joined via `stage_sends.link_id`), NOT the Keitaro visit counter (`campaign_stages.click_count`). Different populations — the two numbers will differ.
 - **Grand totals come from `report_stage_hour` (Fact A) only.** `report_group_hour` (Fact B) fans out over the many-to-many `contact_contact_groups` (avg 1.34 groups/contact), so summing its group rows OVERCOUNTS the true total by design — same caveat as the offer-group report's group unnest.
 - **`stage_sends.provider_phone_id` / `cost_per_sms` are durable send-time snapshots** (stamped at materialization). The rollup resolves `COALESCE(send snapshot, stage live value)` so pre-0112 history still attributes to a number/rate via the (mutable) stage. Cost inherits the flat-rate limitation of `campaign_stages.total_cost` (multi-segment messages under-costed) — a separate future card.
+
+## Click scoring — ASN matching (see [04-features/tracking-attribution.md §7a](04-features/tracking-attribution.md))
+- **Match datacenter ASNs by exact NUMBER. Never by organization-name substring.** The org-name fallback was removed 2026-08-11 after `"colo"` matched *NE COLORADO CELLULAR*, *COLORADO VALLEY COMMUNICATIONS* and *University of Colorado Hospital*, and `"google"` matched *Google Fiber Inc.* (a residential ISP). To improve detection, add the ASN number to `DATACENTER_ASNS` in [`lib/links/datacenter-asns.ts`](../lib/links/datacenter-asns.ts).
+- **`CONSUMER_RELAY_ASNS` (Fastly 54113, Cloudflare 13335, Akamai 36183, Google Fiber 16591) are never datacenter** and win over `DATACENTER_ASNS`. The first three are Apple iCloud Private Relay egress partners — real recipients, converting at 2.24% vs a 0.97% human benchmark.
+- **A false positive is worse than a miss.** A missed bot dilutes a metric; a false positive deletes a real customer from it, silently — it looks identical to successful filtering. When in doubt, don't classify as datacenter.
+- **Rescore backfill ran 2026-08-11** (4,382 rows: 4,312 `suspect→human`, 70 `bot→suspect`). Any Hourly-Clickers or By-Group comparison spanning that date is not like-for-like.
+- **~91% of all taps hinge on one signal** (datacenter ASN, weight 60 — almost entirely Google AS15169 SMS link scanners). If that signal shifts, every click metric on the platform moves at once with no other warning.
 
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.

@@ -137,7 +137,7 @@ export async function scoreClicks(
       const isDatacenter =
         geo.asn == null && geo.asnOrg == null
           ? null
-          : isDatacenterAsn(geo.asn, geo.asnOrg);
+          : isDatacenterAsn(geo.asn);
 
       const result = scoreClick({
         firstPassClassification: row.classification,

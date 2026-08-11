@@ -98,17 +98,33 @@ function rate(numerator: number, denominator: number): number {
 
 // Derived funnel metrics from a tally. `clickers` / `offer_redirect` are the
 // headline (clean) counts; rates chain down the funnel.
-export function withFunnelDerived(t: FunnelTally) {
+//
+// `countedClickers` is REQUIRED, deliberately. It is the platform-wide EPC
+// denominator from lib/reporting/counted-clickers.ts, and making it a required
+// parameter is what makes "no fallback to the old denominator" a compile-time
+// guarantee rather than a convention — there is no overload that divides by
+// redirects any more, so a new caller cannot accidentally reintroduce one.
+//
+// It is NOT derivable from the tally: the tally holds Keitaro aggregates, while
+// the denominator is CamMan's own deduplicated counted-clicker set (or, for
+// manual-mode campaigns which mint no links, Keitaro's clean landing visits).
+// Callers resolve it with denominatorFor() and pass it in.
+export function withFunnelDerived(t: FunnelTally, countedClickers: number) {
   return {
     ...t,
     clickers: t.visit_clicks_clean, // headline: clean visit clicks
     offer_redirect: t.redirect_clicks_clean, // headline: clean redirect clicks
+    // The EPC denominator, surfaced so every screen can show the click count
+    // next to EPC — the grain is only readable if the count is visible.
+    counted_clickers: countedClickers,
     // share of visitors who clicked through to the offer
     redirect_rate: rate(t.redirect_clicks_clean, t.visit_clicks_clean),
     // share of offer redirects that converted to a sale
     sales_cr: rate(t.sales, t.redirect_clicks_clean),
-    // earnings per offer redirect (clean)
-    epc: rate(t.revenue, t.redirect_clicks_clean),
+    // earnings per COUNTED CLICKER (was: per clean offer redirect, until
+    // 2026-08-11 — that denominator was ~8x smaller and inconsistent with every
+    // other surface). See docs/04-features/tracking-attribution.md.
+    epc: rate(t.revenue, countedClickers),
     profit: t.revenue - t.cost,
   };
 }

@@ -3317,3 +3317,51 @@ export const report_group_hour = pgTable(
 );
 
 export type ReportGroupHour = typeof report_group_hour.$inferSelect;
+
+// Counted-clicker cache (migration 0125) — the single denominator behind every
+// EPC on the platform. One row per (stage, contact) counted clicker, where
+// "counted" = at least one click with classification='human', OR a conversion
+// (Rule F). Storing the deduplicated MEMBERSHIP rather than counts is what lets
+// one table serve every grain and both time bases: deduplicated counts are not
+// additive over time or across grains (one contact clicking on two days is one
+// lifetime clicker, not two), so a count cache could not produce a lifetime
+// figure by summing. Reads aggregate at the grain of the row displayed.
+//
+// Rebuilt WHOLESALE by its refresh job — deliberately no watermark. See
+// lib/reporting/counted-clickers.ts for why (a watermark made the sibling
+// `clickers` propagation un-repairable when click classifications were
+// corrected on 2026-08-11).
+export const counted_clickers = pgTable(
+  "counted_clickers",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    creative_id: integer("creative_id"),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    // Earliest counted click for this (stage, contact) — the click-date basis
+    // for period EPC. NULL only for a Rule-F rescue with no click row at all.
+    first_click_at: timestamp("first_click_at", { withTimezone: true }),
+    // TRUE when the row exists only because the contact converted (Rule F).
+    // Instrumented as a regression detector for click scoring, not just a
+    // correction: baseline at build time is 8.
+    rescued_by_conversion: boolean("rescued_by_conversion")
+      .notNull()
+      .default(false),
+  },
+  (table) => [
+    primaryKey({ columns: [table.stage_id, table.contact_id] }),
+    index("counted_clickers_campaign_idx").on(table.campaign_id, table.contact_id),
+    index("counted_clickers_org_click_at_idx").on(table.org_id, table.first_click_at),
+  ],
+);
+
+export type CountedClicker = typeof counted_clickers.$inferSelect;

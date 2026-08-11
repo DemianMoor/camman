@@ -12,6 +12,10 @@ import {
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { addRowToFunnel, emptyFunnel, type FunnelTally } from "@/lib/keitaro/funnel";
 import { manualSalesByStageInRange } from "@/lib/reporting/attribution";
+import {
+  getCountedClickers,
+  getTotalCountedClickers,
+} from "@/lib/reporting/counted-clickers";
 
 // SINGLE SOURCE OF TRUTH for the per-stage Clickers → Offer Redirect → Sales
 // funnel over an ET date range. Extracted from app/api/keitaro/reports/route.ts
@@ -41,12 +45,34 @@ export interface StageMetrics {
   tally: FunnelTally; // visit_clicks_clean = clickers, redirect_clicks_clean = offer redirect, sales, revenue, cost
 }
 
+// The EPC denominator, in both time bases, at both grains the reports render.
+// Fetched here rather than in each route so Overview and the by-X performance
+// reports cannot drift — the same reason the funnel math lives here.
+//
+// PERIOD is bounded by the requested ET range on the CLICK's date; LIFETIME
+// ignores the range entirely. Neither is derivable from the other: counted
+// clickers are deduplicated, so they are not additive over time (one contact
+// clicking on two days is one lifetime clicker, not two). Both are therefore
+// queried, never summed. Lifetime revenue is likewise fetched unbounded.
+export interface ClickerDenominators {
+  periodByCampaign: Map<number, number>;
+  periodByStage: Map<number, number>;
+  periodTotal: number;
+  lifetimeByCampaign: Map<number, number>;
+  lifetimeByStage: Map<number, number>;
+  lifetimeTotal: number;
+  lifetimeRevenueByCampaign: Map<number, number>;
+  lifetimeRevenueByStage: Map<number, number>;
+  lifetimeRevenueTotal: number;
+}
+
 export interface StageMetricsResult {
   stages: StageMetrics[];
   // Grand totals, matching the Overview totals card exactly.
   grand: FunnelTally;
   grandOptOuts: number;
   grandTotalSent: number;
+  clickers: ClickerDenominators;
 }
 
 function addOneDay(d: string): string {
@@ -246,5 +272,65 @@ export async function getStageMetricsInRange(
   grand.sales += grandSalesTopup;
   grand.cost = grandTotalCost;
 
-  return { stages: [...byStage.values()], grand, grandOptOuts, grandTotalSent };
+  const clickers = await getClickerDenominators(orgId, fromUtc, toExclusiveUtc);
+
+  return { stages: [...byStage.values()], grand, grandOptOuts, grandTotalSent, clickers };
+}
+
+// Both time bases, both grains, plus unbounded revenue for the lifetime figure.
+async function getClickerDenominators(
+  orgId: string,
+  fromUtc: Date,
+  toExclusiveUtc: Date,
+): Promise<ClickerDenominators> {
+  const period = { fromUtc, toExclusiveUtc };
+  const [
+    periodByCampaign,
+    periodByStage,
+    periodTotal,
+    lifetimeByCampaign,
+    lifetimeByStage,
+    lifetimeTotal,
+    revenueRows,
+  ] = await Promise.all([
+    getCountedClickers(db, orgId, "campaign", period),
+    getCountedClickers(db, orgId, "stage", period),
+    getTotalCountedClickers(db, orgId, period),
+    getCountedClickers(db, orgId, "campaign"),
+    getCountedClickers(db, orgId, "stage"),
+    getTotalCountedClickers(db, orgId),
+    db.execute(sql`
+      SELECT campaign_id, stage_id, sum(revenue)::float8 AS revenue
+      FROM keitaro_stage_results WHERE org_id = ${orgId}::uuid
+      GROUP BY 1, 2
+    `) as unknown as Promise<{ campaign_id: number; stage_id: number; revenue: number }[]>,
+  ]);
+
+  const lifetimeRevenueByCampaign = new Map<number, number>();
+  const lifetimeRevenueByStage = new Map<number, number>();
+  let lifetimeRevenueTotal = 0;
+  for (const r of await revenueRows) {
+    const rev = Number(r.revenue) || 0;
+    lifetimeRevenueByCampaign.set(
+      Number(r.campaign_id),
+      (lifetimeRevenueByCampaign.get(Number(r.campaign_id)) ?? 0) + rev,
+    );
+    lifetimeRevenueByStage.set(
+      Number(r.stage_id),
+      (lifetimeRevenueByStage.get(Number(r.stage_id)) ?? 0) + rev,
+    );
+    lifetimeRevenueTotal += rev;
+  }
+
+  return {
+    periodByCampaign,
+    periodByStage,
+    periodTotal,
+    lifetimeByCampaign,
+    lifetimeByStage,
+    lifetimeTotal,
+    lifetimeRevenueByCampaign,
+    lifetimeRevenueByStage,
+    lifetimeRevenueTotal,
+  };
 }

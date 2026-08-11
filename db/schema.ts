@@ -2128,10 +2128,13 @@ export const keitaro_stage_results = pgTable(
     // OVERWRITES it with campaign_stages.total_cost before computing profit.
     // Synced only to keep the row shape stable; safe to stop syncing if desired.
     cost: numeric("cost", { precision: 12, scale: 4 }).notNull().default("0"),
-    // Earnings-per-click, derived from revenue (revenue / redirect raw clicks)
-    // at sync time — NOT cost-derived. Reports/results recompute EPC live from
-    // revenue as well; this stored value is a convenience cache.
-    epc: numeric("epc", { precision: 12, scale: 4 }).notNull().default("0"),
+    // NOTE: `epc` was DROPPED in migration 0127 (2026-08-11). It stored a THIRD
+    // EPC definition — revenue over RAW redirect clicks — that nothing read,
+    // while every screen now divides by counted clickers (`counted_clickers`,
+    // see lib/reporting/counted-clickers.ts). Do not reintroduce a stored EPC
+    // here: a denormalized copy drifts from the cache, which is the
+    // second-definition problem the EPC-unification workstream removed.
+    // Pre-drop snapshot: docs/snapshots/keitaro_stage_results_epc_2026-08-11.csv
     synced_at: timestamp("synced_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

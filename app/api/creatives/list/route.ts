@@ -132,7 +132,8 @@ export async function GET(req: NextRequest) {
   const metricsAgg = drizzleSql`(
     SELECT * FROM jsonb_to_recordset(${JSON.stringify(metricsRows)}::jsonb)
       AS m(creative_id int, delivered int, checkouts int, sales int,
-           payout numeric, manual_clean int, tracked_clean int)
+           payout numeric, manual_clean int, tracked_clean int,
+           lifetime_payout numeric, lifetime_clean int)
   ) AS metrics_agg`;
 
   const cleanExpr = drizzleSql`(coalesce(metrics_agg.manual_clean, 0) + coalesce(metrics_agg.tracked_clean, 0))`;
@@ -212,6 +213,8 @@ export async function GET(req: NextRequest) {
           m_payout: drizzleSql<string>`metrics_agg.payout`.as("m_payout"),
           m_manual_clean: drizzleSql<number>`metrics_agg.manual_clean`.as("m_manual_clean"),
           m_tracked_clean: drizzleSql<number>`metrics_agg.tracked_clean`.as("m_tracked_clean"),
+          m_lifetime_payout: drizzleSql<number>`metrics_agg.lifetime_payout`.as("m_lifetime_payout"),
+          m_lifetime_clean: drizzleSql<number>`metrics_agg.lifetime_clean`.as("m_lifetime_clean"),
         })
         .from(creatives)
         // LEFT JOIN so a creative with no activity in the window still returns
@@ -341,6 +344,8 @@ export async function GET(req: NextRequest) {
             m_payout: string | null;
             m_manual_clean: number | null;
             m_tracked_clean: number | null;
+            m_lifetime_payout: number | null;
+            m_lifetime_clean: number | null;
           };
           const delivered = Number(row.m_delivered ?? 0);
           const checkouts = Number(row.m_checkouts ?? 0);
@@ -359,6 +364,18 @@ export async function GET(req: NextRequest) {
               checkout_rate: cleanClicks > 0 ? checkouts / cleanClicks : null,
               sales_cr: cleanClicks > 0 ? sales / cleanClicks : null,
               epc: cleanClicks > 0 ? payout / cleanClicks : null,
+              // LIFETIME pair, shown ALONGSIDE the 30-day figure. The list and
+              // picker still SORT by the 30-day EPC — recency is the better
+              // predictor of what to send next (offers change, audiences
+              // fatigue, creative performance decays), and a mean rank change of
+              // 4.17 in send behaviour must not arrive as a side effect of a
+              // display fix. This column exists so an operator can SEE the full
+              // history and override deliberately.
+              clean_clicks_lifetime: Number(row.m_lifetime_clean ?? 0),
+              epc_lifetime:
+                Number(row.m_lifetime_clean ?? 0) > 0
+                  ? Number(row.m_lifetime_payout ?? 0) / Number(row.m_lifetime_clean ?? 0)
+                  : null,
             },
           };
         })()

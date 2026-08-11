@@ -37,6 +37,11 @@ export interface CreativeMetricsRow {
   payout: number;
   manual_clean: number;
   tracked_clean: number;
+  // LIFETIME pair — no 30-day bound. Shown alongside the 30-day figure so a
+  // creative's full history is visible when choosing one, WITHOUT changing the
+  // picker's sort (which stays on the 30-day number — see the header note).
+  lifetime_payout: number;
+  lifetime_clean: number;
 }
 
 const TTL_MS = 15 * 60 * 1000;
@@ -86,6 +91,30 @@ export async function computeCreativeMetrics(
     -- the single largest EPC inconsistency in the platform. Deduplicating
     -- shrinks this denominator, so creative EPC moves UP while the reports
     -- screens move DOWN — the two converge on the same number.
+    -- LIFETIME counterparts, deliberately unbounded. The picker still SORTS by
+    -- the 30-day figure (recency predicts what to send next: offers change,
+    -- audiences fatigue, creative performance decays), but the lifetime pair is
+    -- displayed so an operator can see the full history and override
+    -- deliberately. Sort by recent, show both.
+    stage_life AS (
+      SELECT cs.creative_id,
+             coalesce(sum(
+               (SELECT coalesce(sum(ksr.revenue), 0)
+                  FROM keitaro_stage_results ksr
+                 WHERE ksr.stage_id = cs.id)
+             ), 0)::numeric AS lifetime_payout,
+             coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS lifetime_manual
+        FROM campaign_stages cs
+        JOIN campaigns c ON c.id = cs.campaign_id
+       WHERE cs.org_id = ${orgId} AND cs.creative_id IS NOT NULL
+       GROUP BY cs.creative_id
+    ),
+    click_life AS (
+      SELECT cc.creative_id, count(DISTINCT cc.contact_id)::int AS lifetime_tracked
+        FROM counted_clickers cc
+       WHERE cc.org_id = ${orgId} AND cc.creative_id IS NOT NULL
+       GROUP BY cc.creative_id
+    ),
     click_agg AS (
       SELECT cc.creative_id,
              count(DISTINCT cc.contact_id)::int AS tracked_clean
@@ -101,9 +130,13 @@ export async function computeCreativeMetrics(
            coalesce(s.sales, 0)          AS sales,
            coalesce(s.payout, 0)         AS payout,
            coalesce(s.manual_clean, 0)   AS manual_clean,
-           coalesce(k.tracked_clean, 0)  AS tracked_clean
+           coalesce(k.tracked_clean, 0)  AS tracked_clean,
+           coalesce(sl.lifetime_payout, 0) AS lifetime_payout,
+           (coalesce(sl.lifetime_manual, 0) + coalesce(kl.lifetime_tracked, 0)) AS lifetime_clean
       FROM stage_agg s
       FULL OUTER JOIN click_agg k ON k.creative_id = s.creative_id
+      LEFT JOIN stage_life sl ON sl.creative_id = coalesce(s.creative_id, k.creative_id)
+      LEFT JOIN click_life kl ON kl.creative_id = coalesce(s.creative_id, k.creative_id)
   `)) as unknown as Record<string, unknown>[];
 
   return rows.map((r) => ({
@@ -114,6 +147,8 @@ export async function computeCreativeMetrics(
     payout: Number(r.payout ?? 0),
     manual_clean: Number(r.manual_clean ?? 0),
     tracked_clean: Number(r.tracked_clean ?? 0),
+    lifetime_payout: Number(r.lifetime_payout ?? 0),
+    lifetime_clean: Number(r.lifetime_clean ?? 0),
   }));
 }
 

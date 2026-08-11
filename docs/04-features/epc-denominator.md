@@ -108,12 +108,22 @@ Each is displayed next to **its own** click count. A `$0.00` EPC is only interpr
 |---|---|
 | `/reports` Overview + all four By-X tabs | **lifetime (primary) + period, both shown** |
 | `GET /api/keitaro/results` | lifetime (totals, stages) · per-day (rows) — see its `time_basis` field |
-| `/creatives` + stage picker | **30-day only** |
-| `/offers/[id]/report` | **lifetime only** (the matview has no date dimension) |
+| `/creatives` + stage picker | **30-day (sorted) + lifetime (shown)** |
+| `/offers/[id]/report` | **lifetime only**, explicitly labelled (the matview has no date dimension) |
 
-Campaign 404 reading `$1.4247` on both `/creatives` and `/reports` is true **because those windows happen to line up**, not because the screens are structurally consistent. The original defect — one campaign, several *denominators* — is fixed. What remains is one campaign, several *time bases*. Do not read the agreement as proof of structural consistency.
+Campaign 404 reading `$1.4247` on both `/creatives` and `/reports` is true **because those windows happen to line up**, not because the screens are structurally consistent. The original defect — one campaign, several *denominators* — is fixed. What remains is one campaign, several *time bases*, and every surface now names its basis in the UI so the reader can tell which they are looking at.
 
-Tracked: [creatives lifetime + picker sort](https://app.clickup.com/t/869egyah0), [offer report date dimension](https://app.clickup.com/t/869egyapn).
+### Why the creatives picker still SORTS by 30 days
+
+Both figures are displayed; the **sort stays on the 30-day EPC**. The picker decides what gets sent **next**, and recency is the better predictor of that — offers change, audiences fatigue, creative performance decays. Lifetime answers a different question ("what has worked").
+
+Measured: sorting by lifetime instead would move rankings by a mean of **4.17 places** (max 29, two of the top ten changing) — roughly **3.5×** the reshuffle caused by the denominator change itself. A shift in send behaviour of that size must be a deliberate decision, not a side effect of a display fix.
+
+The lifetime column exists so an operator can **see** the full history and override deliberately. It is doing real work: **14 creatives read $0.00 over 30 days while carrying genuine lifetime revenue** — creative 23 shows $0.0000 on 108 recent clickers but **$0.5303 across 694 lifetime clickers**. The 30-day view writes those off entirely.
+
+The sorted column is labelled `EPC (30d) ↕` and the lifetime column is explicitly not sortable, so the ordering can never silently disagree with what is being read.
+
+Tracked: [offer report date dimension](https://app.clickup.com/t/869egyapn) — recommended *not now*.
 
 ## 8. Monitors ([`lib/reporting/epc-monitors.ts`](../../lib/reporting/epc-monitors.ts), weekly Mon 08:40 UTC)
 

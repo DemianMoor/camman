@@ -29,7 +29,7 @@ function lifetimeEpc(revenue: number, clickers: number): number {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_RANGE_DAYS = 92;
 
-const SORTABLE = new Set([
+export const SORTABLE = new Set([
   "campaign_name",
   "clickers",
   "offer_redirect",

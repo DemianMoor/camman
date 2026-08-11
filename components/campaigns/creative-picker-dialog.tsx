@@ -34,6 +34,11 @@ export type PickerCreative = {
   metrics: {
     ctr: number | null;
     epc: number | null;
+    // LIFETIME pair, shown alongside the 30-day figure. The picker still SORTS
+    // by the 30-day EPC — this exists so the full history is visible when
+    // choosing, not to change what gets chosen.
+    epc_lifetime: number | null;
+    clean_clicks_lifetime: number;
   };
 };
 
@@ -295,7 +300,14 @@ export function CreativePickerDialog({
                       <th className="px-2 py-2 text-left font-medium">Spam</th>
                       <th className="px-2 py-2 text-left font-medium">Creative</th>
                       <th className="px-2 py-2 text-left font-medium">Seq</th>
-                      <th className="px-2 py-2 text-right font-medium">EPC</th>
+                      {/* SORTED BY THIS COLUMN — named so the basis is visible.
+                          The picker decides what gets sent next and recency
+                          predicts that better; the lifetime column beside it is
+                          context for a deliberate override, not the sort key. */}
+                      <th className="px-2 py-2 text-right font-medium">EPC (30d) ↓</th>
+                      <th className="px-2 py-2 text-right font-medium text-muted-foreground">
+                        EPC (all time)
+                      </th>
                       <th className="px-2 py-2 text-right font-medium">CTR</th>
                     </tr>
                   </thead>
@@ -349,8 +361,17 @@ export function CreativePickerDialog({
                                 {SEQUENCE_LABEL[c.sequence_placement]}
                               </Badge>
                             </td>
-                            <td className="px-2 py-1.5 text-right align-top tabular-nums">
+                            <td
+                              className="px-2 py-1.5 text-right align-top tabular-nums font-medium"
+                              title="Last 30 days — the list is sorted by this"
+                            >
                               {formatEpc(c.metrics.epc)}
+                            </td>
+                            <td
+                              className="px-2 py-1.5 text-right align-top tabular-nums text-muted-foreground"
+                              title={`All time, across ${c.metrics.clean_clicks_lifetime.toLocaleString()} counted clickers. Context only — not the sort key.`}
+                            >
+                              {formatEpc(c.metrics.epc_lifetime)}
                             </td>
                             <td className="px-2 py-1.5 text-right align-top tabular-nums">
                               {formatPercent(c.metrics.ctr)}

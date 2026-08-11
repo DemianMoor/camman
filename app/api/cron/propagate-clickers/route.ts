@@ -3,6 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { db } from "@/db/client";
 import { withCronLease } from "@/lib/cron/lease";
 import { propagateTrackedClickers } from "@/lib/links/propagate-clickers";
+import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 
 // Dedicated cron for tracked-clicker propagation (W1.1). This used to run
 // best-effort at the tail of /api/clicks/score-pending, where a heavy scoring
@@ -20,7 +21,9 @@ import { propagateTrackedClickers } from "@/lib/links/propagate-clickers";
 // never writes `watermark`, and propagate's own upsert never writes
 // `lease_until`.
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// ?mode=rebuild scans ALL history and takes materially longer than the
+// incremental window, so the budget is raised for it.
+export const maxDuration = 300;
 // Pure DB work → pin to Frankfurt (co-located with Supabase), same as the
 // scoring cron this was split out of. Per-route only.
 export const preferredRegion = "fra1";
@@ -33,9 +36,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // ?mode=rebuild ignores the watermark and rescans all history — the repair
+  // path for corrections that land behind the cursor (see propagate-clickers.ts).
+  // ?dryRun=1 counts what would be inserted without writing.
+  const mode = req.nextUrl.searchParams.get("mode") === "rebuild" ? "rebuild" : "incremental";
+  const dryRun = req.nextUrl.searchParams.get("dryRun") === "1";
+
   try {
     const outcome = await withCronLease("propagate-clickers", () =>
-      propagateTrackedClickers(db),
+      propagateTrackedClickers(db, { mode, dryRun }),
     );
     if (!outcome.ran) {
       // Overlap with a prior run still holding the lease — expected backpressure.
@@ -46,9 +55,16 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       });
     }
     const r = outcome.result;
+    // Log the SCOPE, not just the count. A result read without knowing what it
+    // ran against is not evidence — see docs/07-conventions.md.
     console.log(
-      `[propagate-clickers] ok inserted=${r.inserted} watermark=${r.watermarkFrom ?? "null"} -> ${r.watermarkTo ?? "null"}`,
+      `[propagate-clickers] ok mode=${r.mode}${r.dryRun ? " DRY-RUN" : ""} scope="${r.scope}" ` +
+        `inserted=${r.inserted} watermark=${r.watermarkFrom ?? "null"} -> ${r.watermarkTo ?? "null"}`,
     );
+    // Heartbeat only for a real weekly rebuild — the thing the monitors watch.
+    if (mode === "rebuild" && !dryRun) {
+      await recordHeartbeat(db, HEARTBEAT_JOBS.clickerRebuild.job_name);
+    }
     return NextResponse.json({ ok: true, ...r });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

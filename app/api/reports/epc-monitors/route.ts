@@ -44,7 +44,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   // Dead-man check: this job watches the DAILY rebuild, never itself — a dead
   // job cannot report itself dead. The rebuild returns the favour.
-  const heartbeats = await checkHeartbeats(db, [HEARTBEAT_JOBS.countedClickersFull]);
+  const heartbeats = await checkHeartbeats(db, [
+    HEARTBEAT_JOBS.countedClickersFull,
+    HEARTBEAT_JOBS.clickerRebuild,
+  ]);
   const allBreaches = [...report.breaches, ...heartbeatBreaches(heartbeats)];
 
   // Alert only on breach — a weekly all-clear message trains people to ignore it.

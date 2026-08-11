@@ -40,7 +40,10 @@ type ReportRow = {
   sales_cr: number;
   revenue: number;
   cost: number;
-  epc: number;
+  epc: number; // PERIOD — the selected date range
+  counted_clickers: number;
+  lifetime_epc: number; // LIFETIME — ignores the date filter; the PRIMARY figure
+  lifetime_clickers: number;
   profit: number;
 };
 
@@ -372,12 +375,49 @@ export function KeitaroReport() {
           </span>
         ),
       },
+      // LIFETIME first — the primary figure, ignoring the date filter entirely.
+      // Each EPC sits immediately after the count it divided by, because a $0.00
+      // EPC is only interpretable when you can see the denominator was 4. The
+      // two are NOT derivable from one another: counted clickers are
+      // deduplicated, so a lifetime figure can never be summed out of periods.
       {
-        id: "epc",
-        header: "EPC",
+        id: "lifetime_clickers",
+        header: "Clicks (all time)",
         enableSorting: true,
         cell: ({ row }) => (
-          <span className="tabular-nums">{fmtUsd(row.original.epc)}</span>
+          <span className="tabular-nums">
+            {row.original.lifetime_clickers.toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        id: "lifetime_epc",
+        header: "EPC (all time)",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span className="tabular-nums font-medium">
+            {fmtUsd(row.original.lifetime_epc)}
+          </span>
+        ),
+      },
+      {
+        id: "counted_clickers",
+        header: "Clicks (period)",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span className="tabular-nums text-muted-foreground">
+            {row.original.counted_clickers.toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        id: "epc",
+        header: "EPC (period)",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span className="tabular-nums text-muted-foreground">
+            {fmtUsd(row.original.epc)}
+          </span>
         ),
       },
       {

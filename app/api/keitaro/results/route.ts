@@ -86,10 +86,30 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     campaign_id: campaignId,
-    totals: withFunnelDerived(
-      campaignTally,
-      denominatorFor(linkMode, clickersByCampaign.get(campaignId), campaignTally.visit_clicks_clean),
-    ),
+    // TIME BASIS, stated explicitly rather than left to be inferred.
+    //
+    // This endpoint applies NO date filter: it selects every keitaro_stage_results
+    // row for the campaign, and resolves counted clickers unbounded. So `totals`
+    // and `stages` are LIFETIME figures — their `epc` is the lifetime EPC, and is
+    // mirrored as `lifetime_epc` so a consumer never has to infer which basis it
+    // is looking at.
+    //
+    // `rows` is different: one row per (stage, ET day), each divided by that
+    // day's counted clickers. Those are PERIOD figures at day granularity, and
+    // they do NOT sum to the stage total — counted clickers are deduplicated, so
+    // a contact clicking on two days appears in two day-buckets but counts once
+    // in the stage's lifetime figure.
+    time_basis: { totals: "lifetime", stages: "lifetime", rows: "per_day" },
+    totals: {
+      ...withFunnelDerived(
+        campaignTally,
+        denominatorFor(linkMode, clickersByCampaign.get(campaignId), campaignTally.visit_clicks_clean),
+      ),
+      lifetime_epc: withFunnelDerived(
+        campaignTally,
+        denominatorFor(linkMode, clickersByCampaign.get(campaignId), campaignTally.visit_clicks_clean),
+      ).epc,
+    },
     stages: [...perStage.values()]
       .sort((a, b) => a.stage_id - b.stage_id)
       .map((s) => ({
@@ -99,6 +119,10 @@ export async function GET(req: NextRequest) {
           s.tally,
           denominatorFor(linkMode, clickersByStage.get(s.stage_id), s.tally.visit_clicks_clean),
         ),
+        lifetime_epc: withFunnelDerived(
+          s.tally,
+          denominatorFor(linkMode, clickersByStage.get(s.stage_id), s.tally.visit_clicks_clean),
+        ).epc,
       })),
     rows: rows
       .map((r) => {

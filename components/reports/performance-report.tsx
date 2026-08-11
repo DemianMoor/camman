@@ -38,7 +38,8 @@ interface DerivedRow extends PerfRow {
   click_rate: number; // clickers / sent (CR)
   redirect_rate: number; // redirects / clickers
   sales_cr: number; // sales / redirects
-  epc: number; // revenue / counted clickers
+  epc: number; // PERIOD: revenue / counted clickers in the selected range
+  lifetime_epc: number; // LIFETIME: all-time revenue / all-time counted clickers
   profit: number; // revenue - cost
 }
 
@@ -77,6 +78,10 @@ function derive(r: PerfRow): DerivedRow {
     redirect_rate: rate(r.redirects, r.clickers),
     sales_cr: rate(r.sales, r.redirects),
     epc: rate(r.revenue, r.counted_clickers),
+    // Lifetime ignores the date filter entirely and is the PRIMARY figure. It is
+    // NOT derivable from the period numbers — counted clickers are deduplicated
+    // and so not additive over time.
+    lifetime_epc: rate(r.lifetime_revenue, r.lifetime_clickers),
     profit: r.revenue - r.cost,
   };
 }
@@ -109,10 +114,14 @@ const FULL_COLS: Col[] = [
   { id: "sales_cr", header: "Sales CR", kind: "pct", muted: true },
   { id: "revenue", header: "Revenue", kind: "usd" },
   { id: "cost", header: "Cost", kind: "usd", muted: true },
-  // Shown immediately before EPC: it IS the EPC denominator, and the grain is
-  // only readable if the count it divides by is visible.
-  { id: "counted_clickers", header: "Clicks", kind: "count" },
-  { id: "epc", header: "EPC", kind: "usd" },
+  // LIFETIME first — it is the primary figure and ignores the date filter.
+  // Each EPC sits immediately after the count it divided by: a $0.00 EPC is only
+  // interpretable when you can see the denominator was 4. Headers name the time
+  // basis explicitly so nobody has to guess which column is which.
+  { id: "lifetime_clickers", header: "Clicks (all time)", kind: "count" },
+  { id: "lifetime_epc", header: "EPC (all time)", kind: "usd" },
+  { id: "counted_clickers", header: "Clicks (period)", kind: "count", muted: true },
+  { id: "epc", header: "EPC (period)", kind: "usd", muted: true },
   { id: "profit", header: "Profit", kind: "profit" },
 ];
 // Hourly: Sent (by send hour) + activity-time engagement with % rates. Rates use

@@ -31,6 +31,14 @@ export interface PerfMetrics {
   // Keitaro landing-visit count and is display-only; `redirects` is no longer a
   // denominator anywhere.
   counted_clickers: number;
+  // LIFETIME pair — ignores the date filter entirely, and is the PRIMARY figure.
+  // Not derivable from the period pair: counted clickers are deduplicated and
+  // therefore not additive over time, so a lifetime figure can never be summed
+  // out of period slices. Both are carried so each EPC can be shown next to the
+  // count it actually divided by — a $0.00 EPC is only interpretable when you
+  // can see the denominator was 4.
+  lifetime_clickers: number;
+  lifetime_revenue: number;
   sales: number;
   revenue: number;
   cost: number;
@@ -73,12 +81,19 @@ const ZERO: PerfMetrics = {
   clickers: 0,
   redirects: 0,
   counted_clickers: 0,
+  lifetime_clickers: 0,
+  lifetime_revenue: 0,
   sales: 0,
   revenue: 0,
   cost: 0,
 };
 
-function stageMetrics(s: StageMetrics, countedByStage: Map<number, number>): PerfMetrics {
+function stageMetrics(
+  s: StageMetrics,
+  countedByStage: Map<number, number>,
+  lifetimeByStage: Map<number, number>,
+  lifetimeRevenueByStage: Map<number, number>,
+): PerfMetrics {
   return {
     sent: s.total_sent,
     opt_outs: s.opt_outs,
@@ -89,6 +104,12 @@ function stageMetrics(s: StageMetrics, countedByStage: Map<number, number>): Per
       countedByStage.get(s.stage_id),
       s.tally.visit_clicks_clean,
     ),
+    lifetime_clickers: denominatorFor(
+      s.link_mode,
+      lifetimeByStage.get(s.stage_id),
+      s.tally.visit_clicks_clean,
+    ),
+    lifetime_revenue: lifetimeRevenueByStage.get(s.stage_id) ?? 0,
     sales: s.tally.sales,
     revenue: s.tally.revenue,
     cost: s.tally.cost,
@@ -102,6 +123,8 @@ function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     clickers: a.clickers + b.clickers,
     redirects: a.redirects + b.redirects,
     counted_clickers: a.counted_clickers + b.counted_clickers,
+    lifetime_clickers: a.lifetime_clickers + b.lifetime_clickers,
+    lifetime_revenue: a.lifetime_revenue + b.lifetime_revenue,
     sales: a.sales + b.sales,
     revenue: a.revenue + b.revenue,
     cost: a.cost + b.cost,
@@ -114,6 +137,8 @@ function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     clickers: m.clickers * f,
     redirects: m.redirects * f,
     counted_clickers: m.counted_clickers * f,
+    lifetime_clickers: m.lifetime_clickers * f,
+    lifetime_revenue: m.lifetime_revenue * f,
     sales: m.sales * f,
     revenue: m.revenue * f,
     cost: m.cost * f,
@@ -145,22 +170,23 @@ export async function getPerformanceReport(
 
   const { stages, clickers } = await getStageMetricsInRange(orgId, b.from, b.to);
   const countedByStage = clickers.periodByStage;
+  const lifeByStage = clickers.lifetimeByStage;
+  const lifeRevByStage = clickers.lifetimeRevenueByStage;
+  const metricsOf = (s: StageMetrics) =>
+    stageMetrics(s, countedByStage, lifeByStage, lifeRevByStage);
   const filtered =
     b.providerPhoneId != null
       ? stages.filter((s) => s.provider_phone_id === b.providerPhoneId)
       : stages;
 
-  const totals = filtered.reduce(
-    (acc, s) => addMetrics(acc, stageMetrics(s, countedByStage)),
-    { ...ZERO },
-  );
+  const totals = filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), { ...ZERO });
   const refreshedAt = await maxSyncedAt(orgId);
 
   let rows: PerfRow[];
   if (dimension === "group") {
-    rows = await distributeToGroups(orgId, filtered, b, countedByStage);
+    rows = await distributeToGroups(orgId, filtered, b, metricsOf);
   } else {
-    rows = await groupByStageDimension(filtered, dimension, countedByStage);
+    rows = await groupByStageDimension(filtered, dimension, metricsOf);
   }
   return { dimension, rows, totals, refreshedAt };
 }
@@ -169,7 +195,7 @@ export async function getPerformanceReport(
 async function groupByStageDimension(
   stages: StageMetrics[],
   dimension: "number" | "offer" | "sequence",
-  countedByStage: Map<number, number>,
+  metricsOf: (s: StageMetrics) => PerfMetrics,
 ): Promise<PerfRow[]> {
   const keyOf = (s: StageMetrics): string => {
     if (dimension === "number") return s.provider_phone_id == null ? "none" : String(s.provider_phone_id);
@@ -179,7 +205,7 @@ async function groupByStageDimension(
   const acc = new Map<string, PerfMetrics>();
   for (const s of stages) {
     const k = keyOf(s);
-    acc.set(k, addMetrics(acc.get(k) ?? { ...ZERO }, stageMetrics(s, countedByStage)));
+    acc.set(k, addMetrics(acc.get(k) ?? { ...ZERO }, metricsOf(s)));
   }
 
   if (dimension === "number") {
@@ -231,7 +257,7 @@ async function distributeToGroups(
   orgId: string,
   stages: StageMetrics[],
   b: Bounds,
-  countedByStage: Map<number, number>,
+  metricsOf: (s: StageMetrics) => PerfMetrics,
 ): Promise<PerfRow[]> {
   const trackedIds = stages.filter((s) => s.link_mode === "tracked").map((s) => s.stage_id);
   const manualStages = stages.filter((s) => s.link_mode !== "tracked");
@@ -257,7 +283,7 @@ async function distributeToGroups(
     byGroup.set(gid, addMetrics(byGroup.get(gid) ?? { ...ZERO }, m));
 
   for (const s of stages) {
-    const m = stageMetrics(s, countedByStage);
+    const m = metricsOf(s);
     // Final fallback: equal split across the campaign's used groups.
     const equalW = new Map((usedGroups.get(s.campaign_id) ?? []).map((g) => [g, 1]));
     if (s.link_mode === "tracked") {
@@ -268,8 +294,13 @@ async function distributeToGroups(
       spread(add, m.opt_outs, nonEmpty(wOpt.get(s.stage_id)) ?? sentW, "opt_outs");
       spread(add, m.clickers, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "clickers");
       // Counted clickers distribute on the CLICK weights — same basis as the
-      // metric they denominate.
+      // metric they denominate. The LIFETIME pair gets the same treatment on the
+      // same bases (clickers on click weights, revenue on sale weights), so a
+      // group's lifetime EPC is built from consistently-split parts rather than
+      // mixing a split numerator with an unsplit denominator.
       spread(add, m.counted_clickers, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "counted_clickers");
+      spread(add, m.lifetime_clickers, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "lifetime_clickers");
+      spread(add, m.lifetime_revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "lifetime_revenue");
       spread(add, m.redirects, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "redirects");
       spread(add, m.sales, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "sales");
       spread(add, m.revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "revenue");
@@ -291,6 +322,8 @@ async function distributeToGroups(
       clickers: round2(m.clickers),
       redirects: round2(m.redirects),
       counted_clickers: round2(m.counted_clickers),
+      lifetime_clickers: round2(m.lifetime_clickers),
+      lifetime_revenue: round2(m.lifetime_revenue),
       sales: round2(m.sales),
       revenue: round2(m.revenue),
       cost: round2(m.cost),

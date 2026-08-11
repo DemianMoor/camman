@@ -494,6 +494,59 @@ export const ahoi_dlr_events = pgTable(
 export type AhoiDlrEvent = typeof ahoi_dlr_events.$inferSelect;
 export type NewAhoiDlrEvent = typeof ahoi_dlr_events.$inferInsert;
 
+// Text Request per-message status_callback capture + reconcile (migration 0122).
+// Mirrors ahoi_dlr_events for TR's JSON callback shape: message_id/status/
+// error_code instead of smpp_* fields, plus stage_send_id captured directly
+// from the callback URL's ?ss= param (TR's direct-reconcile advantage).
+export const textrequest_dlr_events = pgTable(
+  "textrequest_dlr_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "set null" },
+    ),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    received_at: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    method: text("method").notNull(),
+    query: jsonb("query"),
+    headers: jsonb("headers"),
+    raw_body: text("raw_body"),
+    message_id: text("message_id"),
+    status: text("status"),
+    error_code: text("error_code"),
+    // From the callback URL ?ss= param — the direct reconcile key.
+    stage_send_id: uuid("stage_send_id").references(() => stage_sends.id, {
+      onDelete: "set null",
+    }),
+    matched_stage_send_id: uuid("matched_stage_send_id").references(
+      () => stage_sends.id,
+      { onDelete: "set null" },
+    ),
+    result: text("result"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("textrequest_dlr_events_org_id_idx").on(table.org_id),
+    index("textrequest_dlr_events_received_at_idx").on(table.received_at),
+    index("textrequest_dlr_events_provider_status_idx").on(
+      table.provider_id,
+      table.status,
+      table.received_at,
+    ),
+  ],
+);
+
+export type TextrequestDlrEvent = typeof textrequest_dlr_events.$inferSelect;
+export type NewTextrequestDlrEvent = typeof textrequest_dlr_events.$inferInsert;
+
 export const ahoi_inbound_events = pgTable(
   "ahoi_inbound_events",
   {
@@ -549,6 +602,70 @@ export const ahoi_inbound_events = pgTable(
 
 export type AhoiInboundEvent = typeof ahoi_inbound_events.$inferSelect;
 export type NewAhoiInboundEvent = typeof ahoi_inbound_events.$inferInsert;
+
+// Text Request opt-out signal capture (migration 0124). Mirrors
+// ahoi_inbound_events, but `source` spans SIX channels rather than two because
+// Text Request asserts "this number opted out" in four structurally different
+// ways (STOP reply, its own contact bookkeeping, a delivery-status error code,
+// and a send-time rejection), each with a real-time and a polled flavor. See the
+// migration for the per-value meaning.
+//
+// provider_uuid = TR's message GUID, identical on the webhook and the poll for
+// the same physical message, so the partial unique index below makes capture
+// idempotent ACROSS channels. Contact-shaped signals carry NULL (many allowed).
+export const textrequest_inbound_events = pgTable(
+  "textrequest_inbound_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "set null" },
+    ),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    // Ingestion channel, NOT a phone number (see source_number for that).
+    source: text("source").notNull(),
+    source_number: text("source_number"),
+    destination_number: text("destination_number"),
+    message: text("message"),
+    provider_uuid: text("provider_uuid"),
+    opted_out_utc: timestamp("opted_out_utc", { withTimezone: true }),
+    received_at: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    method: text("method").notNull(),
+    raw_body: text("raw_body"),
+    matched_contact_id: uuid("matched_contact_id").references(
+      () => contacts.id,
+      { onDelete: "set null" },
+    ),
+    matched_stage_send_id: uuid("matched_stage_send_id").references(
+      () => stage_sends.id,
+      { onDelete: "set null" },
+    ),
+    result: text("result"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("textrequest_inbound_events_org_id_idx").on(table.org_id),
+    index("textrequest_inbound_events_received_at_idx").on(table.received_at),
+    index("textrequest_inbound_events_dedup_idx").on(
+      table.org_id,
+      table.source_number,
+      table.received_at,
+    ),
+    uniqueIndex("textrequest_inbound_events_provider_uuid_uniq")
+      .on(table.provider_id, table.provider_uuid)
+      .where(sql`provider_uuid IS NOT NULL`),
+  ],
+);
+
+export type TextrequestInboundEvent = typeof textrequest_inbound_events.$inferSelect;
+export type NewTextrequestInboundEvent = typeof textrequest_inbound_events.$inferInsert;
 
 export type SmsProvider = typeof sms_providers.$inferSelect;
 export type NewSmsProvider = typeof sms_providers.$inferInsert;
@@ -2563,6 +2680,11 @@ export const send_attempts = pgTable(
     message_id: text("message_id"),
     error: text("error"),
     classification: text("classification").notNull(),
+    // Provider-reported segment count for this send, when the provider returns
+    // it (Text Request's `segments_count`; migration 0121). NULL for providers
+    // that don't report it (TextHub, Ahoi) and for attempts that never reached
+    // the provider (network/timeout).
+    segments_count: integer("segments_count"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

@@ -29,25 +29,143 @@ export function textrequestBaseUrl(): string {
   return process.env.TEXTREQUEST_API_BASE_URL ?? TEXTREQUEST_DEFAULT_BASE_URL;
 }
 
-// Phase 1 leaves the recipient format as-is (identity). Text Request accepts
-// North-American 10/11-digit numbers (leading `1` optional); the exact `to`
-// format the send path uses is confirmed against a live key and encoded in
-// Phase 2 alongside the real send() — encoding an unverified assumption here
-// would be a silent bug. Send is stubbed, so nothing depends on this yet.
+// E.164 US (+1XXXXXXXXXX) / 10-digit / 11-digit -> Text Request's canonical
+// 11-digit `1XXXXXXXXXX` (no `+`). The Phase 0 live test confirmed TR accepts
+// `+1…` and echoes back the bare 11-digit form, so we send that form for both
+// `from` and `to`. Hand-rolled (no libphonenumber — throws under tsx; US-only),
+// same posture as toAhoiRecipient / toTexthubSender.
 export function toTextrequestRecipient(e164: string): string {
-  return e164;
+  const digits = (e164 ?? "").replace(/\D/g, "");
+  if (digits.length === 10) return `1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return digits;
+  return digits; // leave as-is for anything non-NANP-shaped (validated upstream)
 }
 
-export const textrequestAdapter: SmsProviderAdapter = {
-  key: "txr",
-  toProviderRecipient: toTextrequestRecipient,
-  async send(_p: NormalizedSendParams): Promise<SendSmsResult> {
-    // Phase 2 implements POST /messages (from / to / body / sender_name +
-    // per-message status_callback carrying the stage_send token). Until then,
-    // refuse cleanly — a not-implemented result, never a throw. status:0
-    // classifies as a transport-side miss, and supports_api_send=false on the
-    // txr provider row means the drain never reaches here in the first place
-    // (defense in depth).
+// Inverse of toTextrequestRecipient: Text Request's wire format (11-digit
+// `1XXXXXXXXXX`, no '+') -> our storage format (E.164 `+1XXXXXXXXXX`). The single
+// entry point for "TR wire format -> contacts.phone_number", used by every
+// opt-out signal in Phase 4 (a STOP must suppress the number even if the contact
+// doesn't exist yet, so this runs before the contact upsert). Mirrors
+// ahoiSourceToE164. Returns null for anything not NANP-shaped rather than
+// guessing — a bad number must never become a bogus contact row.
+export function textrequestPhoneToE164(raw: string | null | undefined): string | null {
+  const digits = (raw ?? "").replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return null;
+}
+
+// Text Request send-time error codes that mean "this number is opted out"
+// (spec §1 error vocabularies): 2100 (status webhook) / 30050 (conversation) /
+// 2001 unreachable is NOT opt-out. A send rejected for one of these is recorded
+// as `filtered` (a distinct, operator-visible bucket), NOT `failed` — mirroring
+// TextHub's `Suppressed` handling. It does NOT itself write an opt_out; Phase 4
+// opt-out intake owns that.
+const OPTOUT_ERROR_CODES = new Set(["2100", "30050"]);
+
+// Pure request-body builder — exported shape is reused for BOTH the real send
+// and the redacted audit string so they can never drift. The x-api-key is a
+// HEADER, never in the body, so the body is safe to log verbatim.
+export interface TxrSendBody {
+  from: string;
+  to: string;
+  body: string;
+  status_callback?: string;
+  sender_name?: string;
+}
+export function buildMessagesBody(p: NormalizedSendParams): TxrSendBody {
+  const out: TxrSendBody = {
+    from: toTextrequestRecipient(p.senderNumber ?? ""),
+    to: toTextrequestRecipient(p.recipientE164),
+    body: p.text,
+  };
+  if (p.statusCallbackUrl) out.status_callback = p.statusCallbackUrl;
+  return out;
+}
+
+// Pure classifier for a POST /messages outcome. Text Request uses REAL HTTP
+// status codes (unlike Ahoi's always-200), so classification keys off the HTTP
+// status AND the body `status` field ("sending" ⇒ accepted, "error" ⇒ rejected).
+// A 2xx with status="sending" and a message_id is the only success shape.
+export interface TxrSendClassification {
+  ok: boolean;
+  messageId: string | null;
+  segmentsCount: number | null;
+  providerStatus: string | null; // body `status` verbatim
+  suppressed: boolean;
+  error: string | null;
+}
+export function classifyTxrSend(
+  httpStatus: number,
+  parsed: Record<string, unknown> | null,
+): TxrSendClassification {
+  const bodyStatus =
+    parsed && typeof parsed.status === "string" ? parsed.status.trim().toLowerCase() : null;
+  const messageId =
+    parsed && (typeof parsed.message_id === "string" || typeof parsed.message_id === "number")
+      ? String(parsed.message_id)
+      : null;
+  const segsRaw = parsed?.segments_count;
+  const segmentsCount = typeof segsRaw === "number" && Number.isFinite(segsRaw) ? segsRaw : null;
+  const errorCode =
+    parsed && (typeof parsed.errorCode === "string" || typeof parsed.errorCode === "number")
+      ? String(parsed.errorCode)
+      : null;
+  const message = parsed && typeof parsed.message === "string" ? parsed.message : null;
+  const suppressed = errorCode != null && OPTOUT_ERROR_CODES.has(errorCode);
+
+  const httpOk = httpStatus >= 200 && httpStatus < 300;
+  const ok = httpOk && bodyStatus !== "error" && messageId != null;
+
+  if (ok) {
+    return { ok: true, messageId, segmentsCount, providerStatus: bodyStatus, suppressed: false, error: null };
+  }
+  const err =
+    message ??
+    (errorCode ? `Text Request errorCode ${errorCode}` : null) ??
+    (bodyStatus === "error" ? 'Text Request returned status="error"' : `Text Request HTTP ${httpStatus}`);
+  return { ok: false, messageId: null, segmentsCount, providerStatus: bodyStatus, suppressed, error: err };
+}
+
+async function txrSendSms(p: NormalizedSendParams, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<SendSmsResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${textrequestBaseUrl()}/messages`, {
+      method: "POST",
+      headers: { "x-api-key": p.apiKey, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(buildMessagesBody(p)),
+      signal: controller.signal,
+    });
+    let rawBody: string | null = null;
+    try {
+      rawBody = await res.text();
+    } catch {
+      rawBody = null;
+    }
+    let parsed: Record<string, unknown> | null = null;
+    if (rawBody) {
+      try {
+        parsed = JSON.parse(rawBody) as Record<string, unknown>;
+      } catch {
+        parsed = null; // non-JSON body — classification falls back to HTTP status
+      }
+    }
+    const c = classifyTxrSend(res.status, parsed);
+    return {
+      ok: c.ok,
+      messageId: c.messageId,
+      response: (parsed?.message as string) ?? c.providerStatus,
+      providerStatus: c.providerStatus,
+      suppressed: c.suppressed,
+      rawBody,
+      error: c.error,
+      status: res.status,
+      timedOut: false,
+      segmentsCount: c.segmentsCount,
+    };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "AbortError";
     return {
       ok: false,
       messageId: null,
@@ -55,17 +173,43 @@ export const textrequestAdapter: SmsProviderAdapter = {
       providerStatus: null,
       suppressed: false,
       rawBody: null,
-      error: "textrequest: send not implemented (Phase 1 skeleton)",
+      error: aborted ? "Text Request request timed out" : "Text Request network error",
       status: 0,
-      timedOut: false,
+      timedOut: aborted,
+      segmentsCount: null,
     };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export const textrequestAdapter: SmsProviderAdapter = {
+  key: "txr",
+  toProviderRecipient: toTextrequestRecipient,
+  async send(p: NormalizedSendParams): Promise<SendSmsResult> {
+    if (!p.senderNumber) {
+      // TR requires `from` to be a number on the account; a stage with no
+      // provider_phone_id can't send. Refuse cleanly (our misconfiguration —
+      // status 0, not timed out), never a throw, never a malformed request.
+      return {
+        ok: false,
+        messageId: null,
+        response: null,
+        providerStatus: null,
+        suppressed: false,
+        rawBody: null,
+        error: "textrequest: no sender number configured for this stage",
+        status: 0,
+        timedOut: false,
+        segmentsCount: null,
+      };
+    }
+    return txrSendSms(p);
   },
   buildRedactedRequest(p: NormalizedSendParams): string {
-    // Never includes the x-api-key header. Representative shape only — the real
-    // audit string is finalized with send() in Phase 2 (incl. status_callback).
-    const to = toTextrequestRecipient(p.recipientE164);
-    const from = p.senderNumber ?? "";
-    return `POST ${textrequestBaseUrl()}/messages  from=${from} to=${to} body=<redacted> [not-implemented Phase 1]`;
+    // Body is safe verbatim (key is a header, not in the body). Records the
+    // exact JSON that was POSTed, incl. status_callback.
+    return `POST ${textrequestBaseUrl()}/messages  ${JSON.stringify(buildMessagesBody(p))}`;
   },
   // DLR intake for Text Request is a per-message status_callback + an account
   // webhook + a messages poll (Phase 3); inbound STOP is assembled from four
@@ -97,18 +241,24 @@ export interface TextrequestHealthResult {
   timedOut: boolean;
 }
 
-// Tolerant extractor: Text Request's exact GET /dashboards response shape is
-// confirmed against a live key during Phase 1 verification. Until then we accept
-// the common shapes — a bare array, or a { data | content | dashboards } wrapper
-// — and pick an id + name off each item. `id` is coerced to a string so an
-// integer or GUID id both render (dashboard_id is stored as TEXT for exactly
-// this reason). If nothing parses, `dashboards` is empty but `ok` (did the key
-// authenticate?) is still the real signal the healthcheck exists to report.
+// CONFIRMED live (recon 2026-07-25, scripts/probe-textrequest-api.ts): every
+// Text Request collection response is the `items` + `meta` envelope documented
+// in their OpenAPI spec —
+//   {"items":[{"phone":"18449903688","name":"18449903688","timeZoneId":null,
+//              "id":68093}],
+//    "meta":{"page":0,"page_size":100,"total_items":2}}
+// Phase 1 guessed `data`/`content`/`dashboards` and so parsed ZERO dashboards
+// off a perfectly healthy 200 (the auth signal was right, the list was always
+// empty). `items` is the real key and is listed FIRST; the guessed aliases are
+// kept only as harmless fallbacks. `id` is coerced to a string so an integer or
+// GUID id both render (dashboard_id is stored as TEXT for exactly this reason).
+// `name` can be the bare number, so the phone is a better label when present.
 function extractDashboards(parsed: unknown): TextrequestDashboard[] {
   const arr = Array.isArray(parsed)
     ? parsed
     : parsed && typeof parsed === "object"
-      ? ((parsed as Record<string, unknown>).data ??
+      ? ((parsed as Record<string, unknown>).items ??
+         (parsed as Record<string, unknown>).data ??
          (parsed as Record<string, unknown>).content ??
          (parsed as Record<string, unknown>).dashboards)
       : null;
@@ -121,7 +271,11 @@ function extractDashboards(parsed: unknown): TextrequestDashboard[] {
     if (typeof rawId !== "string" && typeof rawId !== "number") continue;
     const id = String(rawId);
     const nameVal = o.name ?? o.title ?? o.label;
-    const name = typeof nameVal === "string" && nameVal.trim() ? nameVal : id;
+    const label = typeof nameVal === "string" && nameVal.trim() ? nameVal : id;
+    // Surface the sending number alongside the label — that's what the operator
+    // matches against a provider_phone when binding dashboard_id.
+    const phone = typeof o.phone === "string" && o.phone.trim() ? o.phone : null;
+    const name = phone && phone !== label ? `${label} (${phone})` : label;
     out.push({ id, name });
   }
   return out;

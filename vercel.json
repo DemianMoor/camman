@@ -53,6 +53,10 @@
       "schedule": "13,28,43,58 * * * *"
     },
     {
+      "path": "/api/cron/textrequest-poll",
+      "schedule": "4,19,34,49 * * * *"
+    },
+    {
       "path": "/api/reports/rebuild-counted-clickers",
       "schedule": "20 7 * * *"
     },

@@ -24,3 +24,16 @@ export function countSegments(text: string): SegmentCount {
   const r = calculateSmsSegments(text);
   return { encoding: r.charset, chars: r.characters, segments: r.segments };
 }
+
+// Text Request AUTO-APPENDS this opt-out footer to every outbound message body
+// (confirmed live in Phase 0). We do NOT send it — TR adds it server-side — so
+// the on-wire text (and its segment count) is longer than the rendered text.
+export const TXR_APPENDED_FOOTER = "\nText STOP to opt out";
+
+// The text as the provider will actually transmit it. Only txr appends a
+// footer today; every other provider returns the text unchanged. Used by the G8
+// kickoff gate so a message that fits in N segments raw but tips to N+1 with
+// TR's footer is caught BEFORE send, and by the drain's segment accounting.
+export function withProviderFooter(text: string, providerKey: string | null | undefined): string {
+  return providerKey === "txr" ? text + TXR_APPENDED_FOOTER : text;
+}

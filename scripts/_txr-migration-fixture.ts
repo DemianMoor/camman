@@ -48,6 +48,15 @@ export function migrationStatements(file: string): string[] {
 // a missing breakpoint causes in production.
 export async function applyTxrMigrationsInTx(tx: Tx, files: string[]): Promise<void> {
   await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`));
+  // The migrations may already be DEPLOYED (applied to prod 2026-08-11). When
+  // they are, the tables/indexes exist and re-running the DDL errors (42P07).
+  // Detect the last table (0124) as the sentinel and skip the DDL apply — the
+  // DB-backed tests then exercise the LIVE schema, and their data writes still
+  // roll back with the caller's transaction. Safe on either side of the apply.
+  const applied = (await tx.execute(
+    sql`SELECT to_regclass('public.textrequest_inbound_events') AS t`,
+  )) as unknown as { t: string | null }[];
+  if (applied[0]?.t) return;
   for (const file of files) {
     for (const stmt of migrationStatements(file)) {
       await tx.execute(sql.raw(stmt));

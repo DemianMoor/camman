@@ -284,6 +284,7 @@ export async function processTextrequestOptOut(
       const breaker = await checkOptOutRateBreaker(dbc, {
         orgId: o.orgId,
         campaignId: match.campaign_id,
+        stageId: match.stage_id,
       });
       if (breaker.tripped) breakerTrip = { campaignId: match.campaign_id, result: breaker };
     }

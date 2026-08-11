@@ -62,6 +62,129 @@ export interface RebuildResult {
   durationMs: number;
 }
 
+export const COUNTED_CLICKERS_JOB = "counted-clickers-rebuild";
+
+// How far back the incremental pass looks. Stateless — a fixed lookback, NOT a
+// stored high-water mark, so there is no cursor that data can get stranded
+// behind. Generous relative to the ~15min scoring cron, so a click that is
+// scored late is still inside the window on the next tick.
+const INCREMENTAL_LOOKBACK = sql`interval '6 hours'`;
+
+export type RefreshMode = "incremental" | "full";
+
+export interface RefreshResult {
+  mode: RefreshMode;
+  rows: number;
+  rescuedByConversion: number;
+  durationMs: number;
+}
+
+// Refresh the cache.
+//
+// CADENCE IS TIED TO THE KEITARO POLL, DELIBERATELY. EPC is revenue over counted
+// clickers. Revenue advances every 5 minutes with the Keitaro poll; if the
+// denominator advanced on an independent schedule, EPC would drift one way
+// between rebuilds and snap back at each one — an artifact indistinguishable
+// from a real trend, on the platform's primary metric. So the incremental pass
+// runs inside the same poll tick and both sides move together.
+//
+//   incremental (every poll tick, ~5min): additive only, bounded by a stateless
+//     6h lookback, ON CONFLICT DO NOTHING. Cheap; takes no table-level lock.
+//   full (daily): wholesale rebuild. Repairs anything additive passes cannot —
+//     rows that should be REMOVED because a click was reclassified away from
+//     'human'. This is the self-healing path that makes corrections land
+//     without a backfill (see the propagate-clickers failure in the header).
+//
+// The full pass uses DELETE, not TRUNCATE: TRUNCATE takes ACCESS EXCLUSIVE and
+// would block every EPC read for the duration of the rebuild. DELETE leaves
+// readers on the pre-transaction snapshot via MVCC. Once a day, the resulting
+// dead tuples are trivial for autovacuum.
+export async function refreshCountedClickers(
+  dbc: DbOrTx,
+  mode: RefreshMode = "incremental",
+): Promise<RefreshResult> {
+  const started = Date.now();
+  let rows = 0;
+  let rescued = 0;
+
+  await dbc.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '300s'`);
+    const windowFilter =
+      mode === "full"
+        ? sql``
+        : sql`AND ck.clicked_at >= now() - ${INCREMENTAL_LOOKBACK}`;
+    const convWindow =
+      mode === "full"
+        ? sql``
+        : sql`AND ss.converted_at >= now() - ${INCREMENTAL_LOOKBACK}`;
+
+    if (mode === "full") {
+      await tx.execute(sql`DELETE FROM counted_clickers`);
+    }
+
+    await tx.execute(sql`
+      INSERT INTO counted_clickers
+        (org_id, campaign_id, stage_id, creative_id, contact_id, first_click_at, rescued_by_conversion)
+      SELECT DISTINCT ON (l.stage_id, l.contact_id)
+        l.org_id, l.campaign_id, l.stage_id, l.creative_id, l.contact_id,
+        min(ck.clicked_at) OVER (PARTITION BY l.stage_id, l.contact_id),
+        false
+      FROM clicks ck
+      JOIN links l ON l.id = ck.link_id
+      WHERE ${HUMAN_CLICK} ${windowFilter}
+      ORDER BY l.stage_id, l.contact_id
+      ON CONFLICT (stage_id, contact_id) DO NOTHING
+    `);
+
+    await tx.execute(sql`
+      INSERT INTO counted_clickers
+        (org_id, campaign_id, stage_id, creative_id, contact_id, first_click_at, rescued_by_conversion)
+      SELECT ss.org_id, ss.campaign_id, ss.stage_id, l.creative_id, ss.contact_id,
+             coalesce(
+               (SELECT min(ck.clicked_at) FROM clicks ck WHERE ck.link_id = ss.link_id),
+               ss.converted_at
+             ),
+             true
+      FROM stage_sends ss
+      LEFT JOIN links l ON l.id = ss.link_id
+      WHERE ss.converted_at IS NOT NULL ${convWindow}
+      ON CONFLICT (stage_id, contact_id) DO NOTHING
+    `);
+
+    const totals = (await tx.execute(sql`
+      SELECT count(*)::int AS n,
+             count(*) FILTER (WHERE rescued_by_conversion)::int AS rescued
+      FROM counted_clickers
+    `)) as unknown as { n: number; rescued: number }[];
+    rows = Number(totals[0]?.n ?? 0);
+    rescued = Number(totals[0]?.rescued ?? 0);
+
+    // Stamp the refresh so a stale denominator is VISIBLE rather than silently
+    // misleading — surfaced by the reports API and rendered next to the figure.
+    // Only a full pass advances the watermark; it is the repair guarantee.
+    await tx.execute(sql`
+      INSERT INTO cron_locks (job_name, watermark)
+      VALUES (${COUNTED_CLICKERS_JOB}, ${mode === "full" ? sql`now()` : sql`NULL`})
+      ON CONFLICT (job_name) DO UPDATE
+        SET watermark = ${mode === "full" ? sql`now()` : sql`cron_locks.watermark`}
+    `);
+
+    if (mode === "full") await tx.execute(sql`ANALYZE counted_clickers`);
+  });
+
+  return { mode, rows, rescuedByConversion: rescued, durationMs: Date.now() - started };
+}
+
+// When the cache was last FULLY rebuilt. Surfaced so a stale figure is visible.
+export async function getCountedClickersRefreshedAt(
+  dbc: DbOrTx,
+): Promise<string | null> {
+  const rows = (await dbc.execute(sql`
+    SELECT watermark::text AS t FROM cron_locks WHERE job_name = ${COUNTED_CLICKERS_JOB}
+  `)) as unknown as { t: string | null }[];
+  return rows[0]?.t ?? null;
+}
+
 // Rebuild the whole cache. TRUNCATE + repopulate, in one transaction.
 //
 // NO WATERMARK, DELIBERATELY. This is load-bearing, not laziness. The sibling
@@ -74,63 +197,10 @@ export interface RebuildResult {
 // un-repairable the moment its source is corrected. This table is small
 // (~72K rows, seconds to rebuild), so it is rebuilt wholesale every run and any
 // future correction to click classification self-heals on the next tick.
+// Back-compat wrapper: a full rebuild. Prefer refreshCountedClickers directly.
 export async function rebuildCountedClickers(dbc: DbOrTx): Promise<RebuildResult> {
-  const started = Date.now();
-  let rows = 0;
-  let rescued = 0;
-
-  await dbc.transaction(async (tx) => {
-    await tx.execute(sql`SET LOCAL statement_timeout = '300s'`);
-    await tx.execute(sql`TRUNCATE TABLE counted_clickers`);
-
-    // Human clicks first. DISTINCT ON collapses to one row per (stage, contact)
-    // carrying the EARLIEST counted click — the click-date basis for period EPC.
-    // No RETURNING: shipping 72K rows back to the client dominated the runtime
-    // (50s → seconds). Counts come from a cheap aggregate afterwards.
-    await tx.execute(sql`
-      INSERT INTO counted_clickers
-        (org_id, campaign_id, stage_id, creative_id, contact_id, first_click_at, rescued_by_conversion)
-      SELECT DISTINCT ON (l.stage_id, l.contact_id)
-        l.org_id, l.campaign_id, l.stage_id, l.creative_id, l.contact_id,
-        min(ck.clicked_at) OVER (PARTITION BY l.stage_id, l.contact_id),
-        false
-      FROM clicks ck
-      JOIN links l ON l.id = ck.link_id
-      WHERE ${HUMAN_CLICK}
-      ORDER BY l.stage_id, l.contact_id
-    `);
-
-    // Rule F: a converted recipient is ALWAYS counted, so the revenue numerator
-    // can never sit outside the click denominator. ON CONFLICT DO NOTHING means
-    // a buyer who also has a human click keeps its real click date and is not
-    // relabelled as a rescue — only genuine rescues carry the flag.
-    await tx.execute(sql`
-      INSERT INTO counted_clickers
-        (org_id, campaign_id, stage_id, creative_id, contact_id, first_click_at, rescued_by_conversion)
-      SELECT ss.org_id, ss.campaign_id, ss.stage_id, l.creative_id, ss.contact_id,
-             coalesce(
-               (SELECT min(ck.clicked_at) FROM clicks ck WHERE ck.link_id = ss.link_id),
-               ss.converted_at
-             ),
-             true
-      FROM stage_sends ss
-      LEFT JOIN links l ON l.id = ss.link_id
-      WHERE ss.converted_at IS NOT NULL
-      ON CONFLICT (stage_id, contact_id) DO NOTHING
-    `);
-
-    const totals = (await tx.execute(sql`
-      SELECT count(*)::int AS n,
-             count(*) FILTER (WHERE rescued_by_conversion)::int AS rescued
-      FROM counted_clickers
-    `)) as unknown as { n: number; rescued: number }[];
-    rows = Number(totals[0]?.n ?? 0);
-    rescued = Number(totals[0]?.rescued ?? 0);
-
-    await tx.execute(sql`ANALYZE counted_clickers`);
-  });
-
-  return { rows, rescuedByConversion: rescued, durationMs: Date.now() - started };
+  const r = await refreshCountedClickers(dbc, "full");
+  return { rows: r.rows, rescuedByConversion: r.rescuedByConversion, durationMs: r.durationMs };
 }
 
 export interface CountedClickerBounds {

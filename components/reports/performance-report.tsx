@@ -38,7 +38,7 @@ interface DerivedRow extends PerfRow {
   click_rate: number; // clickers / sent (CR)
   redirect_rate: number; // redirects / clickers
   sales_cr: number; // sales / redirects
-  epc: number; // revenue / redirects
+  epc: number; // revenue / counted clickers
   profit: number; // revenue - cost
 }
 
@@ -76,7 +76,7 @@ function derive(r: PerfRow): DerivedRow {
     click_rate: rate(r.clickers, r.sent),
     redirect_rate: rate(r.redirects, r.clickers),
     sales_cr: rate(r.sales, r.redirects),
-    epc: rate(r.revenue, r.redirects),
+    epc: rate(r.revenue, r.counted_clickers),
     profit: r.revenue - r.cost,
   };
 }
@@ -109,6 +109,9 @@ const FULL_COLS: Col[] = [
   { id: "sales_cr", header: "Sales CR", kind: "pct", muted: true },
   { id: "revenue", header: "Revenue", kind: "usd" },
   { id: "cost", header: "Cost", kind: "usd", muted: true },
+  // Shown immediately before EPC: it IS the EPC denominator, and the grain is
+  // only readable if the count it divides by is visible.
+  { id: "counted_clickers", header: "Clicks", kind: "count" },
   { id: "epc", header: "EPC", kind: "usd" },
   { id: "profit", header: "Profit", kind: "profit" },
 ];

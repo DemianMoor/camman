@@ -76,17 +76,24 @@ export async function computeCreativeMetrics(
          AND cs.created_at >= now() - interval '30 days'
        GROUP BY cs.creative_id
     ),
+    -- The EPC denominator: counted clickers at CREATIVE grain, from the shared
+    -- cache (lib/reporting/counted-clickers.ts) - the same definition every
+    -- other surface divides by.
+    --
+    -- This replaces RAW tracked taps (count of click ROWS, not deduplicated by
+    -- contact) which, added to manual-mode click_count (Keitaro landing
+    -- VISITS), summed two different funnel events into one denominator. It was
+    -- the single largest EPC inconsistency in the platform. Deduplicating
+    -- shrinks this denominator, so creative EPC moves UP while the reports
+    -- screens move DOWN — the two converge on the same number.
     click_agg AS (
-      SELECT l.creative_id,
-             count(cl.id) FILTER (
-               WHERE cl.classification NOT IN ('bot', 'prefetch', 'suspect')
-             )::int AS tracked_clean
-        FROM clicks cl
-        JOIN links l ON l.id = cl.link_id
-       WHERE cl.org_id = ${orgId}
-         AND l.creative_id IS NOT NULL
-         AND cl.clicked_at >= now() - interval '30 days'
-       GROUP BY l.creative_id
+      SELECT cc.creative_id,
+             count(DISTINCT cc.contact_id)::int AS tracked_clean
+        FROM counted_clickers cc
+       WHERE cc.org_id = ${orgId}
+         AND cc.creative_id IS NOT NULL
+         AND cc.first_click_at >= now() - interval '30 days'
+       GROUP BY cc.creative_id
     )
     SELECT coalesce(s.creative_id, k.creative_id) AS creative_id,
            coalesce(s.delivered, 0)      AS delivered,

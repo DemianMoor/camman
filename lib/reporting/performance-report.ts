@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { denominatorFor } from "@/lib/reporting/counted-clickers";
 import type { ReportDimension } from "@/lib/reporting/report-dimensions";
 import {
   getStageMetricsInRange,
@@ -25,6 +26,11 @@ export interface PerfMetrics {
   opt_outs: number;
   clickers: number;
   redirects: number;
+  // The EPC denominator — counted clickers (lib/reporting/counted-clickers.ts),
+  // the same source every other surface divides by. `clickers` above is the
+  // Keitaro landing-visit count and is display-only; `redirects` is no longer a
+  // denominator anywhere.
+  counted_clickers: number;
   sales: number;
   revenue: number;
   cost: number;
@@ -66,17 +72,23 @@ const ZERO: PerfMetrics = {
   opt_outs: 0,
   clickers: 0,
   redirects: 0,
+  counted_clickers: 0,
   sales: 0,
   revenue: 0,
   cost: 0,
 };
 
-function stageMetrics(s: StageMetrics): PerfMetrics {
+function stageMetrics(s: StageMetrics, countedByStage: Map<number, number>): PerfMetrics {
   return {
     sent: s.total_sent,
     opt_outs: s.opt_outs,
     clickers: s.tally.visit_clicks_clean,
     redirects: s.tally.redirect_clicks_clean,
+    counted_clickers: denominatorFor(
+      s.link_mode,
+      countedByStage.get(s.stage_id),
+      s.tally.visit_clicks_clean,
+    ),
     sales: s.tally.sales,
     revenue: s.tally.revenue,
     cost: s.tally.cost,
@@ -89,6 +101,7 @@ function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     opt_outs: a.opt_outs + b.opt_outs,
     clickers: a.clickers + b.clickers,
     redirects: a.redirects + b.redirects,
+    counted_clickers: a.counted_clickers + b.counted_clickers,
     sales: a.sales + b.sales,
     revenue: a.revenue + b.revenue,
     cost: a.cost + b.cost,
@@ -100,6 +113,7 @@ function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     opt_outs: m.opt_outs * f,
     clickers: m.clickers * f,
     redirects: m.redirects * f,
+    counted_clickers: m.counted_clickers * f,
     sales: m.sales * f,
     revenue: m.revenue * f,
     cost: m.cost * f,
@@ -129,20 +143,24 @@ export async function getPerformanceReport(
 ): Promise<PerformanceReport> {
   if (dimension === "hourly") return getHourlyReport(orgId, b);
 
-  const { stages } = await getStageMetricsInRange(orgId, b.from, b.to);
+  const { stages, clickers } = await getStageMetricsInRange(orgId, b.from, b.to);
+  const countedByStage = clickers.periodByStage;
   const filtered =
     b.providerPhoneId != null
       ? stages.filter((s) => s.provider_phone_id === b.providerPhoneId)
       : stages;
 
-  const totals = filtered.reduce((acc, s) => addMetrics(acc, stageMetrics(s)), { ...ZERO });
+  const totals = filtered.reduce(
+    (acc, s) => addMetrics(acc, stageMetrics(s, countedByStage)),
+    { ...ZERO },
+  );
   const refreshedAt = await maxSyncedAt(orgId);
 
   let rows: PerfRow[];
   if (dimension === "group") {
-    rows = await distributeToGroups(orgId, filtered, b);
+    rows = await distributeToGroups(orgId, filtered, b, countedByStage);
   } else {
-    rows = await groupByStageDimension(filtered, dimension);
+    rows = await groupByStageDimension(filtered, dimension, countedByStage);
   }
   return { dimension, rows, totals, refreshedAt };
 }
@@ -151,6 +169,7 @@ export async function getPerformanceReport(
 async function groupByStageDimension(
   stages: StageMetrics[],
   dimension: "number" | "offer" | "sequence",
+  countedByStage: Map<number, number>,
 ): Promise<PerfRow[]> {
   const keyOf = (s: StageMetrics): string => {
     if (dimension === "number") return s.provider_phone_id == null ? "none" : String(s.provider_phone_id);
@@ -160,7 +179,7 @@ async function groupByStageDimension(
   const acc = new Map<string, PerfMetrics>();
   for (const s of stages) {
     const k = keyOf(s);
-    acc.set(k, addMetrics(acc.get(k) ?? { ...ZERO }, stageMetrics(s)));
+    acc.set(k, addMetrics(acc.get(k) ?? { ...ZERO }, stageMetrics(s, countedByStage)));
   }
 
   if (dimension === "number") {
@@ -212,6 +231,7 @@ async function distributeToGroups(
   orgId: string,
   stages: StageMetrics[],
   b: Bounds,
+  countedByStage: Map<number, number>,
 ): Promise<PerfRow[]> {
   const trackedIds = stages.filter((s) => s.link_mode === "tracked").map((s) => s.stage_id);
   const manualStages = stages.filter((s) => s.link_mode !== "tracked");
@@ -237,7 +257,7 @@ async function distributeToGroups(
     byGroup.set(gid, addMetrics(byGroup.get(gid) ?? { ...ZERO }, m));
 
   for (const s of stages) {
-    const m = stageMetrics(s);
+    const m = stageMetrics(s, countedByStage);
     // Final fallback: equal split across the campaign's used groups.
     const equalW = new Map((usedGroups.get(s.campaign_id) ?? []).map((g) => [g, 1]));
     if (s.link_mode === "tracked") {
@@ -247,6 +267,9 @@ async function distributeToGroups(
       spread(add, m.sent, sentW, "sent");
       spread(add, m.opt_outs, nonEmpty(wOpt.get(s.stage_id)) ?? sentW, "opt_outs");
       spread(add, m.clickers, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "clickers");
+      // Counted clickers distribute on the CLICK weights — same basis as the
+      // metric they denominate.
+      spread(add, m.counted_clickers, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "counted_clickers");
       spread(add, m.redirects, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "redirects");
       spread(add, m.sales, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "sales");
       spread(add, m.revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "revenue");
@@ -267,6 +290,7 @@ async function distributeToGroups(
       opt_outs: round2(m.opt_outs),
       clickers: round2(m.clickers),
       redirects: round2(m.redirects),
+      counted_clickers: round2(m.counted_clickers),
       sales: round2(m.sales),
       revenue: round2(m.revenue),
       cost: round2(m.cost),

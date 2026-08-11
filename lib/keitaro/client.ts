@@ -32,7 +32,12 @@ export const KEITARO_GROUPING = ["day", "sub_id_3", "campaign_id"] as const;
 export const KEITARO_VISIT_CAMPAIGN_NAME = "gk-lp-visits";
 export const KEITARO_METRICS = [
   "clicks", // Raw Clicks
-  "campaign_unique_clicks", // Clean Clicks (bot/dup-filtered)
+  // Keitaro's per-campaign UNIQUE-visitor count. NOT a bot filter: CamMan sends
+  // no bot filter with this report (filters: []), so any bot exclusion depends
+  // entirely on a Keitaro-side setting this repo cannot see. It deduplicates
+  // repeat visits; it does not certify humanity. Named accordingly — the old
+  // label "Clean Clicks (bot/dup-filtered)" overstated the guarantee.
+  "campaign_unique_clicks", // Unique visits per campaign (dedup only)
   "conversions", // total (leads + sales)
   "leads", // Checkouts (CI)
   "sales", // Sales (CV)

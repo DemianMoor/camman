@@ -62,7 +62,14 @@ export interface RebuildResult {
   durationMs: number;
 }
 
+// Two rows in cron_locks, one per pass. Both are stamped and reported
+// SEPARATELY, deliberately: if only the full pass stamped a time, the UI would
+// show "last updated 20 hours ago" while the incremental pass had in fact
+// refreshed the figure five minutes earlier. A staleness indicator that
+// overstates staleness gets ignored — and then it is useless on the day it is
+// telling the truth.
 export const COUNTED_CLICKERS_JOB = "counted-clickers-rebuild";
+export const COUNTED_CLICKERS_INCREMENTAL_JOB = "counted-clickers-incremental";
 
 // How far back the incremental pass looks. Stateless — a fixed lookback, NOT a
 // stored high-water mark, so there is no cursor that data can get stranded
@@ -159,14 +166,13 @@ export async function refreshCountedClickers(
     rows = Number(totals[0]?.n ?? 0);
     rescued = Number(totals[0]?.rescued ?? 0);
 
-    // Stamp the refresh so a stale denominator is VISIBLE rather than silently
-    // misleading — surfaced by the reports API and rendered next to the figure.
-    // Only a full pass advances the watermark; it is the repair guarantee.
+    // Stamp THIS pass. Each mode has its own row so the two can be reported
+    // apart — "data last touched" (either pass) vs "last full repair".
+    const jobName =
+      mode === "full" ? COUNTED_CLICKERS_JOB : COUNTED_CLICKERS_INCREMENTAL_JOB;
     await tx.execute(sql`
-      INSERT INTO cron_locks (job_name, watermark)
-      VALUES (${COUNTED_CLICKERS_JOB}, ${mode === "full" ? sql`now()` : sql`NULL`})
-      ON CONFLICT (job_name) DO UPDATE
-        SET watermark = ${mode === "full" ? sql`now()` : sql`cron_locks.watermark`}
+      INSERT INTO cron_locks (job_name, watermark) VALUES (${jobName}, now())
+      ON CONFLICT (job_name) DO UPDATE SET watermark = now()
     `);
 
     if (mode === "full") await tx.execute(sql`ANALYZE counted_clickers`);
@@ -175,14 +181,28 @@ export async function refreshCountedClickers(
   return { mode, rows, rescuedByConversion: rescued, durationMs: Date.now() - started };
 }
 
-// When the cache was last FULLY rebuilt. Surfaced so a stale figure is visible.
-export async function getCountedClickersRefreshedAt(
+export interface CountedClickersFreshness {
+  // Most recent refresh of ANY kind — what "last updated" honestly means.
+  updated_at: string | null;
+  // Most recent FULL rebuild — the repair guarantee. Older than updated_at by
+  // design; label it as such in the UI, never as "last updated".
+  full_rebuild_at: string | null;
+}
+
+// Both stamps, reported separately. Callers MUST NOT collapse these into one
+// "last updated" field: full_rebuild_at is up to 24h old even when the figure
+// on screen is five minutes fresh.
+export async function getCountedClickersFreshness(
   dbc: DbOrTx,
-): Promise<string | null> {
+): Promise<CountedClickersFreshness> {
   const rows = (await dbc.execute(sql`
-    SELECT watermark::text AS t FROM cron_locks WHERE job_name = ${COUNTED_CLICKERS_JOB}
-  `)) as unknown as { t: string | null }[];
-  return rows[0]?.t ?? null;
+    SELECT job_name, watermark::text AS t FROM cron_locks
+    WHERE job_name IN (${COUNTED_CLICKERS_JOB}, ${COUNTED_CLICKERS_INCREMENTAL_JOB})
+  `)) as unknown as { job_name: string; t: string | null }[];
+  const full = rows.find((r) => r.job_name === COUNTED_CLICKERS_JOB)?.t ?? null;
+  const inc = rows.find((r) => r.job_name === COUNTED_CLICKERS_INCREMENTAL_JOB)?.t ?? null;
+  const newest = [full, inc].filter(Boolean).sort().pop() ?? null;
+  return { updated_at: newest, full_rebuild_at: full };
 }
 
 // Rebuild the whole cache. TRUNCATE + repopulate, in one transaction.

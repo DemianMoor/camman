@@ -1,20 +1,21 @@
 import "./_env-preload";
 import { drizzle } from "drizzle-orm/postgres-js"; import postgres from "postgres"; import { sql } from "drizzle-orm";
-import { refreshCountedClickers, getCountedClickersRefreshedAt } from "@/lib/reporting/counted-clickers";
+import { refreshCountedClickers, getCountedClickersFreshness } from "@/lib/reporting/counted-clickers";
 function assert(c:boolean,m:string){if(!c)throw new Error(`ASSERTION FAILED: ${m}`);console.log(`  ✓ ${m}`);}
 async function main(){
   const c=postgres(process.env.DATABASE_URL!,{prepare:false,max:1}); const d=drizzle(c);
   const full = await refreshCountedClickers(d,"full");
   console.log(`full: rows=${full.rows} rescued=${full.rescuedByConversion} ${full.durationMs}ms`);
-  const stampAfterFull = await getCountedClickersRefreshedAt(d);
-  assert(!!stampAfterFull, `full pass stamps the refresh time (${stampAfterFull})`);
+  const fullStamp = (await getCountedClickersFreshness(d));
+  assert(!!fullStamp.full_rebuild_at, `full pass stamps full_rebuild_at (${fullStamp.full_rebuild_at})`);
 
   const inc = await refreshCountedClickers(d,"incremental");
   console.log(`incremental: rows=${inc.rows} ${inc.durationMs}ms`);
   assert(inc.durationMs < full.durationMs, `incremental (${inc.durationMs}ms) is cheaper than full (${full.durationMs}ms)`);
   assert(Math.abs(inc.rows-full.rows) <= 50, `incremental preserves the row count (${full.rows} -> ${inc.rows})`);
-  const stampAfterInc = await getCountedClickersRefreshedAt(d);
-  assert(stampAfterInc === stampAfterFull, "incremental does NOT advance the full-rebuild stamp (staleness stays visible)");
+  const incStamp = await getCountedClickersFreshness(d);
+  assert(incStamp.full_rebuild_at === fullStamp.full_rebuild_at, "incremental does NOT advance full_rebuild_at (the repair stamp stays honest)");
+  assert(!!incStamp.updated_at && incStamp.updated_at !== fullStamp.full_rebuild_at, `incremental DOES advance updated_at (${incStamp.updated_at}) — staleness is not overstated`);
 
   // The repair property: delete a row, incremental must NOT resurrect an old one
   // outside its window, but full must.

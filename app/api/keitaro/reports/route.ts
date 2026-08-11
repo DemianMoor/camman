@@ -9,6 +9,7 @@ import {
   type FunnelTally,
 } from "@/lib/keitaro/funnel";
 import { can } from "@/lib/permissions";
+import { denominatorFor } from "@/lib/reporting/counted-clickers";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 
 // Cross-campaign Keitaro reports (the /reports "Overview" tab): per-stage
@@ -17,6 +18,13 @@ import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 // by-number/offer/sequence/group performance reports compute from the identical
 // numbers. This route only groups (stage/campaign), sorts, paginates, responds.
 export const dynamic = "force-dynamic";
+
+// Lifetime EPC: all-time revenue over all-time counted clickers, ignoring the
+// date filter. Distinct from the period figure and never derived from it —
+// counted clickers are deduplicated and therefore not additive over time.
+function lifetimeEpc(revenue: number, clickers: number): number {
+  return clickers > 0 ? revenue / clickers : 0;
+}
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_RANGE_DAYS = 92;
@@ -88,8 +96,11 @@ export async function GET(req: NextRequest) {
     : "revenue";
   const sortDir = sp.get("sortDir") === "asc" ? "asc" : "desc";
 
-  const { stages, grand, grandOptOuts, grandTotalSent } =
+  const { stages, grand, grandOptOuts, grandTotalSent, clickers } =
     await getStageMetricsInRange(auth.orgId, from, to);
+
+  // link_mode per campaign, so manual-mode rows fall back to Keitaro visits.
+  const linkModeByCampaign = new Map(stages.map((s) => [s.campaign_id, s.link_mode]));
 
   const groupByCampaign = (sp.get("groupBy") ?? "stage") === "campaign";
 
@@ -105,6 +116,9 @@ export async function GET(req: NextRequest) {
     total_sent: number;
     opt_out_rate: number;
     click_rate: number;
+    // Lifetime EPC ignores the date filter entirely and is the PRIMARY figure;
+    // `epc` from withFunnelDerived is the period figure for the selected range.
+    lifetime_epc: number;
   } & ReturnType<typeof withFunnelDerived>;
 
   let data: OutRow[];
@@ -148,7 +162,22 @@ export async function GET(req: NextRequest) {
       total_sent: c.total_sent,
       opt_out_rate: rateOfSent(c.opt_outs, c.total_sent),
       click_rate: rateOfSent(c.tally.visit_clicks_clean, c.total_sent),
-      ...withFunnelDerived(c.tally),
+      ...withFunnelDerived(
+        c.tally,
+        denominatorFor(
+          linkModeByCampaign.get(c.campaign_id),
+          clickers.periodByCampaign.get(c.campaign_id),
+          c.tally.visit_clicks_clean,
+        ),
+      ),
+      lifetime_epc: lifetimeEpc(
+        clickers.lifetimeRevenueByCampaign.get(c.campaign_id) ?? 0,
+        denominatorFor(
+          linkModeByCampaign.get(c.campaign_id),
+          clickers.lifetimeByCampaign.get(c.campaign_id),
+          c.tally.visit_clicks_clean,
+        ),
+      ),
     }));
   } else {
     data = stages.map((acc) => {
@@ -167,7 +196,22 @@ export async function GET(req: NextRequest) {
         total_sent: acc.total_sent,
         opt_out_rate: rateOfSent(acc.opt_outs, acc.total_sent),
         click_rate: rateOfSent(acc.tally.visit_clicks_clean, acc.total_sent),
-        ...withFunnelDerived(acc.tally),
+        ...withFunnelDerived(
+          acc.tally,
+          denominatorFor(
+            acc.link_mode,
+            clickers.periodByStage.get(acc.stage_id),
+            acc.tally.visit_clicks_clean,
+          ),
+        ),
+        lifetime_epc: lifetimeEpc(
+          clickers.lifetimeRevenueByStage.get(acc.stage_id) ?? 0,
+          denominatorFor(
+            acc.link_mode,
+            clickers.lifetimeByStage.get(acc.stage_id),
+            acc.tally.visit_clicks_clean,
+          ),
+        ),
       };
     });
   }
@@ -204,7 +248,8 @@ export async function GET(req: NextRequest) {
     page,
     pageSize,
     totals: {
-      ...withFunnelDerived(grand),
+      ...withFunnelDerived(grand, clickers.periodTotal),
+      lifetime_epc: lifetimeEpc(clickers.lifetimeRevenueTotal, clickers.lifetimeTotal),
       opt_outs: grandOptOuts,
       total_sent: grandTotalSent,
       opt_out_rate: rateOfSent(grandOptOuts, grandTotalSent),

@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { keitaro_stage_results } from "@/db/schema";
@@ -12,6 +12,11 @@ import {
   withFunnelDerived,
   type FunnelTally,
 } from "@/lib/keitaro/funnel";
+import {
+  denominatorFor,
+  getCountedClickers,
+  getCountedClickersByStageDay,
+} from "@/lib/reporting/counted-clickers";
 
 // Read the stored Keitaro per-stage daily aggregates for one campaign, org-
 // scoped. Returns the raw per-(stage, date) rows plus per-stage and campaign
@@ -46,6 +51,18 @@ export async function GET(req: NextRequest) {
       ),
     );
 
+  // EPC denominator: counted clickers, the same source every other surface uses.
+  const [clickersByStage, clickersByCampaign, clickersByStageDay, campaignRow] =
+    await Promise.all([
+      getCountedClickers(db, auth.orgId, "stage"),
+      getCountedClickers(db, auth.orgId, "campaign"),
+      getCountedClickersByStageDay(db, auth.orgId),
+      db.execute(
+        sql`SELECT link_mode FROM campaigns WHERE id = ${campaignId} AND org_id = ${auth.orgId}::uuid`,
+      ) as unknown as Promise<{ link_mode: string }[]>,
+    ]);
+  const linkMode = (await campaignRow)[0]?.link_mode ?? "manual";
+
   const campaignTally = emptyFunnel();
   const perStage = new Map<
     number,
@@ -69,13 +86,19 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     campaign_id: campaignId,
-    totals: withFunnelDerived(campaignTally),
+    totals: withFunnelDerived(
+      campaignTally,
+      denominatorFor(linkMode, clickersByCampaign.get(campaignId), campaignTally.visit_clicks_clean),
+    ),
     stages: [...perStage.values()]
       .sort((a, b) => a.stage_id - b.stage_id)
       .map((s) => ({
         stage_id: s.stage_id,
         stage_tracking_id: s.stage_tracking_id,
-        ...withFunnelDerived(s.tally),
+        ...withFunnelDerived(
+          s.tally,
+          denominatorFor(linkMode, clickersByStage.get(s.stage_id), s.tally.visit_clicks_clean),
+        ),
       })),
     rows: rows
       .map((r) => {
@@ -84,7 +107,14 @@ export async function GET(req: NextRequest) {
           stage_id: r.stage_id,
           stage_tracking_id: r.stage_tracking_id,
           stat_date: r.stat_date,
-          ...withFunnelDerived(t),
+          ...withFunnelDerived(
+            t,
+            denominatorFor(
+              linkMode,
+              clickersByStageDay.get(`${r.stage_id}|${r.stat_date}`),
+              t.visit_clicks_clean,
+            ),
+          ),
           synced_at: r.synced_at,
         };
       })

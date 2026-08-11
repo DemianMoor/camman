@@ -253,6 +253,28 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - **Rescore backfill ran 2026-08-11** (4,382 rows: 4,312 `suspect→human`, 70 `bot→suspect`). Any Hourly-Clickers or By-Group comparison spanning that date is not like-for-like.
 - **~91% of all taps hinge on one signal** (datacenter ASN, weight 60 — almost entirely Google AS15169 SMS link scanners). If that signal shifts, every click metric on the platform moves at once with no other warning.
 
+## EPC — one denominator (see [04-features/epc-denominator.md](04-features/epc-denominator.md))
+- **Every EPC divides by counted clickers.** A contact with ≥1 click scored `human`, OR a conversion (Rule F), deduplicated at the grain of the row displayed. There is no second denominator and no fallback: `withFunnelDerived` takes it as a REQUIRED parameter so the compiler, not a convention, prevents one reappearing.
+- **Counted clickers are NOT additive** — across grains or over time. One person tapping two creatives in one campaign is one campaign clicker and two creative clickers; one person clicking on two days is one lifetime clicker. Stage/creative rows sum ~26% above the campaign total **by design**. Never sum them; re-aggregate from `counted_clickers`.
+- **The relay carve-out lives in the scorer, not in reporting.** By the time a click reaches the denominator the rule has collapsed to `classification = 'human'`. Do not re-implement ASN logic in a reporting query.
+- **Manual-mode campaigns fall back to Keitaro `visit_clicks_clean`** (they mint no links). Comparable in scale: only 11% of Keitaro landing visitors are CamMan-excluded.
+- **The cache refresh is tied to the Keitaro poll**, not an independent schedule — otherwise EPC drifts between rebuilds and snaps back, which reads exactly like a real trend.
+- **Freshness is two values**, `updated_at` and `full_rebuild_at`. Never collapse them into one "last updated": an indicator that overstates staleness gets ignored, then is useless when it is right.
+- **Lifetime EPC is primary**; period EPC attributes revenue by the CLICK's date, not the sale's.
+
+## Migration ordering — additive leads the code, destructive follows it
+
+[CLAUDE.md §14](../CLAUDE.md) says to apply migrations **before** pushing the code that depends on them. That is correct for **additive** changes (a new table or column): the code needs the schema to exist, and an unused new column harms nothing while it waits.
+
+**It inverts for destructive changes.** Dropping a column or table while deployed code still writes to it breaks that code the instant the migration lands. The order is:
+
+1. Remove the dependent code
+2. Merge and deploy it
+3. **Confirm the affected job has run clean against production** — a deploy proves the code shipped, not that the write path is actually gone
+4. Then apply the destructive migration, as a separate step
+
+Applied when `keitaro_stage_results.epc` was dropped (2026-08-11): the write was removed from [`lib/keitaro/poll.ts`](../lib/keitaro/poll.ts) and deployed first, a full poll cycle was confirmed, and only then was the column dropped. Snapshot the data first — a drop is unrecoverable and an export costs nothing (`docs/snapshots/`).
+
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.
 - The live DB's `segment_rules` CHECK contents — discrepancy #2.

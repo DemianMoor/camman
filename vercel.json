@@ -51,6 +51,14 @@
     {
       "path": "/api/cron/ahoi-cdr-poll",
       "schedule": "13,28,43,58 * * * *"
+    },
+    {
+      "path": "/api/reports/rebuild-counted-clickers",
+      "schedule": "20 7 * * *"
+    },
+    {
+      "path": "/api/reports/epc-monitors",
+      "schedule": "40 8 * * 1"
     }
   ]
 }

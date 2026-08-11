@@ -1,0 +1,110 @@
+import { sql } from "drizzle-orm";
+
+import type { db } from "@/db/client";
+
+export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// =============================================================================
+// DEAD-MAN CHECK for the scheduled reporting jobs.
+//
+// Alerting only on breach is right — a weekly all-clear trains people to ignore
+// the channel. But it makes SILENCE AMBIGUOUS: no message means either "healthy"
+// or "the job stopped running two months ago and nothing has been checked
+// since". That second reading is the one you discover in November.
+//
+// So each job records a heartbeat, and each job checks SOMEBODY ELSE'S. The
+// check must never live inside the job it watches: a job that is dead cannot
+// report itself dead. The pairing is mutual —
+//
+//   the weekly monitors job    watches the daily rebuild   (notices within a week)
+//   the daily rebuild job      watches the weekly monitors (notices within a day)
+//
+// Either one dying is therefore caught by the other, and both dying at once is
+// caught by the absence of the Telegram traffic the rest of the platform emits.
+// =============================================================================
+
+export interface HeartbeatExpectation {
+  job_name: string;
+  // Maximum tolerable silence. Set to roughly 2x the schedule interval so a
+  // single missed run (a deploy, a transient failure) does not page anyone, but
+  // two in a row does.
+  max_age_hours: number;
+  label: string;
+}
+
+export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
+  epcMonitors: {
+    job_name: "epc-monitors",
+    max_age_hours: 24 * 16, // weekly cadence, ~2 missed runs
+    label: "EPC integrity monitors (weekly)",
+  },
+  countedClickersFull: {
+    job_name: "counted-clickers-rebuild",
+    max_age_hours: 52, // daily cadence, ~2 missed runs
+    label: "counted-clicker full rebuild (daily)",
+  },
+};
+
+// Stamp a heartbeat for this job. Reuses cron_locks, which is already keyed by
+// job_name; `watermark` carries the last successful completion.
+export async function recordHeartbeat(
+  dbc: DbOrTx,
+  jobName: string,
+): Promise<void> {
+  await dbc.execute(sql`
+    INSERT INTO cron_locks (job_name, watermark) VALUES (${jobName}, now())
+    ON CONFLICT (job_name) DO UPDATE SET watermark = now()
+  `);
+}
+
+export interface HeartbeatStatus {
+  job_name: string;
+  label: string;
+  last_run: string | null;
+  age_hours: number | null;
+  max_age_hours: number;
+  stale: boolean;
+}
+
+// Check the heartbeats of jobs OTHER than the caller. A NULL watermark counts as
+// stale: a job that has never recorded a run is indistinguishable from one that
+// stopped, and both need looking at.
+export async function checkHeartbeats(
+  dbc: DbOrTx,
+  expectations: HeartbeatExpectation[],
+): Promise<HeartbeatStatus[]> {
+  if (expectations.length === 0) return [];
+  const names = sql.join(
+    expectations.map((e) => sql`${e.job_name}`),
+    sql`, `,
+  );
+  const rows = (await dbc.execute(sql`
+    SELECT job_name, watermark::text AS last_run,
+           EXTRACT(EPOCH FROM (now() - watermark)) / 3600 AS age_hours
+    FROM cron_locks WHERE job_name IN (${names})
+  `)) as unknown as { job_name: string; last_run: string | null; age_hours: number | null }[];
+
+  return expectations.map((e) => {
+    const row = rows.find((r) => r.job_name === e.job_name);
+    const age = row?.age_hours == null ? null : Number(row.age_hours);
+    return {
+      job_name: e.job_name,
+      label: e.label,
+      last_run: row?.last_run ?? null,
+      age_hours: age == null ? null : Number(age.toFixed(1)),
+      max_age_hours: e.max_age_hours,
+      stale: age == null || age > e.max_age_hours,
+    };
+  });
+}
+
+export function heartbeatBreaches(statuses: HeartbeatStatus[]): string[] {
+  return statuses
+    .filter((s) => s.stale)
+    .map((s) =>
+      s.last_run == null
+        ? `${s.label} has NEVER recorded a run. Silence from it means nothing.`
+        : `${s.label} last ran ${s.age_hours}h ago (tolerance ${s.max_age_hours}h). ` +
+          `Its silence cannot be read as healthy.`,
+    );
+}

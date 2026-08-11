@@ -1,0 +1,26 @@
+-- Migration 0127: drop keitaro_stage_results.epc.
+--
+-- The column stored a THIRD EPC definition — revenue over RAW redirect clicks —
+-- while /reports, /creatives, /offers and the results API all divided by
+-- something else, and now all divide by counted clickers
+-- (lib/reporting/counted-clickers.ts). Nothing ever read it: confirmed by
+-- grepping lib/, app/ and components/ before removal. Its maximum stored value
+-- was 300.00, which is what revenue over one or two raw clicks produces — the
+-- column could not have been used even if something had read it.
+--
+-- Populating it with the unified value was considered and rejected: it would
+-- bake a denormalized copy that can drift from the cache, reintroducing exactly
+-- the second-definition problem this workstream removed.
+--
+-- ORDERING — this is a DESTRUCTIVE migration, so it FOLLOWS its code rather than
+-- leading it (docs/07-conventions.md). The write was removed from
+-- lib/keitaro/poll.ts in #37, deployed, and a full Keitaro poll cycle was
+-- confirmed clean against production (synced_at advanced with no epc write, and
+-- the counted-clicker refresh stamped 0.2s later on the same tick) before this
+-- was applied. Applying it ahead of that deploy would have errored every poll.
+--
+-- SNAPSHOT — 7,438 rows exported before the drop to
+-- docs/snapshots/keitaro_stage_results_epc_2026-08-11.csv
+-- md5 of stage_id:stat_date:epc, ordered = 6f9cb5544e86a24f530952bebf48f209
+-- 528 non-zero values, range 0.0000-300.0000, sum 13,649.7369.
+ALTER TABLE public.keitaro_stage_results DROP COLUMN IF EXISTS epc;

@@ -253,6 +253,19 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - **Rescore backfill ran 2026-08-11** (4,382 rows: 4,312 `suspect→human`, 70 `bot→suspect`). Any Hourly-Clickers or By-Group comparison spanning that date is not like-for-like.
 - **~91% of all taps hinge on one signal** (datacenter ASN, weight 60 — almost entirely Google AS15169 SMS link scanners). If that signal shifts, every click metric on the platform moves at once with no other warning.
 
+## Migration ordering — additive leads the code, destructive follows it
+
+[CLAUDE.md §14](../CLAUDE.md) says to apply migrations **before** pushing the code that depends on them. That is correct for **additive** changes (a new table or column): the code needs the schema to exist, and an unused new column harms nothing while it waits.
+
+**It inverts for destructive changes.** Dropping a column or table while deployed code still writes to it breaks that code the instant the migration lands. The order is:
+
+1. Remove the dependent code
+2. Merge and deploy it
+3. **Confirm the affected job has run clean against production** — a deploy proves the code shipped, not that the write path is actually gone
+4. Then apply the destructive migration, as a separate step
+
+Applied when `keitaro_stage_results.epc` was dropped (2026-08-11): the write was removed from [`lib/keitaro/poll.ts`](../lib/keitaro/poll.ts) and deployed first, a full poll cycle was confirmed, and only then was the column dropped. Snapshot the data first — a drop is unrecoverable and an export costs nothing (`docs/snapshots/`).
+
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.
 - The live DB's `segment_rules` CHECK contents — discrepancy #2.

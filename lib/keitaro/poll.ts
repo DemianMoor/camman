@@ -373,20 +373,24 @@ export async function pollKeitaro(
   // to its own freshly-computed metrics. Column order below is load-bearing — it
   // must match the INSERT column list exactly.
   const rowVals: SQL[] = [...aggregates.values()].map((agg) => {
-    // EPC is revenue per offer-redirect raw click (derived from the fold).
-    const epc = agg.redirectRaw > 0 ? agg.revenue / agg.redirectRaw : 0;
+    // NOTE: `epc` is no longer written. The column stored a THIRD EPC
+    // definition — revenue over RAW redirect clicks — while every screen now
+    // divides by counted clickers (lib/reporting/counted-clickers.ts). Nothing
+    // ever read it. The write is removed BEFORE the column is dropped: a
+    // destructive migration must follow its dependent code, not lead it, or the
+    // poll errors the moment the column disappears. See docs/07-conventions.md.
     // Per-conversion payout, frozen onto the row so a later CPA edit can't
     // retro-change it. = revenue / conversions; NULL when there are no sales.
     const payoutAtConversion = agg.sales > 0 ? agg.revenue / agg.sales : null;
     // Legacy raw_clicks/clean_clicks mirror the redirect totals so the pre-5b
     // column meaning (offer clicks) stays consistent for any back-compat reader.
-    return sql`(${agg.orgId}::uuid, ${agg.campaignId}::integer, ${agg.stageId}::integer, ${agg.tid}::text, ${agg.statDate}::date, ${agg.visitRaw}::integer, ${agg.visitClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.checkouts}::integer, ${agg.sales}::integer, ${toNumericString(agg.revenue)}::numeric, ${payoutAtConversion == null ? null : toNumericString(payoutAtConversion)}::numeric, ${toNumericString(agg.cost)}::numeric, ${toNumericString(epc)}::numeric)`;
+    return sql`(${agg.orgId}::uuid, ${agg.campaignId}::integer, ${agg.stageId}::integer, ${agg.tid}::text, ${agg.statDate}::date, ${agg.visitRaw}::integer, ${agg.visitClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.checkouts}::integer, ${agg.sales}::integer, ${toNumericString(agg.revenue)}::numeric, ${payoutAtConversion == null ? null : toNumericString(payoutAtConversion)}::numeric, ${toNumericString(agg.cost)}::numeric)`;
   });
 
   let upserted = 0;
   let errored = 0;
   if (rowVals.length > 0) {
-    // 17 params/row ⇒ Postgres's 65535-param ceiling allows ~3855 rows/statement;
+    // 16 params/row ⇒ Postgres's 65535-param ceiling allows ~4095 rows/statement;
     // 500 leaves ample headroom and matches poll-conversions. One transaction so
     // the write is all-or-nothing even once multiple chunks engage (pooler-safe in
     // transaction mode). now() evaluates once per batch — a consistent sync stamp.
@@ -399,7 +403,7 @@ export async function pollKeitaro(
             INSERT INTO keitaro_stage_results
               (org_id, campaign_id, stage_id, stage_tracking_id, stat_date,
                visit_clicks_raw, visit_clicks_clean, redirect_clicks_raw, redirect_clicks_clean,
-               raw_clicks, clean_clicks, checkouts, sales, revenue, payout_at_conversion, cost, epc)
+               raw_clicks, clean_clicks, checkouts, sales, revenue, payout_at_conversion, cost)
             VALUES ${sql.join(chunk, sql`, `)}
             ON CONFLICT (org_id, stage_id, stat_date) DO UPDATE SET
               stage_tracking_id     = EXCLUDED.stage_tracking_id,
@@ -414,7 +418,6 @@ export async function pollKeitaro(
               revenue               = EXCLUDED.revenue,
               payout_at_conversion  = EXCLUDED.payout_at_conversion,
               cost                  = EXCLUDED.cost,
-              epc                   = EXCLUDED.epc,
               synced_at             = now()
           `);
         }

@@ -260,11 +260,65 @@ export async function getRow5Violations(dbc: DbOrTx): Promise<Row5Result> {
   return { reached_without_click: n, breached: n > 0 };
 }
 
+// RECONCILIATION PROBE — clickers vs clicks.
+//
+// THIS IS THE CHECK THAT WOULD HAVE CAUGHT THE ORIGINAL FAILURE. `clickers`
+// feeds segment clicker rules and the campaign audience-snapshot cl_set, and it
+// is populated by a watermark-incremental job. When the 2026-08-11 rescore
+// corrected click classifications without touching `scored_at`, 3,032
+// (contact, brand, offer) combos were stranded behind that watermark with
+// nothing to detect it — the table was simply, quietly wrong for two months.
+//
+// Counts human clicks whose (contact, brand, offer) has no corresponding
+// `clickers` row. Read 3,032 before the backfill; should read ~0 after and stay
+// there. A rise means propagation has fallen behind or been stranded again.
+//
+// Small tolerance: the incremental pass only considers scored_at <= now()-5min,
+// so a handful of very recent clicks are legitimately not yet propagated.
+export const CLICKER_RECONCILIATION_TOLERANCE = 50;
+
+export interface ClickerReconciliationResult {
+  missing: number;
+  tolerance: number;
+  breached: boolean;
+}
+
+export async function getClickerReconciliation(
+  dbc: DbOrTx,
+): Promise<ClickerReconciliationResult> {
+  const rows = (await dbc.execute(sql`
+    SELECT count(*)::int AS n FROM (
+      SELECT ck.org_id, l.contact_id, ca.brand_id, ca.offer_id
+      FROM clicks ck
+      JOIN links l ON l.id = ck.link_id
+      JOIN campaigns ca ON ca.id = l.campaign_id
+      WHERE ck.classification = 'human'
+        AND ck.scored_at IS NOT NULL
+        AND ck.scored_at <= now() - interval '15 minutes'
+      GROUP BY ck.org_id, l.contact_id, ca.brand_id, ca.offer_id
+    ) src
+    WHERE NOT EXISTS (
+      SELECT 1 FROM clickers cx
+      WHERE cx.org_id = src.org_id
+        AND cx.contact_id = src.contact_id
+        AND cx.brand_id = src.brand_id
+        AND cx.offer_id IS NOT DISTINCT FROM src.offer_id
+    )
+  `)) as unknown as { n: number }[];
+  const missing = Number(rows[0]?.n ?? 0);
+  return {
+    missing,
+    tolerance: CLICKER_RECONCILIATION_TOLERANCE,
+    breached: missing > CLICKER_RECONCILIATION_TOLERANCE,
+  };
+}
+
 export interface EpcMonitorReport {
   human_share: HumanShareResult;
   excluded_conversion: ExcludedConversionResult;
   rule_f: RuleFResult;
   row5: Row5Result;
+  clicker_reconciliation: ClickerReconciliationResult;
   breaches: string[];
 }
 
@@ -277,6 +331,7 @@ export async function runEpcMonitors(dbc: DbOrTx): Promise<EpcMonitorReport> {
   const excluded_conversion = await getExcludedClickerConversion(dbc);
   const rule_f = await getRuleFRescues(dbc);
   const row5 = await getRow5Violations(dbc);
+  const clicker_reconciliation = await getClickerReconciliation(dbc);
 
   const breaches: string[] = [];
   if (human_share.breached && human_share.reason) breaches.push(human_share.reason);
@@ -300,5 +355,13 @@ export async function runEpcMonitors(dbc: DbOrTx): Promise<EpcMonitorReport> {
         `decision to skip the Keitaro per-click ingest needs revisiting.`,
     );
   }
-  return { human_share, excluded_conversion, rule_f, row5, breaches };
+  if (clicker_reconciliation.breached) {
+    breaches.push(
+      `${clicker_reconciliation.missing} human-clicked (contact, brand, offer) combos are MISSING from \`clickers\` ` +
+        `(tolerance ${clicker_reconciliation.tolerance}). clickers feeds segment clicker rules and the audience-snapshot ` +
+        `cl_set, so this is a TARGETING defect, not a reporting one. It is exactly the failure that went unnoticed for ` +
+        `two months in 2026-08 — run the propagate rebuild (/api/cron/propagate-clickers?mode=rebuild).`,
+    );
+  }
+  return { human_share, excluded_conversion, rule_f, row5, clicker_reconciliation, breaches };
 }

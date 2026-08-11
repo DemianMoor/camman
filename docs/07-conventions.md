@@ -265,6 +265,22 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - **The creatives picker sorts by the 30-day figure and says so** (`EPC (30d) ↕`); the lifetime column is shown but deliberately NOT sortable. The picker decides what gets sent next, recency predicts that better, and sorting by lifetime would move rankings by a mean of 4.17 places — a send-behaviour change must never arrive as a side effect of a display change.
 - **A column with `enableSorting: true` MUST have a matching entry in the route's server-side sort whitelist.** Without it the request is accepted, the route silently falls back to sorting by revenue, and the header still responds — it looks like it works. Guarded by `scripts/verify-sortable-columns.ts`.
 
+## Verification — a passing check is not evidence until you know what it ran against
+
+Three times in the EPC workstream a check was **correct and passing while running against the wrong input**:
+
+1. A verification harness used a `max: 1` connection pool and ran four monitors under `Promise.all`, one holding a transaction. The others queued behind it forever. It looked exactly like a slow query, and two query "optimisations" were made chasing a phantom.
+2. A sortable-column guard passed against a **14-column set that excluded the very columns it was written for** — the branch had been cut from `main` before the columns merged.
+3. A snapshot script's format change reported success from an unconditional `print` while the string replacement had silently not matched; the output file was unchanged.
+
+All three were caught, but only because the output happened to print enough detail to notice. That is luck, not process.
+
+**Rules:**
+- **Guards MUST print their input scope by default** — how many items, which ones, over what window, from which branch or table. `verify-sortable-columns.ts` prints the column names it found; `propagate-clickers` logs its `scope` string; the counted-clicker verifier prints the row counts it compared. A bare `✓ passed` is not an acceptable output.
+- **Treat an empty or zero-item scope as a FAILURE, not a pass.** Finding zero sortable columns means the parser broke, not that everything is fine. Assert non-emptiness explicitly.
+- **Before trusting a green check, confirm what it examined.** Read the count and the names, not just the tick.
+- **Confirm the base commit before building on a branch.** `git worktree add ... origin/main` uses whatever `origin/main` was last fetched, which may be several merges stale.
+
 ## Migration ordering — additive leads the code, destructive follows it
 
 [CLAUDE.md §14](../CLAUDE.md) says to apply migrations **before** pushing the code that depends on them. That is correct for **additive** changes (a new table or column): the code needs the schema to exist, and an unused new column harms nothing while it waits.

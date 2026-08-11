@@ -49,11 +49,42 @@ export interface PropagateClickersResult {
   inserted: number;
   watermarkFrom: string | null;
   watermarkTo: string | null;
+  mode: PropagateMode;
+  dryRun: boolean;
+  // The scope this run actually considered — printed so a result can never be
+  // read without knowing what it ran against.
+  scope: string;
+}
+
+// 'incremental' (default) processes scored_at in (watermark, now()-lag] — the
+// every-15-min cron. 'rebuild' IGNORES the watermark and scans ALL history.
+//
+// WHY REBUILD EXISTS. The watermark is on clicks.scored_at. When the 2026-08-11
+// rescore backfill corrected `classification` WITHOUT touching `scored_at`, all
+// 4,312 corrected rows fell behind the watermark and became permanently
+// unreachable — 3,032 (contact, brand, offer) combos were left missing and the
+// scorer fix could not repair them. A watermark makes a derived table silently
+// un-repairable the moment its source is corrected.
+//
+// Rebuild is the repair path, and it is safe to run at any time: the NOT EXISTS
+// guard below already makes every insert idempotent. It deliberately does NOT
+// advance the watermark — the incremental pass owns that cursor, and a rebuild
+// must never be able to skip incremental work by moving it forward.
+export type PropagateMode = "incremental" | "rebuild";
+
+export interface PropagateOptions {
+  mode?: PropagateMode;
+  // Count what WOULD be inserted without writing. Used to report before a
+  // production backfill.
+  dryRun?: boolean;
 }
 
 export async function propagateTrackedClickers(
   dbc: DbOrTx,
+  opts: PropagateOptions = {},
 ): Promise<PropagateClickersResult> {
+  const mode = opts.mode ?? "incremental";
+  const dryRun = opts.dryRun === true;
   return await dbc.transaction(async (tx) => {
     // Lock + read (self-creating) the watermark row. ON CONFLICT DO UPDATE takes
     // a row lock, so two overlapping propagate runs serialize here rather than
@@ -63,7 +94,53 @@ export async function propagateTrackedClickers(
       ON CONFLICT (job_name) DO UPDATE SET job_name = cron_locks.job_name
       RETURNING watermark
     `)) as unknown as { watermark: string | null }[];
-    const watermark = wmRows[0]?.watermark ?? null;
+    const storedWatermark = wmRows[0]?.watermark ?? null;
+    // Rebuild scans all history: the watermark is read (for reporting) but not
+    // applied as a filter.
+    const watermark = mode === "rebuild" ? null : storedWatermark;
+    const scope =
+      mode === "rebuild"
+        ? "ALL history (watermark ignored)"
+        : `scored_at in (${storedWatermark ?? "beginning"}, now()-5min]`;
+
+    if (dryRun) {
+      // Same SELECT + NOT EXISTS shape, counted rather than inserted.
+      const preview = (await tx.execute(sql`
+        SELECT count(*)::int AS n FROM (
+          SELECT DISTINCT ON (src.org_id, src.contact_id, src.brand_id, src.offer_id) src.org_id
+          FROM (
+            SELECT ck.org_id, l.contact_id, ca.brand_id, ca.offer_id
+            FROM clicks ck
+            JOIN links l ON l.id = ck.link_id
+            JOIN campaigns ca ON ca.id = l.campaign_id
+            JOIN campaign_stages st ON st.id = l.stage_id
+            JOIN contacts co ON co.id = l.contact_id
+            WHERE ck.classification = 'human'
+              AND ck.scored_at IS NOT NULL
+              AND (${watermark}::timestamptz IS NULL OR ck.scored_at > ${watermark}::timestamptz)
+              AND ck.scored_at <= now() - interval '5 minutes'
+            GROUP BY ck.org_id, l.contact_id, ca.brand_id, ca.offer_id
+          ) src
+          WHERE NOT EXISTS (
+            SELECT 1 FROM clickers cx
+            WHERE cx.org_id = src.org_id
+              AND cx.contact_id = src.contact_id
+              AND cx.brand_id = src.brand_id
+              AND cx.source = ${TRACKED_CLICKER_SOURCE}
+              AND cx.offer_id IS NOT DISTINCT FROM src.offer_id
+          )
+          ORDER BY src.org_id, src.contact_id, src.brand_id, src.offer_id
+        ) t
+      `)) as unknown as { n: number }[];
+      return {
+        inserted: Number(preview[0]?.n ?? 0),
+        watermarkFrom: storedWatermark,
+        watermarkTo: storedWatermark,
+        mode,
+        dryRun: true,
+        scope,
+      };
+    }
 
     const rows = (await tx.execute(sql`
       INSERT INTO clickers (
@@ -109,6 +186,18 @@ export async function propagateTrackedClickers(
       RETURNING id
     `)) as unknown as { id: number }[];
 
+    if (mode === "rebuild") {
+      // Deliberately leaves the cursor alone — see the PropagateMode note.
+      return {
+        inserted: Array.isArray(rows) ? rows.length : 0,
+        watermarkFrom: storedWatermark,
+        watermarkTo: storedWatermark,
+        mode,
+        dryRun: false,
+        scope,
+      };
+    }
+
     // Advance to LEAST(now() - lag, max scored_at over the window). Postgres
     // LEAST ignores NULL, so an empty window advances to now() - lag (the scan
     // window can't regrow), while a non-empty window advances only as far as the
@@ -132,8 +221,11 @@ export async function propagateTrackedClickers(
 
     return {
       inserted: Array.isArray(rows) ? rows.length : 0,
-      watermarkFrom: watermark,
+      watermarkFrom: storedWatermark,
       watermarkTo: updated[0]?.watermark ?? null,
+      mode,
+      dryRun: false,
+      scope,
     };
   });
 }

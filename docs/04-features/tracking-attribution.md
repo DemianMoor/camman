@@ -98,6 +98,27 @@ Relay traffic converts at **2.3× the human rate**; the Google AS15169 mass (91%
 
 **Standing risk.** ~91% of taps ride on a single signal (datacenter ASN, weight 60). If Google shifts ASN, or a scanner appears from residential-looking IPs, every click metric moves platform-wide with no other warning. Monitors are specified on the EPC-unification card: monthly human share of taps, excluded-clicker conversion rate (alert ~0.1% — would have caught this on day one), and the Rule-F rescue count.
 
+## 7b. `clickers` propagation — rebuild mode and the reconciliation probe
+
+`propagateTrackedClickers` ([lib/links/propagate-clickers.ts](../../lib/links/propagate-clickers.ts)) bridges tracked clicks into the `clickers` engagement table, which feeds segment clicker rules (`is_clicker_*`), the campaign audience-snapshot `cl_set`, and the clicker export. It is **targeting data, not reporting data.**
+
+**Two modes:**
+
+| mode | window | when |
+|---|---|---|
+| `incremental` (default) | `scored_at in (watermark, now()-5min]` | every 15 min |
+| `rebuild` | **ALL history, watermark ignored** | weekly, Mon 06:50 UTC |
+
+**Why rebuild exists.** The watermark is on `clicks.scored_at`. When the 2026-08-11 rescore corrected `classification` **without touching `scored_at`**, 4,312 corrected rows fell behind the cursor and became permanently unreachable — 3,022 (contact, brand, offer) combos were left missing and the scorer fix could not repair them. **A watermark makes a derived table silently un-repairable the moment its source is corrected.**
+
+Rebuild is safe to run at any time (the `NOT EXISTS` guard makes every insert idempotent) and **deliberately does not advance the cursor** — the incremental pass owns it, and a rebuild must never be able to skip incremental work by moving it forward. Verified in production: after a rebuild the watermark was unchanged and the next incremental pass advanced it normally.
+
+**Reconciliation probe** (`getClickerReconciliation`, in the weekly EPC monitor set with the same alerting and heartbeat treatment): counts human-clicked combos with no `clickers` row. Tolerance 50, since the incremental pass only considers `scored_at <= now()-5min`. **It read 3,022 before the backfill and 0 after.** This is the check that would have caught the original failure — without it the table was simply, quietly wrong for two months.
+
+**Backfill of 2026-08-11:** 3,022 rows inserted, `clickers` 56,056 → 59,078, probe 3,022 → 0. Gated on no campaign activating, materializing or firing (`was_clicker_at_snapshot` freezes at activation and cannot be corrected afterwards). Pre-write snapshot: `docs/snapshots/clickers_pre_backfill_2026-08-11.csv`.
+
+⚠️ **This fixes future snapshots, the 9 active clicker segment rules, and exports. It does NOT recover the follow-up messages those contacts never received** — those sends already happened against frozen, incorrect pools, and re-snapshotting an activated campaign is not an option.
+
 ## 7. Extension points / limitations
 - Re-score pass (`mode=rescore`) lets you retune weights and re-grade history.
 - Add hosting **ASN numbers** to `datacenter-asns.ts` to improve datacenter detection. Do **not** add org-name keywords — see §7a.

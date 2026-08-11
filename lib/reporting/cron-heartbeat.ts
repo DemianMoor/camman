@@ -38,6 +38,14 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 24 * 16, // weekly cadence, ~2 missed runs
     label: "EPC integrity monitors (weekly)",
   },
+  // The weekly clickers rebuild — the repair path for the watermark-stranding
+  // failure. It gets the same heartbeat treatment as everything else: if it
+  // stops running, that must surface rather than being read as healthy.
+  clickerRebuild: {
+    job_name: "propagate-clickers-rebuild",
+    max_age_hours: 24 * 16, // weekly cadence, ~2 missed runs
+    label: "clickers propagate rebuild (weekly)",
+  },
   countedClickersFull: {
     job_name: "counted-clickers-rebuild",
     max_age_hours: 52, // daily cadence, ~2 missed runs

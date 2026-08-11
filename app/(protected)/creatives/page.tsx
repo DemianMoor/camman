@@ -116,6 +116,10 @@ type Creative = {
     checkout_rate: number | null;
     sales_cr: number | null;
     epc: number | null;
+    // LIFETIME pair, displayed alongside the 30-day figures. Sorting stays on
+    // the 30-day EPC — see the column comment below.
+    clean_clicks_lifetime: number;
+    epc_lifetime: number | null;
   };
   // Spam scoring fields. spam_score is 0-100 (or null when unscored).
   // spam_label is the binary verdict mirrored from the cache; the list
@@ -882,9 +886,19 @@ export default function CreativesPage() {
           );
         },
       },
+      // SORTING STAYS ON THE 30-DAY FIGURE, deliberately. This list and the
+      // stage picker decide what gets sent NEXT, and recency is the better
+      // predictor of that — offers change, audiences fatigue, creative
+      // performance decays. Sorting by lifetime instead would move rankings by a
+      // mean of 4.17 places (max 29, two of the top ten changing), and a shift
+      // in send behaviour must not arrive as a side effect of a display change.
+      //
+      // The lifetime column is shown so an operator can SEE the full history and
+      // override deliberately — e.g. a creative reading $0.00 over 30 days but
+      // $0.53 across 694 lifetime clickers. Sort by recent, show both.
       {
         id: "epc",
-        header: "EPC",
+        header: "EPC (30d) ↕",
         enableSorting: true,
         cell: ({ row }) => {
           const m = row.original.metrics;
@@ -892,10 +906,36 @@ export default function CreativesPage() {
             <MetricCell
               value={m.epc}
               format={formatEpc}
-              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (30d)`}
+              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days) — this is the column the list sorts by`}
             />
           );
         },
+      },
+      {
+        id: "epc_lifetime",
+        header: "EPC (all time)",
+        // Not sortable: sorting here would change which creatives get chosen.
+        enableSorting: false,
+        cell: ({ row }) => {
+          const m = row.original.metrics;
+          return (
+            <MetricCell
+              value={m.epc_lifetime}
+              format={formatEpc}
+              title={`All-time: ${numberFmt.format(m.clean_clicks_lifetime)} counted clickers. Shown for context — the list sorts by the 30-day figure.`}
+            />
+          );
+        },
+      },
+      {
+        id: "clean_clicks_lifetime",
+        header: "Clicks (all time)",
+        enableSorting: false,
+        cell: ({ row }) => (
+          <span className="tabular-nums text-muted-foreground">
+            {numberFmt.format(row.original.metrics.clean_clicks_lifetime)}
+          </span>
+        ),
       },
       {
         id: "created_at",

@@ -261,6 +261,9 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - **The cache refresh is tied to the Keitaro poll**, not an independent schedule — otherwise EPC drifts between rebuilds and snaps back, which reads exactly like a real trend.
 - **Freshness is two values**, `updated_at` and `full_rebuild_at`. Never collapse them into one "last updated": an indicator that overstates staleness gets ignored, then is useless when it is right.
 - **Lifetime EPC is primary**; period EPC attributes revenue by the CLICK's date, not the sale's.
+- **Every surface names its time basis in the UI.** `EPC (all time)` / `EPC (period)` / `EPC (30d)`. A bare "EPC" is not acceptable — the denominator is unified but the WINDOW is not, so the basis has to be readable.
+- **The creatives picker sorts by the 30-day figure and says so** (`EPC (30d) ↕`); the lifetime column is shown but deliberately NOT sortable. The picker decides what gets sent next, recency predicts that better, and sorting by lifetime would move rankings by a mean of 4.17 places — a send-behaviour change must never arrive as a side effect of a display change.
+- **A column with `enableSorting: true` MUST have a matching entry in the route's server-side sort whitelist.** Without it the request is accepted, the route silently falls back to sorting by revenue, and the header still responds — it looks like it works. Guarded by `scripts/verify-sortable-columns.ts`.
 
 ## Migration ordering — additive leads the code, destructive follows it
 

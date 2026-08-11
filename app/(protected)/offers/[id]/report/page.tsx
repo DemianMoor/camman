@@ -42,14 +42,25 @@ type SortKey =
   | "oo_pct" | "net_profit" | "sent_7d" | "sent_30d" | "sent_90d" | "fresh_pool";
 
 const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
+  // TIME BASIS — this report applies NO date filter. offer_report_campaign_econ
+  // has no date dimension, so every economics column here is ALL TIME. That is
+  // stated in the headers rather than left to be inferred: the other reporting
+  // screens show a lifetime figure AND a period figure, and a bare "EPC" here
+  // would look like the same thing while meaning only one of them.
+  //
+  // Labelling only, deliberately. Adding a date dimension means another
+  // migration across two matviews (the group one already fans out over
+  // contact_contact_groups) plus a refresh cron that has no error handling, and
+  // no user has asked for the filter — the gap came from an internal audit.
+  // Tracked, with the case both ways, on ClickUp 869egyapn.
   { key: "group_name", label: "Group", numeric: false },
-  { key: "sends", label: "Sends", numeric: true },
-  { key: "rpm", label: "RPM", numeric: true },
-  { key: "net_rpm", label: "Net RPM", numeric: true },
-  { key: "epc", label: "EPC", numeric: true },
-  { key: "sales", label: "Sales", numeric: true },
-  { key: "oo_pct", label: "Opt-out %", numeric: true },
-  { key: "net_profit", label: "Net profit", numeric: true },
+  { key: "sends", label: "Sends (all time)", numeric: true },
+  { key: "rpm", label: "RPM (all time)", numeric: true },
+  { key: "net_rpm", label: "Net RPM (all time)", numeric: true },
+  { key: "epc", label: "EPC (all time)", numeric: true },
+  { key: "sales", label: "Sales (all time)", numeric: true },
+  { key: "oo_pct", label: "Opt-out % (all time)", numeric: true },
+  { key: "net_profit", label: "Net profit (all time)", numeric: true },
   { key: "sent_7d", label: "Sent 7d", numeric: true },
   { key: "sent_30d", label: "Sent 30d", numeric: true },
   { key: "sent_90d", label: "Sent 90d", numeric: true },

@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import { getCampaignClickReport } from "@/lib/links/click-report";
-import { isDatacenterAsn } from "@/lib/links/datacenter-asns";
+import { CONSUMER_RELAY_ASNS, isDatacenterAsn } from "@/lib/links/datacenter-asns";
 import { mintLink } from "@/lib/links/mint-link";
 import { scoreClicks, type Enricher, type StatusCheck } from "@/lib/links/score-clicks";
 import { scoreClick } from "@/lib/links/scoring";
@@ -16,7 +16,7 @@ import { scoreClick } from "@/lib/links/scoring";
 // and WITHOUT MaxMind (a fake enricher maps test IPs to ASNs). Covers:
 //   - pure scoreClick: datacenter, scanner UA, residential human, prefetch,
 //     missing-UA reasons
-//   - datacenter-ASN matching (number + org keyword)
+//   - datacenter-ASN matching (exact number only) + the consumer-relay guards
 //   - the job: enriches + scores pending rows; idempotent re-score
 //   - clean-vs-raw report math on a tracked campaign
 //
@@ -61,10 +61,31 @@ async function main() {
   const pf = scoreClick({ firstPassClassification: "prefetch", userAgent: "Mozilla/5.0", asn: null, asnOrg: null, isDatacenter: null });
   assert(pf.classification === "prefetch", "prefetch first-pass stays prefetch");
 
-  console.log("Datacenter ASN list:");
-  assert(isDatacenterAsn(16509, null) === true, "AWS ASN number matches");
-  assert(isDatacenterAsn(null, "Hetzner Online GmbH") === true, "org keyword matches");
-  assert(isDatacenterAsn(7922, "Comcast Cable") === false, "residential ISP does not match");
+  console.log("Datacenter ASN list (exact-number matching only):");
+  assert(isDatacenterAsn(16509) === true, "AWS ASN number matches");
+  assert(isDatacenterAsn(24940) === true, "Hetzner ASN number matches");
+  assert(isDatacenterAsn(7922) === false, "residential ISP does not match");
+  assert(isDatacenterAsn(null) === false, "null ASN does not match");
+  assert(isDatacenterAsn(42675) === true, "hosting ASN promoted from the removed org fallback still matches");
+
+  // Regression guards for the 2026-08-11 fix. Each of these was scored as
+  // datacenter by the old org-name substring fallback and must not be again.
+  console.log("Consumer relay / false-positive guards:");
+  assert(isDatacenterAsn(54113) === false, "Fastly (iCloud Private Relay egress) is not datacenter");
+  assert(isDatacenterAsn(13335) === false, "Cloudflare (iCloud Private Relay egress) is not datacenter");
+  assert(isDatacenterAsn(36183) === false, "Akamai (iCloud Private Relay egress) is not datacenter");
+  assert(isDatacenterAsn(16591) === false, "Google Fiber (residential ISP) is not datacenter");
+  assert(isDatacenterAsn(32307) === false, "NE Colorado Cellular is not datacenter ('colo' substring)");
+  assert(isDatacenterAsn(27235) === false, "Colorado Valley Communications is not datacenter ('colo' substring)");
+  assert(isDatacenterAsn(18693) === false, "University of Colorado Hospital is not datacenter ('colo' substring)");
+  assert(isDatacenterAsn(63949) === true, "Akamai Connected Cloud (rebranded Linode VPS) IS datacenter");
+
+  // A relay ASN must stay non-datacenter even if it is mistakenly re-added to
+  // DATACENTER_ASNS — CONSUMER_RELAY_ASNS wins.
+  assert(
+    [...CONSUMER_RELAY_ASNS].every((a) => isDatacenterAsn(a) === false),
+    "every consumer-relay ASN resolves to not-datacenter",
+  );
 
   const dbUrl = process.env.DATABASE_URL;
   if (!dbUrl) throw new Error("DATABASE_URL is not set");

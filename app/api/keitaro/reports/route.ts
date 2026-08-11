@@ -39,6 +39,12 @@ const SORTABLE = new Set([
   "revenue",
   "cost",
   "epc",
+  // Added with the lifetime columns. A column rendered with enableSorting but
+  // absent from this whitelist silently falls back to sorting by revenue — the
+  // header responds and the order changes, just not by what was clicked.
+  "lifetime_epc",
+  "lifetime_clickers",
+  "counted_clickers",
   "profit",
   "opt_outs",
   "total_sent",
@@ -118,7 +124,10 @@ export async function GET(req: NextRequest) {
     click_rate: number;
     // Lifetime EPC ignores the date filter entirely and is the PRIMARY figure;
     // `epc` from withFunnelDerived is the period figure for the selected range.
+    // Each carries its own denominator: a $0.00 EPC is only interpretable when
+    // you can see the count it divided by was 4.
     lifetime_epc: number;
+    lifetime_clickers: number;
   } & ReturnType<typeof withFunnelDerived>;
 
   let data: OutRow[];
@@ -178,6 +187,11 @@ export async function GET(req: NextRequest) {
           c.tally.visit_clicks_clean,
         ),
       ),
+      lifetime_clickers: denominatorFor(
+        linkModeByCampaign.get(c.campaign_id),
+        clickers.lifetimeByCampaign.get(c.campaign_id),
+        c.tally.visit_clicks_clean,
+      ),
     }));
   } else {
     data = stages.map((acc) => {
@@ -211,6 +225,11 @@ export async function GET(req: NextRequest) {
             clickers.lifetimeByStage.get(acc.stage_id),
             acc.tally.visit_clicks_clean,
           ),
+        ),
+        lifetime_clickers: denominatorFor(
+          acc.link_mode,
+          clickers.lifetimeByStage.get(acc.stage_id),
+          acc.tally.visit_clicks_clean,
         ),
       };
     });
@@ -250,6 +269,7 @@ export async function GET(req: NextRequest) {
     totals: {
       ...withFunnelDerived(grand, clickers.periodTotal),
       lifetime_epc: lifetimeEpc(clickers.lifetimeRevenueTotal, clickers.lifetimeTotal),
+      lifetime_clickers: clickers.lifetimeTotal,
       opt_outs: grandOptOuts,
       total_sent: grandTotalSent,
       opt_out_rate: rateOfSent(grandOptOuts, grandTotalSent),

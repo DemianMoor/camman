@@ -98,6 +98,23 @@ All six, through one function. `withFunnelDerived` takes the denominator as a **
 
 **Lifetime EPC is the primary figure** and ignores the date filter entirely. Period EPC respects the selected range and attributes revenue by the **click's** date, not the sale's — otherwise numerator and denominator describe different populations. ~16% of sales shift to an earlier day under this basis; 100% of converted recipients have a recoverable click date.
 
+The two are **not derivable from one another**. Counted clickers are deduplicated, so a lifetime figure can never be summed out of period slices — both are queried and carried separately.
+
+Each is displayed next to **its own** click count. A `$0.00` EPC is only interpretable when the denominator beside it reads `4`. Without that, a narrow filter is actively misleading: on a 7-day window, six of the eight top campaigns by revenue read `$0.00` and one read `$75.00` — a 53x distortion off a single in-window clicker.
+
+### ⚠️ Time basis by surface — convergence holds only at MATCHED windows
+
+| Surface | Time basis |
+|---|---|
+| `/reports` Overview + all four By-X tabs | **lifetime (primary) + period, both shown** |
+| `GET /api/keitaro/results` | lifetime (totals, stages) · per-day (rows) — see its `time_basis` field |
+| `/creatives` + stage picker | **30-day only** |
+| `/offers/[id]/report` | **lifetime only** (the matview has no date dimension) |
+
+Campaign 404 reading `$1.4247` on both `/creatives` and `/reports` is true **because those windows happen to line up**, not because the screens are structurally consistent. The original defect — one campaign, several *denominators* — is fixed. What remains is one campaign, several *time bases*. Do not read the agreement as proof of structural consistency.
+
+Tracked: [creatives lifetime + picker sort](https://app.clickup.com/t/869egyah0), [offer report date dimension](https://app.clickup.com/t/869egyapn).
+
 ## 8. Monitors ([`lib/reporting/epc-monitors.ts`](../../lib/reporting/epc-monitors.ts), weekly Mon 08:40 UTC)
 
 The whole denominator rests on one signal — a click scoring `human`, which rests almost entirely on the datacenter-ASN check covering **91%** of taps. If that signal shifts, every click metric moves at once with no other warning. The 2026-08-11 incident took two months to notice.

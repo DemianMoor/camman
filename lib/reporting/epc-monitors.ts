@@ -26,9 +26,77 @@ export interface EpcMonitorSeries {
   human_share_pct: number;
 }
 
-// MONITOR 1 — human share of taps, monthly.
-// The headline canary. A step change means the scorer's verdict distribution
-// moved; whether that is real traffic or a scoring regression, it demands a look.
+// MONITOR 1 — human share of taps, monthly. NOW FIRES.
+//
+// Thresholds, and the reasoning:
+//
+//   Month-over-month band: ±30% RELATIVE. Observed share has been 7.91% (Jun),
+//   7.64% (Jul), 7.48% (Aug) — month-over-month moves of 3.4% and 2.2%. A ±30%
+//   band is roughly ten times the observed noise, so it will not cry wolf, but a
+//   new scanner network or a carrier range being misclassified would clear it
+//   easily. Share is a RATE, so a partial current month is still comparable to a
+//   complete prior one; a minimum tap count guards the first days of a month
+//   when the ratio is noisy.
+//
+//   Absolute floor 3% / ceiling 25%. These catch gross failure rather than
+//   drift. The ceiling matters most: if the ASN list failed to load, or geoip
+//   returned nulls while still reporting itself available, essentially every
+//   click would score human and the share would leap toward 100% — the scorer
+//   silently switching off. The floor catches the opposite: a signal change that
+//   starts excluding nearly everyone.
+//
+// ⚠️ HONEST LIMITATION, worth stating because it shapes what this monitor is for:
+// a month-over-month band detects a CHANGE. It would NOT have caught the 2026-08-11
+// Private Relay bug, because that bug never changed — it was baked in from the
+// first click and the share was flat and wrong the whole time. Catching a
+// steady-state error that is wrong about a subpopulation is Monitor 2's job
+// (excluded clickers converting like humans). The two are complementary; neither
+// covers the other.
+export const HUMAN_SHARE_MOM_BAND_PCT = 30;
+export const HUMAN_SHARE_FLOOR_PCT = 3;
+export const HUMAN_SHARE_CEILING_PCT = 25;
+// Below this, a month's ratio is too noisy to judge (e.g. the 1st of the month).
+export const HUMAN_SHARE_MIN_TAPS = 5000;
+
+export interface HumanShareResult {
+  series: EpcMonitorSeries[];
+  latest: EpcMonitorSeries | null;
+  previous: EpcMonitorSeries | null;
+  mom_change_pct: number | null;
+  breached: boolean;
+  reason: string | null;
+}
+
+export function evaluateHumanShare(series: EpcMonitorSeries[]): HumanShareResult {
+  const usable = series.filter((m) => m.taps >= HUMAN_SHARE_MIN_TAPS);
+  const latest = usable[usable.length - 1] ?? null;
+  const previous = usable[usable.length - 2] ?? null;
+  let mom: number | null = null;
+  let reason: string | null = null;
+
+  if (latest) {
+    if (latest.human_share_pct < HUMAN_SHARE_FLOOR_PCT) {
+      reason = `Human share ${latest.human_share_pct}% in ${latest.month} is below the ${HUMAN_SHARE_FLOOR_PCT}% floor — the scorer may be excluding nearly everyone.`;
+    } else if (latest.human_share_pct > HUMAN_SHARE_CEILING_PCT) {
+      reason = `Human share ${latest.human_share_pct}% in ${latest.month} is above the ${HUMAN_SHARE_CEILING_PCT}% ceiling — the datacenter check may have silently stopped applying (ASN list or geoip enrichment).`;
+    }
+  }
+  if (!reason && latest && previous && previous.human_share_pct > 0) {
+    mom = Number(
+      (((latest.human_share_pct - previous.human_share_pct) / previous.human_share_pct) * 100).toFixed(2),
+    );
+    if (Math.abs(mom) > HUMAN_SHARE_MOM_BAND_PCT) {
+      reason = `Human share moved ${mom}% month-over-month (${previous.month} ${previous.human_share_pct}% → ${latest.month} ${latest.human_share_pct}%), outside the ±${HUMAN_SHARE_MOM_BAND_PCT}% band. A new scanner network or a misclassified carrier range shows up here first.`;
+    }
+  } else if (latest && previous && previous.human_share_pct > 0) {
+    mom = Number(
+      (((latest.human_share_pct - previous.human_share_pct) / previous.human_share_pct) * 100).toFixed(2),
+    );
+  }
+  return { series, latest, previous, mom_change_pct: mom, breached: reason !== null, reason };
+}
+
+// The underlying series.
 export async function getHumanShareByMonth(
   dbc: DbOrTx,
 ): Promise<EpcMonitorSeries[]> {
@@ -193,7 +261,7 @@ export async function getRow5Violations(dbc: DbOrTx): Promise<Row5Result> {
 }
 
 export interface EpcMonitorReport {
-  human_share: EpcMonitorSeries[];
+  human_share: HumanShareResult;
   excluded_conversion: ExcludedConversionResult;
   rule_f: RuleFResult;
   row5: Row5Result;
@@ -201,14 +269,17 @@ export interface EpcMonitorReport {
 }
 
 export async function runEpcMonitors(dbc: DbOrTx): Promise<EpcMonitorReport> {
-  const [human_share, excluded_conversion, rule_f, row5] = await Promise.all([
-    getHumanShareByMonth(dbc),
-    getExcludedClickerConversion(dbc),
-    getRuleFRescues(dbc),
-    getRow5Violations(dbc),
-  ]);
+  // Sequential, not Promise.all: getExcludedClickerConversion holds a
+  // transaction, and running these concurrently on a small pool queues the
+  // others behind it. Cost is a few seconds on a weekly job.
+  const series = await getHumanShareByMonth(dbc);
+  const human_share = evaluateHumanShare(series);
+  const excluded_conversion = await getExcludedClickerConversion(dbc);
+  const rule_f = await getRuleFRescues(dbc);
+  const row5 = await getRow5Violations(dbc);
 
   const breaches: string[] = [];
+  if (human_share.breached && human_share.reason) breaches.push(human_share.reason);
   if (excluded_conversion.breached) {
     breaches.push(
       `Excluded clickers are converting at ${excluded_conversion.conv_pct}% (> ${EXCLUDED_CONVERSION_ALERT_PCT}%): ` +

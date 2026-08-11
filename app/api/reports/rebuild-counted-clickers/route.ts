@@ -4,6 +4,12 @@ import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { withCronLease } from "@/lib/cron/lease";
 import { can } from "@/lib/permissions";
+import { notifyTelegram } from "@/lib/alerts/telegram";
+import {
+  HEARTBEAT_JOBS,
+  checkHeartbeats,
+  heartbeatBreaches,
+} from "@/lib/reporting/cron-heartbeat";
 import { refreshCountedClickers } from "@/lib/reporting/counted-clickers";
 
 // Daily FULL rebuild of the counted-clicker cache (the EPC denominator).
@@ -36,6 +42,21 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   }
 
   if (bearerMatches) {
+    // Dead-man check: this DAILY job watches the WEEKLY monitors, so if they
+    // stop, it is noticed within a day rather than never. refreshCountedClickers
+    // stamps this job's own heartbeat via cron_locks on a full pass.
+    const heartbeats = await checkHeartbeats(db, [HEARTBEAT_JOBS.epcMonitors]);
+    const stale = heartbeatBreaches(heartbeats);
+    if (stale.length > 0) {
+      try {
+        await notifyTelegram(
+          ["⚠️ *Cron heartbeat*", "", ...stale.map((s) => `• ${s}`)].join("\n"),
+        );
+      } catch (err) {
+        console.error("[rebuild-counted-clickers] heartbeat alert failed", err);
+      }
+    }
+
     const leased = await withCronLease("counted-clickers-full", () =>
       refreshCountedClickers(db, "full"),
     );

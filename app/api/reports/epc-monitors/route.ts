@@ -3,6 +3,12 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { can } from "@/lib/permissions";
+import {
+  HEARTBEAT_JOBS,
+  checkHeartbeats,
+  heartbeatBreaches,
+  recordHeartbeat,
+} from "@/lib/reporting/cron-heartbeat";
 import { runEpcMonitors } from "@/lib/reporting/epc-monitors";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 
@@ -36,12 +42,17 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   const report = await runEpcMonitors(db);
 
+  // Dead-man check: this job watches the DAILY rebuild, never itself — a dead
+  // job cannot report itself dead. The rebuild returns the favour.
+  const heartbeats = await checkHeartbeats(db, [HEARTBEAT_JOBS.countedClickersFull]);
+  const allBreaches = [...report.breaches, ...heartbeatBreaches(heartbeats)];
+
   // Alert only on breach — a weekly all-clear message trains people to ignore it.
-  if (bearerMatches && report.breaches.length > 0) {
+  if (bearerMatches && allBreaches.length > 0) {
     const lines = [
       "⚠️ *EPC integrity monitor*",
       "",
-      ...report.breaches.map((b) => `• ${b}`),
+      ...allBreaches.map((b) => `• ${b}`),
       "",
       `Rule F rescues: ${report.rule_f.rescues} (baseline ${report.rule_f.baseline})`,
       `Excluded-clicker conversion: ${report.excluded_conversion.conv_pct}%`,
@@ -56,7 +67,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  return NextResponse.json(report);
+  // Stamp AFTER the work, so a run that threw does not look healthy.
+  if (bearerMatches) await recordHeartbeat(db, HEARTBEAT_JOBS.epcMonitors.job_name);
+
+  return NextResponse.json({ ...report, heartbeats, breaches: allBreaches });
 }
 
 export async function GET(req: NextRequest) {

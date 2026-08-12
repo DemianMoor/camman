@@ -7,6 +7,14 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 - Policy: **CamMan owns the footer**, rendered into the body via the stage's `stop_text` (wording `Text STOP to opt out`). Removed `withProviderFooter`/`TXR_APPENDED_FOOTER`; added `hasOptOutLanguage()` + a kickoff refusal `missing_opt_out_language` — **enforced for txr**, **dry-run** (log + Telegram, no refusal) for other API providers through a 30-day window before widening. Segment counting now uses the actual rendered body (no phantom footer).
 - Code: `lib/sends/segments.ts`, `lib/sends/kickoff.ts`, `lib/sends/kickoff-refusals.ts`, `lib/sends/scheduled.ts`; tests `scripts/test-textrequest-send.ts`.
 
+## 2026-08-12 — offer-report refresh: dead-man heartbeat + staleness on screen — docs: 07-conventions, CHANGELOG
+- The refresh cron's **failure** path was already sound (try/catch, Tier-1 Telegram alert, HTTP 500 so the scheduler flags red, per-view duration logging, `report_refresh_log` stamped only after BOTH refreshes succeed). An earlier card claimed it had no error handling; that note was stale — see the new conventions entry.
+- **The gap was silence, not failure.** The catch block only runs if the route runs. A scheduler no-show left the previous numbers on screen, internally consistent and arbitrarily old, with nothing raised.
+- Registered `offer-group-report-refresh` in the heartbeat registry (tolerance **26h**; twice-daily at 05:00/20:00 UTC means the worst normal age is 15h). Stamped on success only, after both refreshes.
+- **Watched by the daily** `rebuild-counted-clickers` job, never by itself — a dead job cannot report itself dead. A daily watcher catches a 26h breach promptly; the weekly monitors would take up to a week.
+- `/offers/[id]/report` now flags its own staleness: **>16h warn** (one refresh missed), **>26h alert** (two). A bare timestamp does not carry this — 3 days ago and 6 hours ago render identically.
+- Deploy ordering checked: next refresh 20:00 UTC stamps before the watcher's 07:20 UTC check, so no false "never recorded a run" alert on the first cycle.
+
 ## 2026-08-12 — By-X reports dedup at dimension grain (was summing per-stage counts) — docs: 04-features/epc-denominator, 07-conventions, CHANGELOG
 - **A cross-surface check found lifetime EPC disagreeing for the same campaign** by a median of 26.7% (max 47.7%). Cause: two surfaces followed the documented "dedup at the grain of the row displayed" rule and two summed per-stage counts instead. Summing double-counts anyone who clicked more than one stage, and most campaigns have five.
 - **Fixed for By Number / By Offer / By Sequence**: the dimension row's denominator is now a `COUNT(DISTINCT contact_id)` at the dimension's own grain (`getCountedClickersByDimension`), not an addition of per-stage counts. Measured overcount removed: **By Number −38.6%, By Offer −27.2%, By Sequence −7.4%**.

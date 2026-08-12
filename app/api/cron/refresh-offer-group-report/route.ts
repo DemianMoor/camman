@@ -1,6 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
+import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 import { refreshOfferGroupReport } from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
@@ -20,6 +22,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const startedAt = Date.now();
   try {
     const durations = await refreshOfferGroupReport();
+    // Stamped only on success, and only after both refreshes have completed —
+    // the heartbeat must mean "fresh data", not "the route was reached".
+    await recordHeartbeat(db, HEARTBEAT_JOBS.offerReportRefresh.job_name);
     // Log runtime every run so we can watch it grow toward the 300s ceiling.
     console.log(
       `[refresh-offer-group-report] ok summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} totalMs=${durations.totalMs}`,

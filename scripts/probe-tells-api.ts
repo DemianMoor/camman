@@ -2,6 +2,14 @@ import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 
+import postgres from "postgres";
+
+// Safe despite ESM hoisting running these imports before config() above:
+// secret-box reads PROVIDER_CREDENTIALS_KEY inside getMasterKey(), not at
+// module scope, so the env is populated by the time anything decrypts. Same
+// ordering as scripts/probe-textrequest-api.ts.
+import { decryptCredentialKey } from "@/lib/sends/provider-credential";
+
 // ============================================================================
 // Tells.co Phase 0 — A-series send probes (A1–A8).
 // See docs/superpowers/specs/2026-08-12-tells-provider-design.md §5.
@@ -16,12 +24,22 @@ config({ path: resolve(process.cwd(), ".env.local") });
 //   npx tsx scripts/probe-tells-api.ts               # live
 //   npx tsx scripts/probe-tells-api.ts A3 A5         # only the named probes
 //
+// The key and sending number come from the DATABASE, not from env: the Tells
+// key is pasted into the Accounts UI (encrypted at rest) and the TFN is a
+// provider_phones row, so the probe uses exactly what the real send path would
+// use. The key is decrypted in-process via the same dual-read helper the
+// pollers use and is NEVER printed.
+//
 // Env (from .env.local or the real environment):
-//   TELLS_API_KEY    required  the Tells API key
-//   TELLS_FROM       required  our sending TFN
-//   TELLS_TO         required  the TEST HANDSET — never a real contact
-//   TELLS_TEST_LINK  optional  a real CamMan short link for A6; A6 skips without it
-//   TELLS_API_URL    optional  default https://app.tells.co/api/sms.php
+//   DATABASE_URL       required  resolves the tls provider, its key and its TFN
+//   TELLS_TO           required  the TEST HANDSET — never a real contact, and the
+//                                one thing that can't come from the DB
+//   TELLS_TEST_LINK    optional  a real CamMan short link for A6; A6 skips without it
+//   TELLS_API_URL      optional  default https://app.tells.co/api/sms.php
+//   TELLS_CREDENTIAL_ID optional required only if the tls provider has more than
+//                                one account, to say which one to probe
+//   TELLS_API_KEY      optional  override the DB key (escape hatch; discouraged)
+//   TELLS_FROM         optional  override the DB sending number
 //
 // Every call prints its HTTP STATUS CODE, response headers, elapsed time, and
 // the raw body verbatim — the point of Phase 0 is the exact bytes, so nothing
@@ -50,10 +68,133 @@ function required(name: string): string {
   return v;
 }
 
-const API_KEY = required("TELLS_API_KEY");
-const FROM = required("TELLS_FROM");
 const TO = required("TELLS_TO");
 const TEST_LINK = (process.env.TELLS_TEST_LINK ?? "").trim() || null;
+
+// --- resolve key + sending number from the DB --------------------------------
+
+interface TellsAccount {
+  providerId: number;
+  providerName: string;
+  supportsApiSend: boolean;
+  credentialId: number;
+  label: string | null;
+  last4: string | null;
+  apiKey: string;
+  from: string;
+  maxSendsPerSecond: number | null;
+}
+
+// Single-org app, but the joins carry org_id anyway (CLAUDE.md §3) so this
+// can't straddle orgs if that ever changes.
+async function resolveTellsAccount(): Promise<TellsAccount> {
+  const dbUrl = required("DATABASE_URL");
+  const sqlc = postgres(dbUrl, { max: 1, prepare: false });
+  try {
+    const rows = await sqlc<
+      {
+        provider_id: number;
+        provider_name: string;
+        supports_api_send: boolean;
+        credential_id: number;
+        label: string | null;
+        api_key_encrypted: string | null;
+        api_key: string | null;
+        api_key_last4: string | null;
+        phone_number: string | null;
+        max_sends_per_second: number | null;
+      }[]
+    >`
+      SELECT p.id                AS provider_id,
+             p.name              AS provider_name,
+             p.supports_api_send AS supports_api_send,
+             c.id                AS credential_id,
+             c.label             AS label,
+             c.api_key_encrypted AS api_key_encrypted,
+             c.api_key           AS api_key,
+             c.api_key_last4     AS api_key_last4,
+             ph.phone_number     AS phone_number,
+             ph.max_sends_per_second AS max_sends_per_second
+      FROM sms_providers p
+      JOIN provider_credentials c
+        ON c.provider_id = p.id AND c.org_id = p.org_id
+      LEFT JOIN provider_phones ph
+        ON ph.provider_id = p.id AND ph.org_id = p.org_id
+       AND ph.credential_id = c.id AND ph.status = 'active'
+      WHERE p.sms_provider_id = 'tls'
+      ORDER BY (ph.phone_number IS NOT NULL) DESC, c.id
+    `;
+
+    if (rows.length === 0) {
+      console.error(
+        "✗ No Tells account found. Expected an sms_providers row with sms_provider_id='tls'\n" +
+          "  and at least one provider_credentials row. Add the account in the Accounts UI\n" +
+          "  on the Tells provider page (the key is stored encrypted; never seed it by script).",
+      );
+      process.exit(1);
+    }
+
+    // Multi-account is a first-class concept, so refuse to guess — probing with
+    // the wrong account's key spends money on the wrong account.
+    const wanted = (process.env.TELLS_CREDENTIAL_ID ?? "").trim();
+    const distinctCreds = new Set(rows.map((r) => r.credential_id));
+    let row = rows[0];
+    if (wanted) {
+      const found = rows.find((r) => String(r.credential_id) === wanted);
+      if (!found) {
+        console.error(`✗ TELLS_CREDENTIAL_ID=${wanted} is not an account on the tls provider.`);
+        process.exit(1);
+      }
+      row = found;
+    } else if (distinctCreds.size > 1) {
+      console.error("✗ The tls provider has more than one account — set TELLS_CREDENTIAL_ID to pick one:");
+      for (const r of rows) {
+        console.error(`    ${r.credential_id}  ${r.label ?? "(no label)"}  ••••${r.api_key_last4 ?? "????"}  ${r.phone_number ?? "(no active number)"}`);
+      }
+      process.exit(1);
+    }
+
+    // Same dual-read the pollers use (encrypted first, legacy plaintext second).
+    // Throws on a malformed blob / wrong PROVIDER_CREDENTIALS_KEY — caught below.
+    let apiKey: string | null = null;
+    try {
+      apiKey = decryptCredentialKey(row);
+    } catch {
+      console.error(
+        "✗ The stored Tells key would not decrypt. Usually PROVIDER_CREDENTIALS_KEY here\n" +
+          "  does not match the one the key was encrypted with in Vercel.",
+      );
+      process.exit(1);
+    }
+    if (!apiKey) {
+      console.error("✗ The Tells account has no usable API key stored. Paste it in the Accounts UI.");
+      process.exit(1);
+    }
+
+    const from = (process.env.TELLS_FROM ?? "").trim() || row.phone_number || "";
+    if (!from) {
+      console.error(
+        "✗ No active sending number linked to this Tells account. Add the TFN as a phone on\n" +
+          "  the Tells provider page and link it to the account (or set TELLS_FROM to override).",
+      );
+      process.exit(1);
+    }
+
+    return {
+      providerId: row.provider_id,
+      providerName: row.provider_name,
+      supportsApiSend: row.supports_api_send,
+      credentialId: row.credential_id,
+      label: row.label,
+      last4: row.api_key_last4,
+      apiKey: (process.env.TELLS_API_KEY ?? "").trim() || apiKey,
+      from,
+      maxSendsPerSecond: row.max_sends_per_second,
+    };
+  } finally {
+    await sqlc.end({ timeout: 5 });
+  }
+}
 
 // --- output helpers ----------------------------------------------------------
 
@@ -171,14 +312,40 @@ async function main() {
   // they truly are is itself a Phase 0 finding (cf. C4).
   const billableIds = ["A1a", "A1b", "A5", "A7a", "A7b", "A8-1", "A8-2", ...(TEST_LINK ? ["A6"] : [])];
   const billable = billableIds.filter(selected).length;
+
+  // Key + sending number come from the DB, so the probe exercises exactly the
+  // credential the real send path would resolve. Runs for --dry-run too: a
+  // preview that skipped this would not prove the account resolves at all.
+  const account = await resolveTellsAccount();
+  const API_KEY = account.apiKey;
+  const FROM = account.from;
+
   console.log(RULE);
   console.log("Tells.co Phase 0 — A-series send probes");
   console.log(`endpoint   ${API_URL}`);
-  console.log(`from       ${FROM}`);
+  console.log(`provider   ${account.providerName} (id ${account.providerId}, tls)`);
+  console.log(
+    `account    ${account.label ?? "(no label)"} (credential ${account.credentialId}) · key ••••${account.last4 ?? "????"}`,
+  );
+  console.log(
+    `from       ${FROM}${account.maxSendsPerSecond != null ? ` · ${account.maxSendsPerSecond} MPS` : ""}`,
+  );
   console.log(`to         ${TO}   <-- confirm this is the TEST HANDSET`);
   console.log(`link (A6)  ${TEST_LINK ?? "(TELLS_TEST_LINK unset — A6 will be SKIPPED)"}`);
   console.log(`mode       ${DRY_RUN ? "DRY RUN (nothing sent)" : `LIVE — about ${billable} billable messages`}`);
   if (ONLY.length) console.log(`only       ${ONLY.join(", ")}`);
+  // supports_api_send is the Phase 5 go-live flag. It must stay FALSE until the
+  // tls adapter is registered and gated — with it true, an operator can build a
+  // campaign on Tells that only fails at drain time with `unknown_provider`.
+  if (account.supportsApiSend) {
+    console.log(
+      `\n⚠️  ${account.providerName}.supports_api_send is TRUE, but no 'tls' adapter is registered yet.\n` +
+        "    A stage assigned to this provider would be accepted, activated and scheduled,\n" +
+        "    then refuse at drain time with reason=unknown_provider. Per the spec it should\n" +
+        "    stay FALSE until Phase 5 go-live. Probes below are unaffected (they call the\n" +
+        "    Tells API directly, not through the drain).",
+    );
+  }
   console.log(RULE);
 
   // A1 — number format. Doc examples show bare 11-digit; Text Request accepted

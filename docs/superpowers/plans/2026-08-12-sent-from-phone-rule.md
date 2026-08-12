@@ -468,21 +468,64 @@ In `lib/validators/segment-rules.ts`, add `isProviderPhoneSet` to the import fro
       return isProviderPhoneSet(value);
 ```
 
-- [ ] **Step 5: Run the test to confirm it passes**
+- [ ] **Step 5: Add the eval case in the same commit**
+
+Registering the rule type widens the `RuleType` union, which immediately breaks
+the `const _exhaustive: never = t;` guard in `ruleInnerQuery`. The case ships
+with the type so every commit on this branch compiles.
+
+In `lib/segment-rules-eval.ts`, add next to `textArrayLiteral`:
+
+```ts
+// Postgres int[] literal from a validated id list. Values are integers that
+// already passed isProviderPhoneSet, so there is nothing to escape; Math.trunc
+// is belt-and-braces before the value reaches drizzleSql.raw.
+function intArrayLiteral(values: number[]): string {
+  if (values.length === 0) return "ARRAY[]::int[]";
+  return "ARRAY[" + values.map((n) => String(Math.trunc(n))).join(",") + "]::int[]";
+}
+```
+
+Add `isProviderPhoneSet` to the existing import from
+`@/lib/validators/segment-rule-types`, then add the `case` in `ruleInnerQuery`,
+after `case "carrier"` and before `default`:
+
+```ts
+    case "sent_from_provider_phone": {
+      // Which of OUR numbers messaged the contact. status='sent' is the
+      // codebase-wide "accepted by the provider" definition (lib/reporting/
+      // rollup.ts et al) — counting pending/rejected/filtered would disagree
+      // with /reports for the same number. Written as a literal, not a bind,
+      // so the planner can match the partial index
+      // stage_sends_org_provider_phone_sent_idx (same technique as
+      // contact_added_in_last_n_days). provider_id is not used here: it is
+      // implied by the phone ids and enforced at write time by
+      // verifyValueOwnership.
+      const set = isProviderPhoneSet(v) ? v : { provider_id: 0, phone_ids: [] };
+      return drizzleSql`
+        SELECT DISTINCT contact_id FROM stage_sends
+        WHERE org_id = ${orgId}::uuid
+          AND status = 'sent'
+          AND provider_phone_id = ANY(${drizzleSql.raw(intArrayLiteral(set.phone_ids))})
+      `;
+    }
+```
+
+- [ ] **Step 6: Run the test to confirm it passes**
 
 Run: `npx tsx --conditions=react-server scripts/test-segment-rule-sent-from-phone.ts`
 Expected: `ALL PASS`
 
-- [ ] **Step 6: Typecheck**
+- [ ] **Step 7: Typecheck**
 
 Run: `npx tsc --noEmit`
-Expected: **fails** in `lib/segment-rules-eval.ts` at the `const _exhaustive: never = t;` line — the new rule type has no `case`. This is the exhaustiveness guard doing its job; Task 5 fixes it. Confirm the error names `sent_from_provider_phone` and no other file.
+Expected: **clean** — the exhaustiveness guard is satisfied because the case landed alongside the type.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add lib/validators/segment-rule-types.ts lib/validators/segment-rules.ts scripts/test-segment-rule-sent-from-phone.ts
-git commit -m "feat(segments): sent_from_provider_phone rule type + provider_phone_set value shape"
+git add lib/validators/segment-rule-types.ts lib/validators/segment-rules.ts lib/segment-rules-eval.ts scripts/test-segment-rule-sent-from-phone.ts
+git commit -m "feat(segments): sent_from_provider_phone rule type, value shape and eval case"
 ```
 
 ---
@@ -656,15 +699,18 @@ zero such rules because they could not be created."
 
 ---
 
-### Task 5: Eval SQL case
+### Task 5: Eval verification and index proof
+
+The eval case itself shipped in Task 3 (so no commit leaves the tree
+non-compiling). This task proves its **semantics** against real rows and
+proves the migration's index is actually chosen by the planner.
 
 **Files:**
-- Modify: `lib/segment-rules-eval.ts`
 - Modify: `scripts/test-segment-rule-sent-from-phone.ts`
 
 **Interfaces:**
-- Consumes: `ProviderPhoneSet` (Task 3), backfilled column (Task 2).
-- Produces: `ruleInnerQuery` handles `sent_from_provider_phone`; `intArrayLiteral(number[]): string`.
+- Consumes: eval case + `intArrayLiteral` (Task 3), backfilled column (Task 2), index from migration 0129 (Task 1).
+- Produces: none (verification only).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -717,57 +763,14 @@ async function testEval() {
 
 Call `await testEval();` from `main()`.
 
-- [ ] **Step 2: Run it to confirm it fails**
-
-Run: `npx tsc --noEmit`
-Expected: still failing at the `const _exhaustive: never = t;` guard — `sent_from_provider_phone` has no `case` yet. That compile error **is** the failing test for this task; the new SQL assertions in the script will pass on their own (they query `stage_sends` directly), which is why the typecheck is the gate here.
-
-- [ ] **Step 3: Add `intArrayLiteral` and the eval case**
-
-In `lib/segment-rules-eval.ts`, add next to `textArrayLiteral`:
-
-```ts
-// Postgres int[] literal from a validated id list. Values are integers that
-// already passed isProviderPhoneSet, so there is nothing to escape; Math.trunc
-// is belt-and-braces before the value reaches drizzleSql.raw.
-function intArrayLiteral(values: number[]): string {
-  if (values.length === 0) return "ARRAY[]::int[]";
-  return "ARRAY[" + values.map((n) => String(Math.trunc(n))).join(",") + "]::int[]";
-}
-```
-
-Add the `case` in `ruleInnerQuery`, after `case "carrier"` and before `default`:
-
-```ts
-    case "sent_from_provider_phone": {
-      // Which of OUR numbers messaged the contact. status='sent' is the
-      // codebase-wide "accepted by the provider" definition (lib/reporting/
-      // rollup.ts et al) — counting pending/rejected/filtered would disagree
-      // with /reports for the same number. Written as a literal, not a bind,
-      // so the planner can match the partial index
-      // stage_sends_org_provider_phone_sent_idx (same technique as
-      // contact_added_in_last_n_days). provider_id is not used here: it is
-      // implied by the phone ids and enforced at write time by
-      // verifyValueOwnership.
-      const set = isProviderPhoneSet(v) ? v : { provider_id: 0, phone_ids: [] };
-      return drizzleSql`
-        SELECT DISTINCT contact_id FROM stage_sends
-        WHERE org_id = ${orgId}::uuid
-          AND status = 'sent'
-          AND provider_phone_id = ANY(${drizzleSql.raw(intArrayLiteral(set.phone_ids))})
-      `;
-    }
-```
-
-- [ ] **Step 4: Run the test and typecheck**
+- [ ] **Step 2: Run the test**
 
 Run: `npx tsx --conditions=react-server scripts/test-segment-rule-sent-from-phone.ts`
-Expected: `ALL PASS`
+Expected: `ALL PASS`. If the backfill invariant assertion fails with a non-zero
+count, Task 2's `--apply` has not been run — STOP and report rather than
+weakening the assertion.
 
-Run: `npx tsc --noEmit`
-Expected: clean — the `never` exhaustiveness guard is now satisfied.
-
-- [ ] **Step 5: Confirm the index is actually used**
+- [ ] **Step 3: Confirm the index is actually used**
 
 ```sql
 EXPLAIN (ANALYZE, BUFFERS)

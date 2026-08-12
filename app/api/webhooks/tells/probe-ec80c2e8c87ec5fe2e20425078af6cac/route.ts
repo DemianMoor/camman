@@ -116,6 +116,15 @@ export async function POST(req: NextRequest) {
   // rejection still leaves us the event. One-off and manual — Tells is never
   // configured with a status override in the URL.
   const forced = forcedStatus(req.nextUrl.searchParams.get("status"));
+  // 204/205/304 are defined as bodyless — attaching one makes undici throw, and
+  // the route then answers with a platform 500 instead of the status we asked
+  // for. Caught by the pre-merge smoke test on ?status=204. Harmless for B7
+  // itself (which uses 500), but a probe that silently returns the wrong status
+  // is worse than one that refuses, so handle it explicitly.
+  if (forced !== null && (forced === 204 || forced === 205 || forced === 304)) {
+    console.log(`[tells-probe] forcing bodyless HTTP ${forced} for ${eventId}`);
+    return new NextResponse(null, { status: forced });
+  }
   if (forced !== null && (forced < 200 || forced >= 300)) {
     console.log(`[tells-probe] forcing HTTP ${forced} for ${eventId} (probe B7)`);
     return NextResponse.json({ status: "error", ok: false, forced }, { status: forced });

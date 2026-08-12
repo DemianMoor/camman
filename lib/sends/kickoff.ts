@@ -3,10 +3,11 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { notifyTelegram } from "@/lib/alerts/telegram";
 import { CODE_LENGTH, mintLinksBatch } from "@/lib/links/mint-link";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
-import { countSegments, MAX_SEGMENTS, withProviderFooter } from "@/lib/sends/segments";
+import { countSegments, hasOptOutLanguage, MAX_SEGMENTS } from "@/lib/sends/segments";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   buildStageFullUrl,
@@ -65,6 +66,11 @@ export type KickoffRefusal =
   // G8 hard ceiling: text exceeds MAX_SEGMENTS regardless of the creative's
   // allow_multi_segment override — never runaway multipart.
   | "segment_ceiling_exceeded"
+  // Compliance backstop: the effective rendered body carries no opt-out language
+  // (no STOP keyword). CamMan owns the opt-out footer (via stop_text) — Text
+  // Request does NOT append one on API sends. ENFORCED for txr; other API
+  // providers only dry-run (log + alert) during the 30-day observation window.
+  | "missing_opt_out_language"
   // Ahoi's send() requires a `source` number (spec §5 carry, Section 2 final
   // review): a stage with no provider_phone_id previously passed kickoff,
   // materialized every recipient, then failed at DRAIN — wasteful and risks
@@ -196,8 +202,8 @@ export async function kickoffStageSend(
   let shortDomain: { id: number; domain: string } | null = null;
   let destinationUrl = "";
   let manualText = "";
-  // Provider key (resolved in the tracked branch) — needed by the segment gate
-  // to account for a provider that appends its own footer (Text Request).
+  // Provider key (resolved in the tracked branch) — needed by the opt-out-language
+  // guard to decide enforce (txr) vs dry-run (other API providers).
   let providerKey: string | null = null;
 
   if (mode === "manual") {
@@ -308,14 +314,36 @@ export async function kickoffStageSend(
           linkUrl: `https://${shortDomain!.domain}/r/${"X".repeat(CODE_LENGTH)}`,
           stopText: row.stop_text,
         });
-  // txr appends its own opt-out footer server-side (Phase 0) — count the
-  // effective on-wire text so the ceiling reflects what actually sends.
-  const segCheck = countSegments(withProviderFooter(representativeText, providerKey));
+  // CamMan renders the opt-out footer INTO the body (via stop_text); no provider
+  // appends one on API sends, so representativeText IS the on-wire text.
+  const segCheck = countSegments(representativeText);
   if (segCheck.segments > MAX_SEGMENTS) {
     return { ok: false, reason: "segment_ceiling_exceeded" };
   }
   if (segCheck.segments > 1 && !row.creative_allow_multi_segment) {
     return { ok: false, reason: "multi_segment_not_allowed" };
+  }
+
+  // ---- Opt-out-language guard (compliance backstop). Every message MUST carry
+  // opt-out language — CamMan owns the footer; no provider appends one on API
+  // sends. Checked against the effective on-wire body. ENFORCED for txr now;
+  // other API providers run DRY (log + best-effort alert, no refusal) for a
+  // 30-day observation window before enforcement is widened.
+  if (!hasOptOutLanguage(representativeText)) {
+    const guardKey =
+      providerKey ?? (await resolveProviderKeyForGuard(dbc, row.sms_provider_id, orgId));
+    if (guardKey === "txr") {
+      return { ok: false, reason: "missing_opt_out_language" };
+    }
+    console.warn(
+      `[optout-guard][dryrun] stage ${stageId} (campaign ${campaignId}, provider ${guardKey ?? "unknown"}) ` +
+        `would be REFUSED: rendered body has no opt-out language (STOP). Not enforced for non-txr yet.`,
+    );
+    void notifyTelegram(
+      `⚠️ Opt-out guard (DRY-RUN): stage ${stageId} / campaign ${campaignId} — provider ${guardKey ?? "unknown"} ` +
+        `has NO opt-out language ("STOP") in the rendered body. Enforcement is txr-only for now; this counts toward ` +
+        `the 30-day dry-run before enabling it for other providers. Add opt-out text to the stage's stop_text.`,
+    ).catch(() => {});
   }
 
   // ---- Enumerate the recipients NOT YET materialized (resumable). Behavioral-
@@ -449,6 +477,23 @@ export async function kickoffStageSend(
     complete,
     shortDomain: mode === "tracked" ? (shortDomain?.domain ?? null) : null,
   };
+}
+
+// Resolve a stage's provider key for the opt-out guard when the tracked branch
+// didn't (manual mode). Returns null when the stage has no provider — the guard
+// then treats it as a non-enforced (dry-run) provider, since other guards own
+// the "no provider" refusal in tracked mode.
+async function resolveProviderKeyForGuard(
+  dbc: DbOrTx,
+  providerId: number | null,
+  orgId: string,
+): Promise<string | null> {
+  if (providerId == null) return null;
+  const rows = (await dbc.execute(sql`
+    SELECT sms_provider_id AS key FROM sms_providers
+    WHERE id = ${providerId} AND org_id = ${orgId} LIMIT 1
+  `)) as unknown as { key: string | null }[];
+  return rows[0]?.key ?? null;
 }
 
 // Stamp materialized_at exactly once (only when currently NULL).

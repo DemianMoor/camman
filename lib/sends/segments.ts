@@ -25,15 +25,20 @@ export function countSegments(text: string): SegmentCount {
   return { encoding: r.charset, chars: r.characters, segments: r.segments };
 }
 
-// Text Request AUTO-APPENDS this opt-out footer to every outbound message body
-// (confirmed live in Phase 0). We do NOT send it — TR adds it server-side — so
-// the on-wire text (and its segment count) is longer than the rendered text.
-export const TXR_APPENDED_FOOTER = "\nText STOP to opt out";
+// The opt-out footer wording CamMan owns for Text Request stages (and the value
+// a txr stage's `stop_text` should carry). CamMan renders this INTO the body —
+// Text Request does NOT append an opt-out footer on API `/messages` sends
+// (proven live 2026-08-12: our API send's TR record carried no footer, while
+// the footer seen on earlier messages was either typed in-body or added only by
+// the TR *portal* UI). Never rely on the provider to add opt-out language.
+export const TXR_OPT_OUT_FOOTER = "Text STOP to opt out";
 
-// The text as the provider will actually transmit it. Only txr appends a
-// footer today; every other provider returns the text unchanged. Used by the G8
-// kickoff gate so a message that fits in N segments raw but tips to N+1 with
-// TR's footer is caught BEFORE send, and by the drain's segment accounting.
-export function withProviderFooter(text: string, providerKey: string | null | undefined): string {
-  return providerKey === "txr" ? text + TXR_APPENDED_FOOTER : text;
+// Compliance backstop for the kickoff gate: does the effective on-wire body
+// contain opt-out language? The reserved keyword carriers require is STOP; a
+// word-boundary, case-insensitive match is the guard (a backstop, NOT a content
+// filter). "Text STOP to opt out" and the default "Stop to END" both pass; an
+// empty/omitted footer fails. Checked against the whole rendered body so opt-out
+// language anywhere in the message satisfies it.
+export function hasOptOutLanguage(text: string): boolean {
+  return /\bstop\b/i.test(text);
 }

@@ -46,6 +46,11 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     status: 400,
     message: `This message renders to more than ${MAX_SEGMENTS} SMS segments — shorten the text (even multi-segment creatives can't exceed this)`,
   },
+  missing_opt_out_language: {
+    status: 400,
+    message:
+      'This message has no opt-out language — add "Text STOP to opt out" (or similar) to the stage\'s stop text before sending',
+  },
   no_sender_number: {
     status: 400,
     message: "This provider needs a sending number — assign a provider phone to this stage before sending",

@@ -888,7 +888,9 @@ git commit -m "feat(segments): eval sent_from_provider_phone against the stage_s
 
 **Interfaces:**
 - Consumes: `ProviderPhoneSet`, `isProviderPhoneSet` (Task 3).
-- Produces: rule rows of this type carry `refs: {id,name,color}[]` (one per `phone_id`, same order); `GET /api/provider-phones/list?include_archived=1` returns archived rows too.
+- Produces: rule rows of this type carry `refs: {id,name,color}[]` — **order-preserving, with unresolvable ids omitted**, so `refs.length <= phone_ids.length`; `GET /api/provider-phones/list?include_archived=1` returns archived rows too.
+
+  **Consumers must match each `refs` entry back by its own `id` and never zip `refs` with `phone_ids` by index.** An archived phone still resolves (the lookup is deliberately not status-filtered), so the only way an entry drops is a hard-deleted row — rare and explicit per CLAUDE.md §6, but index-zipping would then silently mislabel every phone after the gap. An earlier draft of this line promised strict index alignment; the shipped behaviour omits instead, and omitting is correct — there is no label to render for a row that no longer exists.
 
 - [ ] **Step 1: Add `include_archived` to the phones list**
 

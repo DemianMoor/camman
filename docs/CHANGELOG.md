@@ -2,6 +2,12 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-12 — Segment rules: rule-type + FK value dropdowns are now type-to-search (`<SearchableSelect>`) — docs: 04-features/ui-system, 04-features/audience-segments, 07-conventions, CHANGELOG
+- New shared `components/searchable-select.tsx`: the single-select sibling of `MultiSelectPicker` (Radix Popover + filter input + ↑/↓/Enter nav, commits one value and closes on pick). Its trigger mirrors `<SelectTrigger>` styling so it drops into an existing row without shifting layout.
+- Applied in `components/segments/rules-panel.tsx` to the **rule type** (22 options) and the **brand/offer/segment/contact-group value** pickers (up to 500 rows each), which had no search at all. Operator, AND/OR combinator, and lookback period stay plain `<Select>`s (2–8 options) — the ≤10-option threshold is now written down in 07-conventions.
+- Behavior preserved: auto-save on pick (PATCH), the hydrated `ref` fallback label for values whose options haven't loaded or that are archived, and the incomplete-rule amber border. No API, schema, or eval change — UI only.
+- Convention note: `SearchableSelect` is the generic single-select; `OfferPicker`/`SegmentPicker` remain the specialized pin+recent variants. The overlap is deliberate and documented in ui-system §6 — extend one of the three rather than adding a fourth.
+
 ## 2026-08-12 — txr footer wording is NOT provider-specific: inherits the system-wide `stop_text` default (`Stop to END`); only the non-empty-footer guard stays txr-specific — docs: 06-integrations, 07-conventions, CHANGELOG
 - Removed the `TXR_OPT_OUT_FOOTER` constant. txr carries opt-out language via the same system-wide `stop_text` default as every other provider; the guard (`hasOptOutLanguage` → `missing_opt_out_language`, enforced for txr) is the only txr-specific piece. Code: `lib/sends/segments.ts`, `scripts/test-textrequest-send.ts`.
 

@@ -167,7 +167,8 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 ## UI
 - `<FormDialog>` for input dialogs (blocks accidental dismissal); `<AlertDialog>` for confirmations; bare `<Dialog>` read-only.
 - Required fields → red asterisk via `<FormLabel required>`; no "(optional)" text.
-- `<FileDropZone>` for all file pickers; `<MultiSelectPicker>` for >10-option selection; `<CopyableId>` for system ids.
+- `<FileDropZone>` for all file pickers; `<MultiSelectPicker>` for >10-option **multi**-selection; `<SearchableSelect>` for >10-option **single**-selection; `<CopyableId>` for system ids.
+- **Long single-select lists get a type-to-search dropdown, not a plain `<Select>`.** `<SearchableSelect>` ([components/searchable-select.tsx](../components/searchable-select.tsx)) is the single-select sibling of `<MultiSelectPicker>` — same Radix Popover + filter-input shape, commits one value and closes on pick, with ↑/↓/Enter keyboard nav. Its trigger deliberately mirrors `<SelectTrigger>`'s styling so swapping one in doesn't shift the surrounding layout. Rule of thumb: **≤10 options stay a plain `<Select>`** (operator, AND/OR, lookback period); more than that, make it searchable.
 
 ### Browser tab titles (page metadata)
 Every route sets its own `<title>`. The root layout ([app/layout.tsx](../app/layout.tsx)) owns the shape:

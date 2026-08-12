@@ -1,6 +1,6 @@
 # Feature — Segments & Segment Rules
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-08-12_
 
 ## 1. Purpose
 A **segment** is a named audience. Its effective membership is the **UNION** of manually-added contacts and contacts matching a chain of declarative **rules**. Segments feed campaign audiences. The rules engine compiles to SQL **set arithmetic** (not boolean predicates) so each branch can pick its own index plan against a >100K-row contacts table.
@@ -78,6 +78,8 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 ## 5. UI surface
 - Rules tab on `app/(protected)/segments/[id]` (next to Contacts/Upload/Remove).
 - **Auto-save per rule:** `rule_type`/`operator` commit immediately; numeric/FK values commit on blur (no per-row save button).
+- **Type-to-search dropdowns** (`<SearchableSelect>`, see [ui-system.md](ui-system.md)) for the two long lists in a rule row: the **rule type** (22 types) and the **FK value** picker (brand / offer / segment / contact group — each loads up to 500 rows). Opening one focuses a filter box and highlights the current selection; ↑/↓/Enter navigate. The operator (`is`/`is not`), AND/OR combinator, and lookback period stay plain `<Select>`s — 2–8 options each. Rule-type options are built once at module load from `RULE_TYPES`, so adding a type to [lib/validators/segment-rule-types.ts](../../lib/validators/segment-rule-types.ts) makes it searchable automatically — the list is flat and ungrouped by design.
+- The FK picker renders a persisted value via `fallbackLabel` (from the rules endpoint's hydrated `ref`) when the options list hasn't loaded yet or the referenced entity is archived, so the row never shows a blank selection.
 - Reorder via up/down arrows (no drag-and-drop dep). `position` has no UNIQUE constraint — reorder briefly duplicates then renumbers in a two-phase update.
 - 600ms debounced preview fires when the in-memory rule list changes (only after a PATCH returns — not on every keystroke).
 - Segments with `active_rules_count > 0` show a `Has rules` badge in the campaign audience picker.

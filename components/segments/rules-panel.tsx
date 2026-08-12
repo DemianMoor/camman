@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { SearchableSelect } from "@/components/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,6 +39,13 @@ import {
   type RuleType,
   type ValueShape,
 } from "@/lib/validators/segment-rule-types";
+
+// Rule-type picker options. Static — built once at module load from the
+// single source of truth in lib/validators/segment-rule-types.ts.
+const RULE_TYPE_OPTIONS = RULE_TYPE_KEYS.map((k) => ({
+  value: k as string,
+  label: RULE_TYPES[k].label,
+}));
 
 // Display labels for the phone_type set editor. Carrier codes are shown as-is.
 const PHONE_TYPE_LABELS: Record<string, string> = {
@@ -736,23 +744,18 @@ function RuleRow({
         </button>
       </div>
 
-      {/* Rule type */}
-      <Select
+      {/* Rule type — searchable: 24 types is more than is comfortable to
+          scan in a plain select. */}
+      <SearchableSelect
+        options={RULE_TYPE_OPTIONS}
         value={ruleType}
-        onValueChange={(v) => handleRuleTypeChange(v as RuleType)}
+        onChange={(v) => handleRuleTypeChange(v as RuleType)}
         disabled={!canEdit || saving}
-      >
-        <SelectTrigger className="h-9 w-[280px]">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {RULE_TYPE_KEYS.map((k) => (
-            <SelectItem key={k} value={k}>
-              {RULE_TYPES[k].label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+        className="h-9 w-[280px]"
+        placeholder="Select a rule"
+        searchPlaceholder="Search rules…"
+        aria-label="Rule type"
+      />
 
       {/* Operator (only when more than one is allowed) */}
       {allowedOperators.length > 1 ? (
@@ -1000,20 +1003,22 @@ function ValueControl({
             ? "Select a segment"
             : "Select a contact group";
 
-  // Fallback display: when the rule has a persisted value but the picker
-  // hasn't loaded its options yet (or the referenced entity is no longer
-  // in the active list), show the hydrated `ref.name` so the user can see
-  // what's currently selected. Opening the dropdown still works once
-  // options arrive.
   const hasValue = typeof value === "number";
-  const matchedInOptions =
-    hasValue && options.some((o) => o.id === (value as number));
-  const showFallback = hasValue && !matchedInOptions && currentRef !== null;
 
+  // Searchable — these lists load up to 500 rows, which is not scannable
+  // without a filter. `fallbackLabel` covers the case where the rule has a
+  // persisted value but the picker hasn't loaded its options yet (or the
+  // referenced entity is no longer in the active list): show the hydrated
+  // `ref.name` so the user can still see what's selected.
   return (
-    <Select
-      value={hasValue ? String(value) : ""}
-      onValueChange={(v) => {
+    <SearchableSelect
+      options={options.map((o) => ({
+        value: String(o.id),
+        label: o.name,
+        color: o.color,
+      }))}
+      value={hasValue ? String(value) : null}
+      onChange={(v) => {
         const parsed = Number.parseInt(v, 10);
         if (!Number.isFinite(parsed)) return;
         onChange(parsed);
@@ -1026,47 +1031,16 @@ function ValueControl({
         onValueCommit(parsed);
       }}
       disabled={disabled}
-    >
-      <SelectTrigger className="h-9 w-[200px]">
-        {/*
-          Children must be conditionally omitted (not passed as `null`) —
-          Radix Select.Value renders whatever you pass as children, so
-          `children={null}` produces a blank trigger. Falling through to
-          the unguarded SelectValue lets Radix render the selected
-          option's content via its internal ItemText mirroring.
-        */}
-        {showFallback ? (
-          <SelectValue placeholder={placeholder}>
-            <span className="inline-flex items-center gap-2">
-              {currentRef!.color ? (
-                <span
-                  className="size-2 rounded-full"
-                  style={{ backgroundColor: currentRef!.color }}
-                />
-              ) : null}
-              <span className="truncate">{currentRef!.name}</span>
-            </span>
-          </SelectValue>
-        ) : (
-          <SelectValue placeholder={placeholder} />
-        )}
-      </SelectTrigger>
-      <SelectContent>
-        {options.map((o) => (
-          <SelectItem key={o.id} value={String(o.id)}>
-            <span className="inline-flex items-center gap-2">
-              {o.color ? (
-                <span
-                  className="size-2 rounded-full"
-                  style={{ backgroundColor: o.color }}
-                />
-              ) : null}
-              {o.name}
-            </span>
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+      className="h-9 w-[200px]"
+      placeholder={placeholder}
+      searchPlaceholder="Search…"
+      // With zero options the "No matches" default is unhelpful — repeat the
+      // placeholder's pointer at where to create one.
+      emptyMessage={options.length === 0 ? placeholder : "No matches"}
+      fallbackLabel={currentRef?.name}
+      fallbackColor={currentRef?.color}
+      aria-label={placeholder}
+    />
   );
 }
 

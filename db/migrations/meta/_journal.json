@@ -904,6 +904,13 @@
       "when": 1787443200000,
       "tag": "0128_offer_report_dedup_at_grain",
       "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1787529600000,
+      "tag": "0129_segment_rules_sent_from_phone",
+      "breakpoints": true
     }
   ]
 }

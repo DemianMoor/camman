@@ -1408,7 +1408,10 @@ export const segment_rules = pgTable(
         'in_use_in_campaign_last_period',
         'in_use_in_offer',
         'member_of_segment',
-        'is_in_contact_group'
+        'is_in_contact_group',
+        'phone_type',
+        'carrier',
+        'sent_from_provider_phone'
       )`,
     ),
     check(
@@ -2651,6 +2654,16 @@ export const stage_sends = pgTable(
     index("stage_sends_texthub_message_id_idx")
       .on(table.texthub_message_id)
       .where(sql`texthub_message_id IS NOT NULL`),
+    // Migration 0129: backs the sent_from_provider_phone segment rule's only
+    // predicate. The migration's DDL adds `INCLUDE (contact_id)` for an
+    // index-only scan; this drizzle-orm version's (0.45.2) pg-core
+    // IndexBuilder has no `.include()` API, so that clause cannot be
+    // expressed here. This TS declaration is therefore narrower than the
+    // real DB index — divergence is TS-model-only, the migration SQL is
+    // what actually created the index.
+    index("stage_sends_org_provider_phone_sent_idx")
+      .on(table.org_id, table.provider_phone_id)
+      .where(sql`status = 'sent'`),
   ],
 );
 

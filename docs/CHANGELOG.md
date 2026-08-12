@@ -2,6 +2,11 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-12 — Segment rule: "Sent from phone number" (0129) — docs: 03-data-model, 04-features/audience-segments, 07-conventions, CHANGELOG
+- New rule type `sent_from_provider_phone`, value `{provider_id, phone_ids[]}`, operators is/is_not. Counts only `stage_sends.status='sent'`, matching the reports. Eval is a single index-only scan of `stage_sends_org_provider_phone_sent_idx` (0129).
+- Backfilled 1,008,689 pre-0112 `stage_sends.provider_phone_id` rows from their stage (100% resolvable, 3 numbers) so the rule sees the full send history rather than only post-2026-07-20 sends.
+- Fixed a latent bug from 0098: set-shaped values (`phone_type`, `carrier`) were rejected by `verifyValueOwnership` and dropped by `isRuleComplete`. Both rule types were uncreatable; prod had zero.
+
 ## 2026-08-12 — Tells.co **Phase 0 CLOSED**: verified payload contract (§5.1), STOP self-healing closed as won't-build — docs: superpowers/specs/2026-08-12-tells-provider-design (§2/§4.5/§4.6/§5/§5.1/§7/§8/§9/§10), CHANGELOG
 - **§5.1 is the new contract and supersedes §2**, which was the pre-probe claim and was **wrong in eight places**. Ran ~11 billable messages (~$0.14) against provider 855 / credential 712 / TFN +18445694179. (ClickUp 869egfjx2.)
 - **Corrections that would each have caused a silent bug:** `metadata` is **lowercase** on an otherwise PascalCase DLR (reading `Metadata` returns undefined on every callback — the field Phase 2's whole correlation depends on); it is always present as `null`, never omitted; it always returns as a **string** even when a JSON object was sent; the status webhook carries **no `Key` field at all**; `Id`/`To`/`From` are **numbers on webhooks but strings on the send response**; two date formats (`Z` on DLRs, `+00:00` elsewhere).
@@ -893,5 +898,10 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   4. No command palette / cmdk exists (was on the wishlist).
   5. `proxy.ts` protected-prefix list is narrower than the full protected route set.
 - Pre-existing `docs/security-notes.md` left untouched; linked from the index.
+
+## 2026-08-13 — Final whole-branch review fixes for feat/segment-rule-sent-from-phone — docs: 04-features/audience-segments, CHANGELOG
+- Documented `phone_type` and `carrier` in the rule-type table — this branch's migration `0129` (four-place-registration fix) makes both creatable for the first time; previously they were correctly omitted because `verifyValueOwnership` rejected them at creation.
+- Replaced the guessed "may approach the 10s timeout" caveat with production measurements: selective number 80.9 ms, worst-case dominant number 1,806 ms (vs. 8,480 ms pre-index) — clears both the 10s preview timeout and the 60s `snapshotAudience` activation budget with wide margin.
+- No schema/behavior change from the docs edits themselves; see the same-commit code fixes (schema.ts check-constraint + index drift, validator id ceiling, eval doc comment, rules-panel incomplete-check alignment, provider-phones org filter, backfill script header/citation/divergence-warning) in the commit this entry ships with.
 
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

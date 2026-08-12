@@ -14,7 +14,8 @@ export type ValueShape =
   | "contact_group_id"
   | "campaign_use_period"
   | "phone_type_set"
-  | "carrier_set";
+  | "carrier_set"
+  | "provider_phone_set";
 
 // Value sets for the carrier/line-type rules (migration 0098). Stored in the
 // rule's `value` as a non-empty array of these codes. 'landline' is intentionally
@@ -44,6 +45,44 @@ export function isStringSubsetOf<T extends string>(
     v.every((x) => typeof x === "string" && (allowed as readonly string[]).includes(x)) &&
     new Set(v).size === v.length
   );
+}
+
+// Value for `sent_from_provider_phone`: a set of provider_phones ids scoped to
+// one provider. provider_id is redundant with the phones (each belongs to
+// exactly one provider) but is persisted so the editor can hold a provider
+// while the user is mid-pick, and so ownership checks can assert both.
+export type ProviderPhoneSet = { provider_id: number; phone_ids: number[] };
+
+// int4 max — both sms_providers.id and provider_phones.id are `serial`
+// (postgres int4). Without a ceiling, Number.isInteger(1e21) is true and
+// String(1e21) renders "1e+21", which is invalid inside ARRAY[...]::int[].
+const INT4_MAX = 2147483647;
+
+export function isProviderPhoneSet(v: unknown): v is ProviderPhoneSet {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  const keys = Object.keys(o);
+  if (keys.length !== 2) return false;
+  if (!keys.includes("provider_id") || !keys.includes("phone_ids")) return false;
+  const pid = o.provider_id;
+  if (
+    typeof pid !== "number" ||
+    !Number.isInteger(pid) ||
+    pid < 1 ||
+    pid > INT4_MAX
+  ) {
+    return false;
+  }
+  const ids = o.phone_ids;
+  if (!Array.isArray(ids) || ids.length === 0) return false;
+  if (
+    !ids.every(
+      (x) => typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= INT4_MAX,
+    )
+  ) {
+    return false;
+  }
+  return new Set(ids).size === ids.length;
 }
 
 // Fixed set of lookback windows for the "in use in another campaign" rule.
@@ -228,6 +267,16 @@ export const RULE_TYPES = {
     label: "Carrier is one of",
     operators: ["is", "is_not"],
     value_shape: "carrier_set",
+  },
+
+  // === Send provenance ===
+  // Which of OUR sending numbers messaged the contact. Distinct from the
+  // contact-side phone_type / carrier rules above, which describe the
+  // RECIPIENT's number — hence the "Sent from" label.
+  sent_from_provider_phone: {
+    label: "Sent from phone number",
+    operators: ["is", "is_not"],
+    value_shape: "provider_phone_set",
   },
 } as const satisfies Record<string, RuleTypeSpec>;
 

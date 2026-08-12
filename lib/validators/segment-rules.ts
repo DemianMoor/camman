@@ -4,6 +4,7 @@ import {
   CARRIER_VALUES,
   getValueShapeForRuleType,
   isCampaignUsePeriod,
+  isProviderPhoneSet,
   isStringSubsetOf,
   isValidOperatorForRuleType,
   PHONE_TYPE_VALUES,
@@ -49,6 +50,11 @@ function validateValueByShape(shape: ValueShape, value: unknown): boolean {
       return isStringSubsetOf(value, PHONE_TYPE_VALUES);
     case "carrier_set":
       return isStringSubsetOf(value, CARRIER_VALUES);
+    case "provider_phone_set":
+      // No "incomplete" null state — an empty set is invalid server-side, so
+      // the editor keeps a half-made selection local until a number is picked
+      // (same contract as phone_type_set / carrier_set).
+      return isProviderPhoneSet(value);
     default:
       return false;
   }

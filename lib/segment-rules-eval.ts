@@ -10,6 +10,7 @@ import { segment_rules, segments } from "@/db/schema";
 import {
   getValueShapeForRuleType,
   isCampaignUsePeriod,
+  isProviderPhoneSet,
 } from "./validators/segment-rule-types";
 import type {
   CampaignUsePeriod,
@@ -66,6 +67,14 @@ function textArrayLiteral(values: string[]): string {
   return (
     "ARRAY[" + values.map((v) => `'${v.replace(/'/g, "''")}'`).join(",") + "]::text[]"
   );
+}
+
+// Postgres int[] literal from a validated id list. Values are integers that
+// already passed isProviderPhoneSet, so there is nothing to escape; Math.trunc
+// is belt-and-braces before the value reaches drizzleSql.raw.
+function intArrayLiteral(values: number[]): string {
+  if (values.length === 0) return "ARRAY[]::int[]";
+  return "ARRAY[" + values.map((n) => String(Math.trunc(n))).join(",") + "]::int[]";
 }
 
 // Build the contact_id subquery for one rule. The returned fragment is a
@@ -266,6 +275,24 @@ function ruleInnerQuery(
         SELECT id AS contact_id FROM contacts
         WHERE org_id = ${orgId}::uuid AND messaging_status = 'eligible'
           AND carrier_norm = ANY(${drizzleSql.raw(textArrayLiteral(expanded))})
+      `;
+    }
+    case "sent_from_provider_phone": {
+      // Which of OUR numbers messaged the contact. status='sent' is the
+      // codebase-wide "accepted by the provider" definition (lib/reporting/
+      // rollup.ts et al) — counting pending/rejected/filtered would disagree
+      // with /reports for the same number. Written as a literal, not a bind,
+      // so the planner can match the partial index
+      // stage_sends_org_provider_phone_sent_idx (same technique as
+      // contact_added_in_last_n_days). provider_id is not used here: it is
+      // implied by the phone ids and enforced at write time by
+      // verifyValueOwnership.
+      const set = isProviderPhoneSet(v) ? v : { provider_id: 0, phone_ids: [] };
+      return drizzleSql`
+        SELECT DISTINCT contact_id FROM stage_sends
+        WHERE org_id = ${orgId}::uuid
+          AND status = 'sent'
+          AND provider_phone_id = ANY(${drizzleSql.raw(intArrayLiteral(set.phone_ids))})
       `;
     }
     default: {

@@ -2,6 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-12 — txr footer wording is NOT provider-specific: inherits the system-wide `stop_text` default (`Stop to END`); only the non-empty-footer guard stays txr-specific — docs: 06-integrations, 07-conventions, CHANGELOG
+- Removed the `TXR_OPT_OUT_FOOTER` constant. txr carries opt-out language via the same system-wide `stop_text` default as every other provider; the guard (`hasOptOutLanguage` → `missing_opt_out_language`, enforced for txr) is the only txr-specific piece. Code: `lib/sends/segments.ts`, `scripts/test-textrequest-send.ts`.
+
 ## 2026-08-12 — Opt-out footer ownership: CamMan owns the footer, TR does NOT auto-append (belief disproven at go-live) — docs: 06-integrations, 07-conventions, CHANGELOG
 - The txr go-live's first send arrived with **no opt-out language** because the code relied on Text Request auto-appending `Text STOP to opt out`. Pulling TR's own message record proved TR did **not** append it on API `/messages` sends — the "auto-appends server-side (Phase 0)" belief was a misattribution of the TR *portal* UI's behavior.
 - Policy: **CamMan owns the footer**, rendered into the body via the stage's `stop_text` (wording `Text STOP to opt out`). Removed `withProviderFooter`/`TXR_APPENDED_FOOTER`; added `hasOptOutLanguage()` + a kickoff refusal `missing_opt_out_language` — **enforced for txr**, **dry-run** (log + Telegram, no refusal) for other API providers through a 30-day window before widening. Segment counting now uses the actual rendered body (no phantom footer).

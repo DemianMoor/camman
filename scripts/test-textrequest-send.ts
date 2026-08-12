@@ -5,7 +5,7 @@ import {
   buildMessagesBody,
   classifyTxrSend,
 } from "@/lib/sends/providers/textrequest";
-import { countSegments, hasOptOutLanguage, TXR_OPT_OUT_FOOTER } from "@/lib/sends/segments";
+import { countSegments, hasOptOutLanguage } from "@/lib/sends/segments";
 import type { NormalizedSendParams } from "@/lib/sends/providers/types";
 
 let pass = 0, fail = 0;
@@ -50,13 +50,13 @@ ok(!c.ok, "200 sending but NO message_id -> not ok");
 c = classifyTxrSend(500, null);
 ok(!c.ok && c.error === "Text Request HTTP 500", "HTTP 500 non-JSON -> fail with HTTP error");
 
-// --- opt-out language guard (CamMan owns the footer; TR does NOT append one) ---
-ok(hasOptOutLanguage(`Deal: buy now\n${TXR_OPT_OUT_FOOTER}`), "footer present -> has opt-out language");
+// --- opt-out language guard (CamMan owns the footer; TR does NOT append one;
+//     wording is NOT provider-specific — txr uses the system-wide stop_text default) ---
+ok(hasOptOutLanguage("Deal: buy now\nText STOP to opt out"), "explicit opt-out footer -> has opt-out language");
 ok(hasOptOutLanguage("Reply STOP to end"), "STOP keyword anywhere -> passes");
-ok(hasOptOutLanguage("Stop to END"), "default stop_text 'Stop to END' -> passes");
+ok(hasOptOutLanguage("Stop to END"), "system-wide default stop_text 'Stop to END' -> passes");
 ok(!hasOptOutLanguage("Guide Kin: check this out\nhttps://gdkn.org/r/abc123"), "no STOP keyword -> fails (the go-live bug)");
 ok(!hasOptOutLanguage(""), "empty body -> fails");
-eq(TXR_OPT_OUT_FOOTER, "Text STOP to opt out", "footer wording is the approved 'Text STOP to opt out'");
 
 // Segment counting reflects the ACTUAL rendered body (no phantom appended footer).
 const near = "A".repeat(150); // 150 GSM-7 chars = 1 segment (limit 160)

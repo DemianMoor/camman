@@ -5,7 +5,7 @@ import {
   buildMessagesBody,
   classifyTxrSend,
 } from "@/lib/sends/providers/textrequest";
-import { countSegments, withProviderFooter, TXR_APPENDED_FOOTER } from "@/lib/sends/segments";
+import { countSegments, hasOptOutLanguage, TXR_OPT_OUT_FOOTER } from "@/lib/sends/segments";
 import type { NormalizedSendParams } from "@/lib/sends/providers/types";
 
 let pass = 0, fail = 0;
@@ -50,15 +50,18 @@ ok(!c.ok, "200 sending but NO message_id -> not ok");
 c = classifyTxrSend(500, null);
 ok(!c.ok && c.error === "Text Request HTTP 500", "HTTP 500 non-JSON -> fail with HTTP error");
 
-// --- footer-aware segment counting ---
-eq(withProviderFooter("hi", "txr"), "hi" + TXR_APPENDED_FOOTER, "withProviderFooter: txr appends footer");
-eq(withProviderFooter("hi", "txh"), "hi", "withProviderFooter: non-txr unchanged");
-eq(withProviderFooter("hi", null), "hi", "withProviderFooter: null unchanged");
+// --- opt-out language guard (CamMan owns the footer; TR does NOT append one) ---
+ok(hasOptOutLanguage(`Deal: buy now\n${TXR_OPT_OUT_FOOTER}`), "footer present -> has opt-out language");
+ok(hasOptOutLanguage("Reply STOP to end"), "STOP keyword anywhere -> passes");
+ok(hasOptOutLanguage("Stop to END"), "default stop_text 'Stop to END' -> passes");
+ok(!hasOptOutLanguage("Guide Kin: check this out\nhttps://gdkn.org/r/abc123"), "no STOP keyword -> fails (the go-live bug)");
+ok(!hasOptOutLanguage(""), "empty body -> fails");
+eq(TXR_OPT_OUT_FOOTER, "Text STOP to opt out", "footer wording is the approved 'Text STOP to opt out'");
 
-// A body that is 1 segment raw but tips to 2 with the ~21-char footer.
+// Segment counting reflects the ACTUAL rendered body (no phantom appended footer).
 const near = "A".repeat(150); // 150 GSM-7 chars = 1 segment (limit 160)
-ok(countSegments(near).segments === 1, "150 chars raw = 1 segment");
-ok(countSegments(withProviderFooter(near, "txr")).segments === 2, "150 chars + TR footer = 2 segments (footer changes segment math)");
+ok(countSegments(near).segments === 1, "150 chars = 1 segment (counted as-is, no provider footer added)");
+ok(countSegments("A".repeat(161)).segments === 2, "161 chars = 2 segments");
 
 console.log(`\ntest-textrequest-send: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

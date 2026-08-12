@@ -2,6 +2,11 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-12 — Opt-out footer ownership: CamMan owns the footer, TR does NOT auto-append (belief disproven at go-live) — docs: 06-integrations, 07-conventions, CHANGELOG
+- The txr go-live's first send arrived with **no opt-out language** because the code relied on Text Request auto-appending `Text STOP to opt out`. Pulling TR's own message record proved TR did **not** append it on API `/messages` sends — the "auto-appends server-side (Phase 0)" belief was a misattribution of the TR *portal* UI's behavior.
+- Policy: **CamMan owns the footer**, rendered into the body via the stage's `stop_text` (wording `Text STOP to opt out`). Removed `withProviderFooter`/`TXR_APPENDED_FOOTER`; added `hasOptOutLanguage()` + a kickoff refusal `missing_opt_out_language` — **enforced for txr**, **dry-run** (log + Telegram, no refusal) for other API providers through a 30-day window before widening. Segment counting now uses the actual rendered body (no phantom footer).
+- Code: `lib/sends/segments.ts`, `lib/sends/kickoff.ts`, `lib/sends/kickoff-refusals.ts`, `lib/sends/scheduled.ts`; tests `scripts/test-textrequest-send.ts`.
+
 ## 2026-08-12 — By-X reports dedup at dimension grain (was summing per-stage counts) — docs: 04-features/epc-denominator, 07-conventions, CHANGELOG
 - **A cross-surface check found lifetime EPC disagreeing for the same campaign** by a median of 26.7% (max 47.7%). Cause: two surfaces followed the documented "dedup at the grain of the row displayed" rule and two summed per-stage counts instead. Summing double-counts anyone who clicked more than one stage, and most campaigns have five.
 - **Fixed for By Number / By Offer / By Sequence**: the dimension row's denominator is now a `COUNT(DISTINCT contact_id)` at the dimension's own grain (`getCountedClickersByDimension`), not an addition of per-stage counts. Measured overcount removed: **By Number −38.6%, By Offer −27.2%, By Sequence −7.4%**.

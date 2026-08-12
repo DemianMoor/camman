@@ -25,20 +25,15 @@ export function countSegments(text: string): SegmentCount {
   return { encoding: r.charset, chars: r.characters, segments: r.segments };
 }
 
-// The opt-out footer wording CamMan owns for Text Request stages (and the value
-// a txr stage's `stop_text` should carry). CamMan renders this INTO the body —
-// Text Request does NOT append an opt-out footer on API `/messages` sends
-// (proven live 2026-08-12: our API send's TR record carried no footer, while
-// the footer seen on earlier messages was either typed in-body or added only by
-// the TR *portal* UI). Never rely on the provider to add opt-out language.
-export const TXR_OPT_OUT_FOOTER = "Text STOP to opt out";
-
 // Compliance backstop for the kickoff gate: does the effective on-wire body
-// contain opt-out language? The reserved keyword carriers require is STOP; a
-// word-boundary, case-insensitive match is the guard (a backstop, NOT a content
-// filter). "Text STOP to opt out" and the default "Stop to END" both pass; an
-// empty/omitted footer fails. Checked against the whole rendered body so opt-out
-// language anywhere in the message satisfies it.
+// contain opt-out language? CamMan owns the opt-out footer (rendered into the
+// body via the stage's `stop_text`) — no provider appends one on API sends. The
+// footer wording is NOT provider-specific: txr uses the same system-wide
+// `stop_text` default ("Stop to END") as every other provider. The reserved
+// keyword carriers require is STOP; a word-boundary, case-insensitive match is
+// the guard (a backstop, NOT a content filter). The default "Stop to END" and
+// e.g. "Text STOP to opt out" both pass; an empty/omitted footer fails. Checked
+// against the whole rendered body so opt-out language anywhere in it satisfies it.
 export function hasOptOutLanguage(text: string): boolean {
   return /\bstop\b/i.test(text);
 }

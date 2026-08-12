@@ -46,6 +46,17 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 24 * 16, // weekly cadence, ~2 missed runs
     label: "clickers propagate rebuild (weekly)",
   },
+  // The offer-report matview refresh. Its route ALREADY handles failure well —
+  // try/catch, a Tier-1 alert, a 500 so the scheduler flags red, and it stamps
+  // report_refresh_log only after both refreshes succeed, so a failure leaves a
+  // stale timestamp rather than a falsely fresh one. What none of that covers is
+  // the job never being invoked: the catch block only runs if the route runs. A
+  // no-show leaves the last good numbers on screen, plausible and months old.
+  offerReportRefresh: {
+    job_name: "offer-group-report-refresh",
+    max_age_hours: 26, // twice-daily (05:00/20:00 UTC); worst normal age is 15h
+    label: "offer-report matview refresh (twice daily)",
+  },
   countedClickersFull: {
     job_name: "counted-clickers-rebuild",
     max_age_hours: 52, // daily cadence, ~2 missed runs

@@ -45,7 +45,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // Dead-man check: this DAILY job watches the WEEKLY monitors, so if they
     // stop, it is noticed within a day rather than never. refreshCountedClickers
     // stamps this job's own heartbeat via cron_locks on a full pass.
-    const heartbeats = await checkHeartbeats(db, [HEARTBEAT_JOBS.epcMonitors]);
+    //
+    // It also watches the twice-daily offer-report refresh. That job's own
+    // failure path is sound, so the only thing left to catch is it not running
+    // at all — and a watcher on a daily cadence notices a 26h breach promptly,
+    // where the weekly monitors would take up to a week.
+    const heartbeats = await checkHeartbeats(db, [
+      HEARTBEAT_JOBS.epcMonitors,
+      HEARTBEAT_JOBS.offerReportRefresh,
+    ]);
     const stale = heartbeatBreaches(heartbeats);
     if (stale.length > 0) {
       try {

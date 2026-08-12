@@ -159,19 +159,67 @@ async function main() {
     assert(ch.ok, `${ch.surface} (${ch.grain} grain): renders DISTINCT contacts, ${ch.rendered} over ${ch.rows} rows`);
   }
 
-  // The offer report is KNOWN NON-COMPLIANT — its view sums per-stage counts.
-  // Asserted as a known state so this script fails the day it silently changes,
-  // in either direction.
-  const or = (await q(sql`
-    SELECT sum(clicks)::int AS summed,
-           (SELECT count(DISTINCT cc.contact_id)::int FROM counted_clickers cc
-              JOIN campaign_stages cs ON cs.id=cc.stage_id WHERE cs.sent_at IS NOT NULL) AS distinct_ct
-    FROM offer_report_campaign_econ`))[0];
-  console.log(`\n=== offer report (KNOWN non-compliant, carded) ===`);
-  console.log(`  view sums per-stage: ${or.summed}   distinct at stage-set: ${or.distinct_ct}`);
+  // The offer report, now COMPLIANT at all three of its display grains. This
+  // block replaces a pin that asserted the opposite — it deliberately failed
+  // whenever the non-compliance changed in either direction, which is how this
+  // fix was allowed to land without silently breaking the check.
+  //
+  // Each grain is asserted as the DECOMPOSITION, not bare equality, because
+  // manual-mode stages contribute Keitaro visit counts with no set to dedup:
+  //     clicks = DISTINCT(tracked at this grain) + SUM(manual visits at grain)
+  console.log(`
+=== offer report: dedup at each of its three display grains ===`);
+  const offerChecks: { grain: string; rendered: number; distinct: number; manual: number }[] =
+    (await q(sql`
+      WITH cell AS (
+        SELECT 'cell (offer,group)' AS grain,
+               (SELECT sum(clicks)::bigint FROM offer_group_report_mv) AS rendered,
+               (SELECT sum(n)::bigint FROM (
+                  SELECT count(DISTINCT cc.contact_id) AS n FROM counted_clickers cc
+                  JOIN campaigns c ON c.id=cc.campaign_id
+                  CROSS JOIN LATERAL unnest(COALESCE(c.audience_contact_group_ids, ARRAY[]::int[])) AS g(group_id)
+                  WHERE c.offer_id IS NOT NULL GROUP BY c.org_id, c.offer_id, g.group_id) t) AS distinct_n,
+               (SELECT COALESCE(sum(v),0)::bigint FROM (
+                  SELECT SUM(COALESCE(k.visits,0)) AS v FROM campaign_stages cs
+                  JOIN campaigns c ON c.id=cs.campaign_id
+                  CROSS JOIN LATERAL unnest(COALESCE(c.audience_contact_group_ids, ARRAY[]::int[])) AS g(group_id)
+                  LEFT JOIN (SELECT stage_id, SUM(visit_clicks_clean)::int visits FROM keitaro_stage_results GROUP BY 1) k ON k.stage_id=cs.id
+                  WHERE cs.sent_at IS NOT NULL AND c.offer_id IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM counted_clickers x WHERE x.stage_id=cs.id)
+                  GROUP BY c.org_id, c.offer_id, g.group_id) t) AS manual_n
+      ), org AS (
+        SELECT 'org benchmark' AS grain,
+               (SELECT sum(clicks)::bigint FROM offer_report_org_summary_mv) AS rendered,
+               (SELECT count(DISTINCT cc.contact_id)::bigint FROM counted_clickers cc
+                  JOIN campaigns c ON c.id=cc.campaign_id
+                  WHERE EXISTS (SELECT 1 FROM campaign_stages s WHERE s.campaign_id=c.id AND s.sent_at IS NOT NULL)) AS distinct_n,
+               (SELECT COALESCE(sum(COALESCE(k.visits,0)),0)::bigint FROM campaign_stages cs
+                  LEFT JOIN (SELECT stage_id, SUM(visit_clicks_clean)::int visits FROM keitaro_stage_results GROUP BY 1) k ON k.stage_id=cs.id
+                  WHERE cs.sent_at IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM counted_clickers x WHERE x.stage_id=cs.id)) AS manual_n
+      )
+      SELECT grain, rendered, distinct_n AS distinct, manual_n AS manual FROM cell
+      UNION ALL SELECT grain, rendered, distinct_n, manual_n FROM org
+    `)) as never;
+  console.table(offerChecks);
+  for (const ch of offerChecks) {
+    assert(
+      Number(ch.rendered) === Number(ch.distinct) + Number(ch.manual),
+      `offer report ${ch.grain}: ${ch.rendered} = ${ch.distinct} distinct + ${ch.manual} manual`,
+    );
+  }
+
+  // The offer footer must NOT be the sum of the cells — a contact in two of the
+  // offer's groups is one offer clicker. If these ever match, either the footer
+  // regressed to a sum or every campaign became single-group.
+  const foot = (await q(sql`
+    SELECT (SELECT sum(clicks)::bigint FROM offer_group_report_mv) AS cell_sum,
+           (SELECT sum(offer_clicks)::bigint FROM (
+              SELECT DISTINCT org_id, offer_id, offer_clicks FROM offer_group_report_mv) t) AS offer_grain`))[0];
+  console.log(`  cell sum ${foot.cell_sum} vs offer-grain footer ${foot.offer_grain}`);
   assert(
-    Number(or.summed) >= Number(or.distinct_ct),
-    `offer report still sums (${or.summed} >= ${or.distinct_ct}) — expected until its card lands`,
+    Number(foot.offer_grain) < Number(foot.cell_sum),
+    `offer footer is deduped at offer grain, not summed from cells (${foot.offer_grain} < ${foot.cell_sum})`,
   );
 
   // By Group is exempt: fractional shares, no set to dedup. Assert the shape is

@@ -777,13 +777,23 @@ and would mutate production data to set up. The builder itself is covered by
 the typecheck's exhaustiveness guard plus the browser check in Task 7.
 
 ```ts
+// Postgres int[] literal from a set of ids read back from the DB (already
+// integers, nothing to escape). Same technique as lib/segment-rules-eval.ts's
+// own intArrayLiteral, duplicated locally because that one is not exported.
+function intArrayLiteral(values: number[]): string {
+  if (values.length === 0) return "ARRAY[]::int[]";
+  return "ARRAY[" + values.map((n) => String(Math.trunc(n))).join(",") + "]::int[]";
+}
+
 async function testEval() {
   console.log("eval");
-  // A contact with a known sent row, and the phone that sent it.
+  // A contact with a known sent row, and the phone that sent it. Deterministic
+  // ORDER BY so LIMIT 1 picks the same row every run.
   const seed = await db.execute<{ contact_id: string; provider_phone_id: number }>(
     drizzleSql`
       SELECT contact_id, provider_phone_id FROM stage_sends
       WHERE org_id = ${ORG}::uuid AND status = 'sent' AND provider_phone_id IS NOT NULL
+      ORDER BY contact_id, provider_phone_id
       LIMIT 1
     `,
   );
@@ -797,17 +807,42 @@ async function testEval() {
   `);
   check("the contact matches the number that sent to it", hit.length === 1);
 
-  const other = await db.execute<{ id: number }>(drizzleSql`
+  // Negative case: pinning contact_id in the WHERE makes `SELECT DISTINCT
+  // contact_id` return 0 or 1 rows BY CONSTRUCTION, regardless of whether the
+  // provider_phone_id filter did anything — `miss.length <= 1` would pass
+  // even with the filter deleted. To make a wrong answer distinguishable from
+  // a right one, pick a phone this org owns that PROVABLY never sent to this
+  // contact (the exact complement of the set that did), then assert the
+  // contact does not appear at all (miss.length === 0).
+  const sentPhones = await db.execute<{ provider_phone_id: number }>(drizzleSql`
+    SELECT DISTINCT provider_phone_id FROM stage_sends
+    WHERE org_id = ${ORG}::uuid AND status = 'sent' AND contact_id = ${contact_id}::uuid
+    ORDER BY provider_phone_id
+  `);
+  const sentPhoneIds = sentPhones.map((r) => r.provider_phone_id);
+
+  const nonSending = await db.execute<{ id: number }>(drizzleSql`
     SELECT id FROM provider_phones
-    WHERE org_id = ${ORG}::uuid AND id <> ${provider_phone_id} LIMIT 1
+    WHERE org_id = ${ORG}::uuid
+      AND NOT (id = ANY(${drizzleSql.raw(intArrayLiteral(sentPhoneIds))}))
+    ORDER BY id
+    LIMIT 1
   `);
-  const miss = await db.execute<{ contact_id: string }>(drizzleSql`
-    SELECT DISTINCT contact_id FROM stage_sends
-    WHERE org_id = ${ORG}::uuid AND status = 'sent'
-      AND provider_phone_id = ANY(ARRAY[${other[0].id}]::int[])
-      AND contact_id = ${contact_id}::uuid
-  `);
-  check("a different number does not necessarily match", miss.length <= 1);
+  if (nonSending.length === 0) {
+    console.log(
+      "  skip a phone that never sent to this contact does not match" +
+        " (every org-owned phone is in the sent set for this contact — no discriminating phone exists)",
+    );
+  } else {
+    const other = nonSending[0].id;
+    const miss = await db.execute<{ contact_id: string }>(drizzleSql`
+      SELECT DISTINCT contact_id FROM stage_sends
+      WHERE org_id = ${ORG}::uuid AND status = 'sent'
+        AND provider_phone_id = ANY(ARRAY[${other}]::int[])
+        AND contact_id = ${contact_id}::uuid
+    `);
+    check("a phone that never sent to this contact does not match", miss.length === 0);
+  }
 
   const [remaining] = await db.execute<{ n: string }>(
     drizzleSql`SELECT count(*)::text AS n FROM stage_sends WHERE provider_phone_id IS NULL`,

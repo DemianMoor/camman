@@ -63,3 +63,6 @@ next-env.d.ts
 
 # Local PII scratch (opt-out CSVs, etc.) — never commit
 /tmp/
+
+# Backfill reversal artifacts (internal ids) — never commit
+scripts/.backfill-0129-reversal.csv

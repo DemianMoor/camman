@@ -187,15 +187,29 @@ Create `scripts/backfill-stage-send-provider-phone.ts`:
 // Run:  npx tsx scripts/backfill-stage-send-provider-phone.ts           (dry run)
 //       npx tsx scripts/backfill-stage-send-provider-phone.ts --apply   (writes)
 //
-// Writes a reversal file (id,provider_phone_id pairs BEFORE the change is
-// applied) to scripts/.backfill-0129-reversal.csv so the change can be undone.
+// Each batch is SELECTed, appended to the reversal file, and flushed to disk
+// BEFORE the UPDATE that changes those rows — so a crash mid-run can only
+// ever leave the reversal file naming rows that were never modified (safe:
+// reversing them sets provider_phone_id back to NULL, which is already
+// their value), never the other way around. The reversal file is written to
+// scripts/.backfill-0129-reversal.csv as (id, provider_phone_id-before)
+// pairs — the "before" column is always empty because every affected row's
+// prior value is NULL by construction of the WHERE clause. Reverse with:
+// UPDATE stage_sends SET provider_phone_id = NULL WHERE id IN (<ids>).
+//
+// The reversal file is NEVER truncated: the CSV header is written only once
+// on first creation, and each --apply run appends a "# run started <ISO>"
+// marker line before its batches, so a second --apply after an interrupted
+// first run accumulates onto the same file instead of destroying the first
+// run's (now-unrecoverable, since those rows are already non-NULL and will
+// never be re-selected) reversal records.
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { sql as drizzleSql } from "drizzle-orm";
+import { sql as drizzleSql, type SQL } from "drizzle-orm";
 import postgres from "postgres";
 
 const BATCH = 50_000;
@@ -211,71 +225,92 @@ async function main() {
   const pg = postgres(dbUrl, { prepare: false, max: 1 });
   const db = drizzle(pg);
 
-  const [pre] = await db.execute<{
-    null_rows: string;
-    resolvable: string;
-    phones: number[];
-  }>(drizzleSql`
-    SELECT count(*)::text AS null_rows,
-           count(*) FILTER (WHERE cs.provider_phone_id IS NOT NULL)::text AS resolvable,
-           array_agg(DISTINCT cs.provider_phone_id)
-             FILTER (WHERE cs.provider_phone_id IS NOT NULL) AS phones
-    FROM stage_sends ss
-    LEFT JOIN campaign_stages cs ON cs.id = ss.stage_id
-    WHERE ss.provider_phone_id IS NULL
-  `);
+  let refuse = false;
+  try {
+    const [pre] = await db.execute<{
+      null_rows: string;
+      resolvable: string;
+      phones: number[];
+    }>(drizzleSql`
+      SELECT count(*)::text AS null_rows,
+             count(*) FILTER (WHERE cs.provider_phone_id IS NOT NULL)::text AS resolvable,
+             array_agg(DISTINCT cs.provider_phone_id)
+               FILTER (WHERE cs.provider_phone_id IS NOT NULL) AS phones
+      FROM stage_sends ss
+      LEFT JOIN campaign_stages cs ON cs.id = ss.stage_id
+      WHERE ss.provider_phone_id IS NULL
+    `);
 
-  console.log(`NULL rows:      ${pre.null_rows}`);
-  console.log(`resolvable:     ${pre.resolvable}`);
-  console.log(`distinct phones: ${JSON.stringify(pre.phones)}`);
+    console.log(`NULL rows:      ${pre.null_rows}`);
+    console.log(`resolvable:     ${pre.resolvable}`);
+    console.log(`distinct phones: ${JSON.stringify(pre.phones)}`);
 
-  if (pre.null_rows !== pre.resolvable) {
-    console.error(
-      `REFUSING: ${Number(pre.null_rows) - Number(pre.resolvable)} rows have no stage phone. Investigate before writing.`,
-    );
-    await pg.end();
-    process.exit(1);
-  }
+    if (pre.null_rows !== pre.resolvable) {
+      console.error(
+        `REFUSING: ${Number(pre.null_rows) - Number(pre.resolvable)} rows have no stage phone. Investigate before writing.`,
+      );
+      refuse = true;
+      return;
+    }
 
-  if (!apply) {
-    console.log("\nDry run — no rows written. Re-run with --apply to write.");
-    await pg.end();
-    return;
-  }
+    if (!apply) {
+      console.log("\nDry run — no rows written. Re-run with --apply to write.");
+      return;
+    }
 
-  writeFileSync(REVERSAL, "id,provider_phone_id\n", "utf8");
-  let total = 0;
-  for (;;) {
-    const rows = await db.execute<{ id: number; provider_phone_id: number }>(drizzleSql`
-      WITH batch AS (
+    if (!existsSync(REVERSAL)) {
+      appendFileSync(REVERSAL, "id,provider_phone_id\n", "utf8");
+    }
+    appendFileSync(REVERSAL, `# run started ${new Date().toISOString()}\n`, "utf8");
+
+    let total = 0;
+    for (;;) {
+      // 1. Pure read — same INNER JOIN + provider_phone_id IS NULL + LIMIT
+      // selection criteria as the old CTE, but no UPDATE happens here.
+      const batch = await db.execute<{ id: string; provider_phone_id: number }>(drizzleSql`
         SELECT ss.id, cs.provider_phone_id
         FROM stage_sends ss
         JOIN campaign_stages cs ON cs.id = ss.stage_id
         WHERE ss.provider_phone_id IS NULL
           AND cs.provider_phone_id IS NOT NULL
         LIMIT ${BATCH}
-      )
-      UPDATE stage_sends ss
-         SET provider_phone_id = b.provider_phone_id
-        FROM batch b
-       WHERE ss.id = b.id
-      RETURNING ss.id, ss.provider_phone_id
-    `);
-    if (rows.length === 0) break;
-    appendFileSync(
-      REVERSAL,
-      rows.map((r) => `${r.id},`).join("\n") + "\n",
-      "utf8",
+      `);
+      // 2. Nothing left to do.
+      if (batch.length === 0) break;
+
+      // 3. Record before writing, flushed to disk synchronously.
+      appendFileSync(
+        REVERSAL,
+        batch.map((r) => `${r.id},`).join("\n") + "\n",
+        "utf8",
+      );
+
+      // 4. Write exactly the ids just recorded, driven by the explicit
+      // (id, provider_phone_id) pairs captured above — not a fresh
+      // subquery — so the recorded set and the written set cannot diverge.
+      const values: SQL[] = batch.map(
+        (r) => drizzleSql`(${r.id}::uuid, ${r.provider_phone_id}::int)`,
+      );
+      const rows = await db.execute<{ id: string }>(drizzleSql`
+        UPDATE stage_sends ss
+           SET provider_phone_id = b.provider_phone_id
+          FROM (VALUES ${drizzleSql.join(values, drizzleSql`, `)}) AS b(id, provider_phone_id)
+         WHERE ss.id = b.id
+        RETURNING ss.id
+      `);
+      total += rows.length;
+      console.log(`  stamped ${total}`);
+    }
+
+    const [post] = await db.execute<{ remaining: string }>(
+      drizzleSql`SELECT count(*)::text AS remaining FROM stage_sends WHERE provider_phone_id IS NULL`,
     );
-    total += rows.length;
-    console.log(`  stamped ${total}`);
+    console.log(`\nDone. Stamped ${total}. Remaining NULL: ${post.remaining}`);
+  } finally {
+    await pg.end({ timeout: 5 });
   }
 
-  const [post] = await db.execute<{ remaining: string }>(
-    drizzleSql`SELECT count(*)::text AS remaining FROM stage_sends WHERE provider_phone_id IS NULL`,
-  );
-  console.log(`\nDone. Stamped ${total}. Remaining NULL: ${post.remaining}`);
-  await pg.end();
+  if (refuse) process.exit(1);
 }
 
 main().catch((e) => {
@@ -285,6 +320,8 @@ main().catch((e) => {
 ```
 
 Note the reversal file records the id with an **empty** prior value, because every affected row's prior value is `NULL` by definition of the `WHERE` clause — undoing is `UPDATE stage_sends SET provider_phone_id = NULL WHERE id IN (…)`.
+
+The loop is deliberately structured SELECT → append-to-reversal-file → UPDATE, in that order, per batch: the reversal record for a batch is flushed to disk *before* that batch's UPDATE runs, so a crash can only ever leave the file naming rows that are still NULL (a harmless no-op to reverse), never the reverse (rows changed with no record). The UPDATE is driven by the exact `(id, provider_phone_id)` pairs read in that batch's SELECT — not a fresh subquery against `campaign_stages` — so the set recorded to the file and the set actually written are provably identical. The reversal file is opened in append mode across `--apply` runs (header written once, on first creation; a `# run started <ISO>` marker line separates runs) so a second `--apply` after an interrupted first run cannot truncate away the first run's records.
 
 - [ ] **Step 2: Run the dry run**
 

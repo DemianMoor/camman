@@ -42,8 +42,14 @@ export async function GET(
 
   const report = await getOfferGroupReport(orgId, offerId);
 
-  // offerTotals = sum of the visible group rows (foots the table; multi-group
-  // campaigns counted fully in each group — same footnote as the rows).
+  // offerTotals foots the table for the ADDITIVE columns — sends, revenue,
+  // sales, cost, optouts — where a multi-group campaign counting fully in each
+  // group is the documented behaviour.
+  //
+  // `clicks` is the exception and must not be summed: the cells are already
+  // deduplicated per (offer, group), so adding them counts anyone in two of the
+  // offer's groups twice. It is overwritten below with the offer-grain distinct
+  // count, which is why the clicks column does not foot on screen.
   const offerTotals: RawMetrics = report.rows.reduce(
     (t, r) => ({
       sends: t.sends + r.sends,
@@ -56,6 +62,8 @@ export async function GET(
     { sends: 0, revenue: 0, sales: 0, clicks: 0, cost: 0, optouts: 0 },
   );
 
+  offerTotals.clicks = report.offerClicks;
+
   const breakEvenPer1k =
     offerTotals.sends > 0 ? (offerTotals.cost / offerTotals.sends) * 1000 : null;
 
@@ -63,6 +71,8 @@ export async function GET(
     offerName: offer.name,
     rows: report.rows,
     offerTotals,
+    offerHasManual: report.offerHasManual,
+    benchmarkHasManual: report.benchmarkHasManual,
     orgBenchmark: report.orgBenchmark,
     breakEvenPer1k,
     refreshedAt: report.refreshedAt,

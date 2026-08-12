@@ -14,6 +14,8 @@ type ReportResponse = {
   offerName: string;
   rows: GroupRawRow[];
   offerTotals: RawMetrics;
+  offerHasManual: boolean;
+  benchmarkHasManual: boolean;
   orgBenchmark: RawMetrics;
   breakEvenPer1k: number | null;
   refreshedAt: string | null;
@@ -35,6 +37,21 @@ const fmtUsd = (n: number | null) => (n == null ? "—" : usd.format(n));
 // internally consistent and arbitrarily old. A bare timestamp does not carry
 // that — 3 days ago and 6 hours ago render identically — so the age is stated
 // and flagged rather than left for the reader to compute.
+// Rows whose clicks mix a deduplicated contact count with Keitaro visit counts
+// (manual-mode stages mint no links, so there is no set to deduplicate). The
+// arithmetic is honest but the unit is mixed, and a bare number would not show
+// it. 33 of 80 cells carry this today.
+function ManualMix() {
+  return (
+    <span
+      title="Includes manual-mode stages. Their clicks are Keitaro visit counts, not deduplicated contacts, so this figure mixes the two."
+      className="ml-1.5 rounded bg-amber-500/10 px-1 py-0.5 text-[10px] font-medium text-amber-700 align-middle dark:text-amber-500"
+    >
+      +manual
+    </span>
+  );
+}
+
 const STALE_WARN_HOURS = 16;
 const STALE_ALERT_HOURS = 26;
 
@@ -266,19 +283,28 @@ export default function OfferGroupReportPage() {
           <tbody>
             {benchmark ? (
               <tr className="border-t bg-muted/30 font-medium">
-                <td className="px-3 py-2">All offers (org-wide)</td>
+                <td className="px-3 py-2">
+                  All offers (org-wide)
+                  {data?.benchmarkHasManual ? <ManualMix /> : null}
+                </td>
                 <MetricCells m={benchmark} isGroup={false} breakEven={breakEven} />
               </tr>
             ) : null}
             {sorted.map((r) => (
               <tr key={r.group_id} className="border-t">
-                <td className="px-3 py-2">{r.group_name}</td>
+                <td className="px-3 py-2">
+                  {r.group_name}
+                  {r.has_manual_stages ? <ManualMix /> : null}
+                </td>
                 <MetricCells m={r} isGroup breakEven={breakEven} />
               </tr>
             ))}
             {offerTotal ? (
               <tr className="border-t bg-muted/30 font-medium">
-                <td className="px-3 py-2">This offer · all groups</td>
+                <td className="px-3 py-2">
+                  This offer · all groups
+                  {data?.offerHasManual ? <ManualMix /> : null}
+                </td>
                 <MetricCells m={offerTotal} isGroup={false} breakEven={breakEven} />
               </tr>
             ) : null}
@@ -294,8 +320,13 @@ export default function OfferGroupReportPage() {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        A campaign targeting multiple groups is counted fully in each group, so group
-        rows may sum to more than the org-wide total. “Sent last 7/30/90d” and “Fresh
+        Clicks are counted once per person <em>at the grain of the row</em>: a contact
+        who clicked two campaigns of this offer is one clicker on the offer row, and
+        one in each group row they belong to. <strong>The Clicks column therefore does
+        not add up</strong> — the offer total is smaller than the sum of the groups,
+        because people are not additive across groups. Every other column is a plain
+        sum: a campaign targeting multiple groups is counted fully in each group, so
+        those columns may sum to more than the org-wide total. “Sent last 7/30/90d” and “Fresh
         pool” count every in-app send (tracked or manual link mode); sends performed
         entirely outside the app (count-only, no per-recipient record) aren’t included.
       </p>

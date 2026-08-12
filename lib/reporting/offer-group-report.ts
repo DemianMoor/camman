@@ -20,6 +20,10 @@ export type RawMetrics = {
 export type GroupRawRow = RawMetrics & {
   group_id: number;
   group_name: string;
+  // True when this cell includes manual-mode stages, whose clicks are Keitaro
+  // visit counts rather than deduplicated contacts. The row then mixes a
+  // deduplicated count with an undeduplicated one, and says so in the UI.
+  has_manual_stages: boolean;
   sent_7d: number;
   sent_30d: number;
   sent_90d: number;
@@ -29,6 +33,13 @@ export type GroupRawRow = RawMetrics & {
 export type OfferGroupReport = {
   rows: GroupRawRow[];
   orgBenchmark: RawMetrics;
+  // Clicks at OFFER grain — deliberately NOT the sum of the group cells. A
+  // contact in two of the offer's groups is one offer clicker and two group
+  // clickers, so this is smaller than the column adds up to. The matview carries
+  // it on every row of the offer so the footer needs no extra query.
+  offerClicks: number;
+  offerHasManual: boolean;
+  benchmarkHasManual: boolean;
   refreshedAt: string | null;
 };
 
@@ -42,13 +53,14 @@ export async function getOfferGroupReport(
 ): Promise<OfferGroupReport> {
   const groupRows = (await db.execute(sql`
     select group_id, group_name, sends, revenue, sales, clicks, cost, optouts,
+           has_manual_stages, offer_clicks, offer_has_manual,
            sent_7d, sent_30d, sent_90d, fresh_pool
     from offer_group_report_mv
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
   `)) as unknown as Record<string, unknown>[];
 
   const benchRows = (await db.execute(sql`
-    select sends, revenue, sales, clicks, cost, optouts
+    select sends, revenue, sales, clicks, cost, optouts, has_manual_stages
     from offer_report_org_summary_mv
     where org_id = ${orgId}::uuid
   `)) as unknown as Record<string, unknown>[];
@@ -67,6 +79,7 @@ export async function getOfferGroupReport(
       revenue: n(r.revenue),
       sales: n(r.sales),
       clicks: n(r.clicks),
+      has_manual_stages: Boolean(r.has_manual_stages),
       cost: n(r.cost),
       optouts: n(r.optouts),
       sent_7d: n(r.sent_7d),
@@ -84,6 +97,10 @@ export async function getOfferGroupReport(
           optouts: n(benchRows[0].optouts),
         }
       : { ...ZERO },
+    // Identical on every row of the offer; read from the first.
+    offerClicks: groupRows[0] ? n(groupRows[0].offer_clicks) : 0,
+    offerHasManual: Boolean(groupRows[0]?.offer_has_manual),
+    benchmarkHasManual: Boolean(benchRows[0]?.has_manual_stages),
     refreshedAt: logRows[0]?.refreshed_at
       ? new Date(logRows[0].refreshed_at).toISOString()
       : null,

@@ -56,7 +56,9 @@ That distinction was got wrong once and is worth stating plainly: the by-dimensi
 | `/reports` By Number / Offer / Sequence | dimension | ✅ (fixed) |
 | `/reports` **By Group** | contact group | ⚠️ **exempt — see below** |
 | `/creatives` + picker | creative | ✅ |
-| `/offers/[id]/report` | offer × group | ❌ **known, carded** |
+| `/offers/[id]/report` cells | offer × group | ✅ (0128) |
+| `/offers/[id]/report` footer | offer | ✅ (0128) |
+| `/offers/[id]/report` benchmark | org | ✅ (0128) |
 
 **By Group is exempt by construction.** Its metrics are fractionally split across each contact's groups — a contact in three of a campaign's used groups contributes ⅓ to each — and a fractional share has no set to take a `DISTINCT` over. Its click counts are split sums and are **not comparable** with the other tabs. The UI says so on the tab; this is a documented exemption, not a silent inconsistency.
 
@@ -67,6 +69,26 @@ dimension denominator = DISTINCT(tracked contacts in dimension) + SUM(manual sta
 ```
 
 Verified on live data: the difference between the rendered figure and the pure distinct count is **exactly** the manual visit total on all three dimensions.
+
+Rows that include manual stages are **labelled `+manual` in the UI** on the offer report, because the arithmetic mixes a deduplicated count with an undeduplicated one and a bare number would not show it.
+
+### The offer report does not foot, on purpose
+
+`/offers/[id]/report` renders three grains in one table: group cells, an offer footer, and an org benchmark. Each deduplicates at its own grain, so **the Clicks column does not add up** — a contact in two of an offer's groups is one offer clicker and two group clickers. The footer is smaller than the sum of the column, and the UI says so. Every other column is a plain sum and does foot.
+
+Before 0128 all three grains were assembled by summing their parts: cells were **+25.5%** over distinct and the benchmark **+49.2%**. Because inflating a denominator depresses EPC, the benchmark was depressed harder than the rows — **every group read ~19% better than the org average by construction**, on the screen whose only purpose is that comparison. Fixing the cells alone would have inverted the bias rather than removed it.
+
+### Time basis — a recorded decision, not an open gap
+
+Surfaces do not share one window, and this is deliberate. Each names its window in the UI:
+
+| Surface | Window | Why |
+|---|---|---|
+| `/reports` Overview + By-X | lifetime primary, period alongside | comparison across campaigns needs a stable basis |
+| `/creatives` + stage picker | 30-day sort, lifetime column | the picker answers "what should I send next", which is a recency question |
+| `/offers/[id]/report` | lifetime | offer/group economics are judged over the offer's life |
+
+Sorting the picker by lifetime was measured and rejected: mean rank change 4.17, max 29, two creatives leaving the top 10 — a ~3.5× bigger reshuffle than the denominator change itself, and it would have altered which creatives get sent as a side effect of a display change. **Numbers from different surfaces are comparable only when their stated windows match.**
 
 ## 4. Storage — the cache stores the SET, not counts
 

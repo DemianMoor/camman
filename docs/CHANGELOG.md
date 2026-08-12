@@ -2,6 +2,11 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-12 — Segment rule: "Sent from phone number" (0129) — docs: 03-data-model, 04-features/audience-segments, 07-conventions, CHANGELOG
+- New rule type `sent_from_provider_phone`, value `{provider_id, phone_ids[]}`, operators is/is_not. Counts only `stage_sends.status='sent'`, matching the reports. Eval is a single index-only scan of `stage_sends_org_provider_phone_sent_idx` (0129).
+- Backfilled 1,008,689 pre-0112 `stage_sends.provider_phone_id` rows from their stage (100% resolvable, 3 numbers) so the rule sees the full send history rather than only post-2026-07-20 sends.
+- Fixed a latent bug from 0098: set-shaped values (`phone_type`, `carrier`) were rejected by `verifyValueOwnership` and dropped by `isRuleComplete`. Both rule types were uncreatable; prod had zero.
+
 ## 2026-08-12 — Segment rules: rule-type + FK value dropdowns are now type-to-search (`<SearchableSelect>`) — docs: 04-features/ui-system, 04-features/audience-segments, 07-conventions, CHANGELOG
 - New shared `components/searchable-select.tsx`: the single-select sibling of `MultiSelectPicker` (Radix Popover + filter input + ↑/↓/Enter nav, commits one value and closes on pick). Its trigger mirrors `<SelectTrigger>` styling so it drops into an existing row without shifting layout.
 - Applied in `components/segments/rules-panel.tsx` to the **rule type** (22 options) and the **brand/offer/segment/contact-group value** pickers (up to 500 rows each), which had no search at all. Operator, AND/OR combinator, and lookback period stay plain `<Select>`s (2–8 options) — the ≤10-option threshold is now written down in 07-conventions.

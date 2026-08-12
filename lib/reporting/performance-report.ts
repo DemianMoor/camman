@@ -1,7 +1,15 @@
 import { sql } from "drizzle-orm";
+import { fromZonedTime } from "date-fns-tz";
+
+import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 
 import { db } from "@/db/client";
-import { denominatorFor } from "@/lib/reporting/counted-clickers";
+import {
+  DIMENSION_NONE_KEY,
+  denominatorFor,
+  getCountedClickersByDimension,
+  type ReportDimensionKey,
+} from "@/lib/reporting/counted-clickers";
 import type { ReportDimension } from "@/lib/reporting/report-dimensions";
 import {
   getStageMetricsInRange,
@@ -184,9 +192,19 @@ export async function getPerformanceReport(
 
   let rows: PerfRow[];
   if (dimension === "group") {
+    // BY-GROUP IS EXEMPT from dimension-grain deduplication, by construction.
+    // Its metrics are FRACTIONALLY SPLIT across a contact's groups (a contact in
+    // 3 used groups contributes ⅓ to each), and a fractional share cannot be
+    // deduplicated — there is no set to take a DISTINCT over. Its clicker counts
+    // therefore remain split sums and are NOT comparable with the other tabs.
+    // Labelled as such in the UI. See docs/04-features/epc-denominator.md.
     rows = await distributeToGroups(orgId, filtered, b, metricsOf);
   } else {
     rows = await groupByStageDimension(filtered, dimension, metricsOf);
+    // Replace the summed clicker counts with DISTINCT counts at the dimension's
+    // own grain — the row grain the rule refers to. Revenue stays summed; it is
+    // genuinely additive.
+    await applyDimensionDistinctClickers(orgId, dimension, b, rows, filtered);
   }
   return { dimension, rows, totals, refreshedAt };
 }
@@ -245,6 +263,58 @@ async function groupByStageDimension(
   return [...acc.entries()]
     .map(([k, m]) => ({ key: k, label: k === "none" ? "—" : `Message ${k}`, ...m }))
     .sort((a, b) => (Number(a.key) || 0) - (Number(b.key) || 0));
+}
+
+// Overwrite the summed clicker counts on already-grouped rows with DISTINCT
+// counts at the dimension's grain.
+//
+// MANUAL-MODE STAGES need care: they mint no links, so they have no
+// counted_clickers rows and their denominator is Keitaro's clean landing-visit
+// counter. Visits are an aggregate, not a set, so they cannot join a DISTINCT.
+// The dimension total is therefore:
+//     DISTINCT(tracked contacts in the dimension)  +  SUM(manual stages' visits)
+// which is the exact aggregate form of the per-stage denominatorFor() rule.
+async function applyDimensionDistinctClickers(
+  orgId: string,
+  dimension: "number" | "offer" | "sequence",
+  b: Bounds,
+  rows: PerfRow[],
+  stages: StageMetrics[],
+): Promise<void> {
+  // Same ET-range → UTC conversion stage-funnel uses, so the period window here
+  // is byte-identical to the one the funnel metrics were computed over.
+  const fromUtc = fromZonedTime(`${b.from}T00:00:00`, CAMPAIGN_TIMEZONE);
+  const nextDay = new Date(Date.parse(`${b.to}T00:00:00Z`) + 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const toExclusiveUtc = fromZonedTime(`${nextDay}T00:00:00`, CAMPAIGN_TIMEZONE);
+  const [period, lifetime] = await Promise.all([
+    getCountedClickersByDimension(db, orgId, dimension as ReportDimensionKey, {
+      fromUtc,
+      toExclusiveUtc,
+    }),
+    getCountedClickersByDimension(db, orgId, dimension as ReportDimensionKey),
+  ]);
+
+  // Manual-mode visit counts per dimension key, summed (they cannot be deduped).
+  const manualVisits = new Map<string, number>();
+  const keyOf = (s: StageMetrics): string => {
+    if (dimension === "number") return s.provider_phone_id == null ? "none" : String(s.provider_phone_id);
+    if (dimension === "offer") return s.offer_id == null ? "none" : String(s.offer_id);
+    return s.stage_number == null ? "none" : String(s.stage_number);
+  };
+  for (const s of stages) {
+    if (s.link_mode === "tracked") continue;
+    const k = keyOf(s);
+    manualVisits.set(k, (manualVisits.get(k) ?? 0) + s.tally.visit_clicks_clean);
+  }
+
+  for (const row of rows) {
+    const dimKey = row.key === "none" ? DIMENSION_NONE_KEY : Number(row.key);
+    const manual = manualVisits.get(row.key) ?? 0;
+    row.counted_clickers = (period.get(dimKey) ?? 0) + manual;
+    row.lifetime_clickers = (lifetime.get(dimKey) ?? 0) + manual;
+  }
 }
 
 // ---- group: distribute each stage's totals across its used contact groups ---

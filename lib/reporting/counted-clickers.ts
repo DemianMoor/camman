@@ -361,3 +361,70 @@ export function countedClickersSubquery(
     GROUP BY 1
   `;
 }
+
+// =============================================================================
+// PER-DIMENSION DISTINCT COUNTS (By Number / By Offer / By Sequence)
+//
+// The performance reports render one row per DIMENSION value, and the rule is
+// "deduplicate at the grain of the row displayed". Summing per-stage counts into
+// a dimension row does NOT do that — it counts a contact once per stage they
+// clicked. Measured overcount on live data: By Number +38.6%, By Offer +27.2%,
+// By Sequence +7.4%.
+//
+// So the dimension row's denominator is counted here, at the dimension's own
+// grain, rather than assembled by addition. Revenue is genuinely additive and is
+// still summed; only the clicker count needs this.
+//
+// Cost measured before adopting: ~85ms per dimension vs ~18ms for the shared
+// per-stage aggregate. A request renders ONE dimension, so the real delta is
+// ~+66ms on a route already issuing several queries.
+// =============================================================================
+
+export type ReportDimensionKey = "number" | "offer" | "sequence";
+
+// GROUP BY target per dimension. `sequence` and `number` live on the stage;
+// `offer` lives on the campaign.
+const DIMENSION_SQL: Record<
+  ReportDimensionKey,
+  { join: SQL; column: SQL }
+> = {
+  number: {
+    join: sql`JOIN campaign_stages cs ON cs.id = cc.stage_id`,
+    column: sql`cs.provider_phone_id`,
+  },
+  sequence: {
+    join: sql`JOIN campaign_stages cs ON cs.id = cc.stage_id`,
+    column: sql`cs.stage_number`,
+  },
+  offer: {
+    join: sql`JOIN campaigns ca ON ca.id = cc.campaign_id`,
+    column: sql`ca.offer_id`,
+  },
+};
+
+// Distinct counted clickers per dimension value. Keys are the dimension's own
+// value; a NULL dimension (no phone / no offer / no stage number) is keyed -1,
+// matching the report's "none" bucket.
+export const DIMENSION_NONE_KEY = -1;
+
+export async function getCountedClickersByDimension(
+  dbc: DbOrTx,
+  orgId: string,
+  dimension: ReportDimensionKey,
+  b: CountedClickerBounds = {},
+): Promise<Map<number, number>> {
+  const { join, column } = DIMENSION_SQL[dimension];
+  const dateFilter =
+    b.fromUtc && b.toExclusiveUtc
+      ? sql`AND cc.first_click_at >= ${b.fromUtc.toISOString()}::timestamptz AND cc.first_click_at < ${b.toExclusiveUtc.toISOString()}::timestamptz`
+      : sql``;
+  const rows = (await dbc.execute(sql`
+    SELECT coalesce(${column}, ${DIMENSION_NONE_KEY}) AS dim_key,
+           count(DISTINCT cc.contact_id)::int AS n
+    FROM counted_clickers cc
+    ${join}
+    WHERE cc.org_id = ${orgId}::uuid ${dateFilter}
+    GROUP BY 1
+  `)) as unknown as { dim_key: number; n: number }[];
+  return new Map(rows.map((r) => [Number(r.dim_key), Number(r.n)]));
+}

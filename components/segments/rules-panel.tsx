@@ -364,9 +364,7 @@ export function RulesPanel({
     // correct — documented — dep here; the plugin's exhaustive-deps check
     // still asks for the parent `phonesApi` object on this pattern (same
     // false positive already present, unsuppressed, on the four sibling
-    // eager fetches above). Suppressed only on this new line so this task's
-    // own addition doesn't push the file's lint baseline past 10 problems.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eager fetches above).
   }, [phonesApi.execute]);
 
   // Debounced preview. Triggers on rules changing — when the user mutates,

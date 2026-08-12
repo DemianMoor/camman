@@ -888,9 +888,9 @@ git commit -m "feat(segments): eval sent_from_provider_phone against the stage_s
 
 **Interfaces:**
 - Consumes: `ProviderPhoneSet`, `isProviderPhoneSet` (Task 3).
-- Produces: rule rows of this type carry `refs: {id,name,color}[]` — **order-preserving, with unresolvable ids omitted**, so `refs.length <= phone_ids.length`; `GET /api/provider-phones/list?include_archived=1` returns archived rows too.
+- Produces: `GET /api/provider-phones/list?include_archived=1` returns archived rows too.
 
-  **Consumers must match each `refs` entry back by its own `id` and never zip `refs` with `phone_ids` by index.** An archived phone still resolves (the lookup is deliberately not status-filtered), so the only way an entry drops is a hard-deleted row — rare and explicit per CLAUDE.md §6, but index-zipping would then silently mislabel every phone after the gap. An earlier draft of this line promised strict index alignment; the shipped behaviour omits instead, and omitting is correct — there is no label to render for a row that no longer exists.
+  **`refs[]` hydration on the rules endpoint was built in this task, then removed in a post-review fix pass (2026-08-13).** Task 7's editor ended up resolving phone-set labels from the eagerly-fetched `/api/provider-phones/list?include_archived=1` response instead of reading `refs` off the rule row — the two sources cover identical rows (both include archived phones, both drop hard-deleted ids), so `refs` was genuinely redundant rather than a fallback covering a gap. `include_archived` was kept; the editor does use it.
 
 - [ ] **Step 1: Add `include_archived` to the phones list**
 
@@ -941,61 +941,11 @@ export async function GET(request: Request) {
 
 `status` is added to the projection so the editor can mark an archived number.
 
-- [ ] **Step 2: Hydrate `refs` in the rules list**
+- [ ] **Step 2: `refs` hydration — built, then removed as dead code**
 
-In `app/api/segments/[id]/rules/route.ts`, inside `hydrateRefs`, collect phone ids alongside the existing sets:
+This step originally hydrated a `refs: Info[] | null` field per phone-set rule row in `hydrateRefs` (collect `phone_ids` from `provider_phone_set` values → batch-fetch `provider_phones`/`sms_providers` via `inArray` → attach `refs` alongside `ref`). It shipped, but Task 7's editor never read it: the `RulesPanel` resolves phone-set labels from the eagerly-fetched `/api/provider-phones/list?include_archived=1` response instead (Step 1 below), and `SegmentRule` on the client carries no `refs` field. Both sources cover identical rows, so this wasn't a fallback for a case the phones list misses — just an unused second query on every rules `GET` whenever a phone-set rule exists.
 
-```ts
-  const phoneIds = new Set<number>();
-```
-
-in the collection loop:
-
-```ts
-    if (shape === "provider_phone_set" && isProviderPhoneSet(r.value)) {
-      for (const id of r.value.phone_ids) phoneIds.add(id);
-    }
-```
-
-fetch them (no `status` filter — archived numbers must still resolve):
-
-```ts
-  const phoneMap = new Map<number, Info>();
-  if (phoneIds.size > 0) {
-    const rows = await db
-      .select({
-        id: provider_phones.id,
-        name: provider_phones.phone_number,
-        color: sms_providers.color,
-      })
-      .from(provider_phones)
-      .innerJoin(sms_providers, eq(sms_providers.id, provider_phones.provider_id))
-      .where(
-        and(
-          eq(provider_phones.org_id, orgId),
-          inArray(provider_phones.id, Array.from(phoneIds)),
-        ),
-      );
-    for (const row of rows) phoneMap.set(row.id, row);
-  }
-```
-
-and in the per-row return, add `refs` while leaving `ref` untouched for every other type:
-
-```ts
-    let refs: Info[] | null = null;
-    if (shape === "provider_phone_set" && isProviderPhoneSet(r.value)) {
-      // One entry per phone_id, in the value's order, so the editor can render
-      // labels positionally. Nulls are filtered: a phone deleted outright
-      // simply drops out of the label list.
-      refs = r.value.phone_ids
-        .map((id) => phoneMap.get(id))
-        .filter((x): x is Info => x !== undefined);
-    }
-    return { ...r, ref, refs };
-```
-
-Add `provider_phones`, `sms_providers` to the `@/db/schema` import, `inArray` to the drizzle import, and `isProviderPhoneSet` to the validators import.
+A post-review fix pass (2026-08-13) removed the hydration entirely: the phone-id collection branch, the `provider_phones`/`sms_providers` lookup query, `phoneMap`, and the `refs` field on the returned row. The imports that existed only for this (`provider_phones`, `sms_providers`, `inArray`, `isProviderPhoneSet`) were removed with it. `ref` is unaffected — it still resolves for `brand_id` / `offer_id` / `segment_id` / `contact_group_id` exactly as before; `provider_phone_set` rows simply carry `ref: null`, same as any other rule whose value isn't a numeric FK.
 
 - [ ] **Step 3: Verify by hand against a real segment**
 
@@ -1208,7 +1158,7 @@ Run: `npx tsc --noEmit`
 Expected: clean.
 
 Run: `npx eslint components/segments/rules-panel.tsx`
-Expected: the pre-existing baseline of **10 problems (4 errors, 6 warnings)** and no more. If the count rose, the new effect is calling setState in an effect body — move it into an event handler.
+Expected: **11 problems (4 errors, 7 warnings)** — the pre-existing 10 plus one `react-hooks/exhaustive-deps` warning on the new eager-fetch effect, unsuppressed and matching its 5 siblings (corrected 2026-08-13: an earlier pass suppressed this one warning to hold the count at 10, which hid a known false positive and made an otherwise-identical effect look inconsistent with its siblings for no real benefit). If the count rises above 11, or a *different* rule appears, that's a real regression — investigate.
 
 - [ ] **Step 6: Verify in the browser**
 

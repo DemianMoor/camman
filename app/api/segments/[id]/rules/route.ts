@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, sql as drizzleSql } from "drizzle-orm";
+import { and, asc, eq, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -6,19 +6,14 @@ import {
   brands,
   contact_groups,
   offers,
-  provider_phones,
   segment_rules,
   segments,
-  sms_providers,
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { verifyValueOwnership } from "@/lib/api/segment-rule-value-ownership";
-import {
-  getValueShapeForRuleType,
-  isProviderPhoneSet,
-} from "@/lib/validators/segment-rule-types";
+import { getValueShapeForRuleType } from "@/lib/validators/segment-rule-types";
 import { segmentRuleCreateSchema } from "@/lib/validators/segment-rules";
 
 function parseId(idParam: string) {
@@ -61,13 +56,8 @@ async function hydrateRefs(rows: RuleRow[], orgId: string) {
   const offerIds = new Set<number>();
   const segmentIds = new Set<number>();
   const contactGroupIds = new Set<number>();
-  const phoneIds = new Set<number>();
   for (const r of rows) {
     const shape = getValueShapeForRuleType(r.rule_type);
-    if (shape === "provider_phone_set" && isProviderPhoneSet(r.value)) {
-      for (const id of r.value.phone_ids) phoneIds.add(id);
-      continue;
-    }
     if (typeof r.value !== "number") continue;
     if (shape === "brand_id") brandIds.add(r.value);
     else if (shape === "offer_id") offerIds.add(r.value);
@@ -132,24 +122,6 @@ async function hydrateRefs(rows: RuleRow[], orgId: string) {
       );
     for (const row of g) contactGroupMap.set(row.id, row);
   }
-  const phoneMap = new Map<number, Info>();
-  if (phoneIds.size > 0) {
-    const rows2 = await db
-      .select({
-        id: provider_phones.id,
-        name: provider_phones.phone_number,
-        color: sms_providers.color,
-      })
-      .from(provider_phones)
-      .innerJoin(sms_providers, eq(sms_providers.id, provider_phones.provider_id))
-      .where(
-        and(
-          eq(provider_phones.org_id, orgId),
-          inArray(provider_phones.id, Array.from(phoneIds)),
-        ),
-      );
-    for (const row of rows2) phoneMap.set(row.id, row);
-  }
   return rows.map((r) => {
     const shape = getValueShapeForRuleType(r.rule_type);
     let ref: Info | null = null;
@@ -160,16 +132,7 @@ async function hydrateRefs(rows: RuleRow[], orgId: string) {
       else if (shape === "contact_group_id")
         ref = contactGroupMap.get(r.value) ?? null;
     }
-    // One entry per phone_id, in the value's order, so the editor can render
-    // labels positionally. Nulls are filtered: a phone deleted outright
-    // simply drops out of the label list.
-    let refs: Info[] | null = null;
-    if (shape === "provider_phone_set" && isProviderPhoneSet(r.value)) {
-      refs = r.value.phone_ids
-        .map((id) => phoneMap.get(id))
-        .filter((x): x is Info => x !== undefined);
-    }
-    return { ...r, ref, refs };
+    return { ...r, ref };
   });
 }
 

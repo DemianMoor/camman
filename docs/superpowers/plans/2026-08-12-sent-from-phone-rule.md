@@ -293,7 +293,7 @@ Expected:
 ```
 NULL rows:      1008689
 resolvable:     1008689
-distinct phones: [26,27,43]
+distinct phones: [26,43,45]
 Dry run — no rows written.
 ```
 If `NULL rows` ≠ `resolvable`, STOP and report — the design's core assumption has changed.

@@ -74,7 +74,7 @@ Measured on production 2026-08-12:
 | `provider_phone_id` stamped | 1,957,628 (66%) |
 | `provider_phone_id` NULL | **1,008,689 (34%)** |
 | of those NULL, resolvable via `campaign_stages.provider_phone_id` | **1,008,689 (100%)** |
-| distinct phones in the NULL set | 3 |
+| distinct phones in the NULL set | 3 — ids `26` (945,198 rows), `43` (63,490), `45` (1) |
 
 The cutover is clean: last unstamped send `2026-07-18`, first stamped
 `2026-07-20`.

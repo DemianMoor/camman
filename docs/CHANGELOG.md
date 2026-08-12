@@ -851,4 +851,9 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   5. `proxy.ts` protected-prefix list is narrower than the full protected route set.
 - Pre-existing `docs/security-notes.md` left untouched; linked from the index.
 
+## 2026-08-13 — Final whole-branch review fixes for feat/segment-rule-sent-from-phone — docs: 04-features/audience-segments, CHANGELOG
+- Documented `phone_type` and `carrier` in the rule-type table — this branch's migration `0129` (four-place-registration fix) makes both creatable for the first time; previously they were correctly omitted because `verifyValueOwnership` rejected them at creation.
+- Replaced the guessed "may approach the 10s timeout" caveat with production measurements: selective number 80.9 ms, worst-case dominant number 1,806 ms (vs. 8,480 ms pre-index) — clears both the 10s preview timeout and the 60s `snapshotAudience` activation budget with wide margin.
+- No schema/behavior change from the docs edits themselves; see the same-commit code fixes (schema.ts check-constraint + index drift, validator id ceiling, eval doc comment, rules-panel incomplete-check alignment, provider-phones org filter, backfill script header/citation/divergence-warning) in the commit this entry ships with.
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

@@ -35,6 +35,18 @@ function testGuard() {
   check("rejects a non-array phone_ids", !isProviderPhoneSet({ provider_id: 3, phone_ids: 26 }));
   check("rejects a missing provider_id", !isProviderPhoneSet({ phone_ids: [26] }));
   check("rejects zero/negative ids", !isProviderPhoneSet({ provider_id: 3, phone_ids: [0] }));
+  check(
+    "rejects a phone id above int4 max",
+    !isProviderPhoneSet({ provider_id: 3, phone_ids: [2147483648] }),
+  );
+  check(
+    "rejects a provider_id above int4 max",
+    !isProviderPhoneSet({ provider_id: 2147483648, phone_ids: [26] }),
+  );
+  check(
+    "accepts a phone id exactly at int4 max",
+    isProviderPhoneSet({ provider_id: 3, phone_ids: [2147483647] }),
+  );
   check("rejects null", !isProviderPhoneSet(null));
   check("rejects an array", !isProviderPhoneSet([26, 43]));
   check("rejects extra keys", !isProviderPhoneSet({ provider_id: 3, phone_ids: [26], period: "1w" }));

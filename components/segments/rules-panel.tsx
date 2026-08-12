@@ -202,9 +202,8 @@ function isRuleIncomplete(
   ) {
     return false;
   }
-  if (shape === "phone_type_set" || shape === "carrier_set") {
-    return !Array.isArray(value) || value.length === 0;
-  }
+  if (shape === "phone_type_set") return !isStringSubsetOf(value, PHONE_TYPE_VALUES);
+  if (shape === "carrier_set") return !isStringSubsetOf(value, CARRIER_VALUES);
   if (shape === "provider_phone_set") return !isProviderPhoneSet(value);
   return value === null || value === undefined;
 }

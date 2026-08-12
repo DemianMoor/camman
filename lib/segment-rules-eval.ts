@@ -93,8 +93,10 @@ function intArrayLiteral(values: number[]): string {
 }
 
 // Build the contact_id subquery for one rule. The returned fragment is a
-// parameterized "(SELECT contact_id FROM ...)" — the caller wraps it in
-// `contact_id IN (...)` or `contact_id NOT IN (...)` based on operator.
+// parameterized "SELECT contact_id FROM ..." — the caller combines it with
+// the running result via SQL set arithmetic (UNION / INTERSECT / EXCEPT),
+// not by wrapping it in `contact_id IN (...)` / `NOT IN (...)` — see
+// ruleSet/combinedOp/operandFor in buildSegmentAudienceClause below.
 function ruleInnerQuery(
   rule: {
     rule_type: string;

@@ -53,6 +53,11 @@ export function isStringSubsetOf<T extends string>(
 // while the user is mid-pick, and so ownership checks can assert both.
 export type ProviderPhoneSet = { provider_id: number; phone_ids: number[] };
 
+// int4 max — both sms_providers.id and provider_phones.id are `serial`
+// (postgres int4). Without a ceiling, Number.isInteger(1e21) is true and
+// String(1e21) renders "1e+21", which is invalid inside ARRAY[...]::int[].
+const INT4_MAX = 2147483647;
+
 export function isProviderPhoneSet(v: unknown): v is ProviderPhoneSet {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
   const o = v as Record<string, unknown>;
@@ -60,10 +65,21 @@ export function isProviderPhoneSet(v: unknown): v is ProviderPhoneSet {
   if (keys.length !== 2) return false;
   if (!keys.includes("provider_id") || !keys.includes("phone_ids")) return false;
   const pid = o.provider_id;
-  if (typeof pid !== "number" || !Number.isInteger(pid) || pid < 1) return false;
+  if (
+    typeof pid !== "number" ||
+    !Number.isInteger(pid) ||
+    pid < 1 ||
+    pid > INT4_MAX
+  ) {
+    return false;
+  }
   const ids = o.phone_ids;
   if (!Array.isArray(ids) || ids.length === 0) return false;
-  if (!ids.every((x) => typeof x === "number" && Number.isInteger(x) && x >= 1)) {
+  if (
+    !ids.every(
+      (x) => typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= INT4_MAX,
+    )
+  ) {
     return false;
   }
   return new Set(ids).size === ids.length;

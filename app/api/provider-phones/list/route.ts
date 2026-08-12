@@ -37,7 +37,13 @@ export async function GET(request: Request) {
       supports_api_send: sms_providers.supports_api_send,
     })
     .from(provider_phones)
-    .innerJoin(sms_providers, eq(sms_providers.id, provider_phones.provider_id))
+    .innerJoin(
+      sms_providers,
+      and(
+        eq(sms_providers.id, provider_phones.provider_id),
+        eq(sms_providers.org_id, orgId),
+      ),
+    )
     .where(
       includeArchived
         ? eq(provider_phones.org_id, orgId)

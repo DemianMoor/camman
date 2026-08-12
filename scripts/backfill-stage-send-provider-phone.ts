@@ -16,8 +16,21 @@
 // their value), never the other way around. The reversal file is written to
 // scripts/.backfill-0129-reversal.csv as (id, provider_phone_id-before)
 // pairs — the "before" column is always empty because every affected row's
-// prior value is NULL by construction of the WHERE clause. Reverse with:
-// UPDATE stage_sends SET provider_phone_id = NULL WHERE id IN (<ids>).
+// prior value is NULL by construction of the WHERE clause.
+//
+// Reverse with (a bare `id IN (<ids>)` list is not executable for
+// 1,008,689 rows — load the CSV into a temp table instead; strip the
+// "# run started …" marker lines first, they aren't valid CSV rows):
+//   grep -v '^#' scripts/.backfill-0129-reversal.csv > /tmp/backfill-0129-undo.csv
+//   psql "$DATABASE_URL" <<'SQL'
+//     CREATE TEMP TABLE backfill_0129_undo (id uuid, provider_phone_id text);
+//     \copy backfill_0129_undo FROM '/tmp/backfill-0129-undo.csv' WITH (FORMAT csv, HEADER true)
+//     UPDATE stage_sends ss SET provider_phone_id = NULL
+//       FROM backfill_0129_undo t WHERE ss.id = t.id;
+//   SQL
+// The CSV (scripts/.backfill-0129-reversal.csv) is a single local file,
+// gitignored and with no off-machine copy — if the undo path might ever
+// matter, copy it somewhere durable before it's lost.
 //
 // The reversal file is NEVER truncated: the CSV header is written only once
 // on first creation, and each --apply run appends a "# run started <ISO>"
@@ -112,15 +125,23 @@ async function main() {
 
       // 4. Write exactly the ids just recorded, driven by the explicit
       // (id, provider_phone_id) pairs captured above — not a fresh
-      // subquery — so the recorded set and the written set cannot diverge.
+      // subquery. The `AND ss.provider_phone_id IS NULL` re-check below
+      // means the recorded set is only a superset of the written set: a row
+      // stamped by the live app between the SELECT and this UPDATE is
+      // skipped here but still named in the reversal file (see the
+      // recorded-vs-written check after this query).
       // Bound as two arrays + unnest (constant 2 parameters per batch),
       // NOT a VALUES list of per-row placeholders (that scaled at 2
       // params/row and blew past the driver's 65534-parameter hard limit
       // at BATCH=50_000). drizzleSql's own `${jsArray}` interpolation does
       // NOT bind as a single array parameter either — it spreads back out
       // to one placeholder per element (same failure mode) — so this uses
-      // the underlying postgres-js client's `pg.array()`, which is the
-      // codebase's proven pattern for a real single-parameter array bind.
+      // the underlying postgres-js client's `pg.array()`, a real
+      // single-parameter array bind. (Not the same technique as
+      // lib/telnyx/pg-array.ts, which builds a raw `ARRAY[...]` string via
+      // `sql.raw()` — that file is a different mechanism, not a precedent
+      // for this one. `pg.array()` was verified independently for this
+      // script.)
       const ids = pg.array(batch.map((r) => r.id));
       const phones = pg.array(batch.map((r) => r.provider_phone_id));
       const rows = await db.execute<{ id: string }>(drizzleSql`
@@ -136,6 +157,20 @@ async function main() {
       `);
       total += rows.length;
       console.log(`  stamped ${total}`);
+
+      // Recorded-vs-written divergence check. Moot for the real run (counts
+      // matched exactly), but the script previously asserted nothing about
+      // it: if a row in this batch was stamped by the live app between the
+      // SELECT (step 1) and this UPDATE, it's still named in the reversal
+      // file but was NOT written by this run — replaying the reversal file
+      // as-is would then incorrectly NULL out that legitimate value.
+      if (rows.length !== batch.length) {
+        console.warn(
+          `  WARNING: batch recorded ${batch.length} id(s) for reversal but the UPDATE only wrote ${rows.length}. ` +
+            `${batch.length - rows.length} id(s) in the reversal file were NOT written by this run (likely stamped ` +
+            `concurrently by the live app) — replaying the reversal file would incorrectly NULL those rows.`,
+        );
+      }
     }
 
     const [post] = await db.execute<{ remaining: string }>(

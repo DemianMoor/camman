@@ -479,16 +479,50 @@ async function main() {
     );
   }
 
-  const codes = new Set(results.map((r) => r.status));
+  // Verdict, derived from what A3 ACTUALLY DID — not from the spread of status
+  // codes across the run. The original heuristic ("more than one distinct status
+  // ⇒ real status codes ⇒ Text Request-shaped") drew exactly the wrong
+  // conclusion on the first live run: it saw A8's 429 alongside the 200s and
+  // reported TR-shaped, when in fact A3's bad key had returned HTTP 200 with the
+  // failure only in the body — i.e. Ahoi-shaped, the opposite. The question is
+  // never "how many status codes appeared", it is "does a hard auth failure
+  // still come back 2xx". Only A3 answers that, so only A3 decides.
+  const a3 = results.find((r) => r.id.toUpperCase().startsWith("A3"));
+  const a3BodyErrored = typeof a3?.parsed?.status === "string" && a3.parsed.status.toLowerCase() === "error";
+  // status 0 is OUR transport failure (timeout / DNS / refused), not a response
+  // Tells sent — listing it as a "non-2xx status" invites reading a local
+  // network problem as provider behaviour.
+  const nonOkCodes = [
+    ...new Set(results.filter((r) => r.status >= 400).map((r) => r.status)),
+  ].sort((a, b) => a - b);
+  const transportFailures = results.filter((r) => r.status === 0).length;
+
   console.log(`\n${RULE}`);
   console.log("READ THIS BEFORE MOVING ON:");
-  console.log(
-    codes.size === 1 && codes.has(200)
-      ? "  • Every call returned HTTP 200, INCLUDING A3's bad key ⇒ Tells is Ahoi-shaped:\n" +
-        "    classify off the BODY, never the HTTP status."
-      : `  • Distinct HTTP statuses observed: ${[...codes].sort().join(", ")} ⇒ Tells appears to use\n` +
-        "    real status codes (Text Request-shaped). Classification keys off HTTP AND body.",
-  );
+  if (!a3) {
+    console.log("  • A3 was not run, so the classification question is UNANSWERED. Do not");
+    console.log("    infer the shape from the other probes — only a rejected key settles it.");
+  } else if (a3.status >= 200 && a3.status < 300 && a3BodyErrored) {
+    console.log(`  • A3 (bad key) returned HTTP ${a3.status} with body.status="error" ⇒ Tells is`);
+    console.log("    AHOI-SHAPED. Classify off the BODY. A status-only classifier would read a");
+    console.log("    total auth failure as a success.");
+  } else if (a3.status >= 400) {
+    console.log(`  • A3 (bad key) returned HTTP ${a3.status} ⇒ Tells rejects auth with a real status`);
+    console.log("    code (Text Request-shaped). Classification can key off HTTP, but keep the");
+    console.log("    body check — this CONTRADICTS the 2026-08-12 probe and needs re-verifying.");
+  } else {
+    console.log(`  • A3 (bad key) returned HTTP ${a3.status}, body.status=${String(a3.parsed?.status ?? "—")} —`);
+    console.log("    an unexpected shape. Do not classify off this run; investigate first.");
+  }
+  if (nonOkCodes.length > 0) {
+    const note = nonOkCodes.includes(429) ? " (429 = duplicate detection, see A8)" : "";
+    console.log(`  • Non-2xx responses also seen: ${nonOkCodes.join(", ")}${note}.`);
+    console.log("    ADDITIONAL failure signals — not evidence about auth classification.");
+  }
+  if (transportFailures > 0) {
+    console.log(`  • ${transportFailures} call(s) never got a response (timeout / network). That is OUR`);
+    console.log("    side failing, not Tells's behaviour — re-run before drawing any conclusion.");
+  }
   console.log("  • Now check the handset: which probes actually ARRIVED, and did A6's link survive?");
   console.log("  • Then the B/C series: capture route + Vercel runtime logs (spec §5.0).");
   console.log(RULE);

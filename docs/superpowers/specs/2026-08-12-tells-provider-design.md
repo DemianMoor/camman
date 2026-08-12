@@ -1,9 +1,11 @@
 # Tells.co SMS provider — design (Phases 0–5)
 
-**Status:** approved design, build gated.
+**Status:** **Phase 0 CLOSED (2026-08-12).** Design approved; Phases 1–5 gated.
 **Last updated:** 2026-08-12
 **Provider key:** `tls`
-**Build gate:** txr S1 passing **and** ClickUp card [`869e97atu`](https://app.clickup.com/t/869e97atu) ("Build API Connection with TextRequest") closing. As of 2026-08-12 that card is still `to do`, so Phases 1–5 are blocked. Phase 0 is manual and unblocked.
+**Build gate:** txr S1 passing **and** ClickUp card [`869e97atu`](https://app.clickup.com/t/869e97atu) ("Build API Connection with TextRequest") closing. As of 2026-08-12 that card is still `to do`, so Phases 1–5 are blocked.
+
+> **Read §5.1 first.** It is the verified payload contract from the live probe and it **supersedes §2**, which is the pre-probe claim and was wrong in eight places. §2 is kept only to show what changed.
 
 > Sequencing note: an earlier draft of this brief gated Tells on the `feat/textrequest-send` branch merging. That already happened — PR #42 (`102baa2`), with #46/#47 landing after it. The real gate is the two conditions above.
 
@@ -19,9 +21,9 @@ Outbound send + delivery receipts + inbound STOP intake. Everything in CLAUDE.md
 
 ---
 
-## 2. API contract as supplied (pre-Phase-0)
+## 2. API contract as supplied (pre-Phase-0) — ⚠️ SUPERSEDED BY §5.1
 
-Everything in this section is **claimed, not observed**. Phase 0 (§5) confirms or corrects each item.
+**Do not build against this section.** It records what Tells's dashboard screenshot and support answers *claimed* before the live probe. Phase 0 corrected it in eight places, several of which would have caused silent bugs. **[§5.1](#51-payload-contract-verified--this-supersedes-2) is the contract**; this section survives only as the before-picture and to make the corrections legible.
 
 ### Send
 
@@ -155,14 +157,33 @@ The handler extracts roughly eight strings inside a `try/catch` that writes `NUL
 
 The considered alternative — a `GENERATED` column over a `jsonb` cast of the body — was rejected because a malformed body would then fail the insert, which is the precise failure mode this design exists to prevent.
 
-### 4.5 Silence monitors
+### 4.5 Silence monitors — the SOLE detection layer for broken STOP intake
 
 Telegram, breach-only, following the EPC monitor pattern ([app/api/reports/epc-monitors/route.ts](../../../app/api/reports/epc-monitors/route.ts)) — a periodic all-clear message trains people to ignore the channel.
 
-- **DLR silence.** After a Tells batch, DLR coverage below threshold within 30 minutes of send completion → alert.
-- **Inbound silence.** Zero inbound events across N thousand Tells sends → alert. STOPs arrive at a predictable rate on any real send; silence means the intake is broken, not that everyone loves us.
+**Priority raised after Phase 0.** These were originally one safety net among several. They are now the only one. With STOP-undelivered self-healing closed as won't-build (§8) and no reconciliation API in existence, **a broken inbound webhook produces no other symptom** — sends keep succeeding, DLRs keep arriving, dashboards look healthy, and STOPs pile up unsuppressed until a carrier complaint surfaces it. Nothing else in the system can notice. Treat these as compliance infrastructure, not observability polish: **Phase 4 does not ship without them, and Phase 5 does not go live without them armed.**
 
-Thresholds are proposed here and **calibrated in Phase 5** against observed Phase 0/Phase 5 rates. A monitor tuned on guesses is a monitor that gets muted.
+- **Inbound silence.** Zero inbound events across N thousand Tells sends → alert. STOPs arrive at a predictable rate on any real send; silence means the intake is broken, not that everyone loves us. This is the compliance-critical one.
+- **DLR coverage.** After a Tells batch, DLR coverage below threshold within 30 minutes of send completion → alert.
+
+**The DLR-coverage monitor must count events per outcome, not per message** (§5.1):
+
+- a **successful** message produces **2** callbacks — `sent` then `delivered`
+- a **failed** message produces **1** — `undelivered`, with no preceding `sent`
+
+A monitor that assumes two events per message will read every genuine failure as a coverage gap and fire constantly, which is how it ends up muted. Compute expected events as `2 × delivered + 1 × undelivered`, or simply track *messages with ≥1 terminal event* rather than raw event counts.
+
+Thresholds are proposed here and **calibrated in Phase 5** against observed rates. A monitor tuned on guesses is a monitor that gets muted.
+
+### 4.6 The `Key` redaction carve-out — a hard Phase 3 requirement
+
+The inbound webhook body contains **the full Tells API key** in its `Key` field (§5.1) — not a webhook secret, the live sending credential.
+
+Applied literally, §4.1's "capture `raw_body` verbatim" would write that credential in plaintext into `tells_webhook_events.raw_body`, where it would land in every database backup and any future export. That breaches CLAUDE.md §11 ("never log secrets") outright.
+
+**The rule:** capture stays byte-for-byte verbatim **except** the `Key` field, which is validated against the stored credential and then replaced with a fixed marker (e.g. `"[REDACTED]"`) before the row is persisted. Surgical — one field, everything else untouched, including whitespace and ordering.
+
+This is **not** contingent on the rotation decision in §5. Rotation was declined because the exposure in runtime logs was judged acceptable; a live credential replicated into every DB backup is a different and larger exposure, and this carve-out stands regardless. Phase 3 is not complete without it.
 
 ---
 
@@ -256,11 +277,113 @@ Key rotation carries a **different** ordering constraint from the `inbound_webho
 | D1 | Burst ~40 sends in one second. Record what a breach looks like (429? error body? silent drop?). | Whether the drain needs Tells-specific backoff, and whether breaches are observable at all |
 | D2 | Note observed per-send latency. | Drain throughput sizing |
 
-**Exit criteria:**
+**Exit criteria — ALL MET, Phase 0 CLOSED 2026-08-12.**
 
-1. A written payload contract — verbatim example bodies for send-success, send-error, DLR (each status), and inbound (normal + STOP) — appended to this document. **Nothing in Phases 1–3 is written against a guess.**
-2. **Rotate the Tells API key** (§5.0). It sat unredacted in runtime logs for the duration of the probe, and this is the last moment the rotation is free — after Phase 3 ships F1's `Key` check, it needs coordinating with Tells's cutover.
-3. **Delete the capture route** once its payloads are transcribed, or at Phase 3 at the latest. It is a public endpoint whose only job is finished.
+1. ✅ Payload contract documented — §5.1 below. Every line is an observed byte, not a claim.
+2. ⛔️ **API key rotation — considered and DECLINED** (Dmytro, 2026-08-12). The inbound webhook echoes the full API key (§5.1), so it now sits in Vercel runtime logs and in the exported log files. Rotation was recommended and declined as an accepted risk: the exposure is confined to accounts we control, and the echo is Tells's design rather than a leak we introduced. **This does not relax the Phase 3 redaction requirement (§4.6)** — a credential in a database column is a different exposure class from one in a log with a retention window.
+3. 🔁 **Capture-route deletion MOVED to the Phase 3 exit.** It stays live through the Phase 3 build so the real handler can be developed against live traffic. It is a public endpoint; deleting it is a Phase 3 completion criterion, not an optional cleanup.
+
+---
+
+## 5.1 Payload contract (VERIFIED — this supersedes §2)
+
+Captured 2026-08-12 against provider 855 / credential 712 / TFN `+18445694179`. §2 records what was *claimed*; this section records what was *observed*. **Where they disagree, this section wins.**
+
+### Send request
+
+`POST https://app.tells.co/api/sms.php`, `application/x-www-form-urlencoded`, params `key`, `from`, `to`, `message`, optional `metadata`. **Both `+1XXXXXXXXXX` and bare `1XXXXXXXXXX` are accepted for `to`**; the response always echoes the bare 11-digit form, so `toTellsRecipient()` emits bare 11-digit.
+
+### Send response — success (HTTP 200)
+
+```json
+{"id":"2303145641","to":"15717709669","from":"18445694179","message":"CamMan probe A1a e164","status":"queued","sms_count":1,"sms_charge":0.0128,"date":"2026-08-12T21:59:02+00:00","timezone":"UTC"}
+```
+
+Lowercase keys. `id`/`to`/`from`/`message`/`status`/`date`/`timezone` are **strings**; `sms_count`/`sms_charge` are **numbers**. `metadata` is **not** echoed here. `status` is always `queued` on success.
+
+### Send response — errors (⚠️ ALL HTTP 200)
+
+```json
+{"status":"error","message":"Invalid api key."}
+{"status":"error","message":"From number is required."}
+{"status":"error","message":"Service Unavailable: The phone number (12025550143) is not enabled for SMS API."}
+```
+
+**A bad API key returns HTTP 200.** Classification MUST key off the body; HTTP status alone would read a total auth failure as success. Ahoi-shaped, not Text Request-shaped. `from` is validated *before* `key`.
+
+### Send response — duplicate (HTTP 429)
+
+```json
+{"status":"error","message":"Duplicate request detected. Please try again later."}
+```
+
+A byte-identical repeat is rejected. The brief's "no idempotency key" is wrong — Tells has duplicate detection. Window and key-fields unknown (Q5).
+
+### Multi-segment
+
+187 chars → `sms_count: 2`, `sms_charge: 0.0256`, and **one `id`**. Multi-segment does **not** fragment DLRs — 1:1 correlation holds, unlike Ahoi. `sms_charge` is $0.0128 per segment.
+
+### DLR webhook — success path (2 events: `sent`, then `delivered`)
+
+```json
+{"Id":2303145809,"To":15717709669,"From":18445694179,"Status":"delivered","Date":"2026-08-12T21:59:09Z","Timezone":"UTC","ErrorMessage":"No error.","metadata":null}
+```
+
+### DLR webhook — failure path (1 event: `undelivered`, no preceding `sent`)
+
+```json
+{"Id":2303223141,"To":15717709669,"From":18445694179,"Status":"undelivered","Date":"2026-08-12T22:21:58Z","Timezone":"UTC","ErrorMessage":"Network Error","metadata":null}
+```
+
+### DLR webhook — with metadata
+
+```json
+"metadata":"{\"stage_send_id\":\"00000000-0000-0000-0000-000000000000\",\"probe\":\"a7b\"}"
+```
+
+### Inbound webhook (STOP)
+
+```json
+{"Key":"<THE FULL TELLS API KEY, 50 chars>","To":18445694179,"From":15717709669,"Body":"Stop","SMSCount":1,"SMSCharge":"0.0128","Date":"2026-08-12T22:19:46+00:00","Timezone":"UTC"}
+```
+
+No `Id` field — inbound has no provider message id, which is why the dedup key must be composite. `Body` arrives as `"Stop"` (capitalized, undecorated); `isOptOutKeyword()` uppercases the first token, so it matches unchanged. **Inbound messages are billed** at $0.0128.
+
+### Corrections to §2 — each of these would have caused a silent bug
+
+| §2 claimed | Observed |
+|---|---|
+| `Metadata` (PascalCase) | **`metadata` — lowercase**, the only lowercase field on an otherwise PascalCase DLR. Reading `Metadata` yields `undefined` on every callback, which would have looked like "Tells doesn't echo metadata" |
+| omitted when no metadata supplied | **always present**, `null` when absent |
+| metadata is "string or JSON object" | **always returned as a STRING.** A JSON object round-trips as an escaped JSON string; Phase 2 must `JSON.parse` it inside a try/catch |
+| `Key` present on the status webhook | **absent entirely.** The path token is the only auth available for DLRs (F1) |
+| `Key` = origin verification | **`Key` IS the full API key**, not a separate webhook secret. See §4.6 |
+| "No webhook retries. Single attempt." | **4 attempts at exactly 60s intervals (~3 min), then abandoned** — *and the message's remaining statuses are abandoned with it* |
+| "No idempotency key on send" | HTTP 429 duplicate detection on byte-identical requests |
+| status enum incl. `queued` | The webhook emits only `sent`, `delivered`, `undelivered`. `queued` appears on the send response only |
+
+### Type asymmetries — coerce on both sides
+
+| field | send response | webhook |
+|---|---|---|
+| `id` / `Id` | string `"2303145641"` | **number** `2303145641` |
+| `to` / `To`, `from` / `From` | string | **number** |
+| `sms_charge` / `SMSCharge` | **number** `0.0128` | **string** `"0.0128"` (inbound) |
+
+Every shared field crosses the boundary with a different type. Correlation that doesn't coerce will silently never match. Values stay well under 2^53, so no precision risk.
+
+### Dates — all truthfully UTC, two formats, and one trap
+
+Send response and inbound use `+00:00`; the DLR uses `Z`. A parser must accept both. **`Timezone: "UTC"` is truthful** — every `Date` was verified against its receipt time to the second. No TextHub-style lie, so the TEXT-not-timestamptz storage decision (F2) is a cheap safety net rather than a load-bearing fix.
+
+⚠️ **`Date` is the delivery-ATTEMPT timestamp, not the status-transition time.** It advances on every retry (`22:08:54Z` → `22:09:54Z` → …). Never put `Date` in a DLR dedup key — retries would each book a separate event. `(Id, Status)` is correct and was verified stable across 4 redeliveries.
+
+### Operational
+
+- **Source IPs:** DLRs from `3.151.97.159`, `3.151.97.190`, `18.223.179.90`; inbound from `13.59.174.129`. All AWS (ASN 16509) but **different ranges, and inbound uses different infrastructure entirely** — different TLS fingerprint. An IP allowlist is not viable.
+- **User-Agent:** DLRs send `TellsWebhookProcessor/2.0 (+18445694179)` — and sometimes `(18445694179)` without the `+`. **Inbound sends no `user-agent` header at all.** Not usable as a signal.
+- `content-type: application/json` on both webhooks.
+- **Latency:** `sent` ~1s after send, `delivered` ~5s. A failure's `undelivered` lands in <1s. Send API 128–733ms.
 
 ---
 
@@ -395,24 +518,31 @@ The provider row (`tls`, `supports_api_send = false`) and the `provider_phones` 
 
 ## 7. Phase plan
 
-### Phase 0 — live probe
-§5. Send probes are manual; the webhook probes require the temporary capture route (§5.0) to be deployed, which merges against ClickUp card [`869egfjx2`](https://app.clickup.com/t/869egfjx2) ("Build API connection with Tells"). No migrations.
+### Phase 0 — live probe ✅ CLOSED 2026-08-12
+§5. Ran against provider 855 / credential 712 / TFN `+18445694179`, ~11 billable messages, ~$0.14. Every A/B/C probe answered (B9 skipped as redundant once B7 mapped the retry behaviour — carried as Q6). Output: **§5.1, the verified payload contract**, which supersedes §2 and corrects it in eight places. Merged against ClickUp card [`869egfjx2`](https://app.clickup.com/t/869egfjx2).
 
-Exit is three things, not one (§5): the documented payload contract, **the Tells API key rotated**, and the capture route deleted. The rotation is scheduled rather than optional because it is free only until Phase 3 ships F1's `Key` validation.
+Exit: contract documented ✅ · key rotation **declined** (§5) ⛔️ · capture-route deletion **moved to the Phase 3 exit** 🔁.
 
 ### Phase 1 — skeleton
 Provider row (`tls`, `supports_api_send = false`), credential via encrypted `provider_credentials`, phone row at `max_sends_per_second = 30`, migration 0129 for `tells_webhook_events`. Additive migration leads the code.
+
+**Already done out-of-band:** the provider row, credential 712 and the TFN phone row were created through the UI during Phase 0 (no migration, no script). `supports_api_send` was set back to `false` on 2026-08-12 after being found `true` with no adapter registered. So Phase 1 reduces to the migration plus the adapter skeleton.
 **Gates:** ClickUp card before migration or merge. Migration itself = Dmytro approval.
 
 ### Phase 2 — send path
-Adapter maps `NormalizedSendParams` → POST. Adds the additive optional `metadata` field to `NormalizedSendParams` (F5); `metadata` carries `stage_send_id` for DLR correlation. **No retry on timeout** — there is no idempotency key, so a timeout-retry is a potential double-send. Normalize `status:"error"` bodies into failures.
+Adapter maps `NormalizedSendParams` → POST, per the verified contract in §5.1: bare 11-digit recipients, **classify off the body not the HTTP status**, coerce `id` to string. Adds the additive optional `metadata` field to `NormalizedSendParams` (F5); `metadata` carries `stage_send_id` for DLR correlation, and comes back as an escaped JSON **string** to be parsed. **No retry on timeout** — Tells does dedupe byte-identical sends (429), but the window is unknown (Q5), so a retry is still a potential double-send.
 
 ### Phase 3 — webhook intake
 §4. Both routes, the sweeper cron, the dedup counter, the org-resolution failure path.
-**Gate:** the STOP-undelivered auto-suppression component is **out of scope pending C3's exact text and explicit Dmytro approval** (§8).
+
+**Hard requirements, not optional polish:**
+- **`Key` redaction before persist (§4.6).** The inbound body carries the live API key; it must never reach `raw_body`.
+- **Delete the temporary capture route** (`app/api/webhooks/tells/probe-*`). Moved here from the Phase 0 exit so the real handler can be built against live traffic. It is a public endpoint — Phase 3 is not complete while it exists.
+
+**No longer gated:** STOP-undelivered self-healing is **closed as won't-build** (§8), so Phase 3 no longer carries a compliance-approval gate.
 
 ### Phase 4 — monitors + runbook
-Both silence monitors (§4.5), the insert-failure alert, the org-resolution-failure alert, and the weekly reconciliation runbook:
+**Elevated after Phase 0: these monitors are the only detection layer for broken STOP intake (§4.5). Phase 4 does not ship without them.** Both silence monitors, the insert-failure alert, the org-resolution-failure alert, and the weekly reconciliation runbook:
 
 - Tells UI counts vs CamMan `send_attempts` + inbound counts for the same day. This is the only true reconciliation available.
 - `SUM(duplicate_count)` and the count of rows with `duplicate_count > 0` for the period — diagnostic only, never an alert.
@@ -430,11 +560,30 @@ Then ramp from ~10/s toward 30/s over days. **30 is Tells's limit, not the toll-
 
 ---
 
-## 8. Explicitly out of scope pending approval
+## 8. STOP-undelivered self-healing — CLOSED, WON'T BUILD
 
-**STOP-undelivered self-healing.** A DLR with `Status: undelivered` and a STOP-related `ErrorMessage` means the network knows about an opt-out we missed, and would auto-write that number to suppression. It is the only automated recovery for a missed STOP, and it is opt-out/compliance logic that writes to the suppression list based on a pattern-matched provider error string.
+**Decision: 2026-08-12, on Phase 0 probe C3 evidence. This is closed, not deferred.**
 
-It requires **both** the exact `ErrorMessage` text from Phase 0 C3 **and** explicit Dmytro approval before any code is written. Until both exist it is not part of Phase 3.
+The design was: a DLR with `Status: undelivered` and a STOP-related `ErrorMessage` means the network knows about an opt-out we missed, so auto-write that number to suppression. It was the only automated recovery for a missed STOP, and it was gated on Phase 0 producing the exact error string.
+
+**Probe C3 produced `ErrorMessage: "Network Error"`.** A message sent to a handset that had just opted out came back:
+
+```json
+{"Id":2303223141,"Status":"undelivered","ErrorMessage":"Network Error","metadata":null, …}
+```
+
+That string is not opt-out-specific. It is exactly what a transient carrier failure, an unreachable handset, a dead number, or congestion would also produce. **No field in the payload distinguishes "recipient opted out" from "delivery failed for a boring reason"** — not `Status`, not `ErrorMessage`, not anything else.
+
+**Why that closes it rather than deferring it.** Keying auto-suppression off `"Network Error"` would permanently remove reachable, consenting contacts from the audience every time a delivery hiccupped. That failure is:
+
+- **silent** — a suppressed contact looks identical to a legitimately opted-out one
+- **compounding** — every transient failure permanently shrinks the addressable audience
+- **hard to undo** — nothing records *why* a number was suppressed, so there's no safe way to reverse it later
+- **directly revenue-costing**, in exchange for recovering an opt-out we would have captured via the inbound webhook anyway
+
+The feature is not blocked on a threshold, an approval, or a better regex. **The signal it requires does not exist at this provider.** Do not reopen it unless Tells introduces a distinct opt-out error code — and if that happens, verify it against a live probe first, because the doc has been wrong about this API in eight separate places (§5.1).
+
+**Consequence, carried into §4.5:** the inbound webhook is now the *only* automated STOP path, and the inbound-silence monitor is the *only* thing that can notice it breaking. Priority raised accordingly.
 
 ---
 
@@ -442,10 +591,12 @@ It requires **both** the exact `ErrorMessage` text from Phase 0 C3 **and** expli
 
 | # | Question | Resolved by |
 |---|---|---|
-| Q1 | Where does `sms_charge` live? No field on `SendSmsResult`, no column on `send_attempts` (F4). Today it survives only inside `raw_body`. | Phase 2 design, once A5/C4 show whether the number is worth persisting |
-| Q2 | Does Tells accept more than one webhook URL per account? If so, credential rotation gets a true dual-token window instead of a procedural one. | Phase 0, opportunistic |
+| Q1 | Where does `sms_charge` live? No field on `SendSmsResult`, no column on `send_attempts` (F4). Today it survives only inside `raw_body`. Phase 0 confirmed it's worth persisting: $0.0128/segment, and **inbound messages bill too**. | Phase 2 design |
+| Q2 | Does Tells accept more than one webhook URL per account? If so, path-token rotation gets a true dual-token window instead of a procedural one. | Not answered in Phase 0; opportunistic |
 | Q3 | What are the actual silence-monitor thresholds? | Phase 5 calibration |
 | Q4 | Does the toll-free network tolerate 30 MPS on a fresh TFN? | Phase 5 ramp |
+| Q5 | **What does the send-side duplicate detection key on, and over what window?** A byte-identical repeat 429s (§5.1). If it keys on `(to, message)` over a long window, two stages sending the same creative to the same contact would be silently refused — a real product constraint, not just a retry-safety nicety. | Phase 2, before any multi-stage Tells campaign |
+| Q6 | Does a **slow ack** (>12s) enter the same 4×60s retry path as an error ack? Probe B9 was skipped once B7 mapped the retry behaviour. | Phase 3, if the inline-processing step ever approaches the timeout |
 
 ---
 
@@ -453,6 +604,6 @@ It requires **both** the exact `ErrorMessage` text from Phase 0 C3 **and** expli
 
 - Recon → findings → approval → build → verify → commit.
 - No migrations or merges without a ClickUp card.
-- Self-merge on green verification **except**: migrations, opt-out/compliance logic (§8), carrier pacing (Phase 5 caps and ramp), provider credentials, and production data writes — those wait for Dmytro.
+- Self-merge on green verification **except**: migrations, opt-out/compliance logic, carrier pacing (Phase 5 caps and ramp), provider credentials, and production data writes — those wait for Dmytro. (The §8 self-healing gate is retired — that feature is closed as won't-build, not pending.)
 - Hand-authored multi-statement migrations need `--> statement-breakpoint`.
 - The TextHub DLR workstream stays out of this workstream entirely.

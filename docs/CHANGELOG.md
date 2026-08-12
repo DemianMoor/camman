@@ -2,6 +2,20 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-12 — Tells.co Phase 0: TEMPORARY webhook capture route (`/api/webhooks/tells/probe-<token>`) — docs: superpowers/specs/2026-08-12-tells-provider-design §5.0, CHANGELOG
+- **Temporary, delete-on-Phase-3.** New public route logs method, headers, full URL and raw body verbatim to the console with a `[tells-probe]` prefix, returns `200` JSON, and does nothing else — no DB, no parsing, no processing. Payloads are read from Vercel runtime logs. (ClickUp 869egfjx2.)
+- Replaces the originally-planned webhook.site bin: the Tells **inbound payload carries our Tells API key in its `Key` field**, so captured payloads must stay on our own infrastructure.
+- Auth is the unguessable path segment only. `/api/*` is excluded from the `proxy.ts` middleware matcher, so no gating change was needed. `?delay=<ms>` (capped 55s, `maxDuration = 60`) exists solely for probe B9's slow-ack test and logs before delaying.
+- **Deliberately unredacted logging** — verbatim capture is the point of Phase 0 — which means runtime logs will contain the Tells API key. Rotate after Phase 0 if we want to be strict; the spec §5.0 records why key rotation has a *different* ordering constraint from the path-token rotation in §4.3.
+- Not added to `05-flows.md` on purpose: the route is ephemeral, and diagramming it would imply a permanent flow that gets deleted in Phase 3. §5.0 of the spec is its documentation surface.
+
+## 2026-08-12 — Tells.co SMS provider (`tls`): approved design spec, build gated — docs: superpowers/specs/2026-08-12-tells-provider-design, CHANGELOG
+- Design only — **no code, no migration, no provider row**. Build is gated on txr S1 passing and ClickUp card `869e97atu` closing (still `to do` at time of writing).
+- Spec: [superpowers/specs/2026-08-12-tells-provider-design.md](superpowers/specs/2026-08-12-tells-provider-design.md). Covers the (undocumented, support-supplied) Tells API contract, a 25-item Phase 0 live-probe checklist, the `tells_webhook_events` schema (provisionally migration 0129), and the Phase 1–5 plan with approval gates.
+- Core design divergence from the `ahoi_*`/`textrequest_*` two-table pattern: **one** append-only `tells_webhook_events` table with a `kind` discriminator, captured persist-first (single committed INSERT, then best-effort inline processing, then ack) and drained by a cron sweeper. Justification: Tells has no webhook retry, no replay, and **no reconciliation API of any kind**, so the table is the only copy and the only retry surface — unlike Ahoi/TR, which are both backstopped by a poll.
+- Recorded gotchas: the status webhook carries **no `Key` field** (so the path token is the only viable auth gate there); `Date`/`Timezone` are captured as verbatim TEXT, never cast at capture, because TextHub claimed UTC while sending Mountain and Text Request repeated the bug.
+- STOP-undelivered auto-suppression is explicitly **out of scope** pending the exact provider error text from Phase 0 and separate compliance approval.
+
 ## 2026-08-12 — Segment rules: rule-type + FK value dropdowns are now type-to-search (`<SearchableSelect>`) — docs: 04-features/ui-system, 04-features/audience-segments, 07-conventions, CHANGELOG
 - New shared `components/searchable-select.tsx`: the single-select sibling of `MultiSelectPicker` (Radix Popover + filter input + ↑/↓/Enter nav, commits one value and closes on pick). Its trigger mirrors `<SelectTrigger>` styling so it drops into an existing row without shifting layout.
 - Applied in `components/segments/rules-panel.tsx` to the **rule type** (22 options) and the **brand/offer/segment/contact-group value** pickers (up to 500 rows each), which had no search at all. Operator, AND/OR combinator, and lookback period stay plain `<Select>`s (2–8 options) — the ≤10-option threshold is now written down in 07-conventions.

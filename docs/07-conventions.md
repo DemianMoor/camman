@@ -291,6 +291,28 @@ All three were caught, but only because the output happened to print enough deta
 - **Before trusting a green check, confirm what it examined.** Read the count and the names, not just the tick.
 - **Confirm the base commit before building on a branch.** `git worktree add ... origin/main` uses whatever `origin/main` was last fetched, which may be several merges stale.
 
+## Working copy — do multi-step work in a throwaway worktree, never in `C:/AFF/camman` directly
+
+`C:/AFF/camman` is a **shared checkout**. More than one agent session works in this repo at a time, and any of them can move its `HEAD` between two of your commands. Git offers no warning and no lock.
+
+The failure this produces is quiet and lands on someone else's work. On 2026-08-12 a session ran `git checkout -b` and committed, and by the time it ran `git branch -m <newname>` a concurrent session had switched the shared checkout onto *its* branch — so the rename retargeted and renamed **the other session's branch**. `git branch -m <newname>` renames whatever `HEAD` currently points at; it never errors, it just silently hits the wrong thing. Uncommitted edits are worse: they follow `HEAD` and can end up staged onto a branch they have nothing to do with.
+
+**The rule: for any task beyond a single read-only command, work in your own worktree.**
+
+```sh
+git fetch origin
+git worktree add -b <branch> .claude/worktrees/<name> origin/main
+```
+
+- **Branch from `origin/main`, never local `main`** — local `main` runs far behind and is checked out in another worktree anyway (see the base-commit note above).
+- **Worktrees have no `node_modules`** (they share `.git`, not dependencies). Junction the shared one instead of a multi-minute install:
+  `cmd //c "mklink /J node_modules C:\AFF\camman\node_modules"`
+- **Remove that junction with `cmd //c "rmdir node_modules"`, NEVER `rm -rf`.** `rm -rf` follows the junction and deletes the main checkout's dependencies. Unlink *before* `git worktree remove`.
+- **Clean up when the branch merges:** `git worktree remove <path>` then `git worktree prune`. Stale worktrees are not free — repo-wide `npm run lint` walks every one of them.
+- Prefer explicit two-argument git forms (`git branch -m <old> <new>`) over "operate on the current branch" forms, which silently follow a `HEAD` you did not move.
+
+If you do disturb another branch, the fix is usually clean — a rename touches no commits and preserves upstream config, so `git branch -m <wrong> <original>` restores it. Say so plainly rather than quietly correcting it; the other session may be mid-task.
+
 ## Migration ordering — additive leads the code, destructive follows it
 
 [CLAUDE.md §14](../CLAUDE.md) says to apply migrations **before** pushing the code that depends on them. That is correct for **additive** changes (a new table or column): the code needs the schema to exist, and an unused new column harms nothing while it waits.

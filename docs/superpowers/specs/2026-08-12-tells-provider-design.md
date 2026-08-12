@@ -183,11 +183,15 @@ The route does exactly one thing: write method, headers, full URL and raw body t
 - **Distinguishing the two channels:** both config fields point at one URL, and the payload shape separates them (`Id`/`Status` = DLR, `Key`/`Body` = inbound). If Tells accepts a query string in those fields, `?src=dlr` / `?src=inbound` makes the logs filterable for free — the full URL is logged either way.
 - **Reachability:** `GET` the URL in a browser to confirm the route is live before configuring Tells. Tells itself always POSTs.
 - **Ack shape:** the route returns `{"status":"success","ok":true}`. Tells asks for "a success response in JSON" without specifying the shape, and a probe bin whose ack gets rejected would corrupt the very B7/B9 results it exists to measure.
-- **B9 delay parameter:** appending `?delay=20000` holds the response ~20s, past Tells's 12s webhook timeout. The payload is logged *before* the delay starts, so B9 still captures its event even if the function is killed mid-hold. Capped at 55s, with `maxDuration = 60` on the route. One-off and manual — Tells is never configured with a delay in the URL.
+- **Two one-off probe parameters**, both applied *after* the payload is logged so neither can cost us an event. Tells is never configured with either — they are appended by hand for a single request.
+  - `?delay=<ms>` (**B9**): holds the response past Tells's 12s webhook timeout. `?delay=20000` for the real test. Capped at 55s, with `maxDuration = 60` on the route.
+  - `?status=<code>` (**B7**): forces a non-2xx ack so we can see whether Tells retries a rejected webhook. `?status=500` for the real test. A value that isn't a plausible HTTP status (200–599 integer) is ignored and falls back to `200`, so a typo can never turn a real capture into a rejected one. The `GET` reachability handler ignores both — a liveness check that hangs or `500`s defeats its own purpose.
 
-**The API key will be in our runtime logs.** Logging is deliberately unredacted — verbatim capture is the entire point of Phase 0 — and the inbound payload's `Key` field is the Tells API key. If we want to be strict, rotate the key after Phase 0.
+**The API key will be in our runtime logs.** Logging is deliberately unredacted — verbatim capture is the entire point of Phase 0 — and the inbound payload's `Key` field is the Tells API key.
 
-Key rotation carries a **different** ordering constraint from the `inbound_webhook_token` rotation in §4.3, and the two should not be conflated:
+**Scheduled action: rotate the Tells API key immediately after Phase 0 closes.** Not "if we want to be strict" — it is a dated step in the Phase 0 exit (§7), because the rotation is **free right now and stops being free later**. Nothing validates `Key` until Phase 3 ships F1's secondary check; from that point on, rotating means coordinating the credential swap with Tells's own cutover. Doing it in the gap costs one credential update and nothing else.
+
+Key rotation carries a **different** ordering constraint from the `inbound_webhook_token` rotation in §4.3, and the two should not be conflated — conflating them produces a wrong runbook step:
 
 - Rotating **our path token** (§4.3): update the Tells dashboard webhook URL *first*, then rotate. Otherwise Tells posts to a URL that no longer resolves and those events are lost outright.
 - Rotating the **Tells API key**: the webhook URL is untouched, but because F1/§4.3 validate the inbound `Key` against the stored credential, the new key must land in `provider_credentials` at the same moment Tells starts sending it — otherwise the secondary check begins failing on live inbound. During Phase 0 nothing validates `Key` yet, so rotating now is free; after Phase 3 it is not.
@@ -215,7 +219,7 @@ Key rotation carries a **different** ordering constraint from the `inbound_webho
 | B4 | Confirm webhook `Id` === send-response `id`, same type and format. | Whether message-id correlation is a viable fallback, or `metadata` is the only path |
 | B5 | Send at a **known wall-clock instant**; compare the webhook's `Date` against it and against the claimed `Timezone`. | Whether `Timezone: "UTC"` is truthful (see F2) |
 | B6 | Capture a full inbound payload. Same casing/Content-Type recording. | `parseTellsInbound`; the inbound dedup key fields |
-| B7 | Return a `500` from the capture route once. Watch for a retry. **⚠️ Not currently runnable** — the route always returns `200`. Needs either a `?status=` param (the symmetric counterpart to B9's `?delay=`) or a one-line edit and redeploy mid-probe. Decide before Phase 0 starts | Confirms "no retry" empirically. If they *do* retry, the design gains a free safety net |
+| B7 | `?status=500` on the capture URL forces a non-2xx ack once. Watch for a retry. | Confirms "no retry" empirically. If they *do* retry, the design gains a free safety net |
 | B8 | Round-trip `metadata` end-to-end: confirm it returns verbatim on **every** callback for that message, not just the final one. | Whether DLR→`stage_send_id` correlation is reliable. This is the load-bearing assumption of Phase 2 |
 | B9 | `?delay=20000` on the capture URL holds the response ~20s, past their 12s timeout, then returns `200`. Distinct from B7's immediate `500`. | Whether a slow ack is treated differently from an error ack — retry, a "failed" mark in their UI, or nothing. Directly bounds how much inline work §4.1 step 4 can afford |
 
@@ -236,7 +240,11 @@ Key rotation carries a **different** ordering constraint from the `inbound_webho
 | D1 | Burst ~40 sends in one second. Record what a breach looks like (429? error body? silent drop?). | Whether the drain needs Tells-specific backoff, and whether breaches are observable at all |
 | D2 | Note observed per-send latency. | Drain throughput sizing |
 
-**Exit criterion:** a written payload contract — verbatim example bodies for send-success, send-error, DLR (each status), and inbound (normal + STOP) — appended to this document. **Nothing in Phases 1–3 is written against a guess.**
+**Exit criteria:**
+
+1. A written payload contract — verbatim example bodies for send-success, send-error, DLR (each status), and inbound (normal + STOP) — appended to this document. **Nothing in Phases 1–3 is written against a guess.**
+2. **Rotate the Tells API key** (§5.0). It sat unredacted in runtime logs for the duration of the probe, and this is the last moment the rotation is free — after Phase 3 ships F1's `Key` check, it needs coordinating with Tells's cutover.
+3. **Delete the capture route** once its payloads are transcribed, or at Phase 3 at the latest. It is a public endpoint whose only job is finished.
 
 ---
 
@@ -372,7 +380,9 @@ The provider row (`tls`, `supports_api_send = false`) and the `provider_phones` 
 ## 7. Phase plan
 
 ### Phase 0 — live probe
-§5. Send probes are manual; the webhook probes require the temporary capture route (§5.0) to be deployed, which merges against ClickUp card [`869egfjx2`](https://app.clickup.com/t/869egfjx2) ("Build API connection with Tells"). No migrations. Exit: a documented payload contract appended to this file.
+§5. Send probes are manual; the webhook probes require the temporary capture route (§5.0) to be deployed, which merges against ClickUp card [`869egfjx2`](https://app.clickup.com/t/869egfjx2) ("Build API connection with Tells"). No migrations.
+
+Exit is three things, not one (§5): the documented payload contract, **the Tells API key rotated**, and the capture route deleted. The rotation is scheduled rather than optional because it is free only until Phase 3 ships F1's `Key` validation.
 
 ### Phase 1 — skeleton
 Provider row (`tls`, `supports_api_send = false`), credential via encrypted `provider_credentials`, phone row at `max_sends_per_second = 30`, migration 0129 for `tells_webhook_events`. Additive migration leads the code.

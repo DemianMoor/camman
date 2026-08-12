@@ -133,7 +133,7 @@ Append to the `entries` array in `db/migrations/meta/_journal.json`, after the `
     }
 ```
 
-The snapshot is cloned unchanged because this migration adds no Drizzle-modelled columns — only a CHECK constraint and an index, neither of which the snapshot tracks for this table.
+Apart from those two identity fields, the snapshot's *content* is cloned unchanged: this migration adds no Drizzle-modelled columns — only a CHECK constraint and an index, neither of which the snapshot tracks for this table. The repo's convention is "content stays frozen, id/prevId always bump".
 
 - [ ] **Step 4: Commit the migration file BEFORE applying it**
 

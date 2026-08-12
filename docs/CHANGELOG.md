@@ -2,6 +2,13 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-12 — Tells.co Phase 0: TEMPORARY webhook capture route (`/api/webhooks/tells/probe-<token>`) — docs: superpowers/specs/2026-08-12-tells-provider-design §5.0, CHANGELOG
+- **Temporary, delete-on-Phase-3.** New public route logs method, headers, full URL and raw body verbatim to the console with a `[tells-probe]` prefix, returns `200` JSON, and does nothing else — no DB, no parsing, no processing. Payloads are read from Vercel runtime logs. (ClickUp 869egfjx2.)
+- Replaces the originally-planned webhook.site bin: the Tells **inbound payload carries our Tells API key in its `Key` field**, so captured payloads must stay on our own infrastructure.
+- Auth is the unguessable path segment only. `/api/*` is excluded from the `proxy.ts` middleware matcher, so no gating change was needed. `?delay=<ms>` (capped 55s, `maxDuration = 60`) exists solely for probe B9's slow-ack test and logs before delaying.
+- **Deliberately unredacted logging** — verbatim capture is the point of Phase 0 — which means runtime logs will contain the Tells API key. Rotate after Phase 0 if we want to be strict; the spec §5.0 records why key rotation has a *different* ordering constraint from the path-token rotation in §4.3.
+- Not added to `05-flows.md` on purpose: the route is ephemeral, and diagramming it would imply a permanent flow that gets deleted in Phase 3. §5.0 of the spec is its documentation surface.
+
 ## 2026-08-12 — Tells.co SMS provider (`tls`): approved design spec, build gated — docs: superpowers/specs/2026-08-12-tells-provider-design, CHANGELOG
 - Design only — **no code, no migration, no provider row**. Build is gated on txr S1 passing and ClickUp card `869e97atu` closing (still `to do` at time of writing).
 - Spec: [superpowers/specs/2026-08-12-tells-provider-design.md](superpowers/specs/2026-08-12-tells-provider-design.md). Covers the (undocumented, support-supplied) Tells API contract, a 25-item Phase 0 live-probe checklist, the `tells_webhook_events` schema (provisionally migration 0129), and the Phase 1–5 plan with approval gates.

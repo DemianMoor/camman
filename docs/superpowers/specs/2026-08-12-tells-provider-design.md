@@ -168,7 +168,29 @@ Thresholds are proposed here and **calibrated in Phase 5** against observed Phas
 
 ## 5. Phase 0 — live probe checklist
 
-Manual. No merges, no migrations. Webhooks point at a throwaway capture bin (webhook.site); the send script follows [scripts/probe-textrequest-api.ts](../../../scripts/probe-textrequest-api.ts).
+No migrations. The send probes are manual; the webhook probes need one temporary route deployed (§5.0). The send script follows [scripts/probe-textrequest-api.ts](../../../scripts/probe-textrequest-api.ts).
+
+### 5.0 Capture bin — a temporary route on our own infrastructure
+
+**Not webhook.site.** The Tells inbound payload carries our Tells API key in its `Key` field, so captured payloads must not leave our infrastructure.
+
+Capture endpoint: **`/api/webhooks/tells/probe-ec80c2e8c87ec5fe2e20425078af6cac`** ([route](../../../app/api/webhooks/tells/probe-ec80c2e8c87ec5fe2e20425078af6cac/route.ts)). Point **both** Tells config fields — Status Webhook URL and Inbound Message URL — at this same URL.
+
+The route does exactly one thing: write method, headers, full URL and raw body to the console, verbatim, and return `200` JSON. No database, no parsing, no processing. **It is not the Phase 3 handler and must never grow into it** — the directory is deleted when the real routes land in Phase 3.
+
+- **Auth** is the unguessable path segment alone. That is all a short-lived probe needs against scanners. It is not a secret from anyone who can read the repo, and it grants nothing but the ability to write a log line.
+- **Reading payloads:** Vercel runtime logs, filtered on `[tells-probe]`. Two lines per event sharing an `eventId` — `meta` (method, URL, headers, byte count) and `body` (raw, verbatim). Split deliberately: Vercel truncates long log lines and an MMS inbound payload carries base64 media that would blow the limit, so keeping metadata on its own line means a truncated body can never cost us the headers, timing and URL too.
+- **Distinguishing the two channels:** both config fields point at one URL, and the payload shape separates them (`Id`/`Status` = DLR, `Key`/`Body` = inbound). If Tells accepts a query string in those fields, `?src=dlr` / `?src=inbound` makes the logs filterable for free — the full URL is logged either way.
+- **Reachability:** `GET` the URL in a browser to confirm the route is live before configuring Tells. Tells itself always POSTs.
+- **Ack shape:** the route returns `{"status":"success","ok":true}`. Tells asks for "a success response in JSON" without specifying the shape, and a probe bin whose ack gets rejected would corrupt the very B7/B9 results it exists to measure.
+- **B9 delay parameter:** appending `?delay=20000` holds the response ~20s, past Tells's 12s webhook timeout. The payload is logged *before* the delay starts, so B9 still captures its event even if the function is killed mid-hold. Capped at 55s, with `maxDuration = 60` on the route. One-off and manual — Tells is never configured with a delay in the URL.
+
+**The API key will be in our runtime logs.** Logging is deliberately unredacted — verbatim capture is the entire point of Phase 0 — and the inbound payload's `Key` field is the Tells API key. If we want to be strict, rotate the key after Phase 0.
+
+Key rotation carries a **different** ordering constraint from the `inbound_webhook_token` rotation in §4.3, and the two should not be conflated:
+
+- Rotating **our path token** (§4.3): update the Tells dashboard webhook URL *first*, then rotate. Otherwise Tells posts to a URL that no longer resolves and those events are lost outright.
+- Rotating the **Tells API key**: the webhook URL is untouched, but because F1/§4.3 validate the inbound `Key` against the stored credential, the new key must land in `provider_credentials` at the same moment Tells starts sending it — otherwise the secondary check begins failing on live inbound. During Phase 0 nothing validates `Key` yet, so rotating now is free; after Phase 3 it is not.
 
 ### A. Send path — blocking
 
@@ -193,9 +215,9 @@ Manual. No merges, no migrations. Webhooks point at a throwaway capture bin (web
 | B4 | Confirm webhook `Id` === send-response `id`, same type and format. | Whether message-id correlation is a viable fallback, or `metadata` is the only path |
 | B5 | Send at a **known wall-clock instant**; compare the webhook's `Date` against it and against the claimed `Timezone`. | Whether `Timezone: "UTC"` is truthful (see F2) |
 | B6 | Capture a full inbound payload. Same casing/Content-Type recording. | `parseTellsInbound`; the inbound dedup key fields |
-| B7 | Return a `500` from the bin once. Watch for a retry. | Confirms "no retry" empirically. If they *do* retry, the design gains a free safety net |
+| B7 | Return a `500` from the capture route once. Watch for a retry. **⚠️ Not currently runnable** — the route always returns `200`. Needs either a `?status=` param (the symmetric counterpart to B9's `?delay=`) or a one-line edit and redeploy mid-probe. Decide before Phase 0 starts | Confirms "no retry" empirically. If they *do* retry, the design gains a free safety net |
 | B8 | Round-trip `metadata` end-to-end: confirm it returns verbatim on **every** callback for that message, not just the final one. | Whether DLR→`stage_send_id` correlation is reliable. This is the load-bearing assumption of Phase 2 |
-| B9 | Hold the response ~20s (past their 12s timeout), then return `200`. Distinct from B7's immediate `500`. | Whether a slow ack is treated differently from an error ack — retry, a "failed" mark in their UI, or nothing. Directly bounds how much inline work §4.1 step 4 can afford |
+| B9 | `?delay=20000` on the capture URL holds the response ~20s, past their 12s timeout, then returns `200`. Distinct from B7's immediate `500`. | Whether a slow ack is treated differently from an error ack — retry, a "failed" mark in their UI, or nothing. Directly bounds how much inline work §4.1 step 4 can afford |
 
 ### C. Opt-out / compliance — blocking; the input to the Phase 3 approval gate
 
@@ -350,7 +372,7 @@ The provider row (`tls`, `supports_api_send = false`) and the `provider_phones` 
 ## 7. Phase plan
 
 ### Phase 0 — live probe
-Manual, no merges. §5. Exit: a documented payload contract appended to this file.
+§5. Send probes are manual; the webhook probes require the temporary capture route (§5.0) to be deployed, which merges against ClickUp card [`869egfjx2`](https://app.clickup.com/t/869egfjx2) ("Build API connection with Tells"). No migrations. Exit: a documented payload contract appended to this file.
 
 ### Phase 1 — skeleton
 Provider row (`tls`, `supports_api_send = false`), credential via encrypted `provider_credentials`, phone row at `max_sends_per_second = 30`, migration 0129 for `tells_webhook_events`. Additive migration leads the code.

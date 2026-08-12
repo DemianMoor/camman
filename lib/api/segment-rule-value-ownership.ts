@@ -1,8 +1,11 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { brands, contact_groups, offers, segments } from "@/db/schema";
-import { getValueShapeForRuleType } from "@/lib/validators/segment-rule-types";
+import { brands, contact_groups, offers, provider_phones, segments } from "@/db/schema";
+import {
+  getValueShapeForRuleType,
+  isProviderPhoneSet,
+} from "@/lib/validators/segment-rule-types";
 
 // Result of a value-ownership check. Routes turn `{ ok: false }` into a
 // 400 response with the carried reason and `field: "value"`.
@@ -37,6 +40,39 @@ export async function verifyValueOwnership(
     // No FK reference to verify — value is a scalar/enum, not an entity id.
     return { ok: true };
   }
+
+  // String-set shapes carry no entity reference — the enum members are
+  // validated by the Zod refinement, so there is nothing to own.
+  if (shape === "phone_type_set" || shape === "carrier_set") {
+    return { ok: true };
+  }
+
+  // Phone sets reference provider_phones rows: every id must belong to the
+  // caller's org AND to the provider named in the value.
+  if (shape === "provider_phone_set") {
+    if (!isProviderPhoneSet(value)) {
+      return { ok: false, reason: "Pick at least one phone number" };
+    }
+    const rows = await db
+      .select({ id: provider_phones.id })
+      .from(provider_phones)
+      .where(
+        and(
+          eq(provider_phones.org_id, orgId),
+          eq(provider_phones.provider_id, value.provider_id),
+          inArray(provider_phones.id, value.phone_ids),
+        ),
+      );
+    if (rows.length !== value.phone_ids.length) {
+      return {
+        ok: false,
+        reason:
+          "One or more phone numbers don't belong to your organization or to the selected provider",
+      };
+    }
+    return { ok: true };
+  }
+
   // FK shapes accept null — an "incomplete" rule that the eval skips. The
   // validator allows this too; nothing to check ownership of.
   if (value == null) {

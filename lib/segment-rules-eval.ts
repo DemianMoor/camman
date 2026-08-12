@@ -8,9 +8,12 @@ import { isStatementTimeout } from "@/lib/db/statement-timeout";
 import { segment_rules, segments } from "@/db/schema";
 
 import {
+  CARRIER_VALUES,
   getValueShapeForRuleType,
   isCampaignUsePeriod,
   isProviderPhoneSet,
+  isStringSubsetOf,
+  PHONE_TYPE_VALUES,
 } from "./validators/segment-rule-types";
 import type {
   CampaignUsePeriod,
@@ -52,6 +55,18 @@ function isRuleComplete(rule: {
       Number.isInteger(rule.value) &&
       rule.value >= 1
     );
+  }
+  // Set shapes hold arrays/objects, not numbers — without these the fall-through
+  // below silently drops every phone_type / carrier / sent_from_provider_phone
+  // rule from evaluation.
+  if (shape === "phone_type_set") {
+    return isStringSubsetOf(rule.value, PHONE_TYPE_VALUES);
+  }
+  if (shape === "carrier_set") {
+    return isStringSubsetOf(rule.value, CARRIER_VALUES);
+  }
+  if (shape === "provider_phone_set") {
+    return isProviderPhoneSet(rule.value);
   }
   return (
     typeof rule.value === "number" &&

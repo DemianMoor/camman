@@ -117,6 +117,8 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - **Permission split.** `provider_credentials.view` (manager+) gates the masked list (`GET`) and the admin UI section's visibility; `provider_credentials.manage` (admin+) gates every mutation — POST/PATCH/DELETE, test-send, register-callback — and every mutate button in the UI. Two new permission literals (`lib/permissions.ts`) since no admin-tier providers permission existed before; flipped atomically with the UI.
 - **Never returns the plaintext.** Every response (list, create, PATCH, DELETE) is masked (`label`/`last4`/`masked`/`linked_numbers`) — the encrypted blob and the plaintext are both server-only. Test-send and register-callback echo what was *sent* (message text, callback URL), never the key.
 - **Backfill (applied 2026-07-16, idempotent).** `scripts/backfill-provider-credentials-encryption.ts` encrypted the 2 existing plaintext rows (TextHub cred 2, Ahoi cred 262) and linked their providers' phones (26/27/43 → cred 2, 44/45 → cred 262), since each provider had exactly one credential at backfill time. Plaintext `api_key` was left populated (dual-read window). A post-write reconciliation step re-queries the DB and asserts the exact expected inventory, aborting rather than silently drifting.
+- **The API-key field is the BASELINE for every provider type; login shapes (email+password etc.) are per-provider EXTRAS layered on top, never the baseline** (decision 2026-08-12, ClickUp 869egmakh open decision #2). `ProviderCredentialsSection`'s key input has always been provider-agnostic and write-only — what made it read as single-provider was the *copy*: the Add/Rotate placeholders hardcoded "TextHub" on every provider's page. They now interpolate the provider row's `name`. A new provider therefore needs **no form work at all** to store a key: create the provider, Accounts → Add account, paste. Never seed a key by script; the UI write path is the only one that encrypts.
+- **Every provider-specific action button MUST be gated to its provider.** The credentials row renders actions that hit provider-hardcoded routes: **Send test** → TextHub's `sendSms`, **STOP callback** → `registerOptOutCallback` + a `/api/webhooks/texthub/opt-out/<token>` URL, **Check connection** → Text Request's `/dashboards`. Ungated, each offers to perform a TextHub (or TR) operation *using another provider's account key*. Send test and Check connection were gated from the start; **STOP callback was not, and rendered for every provider until 2026-08-12** — an Ahoi/Tells account could have registered a TextHub callback against its own key. When adding a provider-specific action, gate it in the same commit. Text Request's own hook registration (`register-textrequest-hooks`) still has no button — tracked on 869egmakh P2, where a descriptor-driven uniform action row replaces this hand-gating.
 
 ## Sending safety
 - Drain requires all of: `send_approved` (per stage) + the **two-switch send gate** + `CRON_SECRET`/`campaigns.drain` + provider not `send_paused`.
@@ -294,6 +296,28 @@ All three were caught, but only because the output happened to print enough deta
 - **Treat an empty or zero-item scope as a FAILURE, not a pass.** Finding zero sortable columns means the parser broke, not that everything is fine. Assert non-emptiness explicitly.
 - **Before trusting a green check, confirm what it examined.** Read the count and the names, not just the tick.
 - **Confirm the base commit before building on a branch.** `git worktree add ... origin/main` uses whatever `origin/main` was last fetched, which may be several merges stale.
+
+## Working copy — do multi-step work in a throwaway worktree, never in `C:/AFF/camman` directly
+
+`C:/AFF/camman` is a **shared checkout**. More than one agent session works in this repo at a time, and any of them can move its `HEAD` between two of your commands. Git offers no warning and no lock.
+
+The failure this produces is quiet and lands on someone else's work. On 2026-08-12 a session ran `git checkout -b` and committed, and by the time it ran `git branch -m <newname>` a concurrent session had switched the shared checkout onto *its* branch — so the rename retargeted and renamed **the other session's branch**. `git branch -m <newname>` renames whatever `HEAD` currently points at; it never errors, it just silently hits the wrong thing. Uncommitted edits are worse: they follow `HEAD` and can end up staged onto a branch they have nothing to do with.
+
+**The rule: for any task beyond a single read-only command, work in your own worktree.**
+
+```sh
+git fetch origin
+git worktree add -b <branch> .claude/worktrees/<name> origin/main
+```
+
+- **Branch from `origin/main`, never local `main`** — local `main` runs far behind and is checked out in another worktree anyway (see the base-commit note above).
+- **Worktrees have no `node_modules`** (they share `.git`, not dependencies). Junction the shared one instead of a multi-minute install:
+  `cmd //c "mklink /J node_modules C:\AFF\camman\node_modules"`
+- **Remove that junction with `cmd //c "rmdir node_modules"`, NEVER `rm -rf`.** `rm -rf` follows the junction and deletes the main checkout's dependencies. Unlink *before* `git worktree remove`.
+- **Clean up when the branch merges:** `git worktree remove <path>` then `git worktree prune`. Stale worktrees are not free — repo-wide `npm run lint` walks every one of them.
+- Prefer explicit two-argument git forms (`git branch -m <old> <new>`) over "operate on the current branch" forms, which silently follow a `HEAD` you did not move.
+
+If you do disturb another branch, the fix is usually clean — a rename touches no commits and preserves upstream config, so `git branch -m <wrong> <original>` restores it. Say so plainly rather than quietly correcting it; the other session may be mid-task.
 
 ## Migration ordering — additive leads the code, destructive follows it
 

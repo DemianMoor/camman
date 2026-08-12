@@ -178,7 +178,11 @@ npx tsx scripts/probe-tells-api.ts              # live — ~7 billable messages
 npx tsx scripts/probe-tells-api.ts A3 A5        # only the named probes ("A8" selects A8-1+A8-2)
 ```
 
-Env: `TELLS_API_KEY`, `TELLS_FROM`, `TELLS_TO` (required — `TO` must be the test handset, never a real contact), `TELLS_TEST_LINK` (optional, A6 skips without it), `TELLS_API_URL` (optional override).
+**Key and sending number come from the DATABASE, not env.** The Tells key is pasted into the Accounts UI on the Tells provider page (encrypted at rest, write-only) and the TFN is a `provider_phones` row, so the probe resolves exactly what the real send path would. Decryption uses the same dual-read helper the pollers use, and the key is never printed — the banner shows only the account label and last-4.
+
+Env: `DATABASE_URL` and `TELLS_TO` (required — `TO` is the test handset, the one value that can't come from the DB, and must never be a real contact). Optional: `TELLS_TEST_LINK` (A6 skips without it), `TELLS_API_URL`, `TELLS_CREDENTIAL_ID` (required only if the `tls` provider has more than one account — the script refuses to guess rather than spend on the wrong key), and `TELLS_API_KEY` / `TELLS_FROM` as discouraged escape-hatch overrides.
+
+The banner prints the resolved provider, account, sending number and MPS before anything is sent, and warns if `supports_api_send` is true while no `tls` adapter is registered.
 
 ⚠️ **It sends real SMS and costs real money.** Run `--dry-run` first and check the target number in the banner. Every call prints its **HTTP status**, response headers, elapsed time and the raw body verbatim; the API key is the one thing redacted from the printed request line, since it isn't part of the contract being established and the output gets pasted around.
 

@@ -76,10 +76,16 @@ function numberWord(n: number) {
 export function ProviderCredentialsSection({
   providerId,
   providerKey,
+  providerName,
   canManage,
 }: {
   providerId: number;
   providerKey: string;
+  // Display name of the provider row, used only to make the API-key prompts
+  // name the provider you're actually on. The FIELD has always been universal;
+  // the COPY used to say "TextHub" on every provider's page, which read as a
+  // form built for one provider.
+  providerName: string;
   canManage: boolean;
 }) {
   const isTextHub = TEXTHUB_KEYS.has(providerKey);
@@ -559,9 +565,21 @@ export function ProviderCredentialsSection({
                               <PlugZap className="size-4" aria-hidden /> Check connection
                             </Button>
                           ) : null}
-                          <Button variant="ghost" size="sm" onClick={() => openRegister(c)}>
-                            <Ban className="size-4" aria-hidden /> STOP callback
-                          </Button>
+                          {/* STOP callback is TextHub-only, same reason as Send
+                              test: the route imports registerOptOutCallback from
+                              lib/sends/texthub-optout and registers a
+                              /api/webhooks/texthub/opt-out/<token> URL. Rendered
+                              unconditionally it offered to register a TEXTHUB
+                              callback from an Ahoi / Text Request / Tells
+                              account's page, using that account's key. Text
+                              Request has its own hook registration
+                              (register-textrequest-hooks) with no button yet —
+                              tracked on ClickUp 869egmakh P2, not added here. */}
+                          {isTextHub ? (
+                            <Button variant="ghost" size="sm" onClick={() => openRegister(c)}>
+                              <Ban className="size-4" aria-hidden /> STOP callback
+                            </Button>
+                          ) : null}
                           <Button variant="ghost" size="sm" onClick={() => openEdit(c)}>
                             <Pencil className="size-4" aria-hidden /> Edit
                           </Button>
@@ -627,7 +645,7 @@ export function ProviderCredentialsSection({
               autoComplete="off"
               value={addApiKey}
               onChange={(e) => setAddApiKey(e.target.value)}
-              placeholder="Paste the TextHub api_key"
+              placeholder={`Paste the ${providerName} API key`}
             />
           </div>
 
@@ -716,7 +734,7 @@ export function ProviderCredentialsSection({
               autoComplete="off"
               value={rotateApiKey}
               onChange={(e) => setRotateApiKey(e.target.value)}
-              placeholder="Paste the new TextHub api_key"
+              placeholder={`Paste the new ${providerName} API key`}
             />
           </div>
 

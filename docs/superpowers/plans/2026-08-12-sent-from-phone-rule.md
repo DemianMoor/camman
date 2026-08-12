@@ -119,6 +119,8 @@ Expected: `w/lf` — CRLF here causes false positives in `verify-migration-integ
 cp db/migrations/meta/0128_snapshot.json db/migrations/meta/0129_snapshot.json
 ```
 
+**After cloning, update ONLY the two identity fields in the new `0129_snapshot.json`:** change `"id"` from `0128a000-0128-4128-8128-000000000128` to `0129a000-0129-4129-8129-000000000129`, and `"prevId"` from `0127a000-0127-4127-8127-000000000127` to `0128a000-0128-4128-8128-000000000128`. Omitting this step makes `verify-migration-integrity.ts` fail with `prevId-chain ✗` because the chain identity no longer matches the file sequence.
+
 Append to the `entries` array in `db/migrations/meta/_journal.json`, after the `idx: 128` object:
 
 ```json

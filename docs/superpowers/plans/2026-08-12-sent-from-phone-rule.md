@@ -209,7 +209,7 @@ config({ path: resolve(process.cwd(), ".env.local") });
 
 import { appendFileSync, existsSync } from "node:fs";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { sql as drizzleSql, type SQL } from "drizzle-orm";
+import { sql as drizzleSql } from "drizzle-orm";
 import postgres from "postgres";
 
 const BATCH = 50_000;
@@ -225,7 +225,6 @@ async function main() {
   const pg = postgres(dbUrl, { prepare: false, max: 1 });
   const db = drizzle(pg);
 
-  let refuse = false;
   try {
     const [pre] = await db.execute<{
       null_rows: string;
@@ -246,11 +245,15 @@ async function main() {
     console.log(`distinct phones: ${JSON.stringify(pre.phones)}`);
 
     if (pre.null_rows !== pre.resolvable) {
-      console.error(
+      // Thrown, not console.error+return: a `return` here would complete
+      // main() as soon as `finally` (below) runs, making the `refuse` exit
+      // code after the try/finally unreachable — the run would look
+      // successful (exit 0) to any caller gating on exit code. Throwing
+      // lets it propagate to main().catch(), which prints it and calls
+      // process.exit(1) — after `finally` has already closed the pool.
+      throw new Error(
         `REFUSING: ${Number(pre.null_rows) - Number(pre.resolvable)} rows have no stage phone. Investigate before writing.`,
       );
-      refuse = true;
-      return;
     }
 
     if (!apply) {
@@ -288,14 +291,25 @@ async function main() {
       // 4. Write exactly the ids just recorded, driven by the explicit
       // (id, provider_phone_id) pairs captured above — not a fresh
       // subquery — so the recorded set and the written set cannot diverge.
-      const values: SQL[] = batch.map(
-        (r) => drizzleSql`(${r.id}::uuid, ${r.provider_phone_id}::int)`,
-      );
+      // Bound as two arrays + unnest (constant 2 parameters per batch),
+      // NOT a VALUES list of per-row placeholders (that scaled at 2
+      // params/row and blew past the driver's 65534-parameter hard limit
+      // at BATCH=50_000). drizzleSql's own `${jsArray}` interpolation does
+      // NOT bind as a single array parameter either — it spreads back out
+      // to one placeholder per element (same failure mode) — so this uses
+      // the underlying postgres-js client's `pg.array()`, which is the
+      // codebase's proven pattern for a real single-parameter array bind.
+      const ids = pg.array(batch.map((r) => r.id));
+      const phones = pg.array(batch.map((r) => r.provider_phone_id));
       const rows = await db.execute<{ id: string }>(drizzleSql`
         UPDATE stage_sends ss
            SET provider_phone_id = b.provider_phone_id
-          FROM (VALUES ${drizzleSql.join(values, drizzleSql`, `)}) AS b(id, provider_phone_id)
+          FROM (
+            SELECT * FROM unnest(${ids}::uuid[], ${phones}::int[])
+              AS t(id, provider_phone_id)
+          ) AS b
          WHERE ss.id = b.id
+           AND ss.provider_phone_id IS NULL
         RETURNING ss.id
       `);
       total += rows.length;
@@ -309,8 +323,6 @@ async function main() {
   } finally {
     await pg.end({ timeout: 5 });
   }
-
-  if (refuse) process.exit(1);
 }
 
 main().catch((e) => {
@@ -320,6 +332,10 @@ main().catch((e) => {
 ```
 
 Note the reversal file records the id with an **empty** prior value, because every affected row's prior value is `NULL` by definition of the `WHERE` clause — undoing is `UPDATE stage_sends SET provider_phone_id = NULL WHERE id IN (…)`.
+
+The write is driven by two array parameters (`ids`, `phones`) bound via the underlying `postgres` client's `pg.array()` and unnested in the `UPDATE ... FROM (SELECT * FROM unnest(...)) AS b` join — a constant 2 bound parameters per batch, independent of `BATCH`. A per-row `VALUES ($1::uuid, $2::int), ($3::uuid, $4::int), …` list (2 params/row) hits the driver's 65534-parameter hard cap at `BATCH=50_000` (100,000 params) before any UPDATE can run. `drizzleSql`'s own `${jsArray}` tagged-template interpolation does **not** bind a JS array as a single Postgres array parameter — empirically it spreads back out to one `$n` placeholder per element (same failure mode as the VALUES list), so `pg.array()` (the codebase's proven single-parameter array-bind pattern, see `lib/telnyx/pg-array.ts`) is required here, not the naive `${ids}::uuid[]` form. The extra `AND ss.provider_phone_id IS NULL` on the UPDATE keeps the write idempotent even if a row was stamped by something else between the SELECT and the UPDATE.
+
+The `pre.null_rows !== pre.resolvable` refusal **throws** rather than setting a flag and `return`ing — a `return` inside the `try` completes `main()` as soon as `finally` (which closes the pool) runs, making any exit-code logic placed after the `try/finally` unreachable. Throwing propagates to `main().catch()`, which logs it and calls `process.exit(1)` after the pool is already closed — so a refused run reliably exits non-zero and performs no writes.
 
 The loop is deliberately structured SELECT → append-to-reversal-file → UPDATE, in that order, per batch: the reversal record for a batch is flushed to disk *before* that batch's UPDATE runs, so a crash can only ever leave the file naming rows that are still NULL (a harmless no-op to reverse), never the reverse (rows changed with no record). The UPDATE is driven by the exact `(id, provider_phone_id)` pairs read in that batch's SELECT — not a fresh subquery against `campaign_stages` — so the set recorded to the file and the set actually written are provably identical. The reversal file is opened in append mode across `--apply` runs (header written once, on first creation; a `# run started <ISO>` marker line separates runs) so a second `--apply` after an interrupted first run cannot truncate away the first run's records.
 

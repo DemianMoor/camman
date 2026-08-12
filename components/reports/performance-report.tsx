@@ -102,6 +102,16 @@ type Col = {
   muted?: boolean;
 };
 // Full metric set for number/offer/sequence/group — mirrors the Overview tab.
+// BY-GROUP EXEMPTION, surfaced in the UI rather than left silent.
+//
+// Every other dimension deduplicates its clicker count at the row's own grain.
+// By Group cannot: its metrics are FRACTIONALLY SPLIT across each contact's
+// groups (a contact in 3 used groups contributes ⅓ to each), and a fractional
+// share has no set to take a DISTINCT over. Its click counts are therefore split
+// SUMS and are not comparable with the other tabs — so the header says so.
+const GROUP_CLICKS_NOTE =
+  "By Group only: click counts are fractional shares split across each contact's groups, not deduplicated people. Not comparable with the other tabs.";
+
 const FULL_COLS: Col[] = [
   { id: "sent", header: "Sent", kind: "count" },
   { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
@@ -283,6 +293,18 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           </span>
         ) : null}
       </div>
+
+      {dimension === "group" ? (
+        <div
+          className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground"
+          title={GROUP_CLICKS_NOTE}
+        >
+          <span className="font-medium text-foreground">Click counts on this tab are split shares, not people.</span>{" "}
+          A contact in several of a campaign&apos;s groups contributes a fraction to each, so these
+          counts cannot be deduplicated and are <span className="font-medium">not comparable</span> with
+          By Number, By Offer or By Sequence — those count distinct people.
+        </div>
+      ) : null}
 
       {totals ? (
         isHourly ? (

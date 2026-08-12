@@ -44,7 +44,29 @@ Not across grains, and not over time.
 
 Measured: per (campaign, contact) 54,494 · per (stage, contact) 68,431 · per (creative, contact) 68,419 · raw human taps 79,835.
 
-Never sum counted-clicker counts — always re-aggregate from the membership. Per-stage and per-creative rows will sum to roughly **26% more** than the campaign total, and that is the correct behaviour, not a discrepancy. The UI shows the click count next to EPC on every surface so the grain is visible.
+**Never sum counted-clicker counts — always re-aggregate from the membership.** This is a rule about how each surface computes its own number, not a licence to sum. Every surface that renders an aggregate row must take a `COUNT(DISTINCT contact_id)` at that row's grain; assembling the row by adding per-stage counts double-counts anyone who clicked more than one stage.
+
+That distinction was got wrong once and is worth stating plainly: the by-dimension reports originally summed per-stage counts and the resulting divergence was documented as "expected non-additivity". It was not — it was a shortcut. Measured overcount before the fix: **By Number +38.6%, By Offer +27.2%, By Sequence +7.4%**.
+
+### Grain compliance by surface
+
+| Surface | Row grain | Dedups at that grain? |
+|---|---|---|
+| `/reports` Overview | campaign | ✅ |
+| `/reports` By Number / Offer / Sequence | dimension | ✅ (fixed) |
+| `/reports` **By Group** | contact group | ⚠️ **exempt — see below** |
+| `/creatives` + picker | creative | ✅ |
+| `/offers/[id]/report` | offer × group | ❌ **known, carded** |
+
+**By Group is exempt by construction.** Its metrics are fractionally split across each contact's groups — a contact in three of a campaign's used groups contributes ⅓ to each — and a fractional share has no set to take a `DISTINCT` over. Its click counts are split sums and are **not comparable** with the other tabs. The UI says so on the tab; this is a documented exemption, not a silent inconsistency.
+
+**Manual-mode stages** mint no links, so they have no `counted_clickers` rows and fall back to Keitaro's clean landing-visit counter — an aggregate with no set to dedup. The aggregate form of `denominatorFor()` is therefore:
+
+```
+dimension denominator = DISTINCT(tracked contacts in dimension) + SUM(manual stages' visits)
+```
+
+Verified on live data: the difference between the rendered figure and the pure distinct count is **exactly** the manual visit total on all three dimensions.
 
 ## 4. Storage — the cache stores the SET, not counts
 

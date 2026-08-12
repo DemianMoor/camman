@@ -168,7 +168,19 @@ Thresholds are proposed here and **calibrated in Phase 5** against observed Phas
 
 ## 5. Phase 0 — live probe checklist
 
-No migrations. The send probes are manual; the webhook probes need one temporary route deployed (§5.0). The send script follows [scripts/probe-textrequest-api.ts](../../../scripts/probe-textrequest-api.ts).
+No migrations. The A-series runs from a script; the B/C series arrive at the temporary capture route (§5.0) and are read from Vercel runtime logs.
+
+**A-series driver: [scripts/probe-tells-api.ts](../../../scripts/probe-tells-api.ts)** (modelled on [scripts/probe-textrequest-api.ts](../../../scripts/probe-textrequest-api.ts)).
+
+```sh
+npx tsx scripts/probe-tells-api.ts --dry-run    # print every request, send nothing
+npx tsx scripts/probe-tells-api.ts              # live — ~7 billable messages
+npx tsx scripts/probe-tells-api.ts A3 A5        # only the named probes ("A8" selects A8-1+A8-2)
+```
+
+Env: `TELLS_API_KEY`, `TELLS_FROM`, `TELLS_TO` (required — `TO` must be the test handset, never a real contact), `TELLS_TEST_LINK` (optional, A6 skips without it), `TELLS_API_URL` (optional override).
+
+⚠️ **It sends real SMS and costs real money.** Run `--dry-run` first and check the target number in the banner. Every call prints its **HTTP status**, response headers, elapsed time and the raw body verbatim; the API key is the one thing redacted from the printed request line, since it isn't part of the contract being established and the output gets pasted around.
 
 ### 5.0 Capture bin — a temporary route on our own infrastructure
 

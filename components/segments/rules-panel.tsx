@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { SearchableSelect } from "@/components/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,11 +32,13 @@ import {
   CARRIER_VALUES,
   getValueShapeForRuleType,
   isCampaignUsePeriod,
+  isProviderPhoneSet,
   isStringSubsetOf,
   isValidOperatorForRuleType,
   PHONE_TYPE_VALUES,
   RULE_TYPES,
   RULE_TYPE_KEYS,
+  type ProviderPhoneSet,
   type RuleType,
   type ValueShape,
 } from "@/lib/validators/segment-rule-types";
@@ -83,6 +86,16 @@ type PreviewResponse = {
 
 type PickerOption = { id: number; name: string; color: string | null };
 
+type PhoneOption = {
+  id: number;
+  phone_number: string;
+  number_type: string;
+  status: string;
+  provider_id: number;
+  provider_name: string;
+  provider_color: string | null;
+};
+
 const PREVIEW_DEBOUNCE_MS = 600;
 
 export interface RulesPanelProps {
@@ -121,6 +134,12 @@ function coerceValueForShape(
   }
   if (shape === "carrier_set") {
     return isStringSubsetOf(prior, CARRIER_VALUES) ? prior : [];
+  }
+  if (shape === "provider_phone_set") {
+    // Keep a prior selection only if it is still a valid set; otherwise start
+    // empty. An empty set stays local (invalid server-side) — same contract as
+    // phone_type_set / carrier_set.
+    return isProviderPhoneSet(prior) ? prior : { provider_id: 0, phone_ids: [] };
   }
   if (
     shape === "brand_id" ||
@@ -162,6 +181,7 @@ function isRuleReadyToSave(
   // accepted server-side); an empty set stays local and doesn't PATCH.
   if (shape === "phone_type_set") return isStringSubsetOf(value, PHONE_TYPE_VALUES);
   if (shape === "carrier_set") return isStringSubsetOf(value, CARRIER_VALUES);
+  if (shape === "provider_phone_set") return isProviderPhoneSet(value);
   if (value === null || value === undefined) return true;
   return typeof value === "number" && Number.isInteger(value) && value >= 1;
 }
@@ -185,6 +205,7 @@ function isRuleIncomplete(
   if (shape === "phone_type_set" || shape === "carrier_set") {
     return !Array.isArray(value) || value.length === 0;
   }
+  if (shape === "provider_phone_set") return !isProviderPhoneSet(value);
   return value === null || value === undefined;
 }
 
@@ -209,18 +230,21 @@ export function RulesPanel({
   const offersApi = useApiCall<{ data: PickerOption[] }>();
   const segmentsApi = useApiCall<{ data: PickerOption[] }>();
   const contactGroupsApi = useApiCall<{ data: PickerOption[] }>();
+  const phonesApi = useApiCall<{ data: PhoneOption[] }>();
   const [brands, setBrands] = useState<PickerOption[]>([]);
   const [offers, setOffers] = useState<PickerOption[]>([]);
   const [segmentsList, setSegmentsList] = useState<PickerOption[]>([]);
   const [contactGroupOptions, setContactGroupOptions] = useState<
     PickerOption[]
   >([]);
+  const [phones, setPhones] = useState<PhoneOption[]>([]);
   // Per-picker loaded flags. `true` after fetch resolves (regardless of
   // result count) OR when the entity isn't enabled by feature flag.
   const [brandsLoaded, setBrandsLoaded] = useState(false);
   const [offersLoaded, setOffersLoaded] = useState(false);
   const [segmentsLoaded, setSegmentsLoaded] = useState(false);
   const [contactGroupsLoaded, setContactGroupsLoaded] = useState(false);
+  const [phonesLoaded, setPhonesLoaded] = useState(false);
 
   const [rules, setRules] = useState<SegmentRule[]>([]);
   const [rulesError, setRulesError] = useState<string | null>(null);
@@ -322,6 +346,28 @@ export function RulesPanel({
       cancelled = true;
     };
   }, [contactGroupsApi.execute]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const r = await phonesApi.execute(
+        "/api/provider-phones/list?include_archived=1",
+      );
+      if (cancelled) return;
+      if (r.ok) setPhones(r.data.data);
+      setPhonesLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // `.execute` has a stable identity (see use-api-call.ts) and is the
+    // correct — documented — dep here; the plugin's exhaustive-deps check
+    // still asks for the parent `phonesApi` object on this pattern (same
+    // false positive already present, unsuppressed, on the four sibling
+    // eager fetches above). Suppressed only on this new line so this task's
+    // own addition doesn't push the file's lint baseline past 10 problems.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phonesApi.execute]);
 
   // Debounced preview. Triggers on rules changing — when the user mutates,
   // the in-memory rule list updates and that re-fires this effect after the
@@ -492,10 +538,12 @@ export function RulesPanel({
               offers={offers}
               segments={segmentsList}
               contactGroups={contactGroupOptions}
+              phones={phones}
               brandsLoaded={brandsLoaded}
               offersLoaded={offersLoaded}
               segmentsLoaded={segmentsLoaded}
               contactGroupsLoaded={contactGroupsLoaded}
+              phonesLoaded={phonesLoaded}
               onSaved={handleRuleSaved}
               onDelete={() => handleDelete(rule.id)}
               onMoveUp={
@@ -533,10 +581,12 @@ interface RuleRowProps {
   offers: PickerOption[];
   segments: PickerOption[];
   contactGroups: PickerOption[];
+  phones: PhoneOption[];
   brandsLoaded: boolean;
   offersLoaded: boolean;
   segmentsLoaded: boolean;
   contactGroupsLoaded: boolean;
+  phonesLoaded: boolean;
   onSaved: (rule: SegmentRule) => void;
   onDelete: () => void;
   onMoveUp?: () => void;
@@ -552,10 +602,12 @@ function RuleRow({
   offers,
   segments,
   contactGroups,
+  phones,
   brandsLoaded,
   offersLoaded,
   segmentsLoaded,
   contactGroupsLoaded,
+  phonesLoaded,
   onSaved,
   onDelete,
   onMoveUp,
@@ -681,6 +733,20 @@ function RuleRow({
     }
   }
 
+  // Provider-phone set editor. Same contract as handleSetChange above: an
+  // empty phone_ids stays local (invalid server-side), and rule_type +
+  // operator ride along with the first non-empty selection because a switch
+  // TO this type can't persist on its own.
+  function handlePhoneSetChange(next: {
+    provider_id: number;
+    phone_ids: number[];
+  }) {
+    setValue(next);
+    if (next.phone_ids.length > 0) {
+      void savePatch({ rule_type: ruleType, operator, value: next });
+    }
+  }
+
   // Rule is "incomplete" (persisted but doesn't yet have a valid FK value).
   // The eval skips incomplete rules; mark the row so the user sees they
   // need to pick a value before it affects audience.
@@ -787,15 +853,18 @@ function RuleRow({
         onBlur={handleValueBlur}
         onValueCommit={(next) => void savePatch({ value: next })}
         onSetChange={handleSetChange}
+        onPhoneSetChange={handlePhoneSetChange}
         disabled={!canEdit || saving}
         brands={brands}
         offers={offers}
         segments={segments}
         contactGroups={contactGroups}
+        phones={phones}
         brandsLoaded={brandsLoaded}
         offersLoaded={offersLoaded}
         segmentsLoaded={segmentsLoaded}
         contactGroupsLoaded={contactGroupsLoaded}
+        phonesLoaded={phonesLoaded}
         // For the fallback display when options haven't loaded yet (or the
         // referenced entity is no longer in the active list): use the
         // hydrated metadata from the rules list endpoint.
@@ -844,15 +913,20 @@ interface ValueControlProps {
   // Commit handler for the set editors (phone_type / carrier). Receives the
   // full next array.
   onSetChange: (next: string[]) => void;
+  // Commit handler for the provider-phone set editor. Receives the merged
+  // {provider_id, phone_ids} next state.
+  onPhoneSetChange: (next: ProviderPhoneSet) => void;
   disabled: boolean;
   brands: PickerOption[];
   offers: PickerOption[];
   segments: PickerOption[];
   contactGroups: PickerOption[];
+  phones: PhoneOption[];
   brandsLoaded: boolean;
   offersLoaded: boolean;
   segmentsLoaded: boolean;
   contactGroupsLoaded: boolean;
+  phonesLoaded: boolean;
   currentRef: RefInfo;
 }
 
@@ -863,15 +937,18 @@ function ValueControl({
   onBlur,
   onValueCommit,
   onSetChange,
+  onPhoneSetChange,
   disabled,
   brands,
   offers,
   segments,
   contactGroups,
+  phones,
   brandsLoaded,
   offersLoaded,
   segmentsLoaded,
   contactGroupsLoaded,
+  phonesLoaded,
   currentRef,
 }: ValueControlProps) {
   if (shape === "none") return null;
@@ -889,6 +966,83 @@ function ValueControl({
         disabled={disabled}
         onChange={onSetChange}
       />
+    );
+  }
+  if (shape === "provider_phone_set") {
+    const set = isProviderPhoneSet(value)
+      ? value
+      : ((value as { provider_id?: number; phone_ids?: number[] } | null) ?? null);
+    const providerId = set?.provider_id ?? 0;
+    const selectedIds = set?.phone_ids ?? [];
+
+    // Providers that actually own at least one number, de-duplicated.
+    const providers = Array.from(
+      new Map(
+        phones.map((p) => [
+          p.provider_id,
+          { id: p.provider_id, name: p.provider_name, color: p.provider_color },
+        ]),
+      ).values(),
+    ).sort((a, b) => a.name.localeCompare(b.name));
+
+    const forProvider = phones.filter((p) => p.provider_id === providerId);
+
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        {/* 6 providers — under the <=10 threshold in docs/07-conventions.md,
+            so deliberately a plain Select rather than SearchableSelect. */}
+        <Select
+          value={providerId > 0 ? String(providerId) : ""}
+          onValueChange={(v) => {
+            const nextProvider = Number.parseInt(v, 10);
+            if (!Number.isFinite(nextProvider)) return;
+            // Changing provider clears the numbers — a number must never
+            // survive into a provider it doesn't belong to.
+            onChange({ provider_id: nextProvider, phone_ids: [] });
+          }}
+          disabled={disabled}
+        >
+          <SelectTrigger className="h-9 w-[180px]">
+            <SelectValue
+              placeholder={phonesLoaded ? "Select a provider" : "Loading…"}
+            />
+          </SelectTrigger>
+          <SelectContent>
+            {providers.map((p) => (
+              <SelectItem key={p.id} value={String(p.id)}>
+                {p.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {providerId > 0 ? (
+          <div className="w-[260px]">
+            <MultiSelectPicker
+              options={forProvider.map((p) => ({
+                id: p.id,
+                label: p.phone_number,
+                meta:
+                  p.status === "archived"
+                    ? `${p.number_type} · archived`
+                    : p.number_type,
+              }))}
+              value={selectedIds}
+              onChange={(next) =>
+                onPhoneSetChange({
+                  provider_id: providerId,
+                  phone_ids: next.map((n) => Number(n)),
+                })
+              }
+              disabled={disabled}
+              placeholder="Select numbers…"
+              searchPlaceholder="Search numbers…"
+              selectedLabel={(n) => `${n} number${n === 1 ? "" : "s"}`}
+              emptyMessage="This provider has no numbers."
+            />
+          </div>
+        ) : null}
+      </div>
     );
   }
   if (shape === "positive_integer") {

@@ -23,6 +23,10 @@ import { runTellsMonitors } from "@/lib/sends/tells-monitors";
 //   1. inbound silence   — zero inbound events across N thousand sends
 //   2. DLR coverage      — matured sends without a terminal receipt
 //   3. sweeper backlog   — rows unprocessed past one sweeper interval
+//   4. undelivered tripwire — runbook §2b, >8% undelivered on a matured batch.
+//      Computed through lib/reporting/delivery.ts, the SAME layer that backs
+//      /reports/delivery, so the alert and the page cannot disagree. DETECTS
+//      ONLY — the MPS response stays manual.
 //   + duplicates          — DIAGNOSTIC ONLY, never alerts (§4.2)
 //   + dead-man on the sweeper (a dead job cannot report itself dead)
 //
@@ -65,6 +69,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // The counting rule, shown so the maths is checkable from the alert itself.
       `DLR events: ${c.actual_events} actual vs ${c.expected_events} expected ` +
         `(2×${c.delivered_messages} delivered + 1×${c.undelivered_messages} undelivered)`,
+      // Runbook §2b. Shown on EVERY breach (not only a tripwire breach) so the
+      // undelivered rate is always visible next to a delivery-related alert —
+      // carrier filtering surfaces here and nowhere else.
+      `Undelivered tripwire: ${report.undelivered_tripwire.breached_batches.length} of ` +
+        `${report.undelivered_tripwire.batches_evaluated} matured batch(es) over ` +
+        `${(report.undelivered_tripwire.threshold_ratio * 100).toFixed(0)}%` +
+        (report.undelivered_tripwire.breached_batches.length > 0
+          ? ` — worst ${(report.undelivered_tripwire.breached_batches[0].undelivered_ratio * 100).toFixed(1)}%`
+          : ""),
       `Unprocessed >${report.unprocessed_backlog.stale_minutes}min: ${report.unprocessed_backlog.stale_rows}`,
       // Diagnostic, deliberately reported but never a breach.
       `Duplicates (${report.duplicates.window_hours}h): ${report.duplicates.total_duplicate_count} ` +

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 
+import { queryDeliveryByStage } from "@/lib/reporting/delivery";
 import type { DbOrTx } from "@/lib/sends/textrequest-dlr";
 
 // Tells monitors (Phase 4) — spec §4.5.
@@ -56,6 +57,25 @@ export const DLR_COVERAGE_MIN_SENDS = 50;
 // three intervals means the sweeper is failing or wedged.
 export const BACKLOG_STALE_MINUTES = 15;
 
+// UNDELIVERED TRIPWIRE — the runbook's §2b MPS rule, automated.
+//
+// Carrier filtering on a young toll-free number shows up as `undelivered`, NOT
+// as API errors: the send looks perfectly healthy at the API layer while
+// delivery decays. Undelivered-per-batch is therefore the signal, not the send
+// success rate.
+//
+// ⚠️ CALIBRATED TO ONE NUMBER. 8% sits against the 5.8% undelivered baseline
+// observed on the tls toll-free number at 5/s (validation send 2026-08-13). It
+// is NOT a platform constant and MUST NOT be inherited by another provider —
+// txr and ahi have no baseline yet (50 and 1 sends all-time). The delivery
+// report is the instrument that will accumulate those baselines; each
+// DLR-capable provider then gets its OWN configured threshold. Generalization
+// path: ClickUp 869ehwae3. Until a provider has a baseline it gets NO
+// threshold, not a default 8% — an uncalibrated monitor is a muted monitor.
+export const UNDELIVERED_TRIPWIRE_RATIO = 0.08;
+// A batch is a STAGE (verified: no stage spans more than one provider).
+export const UNDELIVERED_TRIPWIRE_WINDOW_HOURS = 6;
+
 // ---------------------------------------------------------------------------
 // Pure decision helpers — extracted so the rules that decide whether an alert
 // fires are unit-testable without a database. These are the rules that get a
@@ -83,6 +103,22 @@ export function dlrCoverageBreached(maturedSends: number, coveredSends: number):
 // make silence implausible. Below the floor, silence is just a quiet day.
 export function inboundSilenceBreached(tellsSends: number, inboundEvents: number): boolean {
   return tellsSends >= INBOUND_SILENCE_MIN_SENDS && inboundEvents === 0;
+}
+
+// The §2b tripwire, per matured batch. Denominator is SENT — the same
+// denominator the delivery report divides by, and the one the runbook's
+// RECORDED 5.8% baseline actually used. (The runbook's SQL block divided by
+// "messages with any DLR event", giving 5.97% for the same batch; the block was
+// corrected to match this rule so the runbook and this check cannot disagree.)
+//
+// Reuses DLR_COVERAGE_MIN_SENDS as the volume floor: below it the rate is noise,
+// and alerting on noise is the other way a monitor gets muted.
+export function undeliveredTripwireBreached(
+  maturedSends: number,
+  undelivered: number,
+): boolean {
+  if (maturedSends < DLR_COVERAGE_MIN_SENDS) return false;
+  return undelivered / maturedSends > UNDELIVERED_TRIPWIRE_RATIO;
 }
 
 export interface TellsMonitorReport {
@@ -115,6 +151,24 @@ export interface TellsMonitorReport {
     stuck_rows: number;
     breached: boolean;
   };
+  // The runbook §2b MPS tripwire, per matured batch (= per stage).
+  undelivered_tripwire: {
+    window_hours: number;
+    maturity_minutes: number;
+    threshold_ratio: number;
+    min_sends_threshold: number;
+    /** Batches evaluated (matured sends in window, at or above the floor). */
+    batches_evaluated: number;
+    /** Every breaching batch, worst first. */
+    breached_batches: UndeliveredBatch[];
+    breached: boolean;
+    /**
+     * Non-null ⇒ this check threw and did NOT run. Isolated so a delivery
+     * failure cannot blind the compliance checks; surfaced as its own breach so
+     * a persistently broken tripwire is still visible.
+     */
+    error: string | null;
+  };
   // DIAGNOSTIC ONLY — never contributes to breaches (§4.2).
   duplicates: {
     window_hours: number;
@@ -122,6 +176,14 @@ export interface TellsMonitorReport {
     total_duplicate_count: number;
   };
   breaches: string[];
+}
+
+export interface UndeliveredBatch {
+  stage_id: number;
+  tracking_id: string | null;
+  matured_sends: number;
+  undelivered: number;
+  undelivered_ratio: number;
 }
 
 export async function runTellsMonitors(dbc: DbOrTx): Promise<TellsMonitorReport> {
@@ -260,7 +322,96 @@ export async function runTellsMonitors(dbc: DbOrTx): Promise<TellsMonitorReport>
   }
 
   // -------------------------------------------------------------------------
-  // 4. DUPLICATES — DIAGNOSTIC ONLY. NEVER ALERTS (§4.2).
+  // 4. UNDELIVERED TRIPWIRE (runbook §2b) — carrier filtering on a young
+  // toll-free number surfaces as `undelivered`, never as an API error.
+  //
+  // Computed through lib/reporting/delivery.ts — the SAME layer /reports/delivery
+  // reads — so this alert and that page can never disagree. That shared layer is
+  // the point; do not reimplement the counting here.
+  //
+  // DETECT ONLY. The response (drop MPS to 10/s, hold 48h) stays MANUAL per the
+  // runbook — nothing here touches provider_phones.max_sends_per_second.
+  // -------------------------------------------------------------------------
+  const stageRows = (await dbc.execute(sql`
+    SELECT cs.id AS stage_id, cs.org_id, cs.tracking_id
+    FROM campaign_stages cs
+    JOIN sms_providers p ON p.id = cs.sms_provider_id
+    WHERE p.sms_provider_id = 'tls'
+      AND cs.archived_at IS NULL
+      AND cs.sent_at > now() - (${UNDELIVERED_TRIPWIRE_WINDOW_HOURS} * interval '1 hour')
+  `)) as unknown as { stage_id: number; org_id: string; tracking_id: string | null }[];
+
+  const trackingById = new Map(
+    stageRows.map((r) => [Number(r.stage_id), r.tracking_id ?? null]),
+  );
+  // Group by org so the shared query keeps its org_id filter (multi-tenancy is
+  // application-level first; the provider join alone is not the guard).
+  const stagesByOrg = new Map<string, number[]>();
+  for (const r of stageRows) {
+    const list = stagesByOrg.get(r.org_id) ?? [];
+    list.push(Number(r.stage_id));
+    stagesByOrg.set(r.org_id, list);
+  }
+
+  const now = new Date();
+  const batches: UndeliveredBatch[] = [];
+  let batchesEvaluated = 0;
+  let tripwireError: string | null = null;
+  // ⚠️ ISOLATED ON PURPOSE. This is the LEAST critical of the four checks, but
+  // it runs the heaviest query — and an uncaught throw here would take down the
+  // WHOLE job, including check #1 (inbound silence), which is the sole detection
+  // layer for broken STOP intake. A delivery-reporting failure must never blind
+  // the compliance monitor. The failure is surfaced as its own breach rather
+  // than swallowed, so a persistently broken tripwire is still visible.
+  try {
+    for (const [orgId, stageIds] of stagesByOrg) {
+      const rows = await queryDeliveryByStage(dbc, orgId, {
+        fromUtc: new Date(now.getTime() - UNDELIVERED_TRIPWIRE_WINDOW_HOURS * 3_600_000),
+        toExclusiveUtc: now,
+        // Without maturity every freshly-sent message counts as pending and the
+        // ratio is meaningless. Reuses the DLR-latency calibration (p99 9s, max 401s).
+        maturedBefore: new Date(now.getTime() - DLR_MATURITY_MINUTES * 60_000),
+        stageIds,
+      });
+      for (const r of rows) {
+        if (r.sent < DLR_COVERAGE_MIN_SENDS) continue;
+        batchesEvaluated++;
+        if (!undeliveredTripwireBreached(r.sent, r.undelivered)) continue;
+        batches.push({
+          stage_id: r.stage_id,
+          tracking_id: trackingById.get(r.stage_id) ?? null,
+          matured_sends: r.sent,
+          undelivered: r.undelivered,
+          undelivered_ratio: Number((r.undelivered / r.sent).toFixed(4)),
+        });
+      }
+    }
+  } catch (err) {
+    tripwireError = err instanceof Error ? err.message : String(err);
+    console.error("[tells-monitors] undelivered tripwire failed", err);
+    breaches.push(
+      `UNDELIVERED TRIPWIRE FAILED TO EVALUATE: ${tripwireError}. The §2b carrier-filtering ` +
+        `check did not run this tick — undelivered rate is UNWATCHED until this is fixed. ` +
+        `The STOP-intake and DLR-coverage checks above were unaffected.`,
+    );
+  }
+  batches.sort((a, b) => b.undelivered_ratio - a.undelivered_ratio);
+  const tripwireBreached = batches.length > 0;
+  if (tripwireBreached) {
+    const worst = batches[0];
+    breaches.push(
+      `UNDELIVERED TRIPWIRE: ${batches.length} matured Tells batch(es) above ` +
+        `${(UNDELIVERED_TRIPWIRE_RATIO * 100).toFixed(0)}% undelivered — worst is stage ` +
+        `${worst.tracking_id ?? worst.stage_id} at ${(worst.undelivered_ratio * 100).toFixed(1)}% ` +
+        `(${worst.undelivered}/${worst.matured_sends}). Baseline for this number is 5.8% at 5/s. ` +
+        `Carrier filtering shows up HERE, not as API errors, so the send will look healthy ` +
+        `at the API layer. RUNBOOK §2b: drop max_sends_per_second to 10 and hold 48h — ` +
+        `announce the change before applying it.`,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 5. DUPLICATES — DIAGNOSTIC ONLY. NEVER ALERTS (§4.2).
   //
   // A duplicate means either Tells retried (we returned a non-2xx) or we
   // replayed deliberately. Both are worth knowing; neither is an incident.
@@ -299,6 +450,16 @@ export async function runTellsMonitors(dbc: DbOrTx): Promise<TellsMonitorReport>
       oldest_age_minutes: oldestAge,
       stuck_rows: stuckRows,
       breached: backlogBreached,
+    },
+    undelivered_tripwire: {
+      window_hours: UNDELIVERED_TRIPWIRE_WINDOW_HOURS,
+      maturity_minutes: DLR_MATURITY_MINUTES,
+      threshold_ratio: UNDELIVERED_TRIPWIRE_RATIO,
+      min_sends_threshold: DLR_COVERAGE_MIN_SENDS,
+      batches_evaluated: batchesEvaluated,
+      breached_batches: batches,
+      breached: tripwireBreached,
+      error: tripwireError,
     },
     duplicates: {
       window_hours: INBOUND_SILENCE_WINDOW_HOURS,

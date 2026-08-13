@@ -1,6 +1,6 @@
 # Reports Rollup
 
-_Last updated: 2026-07-30_
+_Last updated: 2026-08-13_
 
 > **⚠️ SOURCE CHANGE (2026-07-20) — read this first.** The five `/reports` tabs
 > were re-sourced to **match the Overview (Keitaro) tab exactly**. On first live
@@ -11,6 +11,13 @@ _Last updated: 2026-07-30_
 >   Keitaro funnel** ([lib/reporting/stage-funnel.ts](../../lib/reporting/stage-funnel.ts)) — the SAME per-stage numbers the Overview route computes, just regrouped → they sum to Overview to the cent.
 > - **By Group** distributes each stage's Overview total across its contact groups (tracked: per-contact ⅟k across the groups used in the campaign; manual: by each group's audience share; equal-split fallback) — group rows reconcile back to the stage total.
 > - **Hourly** buckets by **user-activity time** (internal event tables) with a pinned **Manual** row — a deliberate different basis (see §Hourly).
+>
+> **Delivery (added 2026-08-13)** is a SIXTH tab and is deliberately NOT a
+> `PerformanceReport` dimension: it has its own route, its own column set
+> (delivery receipts, not the EPC/revenue funnel) and its own query layer
+> ([lib/reporting/delivery.ts](../../lib/reporting/delivery.ts)). It also backs
+> the `Delivered %` column on Overview and the undelivered tripwire — see
+> [delivery-report.md](delivery-report.md).
 >
 > **The Phase-1 rollup below (`report_stage_hour` / `report_group_hour`, the
 > `report-rollup` cron, the `stage_sends` snapshot columns) is now UNUSED by the

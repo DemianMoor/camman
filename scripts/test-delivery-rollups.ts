@@ -14,6 +14,7 @@ import {
   rollupByStage,
   undeliveredPct,
   type DeliveryStageRow,
+  type PhoneMeta,
   type ProviderInfo,
   type StageMeta,
 } from "@/lib/reporting/delivery";
@@ -29,24 +30,44 @@ function eq(name: string, actual: unknown, expected: unknown) {
 }
 
 // --- fixtures ---------------------------------------------------------------
-// Two providers: tls (DLR-capable) and txh (not). Campaign 1 is single-provider
-// tls; campaign 2 is MIXED (a tls stage and a txh stage) — the 4-of-212 case.
+// Providers: tls (DLR-capable) and txh2 (not). Campaign 1 is single-provider
+// tls; campaign 2 is MIXED-capability (a tls stage and a txh2 stage).
+//
+// txh2 runs TWO numbers — a short code and a toll-free — which is the real prod
+// shape and the reason this breakdown exists: one provider, two very different
+// deliverability profiles.
+//
+// Stage 11 is SPLIT ACROSS TWO NUMBERS: the resumable-materialization case
+// (phone edited between committed windows). It is 0-of-882 in prod today but is
+// not structurally prevented, and it is exactly what deriving the phone from the
+// stage would misattribute.
+const PH = { tlsTfn: 1, txh2Short: 2, txh2Tfn: 3, tlsTfn2: 4 };
+const phones = new Map<number, PhoneMeta>([
+  [PH.tlsTfn, { provider_phone_id: PH.tlsTfn, phone_number: "+18445694179", number_type: "toll_free", provider_key: "tls" }],
+  [PH.txh2Short, { provider_phone_id: PH.txh2Short, phone_number: "621637", number_type: "short_code", provider_key: "txh2" }],
+  [PH.txh2Tfn, { provider_phone_id: PH.txh2Tfn, phone_number: "+18446210404", number_type: "toll_free", provider_key: "txh2" }],
+  [PH.tlsTfn2, { provider_phone_id: PH.tlsTfn2, phone_number: "+18445690000", number_type: "toll_free", provider_key: "tls" }],
+]);
 const stages = new Map<number, StageMeta>([
-  [10, { campaign_id: 1, provider_key: "tls" }],
-  [11, { campaign_id: 1, provider_key: "tls" }],
-  [20, { campaign_id: 2, provider_key: "tls" }],
-  [21, { campaign_id: 2, provider_key: "txh" }],
+  [10, { campaign_id: 1 }],
+  [11, { campaign_id: 1 }],
+  [20, { campaign_id: 2 }],
+  [21, { campaign_id: 2 }],
 ]);
 const registry: ProviderInfo[] = [
   { provider_key: "tls", name: "Tells", color: null, archived: false },
-  { provider_key: "txh", name: "TextHub", color: null, archived: false },
+  { provider_key: "txh2", name: "TextHub 2", color: null, archived: false },
   { provider_key: "smpl", name: "SimpleTexting", color: null, archived: false },
 ];
 const rows: DeliveryStageRow[] = [
-  { stage_id: 10, sent: 500, delivered: 457, undelivered: 29, no_receipt: 14 },
-  { stage_id: 11, sent: 100, delivered: 90, undelivered: 10, no_receipt: 0 },
-  { stage_id: 20, sent: 400, delivered: 380, undelivered: 12, no_receipt: 8 },
-  { stage_id: 21, sent: 9600, delivered: 0, undelivered: 0, no_receipt: 9600 },
+  { stage_id: 10, provider_phone_id: PH.tlsTfn, sent: 500, delivered: 457, undelivered: 29, no_receipt: 14 },
+  // stage 11 split across two tls numbers — one stage, two rows.
+  { stage_id: 11, provider_phone_id: PH.tlsTfn, sent: 60, delivered: 55, undelivered: 5, no_receipt: 0 },
+  { stage_id: 11, provider_phone_id: PH.tlsTfn2, sent: 40, delivered: 35, undelivered: 5, no_receipt: 0 },
+  { stage_id: 20, provider_phone_id: PH.tlsTfn, sent: 400, delivered: 380, undelivered: 12, no_receipt: 8 },
+  // txh2's two numbers, both non-capable.
+  { stage_id: 21, provider_phone_id: PH.txh2Short, sent: 8600, delivered: 0, undelivered: 0, no_receipt: 8600 },
+  { stage_id: 21, provider_phone_id: PH.txh2Tfn, sent: 1000, delivered: 0, undelivered: 0, no_receipt: 1000 },
 ];
 
 // --- capability declaration -------------------------------------------------
@@ -82,13 +103,13 @@ eq("deliveredPct is null on a zero denominator, not 0", deliveredPct({ sent: 0, 
 
 // --- provider rollup --------------------------------------------------------
 console.log("\nrollupByProvider:");
-const byProvider = rollupByProvider(rows, stages, registry);
+const byProvider = rollupByProvider(rows, phones, registry);
 const tls = byProvider.find((p) => p.provider_key === "tls")!;
-const txh = byProvider.find((p) => p.provider_key === "txh")!;
+const txh = byProvider.find((p) => p.provider_key === "txh2")!;
 const smpl = byProvider.find((p) => p.provider_key === "smpl")!;
 
-eq("tls sent sums its three stages", tls.sent, 1000);
-eq("tls delivered sums its three stages", tls.delivered, 927);
+eq("tls sent sums all its rows", tls.sent, 1000);
+eq("tls delivered sums all its rows", tls.delivered, 927);
 eq("tls columns foot: delivered+undelivered+no_receipt == sent", (tls.delivered ?? 0) + (tls.undelivered ?? 0) + (tls.no_receipt ?? 0), tls.sent);
 
 // THE ONE THAT MATTERS. An ungated computation renders 99.9% of platform volume
@@ -103,11 +124,47 @@ check("non-capable provider is flagged", !txh.dlr_capable);
 eq("a provider with no sends in the window shows a zero row", smpl.sent, 0);
 eq("...and still reports NULL, not 0%, when non-capable", smpl.delivered_pct, null);
 check("registry drives the rows — all 3 providers present", byProvider.length === 3);
-check("rows sort by sent desc", byProvider[0].provider_key === "txh");
+check("rows sort by sent desc", byProvider[0].provider_key === "txh2");
+
+// --- per-number breakdown ---------------------------------------------------
+// The motivating case: ONE provider running numbers with different profiles.
+// In prod today txh2 = short code 621637 (308,828 sends) + TFN +1844…0404
+// (36,802) — collapsed into a single row before this change.
+console.log("\nper-number breakdown:");
+eq("txh2 breaks into its two numbers", txh.numbers.length, 2);
+eq("number sub-rows sum to the provider row", txh.numbers.reduce((n, x) => n + x.sent, 0), txh.sent);
+eq("sub-rows sort by sent desc", txh.numbers[0].phone_number, "621637");
+eq("the short code is labelled", txh.numbers[0].number_type, "short_code");
+eq("the toll-free is labelled", txh.numbers[1].number_type, "toll_free");
+// Capability is per-PROVIDER, so both numbers inherit it. Deliverability can
+// differ per number; MEASURABILITY cannot.
+check("both txh2 numbers inherit the provider's non-capability",
+  txh.numbers.every((x) => !x.dlr_capable && x.delivered_pct === null));
+
+eq("tls breaks into its two numbers", tls.numbers.length, 2);
+eq("tls sub-rows sum to the provider row", tls.numbers.reduce((n, x) => n + x.sent, 0), tls.sent);
+check("capable numbers carry real percentages",
+  tls.numbers.every((x) => x.dlr_capable && x.delivered_pct !== null));
+// Each number's own columns must foot independently, not just the parent's.
+check("every number row foots",
+  byProvider.every((p) => p.numbers.every((x) =>
+    !x.dlr_capable || (x.delivered ?? 0) + (x.undelivered ?? 0) + (x.no_receipt ?? 0) === x.sent)));
+eq("a provider with no sends has no number sub-rows", smpl.numbers.length, 0);
+
+// ⭐ THE REGRESSION THIS GRAIN CHANGE EXISTS FOR. Stage 11 sent from two
+// different numbers (phone edited between materialization windows). Deriving the
+// phone from the stage would attribute all 100 of its sends to whichever number
+// the stage row happens to hold NOW — silently, on the very number someone is
+// investigating. Keying off the send splits them correctly.
+const tls1 = tls.numbers.find((x) => x.phone_number === "+18445694179")!;
+const tls2 = tls.numbers.find((x) => x.phone_number === "+18445690000")!;
+eq("split stage: first number gets its own sends", tls1.sent, 960);
+eq("split stage: second number gets its own sends", tls2.sent, 40);
+check("the split stage is NOT collapsed onto one number", tls2.sent !== 0 && tls1.sent !== 1000);
 
 // --- campaign rollup (mixed-provider) --------------------------------------
 console.log("\nrollupByCampaign:");
-const byCampaign = rollupByCampaign(rows, stages);
+const byCampaign = rollupByCampaign(rows, stages, phones);
 const c1 = byCampaign.get(1)!;
 const c2 = byCampaign.get(2)!;
 
@@ -126,25 +183,31 @@ check(
 );
 
 // A campaign with no capable sends at all must dash, not read 0%.
-const soloTxh = rollupByCampaign([rows[3]], stages).get(2)!;
+const soloTxh = rollupByCampaign(rows.filter((r) => r.stage_id === 21), stages, phones).get(2)!;
 eq("campaign with zero capable sends: pct is NULL", soloTxh.delivered_pct, null);
 eq("...and coverage is 0", soloTxh.coverage_pct, 0);
 
 // --- stage rollup -----------------------------------------------------------
 console.log("\nrollupByStage:");
-const byStage = rollupByStage(rows, stages);
-eq("capable stage: coverage is always 100% (stages are single-provider)", byStage.get(10)!.coverage_pct, 100);
+const byStage = rollupByStage(rows, phones);
+eq("capable stage: coverage 100%", byStage.get(10)!.coverage_pct, 100);
 eq("capable stage: pct", byStage.get(10)!.delivered_pct, (457 / 500) * 100);
 eq("non-capable stage: pct is NULL", byStage.get(21)!.delivered_pct, null);
 eq("non-capable stage: coverage is 0", byStage.get(21)!.coverage_pct, 0);
+// The split stage: two rows, one stage. Must SUM, not overwrite.
+eq("split stage sums both of its numbers", byStage.get(11)!.total_sent, 100);
+eq("split stage delivered sums both numbers", byStage.get(11)!.delivered, 90);
+eq("split stage pct is over the whole stage", byStage.get(11)!.delivered_pct, 90);
 
 // --- rollups reconcile ------------------------------------------------------
 console.log("\nrollups reconcile from the same stage rows:");
 const provSent = byProvider.reduce((n, p) => n + p.sent, 0);
 const campSent = [...byCampaign.values()].reduce((n, c) => n + c.total_sent, 0);
 const stageSent = rows.reduce((n, r) => n + r.sent, 0);
+const phoneSent = byProvider.reduce((n, p) => n + p.numbers.reduce((m, x) => m + x.sent, 0), 0);
 eq("provider totals == stage totals", provSent, stageSent);
 eq("campaign totals == stage totals", campSent, stageSent);
+eq("per-number totals == stage totals", phoneSent, stageSent);
 
 // --- tripwire breach predicate ---------------------------------------------
 console.log("\nundelivered tripwire (>8% on a matured batch):");

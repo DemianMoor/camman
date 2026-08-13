@@ -16,17 +16,19 @@ import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 // ---------------------------------------------------------------------------
 // GRAIN (stated in code, per the EPC workstream's lesson)
 // ---------------------------------------------------------------------------
-// getDeliveryByStage() returns STAGE grain and nothing else. Every surface
-// aggregates those rows at its OWN display grain; no surface consumes another
+// getDeliveryByStage() returns (STAGE, PHONE) grain and nothing else. Every
+// surface aggregates those rows at its OWN display grain — provider, number,
+// campaign, stage, or one batch for the tripwire; no surface consumes another
 // surface's aggregated output.
 //
-// ⚠️ These stage rows ARE safely additive, and it is worth being precise about
-// why, because "counts aren't additive" is a note that has been misapplied in
-// both directions on this codebase. A message belongs to EXACTLY ONE stage, and
-// the fold to one terminal status per message already happened inside the query
-// below. Provider and campaign totals are therefore sums over DISJOINT message
-// sets — unlike counted clickers, which are deduplicated sets that overlap
-// across dimension keys and genuinely cannot be summed.
+// ⚠️ These rows ARE safely additive, and it is worth being precise about why,
+// because "counts aren't additive" is a note that has been misapplied in both
+// directions on this codebase. A message belongs to EXACTLY ONE (stage, number)
+// pair, and the fold to one terminal status per message already happened inside
+// the query below. Provider, number, campaign and stage totals are therefore
+// sums over DISJOINT message sets — unlike counted clickers, which are
+// deduplicated sets that overlap across dimension keys and genuinely cannot be
+// summed.
 //
 // Definitions, fixed across every surface:
 //   sent        = stage_sends.status = 'sent'   (the project's shared
@@ -102,11 +104,37 @@ export function isDlrCapable(providerKey: string | null | undefined): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// STAGE-GRAIN QUERY
+// (STAGE, PHONE)-GRAIN QUERY
 // ---------------------------------------------------------------------------
+//
+// ⚠️ WHY THE PHONE IS ON THE PRIMITIVE AND NOT DERIVED FROM THE STAGE.
+//
+// It is TRUE that no stage currently has sends across more than one number
+// (0 of 882, all 2,954,934 sent rows, verified 2026-08-13). It is NOT
+// STRUCTURAL, and the difference matters:
+//
+//   · stage_sends.provider_phone_id is stamped from the stage row, read ONCE per
+//     materialization INVOCATION (lib/sends/kickoff.ts) and reused across windows;
+//   · materialization is RESUMABLE across invocations — a budget-capped run
+//     commits its windows, leaves materialized_at NULL, and a later tick re-reads
+//     the stage row;
+//   · nothing guards campaign_stages.provider_phone_id against being edited in
+//     between (the stage PATCH locks scheduled_at only);
+//   · partially-materialized stages genuinely occur (2 at time of writing).
+//
+// Edit a stage's number between two windows and its sends split across two
+// numbers. Deriving the phone from the stage would then misattribute every send
+// in that stage — silently, and exactly on the number whose deliverability
+// someone was investigating. So the phone comes from the SEND's own stamped
+// column. Costs +8.4% (238ms → 258ms, measured same-session).
+//
+// The campaign, by contrast, IS derived from the stage — that one is structural
+// (FK, exactly one campaign per stage).
 
 export interface DeliveryStageRow {
   stage_id: number;
+  /** From the SEND's stamped column, not the stage's. Null only for pre-0112 rows. */
+  provider_phone_id: number | null;
   sent: number;
   delivered: number;
   undelivered: number;
@@ -146,12 +174,16 @@ function terminalCte() {
   return sql.join(blocks, sql` UNION ALL `);
 }
 
-// PERF (measured against prod 2026-08-13, 3.07M-row / 2601 MB stage_sends):
-// the `sends` scan is the entire cost — the DLR side is ~4 ms against a ~490-row
-// build side. 7-day window: 0.31–1.31 s. 30-day window: 11.0 s, which is why the
-// route caps the range at 14 days. stage_sends_org_sent_at_idx is (org_id,
-// sent_at), so status/stage_id are heap fetches; a covering index would fix it
-// but is a migration (ClickUp 869ehwae3).
+// PERF (measured against prod, 3.07M-row / 2601 MB stage_sends). The `sends`
+// scan is the entire cost — the DLR side is ~6 ms against a ~540-row build side.
+//   7-day window:  ~832 ms WARM (stable over 4 identical runs), ~2.5 s COLD
+//   30-day window: 11.0 s  ⇒ the route caps the range at 14 days
+// ⚠️ Size decisions off the COLD figure. An earlier note here read "473 ms",
+// which was one warm measurement on a smaller window and made the 14-day cap
+// look roomier than it is.
+// stage_sends_org_sent_at_idx is (org_id, sent_at), so status/stage_id/
+// provider_phone_id are heap fetches; a covering index would fix it but is a
+// migration (ClickUp 869ehwae3).
 export async function getDeliveryByStage(
   orgId: string,
   range: DeliveryRange,
@@ -200,7 +232,7 @@ export async function queryDeliveryByStage(
 
   const rows = (await dbc.execute(sql`
     WITH sends AS (
-      SELECT id, stage_id
+      SELECT id, stage_id, provider_phone_id
       FROM stage_sends
       WHERE org_id = ${orgId}::uuid
         AND status = 'sent'
@@ -216,7 +248,7 @@ export async function queryDeliveryByStage(
         }
     ),
     terminal AS (${terminalCte()})
-    SELECT s.stage_id,
+    SELECT s.stage_id, s.provider_phone_id,
            count(*)::int                                                 AS sent,
            count(*) FILTER (WHERE t.d)::int                              AS delivered,
            count(*) FILTER (WHERE t.u AND NOT COALESCE(t.d, false))::int AS undelivered,
@@ -227,11 +259,12 @@ export async function queryDeliveryByStage(
            count(*) FILTER (WHERE NOT COALESCE(t.d OR t.u, false))::int  AS no_receipt
     FROM sends s
     LEFT JOIN terminal t ON t.ss_id = s.id
-    GROUP BY 1
+    GROUP BY 1, 2
   `)) as unknown as Record<string, unknown>[];
 
   return rows.map((r) => ({
     stage_id: Number(r.stage_id),
+    provider_phone_id: r.provider_phone_id == null ? null : Number(r.provider_phone_id),
     sent: Number(r.sent),
     delivered: Number(r.delivered),
     undelivered: Number(r.undelivered),
@@ -245,28 +278,50 @@ export async function queryDeliveryByStage(
 
 export interface StageMeta {
   campaign_id: number;
-  /** sms_providers.sms_provider_id, or null when the stage has no phone. */
+}
+
+// Stage → campaign only. The PROVIDER is deliberately NOT resolved here any
+// more: it now comes from the send's own provider_phone_id via the phone
+// directory below, so a stage whose number changed mid-materialization cannot
+// misattribute its sends. Campaign stays on the stage — that link is structural.
+export async function getStageDirectory(orgId: string): Promise<Map<number, StageMeta>> {
+  const rows = (await db.execute(sql`
+    SELECT cs.id, cs.campaign_id
+    FROM campaign_stages cs
+    WHERE cs.org_id = ${orgId}::uuid
+  `)) as unknown as Record<string, unknown>[];
+  return new Map(
+    rows.map((r) => [Number(r.id), { campaign_id: Number(r.campaign_id) }]),
+  );
+}
+
+export interface PhoneMeta {
+  provider_phone_id: number;
+  phone_number: string | null;
+  /** 'short_code' | 'toll_free' | '10dlc' | … — the TFN-vs-shortcode split. */
+  number_type: string | null;
+  /** sms_providers.sms_provider_id — the capability key. */
   provider_key: string | null;
 }
 
-// A stage maps to exactly ONE provider: verified 2026-08-13 that no stage has
-// sends across more than one provider_phone_id (0 of 882), and that
-// stage_sends.provider_phone_id→provider_id agrees with
-// campaign_stages.sms_provider_id on all 2,954,934 sent rows. So resolving the
-// provider once per stage (1,020 rows) is lossless AND avoids widening the
-// multi-million-row scan above.
-export async function getStageDirectory(orgId: string): Promise<Map<number, StageMeta>> {
+// provider_phones is ~35 rows, so this is free. One number belongs to exactly
+// one provider (FK), which is what makes phone → provider rollup lossless.
+export async function getPhoneDirectory(orgId: string): Promise<Map<number, PhoneMeta>> {
   const rows = (await db.execute(sql`
-    SELECT cs.id, cs.campaign_id, sp.sms_provider_id AS provider_key
-    FROM campaign_stages cs
-    LEFT JOIN provider_phones pp ON pp.id = cs.provider_phone_id
+    SELECT pp.id, pp.phone_number, pp.number_type, sp.sms_provider_id AS provider_key
+    FROM provider_phones pp
     LEFT JOIN sms_providers sp ON sp.id = pp.provider_id
-    WHERE cs.org_id = ${orgId}::uuid
+    WHERE pp.org_id = ${orgId}::uuid
   `)) as unknown as Record<string, unknown>[];
   return new Map(
     rows.map((r) => [
       Number(r.id),
-      { campaign_id: Number(r.campaign_id), provider_key: (r.provider_key as string) ?? null },
+      {
+        provider_phone_id: Number(r.id),
+        phone_number: (r.phone_number as string) ?? null,
+        number_type: (r.number_type as string) ?? null,
+        provider_key: (r.provider_key as string) ?? null,
+      },
     ]),
   );
 }
@@ -337,54 +392,103 @@ export function undeliveredPct(c: DeliveryCounts): number | null {
   return (c.undelivered / c.sent) * 100;
 }
 
-export interface DeliveryProviderRow {
-  provider_key: string;
-  name: string;
-  color: string | null;
-  archived: boolean;
+// The DLR columns are deliberately `| null`, not `| 0`, on both row types. The
+// type is the gate: a caller cannot render a non-capable row as 0% without first
+// handling null.
+interface DeliveryCells {
   /** false ⇒ delivered/undelivered/no_receipt/pct are all null. */
   dlr_capable: boolean;
-  /** Populated for EVERY provider, capable or not. */
+  /** Populated for EVERY row, capable or not. */
   sent: number;
-  // Deliberately `| null`, not `| 0`. The type is the gate: a caller cannot
-  // render a non-capable provider as 0% without first handling null.
   delivered: number | null;
   undelivered: number | null;
   no_receipt: number | null;
   delivered_pct: number | null;
 }
 
-// Group stage rows by provider. A non-capable provider reports its `sent` count
-// and NULL for everything DLR-derived — never 0, and never a value computed from
-// whatever rows happen to exist. The gate is structural: even if some future
-// path wrote fabricated receipts for a provider absent from DLR_SOURCES, they
-// could not reach this output.
+/** One number under a provider. Same columns, plus the number and its type. */
+export interface DeliveryPhoneRow extends DeliveryCells {
+  provider_phone_id: number | null;
+  phone_number: string | null;
+  number_type: string | null;
+}
+
+export interface DeliveryProviderRow extends DeliveryCells {
+  provider_key: string;
+  name: string;
+  color: string | null;
+  archived: boolean;
+  /** Per-number breakdown, sent desc. Sums exactly to this row. */
+  numbers: DeliveryPhoneRow[];
+}
+
+// Apply the capability gate to a counts bucket.
+function cellsFor(c: DeliveryCounts, providerKey: string | null): DeliveryCells {
+  const capable = isDlrCapable(providerKey);
+  return {
+    dlr_capable: capable,
+    sent: c.sent,
+    delivered: capable ? c.delivered : null,
+    undelivered: capable ? c.undelivered : null,
+    no_receipt: capable ? c.no_receipt : null,
+    delivered_pct: capable ? deliveredPct(c) : null,
+  };
+}
+
+// A send with no stamped number. Zero of 2,954,934 rows today (the 0112 backfill
+// covered all history), but the column is nullable, so these are bucketed
+// EXPLICITLY rather than dropped — silently discarding them would break the
+// invariant that provider totals reconcile with stage totals, and that
+// reconciliation is what the verify script checks.
+export const NO_NUMBER_KEY = "__no_number__";
+
+// Group (stage, phone) rows by PROVIDER, with a per-number breakdown nested
+// under each. Provider attribution comes from the send's own stamped phone —
+// see the note on DeliveryStageRow for why not from the stage.
 export function rollupByProvider(
   rows: DeliveryStageRow[],
-  stages: Map<number, StageMeta>,
+  phones: Map<number, PhoneMeta>,
   registry: ProviderInfo[],
 ): DeliveryProviderRow[] {
   const acc = new Map<string, DeliveryCounts>();
+  // provider_key → (phone id | NO_NUMBER_KEY) → counts
+  const byPhone = new Map<string, Map<string, DeliveryCounts>>();
+
   for (const r of rows) {
-    const key = stages.get(r.stage_id)?.provider_key;
+    const meta = r.provider_phone_id == null ? null : phones.get(r.provider_phone_id);
+    const key = meta?.provider_key;
     if (!key) continue;
     acc.set(key, add(acc.get(key) ?? ZERO, r));
+    const phoneKey = r.provider_phone_id == null ? NO_NUMBER_KEY : String(r.provider_phone_id);
+    if (!byPhone.has(key)) byPhone.set(key, new Map());
+    const inner = byPhone.get(key)!;
+    inner.set(phoneKey, add(inner.get(phoneKey) ?? ZERO, r));
   }
   return registry
     .map((p) => {
       const c = acc.get(p.provider_key) ?? ZERO;
-      const capable = isDlrCapable(p.provider_key);
+      const numbers: DeliveryPhoneRow[] = [...(byPhone.get(p.provider_key) ?? new Map())]
+        .map(([phoneKey, pc]) => {
+          const meta = phoneKey === NO_NUMBER_KEY ? null : phones.get(Number(phoneKey));
+          return {
+            provider_phone_id: meta?.provider_phone_id ?? null,
+            phone_number: meta?.phone_number ?? null,
+            number_type: meta?.number_type ?? null,
+            // Capability is per-PROVIDER, so every number under a provider
+            // inherits it. Two numbers on the same provider can differ wildly in
+            // deliverability (the TFN-vs-short-code case this breakdown exists
+            // for) but never in whether it is MEASURABLE.
+            ...cellsFor(pc, p.provider_key),
+          };
+        })
+        .sort((a, b) => b.sent - a.sent);
       return {
         provider_key: p.provider_key,
         name: p.name,
         color: p.color,
         archived: p.archived,
-        dlr_capable: capable,
-        sent: c.sent,
-        delivered: capable ? c.delivered : null,
-        undelivered: capable ? c.undelivered : null,
-        no_receipt: capable ? c.no_receipt : null,
-        delivered_pct: capable ? deliveredPct(c) : null,
+        numbers,
+        ...cellsFor(c, p.provider_key),
       };
     })
     .sort((a, b) => b.sent - a.sent);
@@ -427,6 +531,7 @@ function cellOf(capable: DeliveryCounts, totalSent: number): DeliveryCell {
 export function rollupByCampaign(
   rows: DeliveryStageRow[],
   stages: Map<number, StageMeta>,
+  phones: Map<number, PhoneMeta>,
 ): Map<number, DeliveryCell> {
   const capable = new Map<number, DeliveryCounts>();
   const totalSent = new Map<number, number>();
@@ -434,7 +539,10 @@ export function rollupByCampaign(
     const meta = stages.get(r.stage_id);
     if (!meta) continue;
     totalSent.set(meta.campaign_id, (totalSent.get(meta.campaign_id) ?? 0) + r.sent);
-    if (!isDlrCapable(meta.provider_key)) continue;
+    // Capability now resolves through the SEND's number, not the stage's.
+    const providerKey =
+      r.provider_phone_id == null ? null : phones.get(r.provider_phone_id)?.provider_key ?? null;
+    if (!isDlrCapable(providerKey)) continue;
     capable.set(meta.campaign_id, add(capable.get(meta.campaign_id) ?? ZERO, r));
   }
   const out = new Map<number, DeliveryCell>();
@@ -444,16 +552,29 @@ export function rollupByCampaign(
   return out;
 }
 
-// Per-stage cells for the Overview column. A stage is single-provider, so
-// coverage is always 0% or 100% here and the UI never labels a stage row.
+// Per-stage cells for the Overview column.
+//
+// ⚠️ Must SUM the (stage, phone) rows — a stage can now legitimately produce
+// more than one row. Coverage is 0% or 100% for every stage in practice, but it
+// is computed rather than assumed: a stage whose number was edited between
+// materialization windows can be genuinely mixed, and if that ever happens the
+// UI's coverage label handles it instead of the number silently being wrong.
 export function rollupByStage(
   rows: DeliveryStageRow[],
-  stages: Map<number, StageMeta>,
+  phones: Map<number, PhoneMeta>,
 ): Map<number, DeliveryCell> {
-  const out = new Map<number, DeliveryCell>();
+  const capable = new Map<number, DeliveryCounts>();
+  const totalSent = new Map<number, number>();
   for (const r of rows) {
-    const capable = isDlrCapable(stages.get(r.stage_id)?.provider_key);
-    out.set(r.stage_id, cellOf(capable ? r : ZERO, r.sent));
+    totalSent.set(r.stage_id, (totalSent.get(r.stage_id) ?? 0) + r.sent);
+    const providerKey =
+      r.provider_phone_id == null ? null : phones.get(r.provider_phone_id)?.provider_key ?? null;
+    if (!isDlrCapable(providerKey)) continue;
+    capable.set(r.stage_id, add(capable.get(r.stage_id) ?? ZERO, r));
+  }
+  const out = new Map<number, DeliveryCell>();
+  for (const [stageId, total] of totalSent) {
+    out.set(stageId, cellOf(capable.get(stageId) ?? ZERO, total));
   }
   return out;
 }

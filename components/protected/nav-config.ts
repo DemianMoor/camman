@@ -2,6 +2,7 @@ import {
   Activity,
   BarChart3,
   CalendarClock,
+  CheckCheck,
   FolderTree,
   Layers,
   LayoutDashboard,
@@ -76,8 +77,10 @@ export const navGroups: NavGroup[] = [
   },
   {
     // Reports are a feature (Keitaro funnel + performance rollup), not entities —
-    // always enabled. Overview is the Keitaro funnel; the rest are the five
-    // rollup dimensions (each a /reports/<dimension> tab route).
+    // always enabled. Overview is the Keitaro funnel; then the five rollup
+    // dimensions (each a /reports/<dimension> tab route); then Delivery, which
+    // has its own route and its own column set (delivery receipts, not the
+    // EPC/revenue funnel) — see docs/04-features/delivery-report.md.
     label: "Reports",
     items: [
       { label: "Overview", href: "/reports", icon: BarChart3, exact: true },
@@ -86,6 +89,7 @@ export const navGroups: NavGroup[] = [
       { label: "By Sequence", href: "/reports/sequence", icon: Layers },
       { label: "Hourly", href: "/reports/hourly", icon: CalendarClock },
       { label: "By Group", href: "/reports/group", icon: FolderTree },
+      { label: "Delivery", href: "/reports/delivery", icon: CheckCheck },
     ],
   },
   {

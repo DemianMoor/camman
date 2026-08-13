@@ -6,8 +6,8 @@ import { can } from "@/lib/permissions";
 import {
   NO_DLR_NOTE,
   getDeliveryByStage,
+  getPhoneDirectory,
   getProviderRegistry,
-  getStageDirectory,
   rollupByProvider,
 } from "@/lib/reporting/delivery";
 
@@ -18,8 +18,8 @@ export const dynamic = "force-dynamic";
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // ⚠️ HARD CAP, and lower than the other reports' 92 days on purpose. MEASURED
-// against prod (3.07M-row stage_sends): a 7-day window is 473 ms server-side; a
-// 30-day window is 11.0 s, which would exceed the function limit. The cost is
+// against prod (3.07M-row stage_sends): a 7-day window is ~832 ms warm and
+// ~2.5 s COLD; a 30-day window is 11.0 s, which would exceed the function limit. The cost is
 // the stage_sends scan — stage_sends_org_sent_at_idx is (org_id, sent_at), so
 // status/stage_id are heap fetches. Raising this cap REQUIRES the covering index
 // first (ClickUp 869ehwae3); do not widen it on the assumption that it scales.
@@ -54,13 +54,15 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const [rows, stages, registry] = await Promise.all([
+  const [rows, phones, registry] = await Promise.all([
     getDeliveryByStage(auth.orgId, { from, to }),
-    getStageDirectory(auth.orgId),
+    getPhoneDirectory(auth.orgId),
     getProviderRegistry(auth.orgId),
   ]);
 
-  const data = rollupByProvider(rows, stages, registry);
+  // Provider rows, each carrying its per-number breakdown. Attribution comes
+  // from each send's own stamped provider_phone_id, not from its stage.
+  const data = rollupByProvider(rows, phones, registry);
   // Totals cover DLR-CAPABLE providers only — summing a null-capability
   // provider's sends into a delivery total would silently re-create the "0.0%
   // delivered across the platform" reading the capability gate exists to prevent.

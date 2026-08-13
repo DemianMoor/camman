@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import { ChevronRight } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
@@ -51,6 +52,45 @@ function Dash() {
   return <span className="text-muted-foreground/60">—</span>;
 }
 
+// The five numeric cells, shared by provider rows and their number sub-rows so
+// the two can never drift in formatting or in null handling.
+function Cells({
+  row,
+  muted,
+}: {
+  row: Pick<
+    DeliveryProviderRow,
+    "sent" | "delivered" | "undelivered" | "no_receipt" | "delivered_pct"
+  >;
+  muted?: boolean;
+}) {
+  return (
+    <>
+      <td className={cn("px-3 py-2 text-right tabular-nums", muted && "text-muted-foreground")}>
+        {fmtInt(row.sent)}
+      </td>
+      <td className={cn("px-3 py-2 text-right tabular-nums", muted && "text-muted-foreground")}>
+        {row.delivered === null ? <Dash /> : fmtInt(row.delivered)}
+      </td>
+      <td className={cn("px-3 py-2 text-right tabular-nums", muted && "text-muted-foreground")}>
+        {row.undelivered === null ? <Dash /> : fmtInt(row.undelivered)}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+        {row.no_receipt === null ? <Dash /> : fmtInt(row.no_receipt)}
+      </td>
+      <td
+        className={cn(
+          "px-3 py-2 text-right font-medium tabular-nums",
+          row.delivered_pct !== null && row.delivered_pct < 90 ? "text-amber-600" : "",
+          muted && row.delivered_pct === null && "text-muted-foreground",
+        )}
+      >
+        {row.delivered_pct === null ? <Dash /> : fmtPct(row.delivered_pct)}
+      </td>
+    </>
+  );
+}
+
 function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="rounded-md border bg-background px-3 py-2">
@@ -71,6 +111,14 @@ export function DeliveryReport() {
   const api = useApiCall<DeliveryResponse>();
   const [resp, setResp] = useState<DeliveryResponse | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // Which providers are expanded into their per-number rows. Deliberately NOT
+  // persisted: the fleet glance is the default view, and a reload should return
+  // to it rather than to whatever was open last week.
+  const [expandedProviders, setExpandedProviders] = useState<string[]>([]);
+  const toggleProvider = (key: string) =>
+    setExpandedProviders((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    );
 
   useEffect(() => {
     let cancelled = false;
@@ -162,48 +210,81 @@ export function DeliveryReport() {
                 </td>
               </tr>
             ) : null}
-            {rows.map((r) => (
-              <tr key={r.provider_key} className="border-b last:border-0">
-                <td className="px-3 py-2">
-                  <span className="inline-flex items-center gap-1.5">
-                    <span
-                      className="size-2 rounded-full"
-                      style={{ backgroundColor: r.color ?? "#64748B" }}
-                    />
-                    <span>{r.name}</span>
-                    {r.archived ? (
-                      <span className="text-xs text-muted-foreground">(archived)</span>
-                    ) : null}
-                    {!r.dlr_capable ? (
-                      <span
-                        className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground"
-                        title="This provider has no delivery-receipt intake, so delivery cannot be measured. These cells are blank rather than zero — a 0% here would be a reporting artefact, not a delivery failure."
-                      >
-                        {resp?.no_dlr_note ?? "no reliable DLR"}
+            {rows.map((r) => {
+              // Only offer expansion where there is something to expand into.
+              // A single-number provider's sub-row would just restate its parent.
+              const expandable = r.numbers.length > 1;
+              const open = expandable && expandedProviders.includes(r.provider_key);
+              return (
+                <Fragment key={r.provider_key}>
+                  <tr className="border-b last:border-0">
+                    <td className="px-3 py-2">
+                      <span className="inline-flex items-center gap-1.5">
+                        {expandable ? (
+                          <button
+                            type="button"
+                            onClick={() => toggleProvider(r.provider_key)}
+                            aria-expanded={open}
+                            aria-label={`${open ? "Collapse" : "Expand"} ${r.name} numbers`}
+                            className="-ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                          >
+                            <ChevronRight
+                              className={cn("size-3.5 transition-transform", open && "rotate-90")}
+                            />
+                          </button>
+                        ) : (
+                          <span className="-ml-1 inline-block size-4.5" />
+                        )}
+                        <span
+                          className="size-2 rounded-full"
+                          style={{ backgroundColor: r.color ?? "#64748B" }}
+                        />
+                        <span>{r.name}</span>
+                        {expandable ? (
+                          <span className="text-xs text-muted-foreground">
+                            {r.numbers.length} numbers
+                          </span>
+                        ) : null}
+                        {r.archived ? (
+                          <span className="text-xs text-muted-foreground">(archived)</span>
+                        ) : null}
+                        {!r.dlr_capable ? (
+                          <span
+                            className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                            title="This provider has no delivery-receipt intake, so delivery cannot be measured. These cells are blank rather than zero — a 0% here would be a reporting artefact, not a delivery failure."
+                          >
+                            {resp?.no_dlr_note ?? "no reliable DLR"}
+                          </span>
+                        ) : null}
                       </span>
-                    ) : null}
-                  </span>
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums">{fmtInt(r.sent)}</td>
-                <td className="px-3 py-2 text-right tabular-nums">
-                  {r.delivered === null ? <Dash /> : fmtInt(r.delivered)}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums">
-                  {r.undelivered === null ? <Dash /> : fmtInt(r.undelivered)}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                  {r.no_receipt === null ? <Dash /> : fmtInt(r.no_receipt)}
-                </td>
-                <td
-                  className={cn(
-                    "px-3 py-2 text-right font-medium tabular-nums",
-                    r.delivered_pct !== null && r.delivered_pct < 90 ? "text-amber-600" : "",
-                  )}
-                >
-                  {r.delivered_pct === null ? <Dash /> : fmtPct(r.delivered_pct)}
-                </td>
-              </tr>
-            ))}
+                    </td>
+                    <Cells row={r} />
+                  </tr>
+                  {open
+                    ? r.numbers.map((n) => (
+                        <tr
+                          key={`${r.provider_key}:${n.provider_phone_id ?? "none"}`}
+                          className="border-b bg-muted/30 last:border-0"
+                        >
+                          <td className="py-1.5 pl-11 pr-3">
+                            <span className="inline-flex items-center gap-2">
+                              <span className="font-mono text-[13px]">
+                                {n.phone_number ?? "No number"}
+                              </span>
+                              {n.number_type ? (
+                                <span className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                                  {n.number_type.replace(/_/g, " ")}
+                                </span>
+                              ) : null}
+                            </span>
+                          </td>
+                          <Cells row={n} muted />
+                        </tr>
+                      ))
+                    : null}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -218,6 +299,13 @@ export function DeliveryReport() {
           Providers marked <span className="font-medium">no reliable DLR</span> have no
           delivery-receipt intake, so their delivery columns are blank rather than zero. Their
           Sent counts are still exact. Windows are not comparable with each other.
+        </p>
+        <p>
+          Providers running more than one number expand into a per-number breakdown — two numbers
+          on the same provider can differ sharply in deliverability (a short code and a toll-free
+          are not the same product). Each number is attributed from the send&apos;s own record, so a
+          stage whose number changed mid-send is split correctly rather than credited to one of
+          them.
         </p>
       </div>
     </div>

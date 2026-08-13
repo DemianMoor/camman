@@ -6,6 +6,11 @@ import { optOutBreakerAlertText } from "@/lib/sends/optout-rate-breaker";
 import { reconcileTellsDlrEvent } from "@/lib/sends/tells-dlr";
 import { processTellsOptOut } from "@/lib/sends/tells-optout";
 import { readStageSendIdFromMetadata } from "@/lib/sends/tells-webhook-shared";
+import {
+  HEARTBEAT_JOBS,
+  checkHeartbeats,
+  heartbeatBreaches,
+} from "@/lib/reporting/cron-heartbeat";
 
 // The sweeper — §4.1's guaranteed floor.
 //
@@ -35,6 +40,43 @@ export interface TellsSweepResult {
   suppressed: number;
   failed: number;
   stuck: number;
+  monitorsStale: boolean;
+}
+
+// The other half of the mutual dead-man watch (§4.5). The monitors job watches
+// this sweeper; this sweeper watches the monitors job — because a dead job
+// cannot report itself dead, and between them they are the ONLY detection layer
+// for broken STOP intake.
+//
+// Rate-limited to one alert per hour via its own cron_locks watermark: this
+// runs every 5 minutes, so an unguarded alert would fire 12×/hour and get the
+// channel muted — which would defeat the entire point.
+const STALE_ALERT_KEY = "tells-monitors-stale-alert";
+const STALE_ALERT_MIN_INTERVAL_HOURS = 1;
+
+async function checkMonitorsAlive(dbc: DbOrTx): Promise<boolean> {
+  const statuses = await checkHeartbeats(dbc, [HEARTBEAT_JOBS.tellsMonitors]);
+  const breaches = heartbeatBreaches(statuses);
+  if (breaches.length === 0) return false;
+
+  const gate = (await dbc.execute(sql`
+    SELECT watermark FROM cron_locks WHERE job_name = ${STALE_ALERT_KEY} LIMIT 1
+  `)) as unknown as { watermark: string | null }[];
+  const last = gate[0]?.watermark ? new Date(gate[0].watermark).getTime() : 0;
+  const dueMs = STALE_ALERT_MIN_INTERVAL_HOURS * 3600 * 1000;
+  if (Date.now() - last < dueMs) return true; // stale, but already alerted recently
+
+  await dbc.execute(sql`
+    INSERT INTO cron_locks (job_name, watermark) VALUES (${STALE_ALERT_KEY}, now())
+    ON CONFLICT (job_name) DO UPDATE SET watermark = now()
+  `);
+  void notifyTelegram(
+    `🚨 <b>Tells monitors are not running.</b>\n` +
+      breaches.map((b) => `• ${b}`).join("\n") +
+      `\n\nThey are the SOLE detection layer for broken STOP intake — while they are ` +
+      `down, a broken inbound webhook would produce no symptom at all.`,
+  ).catch(() => {});
+  return true;
 }
 
 export async function sweepTellsWebhookEvents(
@@ -65,7 +107,7 @@ export async function sweepTellsWebhookEvents(
 
   const out: TellsSweepResult = {
     scanned: rows.length, dlrProcessed: 0, inboundProcessed: 0,
-    suppressed: 0, failed: 0, stuck: 0,
+    suppressed: 0, failed: 0, stuck: 0, monitorsStale: false,
   };
 
   for (const r of rows) {
@@ -134,6 +176,14 @@ export async function sweepTellsWebhookEvents(
         `processing attempts and are no longer being retried. If any are inbound, STOPs are ` +
         `UNSUPPRESSED. Inspect tells_webhook_events WHERE processed_at IS NULL.`,
     ).catch(() => {});
+  }
+
+  // Mutual dead-man watch — see checkMonitorsAlive. Never allowed to fail the
+  // sweep: draining STOPs matters more than reporting on a sibling job.
+  try {
+    out.monitorsStale = await checkMonitorsAlive(dbc);
+  } catch (err) {
+    console.error("[tells-sweep] monitors heartbeat check failed", err);
   }
 
   return out;

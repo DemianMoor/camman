@@ -10,6 +10,13 @@ import {
 } from "@/lib/keitaro/funnel";
 import { can } from "@/lib/permissions";
 import { denominatorFor } from "@/lib/reporting/counted-clickers";
+import {
+  getDeliveryByStage,
+  getStageDirectory,
+  rollupByCampaign,
+  rollupByStage,
+  type DeliveryCell,
+} from "@/lib/reporting/delivery";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 
 // Cross-campaign Keitaro reports (the /reports "Overview" tab): per-stage
@@ -28,6 +35,10 @@ function lifetimeEpc(revenue: number, clickers: number): number {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_RANGE_DAYS = 92;
+// The Delivered % column only. MUST stay <= the cap in
+// app/api/reports/delivery/route.ts — both are bounded by the same measured
+// stage_sends scan (473 ms at 7 days, 11.0 s at 30).
+const DELIVERY_MAX_RANGE_DAYS = 14;
 
 export const SORTABLE = new Set([
   "campaign_name",
@@ -258,11 +269,54 @@ export async function GET(req: NextRequest) {
     return sortDir === "asc" ? cmp : -cmp;
   });
 
-  const totalCount = data.length;
-  const paged = data.slice(page * pageSize, page * pageSize + pageSize);
+  // ---- Delivered % (lib/reporting/delivery.ts — the shared layer) ----------
+  //
+  // ⚠️ CONDITIONAL ON THE RANGE, and that is not an optimisation. This route
+  // permits 92 days; the delivery query costs 473 ms over 7 days but 11.0 s over
+  // 30 (it scans stage_sends, which has no covering index — ClickUp 869ehwae3).
+  // Running it unconditionally would make a wide Overview range time out. Past
+  // the cap the column reports null and the UI says why, rather than silently
+  // showing "—" that reads as "no delivery data".
+  //
+  // Computed AFTER paging is decided but over the FULL row set, then attached —
+  // each grain aggregates the shared stage rows ITSELF (campaign rows via
+  // rollupByCampaign, stage rows via rollupByStage). No grain reads another's
+  // output.
+  const deliveryAvailable = spanDays <= DELIVERY_MAX_RANGE_DAYS;
+  let deliveryByCampaign = new Map<number, DeliveryCell>();
+  let deliveryByStage = new Map<number, DeliveryCell>();
+  if (deliveryAvailable) {
+    const [deliveryRows, stageDir] = await Promise.all([
+      getDeliveryByStage(auth.orgId, { from, to }),
+      getStageDirectory(auth.orgId),
+    ]);
+    deliveryByCampaign = rollupByCampaign(deliveryRows, stageDir);
+    deliveryByStage = rollupByStage(deliveryRows, stageDir);
+  }
+  const withDelivery = data.map((r) => {
+    const cell = groupByCampaign
+      ? deliveryByCampaign.get(r.campaign_id)
+      : r.stage_id != null
+        ? deliveryByStage.get(r.stage_id)
+        : undefined;
+    return {
+      ...r,
+      delivered_pct: cell?.delivered_pct ?? null,
+      // 100 ⇒ every send at this grain is DLR-capable and the figure needs no
+      // qualifier. Below 100 the UI MUST label it: "91.4% (of 4% of sends)".
+      delivery_coverage_pct: cell?.coverage_pct ?? null,
+    };
+  });
+
+  const totalCount = withDelivery.length;
+  const paged = withDelivery.slice(page * pageSize, page * pageSize + pageSize);
 
   return NextResponse.json({
     data: paged,
+    delivery: {
+      available: deliveryAvailable,
+      max_days: DELIVERY_MAX_RANGE_DAYS,
+    },
     totalCount,
     page,
     pageSize,

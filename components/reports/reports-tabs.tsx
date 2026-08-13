@@ -13,6 +13,10 @@ import {
 // the five dimension tabs deep-link to /reports/<dimension>. Active state is
 // derived from the pathname so it stays correct on refresh and matches the
 // sidebar's Reports group.
+//
+// Delivery is listed explicitly rather than through REPORT_DIMENSIONS: like
+// Overview it has its own route and its own column set (delivery receipts, not
+// the shared EPC/revenue funnel), so it is not a PerformanceReport dimension.
 const TABS: { href: string; label: string; exact: boolean }[] = [
   { href: "/reports", label: "Overview", exact: true },
   ...REPORT_DIMENSIONS.map((d) => ({
@@ -20,6 +24,7 @@ const TABS: { href: string; label: string; exact: boolean }[] = [
     label: DIMENSION_TAB_LABEL[d],
     exact: false,
   })),
+  { href: "/reports/delivery", label: "Delivery", exact: false },
 ];
 
 export function ReportsTabs() {

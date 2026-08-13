@@ -122,12 +122,30 @@ Note the same lost-update shape as ClickUp `869ehjwtf`: the phone edit dialog su
 >
 > Baseline for comparison is **5.8% undelivered at 5/s** on this number. Carrier filtering on a young toll-free number shows up as **undelivered**, not as API errors — the send will look perfectly healthy at the API layer while delivery decays. `undelivered` per batch is therefore the signal to watch, not the send success rate.
 >
+> **✅ AUTOMATED since 2026-08-13.** This is check #4 in `/api/cron/tells-monitors`, computed through `lib/reporting/delivery.ts` — the same layer behind `/reports/delivery`, so the alert and the page cannot disagree. It **detects only**: the response below stays manual, and nothing in the monitor writes `max_sends_per_second`. Matured sends only (10 min), floor 50 sends per batch.
+>
 > ```sql
-> SELECT count(DISTINCT e.matched_stage_send_id) FILTER (WHERE lower(e.status)='undelivered')::numeric
->        / NULLIF(count(DISTINCT e.matched_stage_send_id), 0) AS undelivered_rate
-> FROM tells_webhook_events e
-> JOIN stage_sends ss ON ss.id = e.matched_stage_send_id
-> WHERE e.kind = 'dlr' AND ss.stage_id = <STAGE_ID>;
+> -- Denominator is SENT, matching check #4, /reports/delivery, and the 5.8%
+> -- baseline recorded above.
+> --
+> -- ⚠️ CORRECTED 2026-08-13. This block previously divided by "messages with any
+> -- DLR event" (count(DISTINCT matched_stage_send_id)), which yields 5.97% for the
+> -- same validation batch — it disagreed with the 5.8% figure recorded right above
+> -- it. Sent is the denominator everywhere now; do not reintroduce the other one.
+> SELECT count(*) FILTER (WHERE t.u AND NOT COALESCE(t.d, false))::numeric
+>          / NULLIF(count(*), 0) AS undelivered_rate,
+>        count(*) AS sent
+> FROM stage_sends ss
+> LEFT JOIN (
+>   SELECT matched_stage_send_id AS ss_id,
+>          bool_or(lower(status) = 'delivered')   AS d,
+>          bool_or(lower(status) = 'undelivered') AS u
+>   FROM tells_webhook_events
+>   WHERE kind = 'dlr' AND lower(status) IN ('delivered','undelivered')
+>     AND matched_stage_send_id IS NOT NULL
+>   GROUP BY 1
+> ) t ON t.ss_id = ss.id
+> WHERE ss.stage_id = <STAGE_ID> AND ss.status = 'sent';
 > ```
 
 ## 3. Credential rotation — ORDER MATTERS

@@ -45,7 +45,53 @@ type ReportRow = {
   lifetime_epc: number; // LIFETIME — ignores the date filter; the PRIMARY figure
   lifetime_clickers: number;
   profit: number;
+  // Delivery receipts (lib/reporting/delivery.ts — the same layer behind
+  // /reports/delivery and the undelivered tripwire). null when the grain has no
+  // DLR-capable sends, or when the selected range exceeds the delivery cap.
+  delivered_pct: number | null;
+  // < 100 ⇒ a MIXED-capability campaign; the figure must be labelled with its
+  // coverage or a 4%-coverage number is indistinguishable from a 100% one.
+  delivery_coverage_pct: number | null;
 };
+
+// Delivered % cell. Three distinct "no number" cases, which must not look alike:
+//   · range too wide  — the delivery query is capped at 14 days (measured: 473 ms
+//                       at 7 days vs 11.0 s at 30), so the column is not computed
+//   · no capable sends — this grain sends only via providers with no DLR intake
+//   · partial coverage — a MIXED campaign: show the figure AND label its coverage,
+//                        because 91.4% over 4% of sends is not the same claim as
+//                        91.4% over all of them
+function DeliveredCell({ row, available }: { row: ReportRow; available: boolean }) {
+  if (!available) {
+    return (
+      <span className="text-muted-foreground/60" title="Delivery % is only computed for ranges of 14 days or less. Narrow the date range to see it.">
+        —
+      </span>
+    );
+  }
+  if (row.delivered_pct === null) {
+    return (
+      <span className="text-muted-foreground/60" title="No delivery-receipt data: these sends went via a provider with no DLR intake.">
+        —
+      </span>
+    );
+  }
+  const coverage = row.delivery_coverage_pct;
+  const partial = coverage !== null && coverage < 100;
+  return (
+    <span className="tabular-nums">
+      {row.delivered_pct.toFixed(1)}%
+      {partial ? (
+        <span
+          className="ml-1 text-[11px] text-muted-foreground"
+          title="This campaign sends via more than one provider and only some of them report delivery receipts. The percentage covers only that measurable share of its sends."
+        >
+          (of {coverage.toFixed(0)}% of sends)
+        </span>
+      ) : null}
+    </span>
+  );
+}
 
 type Totals = Omit<
   ReportRow,
@@ -56,6 +102,12 @@ type Totals = Omit<
   | "stage_name"
   | "stage_tracking_id"
   | "stage_count"
+  // Deliberately NOT in the totals card. An org-wide "Delivered %" would need a
+  // denominator choice (all sends? DLR-capable sends?) that no single number can
+  // carry honestly while ~99.9% of volume has no receipts. /reports/delivery
+  // shows the per-provider breakdown instead, where the denominator is explicit.
+  | "delivered_pct"
+  | "delivery_coverage_pct"
 >;
 
 type GroupBy = "stage" | "campaign";
@@ -64,6 +116,9 @@ type ReportResponse = {
   data: ReportRow[];
   totalCount: number;
   totals: Totals;
+  // available=false ⇒ the selected range exceeds the delivery cap and the
+  // Delivered % column was not computed at all (see DeliveredCell).
+  delivery?: { available: boolean; max_days: number };
   range: { from: string; to: string; timezone: string };
 };
 
@@ -162,6 +217,8 @@ export function KeitaroReport() {
   const [totals, setTotals] = useState<Totals | null>(null);
   const [totalCount, setTotalCount] = useState(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // Whether the server computed the Delivered % column at all for this range.
+  const [deliveryAvailable, setDeliveryAvailable] = useState(true);
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
 
@@ -188,6 +245,7 @@ export function KeitaroReport() {
         setData(result.data.data);
         setTotals(result.data.totals);
         setTotalCount(result.data.totalCount);
+        setDeliveryAvailable(result.data.delivery?.available ?? true);
       } else {
         setFetchError(result.error);
       }
@@ -300,6 +358,12 @@ export function KeitaroReport() {
             {fmtPct(row.original.opt_out_rate)}
           </span>
         ),
+      },
+      {
+        id: "delivered_pct",
+        header: "Delivered, %",
+        enableSorting: false,
+        cell: ({ row }) => <DeliveredCell row={row.original} available={deliveryAvailable} />,
       },
       {
         id: "clickers",
@@ -438,7 +502,7 @@ export function KeitaroReport() {
       },
     ];
     return [campaignCol, stageCol, ...rest];
-  }, [filters.groupBy]);
+  }, [filters.groupBy, deliveryAvailable]);
 
   const isAuthLoading = !auth;
 

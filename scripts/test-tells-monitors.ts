@@ -13,6 +13,8 @@ import {
   DLR_COVERAGE_MIN_RATIO,
   DLR_COVERAGE_MIN_SENDS,
   INBOUND_SILENCE_MIN_SENDS,
+  UNDELIVERED_TRIPWIRE_RATIO,
+  undeliveredTripwireBreached,
 } from "@/lib/sends/tells-monitors";
 
 let pass = 0, fail = 0;
@@ -99,6 +101,28 @@ ok(INBOUND_SILENCE_MIN_SENDS >= 1149,
 // both because inbound arrived and because 500 is under the floor.
 ok(!inboundSilenceBreached(500, 4), "silence: the 2026-08-13 validation send did not breach");
 ok(!inboundSilenceBreached(500, 0), "silence: 500 sends is below the floor, so silence alone is not a breach");
+
+// ===========================================================================
+// ⭐ UNDELIVERED TRIPWIRE (runbook §2b) — carrier filtering surfaces as
+// `undelivered`, never as an API error, so this is the signal that a young
+// toll-free number is decaying while the API layer still looks perfectly healthy.
+//
+// The threshold is calibrated to ONE number (tls TFN, 5.8% at 5/s). Both failure
+// modes are pinned, for the same reason as the rules above: a monitor that fires
+// on a healthy baseline gets muted, and a monitor that stays quiet through real
+// carrier filtering is worse than none.
+// ===========================================================================
+console.log("\nundelivered tripwire:");
+ok(!undeliveredTripwireBreached(500, 29), "⭐ the 5.8% observed baseline does NOT breach");
+ok(!undeliveredTripwireBreached(1000, 80), "exactly 8.0% does not breach (strictly greater)");
+ok(undeliveredTripwireBreached(1000, 81), "⭐ 8.1% breaches");
+ok(undeliveredTripwireBreached(500, 100), "20% — obvious carrier filtering — breaches");
+ok(!undeliveredTripwireBreached(DLR_COVERAGE_MIN_SENDS - 1, DLR_COVERAGE_MIN_SENDS - 1),
+   "below the volume floor a 100% rate is noise, not a breach");
+ok(undeliveredTripwireBreached(DLR_COVERAGE_MIN_SENDS, DLR_COVERAGE_MIN_SENDS),
+   "at the volume floor a 100% rate DOES breach");
+ok(!undeliveredTripwireBreached(0, 0), "zero sends never breaches (no divide-by-zero alert)");
+eq(UNDELIVERED_TRIPWIRE_RATIO, 0.08, "threshold is the runbook's 8%");
 
 console.log(`\n${fail === 0 ? "✓ ALL PASS" : "✗ FAILED"}  ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -51,8 +51,20 @@ And **no stage is mixed-provider** (0 of 882 stages with sends). A stage
 therefore maps losslessly to exactly one provider, which is what makes the
 stage-grain primitive in §2 correct AND cheap.
 
-**Campaigns CAN be mixed:** 4 of 212 campaigns with sends span >1 provider. The
-mixed-campaign treatment in §5.2 is a real case, not a hypothetical.
+**Campaigns CAN be mixed:** 4 of 212 campaigns with sends span >1 provider.
+
+> ⚠️ **Corrected 2026-08-13 during build.** Mixed-PROVIDER is not the same as
+> mixed-CAPABILITY, and only the latter triggers the coverage label. All 4 of
+> those campaigns are `txh` + `txh2` — **both non-capable** — so they render `—`,
+> not a label. **Zero campaigns currently mix a capable provider with a
+> non-capable one**, so the coverage-label path in §5.2 is NOT exercised by
+> production data today; it is covered by `scripts/test-delivery-rollups.ts`
+> instead, and `verify-delivery-grains.ts` prints an explicit warning rather than
+> a bare `0` that would read as a pass.
+>
+> The path is still built, not deferred: it starts firing the moment a `tls` or
+> `txr` stage lands in a campaign that also sends via TextHub — likely as Tells
+> ramps past validation volume.
 
 ### 1.3 The three counting traps
 

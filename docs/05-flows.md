@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-07-26_
+_Last updated: 2026-08-13_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -246,6 +246,64 @@ sequenceDiagram
 ```
 
 Unlike Ahoi's Layer 3, Text Request's opt-out error codes are **documented and live from day one** (2100 on a delivery status, 30050 on a send response). A hit means our suppression list is behind Text Request's. An UNMATCHED 2100 DLR carries no recipient (the body is only `{message_id,status,errorCode}`) and is logged rather than guessed at — the contacts poll is the backstop for that number.
+
+## E8. Tells webhook intake — persist-first capture (DLR + inbound)
+
+```mermaid
+sequenceDiagram
+  participant T as Tells
+  participant R as /api/webhooks/tells/{dlr|inbound}/[token]
+  participant DB
+  participant Sw as /api/cron/tells-sweep (*/5, offset :2)
+  T->>R: POST JSON
+  R->>R: read body ONCE as text (the evidence)
+  R->>DB: resolveTellsCredential(token) scoped to sms_provider_id='tls'
+  alt token does not resolve
+    R->>R: Tells-shaped body? console.error + Telegram (the event's LAST copy) : silent console.warn
+    R-->>T: 401
+  end
+  opt inbound only (F1 second factor)
+    R->>DB: resolveCredentialKeyById -> stored api_key
+    R->>R: safeEqual(payload Key, stored key); mismatch ⇒ 401 + alert, nothing persisted
+    R->>R: ⚠️ §4.6 redactTellsKeyFromBody — the live API key NEVER reaches raw_body
+  end
+  R->>R: guarded extraction (~8 fields, try/catch ⇒ NULLs) + dedup_key
+  R->>DB: ONE committed INSERT (ON CONFLICT DO UPDATE bumps duplicate_count ONLY)
+  alt INSERT fails
+    R->>R: console.error + Telegram with the payload (last copy)
+    R-->>T: 500 — never ack what was not stored
+  end
+  R->>DB: best-effort inline processing (reconcile / suppress) — cannot fail the request
+  R-->>T: 200
+  Note over DB,Sw: processed_at IS NULL is the work queue
+  Sw->>DB: drain oldest-first, ≤200/tick, ≤10 attempts, then alert on stuck rows
+```
+
+The inline attempt is free precisely because the row is already committed: even if processing blows past Tells's 12-second timeout, the event is ours and we never needed their ack. **Tells has no poll and no reconciliation API**, so this sweeper is the only recovery path — which is why neither Ahoi nor Text Request has an equivalent.
+
+## E9. Tells opt-out intake — ONE signal, and it is the only automated STOP path
+
+```mermaid
+sequenceDiagram
+  participant T as Tells inbound webhook (the ONLY channel)
+  participant App as processTellsOptOut
+  participant DB
+  T->>App: From (contact) + Body, from the committed event row
+  App->>App: isOptOutKeyword(Body) — the SHARED gate (first token, uppercased, non-letters stripped)
+  Note over App: no match ⇒ result='ignored', stored forever, nothing downstream reads it
+  App->>App: tellsPhoneToE164(From) — null ⇒ 'invalid_phone', never a guessed number
+  App->>App: findDuplicateTellsInbound (45-min window, same number + same text)
+  App->>DB: upsert contacts (a STOP must stick for a non-contact number)
+  App->>DB: INSERT opt_outs (source 'tells_inbound_webhook', created_at = ORIGINAL receipt time)
+  App->>DB: cascade-cancel pending stage_sends -> skipped_opted_out / opt_out_cancel
+  App->>DB: latestSendForAttribution -> opt_out_attributions + stage counters + recomputeStageTotalCost
+  App->>DB: checkOptOutRateBreaker (latch in-tx; Telegram post-commit)
+  App->>DB: stamp result='suppressed' + processed_at
+```
+
+**Suppression is org-wide and unconditional; attribution is best-effort.** If `latestSendForAttribution` returns null the contact is still suppressed — the opt-out simply isn't credited to a stage. Losing attribution is a reporting gap; losing suppression would be a compliance breach, and the two are deliberately not coupled.
+
+Unlike Text Request's four signals, Tells has exactly **one**: no state-shaped "contact is opted out" flag, no poll, no opt-out error code on a DLR. Combined with STOP-undelivered self-healing being closed as won't-build (spec §8), **this webhook is the entire automated STOP surface** — which is what makes the Phase 4 silence monitors compliance infrastructure rather than observability polish.
 
 ## F. Segment rule audience resolution
 See [04-features/audience-segments.md](04-features/audience-segments.md) — `buildSegmentAudienceClause` compiles rules to UNION/INTERSECT/EXCEPT set arithmetic and UNIONs the result with manual membership.

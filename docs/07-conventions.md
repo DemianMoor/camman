@@ -319,6 +319,18 @@ git worktree add -b <branch> .claude/worktrees/<name> origin/main
 
 If you do disturb another branch, the fix is usually clean — a rename touches no commits and preserves upstream config, so `git branch -m <wrong> <original>` restores it. Say so plainly rather than quietly correcting it; the other session may be mid-task.
 
+## A provider's own webhook payload can carry a live credential — redact before persist
+
+Tells's **inbound** webhook body includes a `Key` field, and Phase 0 established it is the **full live API key**, not a per-webhook secret. Capturing bodies verbatim — which every other provider's intake does, correctly — would have written a live sending credential into `tells_webhook_events.raw_body`, and from there into every database backup and any future export. That is CLAUDE.md §11 ("never log secrets") broken by a rule that is otherwise right.
+
+The rule for any provider whose payload carries a secret: **capture stays byte-for-byte verbatim EXCEPT that field**, whose value is replaced with a fixed marker before the row is persisted (`redactTellsKeyFromBody`, `lib/sends/tells-webhook-shared.ts`). Surgical — one field, nothing else touched. Three details that make it hold:
+
+- **Case-insensitive.** A casing change on their side must not silently reintroduce the credential.
+- **Fails closed.** If the body doesn't parse we cannot *prove* the key isn't in it, so `null` is stored rather than the bytes. Losing an unparseable body is strictly better than persisting a live key — the extracted columns and the alert still carry the event.
+- **Alerts are redacted too.** The unresolved-token alert path re-uses the same redaction; a Telegram message is not a place to paste an API key either.
+
+Note this is orthogonal to whether the key is *rotated*. Rotation was declined for Tells because the exposure in ephemeral runtime logs was judged acceptable; a live credential replicated into every backup is a different and larger exposure, and the carve-out stands regardless.
+
 ## Go-live gates never live on a bulk settings form
 
 **A field that decides whether something goes live must not be editable through a whole-object form.** `supports_api_send` was, and it silently re-enabled itself on the `tls` provider (2026-08-13, ClickUp 869ehjwtf). Four ordinary things composed into it:

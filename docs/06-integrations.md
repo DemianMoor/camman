@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-13_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -17,6 +17,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | **Ahoi inbound webhook** | provider → app | STOP/reply capture + opt-out write (Sections 3+4) | path token (same column as the DLR webhook) | `POST /api/webhooks/ahoi/inbound/<token>` form body `source/destination/message/type/cost`; `message` is form/URL-encoded, decoded automatically by `URLSearchParams`; STOP-class messages write `opt_outs` (`lib/sends/ahoi-optout.ts`) |
 | **Ahoi CDR poll** | app → provider | inbound capture backstop (Section 3) | `key` query param (DB, provider-default) | `GET {AHOI_API_BASE_URL}/cdrs/download/csv?record_type=sms&startdate=MM/DD/YYYY&enddate=MM/DD/YYYY&key=` → CSV; filtered to `direction=in`, deduped by `uuid` |
 | **Text Request** (`txr`, **LIVE 2026-08-12** — `supports_api_send=true`, provider 641) | app ↔ provider | outbound send + delivery status + opt-out intake | `x-api-key` header (DB, per-account) | healthcheck: `GET {TEXTREQUEST_API_BASE_URL}/dashboards` → `{items,meta}`; send: `POST /messages` `{from,to,body,status_callback?}` → `{message_id,status,segments_count}`; DLR: per-message `status_callback` + account hook `msg_status_updated` → `{message_id,status,errorCode}`; backstops: `GET /dashboards/{id}/messages?start_date&end_date&page&page_size` (+ `message_direction=R`) and `GET /dashboards/{id}/contacts?has_opted_out=true&last_message_received_after`; hooks: `GET/POST /dashboards/{id}/hooks`, `PUT /dashboards/{id}/hooks/{id}` (reactivate), `DELETE`. Real HTTP status codes (unlike Ahoi's always-200). Dashboard-scoped: one dashboard per sending number (`provider_phones.dashboard_id`). |
+| **Tells.co** (`tls`, provider 855 — **`supports_api_send=false` until Phase 5**) | app ↔ provider | outbound send (Phase 2); webhook intake is Phase 3 | `key` **form param** (DB, per-account, AES-256-GCM) | send: `POST {TELLS_API_BASE_URL}` form body `key/from/to/message/metadata?` → success `{id,status:"queued",sms_count,sms_charge,…}`. **⚠️ ALL send errors return HTTP 200** with `{status:"error",message}` — classify off the BODY (Ahoi-shaped, not Text Request-shaped); a bad API key returns 200. Only non-200 observed is **429** `Duplicate request detected` (unreachable by design — see below). `from`/`to` bare 11-digit. `metadata` echoes back on the DLR under the **lowercase** key, always as a **string**, and is the only correlation handle its DLR carries. `id` is a string here but a **number** on the webhook. |
 | **MaxMind GeoLite2** | app → download | click ASN/country enrichment | `MAXMIND_LICENSE_KEY` | downloads `.mmdb` at runtime |
 | **Telegram Bot API** | app → alerts + reports | circuit-breaker / poller alerts (best-effort) + hourly/daily performance report (`/api/cron/telegram-report`) | bot token + chat id | `sendMessage` — best-effort for alerts (`notifyTelegram`), `parse_mode:"HTML"` + error-propagating for the report (`sendTelegramHtml`) |
 | **Keitaro** (tracker) | app → tracker | 5-min results poll + 15-min conversions poll + 15-min offer-reach poll | `Api-Key` header | `POST {KEITARO_API_URL}/admin_api/v1/report/build` `{range,grouping,metrics}` → `{rows[]}`; `POST …/conversions/log` `{range,columns,filters}` → `{rows[]}` (per-recipient sales by `sub_id_1`); `POST …/clicks/log` `{range,columns,filters}` → `{rows[]}` (per-recipient offer-page clicks by `sub_id_1`); `GET …/campaigns` |
@@ -78,6 +79,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | `TELNYX_API_URL` | server | Telnyx base URL override (default `https://api.telnyx.com`; trailing slashes stripped) |
 | `AHOI_API_BASE_URL` | server | optional override for the Ahoi/api19 base URL (default `https://v1.api19.com`) |
 | `TEXTREQUEST_API_BASE_URL` | server | optional override for the Text Request API base URL (default `https://api.textrequest.com/api/v3`) |
+| `TELLS_API_BASE_URL` | server | optional override for the Tells.co send endpoint (default `https://app.tells.co/api/sms.php`) |
 | `AHOI_API_TOKEN` | **local only** | one-time seed input for `scripts/seed-ahoi-number-credential.ts`; not read at runtime after seeding |
 | `AHOI_DLR_REJECT_SPIKE_THRESHOLD` | server | rejected-DLR count that latches the Ahoi provider pause (default 10) |
 | `AHOI_DLR_REJECT_SPIKE_WINDOW_SEC` | server | rolling window (seconds) for the DLR reject-rate breaker (default 900) |

@@ -15,6 +15,15 @@ export type NormalizedSendParams = {
   // no per-message callback (TextHub, Ahoi) ignore it. Additive + optional so
   // those adapters are untouched. Populated by the drain in Phase 2.
   statusCallbackUrl?: string;
+  // Opaque per-message bag echoed back by the provider on its delivery webhook.
+  // Tells's `metadata` param: the ONLY correlation handle its DLR carries, so
+  // the drain populates it with `{ stage_send_id }`. Additive + optional —
+  // adapters without an equivalent (TextHub, Ahoi, Text Request) ignore it.
+  //
+  // ⚠️ Tells returns it as an escaped JSON STRING even when an object went out,
+  // and under the LOWERCASE key `metadata` (spec §5.1). Phase 3 must JSON.parse
+  // it inside a try/catch.
+  metadata?: Record<string, unknown> | null;
 };
 
 export type RawWebhook = {

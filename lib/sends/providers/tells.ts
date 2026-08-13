@@ -41,6 +41,11 @@ import type {
 // Overridable via TELLS_API_BASE_URL for a different base without a code
 // redeploy; the adapter works out of the box even if the env var is unset.
 const TELLS_DEFAULT_BASE_URL = "https://app.tells.co/api/sms.php";
+// Probe measured the send API at 128–733ms (§5.1). 15s matches Ahoi/TextHub —
+// generous enough that a slow-but-live send isn't aborted, short enough that a
+// hung request can't eat the drain's per-invocation budget. On abort we do NOT
+// retry: the message may have landed.
+const DEFAULT_TIMEOUT_MS = 15000;
 
 export function tellsBaseUrl(): string {
   return process.env.TELLS_API_BASE_URL ?? TELLS_DEFAULT_BASE_URL;
@@ -81,31 +86,205 @@ export function tellsPhoneToE164(raw: string | number | null | undefined): strin
   return null;
 }
 
+interface TellsSendParams {
+  apiKey: string;
+  text: string;
+  from: string; // bare 11-digit sending number
+  to: string;   // bare 11-digit recipient
+  metadata?: Record<string, unknown> | null;
+  timeoutMs?: number;
+}
+
+// Pure form-body builder. Used by BOTH the real send and the redacted audit
+// string (with a placeholder key), so the two can never drift — same rule as
+// Ahoi's buildSendBody. `metadata` is serialized to a JSON string because Tells
+// echoes it back as a string regardless (§5.1); sending a string means what we
+// store and what comes back on the DLR are byte-identical.
+export function buildTellsSendBody(p: TellsSendParams): URLSearchParams {
+  const body = new URLSearchParams();
+  body.set("key", p.apiKey);
+  body.set("from", p.from);
+  body.set("to", p.to);
+  body.set("message", p.text);
+  if (p.metadata && Object.keys(p.metadata).length > 0) {
+    body.set("metadata", JSON.stringify(p.metadata));
+  }
+  return body;
+}
+
+// The duplicate-refusal marker, surfaced on providerStatus. NOT a new
+// AttemptClassification value: `send_attempts.classification` is CHECK-
+// constrained to four values (migration 0064) and feeds the reports enum in
+// lib/sends/attempt-summary.ts, so a fifth would mean a migration plus a report
+// ripple. A 429 is a genuine rejection envelope from them ⇒ `theirs_rejected`
+// via the shared classifier, and never retried (failed rows are never
+// re-claimed by the drain). This constant is the distinct, machine-readable
+// handle for it.
+export const TELLS_DUPLICATE_STATUS = "duplicate";
+
+// Pure classifier — HTTP status + verbatim body in, normalized result out. No
+// network, no side effects, so the whole matrix is unit-testable directly
+// (scripts/test-tells-send.ts). Mirrors classifyTxrSend.
+//
+// ⚠️ CLASSIFY OFF THE BODY, NOT THE HTTP STATUS. Every send error — including a
+// totally invalid API key — comes back as HTTP 200 with {"status":"error"}
+// (§5.1). A status-only classifier reads total auth failure as success. Success
+// is `status === "queued"` AND a usable `id`; nothing else counts.
+export function classifyTellsSend(
+  httpStatus: number,
+  rawBody: string | null,
+): SendSmsResult {
+  let parsed: {
+    id?: unknown; status?: unknown; message?: unknown; sms_count?: unknown;
+  } = {};
+  if (rawBody) {
+    try {
+      parsed = JSON.parse(rawBody) as typeof parsed;
+    } catch {
+      // Non-JSON body — leave parsed empty; rawBody is still captured verbatim.
+    }
+  }
+
+  const bodyStatus =
+    typeof parsed.status === "string" ? parsed.status.trim().toLowerCase() : null;
+  // `id` is a STRING on the send response but a NUMBER on the webhook (§5.1).
+  // Coerce to string HERE so stage_sends.texthub_message_id and the DLR's
+  // String(Id) compare equal — correlation that skips this silently never
+  // matches. Numbers stay well under 2^53, so no precision risk.
+  const messageId =
+    typeof parsed.id === "string" && parsed.id.trim() !== ""
+      ? parsed.id.trim()
+      : typeof parsed.id === "number" && Number.isFinite(parsed.id)
+        ? String(parsed.id)
+        : null;
+  const providerMessage =
+    typeof parsed.message === "string" ? parsed.message : null;
+  // Multi-segment does NOT fragment the DLR — one id, sms_count > 1 (§5.1).
+  const segmentsCount =
+    typeof parsed.sms_count === "number" && Number.isFinite(parsed.sms_count)
+      ? parsed.sms_count
+      : null;
+
+  // Success: status "queued" + a usable id. `ok: true` marks the row SENT in
+  // the drain, so it must never be returned without a real messageId.
+  if (bodyStatus === "queued" && messageId) {
+    return {
+      ok: true, messageId, response: bodyStatus, providerStatus: bodyStatus,
+      suppressed: false, // Tells has no per-send suppression status
+      rawBody, error: null, status: httpStatus, timedOut: false, segmentsCount,
+    };
+  }
+
+  // Duplicate refusal (the only non-200 send response observed). Q5 is closed:
+  // this cannot happen in normal operation — CamMan excludes a contact from a
+  // stage it has already been sent — so if it fires, the dedup upstream of here
+  // is broken. The caller logs it loudly; it is OUR bug wearing their code.
+  if (httpStatus === 429) {
+    return {
+      ok: false, messageId: null, response: providerMessage,
+      providerStatus: TELLS_DUPLICATE_STATUS, suppressed: false, rawBody,
+      error: providerMessage ?? "Tells refused a duplicate request",
+      status: httpStatus, timedOut: false, segmentsCount: null,
+    };
+  }
+
+  // Every other failure — all three HTTP-200 error shapes (bad key, missing
+  // `from`, number not SMS-enabled) plus anything unparseable — normalizes to
+  // one shape. ok:false keeps it out of the sent bucket; the verbatim rawBody
+  // is the evidence. Mirrors Ahoi's fall-through.
+  return {
+    ok: false, messageId: null, response: providerMessage,
+    providerStatus: bodyStatus, suppressed: false, rawBody,
+    error:
+      providerMessage ??
+      `Tells returned status="${bodyStatus ?? "unparseable"}" with no message id`,
+    status: httpStatus, timedOut: false, segmentsCount: null,
+  };
+}
+
+// Send one SMS via Tells.
+//
+// NO RETRY, ever — not on timeout, not on the 429. A timeout may have landed
+// (the drain classifies it `indeterminate` for a human to reconcile), and
+// re-sending would risk a double-send.
+async function tellsSendSms(p: TellsSendParams): Promise<SendSmsResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), p.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  try {
+    const res = await fetch(tellsBaseUrl(), {
+      method: "POST", // POST only — the probe never exercised GET, so we never send one
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: buildTellsSendBody(p),
+      signal: controller.signal,
+    });
+
+    let rawBody: string | null = null;
+    try {
+      rawBody = await res.text();
+    } catch {
+      rawBody = null;
+    }
+
+    const result = classifyTellsSend(res.status, rawBody);
+    if (result.providerStatus === TELLS_DUPLICATE_STATUS) {
+      console.error(
+        "[tells] HTTP 429 duplicate refusal — Tells rejected a byte-identical " +
+          "send. CamMan's audience dedup should make this unreachable; treat as " +
+          "a CamMan-side dedup bug, not expected provider behaviour. " +
+          `provider_message=${JSON.stringify(result.response)}`,
+      );
+    }
+    return result;
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "AbortError";
+    return {
+      ok: false, messageId: null, response: null, providerStatus: null,
+      suppressed: false, rawBody: null,
+      error: aborted ? "Tells request timed out" : "Tells network error",
+      status: 0, timedOut: aborted, segmentsCount: null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const tellsAdapter: SmsProviderAdapter = {
   key: "tls",
   toProviderRecipient: toTellsRecipient,
-  async send(_p: NormalizedSendParams): Promise<SendSmsResult> {
-    // Phase 2 implements the real POST. Until then refuse cleanly — never
-    // throw, never post a malformed request. Classified as a transport-side
-    // miss (status 0, not timed out), same shape as Ahoi's no-sender refusal.
-    return {
-      ok: false,
-      messageId: null,
-      response: null,
-      providerStatus: null,
-      suppressed: false,
-      rawBody: null,
-      error: "tells: send not implemented (Phase 2)",
-      status: 0,
-      timedOut: false,
-      segmentsCount: null,
-    };
+  async send(p: NormalizedSendParams): Promise<SendSmsResult> {
+    if (!p.senderNumber) {
+      // Tells validates `from` BEFORE `key` (§5.1), so a missing sender would
+      // come back as "From number is required." — but that costs a round trip
+      // to learn something we already know. Refuse cleanly here instead: OUR
+      // misconfiguration ⇒ mine_transport (status 0, not timed out). Same
+      // posture as Ahoi's no-sender refusal.
+      return {
+        ok: false, messageId: null, response: null, providerStatus: null,
+        suppressed: false, rawBody: null,
+        error: "tells: no sender number configured for this stage",
+        status: 0, timedOut: false, segmentsCount: null,
+      };
+    }
+    return tellsSendSms({
+      apiKey: p.apiKey,
+      text: p.text,
+      from: toTellsRecipient(p.senderNumber),
+      to: toTellsRecipient(p.recipientE164),
+      metadata: p.metadata ?? null,
+    });
   },
   buildRedactedRequest(p: NormalizedSendParams): string {
-    // Shape-only until Phase 2 builds the real form body. The api key is a form
-    // param for Tells (not a header), so the redaction placeholder is not
-    // optional here — never interpolate p.apiKey.
-    return `POST ${tellsBaseUrl()}  key=<REDACTED> from=${p.senderNumber ?? ""} to=${toTellsRecipient(p.recipientE164)}`;
+    // Built from the SAME builder the real send uses, with the key replaced by
+    // the caller's placeholder — the api key is a form PARAM for Tells (not a
+    // header), so redaction here is load-bearing, not cosmetic.
+    const body = buildTellsSendBody({
+      apiKey: p.apiKey, // already a `redacted_XXXX` placeholder at the call site
+      text: p.text,
+      from: p.senderNumber ? toTellsRecipient(p.senderNumber) : "",
+      to: toTellsRecipient(p.recipientE164),
+      metadata: p.metadata ?? null,
+    });
+    return `POST ${tellsBaseUrl()}  ${body.toString()}`;
   },
   // Phase 3 owns both. Returning null is the interface's "not handled" signal.
   // Note for the implementer: the DLR's metadata field is lowercase, and a

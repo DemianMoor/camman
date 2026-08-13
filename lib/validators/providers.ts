@@ -4,7 +4,50 @@ export { nullIfEmpty } from "./_helpers";
 
 // SMS Provider validators. Brands/Networks shape plus two short-link fields.
 
-export const providerCreateSchema = z.object({
+// ⚠️ A send window is only honoured when `start < end`. `effectiveWindow`
+// (lib/quiet-hours.ts) treats anything else — equal bounds, inverted bounds —
+// as UNSET and silently falls back to the DEFAULT 08:00–21:00 ET window. So
+// `0/0` does not mean "never send"; it means "send during the default hours",
+// the exact opposite of what an operator typing it intends.
+//
+// These columns cannot express "never send" at all. Disabling a provider is
+// `send_paused` (the audited latch), which is what this error points at.
+//
+// Applied to BOTH create and update via the shared base below, because a PATCH
+// can set the pair just as easily as a POST.
+function checkSendWindows(
+  data: {
+    send_window_weekday_start?: number | null;
+    send_window_weekday_end?: number | null;
+    send_window_weekend_start?: number | null;
+    send_window_weekend_end?: number | null;
+  },
+  ctx: z.RefinementCtx,
+) {
+  const pairs = [
+    ["weekday", data.send_window_weekday_start, data.send_window_weekday_end],
+    ["weekend", data.send_window_weekend_start, data.send_window_weekend_end],
+  ] as const;
+  for (const [label, start, end] of pairs) {
+    if (start == null || end == null) continue; // null pair = "use the default", legitimate
+    if (start < end) continue;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [`send_window_${label}_start`],
+      message:
+        start === end
+          ? `The ${label} sending window start and end are the same, which does not disable sending — ` +
+            `it falls back to the default 08:00–21:00 ET window. To stop this provider sending, ` +
+            `pause it instead (Pause sending on the provider page).`
+          : `The ${label} sending window ends before it starts, which falls back to the default ` +
+            `08:00–21:00 ET window. Set start earlier than end, or pause the provider to stop sending.`,
+    });
+  }
+}
+
+// Base object. Kept as a plain ZodObject so `.partial()` still works below —
+// attaching the refinement here would make it a ZodEffects and break that.
+const providerBaseSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(120),
   sms_provider_id: z
     .string()
@@ -57,7 +100,9 @@ export const providerCreateSchema = z.object({
     .optional(),
 });
 
-export const providerUpdateSchema = providerCreateSchema
+export const providerCreateSchema = providerBaseSchema.superRefine(checkSendWindows);
+
+export const providerUpdateSchema = providerBaseSchema
   .partial()
   .extend({
     // ⚠️ `.partial()` does NOT strip an inner `.default()`. Verified against the
@@ -74,6 +119,7 @@ export const providerUpdateSchema = providerCreateSchema
     // provider silently losing a flag.
     short_link_supported: z.boolean().optional(),
   })
+  .superRefine(checkSendWindows)
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: "At least one field must be provided",
   });

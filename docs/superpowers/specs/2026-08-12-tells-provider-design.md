@@ -317,7 +317,7 @@ Lowercase keys. `id`/`to`/`from`/`message`/`status`/`date`/`timezone` are **stri
 {"status":"error","message":"Duplicate request detected. Please try again later."}
 ```
 
-A byte-identical repeat is rejected. The brief's "no idempotency key" is wrong — Tells has duplicate detection. Window and key-fields unknown (Q5).
+A byte-identical repeat is rejected. The brief's "no idempotency key" is wrong — Tells has duplicate detection. Window and key-fields remain unknown, but **Q5 is closed as unreachable**: CamMan excludes a contact from a stage it has already been sent, so this response should never occur in normal operation. Phase 2 therefore treats it as a signal that *our* dedup broke — non-retryable, distinctly marked, and logged at `console.error` (§9 Q5).
 
 ### Multi-segment
 
@@ -530,7 +530,13 @@ Provider row (`tls`, `supports_api_send = false`), credential via encrypted `pro
 **Gates:** ClickUp card before migration or merge. Migration itself = Dmytro approval.
 
 ### Phase 2 — send path
-Adapter maps `NormalizedSendParams` → POST, per the verified contract in §5.1: bare 11-digit recipients, **classify off the body not the HTTP status**, coerce `id` to string. Adds the additive optional `metadata` field to `NormalizedSendParams` (F5); `metadata` carries `stage_send_id` for DLR correlation, and comes back as an escaped JSON **string** to be parsed. **No retry on timeout** — Tells does dedupe byte-identical sends (429), but the window is unknown (Q5), so a retry is still a potential double-send.
+Adapter maps `NormalizedSendParams` → POST, per the verified contract in §5.1: bare 11-digit recipients, **classify off the body not the HTTP status**, coerce `id` to string. Adds the additive optional `metadata` field to `NormalizedSendParams` (F5); `metadata` carries `stage_send_id` for DLR correlation, and comes back as an escaped JSON **string** to be parsed. **No retry on timeout** — a timeout may have landed, so a retry is a potential double-send regardless of Tells's own dedup.
+
+**✅ BUILT 2026-08-13.** `classifyTellsSend(httpStatus, rawBody)` is a pure function (no network) so the whole matrix is unit-testable — [scripts/test-tells-send.ts](../../../scripts/test-tells-send.ts), 41 assertions over the verbatim §5.1 fixtures. `sms_count` maps to `segmentsCount`. The drain threads `metadata: { stage_send_id }` unconditionally (no lookup needed, other adapters ignore it) and mirrors it into the redacted `send_attempts` audit string so the evidence matches the wire.
+
+Two decisions worth recording:
+- **`ok: true` is never returned without a `messageId`.** The drain keys its `sent` bucket off `res.ok` alone, so a `queued`-with-no-id response must normalize to a failure — otherwise a row is marked sent with a null message id and correlation is lost.
+- **The 429 is NOT a fifth `AttemptClassification` value.** `send_attempts.classification` is CHECK-constrained to four values (migration 0064) and feeds the reports enum in `lib/sends/attempt-summary.ts`; a fifth means a migration plus a report ripple. It gets a distinct `providerStatus = "duplicate"` marker plus a `console.error` instead — which, given Q5's closure, is the more useful signal anyway: it means *our* dedup broke.
 
 ### Phase 3 — webhook intake
 §4. Both routes, the sweeper cron, the dedup counter, the org-resolution failure path.
@@ -595,7 +601,7 @@ The feature is not blocked on a threshold, an approval, or a better regex. **The
 | Q2 | Does Tells accept more than one webhook URL per account? If so, path-token rotation gets a true dual-token window instead of a procedural one. | Not answered in Phase 0; opportunistic |
 | Q3 | What are the actual silence-monitor thresholds? | Phase 5 calibration |
 | Q4 | Does the toll-free network tolerate 30 MPS on a fresh TFN? | Phase 5 ramp |
-| Q5 | **What does the send-side duplicate detection key on, and over what window?** A byte-identical repeat 429s (§5.1). If it keys on `(to, message)` over a long window, two stages sending the same creative to the same contact would be silently refused — a real product constraint, not just a retry-safety nicety. | Phase 2, before any multi-stage Tells campaign |
+| ~~Q5~~ | ~~**What does the send-side duplicate detection key on, and over what window?**~~ **CLOSED 2026-08-13 by Dmytro — not by probing Tells, but by ruling it out from our side.** CamMan's system design guarantees a contact never receives the same message twice: a contact already sent a stage is excluded from the campaign/stage audience. So Tells's duplicate refusal **cannot fire in normal operation**, and the unknown window is not a product constraint. Consequence for Phase 2: the 429 stays **non-retryable** and keeps its distinct `providerStatus = "duplicate"` marker, **and is logged at `console.error`** — if one ever appears in production it indicates a **CamMan-side dedup bug**, not expected provider behaviour. A silent classification would have hidden exactly that. | ✅ closed |
 | Q6 | Does a **slow ack** (>12s) enter the same 4×60s retry path as an error ack? Probe B9 was skipped once B7 mapped the retry behaviour. | Phase 3, if the inline-processing step ever approaches the timeout |
 
 ---

@@ -64,6 +64,11 @@ export type Sender = (opts: {
   // ?ss=<stage_send_id>). OPTIONAL — only the drain's txr path sets it; other
   // adapters and injected test fakes ignore it.
   statusCallbackUrl?: string;
+  // Opaque per-message bag echoed back on the provider's DLR (Tells's
+  // `metadata`, carrying { stage_send_id }). OPTIONAL — only adapters with an
+  // equivalent read it; injected test fakes that don't destructure it keep
+  // compiling unchanged.
+  metadata?: Record<string, unknown> | null;
 }) => Promise<SendSmsResult>;
 
 export type DrainRefusal =
@@ -134,8 +139,8 @@ function sleep(ms: number): Promise<void> {
 export function resolveSenderForStage(providerKey: string, injected?: Sender): Sender {
   if (injected) return injected;
   const adapter = getAdapter(providerKey);
-  return ({ apiKey, text, number, leadId, senderNumber, statusCallbackUrl }) =>
-    adapter.send({ apiKey, text, recipientE164: number, senderNumber: senderNumber ?? null, leadId, statusCallbackUrl });
+  return ({ apiKey, text, number, leadId, senderNumber, statusCallbackUrl, metadata }) =>
+    adapter.send({ apiKey, text, recipientE164: number, senderNumber: senderNumber ?? null, leadId, statusCallbackUrl, metadata });
 }
 
 const EMPTY = {
@@ -534,6 +539,12 @@ export async function runStageDrain(
             apiKey, text: c.rendered_text, number: c.phone, leadId: c.lead_id,
             senderNumber: stage.sender_number,
             statusCallbackUrl: txrCallbackBase ? `${txrCallbackBase}?ss=${c.id}` : undefined,
+            // Tells's DLR carries NO callback URL and no `?ss=` — its echoed
+            // `metadata` is the only correlation handle it has (§5.1). Passed
+            // unconditionally rather than gated on provider_key: it needs no
+            // lookup (unlike txrCallbackBase above), and every other adapter
+            // ignores it.
+            metadata: { stage_send_id: c.id },
           }),
         ),
       );
@@ -596,6 +607,9 @@ export async function runStageDrain(
           recipientE164: c.phone,
           senderNumber: stage.sender_number,
           leadId: c.lead_id,
+          // Must mirror the send call above, or the audit row understates what
+          // actually went over the wire for providers that send it (Tells).
+          metadata: { stage_send_id: c.id },
         });
         const attemptNumber = attemptsById.get(c.id) ?? 1;
         // segments_count is provider-reported (Text Request); null for TextHub/

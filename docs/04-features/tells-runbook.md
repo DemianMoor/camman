@@ -36,9 +36,21 @@ So expected events = **`2 × delivered + 1 × undelivered`**, never `2 × messag
 
 Coverage itself is therefore measured as **messages with ≥1 terminal event**, which sidesteps the asymmetry entirely. A batch where *everything failed* still has 100% coverage and correctly does **not** breach. Pinned by [`scripts/test-tells-monitors.ts`](../../scripts/test-tells-monitors.ts).
 
-### Thresholds are PROPOSED, not calibrated
+### Thresholds — CALIBRATED 2026-08-13
 
-`INBOUND_SILENCE_MIN_SENDS = 2000`, `DLR_COVERAGE_MIN_RATIO = 0.9`, `DLR_COVERAGE_MIN_SENDS = 50`, `BACKLOG_STALE_MINUTES = 15`. **Calibrate in Phase 5 against observed rates.** A monitor tuned on guesses is a monitor that gets muted.
+Derived from the 500-message validation send (stage `8_59_081326_1_s1_c250`), not guessed:
+
+| constant | value | basis |
+|---|---|---|
+| `INBOUND_SILENCE_MIN_SENDS` | **1200** (was 2000) | observed STOP rate **0.40%** (2/500). Zero STOPs is <1% likely by chance once `N > ln(0.01)/ln(1−0.004) ≈ 1149` |
+| `DLR_MATURITY_MINUTES` | **10** (was 30) | terminal-DLR latency p50 **2s**, p99 **9s**, max **401s** (~6.7 min) |
+| `DLR_COVERAGE_MIN_RATIO` | **0.90** (unchanged) | observed **96.0%** leaves only 6 points of headroom; raising it converts variance into pages |
+| `DLR_COVERAGE_MIN_SENDS` | 50 (unchanged) | volume floor below which the ratio is noise |
+| `BACKLOG_STALE_MINUTES` | 15 (unchanged) | 3 sweeper intervals; no backlog observed |
+
+**Observed baseline to compare future batches against:** 500 sent · 451 delivered · **29 undelivered (5.8%)** · 480 with ≥1 terminal event (**96.0% coverage**) · 961 DLR events vs 931 expected · 2 STOPs (0.40%) · 100% DLR correlation via `metadata.stage_send_id`.
+
+These numbers are pinned as a regression fixture in [`scripts/test-tells-monitors.ts`](../../scripts/test-tells-monitors.ts), including the assertion that a naive 2-per-message monitor would have reported a ~4% coverage gap that does not exist.
 
 ---
 
@@ -94,6 +106,30 @@ Anything older than one sweeper interval (5 min) is already alerting. **Rows at 
 
 ---
 
+## 2b. Sending rate (MPS) — announce before changing, both directions
+
+**`provider_phones.max_sends_per_second` on the Tells number is not edited silently by anyone — operator or agent. Announce the change and the reason before applying it.**
+
+This rule exists because of a concrete near-miss on **2026-08-13**: the operator raised MPS 5 → 30 in the UI ahead of the validation send; the agent read 30, judged it drift from the approved plan, and reverted it to 5 **1.4 seconds before the send fired**. The send ran at 5/s instead of the intended 30/s. No harm — but the two sides were writing the same field from different assumptions with seconds to spare, and next time the race could land the other way, mid-send, on a fresh toll-free number.
+
+Note the same lost-update shape as ClickUp `869ehjwtf`: the phone edit dialog submits the whole object with no concurrency check, so a stale page can silently restore an old rate. Re-read the current value before assuming what it is.
+
+### Current setting and its tripwire
+
+**MPS = 30/s**, set 2026-08-13 at the operator's explicit decision, overriding the 5→10→15→20→25→30 ladder in the Phase 5 plan.
+
+> ⚠️ **TRIPWIRE: undelivered > 8% on any batch → drop to 10/s and hold 48h.**
+>
+> Baseline for comparison is **5.8% undelivered at 5/s** on this number. Carrier filtering on a young toll-free number shows up as **undelivered**, not as API errors — the send will look perfectly healthy at the API layer while delivery decays. `undelivered` per batch is therefore the signal to watch, not the send success rate.
+>
+> ```sql
+> SELECT count(DISTINCT e.matched_stage_send_id) FILTER (WHERE lower(e.status)='undelivered')::numeric
+>        / NULLIF(count(DISTINCT e.matched_stage_send_id), 0) AS undelivered_rate
+> FROM tells_webhook_events e
+> JOIN stage_sends ss ON ss.id = e.matched_stage_send_id
+> WHERE e.kind = 'dlr' AND ss.stage_id = <STAGE_ID>;
+> ```
+
 ## 3. Credential rotation — ORDER MATTERS
 
 Rotating either secret in the wrong order drops inbound events, and a dropped inbound event is a dropped STOP.
@@ -135,8 +171,34 @@ Neither vouches for itself. Both stamp `cron_locks.watermark` **after** the work
 
 ---
 
+## 5b. Validation send — 2026-08-13 (all Phase 5 gates passed)
+
+Campaign `8_59_081326_1`, stage `8_59_081326_1_s1_c250`, 500 recipients, brand Guide Kin, at 5/s.
+
+- **Send:** 500/500 `sent`, zero failures, all `accepted`. 100s for 500 = exactly 5/s.
+- **DLR:** 500/500 correlated via `metadata.stage_send_id` — the only handle a Tells DLR carries.
+- **STOP, end-to-end:** two *organic* STOPs — `"Stop to END"` and `"Stop"` — both suppressed, contact-matched and **attributed**, writing `opt_outs` with source `tells_inbound_webhook` and moving `campaign_stages.inbound_opt_out_count` to 2. `"Hello"` and `"Start"` were correctly `ignored` (opt-IN is deliberately not handled — see `lib/sends/opt-out-keywords.ts`).
+- **§4.6 redaction:** held on all four real inbound payloads — `[REDACTED]` present, API-key last-4 absent from `raw_body`.
+- **Cost:** `total_cost` 6.4256 = 500 sends + 2 billed inbound × $0.0128. Inbound is billed; the corrected rate flows through.
+
 ## 6. Go-live status
 
 **`supports_api_send` is `false`.** Phase 5 gates (spec §7): one small live send (~200–500) with DLR coverage verified against the Tells UI; at least one real STOP captured end-to-end into suppression; monitors armed **with thresholds calibrated against observed rates**. Then ramp ~10/s → 30/s over days — **30 is Tells's limit, not a fresh toll-free number's tolerance**. Pacing values need Dmytro's approval.
 
-> **⛔ ZERO-TELLS-VOLUME RULE (in force).** No sends and no manual tests until Phase 4 is live, per the Phase 3 compliance approval. Enabling the gate is a deliberate, audited act via `POST /api/providers/[providerId]/api-send` — it is not settable from the provider form (ClickUp 869ehjwtf).
+> **✅ LIVE since 2026-08-13.** `supports_api_send = true` (audited), MPS 30/s, cost $0.0128. The zero-volume rule is lifted — it held from the Phase 3 merge until Phase 4 landed and the monitors ticked, exactly as designed. Enabling/disabling the gate remains a deliberate, audited act via `POST /api/providers/[providerId]/api-send`; it is NOT settable from the provider form (ClickUp 869ehjwtf).
+>
+> **Still owed before sustained volume:** the send-window guard — see §7.
+
+---
+
+## 7. Known gap — the send window is not enforced on the manual path
+
+**Tells accepts messages at any hour** (confirmed with the vendor, 2026-08-13), so the 09:30–19:30 ET window is enforced *entirely* by CamMan. Today that enforcement is incomplete:
+
+- `lib/sends/scheduled.ts` (the `*/5` auto-send cron) **does** check — `decideScheduledSend` on first fire, `isOutsideSendWindow` on resume.
+- **The manual per-stage drain route does NOT check at all.** An operator triggering a drain sends at any hour.
+- **The window is not re-checked mid-drain**, so a slice starting at 19:29 runs to completion; the next tick holds it.
+
+So the real guarantee is *"scheduled sends **start** inside the window and are re-held at the next 5-minute tick"* — not *"no message leaves outside it."*
+
+**Interim rule: trigger Tells sends inside 09:30–19:30 ET, or schedule them.** The fix — a check in the manual route plus a re-check in the drain batch loop, alongside the existing `SEND_ENABLED` re-check — is owed as its own PR and affects all providers, not just Tells.

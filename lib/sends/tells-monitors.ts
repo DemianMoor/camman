@@ -25,15 +25,29 @@ import type { DbOrTx } from "@/lib/sends/textrequest-dlr";
 // inbound events is treated as evidence of breakage rather than a quiet day.
 // STOPs arrive at a predictable rate on any real send volume; silence across
 // thousands of sends means the intake is broken, not that everyone loves us.
-export const INBOUND_SILENCE_MIN_SENDS = 2000;
+// CALIBRATED 2026-08-13 against the 500-message validation send (stage
+// 8_59_081326_1_s1_c250): 2 STOPs / 500 sends = a 0.40% STOP rate. For zero
+// STOPs to be <1% likely by chance:  N > ln(0.01) / ln(1 - 0.004) ≈ 1149.
+// 1200 clears that with headroom. Was 2000 — a guess that would have waited
+// ~1.7× longer than necessary before flagging a broken intake, and on the
+// compliance-critical monitor that delay is the cost that matters.
+export const INBOUND_SILENCE_MIN_SENDS = 1200;
 export const INBOUND_SILENCE_WINDOW_HOURS = 24;
 
 // DLR coverage: fraction of matured sends that have at least one terminal DLR.
+// KEPT at 0.90 after calibration. The validation send observed 96.0%
+// (480/500), leaving only 6 points of headroom — raising the threshold would
+// convert ordinary variance into pages. Revisit with several batches of data.
 export const DLR_COVERAGE_MIN_RATIO = 0.9;
-// Sends younger than this are excluded — Phase 0 measured `sent` ~1s and
-// `delivered` ~5s after send, so 30 minutes is generous headroom. Without it
-// every freshly-sent message would count as an uncovered one.
-export const DLR_MATURITY_MINUTES = 30;
+// Sends younger than this are excluded, or every freshly-sent message would
+// count as uncovered.
+//
+// CALIBRATED 2026-08-13: terminal-DLR latency on the validation send was p50
+// 2s, p99 9s, max 401s (~6.7 min). 10 minutes clears the observed maximum with
+// ~50% headroom. Was 30 — safe, but it left a completed batch UNEVALUATED for
+// half an hour, a long blind spot on a monitor whose job is to notice a dead
+// DLR feed quickly.
+export const DLR_MATURITY_MINUTES = 10;
 export const DLR_COVERAGE_WINDOW_HOURS = 6;
 // Below this many matured sends the ratio is statistical noise — don't alert.
 export const DLR_COVERAGE_MIN_SENDS = 50;

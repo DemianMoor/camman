@@ -60,6 +60,24 @@ ok(!dlrCoverageBreached(100, 100),
 ok(expectedDlrEvents(0, 100) === 100,
    "⭐ coverage: ...and that batch legitimately produces 100 events, not 200");
 
+// =====================================================================
+// ⭐ FIELD DATA — the real 2026-08-13 validation send, 500 messages.
+// Not synthetic: these are the numbers production actually produced, kept as a
+// regression fixture so a future change to the counting rule has to explain
+// itself against observed reality.
+//   sent 500 · delivered 451 · undelivered 29 · >=1 terminal 480 · 961 events
+// =====================================================================
+const REAL = { sent: 500, delivered: 451, undelivered: 29, covered: 480, actualEvents: 961 };
+eq(expectedDlrEvents(REAL.delivered, REAL.undelivered), 931,
+   "⭐ field: expected events = 2x451 + 1x29 = 931");
+ok(REAL.actualEvents > expectedDlrEvents(REAL.delivered, REAL.undelivered),
+   "field: actual (961) exceeds expected (931) by the in-flight `sent`-only events — not a gap");
+ok(!dlrCoverageBreached(REAL.sent, REAL.covered),
+   "⭐ field: 96.0% coverage did NOT breach the 90% threshold");
+// The whole point of the counting rule, in one assertion:
+ok(2 * REAL.sent === 1000 && 2 * REAL.sent > REAL.actualEvents,
+   "⭐ field: a naive 2-per-message monitor would expect 1000, see 961, and report a ~4% gap that DOES NOT EXIST");
+
 // ===========================================================================
 // Inbound silence — the compliance-critical monitor
 // ===========================================================================
@@ -72,7 +90,15 @@ ok(inboundSilenceBreached(50_000, 0), "silence: heavy volume, zero inbound -> BR
 ok(!inboundSilenceBreached(50_000, 1),
    "silence: a SINGLE inbound event proves the pipe is alive -> no breach");
 ok(!inboundSilenceBreached(INBOUND_SILENCE_MIN_SENDS, 3), "silence: some inbound -> no breach");
-eq(INBOUND_SILENCE_MIN_SENDS, 2000, "silence: floor is 2000 sends (proposed; calibrated in Phase 5)");
+// CALIBRATED from the validation send's observed 0.40% STOP rate:
+// ln(0.01)/ln(1-0.004) ≈ 1149 sends for 99% confidence that zero STOPs is breakage.
+eq(INBOUND_SILENCE_MIN_SENDS, 1200, "silence: floor is 1200 sends (calibrated 2026-08-13)");
+ok(INBOUND_SILENCE_MIN_SENDS >= 1149,
+   "⭐ silence: floor clears the 99%-confidence bound implied by the observed 0.40% STOP rate");
+// The validation send itself (500 sends, 4 inbound) must NOT have breached —
+// both because inbound arrived and because 500 is under the floor.
+ok(!inboundSilenceBreached(500, 4), "silence: the 2026-08-13 validation send did not breach");
+ok(!inboundSilenceBreached(500, 0), "silence: 500 sends is below the floor, so silence alone is not a breach");
 
 console.log(`\n${fail === 0 ? "✓ ALL PASS" : "✗ FAILED"}  ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

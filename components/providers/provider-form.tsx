@@ -33,6 +33,10 @@ export type { ProviderFormValues };
 export interface ProviderFormProps {
   mode: "create" | "edit";
   initialValues?: Partial<ProviderFormValues>;
+  // Current server value of the go-live gate. DISPLAY ONLY — this form cannot
+  // change it (see the note where the switch used to be); it only decides
+  // whether the sending-hours block is shown.
+  supportsApiSend?: boolean;
   onSubmit: (values: ProviderFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
@@ -41,6 +45,7 @@ export interface ProviderFormProps {
 export function ProviderForm({
   mode,
   initialValues,
+  supportsApiSend = false,
   onSubmit,
   onCancel,
   isSubmitting,
@@ -54,7 +59,6 @@ export function ProviderForm({
       sms_provider_id: initialValues?.sms_provider_id ?? "",
       short_link_supported: initialValues?.short_link_supported ?? false,
       short_link_example: initialValues?.short_link_example ?? "",
-      supports_api_send: initialValues?.supports_api_send ?? false,
       send_window_weekday_start: initialValues?.send_window_weekday_start ?? null,
       send_window_weekday_end: initialValues?.send_window_weekday_end ?? null,
       send_window_weekend_start: initialValues?.send_window_weekend_start ?? null,
@@ -68,7 +72,11 @@ export function ProviderForm({
   });
 
   const shortLinkSupported = form.watch("short_link_supported");
-  const apiSendEnabled = form.watch("supports_api_send");
+  // Read-only: the form can no longer WRITE supports_api_send, but the sending-
+  // hours block is only meaningful for an API-sending provider, so it still
+  // needs to know. Comes in as a prop from the current server value, never from
+  // form state — that's the whole point of the carve-out.
+  const apiSendEnabled = supportsApiSend;
 
   return (
     <Form {...form}>
@@ -162,28 +170,14 @@ export function ProviderForm({
           />
         ) : null}
 
-        <FormField
-          control={form.control}
-          name="supports_api_send"
-          render={({ field }) => (
-            <FormItem className="flex flex-row items-start gap-3 rounded-md border p-3">
-              <FormControl>
-                <Switch
-                  checked={!!field.value}
-                  onCheckedChange={field.onChange}
-                  disabled={isSubmitting}
-                />
-              </FormControl>
-              <div className="grid gap-1">
-                <FormLabel>API sending enabled</FormLabel>
-                <FormDescription>
-                  This provider can be sent through via API (TextHub). Tracked
-                  campaigns also need an API key set below.
-                </FormDescription>
-              </div>
-            </FormItem>
-          )}
-        />
+        {/*
+          The "API sending enabled" switch used to live here. It was REMOVED
+          (ClickUp 869ehjwtf): this form submits every field on every save with
+          no concurrency check, so a stale page wrote back a `true` that a
+          deliberate act had already cleared. The go-live gate now has its own
+          audited control on the provider detail page. Same carve-out as
+          `send_paused`. Do not re-add it here.
+        */}
 
         {apiSendEnabled ? (
           <div className="grid gap-3 rounded-md border p-3">

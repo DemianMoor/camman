@@ -44,7 +44,9 @@ export async function POST(req: NextRequest) {
         name: parsed.data.name,
         sms_provider_id: parsed.data.sms_provider_id,
         short_link_supported: parsed.data.short_link_supported ?? false,
-        supports_api_send: parsed.data.supports_api_send ?? false,
+        // Always OFF at creation — never client-settable. Enabling the go-live
+        // gate is a deliberate, audited act via POST /api/providers/[id]/api-send.
+        supports_api_send: false,
         send_window_weekday_start: parsed.data.send_window_weekday_start ?? null,
         send_window_weekday_end: parsed.data.send_window_weekday_end ?? null,
         send_window_weekend_start: parsed.data.send_window_weekend_start ?? null,

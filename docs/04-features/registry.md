@@ -1,6 +1,6 @@
 # Feature — Registry (brands, offers, networks, providers, …)
 
-_Last updated: 2026-07-22_
+_Last updated: 2026-08-13_
 
 ## 1. Purpose
 The registry is the set of lookup/reference entities a campaign is composed from: who the campaign is for (brand/offer/network), how it's sent (provider/phone), and how it's classified (routing type, traffic type, UTM tags). They share one CRUD pattern, cloned from the original **Brands** implementation (CLAUDE.md §11).
@@ -11,7 +11,7 @@ The registry is the set of lookup/reference entities a campaign is composed from
 | Brands | `brands` | `brand_id` (text uniq), `website`, `color`, `avatar_url` | `brands` |
 | Offers | `offers` | `offer_id`, `network_id` (NOT NULL, restrict), `payout_model` cpa/revshare, `payout_cpa` (**current-rate cache only** — not used for historical revenue), `payout_revshare`, `sales_pages[]` | `offers` |
 | Affiliate networks | `affiliate_networks` | `network_id`, `url` | `networks` |
-| SMS providers | `sms_providers` | `supports_api_send`, send-window cols, circuit-breaker cols | `providers` |
+| SMS providers | `sms_providers` | `supports_api_send` (**not editable via the provider form** — dedicated audited endpoint, see below), send-window cols, circuit-breaker cols | `providers` |
 | Provider phones | `provider_phones` | `provider_id`, `brand_id`, `phone_number`, `number_type` (10dlc/toll_free/short_code), `cost_per_sms` | (under providers) |
 | Routing types | `routing_types` | `routing_type_id`, `name` | `routing_types` |
 | Traffic types | `traffic_types` | `traffic_type_id`, `name` | `traffic_types` |
@@ -38,6 +38,7 @@ The registry is the set of lookup/reference entities a campaign is composed from
 - `provider_phones`: `short_code` numbers leave geo columns NULL; `10dlc`/`toll_free` are E.164.
 - **Move a number to another provider.** The Edit-phone dialog has a **Provider** picker; changing it reassigns `provider_phones.provider_id` **in place** (same row, so the `(org_id, phone_number)` unique constraint is never re-triggered — this is how you shift a number between vendors without the "already exists" error). Handled by `PATCH /api/providers/[providerId]/phones/[phoneId]` with a `provider_id` (target) field. The move also **clears `credential_id`** (the account link belonged to the old provider) and, because number-level reports resolve a send's provider from the phone's current `provider_id`, **re-attributes the number's past sends to the new provider** in those reports. If not-yet-sent stages (`status IN ('draft','pending')`) reference the number, the API returns `409` with `details.reason = 'move_needs_confirmation'` (+ the affected stages); the UI shows a confirm dialog and the client re-submits with `confirm_move: true`. Permission: `provider_phones.update` (operator+). No schema change — the column and all `provider_phones.id` FKs (`ON DELETE SET NULL`) already support it.
 - Provider circuit-breaker + send-window columns live on `sms_providers` but are consumed by the [send pipeline](sms-send-pipeline.md), not the registry CRUD.
+- **`supports_api_send` is NOT part of provider CRUD** (ClickUp 869ehjwtf). It's the go-live gate — whether the provider may send live SMS at all — so it's stripped from `providerCreateSchema`/`providerUpdateSchema` and has its own endpoint, `POST /api/providers/[providerId]/api-send` `{ enabled, reason? }` (permission `providers.update`, manager+), which writes an `api_send_enabled` / `api_send_disabled` row to `send_circuit_events` naming the actor. Same carve-out as `send_paused`, and for a stronger reason: `send_paused` fails safe, this fails **open**. It used to live on the provider form, which submits every field on every save with no concurrency check, so a stale page re-enabled it silently. New providers are always created with the gate **off**. The UI control is on the provider detail page next to the "API sending" value; **enabling** confirms first, **disabling** applies directly. See the "go-live gates" rule in [07-conventions.md](../07-conventions.md).
 
 ## 7. Extension points / limitations
 - New registry entity: copy the Brands implementation, add the table + migration, build API + UI, **then** flip its `ENTITY_AVAILABILITY` flag last (CLAUDE.md §7). Before flipping, confirm no other entity's form silently starts fetching it.

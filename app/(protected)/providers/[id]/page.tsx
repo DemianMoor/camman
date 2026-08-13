@@ -230,6 +230,7 @@ export default function ProviderDetailPage() {
   const archiveProviderApi = useApiCall<Provider>();
   const restoreProviderApi = useApiCall<Provider>();
   const circuitApi = useApiCall<{ ok: boolean; send_paused: boolean }>();
+  const apiSendApi = useApiCall<{ ok: boolean; supports_api_send: boolean }>();
 
   const phonesApi = useApiCall<PhonesListResponse>();
   const createPhoneApi = useApiCall<Phone>();
@@ -359,6 +360,10 @@ export default function ProviderDetailPage() {
     "archive" | "restore" | null
   >(null);
   const [confirmingResume, setConfirmingResume] = useState(false);
+  // Turning the go-live gate ON is the consequential direction — it is what
+  // lets real SMS leave the building — so that transition confirms. Turning it
+  // off fails safe and does not.
+  const [confirmingApiSend, setConfirmingApiSend] = useState(false);
   const [confirmingPhone, setConfirmingPhone] = useState<
     | { kind: "archive"; phone: Phone }
     | { kind: "restore"; phone: Phone }
@@ -428,6 +433,30 @@ export default function ProviderDetailPage() {
     }
     toast.success(action === "pause" ? "Sending paused" : "Sending resumed");
     setConfirmingResume(false);
+    refetchProvider();
+  }
+
+  // The go-live gate. Deliberately NOT part of the provider edit form: that
+  // form submits every field on every save with no concurrency check, so a
+  // stale page could write back a `true` that had already been cleared
+  // (observed on `tls`, 2026-08-13 — ClickUp 869ehjwtf). Its own endpoint, its
+  // own audit row in send_circuit_events.
+  async function handleApiSend(enabled: boolean) {
+    if (!provider) return;
+    const result = await apiSendApi.execute(
+      `/api/providers/${provider.id}/api-send`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+    );
+    if (!result.ok) {
+      toastApiError(result, "Couldn't update API sending");
+      return;
+    }
+    toast.success(enabled ? "API sending enabled" : "API sending disabled");
+    setConfirmingApiSend(false);
     refetchProvider();
   }
 
@@ -845,8 +874,26 @@ export default function ProviderDetailPage() {
           </div>
           <div className="grid gap-1">
             <span className="text-xs text-muted-foreground">API sending</span>
-            <span className="font-medium">
-              {provider.supports_api_send ? "Enabled" : "Off"}
+            <span className="flex items-center gap-2">
+              <span className="font-medium">
+                {provider.supports_api_send ? "Enabled" : "Off"}
+              </span>
+              {canUpdateProvider ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  disabled={apiSendApi.isLoading}
+                  onClick={() => {
+                    // Enabling is what lets real SMS leave the building —
+                    // confirm it. Disabling fails safe, so it applies directly.
+                    if (provider.supports_api_send) void handleApiSend(false);
+                    else setConfirmingApiSend(true);
+                  }}
+                >
+                  {provider.supports_api_send ? "Disable" : "Enable"}
+                </Button>
+              ) : null}
             </span>
           </div>
           <div className="grid gap-1">
@@ -1038,12 +1085,14 @@ export default function ProviderDetailPage() {
         <ProviderForm
           key={`edit-${provider.id}`}
           mode="edit"
+          // Display-only — the form can't write it (ClickUp 869ehjwtf); it only
+          // decides whether the sending-hours block renders.
+          supportsApiSend={provider.supports_api_send}
           initialValues={{
             name: provider.name,
             sms_provider_id: provider.sms_provider_id,
             short_link_supported: provider.short_link_supported,
             short_link_example: provider.short_link_example ?? "",
-            supports_api_send: provider.supports_api_send,
             send_window_weekday_start: provider.send_window_weekday_start,
             send_window_weekday_end: provider.send_window_weekday_end,
             send_window_weekend_start: provider.send_window_weekend_start,
@@ -1218,6 +1267,42 @@ export default function ProviderDetailPage() {
               }
             >
               {confirmingProvider === "archive" ? "Archive" : "Restore"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Enable API sending confirm — the go-live gate. Enabling is what lets
+          real SMS leave the building, so it confirms and is audited. Disabling
+          fails safe and applies directly. */}
+      <AlertDialog
+        open={confirmingApiSend}
+        onOpenChange={(open) => {
+          if (!open) setConfirmingApiSend(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Enable API sending for this provider?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This lets CamMan send live SMS through {provider.name}. Campaign
+              stages assigned to it will start dispatching for real once a
+              credential and sending number are configured. This is recorded
+              against your account.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={apiSendApi.isLoading}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleApiSend(true);
+              }}
+              disabled={apiSendApi.isLoading}
+            >
+              Enable sending
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

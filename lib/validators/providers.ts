@@ -17,9 +17,18 @@ export const providerCreateSchema = z.object({
     ),
   short_link_supported: z.boolean().optional().default(false),
   short_link_example: z.string().trim().max(200).optional(),
-  // Whether this provider can be sent through via API (TextHub). Toggled in the
-  // provider edit UI; a tracked send requires this on + a resolvable credential.
-  supports_api_send: z.boolean().optional().default(false),
+  // `supports_api_send` is NOT settable here — it's the go-live gate, managed
+  // via the dedicated POST /api/providers/[providerId]/api-send endpoint
+  // (audited into send_circuit_events). Same carve-out as `send_paused` below,
+  // and for a stronger reason: send_paused fails SAFE (stops sending) while
+  // this fails OPEN.
+  //
+  // It used to live on this schema and in the bulk provider form, which submits
+  // the whole object on every save with no concurrency check — so a page loaded
+  // while the flag was true and saved after it was set false wrote `true` back.
+  // Observed on the `tls` provider 2026-08-13 (ClickUp 869ehjwtf). A new
+  // provider is always created with the flag OFF; turning it on is a deliberate,
+  // attributable act.
   // Per-provider auto-send window, minute-of-day in ET (0–1439), per day-type.
   // Null = use the default window (see lib/quiet-hours.ts). The form sends
   // minutes (HH:mm is purely the rendered input), so these pass straight to the
@@ -50,9 +59,33 @@ export const providerCreateSchema = z.object({
 
 export const providerUpdateSchema = providerCreateSchema
   .partial()
+  .extend({
+    // ⚠️ `.partial()` does NOT strip an inner `.default()`. Verified against the
+    // Zod version in this repo: parsing `{ name: "x" }` against the partial
+    // schema yields `short_link_supported: false` — a REAL value, not
+    // `undefined` — so the PATCH route's `if (v === undefined) continue` guard
+    // does not skip it and the route WRITES false. Any partial PATCH that
+    // omitted this field silently cleared it.
+    //
+    // Re-declared here without the default so "omitted" means "leave
+    // unchanged", which is what a PATCH must mean. Pinned by
+    // scripts/test-provider-update-schema.ts — if a Zod upgrade changes
+    // `.partial()`/`.default()` composition, that test fails rather than a
+    // provider silently losing a flag.
+    short_link_supported: z.boolean().optional(),
+  })
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: "At least one field must be provided",
   });
+
+// The `supports_api_send` go-live gate. Its own endpoint, its own audit row.
+// `reason` is free text for the audit trail (why it was turned on/off).
+export const providerApiSendSchema = z.object({
+  enabled: z.boolean(),
+  reason: z.string().trim().max(200).optional(),
+});
+
+export type ProviderApiSendInput = z.infer<typeof providerApiSendSchema>;
 
 export type ProviderCreateInput = z.infer<typeof providerCreateSchema>;
 export type ProviderUpdateInput = z.infer<typeof providerUpdateSchema>;

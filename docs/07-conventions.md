@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-13_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -318,6 +318,29 @@ git worktree add -b <branch> .claude/worktrees/<name> origin/main
 - Prefer explicit two-argument git forms (`git branch -m <old> <new>`) over "operate on the current branch" forms, which silently follow a `HEAD` you did not move.
 
 If you do disturb another branch, the fix is usually clean — a rename touches no commits and preserves upstream config, so `git branch -m <wrong> <original>` restores it. Say so plainly rather than quietly correcting it; the other session may be mid-task.
+
+## Go-live gates never live on a bulk settings form
+
+**A field that decides whether something goes live must not be editable through a whole-object form.** `supports_api_send` was, and it silently re-enabled itself on the `tls` provider (2026-08-13, ClickUp 869ehjwtf). Four ordinary things composed into it:
+
+1. The provider edit dialog rendered the flag as a Switch.
+2. Save submits the **whole object**, not a dirty-field diff.
+3. The PATCH applies every key present, with **no optimistic-concurrency check** (no version / etag / `updated_at` comparison).
+4. react-hook-form captures `defaultValues` at **mount**, and the dialog keys on `provider.id` only — so the instance holds whatever value the page loaded with, for the page's whole lifetime.
+
+Net: any save on that dialog — even one that only renames the provider — writes back the flag as it was when the page loaded. **A lost update on a gate that fails OPEN.** `send_paused` had already been carved out of that same form for this reason; the rule is now general:
+
+- Such a flag gets its **own endpoint**, its own Zod schema, and an **audit row naming the actor** (`send_circuit_events`, migration 0131 for the api-send verbs).
+- It is **stripped from the create/update schemas entirely**, so the bulk PATCH cannot carry it even if a client sends it. New rows start with the gate OFF; turning it on is a deliberate, attributable act.
+- The bulk form may still *read* the value for display/layout (`ProviderForm`'s `supportsApiSend` prop) — it just cannot write it.
+
+Also worth knowing: this was undiagnosable from stored data because `sms_providers` has **no `updated_at`** and nothing audited the column. When a field matters enough to gate sending, it matters enough to audit.
+
+## ⚠️ Zod: `.partial()` does NOT strip an inner `.default()`
+
+`providerUpdateSchema = providerCreateSchema.partial()` over a field declared `z.boolean().optional().default(false)` parses an **omitted** key to `false` — a real value, not `undefined`. So a route that skips undefined (`if (v === undefined) continue`) still **writes** it, and any partial PATCH silently cleared the flag. Verified against the Zod version in this repo, not assumed.
+
+Fix: re-declare the field on the update schema without the default (`.extend({ short_link_supported: z.boolean().optional() })`), so "omitted" means "leave unchanged" while an **explicit** `false` is still written — those are different intents and must not collapse. Pinned by [scripts/test-provider-update-schema.ts](../scripts/test-provider-update-schema.ts), which asserts on what the route would actually SET (it reproduces the route's update-building loop), not merely on what Zod returns. **A `.default()` is right for a create schema and wrong for an update schema** — check any other `X.partial()` you build from a defaulted create schema.
 
 ## Migration ordering — additive leads the code, destructive follows it
 

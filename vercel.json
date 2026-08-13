@@ -67,6 +67,10 @@
     {
       "path": "/api/cron/propagate-clickers?mode=rebuild",
       "schedule": "50 6 * * 1"
+    },
+    {
+      "path": "/api/cron/tells-sweep",
+      "schedule": "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
     }
   ]
 }

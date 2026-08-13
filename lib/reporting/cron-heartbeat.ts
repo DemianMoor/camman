@@ -62,6 +62,20 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 52, // daily cadence, ~2 missed runs
     label: "counted-clicker full rebuild (daily)",
   },
+  // ---- Tells (spec §4.5) — MUTUAL WATCH, because these two are the sole
+  // detection layer for broken STOP intake and a dead job cannot report itself
+  // dead. tellsMonitors (hourly) checks tellsSweep; tellsSweep (*/5) checks
+  // tellsMonitors. Neither vouches for itself.
+  tellsMonitors: {
+    job_name: "tells-monitors",
+    max_age_hours: 3, // hourly cadence, ~2 missed runs
+    label: "Tells silence monitors (hourly)",
+  },
+  tellsSweep: {
+    job_name: "tells-sweep",
+    max_age_hours: 1, // every 5 min; 1h is ~11 missed runs
+    label: "Tells webhook sweeper (every 5 min)",
+  },
 };
 
 // Stamp a heartbeat for this job. Reuses cron_locks, which is already keyed by

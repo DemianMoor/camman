@@ -4,6 +4,7 @@ import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { withCronLease } from "@/lib/cron/lease";
 import { can } from "@/lib/permissions";
+import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 import { sweepTellsWebhookEvents } from "@/lib/sends/tells-sweep";
 
 // Tells webhook sweeper — drains tells_webhook_events WHERE processed_at IS NULL.
@@ -41,6 +42,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         skipped: true, reason: "prior_run_in_progress", skippedCount: leased.skippedCount,
       });
     }
+    // Stamp AFTER the work, so a run that threw does not look healthy. This is
+    // the heartbeat the MONITORS job checks (mutual dead-man watch, §4.5).
+    // Safe to share the lease's cron_locks row: the lease writes `lease_until`,
+    // this writes `watermark` — different columns.
+    await recordHeartbeat(db, HEARTBEAT_JOBS.tellsSweep.job_name);
     return NextResponse.json(leased.result);
   }
 

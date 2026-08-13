@@ -1,6 +1,6 @@
 # Delivery Report
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-14_
 
 Delivery-rate visibility across every provider. Three surfaces read from **one**
 query layer — [lib/reporting/delivery.ts](../../lib/reporting/delivery.ts) — so
@@ -8,7 +8,7 @@ the human view and the automated alert can never disagree:
 
 | Surface | Grain | Where |
 |---|---|---|
-| `/reports/delivery` | provider × window | [components/reports/delivery-report.tsx](../../components/reports/delivery-report.tsx) · [app/api/reports/delivery/route.ts](../../app/api/reports/delivery/route.ts) |
+| `/reports/delivery` | provider × window, expandable to **per number** | [components/reports/delivery-report.tsx](../../components/reports/delivery-report.tsx) · [app/api/reports/delivery/route.ts](../../app/api/reports/delivery/route.ts) |
 | `Delivered %` column on the Overview tab | campaign **and** stage | [components/reports/keitaro-report.tsx](../../components/reports/keitaro-report.tsx) · [app/api/keitaro/reports/route.ts](../../app/api/keitaro/reports/route.ts) |
 | Undelivered tripwire (check #4) | batch (= stage) | [lib/sends/tells-monitors.ts](../../lib/sends/tells-monitors.ts) · [app/api/cron/tells-monitors/route.ts](../../app/api/cron/tells-monitors/route.ts) |
 
@@ -39,6 +39,41 @@ a slow DLR feed look like a delivery failure.
 
 ---
 
+## 1b. Grain: `(stage, provider_phone)` — and why the phone is on the primitive
+
+`getDeliveryByStage()` returns one row per **(stage, number)**, and the number
+comes from **the send's own `stage_sends.provider_phone_id`**, never from the
+stage's current `campaign_stages.provider_phone_id`.
+
+No stage currently sends from more than one number — 0 of 882, across all
+2,954,934 sent rows. **That is incidental, not structural:**
+
+- `provider_phone_id` is stamped from the stage row, read **once per
+  materialization *invocation*** ([lib/sends/kickoff.ts](../../lib/sends/kickoff.ts))
+  and reused across that run's windows;
+- materialization is **resumable across invocations** — a budget-capped run
+  commits its windows, leaves `materialized_at` NULL, and a later tick re-reads
+  the stage row;
+- **nothing guards `campaign_stages.provider_phone_id` against being edited in
+  between.** The stage `PATCH` locks `scheduled_at` only;
+- partially-materialized stages genuinely occur (2 at time of writing).
+
+Edit a stage's number between two windows and its sends legitimately split. If
+the phone were derived from the stage, every send in that stage would be
+credited to whichever number the stage holds *now* — silently, and precisely on
+the number whose deliverability someone was investigating. The split-stage case
+is pinned in [scripts/test-delivery-rollups.ts](../../scripts/test-delivery-rollups.ts).
+
+Cost of the wider grain: **+8.4%** (238 ms → 258 ms, measured same-session,
+three runs each). No cap change.
+
+**The campaign is still derived from the stage** — that link *is* structural
+(FK, exactly one campaign per stage).
+
+`rollupByStage` therefore SUMS a stage's number-rows rather than assuming one.
+
+---
+
 ## 2. Capability declaration — why some cells are blank
 
 Report **rows** come from the `sms_providers` registry (every current and future
@@ -55,7 +90,12 @@ provider). **Capability** comes from `DLR_SOURCES` in
 | `snx` / `smpl` | **none** | no API send path |
 
 A provider with no source reports its **Sent** count and `null` — rendered `—` —
-for Delivered / Undelivered / No receipt / %. **Never `0`.** The gate is
+for Delivered / Undelivered / No receipt / %. **Never `0`.**
+
+**Capability is per-PROVIDER, and every number under it inherits that.** Two
+numbers on the same provider can differ sharply in *deliverability* — that is the
+entire reason for the per-number breakdown — but never in whether delivery is
+*measurable*. The gate is
 structural, enforced by the types (`number | null`), not by the UI choosing to
 hide a computed zero.
 
@@ -124,8 +164,15 @@ Measured against prod 2026-08-13 (`stage_sends`: 3.07M rows / 2601 MB):
 
 | Window | Sends scanned | Server-side |
 |---|---|---|
-| 7 days | 551,753 | **473 ms** |
+| 7 days | ~560,000 | **~832 ms warm** (stable over 4 identical runs) · **~2.5 s cold** |
 | 30 days | 2,198,888 | **11.0 s** |
+
+> ⚠️ **Corrected 2026-08-14.** This table previously read "473 ms" for 7 days —
+> a single favorable measurement. Repeated runs put the full query at **832 ms
+> warm and ~2.5 s cold**; the 473 ms figure was a warm buffer cache on a
+> slightly smaller window. Size decisions off the COLD figure. Widening the
+> grain to `(stage, phone)` was **not** the cause: measured same-session on
+> identical runs, that costs **+8.4%** (238 ms → 258 ms on the bare aggregate).
 
 The whole cost is the `stage_sends` scan: `stage_sends_org_sent_at_idx` is
 `(org_id, sent_at) WHERE sent_at IS NOT NULL`, so `status` and `stage_id` are
@@ -172,6 +219,18 @@ as a missing join reported 0 where the truth was 14.
 | [scripts/test-delivery-rollups.ts](../../scripts/test-delivery-rollups.ts) | 45 assertions over the pure aggregators + the tripwire predicate. No DB. Covers the mixed-capability path that prod data does not yet exercise. |
 | [scripts/verify-delivery-grains.ts](../../scripts/verify-delivery-grains.ts) | Live: rows foot, the capability gate emits null, the per-message fold dedups, all rollups reconcile. **Prints its input scope**, and warns explicitly when the mixed-capability path was not exercised rather than printing a `0` that reads as a pass. |
 | [scripts/test-tells-monitors.ts](../../scripts/test-tells-monitors.ts) | 39 assertions incl. 8 for the tripwire (baseline does not fire, 8.1% does, volume floor holds). |
+
+Per-number breakdown, 7-day window (the motivating case: `txh2` runs a short
+code AND a toll-free, collapsed into one row before this change):
+
+```
+provider          number         type          sent
+txh2             621637         short_code     308,828
+txh2             +18446210404   toll_free       36,802
+txh              63109          short_code     205,573
+tls              +18445694179   toll_free          500
+txr              +18449903688   toll_free           50
+```
 
 Live figures, 7-day window 2026-08-13:
 

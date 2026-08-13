@@ -12,6 +12,7 @@ import { can } from "@/lib/permissions";
 import { denominatorFor } from "@/lib/reporting/counted-clickers";
 import {
   getDeliveryByStage,
+  getPhoneDirectory,
   getStageDirectory,
   rollupByCampaign,
   rollupByStage,
@@ -286,12 +287,15 @@ export async function GET(req: NextRequest) {
   let deliveryByCampaign = new Map<number, DeliveryCell>();
   let deliveryByStage = new Map<number, DeliveryCell>();
   if (deliveryAvailable) {
-    const [deliveryRows, stageDir] = await Promise.all([
+    const [deliveryRows, stageDir, phoneDir] = await Promise.all([
       getDeliveryByStage(auth.orgId, { from, to }),
       getStageDirectory(auth.orgId),
+      getPhoneDirectory(auth.orgId),
     ]);
-    deliveryByCampaign = rollupByCampaign(deliveryRows, stageDir);
-    deliveryByStage = rollupByStage(deliveryRows, stageDir);
+    // Campaign comes via the stage (structural); capability via the send's own
+    // number (a stage's number can change between materialization windows).
+    deliveryByCampaign = rollupByCampaign(deliveryRows, stageDir, phoneDir);
+    deliveryByStage = rollupByStage(deliveryRows, phoneDir);
   }
   const withDelivery = data.map((r) => {
     const cell = groupByCampaign

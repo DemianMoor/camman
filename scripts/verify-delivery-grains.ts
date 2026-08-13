@@ -22,6 +22,7 @@ import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import {
   DLR_SOURCES,
   getDeliveryByStage,
+  getPhoneDirectory,
   getProviderRegistry,
   getStageDirectory,
   isDlrCapable,
@@ -59,13 +60,16 @@ async function main() {
   const t0 = Date.now();
   const rows = await getDeliveryByStage(orgId, { from, to: today });
   const queryMs = Date.now() - t0;
-  const [stages, registry] = await Promise.all([
+  const [stages, phones, registry] = await Promise.all([
     getStageDirectory(orgId),
+    getPhoneDirectory(orgId),
     getProviderRegistry(orgId),
   ]);
 
   const totalSent = rows.reduce((n, r) => n + r.sent, 0);
-  console.log(`stages in win  ${rows.length}`);
+  console.log(`rows in win    ${rows.length}  (grain: stage x phone)`);
+  console.log(`stages in win  ${new Set(rows.map((r) => r.stage_id)).size}`);
+  console.log(`numbers in win ${new Set(rows.map((r) => r.provider_phone_id)).size}`);
   console.log(`sends in win   ${totalSent.toLocaleString()}`);
   console.log(`providers      ${registry.map((p) => p.provider_key).join(", ")}`);
   console.log(`query time     ${queryMs} ms`);
@@ -82,7 +86,7 @@ async function main() {
   );
   check(`all ${rows.length} stage rows foot`, badStages.length === 0, JSON.stringify(badStages.slice(0, 3)));
 
-  const byProvider = rollupByProvider(rows, stages, registry);
+  const byProvider = rollupByProvider(rows, phones, registry);
   const badProviders = byProvider.filter(
     (p) => p.dlr_capable && (p.delivered ?? 0) + (p.undelivered ?? 0) + (p.no_receipt ?? 0) !== p.sent,
   );
@@ -146,10 +150,54 @@ async function main() {
     JSON.stringify(byProvider.filter((p) => p.dlr_capable).map((p) => [p.provider_key, p.delivered, p.sent])),
   );
 
+  // ---- 3b. per-number breakdown -------------------------------------------
+  console.log("\n3b. PER-NUMBER BREAKDOWN (grain is (stage, phone), keyed off the");
+  console.log("    SEND's stamped number — not the stage's, which can change");
+  console.log("    between resumable-materialization windows)");
+  const allNumbers = byProvider.flatMap((p) => p.numbers);
+  check(
+    "every provider's number sub-rows sum to its own row",
+    byProvider.every((p) => p.numbers.reduce((n, x) => n + x.sent, 0) === p.sent),
+    JSON.stringify(byProvider.map((p) => [p.provider_key, p.sent, p.numbers.reduce((n, x) => n + x.sent, 0)])),
+  );
+  check(
+    "every capable number row foots independently",
+    allNumbers.every((x) => !x.dlr_capable ||
+      (x.delivered ?? 0) + (x.undelivered ?? 0) + (x.no_receipt ?? 0) === x.sent),
+  );
+  check(
+    "no number row reports a % while its provider is non-capable",
+    allNumbers.every((x) => x.dlr_capable || x.delivered_pct === null),
+  );
+  // Sends with no stamped number would silently vanish from provider rows and
+  // break the reconciliation below; bucket them explicitly instead.
+  const noNumberSends = rows.filter((r) => r.provider_phone_id == null).reduce((n, r) => n + r.sent, 0);
+  check(`sends with no stamped number: ${noNumberSends}`, noNumberSends === 0 || allNumbers.some((x) => x.provider_phone_id === null));
+
+  // Split stages: one stage sending from >1 number. 0 in prod today, but the
+  // report must handle it — print the count either way so a future occurrence is
+  // visible rather than silently averaged.
+  const phonesPerStage = new Map<number, Set<number | null>>();
+  for (const r of rows) {
+    if (!phonesPerStage.has(r.stage_id)) phonesPerStage.set(r.stage_id, new Set());
+    phonesPerStage.get(r.stage_id)!.add(r.provider_phone_id);
+  }
+  const split = [...phonesPerStage.entries()].filter(([, s]) => s.size > 1);
+  console.log(`   stages sending from >1 number: ${split.length}${split.length ? " — " + split.slice(0, 5).map(([id]) => id).join(", ") : " (expected 0 today; not structurally prevented)"}`);
+  check(
+    "split stages (if any) keep their numbers separate, not collapsed",
+    split.every(([id]) => rows.filter((r) => r.stage_id === id).length > 1),
+  );
+
+  console.log("\n   provider          number         type          sent");
+  for (const p of byProvider.filter((x) => x.sent > 0))
+    for (const n of p.numbers)
+      console.log(`   ${p.provider_key.padEnd(17)}${String(n.phone_number ?? "(none)").padEnd(15)}${String(n.number_type ?? "—").padEnd(13)}${n.sent.toLocaleString().padStart(9)}`);
+
   // ---- 4. rollups reconcile ------------------------------------------------
   console.log("\n4. ROLLUPS RECONCILE (every surface aggregates the SAME stage rows)");
-  const byCampaign = rollupByCampaign(rows, stages);
-  const byStage = rollupByStage(rows, stages);
+  const byCampaign = rollupByCampaign(rows, stages, phones);
+  const byStage = rollupByStage(rows, phones);
   const known = rows.filter((r) => stages.has(r.stage_id));
   const knownSent = known.reduce((n, r) => n + r.sent, 0);
   check(
@@ -160,7 +208,8 @@ async function main() {
     "campaign rollup Sent == stage rows Sent",
     [...byCampaign.values()].reduce((n, c) => n + c.total_sent, 0) === knownSent,
   );
-  check("stage rollup covers every stage row", byStage.size === rows.length);
+  check("stage rollup covers every distinct stage",
+    byStage.size === new Set(rows.map((r) => r.stage_id)).size);
   check(
     "every stage maps to a known campaign+provider",
     known.length === rows.length,

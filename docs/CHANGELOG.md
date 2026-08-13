@@ -2,6 +2,10 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-13 — Segment rule rows stay on one line: `MultiSelectPicker` gains an inline chip layout — docs: 04-features/ui-system, CHANGELOG
+- Picking a phone number on a `sent_from_provider_phone` rule put its chip on a second row beneath the trigger, which made that control taller than its siblings — and because the rule row centres its items, every other dropdown shifted off the shared baseline. `components/multi-select-picker.tsx` gains `layout="inline"` (chips beside the trigger, `flex-nowrap`) plus `triggerClassName`; the segment Rules row opts in with `maxChipsShown={3}`. Default `"stacked"` is unchanged, so every existing full-width form caller is untouched.
+- Measured after: adding chips leaves the row at 66px and the other controls' positions **identical** — the block widens instead (chips box 258px at 3 chips).
+
 ## 2026-08-12 — Segment rule: "Sent from phone number" (0129) — docs: 03-data-model, 04-features/audience-segments, 07-conventions, CHANGELOG
 - New rule type `sent_from_provider_phone`, value `{provider_id, phone_ids[]}`, operators is/is_not. Counts only `stage_sends.status='sent'`, matching the reports. Eval is a single index-only scan of `stage_sends_org_provider_phone_sent_idx` (0129).
 - Backfilled 1,008,689 pre-0112 `stage_sends.provider_phone_id` rows from their stage (100% resolvable, 3 numbers) so the rule sees the full send history rather than only post-2026-07-20 sends.

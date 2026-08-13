@@ -1014,30 +1014,35 @@ function ValueControl({
         </Select>
 
         {providerId > 0 ? (
-          <div className="w-[260px]">
-            <MultiSelectPicker
-              options={forProvider.map((p) => ({
-                id: p.id,
-                label: p.phone_number,
-                meta:
-                  p.status === "archived"
-                    ? `${p.number_type} · archived`
-                    : p.number_type,
-              }))}
-              value={selectedIds}
-              onChange={(next) =>
-                onPhoneSetChange({
-                  provider_id: providerId,
-                  phone_ids: next.map((n) => Number(n)),
-                })
-              }
-              disabled={disabled}
-              placeholder="Select numbers…"
-              searchPlaceholder="Search numbers…"
-              selectedLabel={(n) => `${n} number${n === 1 ? "" : "s"}`}
-              emptyMessage="This provider has no numbers."
-            />
-          </div>
+          // Inline layout: selected numbers appear BESIDE the trigger, so
+          // picking one widens this control instead of adding a second row.
+          // A second row would push every other dropdown in this rule off the
+          // shared baseline, because the row centres its items vertically.
+          <MultiSelectPicker
+            layout="inline"
+            triggerClassName="h-9 w-[150px]"
+            maxChipsShown={3}
+            options={forProvider.map((p) => ({
+              id: p.id,
+              label: p.phone_number,
+              meta:
+                p.status === "archived"
+                  ? `${p.number_type} · archived`
+                  : p.number_type,
+            }))}
+            value={selectedIds}
+            onChange={(next) =>
+              onPhoneSetChange({
+                provider_id: providerId,
+                phone_ids: next.map((n) => Number(n)),
+              })
+            }
+            disabled={disabled}
+            placeholder="Select numbers…"
+            searchPlaceholder="Search numbers…"
+            selectedLabel={(n) => `${n} number${n === 1 ? "" : "s"}`}
+            emptyMessage="This provider has no numbers."
+          />
         ) : null}
       </div>
     );

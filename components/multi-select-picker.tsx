@@ -33,6 +33,18 @@ export interface MultiSelectPickerProps {
   searchPlaceholder?: string;
   maxChipsShown?: number;
   className?: string;
+  // Where the selected-item chips go.
+  //
+  // "stacked" (default) puts them on their own row beneath the trigger — right
+  // for a full-width form field, where growing downward costs nothing.
+  //
+  // "inline" puts them beside the trigger so the control grows WIDER instead of
+  // TALLER. Use it inside a horizontal row of controls: a control that gains a
+  // second row there shifts every sibling, because the row centres its items.
+  layout?: "stacked" | "inline";
+  // Applied to the trigger button. In "inline" layout this is where you set the
+  // trigger's width, since it is no longer full-width.
+  triggerClassName?: string;
 }
 
 function defaultSelectedLabel(n: number): string {
@@ -51,7 +63,10 @@ export function MultiSelectPicker({
   searchPlaceholder = "Search…",
   maxChipsShown = 5,
   className,
+  layout = "stacked",
+  triggerClassName,
 }: MultiSelectPickerProps) {
+  const inline = layout === "inline";
   const [open, setOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
   const [focusedIndex, setFocusedIndex] = React.useState(0);
@@ -133,7 +148,12 @@ export function MultiSelectPicker({
   const extraChips = chipOptions.length - visibleChips.length;
 
   return (
-    <div className={cn("grid gap-2", className)}>
+    <div
+      className={cn(
+        inline ? "flex min-w-0 items-center gap-2" : "grid gap-2",
+        className,
+      )}
+    >
       <PopoverPrimitive.Root
         open={open}
         onOpenChange={(o) => {
@@ -148,8 +168,10 @@ export function MultiSelectPicker({
             variant="outline"
             disabled={triggerDisabled}
             className={cn(
-              "w-full justify-between font-normal",
+              "justify-between font-normal",
+              inline ? "shrink-0" : "w-full",
               selectedCount === 0 && "text-muted-foreground",
+              triggerClassName,
             )}
           >
             <span className="truncate text-left">
@@ -289,7 +311,14 @@ export function MultiSelectPicker({
       </PopoverPrimitive.Root>
 
       {chipOptions.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5">
+        <div
+          className={cn(
+            "flex gap-1.5",
+            // Inline: never wrap — wrapping is the thing this layout exists to
+            // avoid. The row grows sideways and `maxChipsShown` caps how far.
+            inline ? "items-center" : "flex-wrap",
+          )}
+        >
           {visibleChips.map((o) => (
             <span
               key={o.id}

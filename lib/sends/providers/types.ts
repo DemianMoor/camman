@@ -42,7 +42,7 @@ export type InboundEvent = {
 
 import type { SendSmsResult } from "@/lib/sends/texthub";
 export interface SmsProviderAdapter {
-  key: "txh" | "ahi" | "txr";
+  key: "txh" | "ahi" | "txr" | "tls";
   send(p: NormalizedSendParams): Promise<SendSmsResult>;
   buildRedactedRequest(p: NormalizedSendParams): string;
   toProviderRecipient(e164: string): string;

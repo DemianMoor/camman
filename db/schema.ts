@@ -667,6 +667,99 @@ export const textrequest_inbound_events = pgTable(
 export type TextrequestInboundEvent = typeof textrequest_inbound_events.$inferSelect;
 export type NewTextrequestInboundEvent = typeof textrequest_inbound_events.$inferInsert;
 
+// Tells.co webhook capture (migration 0130). ONE table with a `kind`
+// discriminator, deliberately unlike the two-table ahoi_*/textrequest_* pattern
+// above: Tells has no replay and no reconciliation API, so this table is the
+// only copy of an event and the only retry surface. Design + the verified
+// payload contract: docs/superpowers/specs/2026-08-12-tells-provider-design.md
+// §4 and §5.1 (NOT §2 — the pre-probe claim was wrong in eight places).
+export const tells_webhook_events = pgTable(
+  "tells_webhook_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "set null" },
+    ),
+    provider_id: integer("provider_id").references(() => sms_providers.id, {
+      onDelete: "set null",
+    }),
+    // 'dlr' = status webhook, 'inbound' = reply webhook.
+    kind: text("kind").notNull(),
+    received_at: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    method: text("method").notNull(),
+    query: jsonb("query"),
+    headers: jsonb("headers"),
+    // ⚠️ The INBOUND body carries the FULL LIVE API KEY in its `Key` field. That
+    // one field must be replaced with a marker before this row is written
+    // (spec §4.6). Everything else is byte-for-byte verbatim.
+    raw_body: text("raw_body"),
+    // Guarded extraction at capture; all NULL if the body didn't parse.
+    // ⚠️ Id/To/From are JSON numbers on the webhooks but strings on the send
+    // response — coerce to text or correlation silently never matches.
+    provider_message_id: text("provider_message_id"),
+    status: text("status"),
+    error_message: text("error_message"),
+    from_number: text("from_number"),
+    to_number: text("to_number"),
+    body: text("body"),
+    // ⚠️ `metadata` is LOWERCASE on the wire — the only lowercase field on an
+    // otherwise PascalCase DLR — always present (null when unset), and always a
+    // string even when a JSON object was sent.
+    metadata_raw: text("metadata_raw"),
+    // TEXT verbatim, never cast at capture. ⚠️ Date is the delivery-ATTEMPT
+    // timestamp and advances on every retry — never put it in a dedup key.
+    provider_date: text("provider_date"),
+    provider_timezone: text("provider_timezone"),
+    // dlr -> 'dlr:<Id>:<Status>' · inbound -> 'in:<From>:<To>:<sha256(Body)>:<Date>'
+    dedup_key: text("dedup_key"),
+    // Redeliveries bump these instead of inserting. Tells retries a non-2xx 4x
+    // at 60s, so duplicates are normal whenever we fail. Diagnostic; never alerts.
+    duplicate_count: integer("duplicate_count").notNull().default(0),
+    last_duplicate_at: timestamp("last_duplicate_at", { withTimezone: true }),
+    // Filled by the processor (inline attempt, or the cron sweeper).
+    matched_stage_send_id: uuid("matched_stage_send_id").references(
+      () => stage_sends.id,
+      { onDelete: "set null" },
+    ),
+    matched_contact_id: uuid("matched_contact_id").references(
+      () => contacts.id,
+      { onDelete: "set null" },
+    ),
+    result: text("result"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
+    process_attempts: integer("process_attempts").notNull().default(0),
+    process_error: text("process_error"),
+  },
+  (table) => [
+    index("tells_webhook_events_org_id_idx").on(table.org_id),
+    index("tells_webhook_events_received_at_idx").on(table.received_at),
+    index("tells_webhook_events_unprocessed_idx")
+      .on(table.received_at)
+      .where(sql`processed_at IS NULL`),
+    uniqueIndex("tells_webhook_events_dedup_uniq")
+      .on(table.provider_id, table.dedup_key)
+      .where(sql`dedup_key IS NOT NULL`),
+    index("tells_webhook_events_provider_status_idx").on(
+      table.provider_id,
+      table.kind,
+      table.status,
+      table.received_at,
+    ),
+    index("tells_webhook_events_from_number_idx")
+      .on(table.org_id, table.from_number, table.received_at)
+      .where(sql`kind = 'inbound'`),
+  ],
+);
+
+export type TellsWebhookEvent = typeof tells_webhook_events.$inferSelect;
+export type NewTellsWebhookEvent = typeof tells_webhook_events.$inferInsert;
+
 export type SmsProvider = typeof sms_providers.$inferSelect;
 export type NewSmsProvider = typeof sms_providers.$inferInsert;
 

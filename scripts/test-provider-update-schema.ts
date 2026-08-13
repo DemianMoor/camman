@@ -103,5 +103,59 @@ ok(providerApiSendSchema.safeParse({ enabled: false, reason: "go-live" }).succes
 ok(!providerApiSendSchema.safeParse({}).success, "api-send: enabled is REQUIRED (no default)");
 ok(!providerApiSendSchema.safeParse({ enabled: "yes" }).success, "api-send: non-boolean rejected");
 
+// ===========================================================================
+// ⭐ Degenerate send windows must be REJECTED, not silently defaulted.
+//
+// effectiveWindow (lib/quiet-hours.ts) honours a window only when start < end;
+// anything else falls back to the DEFAULT 08:00–21:00 ET. So `0/0` does not
+// mean "never send" — it means "send during the default hours", the opposite of
+// what an operator typing it intends. These columns cannot express "never
+// send"; that is what send_paused is for, and the error says so.
+// ===========================================================================
+const base = { name: "T", sms_provider_id: "t" };
+
+// start === end — the case that reads as "disable sending" and is not.
+const eqDay = providerCreateSchema.safeParse({
+  ...base, send_window_weekday_start: 0, send_window_weekday_end: 0,
+});
+ok(!eqDay.success, "⭐ create: weekday window 0/0 is REJECTED (does not disable sending)");
+ok(!eqDay.success && /pause/i.test(eqDay.error.issues[0]?.message ?? ""),
+   "⭐ create: the error points at pausing the provider as the way to stop sending");
+ok(!providerCreateSchema.safeParse({
+  ...base, send_window_weekend_start: 600, send_window_weekend_end: 600,
+}).success, "create: weekend window 600/600 is REJECTED too (both pairs checked)");
+
+// start > end — same silent fallback, same rejection.
+ok(!providerCreateSchema.safeParse({
+  ...base, send_window_weekday_start: 1200, send_window_weekday_end: 600,
+}).success, "create: inverted weekday window (start > end) is REJECTED");
+
+// Valid and null-pair cases must still pass — the guard must not block real use.
+ok(providerCreateSchema.safeParse({
+  ...base, send_window_weekday_start: 570, send_window_weekday_end: 1170,
+}).success, "create: a real window 570/1170 (09:30–19:30 ET) is accepted");
+ok(providerCreateSchema.safeParse(base).success,
+   "create: omitting the window entirely is accepted (null pair = use the default)");
+ok(providerCreateSchema.safeParse({
+  ...base, send_window_weekday_start: null, send_window_weekday_end: null,
+}).success, "create: an explicit null pair is accepted (legitimately means 'default')");
+// A half-set pair is already 'unset' to effectiveWindow, so it is not the trap.
+ok(providerCreateSchema.safeParse({
+  ...base, send_window_weekday_start: 600, send_window_weekday_end: null,
+}).success, "create: a half-set pair is accepted (already treated as unset)");
+
+// The SAME guard must apply on PATCH — a bad pair can arrive either way.
+ok(!providerUpdateSchema.safeParse({ send_window_weekday_start: 0, send_window_weekday_end: 0 }).success,
+   "⭐ update: 0/0 is REJECTED on PATCH too, not just create");
+ok(providerUpdateSchema.safeParse({ send_window_weekday_start: 570, send_window_weekday_end: 1170 }).success,
+   "update: a real window is accepted on PATCH");
+// And the earlier guarantees must survive the base/refine restructure.
+ok(!providerUpdateSchema.safeParse({}).success, "update: empty payload still rejected after refactor");
+{
+  const p = providerUpdateSchema.safeParse({ name: "Only renaming this" });
+  ok(p.success && !("short_link_supported" in routeWouldSet(p.data as Record<string, unknown>)),
+     "update: the .partial()/.default() fix still holds after the restructure");
+}
+
 console.log(`\n${fail === 0 ? "✓ ALL PASS" : "✗ FAILED"}  ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

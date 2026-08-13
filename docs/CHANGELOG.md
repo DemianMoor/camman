@@ -2,6 +2,13 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-13 — Reject degenerate send windows at validation — docs: 07-conventions, 04-features/tells-runbook, CHANGELOG
+- **`0/0` looked like "disable sending" and did the opposite.** `effectiveWindow` honours a window only when `start < end`; equal or inverted bounds are treated as unset and fall back to the **default 08:00–21:00 ET**. So an operator typing `0/0` to stop a provider sending would have widened its hours instead.
+- `checkSendWindows` (`lib/validators/providers.ts`) now rejects any pair where both bounds are set and `start >= end`, on **both create and update**, with an error pointing at **`send_paused`** — the audited latch — as the way to stop a provider sending. A **null pair still passes**: that legitimately means "use the default".
+- Structural note: the refinement hangs off a shared **base object**, not off `providerCreateSchema` directly. Attaching it there would make it a `ZodEffects` and break the `.partial()` that `providerUpdateSchema` is built from — so create and update each apply the same check to the same base.
+- **The send-window columns cannot express "never send" at all**, and that is now stated in both the runbook and conventions rather than being folklore.
+- `scripts/test-provider-update-schema.ts`: 16 → **28 assertions** — equal bounds, inverted bounds, both day-types, create *and* update, plus explicit coverage that valid windows, omitted windows, null pairs and half-set pairs all still pass, and that the earlier `.partial()`/`.default()` fix survives the restructure.
+
 ## 2026-08-13 — Send window enforced on the drain + the manual route (all providers) — docs: 07-conventions, 04-features/tells-runbook, CHANGELOG
 - **The 09:30–19:30 ET window was enforced in exactly one place** — `lib/sends/scheduled.ts`, once per stage per tick. So the **manual per-stage drain route never checked it at all**, and the window was **never re-checked mid-drain**, letting a slice that started at 19:29 run past the close. Providers do not police this for us (Tells confirmed it accepts sends at any hour), so the window is entirely CamMan's to enforce.
 - **Two layers now:** `runStageDrain` re-checks before **every batch** (alongside the existing `SEND_ENABLED` re-check) — which, because the gate block runs before the first batch, also closes the manual-path hole at the source; and the manual route refuses up front with **`409 outside_send_window`** so an operator gets a real error rather than a silent "0 sent". New `DrainStopReason` `outside_send_window` is **SOFT**: rows stay `pending`, nothing latched, next in-window tick resumes.

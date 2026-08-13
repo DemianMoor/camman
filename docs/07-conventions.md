@@ -348,7 +348,9 @@ Plus a legibility check in the **manual per-stage drain route**, which refuses w
 
 `effectiveWindow` (`lib/quiet-hours.ts`) accepts a window only when `start != null && end != null && start < end`. Anything else — nulls, `start == end`, `start > end` — silently yields the **default 08:00–21:00 ET** window.
 
-So **there is no way to express "never send" in these columns**, and setting `0/0` to disable a provider does the opposite of what it looks like. This bit the first draft of the quiet-hours test in `scripts/verify-drain.ts`, which passed vacuously at midday because `0/0` had fallen back to the default and midday is inside it. That test now computes a valid band excluding the current minute from the DB clock, so it holds at any hour — worth copying if you ever test window behaviour.
+So **there is no way to express "never send" in these columns**, and setting `0/0` to disable a provider does the opposite of what it looks like. **Use `send_paused` to stop a provider sending** — the audited latch, not the window.
+
+**Rejected at validation since 2026-08-13.** `checkSendWindows` in [lib/validators/providers.ts](../lib/validators/providers.ts) refuses any pair where both bounds are set and `start >= end`, on BOTH create and update, with a message pointing at pausing. A null pair still passes — that legitimately means "use the default". The refinement is applied to a shared base object rather than to `providerCreateSchema` directly, because attaching it there would turn it into a `ZodEffects` and break the `.partial()` the update schema is built from. This bit the first draft of the quiet-hours test in `scripts/verify-drain.ts`, which passed vacuously at midday because `0/0` had fallen back to the default and midday is inside it. That test now computes a valid band excluding the current minute from the DB clock, so it holds at any hour — worth copying if you ever test window behaviour.
 
 ## Go-live gates never live on a bulk settings form
 

@@ -162,6 +162,12 @@ export interface TellsMonitorReport {
     /** Every breaching batch, worst first. */
     breached_batches: UndeliveredBatch[];
     breached: boolean;
+    /**
+     * Non-null ⇒ this check threw and did NOT run. Isolated so a delivery
+     * failure cannot blind the compliance checks; surfaced as its own breach so
+     * a persistently broken tripwire is still visible.
+     */
+    error: string | null;
   };
   // DIAGNOSTIC ONLY — never contributes to breaches (§4.2).
   duplicates: {
@@ -350,27 +356,44 @@ export async function runTellsMonitors(dbc: DbOrTx): Promise<TellsMonitorReport>
   const now = new Date();
   const batches: UndeliveredBatch[] = [];
   let batchesEvaluated = 0;
-  for (const [orgId, stageIds] of stagesByOrg) {
-    const rows = await queryDeliveryByStage(dbc, orgId, {
-      fromUtc: new Date(now.getTime() - UNDELIVERED_TRIPWIRE_WINDOW_HOURS * 3_600_000),
-      toExclusiveUtc: now,
-      // Without maturity every freshly-sent message counts as pending and the
-      // ratio is meaningless. Reuses the DLR-latency calibration (p99 9s, max 401s).
-      maturedBefore: new Date(now.getTime() - DLR_MATURITY_MINUTES * 60_000),
-      stageIds,
-    });
-    for (const r of rows) {
-      if (r.sent < DLR_COVERAGE_MIN_SENDS) continue;
-      batchesEvaluated++;
-      if (!undeliveredTripwireBreached(r.sent, r.undelivered)) continue;
-      batches.push({
-        stage_id: r.stage_id,
-        tracking_id: trackingById.get(r.stage_id) ?? null,
-        matured_sends: r.sent,
-        undelivered: r.undelivered,
-        undelivered_ratio: Number((r.undelivered / r.sent).toFixed(4)),
+  let tripwireError: string | null = null;
+  // ⚠️ ISOLATED ON PURPOSE. This is the LEAST critical of the four checks, but
+  // it runs the heaviest query — and an uncaught throw here would take down the
+  // WHOLE job, including check #1 (inbound silence), which is the sole detection
+  // layer for broken STOP intake. A delivery-reporting failure must never blind
+  // the compliance monitor. The failure is surfaced as its own breach rather
+  // than swallowed, so a persistently broken tripwire is still visible.
+  try {
+    for (const [orgId, stageIds] of stagesByOrg) {
+      const rows = await queryDeliveryByStage(dbc, orgId, {
+        fromUtc: new Date(now.getTime() - UNDELIVERED_TRIPWIRE_WINDOW_HOURS * 3_600_000),
+        toExclusiveUtc: now,
+        // Without maturity every freshly-sent message counts as pending and the
+        // ratio is meaningless. Reuses the DLR-latency calibration (p99 9s, max 401s).
+        maturedBefore: new Date(now.getTime() - DLR_MATURITY_MINUTES * 60_000),
+        stageIds,
       });
+      for (const r of rows) {
+        if (r.sent < DLR_COVERAGE_MIN_SENDS) continue;
+        batchesEvaluated++;
+        if (!undeliveredTripwireBreached(r.sent, r.undelivered)) continue;
+        batches.push({
+          stage_id: r.stage_id,
+          tracking_id: trackingById.get(r.stage_id) ?? null,
+          matured_sends: r.sent,
+          undelivered: r.undelivered,
+          undelivered_ratio: Number((r.undelivered / r.sent).toFixed(4)),
+        });
+      }
     }
+  } catch (err) {
+    tripwireError = err instanceof Error ? err.message : String(err);
+    console.error("[tells-monitors] undelivered tripwire failed", err);
+    breaches.push(
+      `UNDELIVERED TRIPWIRE FAILED TO EVALUATE: ${tripwireError}. The §2b carrier-filtering ` +
+        `check did not run this tick — undelivered rate is UNWATCHED until this is fixed. ` +
+        `The STOP-intake and DLR-coverage checks above were unaffected.`,
+    );
   }
   batches.sort((a, b) => b.undelivered_ratio - a.undelivered_ratio);
   const tripwireBreached = batches.length > 0;
@@ -436,6 +459,7 @@ export async function runTellsMonitors(dbc: DbOrTx): Promise<TellsMonitorReport>
       batches_evaluated: batchesEvaluated,
       breached_batches: batches,
       breached: tripwireBreached,
+      error: tripwireError,
     },
     duplicates: {
       window_hours: INBOUND_SILENCE_WINDOW_HOURS,

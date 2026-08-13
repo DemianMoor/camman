@@ -9,6 +9,7 @@ import postgres from "postgres";
 import {
   ceilingBreached,
   countSentSince,
+  isHardStop,
   resolve24hCap,
   resolveMinuteCap,
   resolvePacingCap,
@@ -180,9 +181,17 @@ async function main() {
         (await one<{ id: number }>(sql`
           INSERT INTO sms_providers
             (sms_provider_id, org_id, name, supports_api_send, status,
-             max_sends_per_run, max_sends_per_minute, max_sends_per_24h)
+             max_sends_per_run, max_sends_per_minute, max_sends_per_24h,
+             -- Full-day window (00:00–23:59 ET) on every synthetic provider.
+             -- The drain now re-checks quiet hours per batch, so leaving these
+             -- NULL would inherit the 08:00–21:00 default and make this whole
+             -- suite TIME-DEPENDENT: green during the day, red at night for a
+             -- reason unrelated to anything under test.
+             send_window_weekday_start, send_window_weekday_end,
+             send_window_weekend_start, send_window_weekend_end)
           VALUES (${`vd-prov-${provSeq++}`}, ${orgId}, ${"VD"}, true, 'active',
-                  ${caps?.maxRun ?? null}, ${caps?.maxMin ?? null}, ${caps?.max24 ?? null})
+                  ${caps?.maxRun ?? null}, ${caps?.maxMin ?? null}, ${caps?.max24 ?? null},
+                  0, 1439, 0, 1439)
           RETURNING id
         `)).id;
       const addCred = async (providerId: number) =>
@@ -416,6 +425,48 @@ async function main() {
       assert(mid.ok && mid.sent === 2, "sent 2 before the concurrent pause took effect");
       assert(mid.halted === true && mid.stopReason === "paused", "halted at next batch on mid-run pause");
       assert(mid.remaining === 1, "1 row left pending (untouched) after the mid-run kill");
+
+      // Quiet hours: the drain must refuse to send outside the provider's window,
+      // and must do so BEFORE the first batch — that is what closes the manual-
+      // drain hole, since the manual route calls straight into runStageDrain.
+      // SOFT stop: rows stay pending for the next in-window tick, nothing failed.
+      console.log("Quiet hours: a closed send window stops the drain before any send:");
+      const winProv = await mkProvider();
+      await addCred(winProv);
+      // Build a window that is VALID but excludes the current minute, computed
+      // from the DB clock so the assertion holds at 3am and at noon alike.
+      //
+      // ⚠️ It must be a real band with start < end. A degenerate window
+      // (start >= end, e.g. 0/0) does NOT mean "always closed" — effectiveWindow
+      // in lib/quiet-hours.ts treats it as unset and falls back to the DEFAULT
+      // 08:00–21:00 window. There is no way to express "never send" in these
+      // columns, which is exactly how the first draft of this test passed
+      // vacuously at midday.
+      await tx.execute(sql`
+        WITH m AS (
+          SELECT (EXTRACT(HOUR FROM now() AT TIME ZONE 'America/New_York') * 60
+                + EXTRACT(MINUTE FROM now() AT TIME ZONE 'America/New_York'))::int AS now_min
+        )
+        UPDATE sms_providers p
+        SET send_window_weekday_start = CASE WHEN m.now_min < 1380 THEN m.now_min + 1 ELSE 0 END,
+            send_window_weekday_end   = CASE WHEN m.now_min < 1380 THEN 1439 ELSE m.now_min END,
+            send_window_weekend_start = CASE WHEN m.now_min < 1380 THEN m.now_min + 1 ELSE 0 END,
+            send_window_weekend_end   = CASE WHEN m.now_min < 1380 THEN 1439 ELSE m.now_min END
+        FROM m
+        WHERE p.id = ${winProv}
+      `);
+      const winStage = await mkStage(winProv);
+      for (let i = 0; i < 3; i++) await addPending(winStage, await mkContact(), `w${i}`);
+      let winSendCalls = 0;
+      const countingSender: Sender = async () => {
+        winSendCalls++;
+        return { ok: true, messageId: "TH-win", response: "queued", providerStatus: null, suppressed: false, rawBody: '{"id":"TH-win"}', error: null, status: 200, timedOut: false };
+      };
+      const win = await runStageDrain(tx, { stageId: winStage, sendSms: countingSender, isEnabled: () => true, batchSize: 1 });
+      assert(win.sent === 0 && winSendCalls === 0, "closed window: NOTHING was sent (no provider call at all)");
+      assert(win.stopReason === "outside_send_window", "closed window: stopReason = outside_send_window");
+      assert(win.remaining === 3, "closed window: all 3 rows left pending for the next in-window tick");
+      assert(isHardStop("outside_send_window") === false, "closed window is a SOFT stop (no pause latched)");
 
       console.log("Breaker: failure-spike latches the pause + writes an audit event:");
       const spikeProv = await mkProvider();

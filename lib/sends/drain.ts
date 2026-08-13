@@ -17,6 +17,7 @@ import {
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
+import { isOutsideSendWindow, type ProviderSendWindow } from "@/lib/quiet-hours";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
 import { getOrgSendsEnabled, getOrgSendsPaused } from "@/lib/sends/org-send-flag";
 import { optOutBreakerAlertText } from "@/lib/sends/optout-rate-breaker";
@@ -227,7 +228,15 @@ export async function runStageDrain(
            -- Per-second rate lives on the PHONE (carrier limit, differs by number
            -- type within one provider). Resolved from the stage's chosen phone.
            pp.max_sends_per_second AS max_sends_per_second,
-           pp.phone_number         AS sender_number
+           pp.phone_number         AS sender_number,
+           -- Quiet-hours window (minute-of-day in ET, per day-type). Fetched so
+           -- the batch loop can re-check it mid-drain: previously the window was
+           -- consulted ONCE per stage per tick in lib/sends/scheduled.ts, so a
+           -- slice that began at 19:29 ran to completion past the close.
+           p.send_window_weekday_start AS send_window_weekday_start,
+           p.send_window_weekday_end   AS send_window_weekday_end,
+           p.send_window_weekend_start AS send_window_weekend_start,
+           p.send_window_weekend_end   AS send_window_weekend_end
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
@@ -248,6 +257,10 @@ export async function runStageDrain(
     max_sends_per_minute: number | null;
     max_sends_per_24h: number | null;
     max_sends_per_second: number | null;
+    send_window_weekday_start: number | null;
+    send_window_weekday_end: number | null;
+    send_window_weekend_start: number | null;
+    send_window_weekend_end: number | null;
     sender_number: string | null;
   }[];
 
@@ -347,6 +360,15 @@ export async function runStageDrain(
   let processed = 0;
   let halted = false;
   let stopReason: DrainStopReason | null = null;
+
+  // Provider quiet-hours config, read once per drain from the stage context and
+  // evaluated fresh against the clock on every batch (see the gate block below).
+  const sendWindow: ProviderSendWindow = {
+    send_window_weekday_start: stage.send_window_weekday_start,
+    send_window_weekday_end: stage.send_window_weekday_end,
+    send_window_weekend_start: stage.send_window_weekend_start,
+    send_window_weekend_end: stage.send_window_weekend_end,
+  };
   let pausedNow = false;
   let consecutiveFailures = 0;
   // Recipients Text Request refused as already-opted-out (errorCode 30050),
@@ -403,6 +425,20 @@ export async function runStageDrain(
     if (await isCampaignPaused(dbc, stage.campaign_id)) {
       halted = true;
       stopReason = "paused";
+      break;
+    }
+
+    // QUIET HOURS, re-checked every batch. Before this, the send window was
+    // consulted exactly ONCE per stage per scheduler tick (lib/sends/scheduled.ts)
+    // and never again — so a slice that started at 19:29 ran to completion well
+    // past the 19:30 close, and a MANUAL drain never consulted it at all. This
+    // check also covers the first batch, since the gate block runs at the top of
+    // every iteration, which is what closes the manual-path hole at the source.
+    //
+    // SOFT: rows stay pending and the next tick inside the window resumes them.
+    // Nothing failed — we simply must not be sending at this hour.
+    if (isOutsideSendWindow(sendWindow, new Date())) {
+      stopReason = "outside_send_window";
       break;
     }
 

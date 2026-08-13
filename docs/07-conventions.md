@@ -331,6 +331,25 @@ The rule for any provider whose payload carries a secret: **capture stays byte-f
 
 Note this is orthogonal to whether the key is *rotated*. Rotation was declined for Tells because the exposure in ephemeral runtime logs was judged acceptable; a live credential replicated into every backup is a different and larger exposure, and the carve-out stands regardless.
 
+## The send window is enforced in TWO places, and a degenerate window means "default", not "closed"
+
+Quiet hours (`sms_providers.send_window_*`, minute-of-day in ET) are enforced at two layers, because one was never enough:
+
+1. **`lib/sends/scheduled.ts`** — the `*/5` auto-send cron, per stage per tick, before handing off to the drain (`decideScheduledSend` on first fire, `isOutsideSendWindow` on resume).
+2. **`runStageDrain`'s batch loop** — re-checked before **every** batch, alongside the `SEND_ENABLED` re-check. Stops a slice from spilling past the close mid-run, and because the gate block runs before the first batch it also covers callers that never went through the scheduler.
+
+Plus a legibility check in the **manual per-stage drain route**, which refuses with `409 outside_send_window` so an operator gets a real error instead of a silent "0 sent" (`isStageOutsideSendWindow`, `lib/sends/send-window.ts`).
+
+**Why two layers:** before 2026-08-13 the window was consulted *only* in (1), which meant a manual drain sent at any hour and a slice starting at 19:29 ran past the 19:30 close. Providers do not police this — Tells confirmed it accepts sends at any time — so the window is entirely ours to enforce.
+
+`outside_send_window` is a **SOFT** `DrainStopReason`: rows stay `pending`, nothing is latched, and the next in-window tick resumes them. Nothing failed; we simply must not send at that hour.
+
+### ⚠️ A degenerate window falls back to the DEFAULT, not to "closed"
+
+`effectiveWindow` (`lib/quiet-hours.ts`) accepts a window only when `start != null && end != null && start < end`. Anything else — nulls, `start == end`, `start > end` — silently yields the **default 08:00–21:00 ET** window.
+
+So **there is no way to express "never send" in these columns**, and setting `0/0` to disable a provider does the opposite of what it looks like. This bit the first draft of the quiet-hours test in `scripts/verify-drain.ts`, which passed vacuously at midday because `0/0` had fallen back to the default and midday is inside it. That test now computes a valid band excluding the current minute from the DB clock, so it holds at any hour — worth copying if you ever test window behaviour.
+
 ## Go-live gates never live on a bulk settings form
 
 **A field that decides whether something goes live must not be editable through a whole-object form.** `supports_api_send` was, and it silently re-enabled itself on the `tls` provider (2026-08-13, ClickUp 869ehjwtf). Four ordinary things composed into it:

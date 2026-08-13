@@ -4,6 +4,7 @@ import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { decideDrainAuth, type DrainRefusal } from "@/lib/sends/drain";
 import { runStageDrainAndRecord } from "@/lib/sends/drain-and-record";
+import { isStageOutsideSendWindow } from "@/lib/sends/send-window";
 
 // Real-send drain for one stage. Owner-triggered, explicit (NOT an always-on
 // cron). Three gates inside runStageDrain: SEND_ENABLED env kill-switch
@@ -82,6 +83,35 @@ export async function POST(
   const stageId = parseId(sParam);
   if (campaignId === null || stageId === null) {
     return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+  }
+
+  // QUIET HOURS — refuse before draining, so an operator gets a real error
+  // instead of a silent "0 sent". Until now this route consulted the send window
+  // NOWHERE: the 09:30–19:30 ET guarantee lived only in the scheduled cron, so a
+  // manual drain sent at any hour. Providers do not police this for us (Tells
+  // confirmed it accepts sends at any time), which makes the window entirely
+  // ours to enforce.
+  //
+  // The drain ALSO re-checks per batch — that stops a slice from spilling past
+  // the close mid-run. This check exists on top of it purely so the failure is
+  // legible at the API boundary.
+  //
+  // Cron-driven calls are exempt: the scheduler has already made the window
+  // decision (decideScheduledSend / isOutsideSendWindow) and re-deciding here
+  // would double-gate the same policy in two places.
+  if (!bearerMatches) {
+    const outside = await isStageOutsideSendWindow(db, stageId);
+    if (outside) {
+      return NextResponse.json(
+        {
+          error:
+            "Outside this provider's sending window (quiet hours). Schedule the stage " +
+            "instead, or drain once the window reopens.",
+          reason: "outside_send_window",
+        },
+        { status: 409 },
+      );
+    }
   }
 
   const result = await runStageDrainAndRecord(db, { campaignId, stageId, actorUserId });

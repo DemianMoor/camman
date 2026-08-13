@@ -187,11 +187,11 @@ Campaign `8_59_081326_1`, stage `8_59_081326_1_s1_c250`, 500 recipients, brand G
 
 > **✅ LIVE since 2026-08-13.** `supports_api_send = true` (audited), MPS 30/s, cost $0.0128. The zero-volume rule is lifted — it held from the Phase 3 merge until Phase 4 landed and the monitors ticked, exactly as designed. Enabling/disabling the gate remains a deliberate, audited act via `POST /api/providers/[providerId]/api-send`; it is NOT settable from the provider form (ClickUp 869ehjwtf).
 >
-> **Still owed before sustained volume:** the send-window guard — see §7.
+> **Send-window guard: shipped 2026-08-13** — see §7.
 
 ---
 
-## 7. Known gap — the send window is not enforced on the manual path
+## 7. Send window — CLOSED 2026-08-13
 
 **Tells accepts messages at any hour** (confirmed with the vendor, 2026-08-13), so the 09:30–19:30 ET window is enforced *entirely* by CamMan. Today that enforcement is incomplete:
 
@@ -201,4 +201,6 @@ Campaign `8_59_081326_1`, stage `8_59_081326_1_s1_c250`, 500 recipients, brand G
 
 So the real guarantee is *"scheduled sends **start** inside the window and are re-held at the next 5-minute tick"* — not *"no message leaves outside it."*
 
-**Interim rule: trigger Tells sends inside 09:30–19:30 ET, or schedule them.** The fix — a check in the manual route plus a re-check in the drain batch loop, alongside the existing `SEND_ENABLED` re-check — is owed as its own PR and affects all providers, not just Tells.
+**FIXED.** The drain now re-checks the window before **every batch** (soft stop `outside_send_window` — rows stay pending, nothing latched), and the manual route refuses up front with `409 outside_send_window`. Applies to every provider, not just Tells. A manual drain outside 09:30–19:30 ET now returns a clear error instead of sending.
+
+⚠️ Note a related trap documented in [07-conventions.md](../07-conventions.md): a degenerate window (`start >= end`, e.g. 0/0) does **not** mean "never send" — it falls back to the default 08:00–21:00 ET window. There is no way to express "always closed" in these columns.

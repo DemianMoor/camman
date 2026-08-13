@@ -48,7 +48,11 @@ export type DrainStopReason =
   | "rate_minute" // per-minute ceiling — SOFT, retry next tick
   | "rate_24h" // 24h ceiling — SOFT, retry next tick
   | "org_disabled" // DB master switch flipped off mid-run — SOFT, retry next tick
-  | "org_paused"; // emergency hard-stop engaged mid-run — SOFT, resumes on Proceed
+  | "org_paused" // emergency hard-stop engaged mid-run — SOFT, resumes on Proceed
+  // Provider send window (quiet hours) closed. SOFT by design: the rows stay
+  // pending and the next tick INSIDE the window resumes them. Nothing failed —
+  // we simply must not be sending at this hour.
+  | "outside_send_window";
 
 export function isHardStop(reason: DrainStopReason): boolean {
   return reason === "paused" || reason === "failure_spike" || reason === "pacing_tripwire";

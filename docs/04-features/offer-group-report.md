@@ -231,3 +231,10 @@ pin rows or foot a table; justified by the small per-offer row count).
 - `app/(protected)/offers/[id]/report/page.tsx` — the report page.
 - `app/(protected)/offers/page.tsx` — the "Group Report" entry-point link.
 - `vercel.json` — cron registration.
+- `scripts/verify-offer-group-attribution.ts` — the only gate on this work;
+  recomputes both sides of every check against the live database (no numbers
+  transcribed from a spec) and asserts the footer/group-row/residual
+  identities migration 0132 depends on.
+- `scripts/test-offer-group-report-helper.ts` — smoke-tests
+  `getOfferGroupReport`/`refreshOfferGroupReport` directly against a real org
+  and offer, independent of the API route and the UI.

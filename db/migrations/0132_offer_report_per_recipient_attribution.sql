@@ -114,6 +114,39 @@
 -- from different underlying sources, not a subset -- so subtracting one from
 -- the other would imply a precision the data does not have.
 --
+-- LIST PRESSURE RE-SCOPING (Sent 7d/30d/90d) -- referenced by the "Intentional
+-- and approved -- see the header" comment on the `attr` CTE's sent_7d/30d/90d
+-- columns below.
+--
+-- Before this migration, sent_7d/30d/90d counted ANY in-app send to a member
+-- of the group -- any offer, either link mode, whether or not the campaign
+-- even targeted the group. After this migration they count only sends of
+-- THIS OFFER's `link_mode='tracked'` campaigns that TARGETED this group --
+-- the same `offer_report_tracked_campaigns` / `ANY(camp.gids)` scope as the
+-- economics columns on the same row. This is a STRICT NARROWING (every post-
+-- migration value is a subset of its pre-migration value), and it is
+-- intentional and approved, not a bug. Three separate causes, all from
+-- joining through `offer_report_tracked_campaigns` instead of the raw
+-- `campaigns` table:
+--   1. `camp.offer_id` -- restricts to THIS offer, not every offer the
+--      recipient's campaigns happened to belong to.
+--   2. `camp.link_mode = 'tracked'` (part of that view's WHERE clause) --
+--      drops manual-mode sends, which have no per-recipient row anyway.
+--   3. `ccg.contact_group_id = ANY(camp.gids)` -- only counts a send toward a
+--      group the campaign actually TARGETED, not every group the recipient
+--      happens to belong to.
+--
+-- CONSEQUENCE: `Fresh pool` (the `fresh` CTE below) deliberately did NOT
+-- change -- it is still cross-offer, cross-link-mode, unchanged since 0093/
+-- 0128: a contact counts as "fresh" only if NO offer sent to them (tracked or
+-- manual) in the last 90 days. So a group worked hard by OTHER offers' tracked
+-- campaigns can now show `Sent 90d = 0` for THIS offer (this offer hasn't
+-- sent here) at the SAME TIME as `Fresh pool = 0` (nobody in the group is
+-- unsent, because other offers kept it warm). That reads contradictory on
+-- screen -- "we've sent nothing here but there's no fresh pool left?" -- but
+-- it is not: the two columns now measure different offer populations by
+-- design, and only `Fresh pool` still answers the cross-offer question.
+--
 -- `offer_report_campaign_econ` and `offer_report_org_summary_mv` are UNCHANGED:
 -- the benchmark was already campaign-grain and correct. Note the bias direction
 -- is the opposite of the EPC workstream -- there the benchmark was the inflated

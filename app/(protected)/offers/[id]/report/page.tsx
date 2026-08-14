@@ -104,9 +104,11 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   // would look like the same thing while meaning only one of them.
   //
   // Labelling only, deliberately. Adding a date dimension means another
-  // migration across two matviews (the group one already fans out over
-  // contact_contact_groups) plus a refresh cron that has no error handling, and
-  // no user has asked for the filter — the gap came from an internal audit.
+  // migration across three matviews (the group one already fans out over
+  // contact_contact_groups) plus reworking a refresh cron that already has
+  // error handling (try/catch, a Tier-1 Telegram alert, a 500, and duration
+  // logging — see app/api/cron/refresh-offer-group-report/route.ts), and no
+  // user has asked for the filter — the gap came from an internal audit.
   // Tracked, with the case both ways, on ClickUp 869egyapn.
   { key: "group_name", label: "Group", numeric: false },
   { key: "sends", label: "Sends (all time)", numeric: true },
@@ -116,9 +118,9 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "sales", label: "Sales (all time)", numeric: true },
   { key: "oo_pct", label: "Opt-out % (all time)", numeric: true },
   { key: "net_profit", label: "Net profit (all time)", numeric: true },
-  { key: "sent_7d", label: "Sent 7d", numeric: true },
-  { key: "sent_30d", label: "Sent 30d", numeric: true },
-  { key: "sent_90d", label: "Sent 90d", numeric: true },
+  { key: "sent_7d", label: "Sent 7d (this offer)", numeric: true },
+  { key: "sent_30d", label: "Sent 30d (this offer)", numeric: true },
+  { key: "sent_90d", label: "Sent 90d (this offer)", numeric: true },
   { key: "fresh_pool", label: "Fresh pool", numeric: true },
 ];
 
@@ -201,6 +203,23 @@ export default function OfferGroupReportPage() {
   const staleness = refreshAge(data?.refreshedAt ?? null);
   const offerTotal = data ? { ...data.offerTotals, ...derive(data.offerTotals) } : null;
   const benchmark = data ? { ...data.orgBenchmark, ...derive(data.orgBenchmark) } : null;
+
+  // Group rows compute revenue/sales per recipient (stage_sends.sale_revenue /
+  // converted_at); the footer and benchmark use Keitaro's per-stage aggregate
+  // instead (see attributable_revenue/attributable_sales on offer_report_offer_totals_mv,
+  // migration 0132). Coverage is <100%, so every group row's RPM/EPC/Net RPM
+  // reads a little low next to the footer/benchmark beside it — this makes
+  // that gap visible instead of silent. Both divisions guarded against a zero
+  // denominator independently: revenue and sales can each be zero while the
+  // other is not.
+  const revenueCoveragePct =
+    data && data.offerTotals.revenue > 0
+      ? (data.offerTotals.attributable_revenue / data.offerTotals.revenue) * 100
+      : null;
+  const salesCoveragePct =
+    data && data.offerTotals.sales > 0
+      ? (data.offerTotals.attributable_sales / data.offerTotals.sales) * 100
+      : null;
 
   function toggleSort(key: SortKey) {
     if (key === sortBy) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -333,14 +352,29 @@ export default function OfferGroupReportPage() {
         </p>
       ) : null}
 
+      {data && revenueCoveragePct != null ? (
+        <p className="text-xs text-muted-foreground">
+          Group rows cover {fmtPct(revenueCoveragePct)} of this offer’s revenue
+          {salesCoveragePct != null ? ` and ${fmtPct(salesCoveragePct)} of sales` : ""}{" "}
+          on a per-recipient basis; the footer and benchmark beside them use
+          the provider’s per-stage totals instead, so group rows read
+          slightly low against them.
+        </p>
+      ) : null}
+
       <p className="text-xs text-muted-foreground">
-        Every metric is counted <em>per recipient</em>: a group row covers the
-        messages actually sent to contacts in that group. Because a contact can
-        belong to several groups, <strong>the count and money columns do not add
-        up to the offer total</strong> — the same person is one send on the offer row and one send
-        in each of their groups. “Sent last 7/30/90d” only counts tracked-campaign
-        sends to this offer’s targeted groups; “Fresh pool” counts across every
-        offer and both link modes, independent of tracking.
+        <strong>Group rows</strong> are counted <em>per recipient</em>: each row
+        covers the messages actually sent to contacts in that group. The offer
+        footer and org benchmark use a different, campaign-grain basis instead —
+        sends are counted per campaign (tracked → stage_sends count, manual →
+        recorded sms_count), and revenue/sales come from the provider’s
+        per-stage totals, not individual recipients. Because a contact can
+        belong to several groups, <strong>the group columns sum to more than
+        the offer total</strong> — the same send is counted once in each of
+        that contact’s group rows. “Sent last 7/30/90d” only counts
+        tracked-campaign sends to this offer’s targeted groups; “Fresh pool”
+        counts across every offer and both link modes, independent of
+        tracking.
       </p>
     </div>
   );

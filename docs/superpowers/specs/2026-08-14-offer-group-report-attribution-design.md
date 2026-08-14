@@ -2,6 +2,14 @@
 
 _Design spec · 2026-08-14 · branch `fix/offer-group-report-attribution`_
 
+> **Every figure in this spec is a snapshot, measured against production
+> 2026-08-13/14.** The matviews refresh twice daily and campaigns 763 and 775 are
+> still `active`: offer 96's true sends moved 88,536 → 93,176 and the org benchmark
+> 3,106,967 → 3,135,015 *between two reads a day apart while this spec was being
+> written*. The numbers below illustrate the mechanism and its magnitude; they are
+> not expected values. **No verification criterion in §8 compares against a constant
+> from this document** — each computes both sides in the same run.
+
 ## 1. Problem
 
 On `/offers/[id]/report`, group rows do not show per-group metrics. They show the
@@ -71,12 +79,13 @@ Two constraints:
   967,276 of 2,954,929 sent rows (32.7%) — Σ covers only $19,879 of $32,440.
   Cost is therefore derived from `campaign_stages.total_cost / (sent rows of that
   stage)`, which covers everything.
-- **4.89% of sends have no per-recipient row at all** (152,040 / 3,106,967) — sends
-  performed entirely outside the app with a hand-recorded `sms_count`. 59 sent stages
-  have no `stage_sends` rows; they sit in 28 campaigns, 21 of which are affected in
-  full and 7 only partially (so e.g. Lulutox-13759 loses 7.2% of its sends,
-  Kinzeno-14508 3.9%). Six offers are 100% external. A further 2 campaigns have an
-  empty `audience_contact_group_ids` and contribute 2 sends that no group can claim.
+- **~4.9% of sends cannot reach a group row** — 152,929 of 3,135,015 on the
+  §4.1.1 tracked-only basis (2026-08-14). Mostly sends performed entirely outside the
+  app with a hand-recorded `sms_count`: 59 sent stages have no `stage_sends` rows,
+  sitting in 28 campaigns, 21 affected in full and 7 partially (Lulutox-13759 loses
+  7.2% of its sends, Kinzeno-14508 3.9%). **6 of 21 offers are 100% external** and
+  will render no group rows; 15 have them. Two further campaigns have an empty
+  `audience_contact_group_ids` (2 sends), and campaign 110 contributes 889 (§4.1.1).
 
 ### 2.1 Multi-group overlap
 
@@ -176,6 +185,7 @@ camp AS (
   SELECT c.id, c.org_id, c.offer_id, c.audience_contact_group_ids AS gids
   FROM public.campaigns c
   WHERE c.offer_id IS NOT NULL
+    AND c.link_mode = 'tracked'          -- see §4.1.1
     AND EXISTS (SELECT 1 FROM public.campaign_stages s
                 WHERE s.campaign_id = c.id AND s.sent_at IS NOT NULL)
 ),
@@ -212,6 +222,47 @@ attr AS (
 This single CTE replaces **both** `e` and `lp`/`lp2`. The expensive join
 (`stage_sends ⋈ contact_contact_groups`, 3.69M rows) already runs today for the
 list-pressure columns, so the economics ride along for free.
+
+#### 4.1.1 Scope filters must match `offer_report_campaign_econ` branch for branch
+
+The econ view does **not** apply one consistent scope. Verified against its source in
+[0128:115‑165](../../../db/migrations/0128_offer_report_dedup_at_grain.sql#L115-L165):
+
+| Econ view input | Predicate |
+|---|---|
+| campaign universe (`sent`) | campaigns with ≥1 stage where `sent_at IS NOT NULL` |
+| tracked sends (`ts`) | `stage_sends.status = 'sent'` — **no** stage-level `sent_at` or `archived_at` filter |
+| manual sends (`mc`) | `campaign_stages.sms_count` where `sent_at IS NOT NULL AND archived_at IS NULL` |
+| cost (`cst`) | same as `mc` |
+| opt-outs (`oo`) | no filter at all |
+| `sends` column | `CASE WHEN link_mode = 'tracked' THEN ts ELSE mc END` |
+
+So "align with the econ view" is per-column, not one predicate:
+
+- `attr` mirrors `ts`: `status = 'sent'`, campaign in the universe, **no** stage-level
+  filter. Adding `archived_at IS NULL` here would drop sends the footer still counts.
+- `rate` mirrors `cst`: `sent_at IS NOT NULL AND archived_at IS NULL`. Sends on an
+  archived stage therefore attribute at cost 0 — correct, because the footer excludes
+  that stage's cost too. Both sides exclude it; the residual stays consistent.
+  (0 sent rows sit on archived or unsent stages today, so this is latent, not live.)
+- **`camp` is restricted to `link_mode = 'tracked'`, which is the load-bearing part.**
+  For a manual-link-mode campaign the footer counts `sms_count` while per-recipient
+  rows count actual sends, and the two are unrelated numbers. Campaign 110 (offer 58)
+  has `sms_count = 0` across its stages but **889 real `stage_sends` rows**, all 889
+  attributable — a campaign-grain residual of **−889**, masked only because offer 58
+  is large enough to absorb it. Restricting `camp` to tracked drops those 889 sends
+  from group rows and moves them into `unattributed_sends`, which takes the minimum
+  campaign-grain residual from −889 to exactly **0**.
+
+The restriction lives in `camp` so it applies uniformly to `attr`, `cell_clicks` and
+`cell_optouts`. Applying it to sends alone would leave a manual campaign's opt-outs in
+a group row with no denominator behind them.
+
+Pre-existing, out of scope, named so it is not blamed on this change: campaign 110's
+econ `sends` of 0 against 889 real sends is an under-count in the *existing* view — an
+operator never recorded `sms_count` for an in-app manual-link-mode send. This spec
+makes group rows consistent with that footer rather than silently disagreeing with it;
+correcting the footer is separate work.
 
 Two smaller CTEs gain the membership predicate 0128 omitted, deduplicated at cell
 grain:
@@ -279,6 +330,10 @@ Also update `03-data-model.md` + the Mermaid ERD (new matview), `07-conventions.
 
 ## 5. What changes on screen — offer 96
 
+_Matview snapshot of 2026-08-13. The offer is still live (campaigns 763 and 775 are
+`active`), so the absolute figures have already moved — true sends 88,536 → 93,176 by
+2026-08-14. The shape of the change is the point, not the values._
+
 | Group | Sends now | after | Net RPM now | after | Opt-out % now | after |
 |---|--:|--:|--:|--:|--:|--:|
 | Nerve Pain | 78,765 | 4,747 | $12.59 | **$37.18** | 2.66% | 1.73% |
@@ -326,23 +381,63 @@ All components measured with `EXPLAIN ANALYZE` against production, 2026-08-13.
 
 ## 8. Verification criteria
 
-Checked before the change is called done. Numbers are exact, not tolerances.
+Checked before the change is called done. Comparisons are exact, not tolerances —
+but **every one of them recomputes both sides in the same run**. Production keeps
+sending and the matviews refresh twice daily, so any criterion phrased against a
+number copied out of this document is measuring the calendar, not the code.
 
-1. **Offer 96, per row:** new `sends` equals today's `sent_90d` for each of the 11
-   groups with sends (same quantity — all this offer's sends fall inside 7 days).
-2. **Offer 96, aggregate:** Σ group `sends` = 105,056; footer = 88,536 =
-   Σ `offer_report_campaign_econ.sends`. Σ group `revenue` = $2,475.00 against a
-   footer of $1,800.00.
-3. **Org-wide structural check:** for every offer, `footer sends` =
-   `attributable_sends + unattributed_sends`, and Σ over all 21 offers = 3,106,967
-   exactly. Same shape of check that validated the `provider_phone_id` backfill —
-   it must match by construction, not approximately.
+1. **Offer 96, per row:** new `sends` equals the row's own `sent_90d` for every group
+   with sends — the same quantity by two paths, valid only while all of this offer's
+   sends fall inside 90 days (assert that precondition, don't assume it: check
+   `min(sent_at) >= now() - interval '90 days'` for the offer, and skip the criterion
+   with a printed reason if it no longer holds).
+2. **Offer 96, aggregate:** Σ group `sends` > footer (strictly, given a multi-group
+   campaign exists) and footer == Σ `offer_report_campaign_econ.sends` for the offer,
+   both read in the same transaction. Same for `revenue`. The *ratio* is the stable
+   observable, not the absolute: the column should exceed the footer by roughly the
+   multi-group overlap factor (~1.19× sends, ~1.38× revenue as of 2026-08-13) —
+   print it, and treat a jump to ~10× as the defect having survived.
+3. **Org-wide partition check.** Note first what does *not* count as evidence:
+   `footer sends = attributable_sends + unattributed_sends` is an identity, because
+   §4.1 defines `unattributed_sends` as the residual. It can never fail and verifies
+   nothing. Two checks with actual teeth:
+
+   a. **Σ footer sends over every offer == benchmark sends**, the right side read from
+      `offer_report_org_summary_mv` in the same transaction (never transcribed) and
+      pinned byte-identical by criterion 4. This catches campaigns leaking out of the
+      offer partition — `camp`
+      filters `offer_id IS NOT NULL`, so a sent campaign whose `offer_id` is NULL (or
+      is set to an offer that then vanishes from the totals matview) drops out of the
+      left side while staying in the benchmark — and it catches a dropped or
+      duplicated offer row, which a per-offer check would not. Assert the offer row
+      count **from the data**, not against a hardcoded 21.
+
+      Caveat to print, not to hide: the benchmark universe is every campaign with a
+      sent stage, including `offer_id IS NULL`, so the exact identity is
+      `Σ footer + Σ sends of NULL-offer campaigns == benchmark sends`. The second
+      term is 0 today. The script must print it rather than assume it, or a future
+      NULL-offer campaign turns a real failure into a silent one.
+
+   b. **`0 <= unattributed_sends <= sends` for every offer.** A negative residual is
+      the tell of a scope mismatch between the totals matview and the attribution
+      CTE — group rows claiming sends the footer never counted. Measured at campaign
+      grain (the strictest form) this currently holds with a minimum of exactly 0
+      under the §4.1.1 alignment, and fails on one campaign without it.
 4. **Benchmark unchanged:** `offer_report_org_summary_mv` byte-identical before and
-   after (3,106,967 / $56,116.0000 / 904 / 69,835 / $32,439.1514 / 83,149).
+   after — snapshotted into a temp table (or a printed row) **immediately before** the
+   migration runs and compared **immediately after**, in the same session. Do not
+   compare against values transcribed earlier: this matview refreshes on the twice-
+   daily cron, and it moved 3,106,967 → 3,135,015 in the 24h this spec took to write.
+   The migration does not touch this matview, so the only legitimate difference is a
+   cron refresh landing mid-run — if the values differ, establish which before
+   treating it as a failure.
 5. **No group row carries `has_manual_stages`** — the column is gone from the group
    matview; assert the offer-totals row still carries it where expected.
-6. **Six fully-external offers** (6, 61, 5, 2, 75, 3) render zero group rows, a
-   correct footer, and the un-attributed line.
+6. **Fully-external offers** — those with `attributable_sends = 0`, derived from the
+   data rather than the id list 6/61/5/2/75/3 that held on 2026-08-14 — render zero
+   group rows, a correct footer, and the un-attributed line. Assert that every offer
+   in the totals matview is in exactly one of the two states (rows, or zero rows plus
+   a non-zero footer); an offer with neither is a dropped row.
 7. **Refresh timing** logged per matview and under 60s total.
 8. `npx tsx scripts/verify-migration-integrity.ts` clean after apply.
 9. Lint the changed files only; prove no new problems by linting

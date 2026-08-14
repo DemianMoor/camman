@@ -283,7 +283,7 @@ sends both moved while the spec was being written."
 - Consumes: nothing.
 - Produces:
   - `offer_report_tracked_campaigns` (plain view) `(id int, org_id uuid, offer_id int, gids int[])` — the attribution universe, defined once and selected by both matviews.
-  - `offer_report_offer_totals_mv (org_id uuid, offer_id int, sends bigint, revenue numeric(14,4), sales bigint, clicks bigint, cost numeric(14,4), optouts bigint, has_manual_stages bool, attributable_sends bigint, unattributed_sends bigint)`
+  - `offer_report_offer_totals_mv (org_id uuid, offer_id int, sends bigint, revenue numeric(14,4), sales bigint, clicks bigint, cost numeric(14,4), optouts bigint, has_manual_stages bool, attributable_sends bigint, attributable_revenue numeric(14,4), attributable_sales bigint, unattributed_sends bigint)`
   - a rebuilt `offer_group_report_mv (org_id, offer_id, group_id, group_name, sends, revenue, sales, clicks, cost, optouts, sent_7d, sent_30d, sent_90d, fresh_pool)`
   - Tasks 3–5 read these names.
 
@@ -614,6 +614,15 @@ export type OfferTotals = RawMetrics & {
   // sends - attributable_sends. Recorded outside the app (no per-recipient
   // row), or on a campaign that targeted no group. Cannot reach a group row.
   unattributed_sends: number;
+  // The group rows' revenue/sales come from a DIFFERENT source than this row's:
+  // per-recipient stage_sends.sale_revenue / converted_at, versus Keitaro's
+  // per-stage aggregate (and GREATEST(keitaro, manual) for sales). Coverage is
+  // ~97% of revenue and ~90% of sales, so a group row is systematically a little
+  // lower than its share of the footer. These two carry the same figures on the
+  // group rows' basis so the gap is visible instead of being read as a shortfall.
+  // NOT a whole-and-part pair with revenue/sales — do not subtract them.
+  attributable_revenue: number;
+  attributable_sales: number;
 };
 
 export type OfferGroupReport = {
@@ -643,7 +652,8 @@ export async function getOfferGroupReport(
   // outside the app has NO group rows, and still needs a footer.
   const totalsRows = (await db.execute(sql`
     select sends, revenue, sales, clicks, cost, optouts, has_manual_stages,
-           attributable_sends, unattributed_sends
+           attributable_sends, unattributed_sends,
+           attributable_revenue, attributable_sales
     from offer_report_offer_totals_mv
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
   `)) as unknown as Record<string, unknown>[];
@@ -687,8 +697,17 @@ export async function getOfferGroupReport(
           has_manual_stages: Boolean(t.has_manual_stages),
           attributable_sends: n(t.attributable_sends),
           unattributed_sends: n(t.unattributed_sends),
+          attributable_revenue: n(t.attributable_revenue),
+          attributable_sales: n(t.attributable_sales),
         }
-      : { ...ZERO, has_manual_stages: false, attributable_sends: 0, unattributed_sends: 0 },
+      : {
+          ...ZERO,
+          has_manual_stages: false,
+          attributable_sends: 0,
+          unattributed_sends: 0,
+          attributable_revenue: 0,
+          attributable_sales: 0,
+        },
     orgBenchmark: benchRows[0]
       ? {
           sends: n(benchRows[0].sends),
@@ -1043,6 +1062,16 @@ Append to `docs/07-conventions.md` (and set its date):
   campaign the footer counts `sms_count` while per-recipient rows count real
   sends, and the two are unrelated: campaign 110 has `sms_count = 0` against 889
   real send rows. Counting it gives a negative residual.
+- **Group revenue/sales come from a different SOURCE than the footer's, not just
+  a different grain.** Group rows use per-recipient `stage_sends.sale_revenue` /
+  `converted_at`; the footer and org benchmark use `keitaro_stage_results.revenue`
+  and `GREATEST(keitaro sales, stage_manual_sales.delta)`. Per-recipient covers
+  ~97% of revenue and **~90% of the footer's sales basis** — quote that against
+  `GREATEST(...)`, not against Keitaro sales alone (which reads ~96% and
+  understates the gap). `offer_report_offer_totals_mv.attributable_revenue` /
+  `.attributable_sales` carry the footer's own figures on the group rows' basis so
+  the difference is measurable. They are **not** a whole-and-part pair with
+  `revenue`/`sales` — never subtract them to derive an "unattributed" amount.
 ```
 
 - [ ] **Step 4: Append the changelog line**

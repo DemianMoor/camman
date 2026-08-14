@@ -10,7 +10,54 @@ function pathStartsWith(pathname: string, prefixes: string[]) {
   );
 }
 
+// ── Demo-only HTTP Basic Auth gate ──────────────────────────────────────────
+// A free stand-in for Vercel Deployment Protection on the external demo project
+// (see docs/09-demo-environment.md). ACTIVE ONLY when DEMO_BASIC_AUTH is set, as
+// "user:password" — production leaves it unset, so this returns null on the
+// first line and prod behaviour is unchanged.
+//
+// Runs BEFORE the Supabase session work below so an unauthenticated visitor
+// doesn't cost a getUser() round-trip.
+//
+// SCOPE: the `config.matcher` at the bottom already excludes `/api/` and `/r/`,
+// so this gate never sees them. That is what keeps the 19 Vercel Cron entries
+// working — every cron path lives under `/api/`. It also leaves the public
+// short-link redirect and the provider webhooks reachable, which they must be.
+//
+// The Bearer branch below is therefore currently unreachable, and is kept
+// deliberately: Basic Auth and Vercel Cron share the `Authorization` header, so
+// anyone who later widens the matcher to cover `/api/` would otherwise 401 every
+// cron with no obvious cause. Each cron route re-checks CRON_SECRET itself, so
+// letting a Bearer through weakens nothing.
+function demoAuthGate(request: NextRequest): NextResponse | null {
+  const expected = process.env.DEMO_BASIC_AUTH;
+  if (!expected) return null; // production: inert
+
+  const header = request.headers.get("authorization");
+  if (header?.startsWith("Bearer ")) return null; // see note above
+
+  if (header?.startsWith("Basic ")) {
+    try {
+      // Compare the whole decoded "user:password" so a colon inside the
+      // password is handled without splitting.
+      if (atob(header.slice("Basic ".length)) === expected) return null;
+    } catch {
+      // Malformed base64 — fall through to the challenge.
+    }
+  }
+
+  return new NextResponse("Authentication required", {
+    status: 401,
+    headers: {
+      "WWW-Authenticate": 'Basic realm="CamMan demo", charset="UTF-8"',
+    },
+  });
+}
+
 export async function proxy(request: NextRequest) {
+  const gate = demoAuthGate(request);
+  if (gate) return gate;
+
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(

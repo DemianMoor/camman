@@ -107,22 +107,42 @@ outbound call possible.
 
 ## Basic Auth (`DEMO_BASIC_AUTH`)
 
-[middleware.ts](../middleware.ts) gates the whole deployment behind HTTP Basic
-Auth, as a free replacement for Vercel Deployment Protection. It is **inert
+The gate lives in [proxy.ts](../proxy.ts) — **Next 16 renamed `middleware.ts` to
+`proxy.ts`, and having both files present is a hard build error**
+(`Both middleware file "./middleware.ts" and proxy file "./proxy.ts" are
+detected`). There is one edge module in this project; add to it, don't create a
+sibling. See [02-architecture.md](02-architecture.md).
+
+`demoAuthGate()` runs at the top of `proxy()`, before the Supabase session work,
+so an unauthenticated visitor costs no `getUser()` round-trip. It is **inert
 unless `DEMO_BASIC_AUTH` is set** (format `user:password`), so production — which
 does not set it — is unaffected.
 
-Two behaviours matter:
+**Scope comes from `proxy.ts`'s existing matcher, which already excludes `/api/`
+and `/r/`.** That exclusion is what keeps the demo working:
 
-- **Bearer passthrough.** Vercel Cron authenticates with
-  `Authorization: Bearer <CRON_SECRET>` — the same header Basic Auth uses. The
-  middleware branches on the auth *scheme* and lets any `Bearer` through;
-  each cron route then checks `CRON_SECRET` itself. Without this, all 17 cron
-  entries would 401. A path-prefix exemption would not work: cron paths span
-  `/api/cron`, `/api/keitaro`, `/api/clicks`, `/api/opt-outs` and `/api/reports`.
-- **Public exemptions.** `/r/` (the link shortener — recipients and reviewers
-  clicking a seeded link hold no credentials) and `/api/webhooks/` (authenticated
-  by their own per-credential path token).
+- every one of the 19 Vercel Cron paths lives under `/api/`, so none is ever
+  gated;
+- the provider webhooks (`/api/webhooks/…`) stay reachable, authenticated by
+  their own per-credential path token;
+- `/r/` stays public, so a reviewer clicking a seeded message link gets the
+  redirect rather than a login box.
+
+API routes being ungated is not a hole: all of them authenticate inside their own
+handler (`requireApiUser` / `requireApiMembership`, a `CRON_SECRET` Bearer check,
+or a webhook token), which is the same posture as production.
+
+`demoAuthGate` also passes any `Authorization: Bearer …` through. That branch is
+**currently unreachable** — Bearer traffic is cron traffic, which the matcher
+already excludes — and is kept deliberately: Basic Auth and Vercel Cron share the
+`Authorization` header, so widening the matcher to cover `/api/` would otherwise
+401 every cron with no obvious cause. Each cron route re-checks `CRON_SECRET`
+itself, so letting a Bearer through weakens nothing.
+
+Verified against a local production build with the gate enabled: no credentials
+⇒ 401 + `WWW-Authenticate`; correct credentials ⇒ 200; wrong password ⇒ 401;
+`/r/` ⇒ 404 (ungated); `/api/cron/telegram-report` ⇒ 401 without a secret and
+200 with one.
 
 ## Seeding
 

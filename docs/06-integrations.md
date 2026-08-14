@@ -82,7 +82,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | `AHOI_API_BASE_URL` | server | optional override for the Ahoi/api19 base URL (default `https://v1.api19.com`) |
 | `TEXTREQUEST_API_BASE_URL` | server | optional override for the Text Request API base URL (default `https://api.textrequest.com/api/v3`) |
 | `TELLS_API_BASE_URL` | server | optional override for the Tells.co send endpoint (default `https://app.tells.co/api/sms.php`) |
-| `DEMO_BASIC_AUTH` | server | **demo deployment only** (`user:password`). Gates the whole app behind HTTP Basic Auth via `middleware.ts`, replacing Vercel Deployment Protection. Unset ⇒ middleware is inert, so production is unaffected. `Authorization: Bearer …` requests pass through (Vercel Cron shares that header); `/r/` and `/api/webhooks/` are exempt. See [09-demo-environment.md](09-demo-environment.md) |
+| `DEMO_BASIC_AUTH` | server | **demo deployment only** (`user:password`). Gates the app behind HTTP Basic Auth in [`proxy.ts`](../proxy.ts) (Next 16's renamed middleware), replacing Vercel Deployment Protection. Unset ⇒ the gate is inert, so production is unaffected. `proxy.ts`'s existing matcher already excludes `/api/` and `/r/`, so all 19 cron routes, the provider webhooks and the public short-link redirect are never gated. See [09-demo-environment.md](09-demo-environment.md) |
 | `AHOI_API_TOKEN` | **local only** | one-time seed input for `scripts/seed-ahoi-number-credential.ts`; not read at runtime after seeding |
 | `AHOI_DLR_REJECT_SPIKE_THRESHOLD` | server | rejected-DLR count that latches the Ahoi provider pause (default 10) |
 | `AHOI_DLR_REJECT_SPIKE_WINDOW_SEC` | server | rolling window (seconds) for the DLR reject-rate breaker (default 900) |

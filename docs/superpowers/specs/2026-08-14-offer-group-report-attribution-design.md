@@ -164,12 +164,16 @@ the SQL, clone the snapshot forward, add the journal entry, LF line endings with
   least one targeted group. **Not** Σ of the group matview's `sends`: that sum is
   non-additive by design (105,056 vs 88,536 on offer 96) and using it here would
   reintroduce the very defect this spec removes.
-- `unattributed_sends` = `sends − attributable_sends`. `unattributed_cost` follows
-  the same distinct basis: `cost − Σ(rate.per_send over the distinct attributable
-  sends)`. Defining both as residuals rather than enumerating causes means they
-  absorbs all three of them: externally-recorded sends, campaigns with an empty
-  `audience_contact_group_ids`, and (should any appear) recipients with no membership
-  in a targeted group.
+- `unattributed_sends` = `sends − attributable_sends`. Defining it as a residual
+  rather than enumerating causes means it absorbs all three of them:
+  externally-recorded sends, campaigns with an empty `audience_contact_group_ids`,
+  and (should any appear) recipients with no membership in a targeted group.
+
+  A matching `unattributed_cost` was considered and **dropped as YAGNI** — nothing
+  displays it and no criterion in §8 uses it, so it would be an unused
+  `COUNT(DISTINCT)`-scale aggregate on every refresh. If a cost breakdown is wanted
+  later it is a one-column addition on the same distinct-send basis:
+  `cost − Σ(rate.per_send over the distinct attributable sends)`.
 
 It exists for **every** offer with a sent campaign, including offers with zero
 attributable sends — that is what lets the six fully-external offers still render a

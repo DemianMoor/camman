@@ -27,7 +27,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     await recordHeartbeat(db, HEARTBEAT_JOBS.offerReportRefresh.job_name);
     // Log runtime every run so we can watch it grow toward the 300s ceiling.
     console.log(
-      `[refresh-offer-group-report] ok summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} totalMs=${durations.totalMs}`,
+      `[refresh-offer-group-report] ok totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} totalMs=${durations.totalMs}`,
     );
     return NextResponse.json({ ok: true, durations });
   } catch (err) {

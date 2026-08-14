@@ -297,10 +297,17 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
   reverted it by `DROP VIEW` + `CREATE VIEW` without carrying the option
   forward, leaving that advisor ERROR live in production until migration
   `0132` re-applied it and set it on `offer_report_tracked_campaigns` too.
-  **Any future `DROP VIEW` / `CREATE VIEW` on either object MUST re-apply
-  `security_invoker = true`, and `get_advisors` (type=security) should be
-  re-run after any view DDL** to confirm it didn't regress — don't rely on
-  memory that it was set once.
+  **Any migration that does `CREATE VIEW` or `DROP VIEW` + `CREATE VIEW` on
+  either object MUST include `ALTER VIEW public.<view> SET (security_invoker
+  = true);` in the same migration** — neither a bare `CREATE VIEW` nor
+  `CREATE OR REPLACE VIEW` carries the option forward from the view's prior
+  definition; it must be re-asserted every time the view is recreated, not
+  set-and-forget. Re-run `get_advisors` (type=security) after any view DDL —
+  the signal to watch is Supabase advisor check `0010_security_definer_view`
+  at **ERROR**; it must report zero hits for these two views. Don't rely on
+  memory that it was set once: `scripts/verify-migration-integrity.ts` now
+  asserts `security_invoker=true` in `pg_class.reloptions` for both views
+  directly, so this is checkable without a live advisor call.
 
 ## Reports rollup (migration 0112, see [04-features/reports-rollup.md](04-features/reports-rollup.md))
 - **Bucketed by the SEND hour in ET, not the event hour.** Every metric (opt-outs, clicks, redirects, sales, cost) is attributed to the hour the message was SENT, so each rate is a batch rate ("of messages sent in hour H, X% opted out"). `date_trunc('hour', sent_at AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'` → the stored `bucket_start_utc`. Only ever done inside the bounded rolling-window build, never in a hot read.

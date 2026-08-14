@@ -10,14 +10,27 @@
 -- exist`. Keep that window short and apply this deliberately -- watch the
 -- reader deploy land, not as an unattended/background step.
 --
--- `refreshOfferGroupReport()` (lib/reporting/offer-group-report.ts) today
--- refreshes only the two matviews created in 0093 --
--- `offer_report_org_summary_mv` and `offer_group_report_mv` -- and stamps
--- only those two `report_refresh_log` rows. `offer_report_offer_totals_mv`
--- (new below) is not in that list, so until the function is updated (a later
--- task in this plan) it holds data frozen at THIS migration's apply time
--- while `offer_group_report_mv` keeps refreshing twice daily -- footer and
--- rows drift apart in time, not just in join path.
+-- APPLY THIS MIGRATION BEFORE MERGING/DEPLOYING THIS BRANCH -- this project's
+-- documented convention (CLAUDE.md section 14: migrations are applied before
+-- the code that depends on them). Getting the order backwards fails
+-- differently in each direction:
+--   migration-first -- the OLD reader (pre-this-branch code, still deployed)
+--     500s on /offers/[id]/report as described above, until the code deploy
+--     lands.
+--   code-first -- the NEW reader queries `offer_report_offer_totals_mv`, which
+--     doesn't exist yet, so the page 500s immediately; the twice-daily refresh
+--     cron (`refreshOfferGroupReport()`, lib/reporting/offer-group-report.ts)
+--     also throws on that matview's refresh, and the invocation ends in a
+--     Tier-1 alert every run until the migration applies. That refresh runs
+--     LAST specifically so the two pre-existing matviews still refresh before
+--     the throw, instead of neither running at all.
+--
+-- SECURITY: `offer_report_tracked_campaigns` (new below) and
+-- `offer_report_campaign_econ` (0093, re-secured by 0113) both get
+-- `security_invoker = true` in this migration -- see the ALTER VIEW
+-- statements below. Any future DROP VIEW / CREATE VIEW on either object MUST
+-- re-apply that option, or it silently reopens the RLS-bypass advisor ERROR
+-- this migration closes -- 0126 and 0128 already did this once, by omission.
 -- ----------------------------------------------------------------------------
 --
 -- 0128 fixed HOW the clicker count was aggregated. It did not fix WHO a row is
@@ -127,6 +140,18 @@ CREATE VIEW public.offer_report_tracked_campaigns AS
     AND EXISTS (SELECT 1 FROM public.campaign_stages s
                 WHERE s.campaign_id = c.id AND s.sent_at IS NOT NULL);
 --> statement-breakpoint
+-- security_invoker = true: see "SECURITY" in the header. Without this, the
+-- view runs as its (postgres) owner and RLS on campaigns does not apply,
+-- exposing every org's campaign id -> org_id -> offer_id -> targeted group
+-- ids to anon/authenticated over /rest/v1/offer_report_tracked_campaigns.
+ALTER VIEW public.offer_report_tracked_campaigns SET (security_invoker = true);
+--> statement-breakpoint
+-- Re-asserting what 0113 set on this view and 0126/0128 each silently
+-- dropped by DROP VIEW + CREATE VIEW without carrying the option forward.
+-- offer_report_campaign_econ is not otherwise touched by this migration --
+-- this ALTER exists purely to close that regression while we're here.
+ALTER VIEW public.offer_report_campaign_econ SET (security_invoker = true);
+--> statement-breakpoint
 CREATE MATERIALIZED VIEW public.offer_report_offer_totals_mv AS
 WITH base AS (
   SELECT e.org_id, e.offer_id,
@@ -167,10 +192,15 @@ attributable AS (
     JOIN public.campaign_stages cs ON cs.id = ss.stage_id
     JOIN public.offer_report_tracked_campaigns camp ON camp.id = cs.campaign_id
     WHERE ss.status = 'sent'
+      -- org_id checked explicitly even though contact_group_id is already
+      -- scoped to camp.gids (a single org's campaign): defense-in-depth
+      -- against the project's #1 rule (multi-tenancy) if a
+      -- contact_contact_groups row is ever mis-tagged. Changes no rows today.
       AND EXISTS (
         SELECT 1 FROM public.contact_contact_groups ccg
         WHERE ccg.contact_id = ss.contact_id
           AND ccg.contact_group_id = ANY(camp.gids)
+          AND ccg.org_id = camp.org_id
       )
   ) ds
   GROUP BY ds.org_id, ds.offer_id
@@ -250,9 +280,14 @@ attr AS (
   -- and `attributable` above -- not ss.campaign_id. See the comment there.
   JOIN public.campaign_stages cs ON cs.id = ss.stage_id
   JOIN public.offer_report_tracked_campaigns camp ON camp.id = cs.campaign_id
+  -- org_id checked explicitly (not just contact_group_id = ANY(camp.gids)):
+  -- defense-in-depth against a mis-tagged contact_contact_groups row leaking
+  -- another org's data into this org's report. Changes no rows today; same
+  -- reasoning as `attributable` above and the two CTEs below.
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = ss.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
+   AND ccg.org_id = camp.org_id
   LEFT JOIN rate r ON r.stage_id = ss.stage_id
   WHERE ss.status = 'sent'
   GROUP BY camp.org_id, camp.offer_id, ccg.contact_group_id
@@ -268,6 +303,7 @@ cell_clicks AS (
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = cc.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
+   AND ccg.org_id = camp.org_id
   GROUP BY camp.org_id, camp.offer_id, ccg.contact_group_id
 ),
 -- Campaign resolved via oa.stage_id -> campaign_stages, matching the footer's
@@ -292,6 +328,7 @@ cell_optouts AS (
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = ss.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
+   AND ccg.org_id = camp.org_id
   GROUP BY camp.org_id, camp.offer_id, ccg.contact_group_id
 ),
 -- Unchanged from 0128: contacts in the group with no 'sent' row in 90 days,
@@ -315,7 +352,10 @@ SELECT a.org_id, a.offer_id, a.group_id, cg.name AS group_name,
   a.sent_7d, a.sent_30d, a.sent_90d,
   COALESCE(f.fresh_pool, 0) AS fresh_pool
 FROM attr a
-LEFT JOIN public.contact_groups cg ON cg.id = a.group_id
+-- org_id restored: 0093 had `cg.org_id = e.org_id` here; 0126/0128 dropped it
+-- on drop/recreate. Defense-in-depth against a mis-tagged group id crossing
+-- an org boundary. Changes no rows today.
+LEFT JOIN public.contact_groups cg ON cg.id = a.group_id AND cg.org_id = a.org_id
 LEFT JOIN cell_clicks  ck ON ck.org_id = a.org_id AND ck.offer_id = a.offer_id AND ck.group_id = a.group_id
 LEFT JOIN cell_optouts oo ON oo.org_id = a.org_id AND oo.offer_id = a.offer_id AND oo.group_id = a.group_id
 LEFT JOIN fresh f ON f.org_id = a.org_id AND f.group_id = a.group_id;
@@ -323,15 +363,27 @@ LEFT JOIN fresh f ON f.org_id = a.org_id AND f.group_id = a.group_id;
 CREATE UNIQUE INDEX offer_group_report_mv_key_uniq
   ON public.offer_group_report_mv (org_id, offer_id, group_id);
 --> statement-breakpoint
--- Seeded NULL, not now(): nothing refreshes this matview until
--- refreshOfferGroupReport() is rewritten to include it (a later task).
--- CREATE MATERIALIZED VIEW ... AS <query> populates the view immediately --
--- there is no WITH NO DATA here -- so it holds real data the moment this
--- migration applies; NULL does not mean the view is empty. NULL means
--- "as-of unknown": stamping now() here would claim the data is as current as
--- the twice-daily cron implies, when in fact nothing has refreshed it since
--- apply. Same convention as 0093's seed of offer_group_report_mv /
--- offer_report_org_summary_mv.
+-- Seeded NULL, not now(): CREATE MATERIALIZED VIEW ... AS <query> populates
+-- the view immediately -- there is no WITH NO DATA here -- so it holds real
+-- data the moment this migration applies; NULL does not mean the view is
+-- empty. NULL means "as-of unknown": stamping now() here would claim the
+-- data is as current as the twice-daily cron implies, when in fact nothing
+-- has refreshed it via the cron since apply. Same convention as 0093's seed
+-- of offer_group_report_mv / offer_report_org_summary_mv. Unlike that row,
+-- this one is never read for the page's "Data as of" banner --
+-- getOfferGroupReport() only reads offer_group_report_mv's row (see the
+-- UPDATE below) -- so leaving it NULL costs nothing on screen.
 INSERT INTO public.report_refresh_log (view_name, refreshed_at)
 VALUES ('offer_report_offer_totals_mv', NULL)
 ON CONFLICT (view_name) DO UPDATE SET refreshed_at = NULL;
+--> statement-breakpoint
+-- offer_group_report_mv's own report_refresh_log row (seeded by 0093, kept
+-- current since by the twice-daily cron) still holds the timestamp of the
+-- last cron run BEFORE this migration applied. The DROP + CREATE MATERIALIZED
+-- VIEW above rebuilt it with fresh data at apply time, but left that row
+-- untouched -- so without this, the page's "Data as of" banner (the only
+-- place this row is read) would report the data as older than it actually
+-- is, potentially old enough to trip the amber staleness warning for rows
+-- that are seconds old.
+UPDATE public.report_refresh_log SET refreshed_at = now()
+WHERE view_name = 'offer_group_report_mv';

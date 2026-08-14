@@ -157,17 +157,27 @@ export type RefreshDurations = {
 // refresh log. Called by the twice-daily cron. CONCURRENTLY must run outside a
 // transaction, so each statement is its own execute() call.
 //
-// The group matview reads no other matview, so order is not load-bearing; the
-// totals matview goes first only so the footer is never newer than the rows a
-// reader is looking at. Measured 2026-08-13: totals ~4.5s, summary ~11s, group
-// ~25s -- ~40.5s against a 300s ceiling.
+// offer_report_offer_totals_mv (introduced in migration 0132) refreshes LAST,
+// not for a cosmetic footer-freshness reason, but for deploy-order blast
+// radius: this code and 0132 are meant to deploy together (0132 first, per
+// CLAUDE.md §14), but if this code ever ships before 0132 applies, the
+// `offer_report_offer_totals_mv` statement is the one that throws (relation
+// does not exist). With it last, the two PRE-EXISTING matviews
+// (offer_report_org_summary_mv, offer_group_report_mv -- both from 0093,
+// refreshed by this function since before 0132 existed) still refresh and
+// stay live before the throw ends the invocation. Refreshing it first would
+// mean the throw happens before either of the other two statements run, so a
+// code-before-migration deploy would freeze ALL THREE reports at their last
+// snapshot (twice-daily cron, so potentially days) instead of just one.
+// Measured 2026-08-13: summary ~11s, group ~25s, totals ~4.5s -- ~40.5s
+// against a 300s ceiling.
 export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
   const t0 = Date.now();
-  await db.execute(sql`refresh materialized view concurrently offer_report_offer_totals_mv`);
-  const t1 = Date.now();
   await db.execute(sql`refresh materialized view concurrently offer_report_org_summary_mv`);
-  const t2 = Date.now();
+  const t1 = Date.now();
   await db.execute(sql`refresh materialized view concurrently offer_group_report_mv`);
+  const t2 = Date.now();
+  await db.execute(sql`refresh materialized view concurrently offer_report_offer_totals_mv`);
   const t3 = Date.now();
   await db.execute(sql`
     update report_refresh_log set refreshed_at = now()
@@ -175,9 +185,9 @@ export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
                         'offer_report_offer_totals_mv')
   `);
   return {
-    totalsMs: t1 - t0,
-    summaryMs: t2 - t1,
-    groupMs: t3 - t2,
+    summaryMs: t1 - t0,
+    groupMs: t2 - t1,
+    totalsMs: t3 - t2,
     totalMs: Date.now() - t0,
   };
 }

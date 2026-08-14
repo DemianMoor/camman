@@ -142,8 +142,29 @@ async function main() {
     const ratio = n(agg.col_sends) / Math.max(n(agg.foot_sends), 1);
     console.log(`  column ${agg.col_sends} / footer ${agg.foot_sends} = ${ratio.toFixed(3)}x ` +
                 `(revenue ${agg.col_rev} / ${agg.foot_rev})`);
-    assert(n(agg.foot_sends) === n(agg.econ_sends),
-      `footer ${agg.foot_sends} == campaign-grain econ ${agg.econ_sends}`);
+    // foot_sends reads offer_report_offer_totals_mv (MATERIALIZED, frozen at
+    // its last refresh); econ_sends aggregates offer_report_campaign_econ (a
+    // plain VIEW, computed LIVE from stage_sends WHERE status='sent'), which
+    // keeps growing while production keeps sending. An `===` here would fail
+    // the moment anything lands for offer 96 between the matview's refresh
+    // and this read (measured 88,536 -> 93,176 in 24h during planning) — the
+    // same defect criterion 3a was rewritten to remove; it was missed here.
+    // The time-independent direction: the matview is a frozen PREFIX of a
+    // monotonically growing live count (sends are never un-sent), so
+    // foot_sends <= econ_sends holds no matter how much time elapsed between
+    // the two reads. A violation means either data was deleted from what
+    // offer_report_campaign_econ reads, or the offer partition leaked (the
+    // totals matview counted a send econ does not attribute to offer 96) —
+    // both worth failing on, neither explained by ordinary elapsed time.
+    const econDelta = n(agg.econ_sends) - n(agg.foot_sends);
+    const econDeltaPct = n(agg.foot_sends) > 0 ? (econDelta / n(agg.foot_sends)) * 100 : null;
+    console.log(`  ℹ INFORMATIONAL, not asserted: footer ${agg.foot_sends} vs live campaign-grain econ ` +
+                `${agg.econ_sends} (delta +${econDelta}, ${econDeltaPct == null ? "n/a" : econDeltaPct.toFixed(3) + "%"}) ` +
+                `— sends land continuously between the matview's refresh and this read, so a positive delta is ` +
+                `expected, not a failure.`);
+    assert(n(agg.foot_sends) <= n(agg.econ_sends),
+      `footer ${agg.foot_sends} <= campaign-grain econ ${agg.econ_sends} ` +
+      `(frozen prefix of a monotonically growing live count — a violation means deleted data or a leaked partition)`);
     assert(ratio > 1, `column exceeds footer (a multi-group campaign exists): ${ratio.toFixed(3)}x`);
     assert(ratio < 3,
       `overlap factor is plausible (<3x); ~10x means the unnest fan-out survived — got ${ratio.toFixed(3)}x`);

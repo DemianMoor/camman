@@ -338,9 +338,9 @@ export default function OfferGroupReportPage() {
         messages actually sent to contacts in that group. Because a contact can
         belong to several groups, <strong>the count and money columns do not add
         up to the offer total</strong> — the same person is one send on the offer row and one send
-        in each of their groups. “Sent last 7/30/90d” and “Fresh pool” count every
-        in-app send (tracked or manual link mode); sends performed entirely outside
-        the app aren’t included anywhere except the offer total.
+        in each of their groups. “Sent last 7/30/90d” only counts tracked-campaign
+        sends to this offer’s targeted groups; “Fresh pool” counts across every
+        offer and both link modes, independent of tracking.
       </p>
     </div>
   );

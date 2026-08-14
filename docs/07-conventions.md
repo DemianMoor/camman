@@ -279,14 +279,20 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
   `.attributable_sales` carry the footer's own figures on the group rows' basis so
   the difference is measurable. They are **not** a whole-and-part pair with
   `revenue`/`sales` — never subtract them to derive an "unattributed" amount.
-- **Not yet applied to production.** Migration 0132 is committed but gated on
-  owner approval; see `docs/CHANGELOG.md`.
+- **Group opt-outs can fall short of the footer for a reason no other column
+  here has.** `opt_out_attributions.stage_send_id` is nullable by design (an
+  attribution survives its send row being pruned); such a row has no
+  recipient, so `cell_optouts` genuinely cannot place it in a group. The
+  footer's own opt-out subquery in `offer_report_campaign_econ` joins through
+  `oa.stage_id` instead and keeps these rows regardless. Not the grain
+  difference the rest of this section describes — rows the group join can
+  never reach at all.
 
 ## Reports rollup (migration 0112, see [04-features/reports-rollup.md](04-features/reports-rollup.md))
 - **Bucketed by the SEND hour in ET, not the event hour.** Every metric (opt-outs, clicks, redirects, sales, cost) is attributed to the hour the message was SENT, so each rate is a batch rate ("of messages sent in hour H, X% opted out"). `date_trunc('hour', sent_at AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'` → the stored `bucket_start_utc`. Only ever done inside the bounded rolling-window build, never in a hot read.
-- **Sales/revenue use the PER-RECIPIENT `stage_sends` attribution** (`converted_at`/`sale_revenue`), NOT the `keitaro_stage_results` daily aggregate — that's the only source that can be split by hour and group. It recovers ~93% of the authoritative aggregate (295 vs 319 sales; $20,982 vs $22,324); the read layer surfaces the delta so the structural gap isn't mistaken for a bug. This is a DIFFERENT sales basis than `/reports` and the offer-group report (which use the aggregate).
+- **Sales/revenue use the PER-RECIPIENT `stage_sends` attribution** (`converted_at`/`sale_revenue`), NOT the `keitaro_stage_results` daily aggregate — that's the only source that can be split by hour and group. It recovers ~93% of the authoritative aggregate (295 vs 319 sales; $20,982 vs $22,324); the read layer surfaces the delta so the structural gap isn't mistaken for a bug. This is a DIFFERENT sales basis than `/reports` and the offer-group report's footer and org benchmark (which use the aggregate); the offer-group report's group rows use the per-recipient basis (migration 0132), same as here.
 - **"Clickers" = internal clean clicks** (`clicks.classification='human' AND scored_at IS NOT NULL`, joined via `stage_sends.link_id`), NOT the Keitaro visit counter (`campaign_stages.click_count`). Different populations — the two numbers will differ.
-- **Grand totals come from `report_stage_hour` (Fact A) only.** `report_group_hour` (Fact B) fans out over the many-to-many `contact_contact_groups` (avg 1.34 groups/contact), so summing its group rows OVERCOUNTS the true total by design — same caveat as the offer-group report's group unnest.
+- **Grand totals come from `report_stage_hour` (Fact A) only.** `report_group_hour` (Fact B) fans out over the many-to-many `contact_contact_groups` (avg 1.34 groups/contact), so summing its group rows OVERCOUNTS the true total by design — same caveat as the offer-group report's group rows, which fan out the same way over a contact's multiple group memberships (migration 0132), not a group-id unnest.
 - **`stage_sends.provider_phone_id` / `cost_per_sms` are durable send-time snapshots** (stamped at materialization). The rollup resolves `COALESCE(send snapshot, stage live value)` so pre-0112 history still attributes to a number/rate via the (mutable) stage. Cost inherits the flat-rate limitation of `campaign_stages.total_cost` (multi-segment messages under-costed) — a separate future card.
 
 ## Click scoring — ASN matching (see [04-features/tracking-attribution.md §7a](04-features/tracking-attribution.md))

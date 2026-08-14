@@ -21,9 +21,11 @@ before the row's `⋯` actions dropdown. Visible to anyone with `offers.view`
 
 ## Metric definitions (LOCKED)
 
-The **offer total and org benchmark rows** aggregate every campaign of the
-offer with ≥1 sent stage (`campaign_stages.sent_at IS NOT NULL`), **tracked and
-manual alike**, `offer_id` non-null — unchanged since migration 0093.
+The **offer total row** aggregates every campaign of the offer with ≥1 sent
+stage (`campaign_stages.sent_at IS NOT NULL`), **tracked and manual alike**,
+`offer_id` non-null — unchanged since migration 0093. The **org benchmark
+row** aggregates that same sent-stage universe org-wide with **no `offer_id`
+filter** — campaigns with no offer set are still counted in it.
 **Group rows are narrower** (migration 0132): only `link_mode='tracked'`
 campaigns contribute, because a manual-mode campaign's `sms_count` has no
 per-recipient row to attribute to a group (see "Tracked-only attribution"
@@ -94,8 +96,11 @@ large tables) are too heavy to run per page load, v1 precomputes into
 lookups.
 
 - **`offer_report_campaign_econ`** (plain view) — per-campaign economics
-  (tracked + manual alike); the sole source of the offer total and org
-  benchmark rows.
+  (tracked + manual alike); the sole source of **sends, revenue, sales, cost,
+  and optouts** on the offer total and org benchmark rows. Clicks on those
+  rows come from `counted_clickers`/`keitaro_stage_results` directly, and the
+  offer total's `attributable_*` columns come from `stage_sends` directly —
+  neither routes through this view.
 - **`offer_report_tracked_campaigns`** (plain view, migration 0132) — the
   group-row attribution universe: campaigns with an offer, `link_mode='tracked'`,
   and ≥1 sent stage. `offer_group_report_mv` and `offer_report_offer_totals_mv`
@@ -219,8 +224,7 @@ pin rows or foot a table; justified by the small per-offer row count).
 - `db/migrations/0132_offer_report_per_recipient_attribution.sql` — per-recipient
   group-row attribution; adds `offer_report_tracked_campaigns` and
   `offer_report_offer_totals_mv`; extends the dedup-at-grain rule to every
-  group-row column. **Not yet applied to production** as of this writing —
-  gated on owner approval (see `docs/CHANGELOG.md`).
+  group-row column.
 - `lib/reporting/offer-group-report.ts` — read + refresh helper.
 - `app/api/offers/[id]/report/route.ts` — the API route.
 - `app/api/cron/refresh-offer-group-report/route.ts` — the twice-daily refresh cron.

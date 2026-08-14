@@ -56,8 +56,8 @@ export async function GET(
     orgBenchmark: report.orgBenchmark,
     benchmarkHasManual: report.benchmarkHasManual,
     breakEvenPer1k,
-    // Sends that cannot reach any group row: recorded entirely outside the app
-    // (no per-recipient row), or on a campaign that targeted no group.
+    // Sends that cannot reach any group row: recorded outside the app, from a
+    // non-tracked/untargeted campaign, or to a recipient outside its targeted groups.
     unattributedSends: offerTotals.unattributed_sends,
     refreshedAt: report.refreshedAt,
   });

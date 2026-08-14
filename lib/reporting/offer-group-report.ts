@@ -32,8 +32,8 @@ export type GroupRawRow = RawMetrics & {
 export type OfferTotals = RawMetrics & {
   has_manual_stages: boolean;
   attributable_sends: number;
-  // sends - attributable_sends. Recorded outside the app (no per-recipient
-  // row), or on a campaign that targeted no group. Cannot reach a group row.
+  // sends - attributable_sends: recorded outside the app, from a non-tracked
+  // or untargeted campaign, or sent to a recipient outside its targeted groups.
   unattributed_sends: number;
   // The group rows' revenue/sales come from a DIFFERENT source than this row's:
   // per-recipient stage_sends.sale_revenue / converted_at, versus Keitaro's

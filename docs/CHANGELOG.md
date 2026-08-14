@@ -3,6 +3,7 @@
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
 2026-08-14 — Offer group report attributed per recipient (migration 0132); footer moved to a new offer-grain matview; three stale metric definitions corrected — docs/03-data-model.md, docs/04-features/offer-group-report.md, docs/07-conventions.md
+2026-08-14 — Fixed 8 post-0132 accuracy gaps: Sent 7/30/90d vs Fresh pool UI footnote, two stale unattributed-sends comments, org-benchmark offer_id scope, "sole source" overstated, stale unnest reference, undocumented opt-out asymmetry, and removed transient "not yet applied to production" notes — docs/03-data-model.md, docs/04-features/offer-group-report.md, docs/07-conventions.md, app/(protected)/offers/[id]/report/page.tsx, app/api/offers/[id]/report/route.ts, lib/reporting/offer-group-report.ts
 
 ## 2026-08-14 — Delivery report breaks down by phone number; grain widened to (stage, phone) — docs: 04-features/delivery-report, 07-conventions, CHANGELOG
 - **One provider can run several numbers with very different deliverability.** `/reports/delivery` provider rows now expand into **per-number sub-rows** (same columns, plus the number and its type). The motivating case is live: `txh2` runs short code `621637` (308,828 sends/7d) AND toll-free `+18446210404` (36,802) — collapsed into a single row until now. Sub-rows sum exactly to their parent.

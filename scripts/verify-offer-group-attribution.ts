@@ -17,8 +17,10 @@ import { sql } from "drizzle-orm";
 // =============================================================================
 
 let failed = 0;
+let passed = 0;
+let skipped = 0;
 function assert(cond: boolean, msg: string) {
-  if (cond) console.log(`  ✓ ${msg}`);
+  if (cond) { passed++; console.log(`  ✓ ${msg}`); }
   else { failed++; console.log(`  ✗ ${msg}`); }
 }
 
@@ -81,6 +83,7 @@ async function main() {
     WHERE ca.offer_id = 96 AND ss.status = 'sent'
   `))[0];
   if (!win.oldest || new Date(String(win.oldest)) < new Date(String(win.floor))) {
+    skipped++;
     console.log(`  ~ SKIPPED: offer 96's oldest send (${win.oldest}) predates the 90d floor ` +
                 `(${win.floor}); the two columns are no longer the same quantity.`);
   } else {
@@ -115,27 +118,47 @@ async function main() {
     `overlap factor is plausible (<3x); ~10x means the unnest fan-out survived — got ${ratio.toFixed(3)}x`);
 
   // --------------------------------------------------------------- criterion 3a
-  // Σ footer over every offer == benchmark sends. Catches campaigns leaking out
-  // of the offer partition and dropped/duplicated offer rows. Offer count comes
+  // Σ footer over every offer == benchmark sends, asserted PER ORG. A global sum
+  // can balance while individual orgs are wrong in opposite directions (an
+  // inflated org and a deflated org cancel) — this codebase has already shipped
+  // that exact bug class once (see the EPC-unification note). Offer count comes
   // from the data, never a hardcoded 21.
-  console.log("\n=== 3a. Σ footer == benchmark (offer partition is complete) ===");
-  const part = (await q(sql`
-    SELECT (SELECT count(*) FROM offer_report_offer_totals_mv)::int      AS offers,
-           (SELECT sum(sends) FROM offer_report_offer_totals_mv)::bigint AS footer_sum,
-           (SELECT sum(sends) FROM offer_report_org_summary_mv)::bigint  AS benchmark,
-           (SELECT COALESCE(sum(e.sends), 0) FROM offer_report_campaign_econ e
-             WHERE e.offer_id IS NULL)::bigint                           AS null_offer_sends
-  `))[0];
-  console.table([part]);
-  assert(n(part.offers) > 0, `totals matview covers ${part.offers} offers (asserted from data)`);
-  assert(
-    n(part.footer_sum) + n(part.null_offer_sends) === n(part.benchmark),
-    `Σ footer ${part.footer_sum} + NULL-offer ${part.null_offer_sends} == benchmark ${part.benchmark}`,
-  );
-  if (n(part.null_offer_sends) > 0) {
-    console.log(`  ! ${part.null_offer_sends} sends belong to campaigns with a NULL offer_id — ` +
-                `expected 0; they are outside every offer's report by design, but the ` +
-                `non-zero value is printed so this never fails silently.`);
+  console.log("\n=== 3a. Σ footer == benchmark, per org (offer partition is complete) ===");
+  const perOrg = await q(sql`
+    SELECT
+      s.org_id,
+      COALESCE(t.footer_sum, 0)::bigint     AS footer_sum,
+      s.sends::bigint                       AS benchmark,
+      COALESCE(e.null_offer_sends, 0)::bigint AS null_offer_sends,
+      COALESCE(t.offers, 0)::int            AS offers
+    FROM offer_report_org_summary_mv s
+    LEFT JOIN (
+      SELECT org_id, sum(sends)::bigint AS footer_sum, count(*)::int AS offers
+      FROM offer_report_offer_totals_mv
+      GROUP BY org_id
+    ) t ON t.org_id = s.org_id
+    LEFT JOIN (
+      SELECT org_id, sum(sends)::bigint AS null_offer_sends
+      FROM offer_report_campaign_econ
+      WHERE offer_id IS NULL
+      GROUP BY org_id
+    ) e ON e.org_id = s.org_id
+    ORDER BY s.org_id
+  `);
+  console.table(perOrg);
+  const totalOffers = perOrg.reduce((sum, r) => sum + n(r.offers), 0);
+  assert(totalOffers > 0,
+    `totals matview covers ${totalOffers} offers across ${perOrg.length} orgs (asserted from data)`);
+  for (const r of perOrg) {
+    assert(
+      n(r.footer_sum) + n(r.null_offer_sends) === n(r.benchmark),
+      `org ${r.org_id}: Σ footer ${r.footer_sum} + NULL-offer ${r.null_offer_sends} == benchmark ${r.benchmark}`,
+    );
+    if (n(r.null_offer_sends) > 0) {
+      console.log(`  ! org ${r.org_id}: ${r.null_offer_sends} sends belong to campaigns with a NULL ` +
+                  `offer_id — expected 0; they are outside every offer's report by design, but the ` +
+                  `non-zero value is printed so this never fails silently.`);
+    }
   }
 
   // --------------------------------------------------------------- criterion 3b
@@ -154,6 +177,13 @@ async function main() {
   `));
   assert(resid.length === 0,
     `no offer has a residual outside [0, sends] (${resid.length} violations)`);
+
+  // ----------------------------------------------------------------- criterion 4
+  // Not missing. Criterion 4 is the org-benchmark before/after comparison,
+  // which must bracket the migration apply and therefore lives in the plan's
+  // Task 8 (snapshot the benchmark immediately before `db:migrate`, re-read it
+  // immediately after) — not here. This script runs at a single point in
+  // time, so it cannot itself compute a before/after diff.
 
   // ----------------------------------------------------------------- criterion 5
   console.log("\n=== 5. group rows carry no manual-mix flag ===");
@@ -196,7 +226,14 @@ async function main() {
       `offer ${s.offer_id}: has ${s.group_rows} group rows AND attributable_sends > 0`);
   }
 
-  console.log(failed === 0 ? "\nverify-offer-group-attribution OK." : `\n${failed} FAILED.`);
+  const summaryLine = `${passed} checks passed, ${failed} failed, ${skipped} SKIPPED`;
+  if (failed > 0) {
+    console.log(`\n${summaryLine}.`);
+  } else if (skipped > 0) {
+    console.log(`\n⚠ ${summaryLine} — not a clean pass (criterion 1 skipped, not run).`);
+  } else {
+    console.log(`\n${summaryLine}. verify-offer-group-attribution OK.`);
+  }
   await c.end();
   process.exit(failed > 0 ? 1 : 0);
 }

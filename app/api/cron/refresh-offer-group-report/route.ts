@@ -6,9 +6,10 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat"
 import { refreshOfferGroupReport } from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
-// Task 2 measured the full CONCURRENTLY refresh at ~50s worst-case (cold) / ~37s
-// warm. 60s left no cold-start headroom, so this cron gets a larger budget. It is
-// a background job (not user-facing), so a longer ceiling costs nothing.
+// Measured 2026-08-13 across all three matviews (summary + group + the 0132
+// offer-totals matview): ~40.5s total against this 300s ceiling. 60s left no
+// cold-start headroom, so this cron gets a larger budget. It is a background
+// job (not user-facing), so a longer ceiling costs nothing.
 export const maxDuration = 300;
 
 async function handle(req: NextRequest): Promise<NextResponse> {
@@ -22,12 +23,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const startedAt = Date.now();
   try {
     const durations = await refreshOfferGroupReport();
-    // Stamped only on success, and only after both refreshes have completed —
-    // the heartbeat must mean "fresh data", not "the route was reached".
+    // Stamped only on success, and only after all three refreshes have
+    // completed — the heartbeat must mean "fresh data", not "the route was
+    // reached".
     await recordHeartbeat(db, HEARTBEAT_JOBS.offerReportRefresh.job_name);
     // Log runtime every run so we can watch it grow toward the 300s ceiling.
     console.log(
-      `[refresh-offer-group-report] ok summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} totalMs=${durations.totalMs}`,
+      `[refresh-offer-group-report] ok totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} totalMs=${durations.totalMs}`,
     );
     return NextResponse.json({ ok: true, durations });
   } catch (err) {

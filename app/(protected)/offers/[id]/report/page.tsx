@@ -8,16 +8,20 @@ import { ArrowLeft, RefreshCw, Download, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
-import type { RawMetrics, GroupRawRow } from "@/lib/reporting/offer-group-report";
+import type {
+  RawMetrics,
+  GroupRawRow,
+  OfferTotals,
+} from "@/lib/reporting/offer-group-report";
 
 type ReportResponse = {
   offerName: string;
   rows: GroupRawRow[];
-  offerTotals: RawMetrics;
-  offerHasManual: boolean;
-  benchmarkHasManual: boolean;
+  offerTotals: OfferTotals;
   orgBenchmark: RawMetrics;
+  benchmarkHasManual: boolean;
   breakEvenPer1k: number | null;
+  unattributedSends: number;
   refreshedAt: string | null;
 };
 
@@ -38,9 +42,11 @@ const fmtUsd = (n: number | null) => (n == null ? "—" : usd.format(n));
 // that — 3 days ago and 6 hours ago render identically — so the age is stated
 // and flagged rather than left for the reader to compute.
 // Rows whose clicks mix a deduplicated contact count with Keitaro visit counts
-// (manual-mode stages mint no links, so there is no set to deduplicate). The
-// arithmetic is honest but the unit is mixed, and a bare number would not show
-// it. 33 of 80 cells carry this today.
+// (manual-mode stages mint no links, so there is no set to deduplicate). Since
+// migration 0132 this can only occur on the offer footer and the org benchmark:
+// a group row is built from per-recipient rows, and every manual-fallback visit
+// in this data sits on a stage that has none. Verified, not assumed -- of 938
+// sent stages, the 22 with sends but no clickers all have zero visits.
 function ManualMix() {
   return (
     <span
@@ -98,9 +104,11 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   // would look like the same thing while meaning only one of them.
   //
   // Labelling only, deliberately. Adding a date dimension means another
-  // migration across two matviews (the group one already fans out over
-  // contact_contact_groups) plus a refresh cron that has no error handling, and
-  // no user has asked for the filter — the gap came from an internal audit.
+  // migration across three matviews (the group one already fans out over
+  // contact_contact_groups) plus reworking a refresh cron that already has
+  // error handling (try/catch, a Tier-1 Telegram alert, a 500, and duration
+  // logging — see app/api/cron/refresh-offer-group-report/route.ts), and no
+  // user has asked for the filter — the gap came from an internal audit.
   // Tracked, with the case both ways, on ClickUp 869egyapn.
   { key: "group_name", label: "Group", numeric: false },
   { key: "sends", label: "Sends (all time)", numeric: true },
@@ -110,9 +118,9 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "sales", label: "Sales (all time)", numeric: true },
   { key: "oo_pct", label: "Opt-out % (all time)", numeric: true },
   { key: "net_profit", label: "Net profit (all time)", numeric: true },
-  { key: "sent_7d", label: "Sent 7d", numeric: true },
-  { key: "sent_30d", label: "Sent 30d", numeric: true },
-  { key: "sent_90d", label: "Sent 90d", numeric: true },
+  { key: "sent_7d", label: "Sent 7d (this offer)", numeric: true },
+  { key: "sent_30d", label: "Sent 30d (this offer)", numeric: true },
+  { key: "sent_90d", label: "Sent 90d (this offer)", numeric: true },
   { key: "fresh_pool", label: "Fresh pool", numeric: true },
 ];
 
@@ -128,6 +136,16 @@ function netRpmClass(v: number | null, breakEven: number | null) {
 }
 function ooClass(v: number | null) {
   return v == null ? "" : v <= 2 ? "text-emerald-600" : v <= 3 ? "text-amber-600" : "text-destructive";
+}
+// "read low" / "read high" / "match" is derived from the actual ratio, never
+// assumed: attributable_revenue/attributable_sales and revenue/sales are not
+// a whole-and-part pair (different sources, not a subset — see the comment on
+// OfferTotals in lib/reporting/offer-group-report.ts), so a coverage figure
+// above 100% is representable and does happen.
+function coverageWord(pct: number): string {
+  if (pct > 100) return "read high";
+  if (pct < 100) return "read low";
+  return "match exactly";
 }
 
 function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived; isGroup: boolean; breakEven: number | null }) {
@@ -196,6 +214,34 @@ export default function OfferGroupReportPage() {
   const offerTotal = data ? { ...data.offerTotals, ...derive(data.offerTotals) } : null;
   const benchmark = data ? { ...data.orgBenchmark, ...derive(data.orgBenchmark) } : null;
 
+  // Group rows compute revenue/sales per recipient (stage_sends.sale_revenue /
+  // converted_at); the footer and benchmark use Keitaro's per-stage aggregate
+  // instead (see attributable_revenue/attributable_sales on offer_report_offer_totals_mv,
+  // migration 0132), so coverage is usually <100% and a group row's RPM/EPC/
+  // Net RPM usually reads a little low next to the footer/benchmark beside it
+  // — this makes that gap visible instead of silent. Revenue and sales are
+  // guarded against a zero denominator independently (each can be zero while
+  // the other is not), and each is rendered as its own conditional clause
+  // below for the same reason — an offer with sales and zero revenue (or vice
+  // versa) still has something to show.
+  const revenueCoveragePct =
+    data && data.offerTotals.revenue > 0
+      ? (data.offerTotals.attributable_revenue / data.offerTotals.revenue) * 100
+      : null;
+  const salesCoveragePct =
+    data && data.offerTotals.sales > 0
+      ? (data.offerTotals.attributable_sales / data.offerTotals.sales) * 100
+      : null;
+
+  const coverageParts = [
+    revenueCoveragePct != null
+      ? `${fmtPct(revenueCoveragePct)} of this offer’s revenue (${coverageWord(revenueCoveragePct)})`
+      : null,
+    salesCoveragePct != null
+      ? `${fmtPct(salesCoveragePct)} of sales (${coverageWord(salesCoveragePct)})`
+      : null,
+  ].filter((p): p is string => p != null);
+
   function toggleSort(key: SortKey) {
     if (key === sortBy) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else { setSortBy(key); setSortDir(key === "group_name" ? "asc" : "desc"); }
@@ -216,7 +262,7 @@ export default function OfferGroupReportPage() {
       header,
       ...(benchmark ? [line("All offers (org-wide)", benchmark as ViewRow)] : []),
       ...sorted.map((r) => line(r.group_name, r)),
-      ...(offerTotal ? [line("This offer · all groups", offerTotal as ViewRow)] : []),
+      ...(offerTotal ? [line("This offer · all groups", offerTotal)] : []),
     ];
     const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -292,10 +338,7 @@ export default function OfferGroupReportPage() {
             ) : null}
             {sorted.map((r) => (
               <tr key={r.group_id} className="border-t">
-                <td className="px-3 py-2">
-                  {r.group_name}
-                  {r.has_manual_stages ? <ManualMix /> : null}
-                </td>
+                <td className="px-3 py-2">{r.group_name}</td>
                 <MetricCells m={r} isGroup breakEven={breakEven} />
               </tr>
             ))}
@@ -303,7 +346,7 @@ export default function OfferGroupReportPage() {
               <tr className="border-t bg-muted/30 font-medium">
                 <td className="px-3 py-2">
                   This offer · all groups
-                  {data?.offerHasManual ? <ManualMix /> : null}
+                  {data?.offerTotals.has_manual_stages ? <ManualMix /> : null}
                 </td>
                 <MetricCells m={offerTotal} isGroup={false} breakEven={breakEven} />
               </tr>
@@ -319,16 +362,38 @@ export default function OfferGroupReportPage() {
         </table>
       </div>
 
+      {data && data.unattributedSends > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          <strong>{fmtInt(data.unattributedSends)} sends</strong>{" "}
+          ({((data.unattributedSends / Math.max(data.offerTotals.sends, 1)) * 100).toFixed(1)}%)
+          could not be attributed to a group — some were recorded outside the
+          app with no per-recipient detail, others came from a non-tracked
+          campaign or a campaign whose targeted groups didn’t include the
+          recipient — so they are in the offer total but not in any group row.
+        </p>
+      ) : null}
+
+      {data && data.rows.length > 0 && coverageParts.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Group rows cover {coverageParts.join(" and ")} on a per-recipient
+          basis; the footer and benchmark beside them use the provider’s
+          per-stage totals instead.
+        </p>
+      ) : null}
+
       <p className="text-xs text-muted-foreground">
-        Clicks are counted once per person <em>at the grain of the row</em>: a contact
-        who clicked two campaigns of this offer is one clicker on the offer row, and
-        one in each group row they belong to. <strong>The Clicks column therefore does
-        not add up</strong> — the offer total is smaller than the sum of the groups,
-        because people are not additive across groups. Every other column is a plain
-        sum: a campaign targeting multiple groups is counted fully in each group, so
-        those columns may sum to more than the org-wide total. “Sent last 7/30/90d” and “Fresh
-        pool” count every in-app send (tracked or manual link mode); sends performed
-        entirely outside the app (count-only, no per-recipient record) aren’t included.
+        <strong>Group rows</strong> are counted <em>per recipient</em>: each row
+        covers the messages actually sent to contacts in that group. The offer
+        footer and org benchmark use a different, campaign-grain basis instead —
+        sends are counted per campaign (tracked → stage_sends count, manual →
+        recorded sms_count), and revenue/sales come from the provider’s
+        per-stage totals, not individual recipients. Because a contact can
+        belong to several groups, <strong>the count and money columns do not
+        add up to the offer total</strong> — the same send is counted once in
+        each of that contact’s group rows. “Sent last 7/30/90d” only counts
+        tracked-campaign sends to this offer’s targeted groups; “Fresh pool”
+        counts across every offer and both link modes, independent of
+        tracking.
       </p>
     </div>
   );

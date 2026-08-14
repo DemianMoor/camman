@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-14_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -244,18 +244,76 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - `actor_user_id` NULL ⇒ system/cron (e.g. the scheduled drain); the UI renders "System / automatic".
 - The Activity **Messages** drill-down reads `stage_sends` live — individual recipient sends are **never** copied into `campaign_events`.
 
-## Offer group report (migration 0093, see [04-features/offer-group-report.md](04-features/offer-group-report.md))
-- **Sales are `GREATEST(Σ keitaro_stage_results.sales, Σ stage_manual_sales.delta)` per STAGE, then summed across stages — never simply summed with Keitaro's count.** Same `max`-not-sum convention as the Money section's `combineSales` above, restated here because this report computes it directly in SQL (`offer_report_campaign_econ`'s `stage_sales` CTE), not via `lib/reporting/attribution.ts`.
-- **Sends are `campaigns.link_mode`-based, not a single column.** `link_mode='tracked'` → `count(*)` of `stage_sends` rows with `sent_at IS NOT NULL`; `manual` → `Σ campaign_stages.sms_count` over sent stages. Revenue/Cost/Clicks/Opt-outs are drawn identically for both modes — only Sends branches.
-- **A campaign that targets multiple contact groups (`campaigns.audience_contact_group_ids`) is counted FULLY in every targeted group**, not split proportionally. `offer_group_report_mv` rows can therefore sum to MORE than `offer_report_org_summary_mv`'s de-duplicated (each campaign counted once) org-wide benchmark row. Footnoted in the UI — don't treat the mismatch as a bug.
+## Offer group report (migrations 0093–0132, see [04-features/offer-group-report.md](04-features/offer-group-report.md))
+- **Sales are `GREATEST(Σ keitaro_stage_results.sales, Σ stage_manual_sales.delta)` per STAGE, then summed across stages — never simply summed with Keitaro's count.** Same `max`-not-sum convention as the Money section's `combineSales` above, restated here because this report computes it directly in SQL (`offer_report_campaign_econ`'s `stage_sales` CTE), not via `lib/reporting/attribution.ts`. This still governs the **offer total and org benchmark** rows; group rows (below) use a different, per-recipient basis.
+- **Sends are `campaigns.link_mode`-based on the offer total and org benchmark rows, not a single column** — `link_mode='tracked'` → `count(*)` of `stage_sends` rows with `status='sent'`; `manual` → `Σ campaign_stages.sms_count` over sent, non-archived stages. Revenue/Cost/Clicks/Opt-outs are drawn identically for both modes on those two rows — only Sends branches. **Group rows don't use this view at all** (see the migration 0132 entry below).
+- **Group rows no longer come from `unnest(offer_report_campaign_econ.group_ids)`** (migration `0132`). Before 0132, a campaign targeting multiple contact groups was counted FULLY in every one, not split — `offer_group_report_mv` rows summed to MORE than `offer_report_org_summary_mv`'s de-duplicated benchmark, and the API route's `offerTotals` (summed from those same rows) inherited the same inflation (10.2x on one measured offer). Group rows are now built directly per-recipient and the footer is read from its own matview — see the migration 0132 entry below for the current rule.
 - **The twice-daily refresh cron is fixed-UTC (`0 5,20 * * *`) and drifts ~1h across DST**: 00:00 & 15:00 ET in winter (EST), 01:00 & 16:00 ET in summer (EDT). Acceptable for a historical, twice-daily report — the same fixed-UTC tradeoff CamMan already accepts for `telegram-report`'s Warsaw-time schedule; documented, not corrected.
-- **Per-contact columns (`Sent 7d/30d/90d`, `Fresh pool`) count every in-app per-recipient `stage_sends` row regardless of `link_mode`** — tracked AND manual in-app sends both write these rows. Only a send performed **entirely outside the app** (an operator hand-entering `campaign_stages.sms_count` with no corresponding `stage_sends` row) is invisible to these four columns. The economics columns (Sends/Revenue/Sales/Cost/Clicks/Opt-outs) are unaffected — they include external sends via `sms_count`.
+- **Per-contact columns no longer share one rule** (migration `0132`). `Sent 7d/30d/90d` now shares the group-row economics' scope exactly — tracked campaigns that targeted this group, for this offer — a narrowing from before, when every in-app `stage_sends` row counted regardless of `link_mode`, offer, or whether the campaign even targeted the group. `Fresh pool` is unchanged: across **all** offers and **both** link modes, no opt-out filter. Only a send performed **entirely outside the app** (hand-entered `campaign_stages.sms_count`, no `stage_sends` row) is invisible to `Sent 7d/30d/90d`/`Fresh pool` **and** to group-row economics; the offer total and org benchmark still include it via `sms_count`.
+
+### Offer group report attribution (migration 0132)
+
+- A group row counts what reached contacts in that group. **The columns do not
+  foot** — a contact in three groups is one send and three group-sends. The
+  footer is read at offer grain, never summed. Do not "fix" a non-footing column
+  by summing the rows; that was the defect.
+- **`stage_sends.cost_per_sms` is NULL on ~33% of sent rows** (added after the
+  fact). Never aggregate it as a cost source. Derive per-send cost from
+  `campaign_stages.total_cost / (that stage's sent-row count)`.
+- **`offer_report_campaign_econ` does not apply one consistent scope.** Tracked
+  sends carry no stage-level filter; manual sends and cost require
+  `sent_at IS NOT NULL AND archived_at IS NULL`; opt-outs are unfiltered. Anything
+  compared against it must mirror it *per column*, not pick one predicate.
+- **Attribution is restricted to `link_mode='tracked'`.** For a manual-link-mode
+  campaign the footer counts `sms_count` while per-recipient rows count real
+  sends, and the two are unrelated: campaign 110 has `sms_count = 0` against 889
+  real send rows. Counting it gives a negative residual.
+- **Group revenue/sales come from a different SOURCE than the footer's, not just
+  a different grain.** Group rows use per-recipient `stage_sends.sale_revenue` /
+  `converted_at`; the footer and org benchmark use `keitaro_stage_results.revenue`
+  and `GREATEST(keitaro sales, stage_manual_sales.delta)`. Per-recipient covers
+  ~97% of revenue (54,844 / 56,338 org-wide) and **~90% of the footer's sales
+  basis** (815 attributable vs 908 campaign-grain, 89.8%) — quote that against
+  `GREATEST(...)`, not against Keitaro sales alone (which reads ~96% and
+  understates the gap). `offer_report_offer_totals_mv.attributable_revenue` /
+  `.attributable_sales` carry the footer's own figures on the group rows' basis so
+  the difference is measurable. They are **not** a whole-and-part pair with
+  `revenue`/`sales` — never subtract them to derive an "unattributed" amount.
+- **Group opt-outs can fall short of the footer for a reason no other column
+  here has.** `opt_out_attributions.stage_send_id` is nullable by design (an
+  attribution survives its send row being pruned); such a row has no
+  recipient, so `cell_optouts` genuinely cannot place it in a group. The
+  footer's own opt-out subquery in `offer_report_campaign_econ` joins through
+  `oa.stage_id` instead and keeps these rows regardless. Not the grain
+  difference the rest of this section describes — rows the group join can
+  never reach at all.
+- **`offer_report_campaign_econ` and `offer_report_tracked_campaigns` must
+  carry `security_invoker = true`.** Without it the view runs as its owner
+  and RLS on the underlying tables does not apply, exposing every org's data
+  to anon/authenticated over PostgREST — the same class of ERROR-level
+  Supabase advisor finding migration `0113` originally closed (see the
+  Multi-tenancy section above). Migration `0113` set this on
+  `offer_report_campaign_econ`; migrations `0126` and `0128` each silently
+  reverted it by `DROP VIEW` + `CREATE VIEW` without carrying the option
+  forward, leaving that advisor ERROR live in production until migration
+  `0132` re-applied it and set it on `offer_report_tracked_campaigns` too.
+  **Any migration that does `CREATE VIEW` or `DROP VIEW` + `CREATE VIEW` on
+  either object MUST include `ALTER VIEW public.<view> SET (security_invoker
+  = true);` in the same migration** — neither a bare `CREATE VIEW` nor
+  `CREATE OR REPLACE VIEW` carries the option forward from the view's prior
+  definition; it must be re-asserted every time the view is recreated, not
+  set-and-forget. Re-run `get_advisors` (type=security) after any view DDL —
+  the signal to watch is Supabase advisor check `0010_security_definer_view`
+  at **ERROR**; it must report zero hits for these two views. Don't rely on
+  memory that it was set once: `scripts/verify-migration-integrity.ts` now
+  asserts `security_invoker=true` in `pg_class.reloptions` for both views
+  directly, so this is checkable without a live advisor call.
 
 ## Reports rollup (migration 0112, see [04-features/reports-rollup.md](04-features/reports-rollup.md))
 - **Bucketed by the SEND hour in ET, not the event hour.** Every metric (opt-outs, clicks, redirects, sales, cost) is attributed to the hour the message was SENT, so each rate is a batch rate ("of messages sent in hour H, X% opted out"). `date_trunc('hour', sent_at AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'` → the stored `bucket_start_utc`. Only ever done inside the bounded rolling-window build, never in a hot read.
-- **Sales/revenue use the PER-RECIPIENT `stage_sends` attribution** (`converted_at`/`sale_revenue`), NOT the `keitaro_stage_results` daily aggregate — that's the only source that can be split by hour and group. It recovers ~93% of the authoritative aggregate (295 vs 319 sales; $20,982 vs $22,324); the read layer surfaces the delta so the structural gap isn't mistaken for a bug. This is a DIFFERENT sales basis than `/reports` and the offer-group report (which use the aggregate).
+- **Sales/revenue use the PER-RECIPIENT `stage_sends` attribution** (`converted_at`/`sale_revenue`), NOT the `keitaro_stage_results` daily aggregate — that's the only source that can be split by hour and group. It recovers ~93% of the authoritative aggregate (295 vs 319 sales; $20,982 vs $22,324); the read layer surfaces the delta so the structural gap isn't mistaken for a bug. This is a DIFFERENT sales basis than `/reports` and the offer-group report's footer and org benchmark (which use the aggregate); the offer-group report's group rows use the per-recipient basis (migration 0132), same as here.
 - **"Clickers" = internal clean clicks** (`clicks.classification='human' AND scored_at IS NOT NULL`, joined via `stage_sends.link_id`), NOT the Keitaro visit counter (`campaign_stages.click_count`). Different populations — the two numbers will differ.
-- **Grand totals come from `report_stage_hour` (Fact A) only.** `report_group_hour` (Fact B) fans out over the many-to-many `contact_contact_groups` (avg 1.34 groups/contact), so summing its group rows OVERCOUNTS the true total by design — same caveat as the offer-group report's group unnest.
+- **Grand totals come from `report_stage_hour` (Fact A) only.** `report_group_hour` (Fact B) fans out over the many-to-many `contact_contact_groups` (avg 1.34 groups/contact), so summing its group rows OVERCOUNTS the true total by design — same caveat as the offer-group report's group rows, which fan out the same way over a contact's multiple group memberships (migration 0132), not a group-id unnest.
 - **`stage_sends.provider_phone_id` / `cost_per_sms` are durable send-time snapshots** (stamped at materialization). The rollup resolves `COALESCE(send snapshot, stage live value)` so pre-0112 history still attributes to a number/rate via the (mutable) stage. Cost inherits the flat-rate limitation of `campaign_stages.total_cost` (multi-segment messages under-costed) — a separate future card.
 
 ## Click scoring — ASN matching (see [04-features/tracking-attribution.md §7a](04-features/tracking-attribution.md))
@@ -270,7 +328,7 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - **Counted clickers are NOT additive** — across grains or over time. One person tapping two creatives in one campaign is one campaign clicker and two creative clickers; one person clicking on two days is one lifetime clicker. Never sum them; **re-aggregate with `COUNT(DISTINCT contact_id)` at the row's own grain**.
 - **A claim on a card is not evidence either — re-verify before acting on your own earlier finding.** The offer-report card carried "the refresh cron has no error handling" into a build decision. The cron had gained a try/catch, a Tier-1 alert, a 500, and duration logging in the meantime. The note was true when written and nobody rechecked it. This is the same failure as the guard that ran against the wrong scope: **the check was real, the context moved.** Written notes, card text, commit messages, and prior measurements all decay — re-read the file before you build on what you wrote about it.
 - **An aggregate row must dedup at ITS grain, not add up its parts.** Summing per-stage counts into a dimension row double-counts anyone who clicked more than one stage — measured at +38.6% (By Number), +27.2% (By Offer), +7.4% (By Sequence) before this was fixed. That divergence was once documented as "expected non-additivity"; that framing described a shortcut, not a grain decision.
-- **A table may legitimately not foot.** The offer report shows group cells, an offer footer and an org benchmark in one column; each deduplicates at its own grain, so the footer is smaller than the sum of the rows. Do not "fix" this by summing — say it in the UI. Every non-count column in the same table is a plain sum and does foot.
+- **A table may legitimately not foot.** The offer report shows group cells, an offer footer and an org benchmark in one column; each deduplicates at its own grain, so the footer is smaller than the sum of the rows. Do not "fix" this by summing — say it in the UI. This was true of clicks alone through migration 0128; **migration 0132 extended it to every column** (sends/revenue/sales/cost/optouts) on the offer report, so no column there foots to the offer total any more — see [the migration 0132 entry above](#offer-group-report-attribution-migration-0132).
 - **By Group is the one exemption**, by construction: its metrics are fractional shares split across a contact's groups, and a fraction has no set to dedup. Labelled in the UI as not comparable with the other tabs.
 - **The relay carve-out lives in the scorer, not in reporting.** By the time a click reaches the denominator the rule has collapsed to `classification = 'human'`. Do not re-implement ASN logic in a reporting query.
 - **Manual-mode campaigns fall back to Keitaro `visit_clicks_clean`** (they mint no links). Comparable in scale: only 11% of Keitaro landing visitors are CamMan-excluded.

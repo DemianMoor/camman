@@ -35,6 +35,23 @@ interface SnapshotMeta {
   prevId?: string;
 }
 
+interface ViewSecurityRow extends Record<string, unknown> {
+  relname: string;
+  reloptions: string[] | null;
+}
+
+// Views that MUST carry `security_invoker = true` (see docs/07-conventions.md
+// "Offer group report attribution"). Migration 0113 originally set this on
+// offer_report_campaign_econ; migrations 0126 and 0128 each silently reverted
+// it via DROP VIEW + CREATE VIEW; migration 0132 restored it and added
+// offer_report_tracked_campaigns. Neither CREATE VIEW nor CREATE OR REPLACE
+// VIEW carries the option forward from a prior definition, so this has to be
+// re-checked, not remembered.
+const SECURITY_INVOKER_VIEWS = [
+  "offer_report_campaign_econ",
+  "offer_report_tracked_campaigns",
+] as const;
+
 async function main() {
   const dbUrl = process.env.DATABASE_URL;
   if (!dbUrl) throw new Error("DATABASE_URL is not set");
@@ -145,6 +162,42 @@ async function main() {
       if (!prevIdMatches) {
         console.log(
           `      prevId in snapshot: ${snapshot.prevId}, expected: ${expectedPrevId}`,
+        );
+        issues++;
+      }
+    }
+
+    console.log("\n--- Security: security_invoker on offer-report views ---");
+
+    const viewRows = await db.execute<ViewSecurityRow>(drizzleSql`
+      SELECT c.relname, c.reloptions
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND c.relkind = 'v'
+        AND c.relname IN ('offer_report_campaign_econ', 'offer_report_tracked_campaigns')
+    `);
+    const viewOptionsByName = new Map(
+      viewRows.map((r) => [r.relname, r.reloptions ?? []]),
+    );
+
+    for (const viewName of SECURITY_INVOKER_VIEWS) {
+      if (!viewOptionsByName.has(viewName)) {
+        console.log(
+          `  · public.${viewName}: view does not exist yet (informational — not a failure)`,
+        );
+        continue;
+      }
+      const options = viewOptionsByName.get(viewName) ?? [];
+      const hasSecurityInvoker = options.some(
+        (o) => o.replace(/\s+/g, "") === "security_invoker=true",
+      );
+      if (hasSecurityInvoker) {
+        console.log(`  ✓ public.${viewName}: security_invoker=true`);
+      } else {
+        console.log(
+          `  ✗ public.${viewName}: security_invoker is NOT set — run: ` +
+            `ALTER VIEW public.${viewName} SET (security_invoker = true);`,
         );
         issues++;
       }

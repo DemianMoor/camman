@@ -6,10 +6,7 @@ import { can } from "@/lib/permissions";
 import { db } from "@/db/client";
 import { and, eq } from "drizzle-orm";
 import { offers } from "@/db/schema";
-import {
-  getOfferGroupReport,
-  type RawMetrics,
-} from "@/lib/reporting/offer-group-report";
+import { getOfferGroupReport } from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
 
@@ -42,27 +39,12 @@ export async function GET(
 
   const report = await getOfferGroupReport(orgId, offerId);
 
-  // offerTotals foots the table for the ADDITIVE columns — sends, revenue,
-  // sales, cost, optouts — where a multi-group campaign counting fully in each
-  // group is the documented behaviour.
-  //
-  // `clicks` is the exception and must not be summed: the cells are already
-  // deduplicated per (offer, group), so adding them counts anyone in two of the
-  // offer's groups twice. It is overwritten below with the offer-grain distinct
-  // count, which is why the clicks column does not foot on screen.
-  const offerTotals: RawMetrics = report.rows.reduce(
-    (t, r) => ({
-      sends: t.sends + r.sends,
-      revenue: t.revenue + r.revenue,
-      sales: t.sales + r.sales,
-      clicks: t.clicks + r.clicks,
-      cost: t.cost + r.cost,
-      optouts: t.optouts + r.optouts,
-    }),
-    { sends: 0, revenue: 0, sales: 0, clicks: 0, cost: 0, optouts: 0 },
-  );
-
-  offerTotals.clicks = report.offerClicks;
+  // The footer is read at OFFER grain, never summed from the group rows. Those
+  // rows are per-recipient full counts and a contact in three of this offer's
+  // groups appears in three of them -- summing them read 904,926 sends against
+  // a true 88,536 on offer 96. The columns above this footer therefore do not
+  // add up to it, which is stated in the UI rather than papered over.
+  const { offerTotals } = report;
 
   const breakEvenPer1k =
     offerTotals.sends > 0 ? (offerTotals.cost / offerTotals.sends) * 1000 : null;
@@ -71,10 +53,12 @@ export async function GET(
     offerName: offer.name,
     rows: report.rows,
     offerTotals,
-    offerHasManual: report.offerHasManual,
-    benchmarkHasManual: report.benchmarkHasManual,
     orgBenchmark: report.orgBenchmark,
+    benchmarkHasManual: report.benchmarkHasManual,
     breakEvenPer1k,
+    // Sends that cannot reach any group row: recorded entirely outside the app
+    // (no per-recipient row), or on a campaign that targeted no group.
+    unattributedSends: offerTotals.unattributed_sends,
     refreshedAt: report.refreshedAt,
   });
 }

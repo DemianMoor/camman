@@ -326,16 +326,18 @@ export default function OfferGroupReportPage() {
         <p className="text-xs text-muted-foreground">
           <strong>{fmtInt(data.unattributedSends)} sends</strong>{" "}
           ({((data.unattributedSends / Math.max(data.offerTotals.sends, 1)) * 100).toFixed(1)}%)
-          were recorded outside the app with no per-recipient detail, so they are in
-          the offer total but not in any group row.
+          could not be attributed to a group — some were recorded outside the
+          app with no per-recipient detail, others came from a non-tracked
+          campaign or a campaign whose targeted groups didn’t include the
+          recipient — so they are in the offer total but not in any group row.
         </p>
       ) : null}
 
       <p className="text-xs text-muted-foreground">
         Every metric is counted <em>per recipient</em>: a group row covers the
         messages actually sent to contacts in that group. Because a contact can
-        belong to several groups, <strong>the columns do not add up to the offer
-        total</strong> — the same person is one send on the offer row and one send
+        belong to several groups, <strong>the count and money columns do not add
+        up to the offer total</strong> — the same person is one send on the offer row and one send
         in each of their groups. “Sent last 7/30/90d” and “Fresh pool” count every
         in-app send (tracked or manual link mode); sends performed entirely outside
         the app aren’t included anywhere except the offer total.

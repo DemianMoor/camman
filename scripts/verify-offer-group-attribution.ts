@@ -496,6 +496,108 @@ async function main() {
       `offer ${s.offer_id}: has ${s.group_rows} group rows AND attributable_sends > 0`);
   }
 
+  // ----------------------------------------------------------------- criterion 7
+  // Regression guard for the Fresh pool defect fixed by migration 0133 (see
+  // its header and docs/07-conventions.md's "Offer group report" section).
+  // 0126 silently replaced Fresh pool's definition — "sendable and never
+  // sent THIS offer" — with "no sent row in the last 90 days, across ALL
+  // offers, no opt-out filter". 0128 and 0132 each recreated
+  // offer_group_report_mv for unrelated reasons and copied the regressed
+  // subquery forward without noticing. Both checks below recompute from base
+  // tables (contacts/opt_outs/offer_exposures) — re-reading the matview
+  // would prove nothing, since the matview's correctness is exactly what is
+  // in question.
+
+  // --------------------------------------------------------------- criterion 7a
+  // fresh_pool excludes opt-outs and ineligible contacts, and only subtracts
+  // exposure to the ROW'S OWN offer. Recomputed using migration 0133's exact
+  // shape: sendable = messaging_status='eligible' AND NOT EXISTS a
+  // matching opt_outs row; fresh = sendable_per_group MINUS
+  // exposed_per_offer_group (subtraction, not a direct per-offer anti-join —
+  // the migration's own comment measures the direct form at 45.6s vs 9.4s
+  // here; that reasoning is unchanged for this recomputation).
+  //
+  // What would have to break for this to fire: fresh_pool counting an
+  // opted-out or ineligible contact as fresh (0126's actual defect), or
+  // fresh_pool failing to subtract — or wrongly subtracting a DIFFERENT
+  // offer's — exposure set.
+  console.log("\n=== 7a. fresh_pool recomputed from base tables (sendable minus this offer's exposure) ===");
+  const freshCheck = await q(sql`
+    WITH sendable AS (
+      SELECT ccg.contact_group_id AS group_id, ct.org_id, ct.id AS contact_id
+      FROM contacts ct
+      JOIN contact_contact_groups ccg
+        ON ccg.contact_id = ct.id AND ccg.org_id = ct.org_id
+      WHERE ct.messaging_status = 'eligible'
+        AND NOT EXISTS (
+          SELECT 1 FROM opt_outs o
+          WHERE o.contact_id = ct.id AND o.org_id = ct.org_id
+        )
+    ),
+    sendable_per_group AS (
+      SELECT org_id, group_id, COUNT(*)::bigint AS n FROM sendable GROUP BY org_id, group_id
+    ),
+    exposed_per_offer_group AS (
+      SELECT s.org_id, e.offer_id, s.group_id, COUNT(*)::bigint AS n
+      FROM sendable s
+      JOIN offer_exposures e ON e.contact_id = s.contact_id
+      GROUP BY s.org_id, e.offer_id, s.group_id
+    )
+    SELECT m.org_id, m.offer_id, m.group_id,
+           m.fresh_pool::bigint AS stored,
+           (COALESCE(g.n, 0) - COALESCE(x.n, 0))::bigint AS recomputed
+    FROM offer_group_report_mv m
+    LEFT JOIN sendable_per_group g ON g.org_id = m.org_id AND g.group_id = m.group_id
+    LEFT JOIN exposed_per_offer_group x
+      ON x.org_id = m.org_id AND x.offer_id = m.offer_id AND x.group_id = m.group_id
+  `);
+  // Guard the guard: with zero rows the mismatch assert below would pass
+  // vacuously (an empty set trivially has no mismatches).
+  assert(freshCheck.length > 0,
+    `offer_group_report_mv has rows to recompute fresh_pool against (${freshCheck.length})`);
+  const freshMismatches = freshCheck.filter((r) => n(r.stored) !== n(r.recomputed));
+  if (freshMismatches.length > 0) console.table(freshMismatches.slice(0, 15));
+  assert(freshMismatches.length === 0,
+    `fresh_pool matches the base-table recomputation on all ${freshCheck.length} rows ` +
+    `(${freshMismatches.length} mismatched` +
+    (freshMismatches.length > 15 ? ", showing first 15 above" : "") + `)`);
+
+  // --------------------------------------------------------------- criterion 7b
+  // fresh_pool is offer-scoped: the same group must be free to read
+  // differently under two different offers, since exposure is per-offer.
+  // Before the fix every group's fresh_pool was IDENTICAL across every offer
+  // it appeared under (count(DISTINCT fresh_pool) = 1 for all 12 groups,
+  // measured pre-migration) — the signature of computing fresh_pool with no
+  // offer_id join at all. This is the check that makes that shape of defect
+  // impossible to reintroduce silently.
+  //
+  // What would have to break for this to fire: fresh_pool computed without
+  // ever joining offer_exposures to offer_id — every group would then read
+  // the same number under every offer's report, and this assert catches
+  // that directly rather than inferring it from 7a alone (7a can pass on a
+  // database where no group happens to span multiple offers).
+  console.log("\n=== 7b. fresh_pool is offer-scoped (same group differs across offers) ===");
+  const perGroupAcrossOffers = await q(sql`
+    SELECT org_id, group_id,
+           count(DISTINCT offer_id)::int AS offers_covering,
+           count(DISTINCT fresh_pool)::int AS distinct_fresh_pool_values
+    FROM offer_group_report_mv
+    GROUP BY org_id, group_id
+    HAVING count(DISTINCT offer_id) > 1
+    ORDER BY offers_covering DESC
+  `);
+  if (perGroupAcrossOffers.length === 0) {
+    skip("criterion 7b", "no group appears under more than one offer on this database " +
+      "— offer-scoping cannot be exercised this way here.");
+  } else {
+    console.table(perGroupAcrossOffers.slice(0, 15));
+    const varies = perGroupAcrossOffers.filter((r) => n(r.distinct_fresh_pool_values) > 1);
+    assert(varies.length > 0,
+      `at least one multi-offer group's fresh_pool differs across offers ` +
+      `(${varies.length} of ${perGroupAcrossOffers.length} multi-offer groups vary; ` +
+      `all reading identical is the pre-0133 signature)`);
+  }
+
   const summaryLine = `${passed} checks passed, ${failed} failed, ${skipped} SKIPPED`;
   if (failed > 0) {
     console.log(`\n${summaryLine}.`);

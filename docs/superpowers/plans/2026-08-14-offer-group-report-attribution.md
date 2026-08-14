@@ -281,7 +281,11 @@ sends both moved while the spec was being written."
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `offer_report_offer_totals_mv (org_id uuid, offer_id int, sends bigint, revenue numeric(14,4), sales bigint, clicks bigint, cost numeric(14,4), optouts bigint, has_manual_stages bool, attributable_sends bigint, unattributed_sends bigint)` and a rebuilt `offer_group_report_mv (org_id, offer_id, group_id, group_name, sends, revenue, sales, clicks, cost, optouts, sent_7d, sent_30d, sent_90d, fresh_pool)`. Tasks 3–5 read these names.
+- Produces:
+  - `offer_report_tracked_campaigns` (plain view) `(id int, org_id uuid, offer_id int, gids int[])` — the attribution universe, defined once and selected by both matviews.
+  - `offer_report_offer_totals_mv (org_id uuid, offer_id int, sends bigint, revenue numeric(14,4), sales bigint, clicks bigint, cost numeric(14,4), optouts bigint, has_manual_stages bool, attributable_sends bigint, unattributed_sends bigint)`
+  - a rebuilt `offer_group_report_mv (org_id, offer_id, group_id, group_name, sends, revenue, sales, clicks, cost, optouts, sent_7d, sent_30d, sent_90d, fresh_pool)`
+  - Tasks 3–5 read these names.
 
 - [ ] **Step 1: Write the migration SQL**
 
@@ -350,6 +354,24 @@ Create `db/migrations/0132_offer_report_per_recipient_attribution.sql` (**LF lin
 -- half; here it is the only correct one.
 DROP MATERIALIZED VIEW IF EXISTS public.offer_group_report_mv;
 --> statement-breakpoint
+DROP VIEW IF EXISTS public.offer_report_tracked_campaigns;
+--> statement-breakpoint
+-- The attribution universe, defined ONCE. Both matviews below select from this
+-- rather than each carrying its own copy: if the two ever diverged,
+-- `attributable_sends` and the group rows would be computed over different
+-- campaign sets and the residual `sends - attributable_sends` could go negative
+-- while every individual query still looked correct. That scope mismatch is
+-- precisely the failure this migration exists to prevent, so it is made
+-- structurally impossible instead of guarded by a comment. Postgres inlines a
+-- plain view like this one, so there is no planning or execution cost.
+CREATE VIEW public.offer_report_tracked_campaigns AS
+  SELECT c.id, c.org_id, c.offer_id, c.audience_contact_group_ids AS gids
+  FROM public.campaigns c
+  WHERE c.offer_id IS NOT NULL
+    AND c.link_mode = 'tracked'
+    AND EXISTS (SELECT 1 FROM public.campaign_stages s
+                WHERE s.campaign_id = c.id AND s.sent_at IS NOT NULL);
+--> statement-breakpoint
 CREATE MATERIALIZED VIEW public.offer_report_offer_totals_mv AS
 WITH base AS (
   SELECT e.org_id, e.offer_id,
@@ -363,20 +385,12 @@ WITH base AS (
   WHERE e.offer_id IS NOT NULL
   GROUP BY e.org_id, e.offer_id
 ),
-camp AS (
-  SELECT c.id, c.org_id, c.offer_id, c.audience_contact_group_ids AS gids
-  FROM public.campaigns c
-  WHERE c.offer_id IS NOT NULL
-    AND c.link_mode = 'tracked'
-    AND EXISTS (SELECT 1 FROM public.campaign_stages s
-                WHERE s.campaign_id = c.id AND s.sent_at IS NOT NULL)
-),
 -- DISTINCT sends, not the sum of the group cells: that sum is non-additive by
 -- design and using it here would reintroduce the defect this migration removes.
 attributable AS (
   SELECT camp.org_id, camp.offer_id, COUNT(DISTINCT ss.id)::bigint AS n
   FROM public.stage_sends ss
-  JOIN camp ON camp.id = ss.campaign_id
+  JOIN public.offer_report_tracked_campaigns camp ON camp.id = ss.campaign_id
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = ss.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
@@ -418,17 +432,9 @@ CREATE UNIQUE INDEX offer_report_offer_totals_mv_key_uniq
   ON public.offer_report_offer_totals_mv (org_id, offer_id);
 --> statement-breakpoint
 CREATE MATERIALIZED VIEW public.offer_group_report_mv AS
-WITH camp AS (
-  SELECT c.id, c.org_id, c.offer_id, c.audience_contact_group_ids AS gids
-  FROM public.campaigns c
-  WHERE c.offer_id IS NOT NULL
-    AND c.link_mode = 'tracked'
-    AND EXISTS (SELECT 1 FROM public.campaign_stages s
-                WHERE s.campaign_id = c.id AND s.sent_at IS NOT NULL)
-),
 -- Effective per-send cost from the STAGE. stage_sends.cost_per_sms is NULL on
 -- 32.7% of sent rows and would silently under-count older campaigns.
-rate AS (
+WITH rate AS (
   SELECT cs.id AS stage_id,
          cs.total_cost / NULLIF(COUNT(ss.id), 0) AS per_send
   FROM public.campaign_stages cs
@@ -449,7 +455,7 @@ attr AS (
     COUNT(*) FILTER (WHERE ss.sent_at >= now() - interval '30 days')::bigint AS sent_30d,
     COUNT(*) FILTER (WHERE ss.sent_at >= now() - interval '90 days')::bigint AS sent_90d
   FROM public.stage_sends ss
-  JOIN camp ON camp.id = ss.campaign_id
+  JOIN public.offer_report_tracked_campaigns camp ON camp.id = ss.campaign_id
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = ss.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
@@ -464,7 +470,7 @@ cell_clicks AS (
   SELECT camp.org_id, camp.offer_id, ccg.contact_group_id AS group_id,
     COUNT(DISTINCT cc.contact_id)::bigint AS n
   FROM public.counted_clickers cc
-  JOIN camp ON camp.id = cc.campaign_id
+  JOIN public.offer_report_tracked_campaigns camp ON camp.id = cc.campaign_id
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = cc.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
@@ -475,7 +481,7 @@ cell_optouts AS (
     COUNT(DISTINCT oa.opt_out_id)::bigint AS n
   FROM public.opt_out_attributions oa
   JOIN public.stage_sends ss ON ss.id = oa.stage_send_id
-  JOIN camp ON camp.id = ss.campaign_id
+  JOIN public.offer_report_tracked_campaigns camp ON camp.id = ss.campaign_id
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = ss.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
@@ -936,15 +942,14 @@ cd C:/AFF/camman/.claude/worktrees/og-attrib
 npx eslint "app/(protected)/offers/[id]/report/page.tsx" "app/api/offers/[id]/report/route.ts" lib/reporting/offer-group-report.ts scripts/verify-offer-group-attribution.ts
 ```
 
-Expected: no NEW problems. To prove that, lint the pre-change versions and compare totals:
+Expected: **exactly `✖ 2 problems (1 error, 1 warning)`** — the pre-change baseline, captured on this branch before any edits. Both live in `page.tsx` and are unrelated to this work:
 
-```bash
-cd C:/AFF/camman/.claude/worktrees/og-attrib
-git show HEAD~4:"app/(protected)/offers/[id]/report/page.tsx" > /tmp/before-page.tsx
-npx eslint --no-eslintrc --config .eslintrc.json /tmp/before-page.tsx 2>&1 | tail -3
-```
+- `165:6 warning react-hooks/exhaustive-deps` — `useCallback` missing dependency `api`
+- `167:26 error react-hooks/set-state-in-effect` — `useEffect(() => { void load(); }, [load])`
 
-Do not run `npm run lint` — it lints all 9 worktrees (8.4MB, ~5min) and exits 1 on other branches' problems.
+Anything above 2, or any problem in `route.ts` / `offer-group-report.ts` / the verify script, is new and must be fixed. Do not "fix" the two baseline problems — they are outside this task's scope and touching the effect wiring risks the fetch loop documented in the repo's `useApiCall` convention.
+
+This repo uses **flat ESLint config** (`eslint.config.mjs`); there is no `.eslintrc.json`, so `--no-eslintrc` / `--config .eslintrc.json` will fail. Do not run `npm run lint` either — it lints all 9 worktrees (8.4MB, ~5min) and exits 1 on other branches' problems.
 
 - [ ] **Step 6: Commit**
 
@@ -1003,6 +1008,10 @@ are 100% external and render no group rows at all.
 In `docs/03-data-model.md`, set the "last updated" date, and in the reporting section add:
 
 ```markdown
+- **`offer_report_tracked_campaigns`** (plain view, migration 0132) — the
+  attribution universe: campaigns with an offer, `link_mode='tracked'`, and at
+  least one sent stage. Both matviews below select from it so their campaign sets
+  cannot drift apart.
 - **`offer_report_offer_totals_mv`** (materialized, unique on `(org_id, offer_id)`,
   migration 0132) — offer-grain campaign totals plus `attributable_sends` and
   `unattributed_sends`. Exists for every offer with a sent campaign, including

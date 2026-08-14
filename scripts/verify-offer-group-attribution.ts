@@ -123,27 +123,49 @@ async function main() {
   // inflated org and a deflated org cancel) — this codebase has already shipped
   // that exact bug class once (see the EPC-unification note). Offer count comes
   // from the data, never a hardcoded 21.
+  //
+  // The row set is the UNION of org_ids across all three sources, not a LEFT
+  // JOIN driven off offer_report_org_summary_mv. Driving off one table only
+  // catches an org that's present there but missing/short elsewhere; it can't
+  // catch the opposite — an org with rows in offer_report_offer_totals_mv (a
+  // brand-new matview built by the migration this script gates) but NO row in
+  // the summary matview. That org would simply never appear in a summary-driven
+  // join, so it'd be silently skipped rather than asserted and failed. Since the
+  // whole point of 3a is to catch exactly that kind of divergence between the
+  // two matviews, the base table cannot be either one of them alone — it has to
+  // be every org_id seen in any source, with every side COALESCEd to 0 (an org
+  // missing from the summary has a benchmark of 0, so a totals-only org fails
+  // the identity loudly instead of vanishing). Do not "simplify" this back to a
+  // single-table FROM.
   console.log("\n=== 3a. Σ footer == benchmark, per org (offer partition is complete) ===");
   const perOrg = await q(sql`
+    WITH ids AS (
+      SELECT org_id FROM offer_report_org_summary_mv
+      UNION
+      SELECT org_id FROM offer_report_offer_totals_mv
+      UNION
+      SELECT org_id FROM offer_report_campaign_econ WHERE offer_id IS NULL
+    )
     SELECT
-      s.org_id,
-      COALESCE(t.footer_sum, 0)::bigint     AS footer_sum,
-      s.sends::bigint                       AS benchmark,
+      ids.org_id,
+      COALESCE(t.footer_sum, 0)::bigint       AS footer_sum,
+      COALESCE(s.sends, 0)::bigint            AS benchmark,
       COALESCE(e.null_offer_sends, 0)::bigint AS null_offer_sends,
-      COALESCE(t.offers, 0)::int            AS offers
-    FROM offer_report_org_summary_mv s
+      COALESCE(t.offers, 0)::int              AS offers
+    FROM ids
+    LEFT JOIN offer_report_org_summary_mv s ON s.org_id = ids.org_id
     LEFT JOIN (
       SELECT org_id, sum(sends)::bigint AS footer_sum, count(*)::int AS offers
       FROM offer_report_offer_totals_mv
       GROUP BY org_id
-    ) t ON t.org_id = s.org_id
+    ) t ON t.org_id = ids.org_id
     LEFT JOIN (
       SELECT org_id, sum(sends)::bigint AS null_offer_sends
       FROM offer_report_campaign_econ
       WHERE offer_id IS NULL
       GROUP BY org_id
-    ) e ON e.org_id = s.org_id
-    ORDER BY s.org_id
+    ) e ON e.org_id = ids.org_id
+    ORDER BY ids.org_id
   `);
   console.table(perOrg);
   const totalOffers = perOrg.reduce((sum, r) => sum + n(r.offers), 0);

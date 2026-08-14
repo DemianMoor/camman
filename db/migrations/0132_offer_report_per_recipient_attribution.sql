@@ -1,5 +1,16 @@
 -- Migration 0132: attribute the offer group report PER RECIPIENT.
 --
+-- -- DEPLOY ORDERING -- read before applying --------------------------------
+-- This migration is DESTRUCTIVE against the reader currently deployed:
+-- `offer_group_report_mv` loses `has_manual_stages`, `offer_clicks`, and
+-- `offer_has_manual`, all three of which lib/reporting/offer-group-report.ts
+-- SELECTs today. There is an unavoidable window between this migration
+-- applying and the updated reader's deploy landing, during which
+-- /offers/[id]/report errors with `column "has_manual_stages" does not
+-- exist`. Keep that window short and apply this deliberately -- watch the
+-- reader deploy land, not as an unattended/background step.
+-- ----------------------------------------------------------------------------
+--
 -- 0128 fixed HOW the clicker count was aggregated. It did not fix WHO a row is
 -- about. `offer_group_report_mv` builds its economics with
 -- `CROSS JOIN LATERAL unnest(group_ids)`, so a campaign that targeted 12 groups
@@ -54,11 +65,33 @@
 -- `offer_report_offer_totals_mv` exists per offer regardless, so the footer and
 -- the "recorded outside the app" note still render for them.
 --
+-- ATTRIBUTABLE REVENUE AND SALES -- same basis gap as sends, made measurable.
+-- `revenue`/`sales` in `base` come from `offer_report_campaign_econ`, sourced
+-- from `keitaro_stage_results.revenue` and GREATEST(keitaro sales,
+-- stage_manual_sales.delta) -- a PER-STAGE AGGREGATE basis. The group rows
+-- (and now `attributable_revenue`/`attributable_sales` below) compute
+-- SUM(stage_sends.sale_revenue) and COUNT(*) FILTER (WHERE converted_at IS
+-- NOT NULL) -- a PER-RECIPIENT basis. Measured org-wide: per-recipient covers
+-- ~97% of Keitaro revenue and ~96% of sales. A stage whose sales are entirely
+-- hand-entered (stage_manual_sales, with no per-recipient conversion behind
+-- it) contributes to the footer and zero to any group row -- the same "reads
+-- different from the benchmark by construction" defect this workstream exists
+-- to remove, this time pointing at the group rows instead of the benchmark.
+-- Left unmeasured, every group row would carry a silent haircut against the
+-- total beside it. `attributable_revenue`/`attributable_sales` exist so the
+-- gap can be SEEN (compare directly against `revenue`/`sales`) rather than
+-- inferred. No `unattributed_revenue`/`unattributed_sales` columns: unlike
+-- `sends`, the two bases are not a whole-and-part relationship -- they come
+-- from different underlying sources, not a subset -- so subtracting one from
+-- the other would imply a precision the data does not have.
+--
 -- `offer_report_campaign_econ` and `offer_report_org_summary_mv` are UNCHANGED:
 -- the benchmark was already campaign-grain and correct. Note the bias direction
 -- is the opposite of the EPC workstream -- there the benchmark was the inflated
 -- half; here it is the only correct one.
 DROP MATERIALIZED VIEW IF EXISTS public.offer_group_report_mv;
+--> statement-breakpoint
+DROP MATERIALIZED VIEW IF EXISTS public.offer_report_offer_totals_mv;
 --> statement-breakpoint
 DROP VIEW IF EXISTS public.offer_report_tracked_campaigns;
 --> statement-breakpoint
@@ -93,15 +126,38 @@ WITH base AS (
 ),
 -- DISTINCT sends, not the sum of the group cells: that sum is non-additive by
 -- design and using it here would reintroduce the defect this migration removes.
+-- Membership is tested as EXISTS rather than a JOIN so a recipient who belongs
+-- to several of the campaign's targeted groups still contributes exactly one
+-- row here -- joining contact_contact_groups directly (as `attr` below does
+-- for the group cells) would fan revenue/sales out across each matching group,
+-- reintroducing the same defect at the offer grain instead of the group grain.
 attributable AS (
-  SELECT camp.org_id, camp.offer_id, COUNT(DISTINCT ss.id)::bigint AS n
-  FROM public.stage_sends ss
-  JOIN public.offer_report_tracked_campaigns camp ON camp.id = ss.campaign_id
-  JOIN public.contact_contact_groups ccg
-    ON ccg.contact_id = ss.contact_id
-   AND ccg.contact_group_id = ANY(camp.gids)
-  WHERE ss.status = 'sent'
-  GROUP BY camp.org_id, camp.offer_id
+  SELECT ds.org_id, ds.offer_id,
+    COUNT(*)::bigint                                            AS n,
+    SUM(ds.sale_revenue)::numeric(14,4)                         AS revenue,
+    COUNT(*) FILTER (WHERE ds.converted_at IS NOT NULL)::bigint AS sales
+  FROM (
+    SELECT ss.id, ss.sale_revenue, ss.converted_at,
+           camp.org_id, camp.offer_id
+    FROM public.stage_sends ss
+    -- Campaign resolved via the send's STAGE, matching
+    -- offer_report_campaign_econ (the footer's source) -- not ss.campaign_id,
+    -- the denormalized column. Sharing the SET (offer_report_tracked_campaigns)
+    -- but not the join PATH would let a send whose campaign_id disagrees with
+    -- its stage_id's campaign land its revenue/sales on the wrong offer while
+    -- `sends` still (correctly) excludes it, which could drive
+    -- unattributed_sends negative. `attr` in offer_group_report_mv shares this
+    -- same path below, for the same reason.
+    JOIN public.campaign_stages cs ON cs.id = ss.stage_id
+    JOIN public.offer_report_tracked_campaigns camp ON camp.id = cs.campaign_id
+    WHERE ss.status = 'sent'
+      AND EXISTS (
+        SELECT 1 FROM public.contact_contact_groups ccg
+        WHERE ccg.contact_id = ss.contact_id
+          AND ccg.contact_group_id = ANY(camp.gids)
+      )
+  ) ds
+  GROUP BY ds.org_id, ds.offer_id
 ),
 -- Offer-grain clicks: DISTINCT contacts, plus manual-stage visits which have no
 -- set behind them to deduplicate. Same decomposition 0128 established.
@@ -128,6 +184,8 @@ SELECT b.org_id, b.offer_id, b.sends, b.revenue, b.sales,
   (COALESCE(ot.n, 0) + COALESCE(om.n, 0))::bigint AS clicks,
   b.cost, b.optouts, b.has_manual_stages,
   COALESCE(a.n, 0)::bigint                      AS attributable_sends,
+  COALESCE(a.revenue, 0)::numeric(14,4)         AS attributable_revenue,
+  COALESCE(a.sales, 0)::bigint                  AS attributable_sales,
   (b.sends - COALESCE(a.n, 0))::bigint          AS unattributed_sends
 FROM base b
 LEFT JOIN attributable  a  ON a.org_id  = b.org_id AND a.offer_id  = b.offer_id
@@ -149,8 +207,16 @@ WITH rate AS (
   GROUP BY cs.id, cs.total_cost
 ),
 -- ONE pass over the stage_sends x contact_contact_groups join: economics AND
--- list pressure. That join already ran for the list-pressure columns alone, so
--- the economics ride along at ~zero marginal cost (9.53s -> 9.96s measured).
+-- list pressure. The marginal COST is ~zero because that join already ran for
+-- the list-pressure columns alone (9.53s -> 9.96s measured) -- but the
+-- POPULATION is not unchanged. 0128's `lp` CTE joined contact_contact_groups
+-- on contact_id only, with no `= ANY(gids)` restriction to the groups the
+-- campaign actually targeted and no `link_mode = 'tracked'` filter, so
+-- sent_7d/30d/90d counted every send of the offer that reached a member of
+-- group X whether or not the campaign targeted X. Here they share the same
+-- `offer_report_tracked_campaigns` / `ANY(camp.gids)` scope as the economics
+-- columns, so sent_7d/30d/90d are now a strict SUBSET of their 0128 values.
+-- Intentional and approved -- see the header.
 attr AS (
   SELECT camp.org_id, camp.offer_id, ccg.contact_group_id AS group_id,
     COUNT(*)::bigint                                        AS sends,
@@ -161,7 +227,10 @@ attr AS (
     COUNT(*) FILTER (WHERE ss.sent_at >= now() - interval '30 days')::bigint AS sent_30d,
     COUNT(*) FILTER (WHERE ss.sent_at >= now() - interval '90 days')::bigint AS sent_90d
   FROM public.stage_sends ss
-  JOIN public.offer_report_tracked_campaigns camp ON camp.id = ss.campaign_id
+  -- Campaign resolved via the send's STAGE, matching offer_report_campaign_econ
+  -- and `attributable` above -- not ss.campaign_id. See the comment there.
+  JOIN public.campaign_stages cs ON cs.id = ss.stage_id
+  JOIN public.offer_report_tracked_campaigns camp ON camp.id = cs.campaign_id
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = ss.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
@@ -222,6 +291,11 @@ LEFT JOIN fresh f ON f.org_id = a.org_id AND f.group_id = a.group_id;
 CREATE UNIQUE INDEX offer_group_report_mv_key_uniq
   ON public.offer_group_report_mv (org_id, offer_id, group_id);
 --> statement-breakpoint
+-- Seeded NULL, not now(): nothing refreshes this matview until
+-- refreshOfferGroupReport() is rewritten to include it (a later task). NULL
+-- makes an un-refreshed view visibly empty rather than quietly stale with a
+-- plausible-looking "data as of" timestamp. Same convention as 0093's seed of
+-- offer_group_report_mv / offer_report_org_summary_mv.
 INSERT INTO public.report_refresh_log (view_name, refreshed_at)
-VALUES ('offer_report_offer_totals_mv', now())
-ON CONFLICT (view_name) DO UPDATE SET refreshed_at = now();
+VALUES ('offer_report_offer_totals_mv', NULL)
+ON CONFLICT (view_name) DO UPDATE SET refreshed_at = NULL;

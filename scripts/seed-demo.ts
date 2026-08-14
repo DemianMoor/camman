@@ -249,7 +249,7 @@ async function main() {
           INSERT INTO provider_phones (org_id, provider_id, brand_id, phone_number, country_code,
                                        dial_code, local_number, cost_per_sms, number_type, status)
           VALUES (${orgId}::uuid, ${providers[i]!.id}, ${brand!.id}, ${number}, 'US', '+1',
-                  ${number.slice(2)}, 0.0075, 'long_code', 'active')
+                  ${number.slice(2)}, 0.0075, '10dlc', 'active')
           RETURNING id, phone_number`;
         phones.push(ph!);
       }
@@ -380,7 +380,7 @@ async function main() {
                                  created_by_user_id, tracking_id, created_at, exclude_in_use_contacts)
           VALUES (${orgId}::uuid, ${spec.slug}, ${spec.name}, ${spec.slug.toUpperCase()},
                   ${brand!.id}, ${offers[spec.offer]!.id}, ${spec.status},
-                  ${JSON.stringify([segments[0]!.id])}::jsonb, ${JSON.stringify([])}::jsonb, 'tracked',
+                  ${[segments[0]!.id]}::int[], ${[] as number[]}::int[], 'tracked',
                   ${userId}::uuid, ${trackingId}, ${spec.created}, false)
           RETURNING id, slug, tracking_id, status`;
         campaigns.push(c!);

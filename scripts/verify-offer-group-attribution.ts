@@ -442,21 +442,36 @@ async function main() {
 
   // ----------------------------------------------------------------- criterion 5
   console.log("\n=== 5. group rows carry no manual-mix flag ===");
-  const cols = await q(sql`
-    SELECT column_name FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'offer_group_report_mv'
-      AND column_name IN ('has_manual_stages', 'offer_clicks', 'offer_has_manual')
-  `);
-  assert(cols.length === 0,
+  // Column checks MUST read pg_attribute, not information_schema.columns:
+  // information_schema covers ordinary tables and views only and returns ZERO
+  // rows for a MATERIALIZED view. Both of these targets are matviews, so the
+  // earlier information_schema version made the "these columns are absent"
+  // assertion pass vacuously — it could not have failed even if the columns were
+  // still there — while the "this column is present" assertion failed always.
+  // A check that cannot fail is worse than no check; that is what caught it.
+  const mvCols = async (rel: string) =>
+    (await q(sql`
+      SELECT a.attname AS column_name
+      FROM pg_class c
+      JOIN pg_namespace ns ON ns.oid = c.relnamespace
+      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+      WHERE ns.nspname = 'public' AND c.relkind = 'm' AND c.relname = ${rel}
+    `)).map((r) => String(r.column_name));
+
+  const groupCols = await mvCols("offer_group_report_mv");
+  // Guard the guard: an empty list would make the "absent" assertion vacuous again.
+  assert(groupCols.length > 0,
+    `offer_group_report_mv is a matview with ${groupCols.length} columns visible ` +
+    `(0 would mean this check is inspecting nothing)`);
+  const stray = groupCols.filter((c) =>
+    ["has_manual_stages", "offer_clicks", "offer_has_manual"].includes(c));
+  assert(stray.length === 0,
     `offer_group_report_mv has none of has_manual_stages/offer_clicks/offer_has_manual ` +
-    `(found: ${cols.map((r) => r.column_name).join(", ") || "none"})`);
-  assert(
-    n((await q(sql`
-      SELECT count(*)::int AS n FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='offer_report_offer_totals_mv'
-        AND column_name='has_manual_stages'`))[0].n) === 1,
-    "has_manual_stages moved to the offer-totals matview",
-  );
+    `(found: ${stray.join(", ") || "none"})`);
+
+  const totalsCols = await mvCols("offer_report_offer_totals_mv");
+  assert(totalsCols.includes("has_manual_stages"),
+    `has_manual_stages moved to the offer-totals matview (its columns: ${totalsCols.join(", ")})`);
 
   // ----------------------------------------------------------------- criterion 6
   // Every offer is in exactly one of two states: has group rows, or has none and

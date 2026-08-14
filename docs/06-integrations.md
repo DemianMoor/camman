@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-14_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -72,7 +72,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | `CRON_SECRET` | server | shared secret for cron endpoints (Bearer). Also gates the send drain. Unset ⇒ click-scoring endpoint returns 503 |
 | `PROVIDER_CREDENTIALS_KEY` | server | 32-byte base64 master key for AES-256-GCM encryption of `provider_credentials.api_key_encrypted` (migration 0110). MUST be byte-identical between Vercel and any local `.env.local` that encrypts (the backfill script) or decrypts (dev drain/pollers) — a mismatch makes existing rows silently fail to decrypt, not error at write time. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. Never commit a value |
 | `SEND_ENABLED` | server | deploy-level **backstop** for the send **drain**; must be exactly `"true"` to send. Left permanently on in Vercel — the day-to-day on/off is the DB flag `org_settings.sends_enabled` (Settings → Sending). The drain requires BOTH. Re-checked between batches mid-drain |
-| `TELEGRAM_BOT_TOKEN` | server | Telegram bot token — best-effort alerts (unset ⇒ silent no-op) **and** the performance report (unset ⇒ report returns 500 when a send is due) |
+| `TELEGRAM_BOT_TOKEN` | server | Telegram bot token — best-effort alerts (unset ⇒ silent no-op) **and** the performance report (unset ⇒ report skips with HTTP 200 `{skipped:true, reason:"telegram_not_configured"}` and an error-level log line, so a deployment that ships without Telegram doesn't emit ~11 spurious 500s/day) |
 | `TELEGRAM_CHAT_ID` | server | numeric chat/group id for alerts + the performance report |
 | `KEITARO_API_URL` | server | Keitaro admin/API host (default `https://admin.gdkn.org`). Never a brand tracking domain |
 | `KEITARO_API_KEY` | server | Keitaro Admin API key (`Api-Key` header). Unset ⇒ poll returns `degraded:true` and writes nothing. **Rotate** the key shared in plaintext during setup |
@@ -82,6 +82,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | `AHOI_API_BASE_URL` | server | optional override for the Ahoi/api19 base URL (default `https://v1.api19.com`) |
 | `TEXTREQUEST_API_BASE_URL` | server | optional override for the Text Request API base URL (default `https://api.textrequest.com/api/v3`) |
 | `TELLS_API_BASE_URL` | server | optional override for the Tells.co send endpoint (default `https://app.tells.co/api/sms.php`) |
+| `DEMO_BASIC_AUTH` | server | **demo deployment only** (`user:password`). Gates the app behind HTTP Basic Auth in [`proxy.ts`](../proxy.ts) (Next 16's renamed middleware), replacing Vercel Deployment Protection. Unset ⇒ the gate is inert, so production is unaffected. `proxy.ts`'s existing matcher already excludes `/api/` and `/r/`, so all 19 cron routes, the provider webhooks and the public short-link redirect are never gated. See [09-demo-environment.md](09-demo-environment.md) |
 | `AHOI_API_TOKEN` | **local only** | one-time seed input for `scripts/seed-ahoi-number-credential.ts`; not read at runtime after seeding |
 | `AHOI_DLR_REJECT_SPIKE_THRESHOLD` | server | rejected-DLR count that latches the Ahoi provider pause (default 10) |
 | `AHOI_DLR_REJECT_SPIKE_WINDOW_SEC` | server | rolling window (seconds) for the DLR reject-rate breaker (default 900) |

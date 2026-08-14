@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-07-30_
+_Last updated: 2026-08-14_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -96,7 +96,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - **Resilient send:** the report fires once per hour with no natural recovery until the next tick, so the handler wraps the send in `sendHtmlWithRetry` — **2 attempts**, an **8 s** timeout each (up from the 4 s best-effort default), 1 s backoff.
 - **Build + send are wrapped in ONE try/catch under a 50 s overall timeout** (`withTimeout`, below `maxDuration=60`). Any failure — send error, **or a hung/slow metrics build** — returns **500** (scheduler failure-monitoring still catches it) **and** fires a best-effort plain-text `notifyTelegram` alert (`⚠️ CamMan <format> report failed…`) so a dropped report is visible instead of silent. Earlier the build ran *outside* the catch, so a hung build produced no report and no alert — just a silent `maxDuration` kill.
 - **Cold-start DB fan-out (why hourly silently died while daily worked, fixed 2026-07-07).** `buildHourly` used to run `2× computeReportMetrics` (today + yesterday) via `Promise.all` = **8 concurrent queries**; on a cold serverless start during busy ET hours that burst stalled the connection pooler past `maxDuration`. The queries themselves are ~16 ms — the cost was concurrent *connection acquisition*, not execution. Fix: hourly now fetches today's full metrics (4 queries) + yesterday's **spend only** (`spendInRange`, 1 query) **sequentially** — peak concurrency 4, matching the daily path that never failed. Daily (`buildDaily`, 4 queries at the quiet 05:00 ET hour) was always fine.
-- Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (fail-fast 500 if missing when a send is due), `CRON_SECRET`.
+- Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CRON_SECRET`. **Unconfigured Telegram is a deployment shape, not a failure:** when either var is unset the route returns **200** `{skipped:true, reason:"telegram_not_configured"}` (changed 2026-08-14 — it used to 500). Deployments that deliberately ship without Telegram, such as the external demo project, would otherwise emit a 500 on ~11 of the 24 hourly ticks. An accidental unset stays visible via an error-level log line rather than an HTTP alarm. See [09-demo-environment.md](../09-demo-environment.md).
 
 ### `/api/cron/refresh-offer-group-report` (offer group report refresh)
 - Calls `refreshOfferGroupReport()` ([lib/reporting/offer-group-report.ts](../../lib/reporting/offer-group-report.ts)): `REFRESH MATERIALIZED VIEW CONCURRENTLY` on `offer_report_org_summary_mv` then `offer_group_report_mv` (two separate statements — `CONCURRENTLY` cannot run inside an explicit transaction), then stamps both `report_refresh_log` rows with `now()`.

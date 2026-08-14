@@ -201,16 +201,26 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ skipped: true, warsawHour, warsawIsoDow });
   }
 
-  // Fail fast on missing Telegram config BEFORE building/sending — clear 500,
-  // no partial send. (sendTelegramHtml also guards, but we check up front.)
+  // Check Telegram config BEFORE building/sending — no partial send.
+  //
+  // Unconfigured is a DEPLOYMENT SHAPE, not a failure: environments that
+  // deliberately ship without Telegram (the external demo project, where every
+  // outbound-integration env is intentionally empty) would otherwise return a
+  // 500 on ~11 of the 24 hourly ticks — alarm noise that means nothing. Skip
+  // quietly with 200 instead, mirroring the out-of-window `skipped` response.
+  //
+  // Still logged at error level so an ACCIDENTAL unset in an environment that
+  // is supposed to have Telegram stays visible in the function logs rather than
+  // disappearing — we trade the HTTP alarm for a log line, not for silence.
   if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
-    return NextResponse.json(
-      {
-        error:
-          "Missing Telegram config: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required",
-      },
-      { status: 500 },
+    console.error(
+      "[telegram-report] skipped: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set",
     );
+    return NextResponse.json({
+      skipped: true,
+      reason: "telegram_not_configured",
+      format,
+    });
   }
 
   // Build AND send inside ONE try/catch under an overall timeout. The build used

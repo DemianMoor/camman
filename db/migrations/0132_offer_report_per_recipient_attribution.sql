@@ -9,6 +9,15 @@
 -- /offers/[id]/report errors with `column "has_manual_stages" does not
 -- exist`. Keep that window short and apply this deliberately -- watch the
 -- reader deploy land, not as an unattended/background step.
+--
+-- `refreshOfferGroupReport()` (lib/reporting/offer-group-report.ts) today
+-- refreshes only the two matviews created in 0093 --
+-- `offer_report_org_summary_mv` and `offer_group_report_mv` -- and stamps
+-- only those two `report_refresh_log` rows. `offer_report_offer_totals_mv`
+-- (new below) is not in that list, so until the function is updated (a later
+-- task in this plan) it holds data frozen at THIS migration's apply time
+-- while `offer_group_report_mv` keeps refreshing twice daily -- footer and
+-- rows drift apart in time, not just in join path.
 -- ----------------------------------------------------------------------------
 --
 -- 0128 fixed HOW the clicker count was aggregated. It did not fix WHO a row is
@@ -71,8 +80,15 @@
 -- stage_manual_sales.delta) -- a PER-STAGE AGGREGATE basis. The group rows
 -- (and now `attributable_revenue`/`attributable_sales` below) compute
 -- SUM(stage_sends.sale_revenue) and COUNT(*) FILTER (WHERE converted_at IS
--- NOT NULL) -- a PER-RECIPIENT basis. Measured org-wide: per-recipient covers
--- ~97% of Keitaro revenue and ~96% of sales. A stage whose sales are entirely
+-- NOT NULL) -- a PER-RECIPIENT basis. `attributable_revenue` sits beside
+-- `revenue`, which is Keitaro revenue alone, and covers ~97% of it org-wide
+-- (54,844 / 56,338). `attributable_sales` sits beside `sales`, which is
+-- GREATEST(keitaro sales, stage_manual_sales.delta) -- a LARGER denominator
+-- than Keitaro sales alone, because it also counts hand-entered sales with no
+-- per-recipient conversion behind them. Measured on this migration's 21-offer
+-- verification table: campaign-grain sales 908, attributable sales 815 --
+-- ~90% (89.8%) of GREATEST(keitaro, manual), not the ~96% a Keitaro-sales-only
+-- comparison would read. A stage whose sales are entirely
 -- hand-entered (stage_manual_sales, with no per-recipient conversion behind
 -- it) contributes to the footer and zero to any group row -- the same "reads
 -- different from the benchmark by construction" defect this workstream exists
@@ -210,13 +226,16 @@ WITH rate AS (
 -- list pressure. The marginal COST is ~zero because that join already ran for
 -- the list-pressure columns alone (9.53s -> 9.96s measured) -- but the
 -- POPULATION is not unchanged. 0128's `lp` CTE joined contact_contact_groups
--- on contact_id only, with no `= ANY(gids)` restriction to the groups the
--- campaign actually targeted and no `link_mode = 'tracked'` filter, so
--- sent_7d/30d/90d counted every send of the offer that reached a member of
--- group X whether or not the campaign targeted X. Here they share the same
--- `offer_report_tracked_campaigns` / `ANY(camp.gids)` scope as the economics
--- columns, so sent_7d/30d/90d are now a strict SUBSET of their 0128 values.
--- Intentional and approved -- see the header.
+-- on contact_id only, with three narrowings absent versus here: no
+-- `= ANY(gids)` restriction to the groups the campaign actually targeted, no
+-- `link_mode = 'tracked'` filter, and no requirement that the campaign have
+-- EXISTS a stage with sent_at IS NOT NULL -- so sent_7d/30d/90d counted every
+-- send of the offer that reached a member of group X whether or not the
+-- campaign targeted X, whether or not it was tracked, and whether or not it
+-- had actually sent. Here they share the same `offer_report_tracked_campaigns`
+-- / `ANY(camp.gids)` scope as the economics columns, so sent_7d/30d/90d are
+-- now a strict SUBSET of their 0128 values. Intentional and approved -- see
+-- the header.
 attr AS (
   SELECT camp.org_id, camp.offer_id, ccg.contact_group_id AS group_id,
     COUNT(*)::bigint                                        AS sends,
@@ -251,12 +270,25 @@ cell_clicks AS (
    AND ccg.contact_group_id = ANY(camp.gids)
   GROUP BY camp.org_id, camp.offer_id, ccg.contact_group_id
 ),
+-- Campaign resolved via oa.stage_id -> campaign_stages, matching the footer's
+-- own opt-out subquery in offer_report_campaign_econ exactly (it joins
+-- opt_out_attributions to campaign_stages, never touches stage_sends for the
+-- campaign). stage_sends is kept only to get from the attribution to the
+-- recipient's contact_id.
+--
+-- ASYMMETRY: oa.stage_send_id is nullable by design (an attribution survives
+-- its send row being pruned). Such rows have no recipient, so they genuinely
+-- cannot be placed in a group -- but the footer's oa.stage_id path keeps them
+-- regardless. So group opt-outs can fall short of the footer for a reason no
+-- other column here has: not a scope difference, but rows this join can never
+-- reach.
 cell_optouts AS (
   SELECT camp.org_id, camp.offer_id, ccg.contact_group_id AS group_id,
     COUNT(DISTINCT oa.opt_out_id)::bigint AS n
   FROM public.opt_out_attributions oa
   JOIN public.stage_sends ss ON ss.id = oa.stage_send_id
-  JOIN public.offer_report_tracked_campaigns camp ON camp.id = ss.campaign_id
+  JOIN public.campaign_stages cs ON cs.id = oa.stage_id
+  JOIN public.offer_report_tracked_campaigns camp ON camp.id = cs.campaign_id
   JOIN public.contact_contact_groups ccg
     ON ccg.contact_id = ss.contact_id
    AND ccg.contact_group_id = ANY(camp.gids)
@@ -292,10 +324,14 @@ CREATE UNIQUE INDEX offer_group_report_mv_key_uniq
   ON public.offer_group_report_mv (org_id, offer_id, group_id);
 --> statement-breakpoint
 -- Seeded NULL, not now(): nothing refreshes this matview until
--- refreshOfferGroupReport() is rewritten to include it (a later task). NULL
--- makes an un-refreshed view visibly empty rather than quietly stale with a
--- plausible-looking "data as of" timestamp. Same convention as 0093's seed of
--- offer_group_report_mv / offer_report_org_summary_mv.
+-- refreshOfferGroupReport() is rewritten to include it (a later task).
+-- CREATE MATERIALIZED VIEW ... AS <query> populates the view immediately --
+-- there is no WITH NO DATA here -- so it holds real data the moment this
+-- migration applies; NULL does not mean the view is empty. NULL means
+-- "as-of unknown": stamping now() here would claim the data is as current as
+-- the twice-daily cron implies, when in fact nothing has refreshed it since
+-- apply. Same convention as 0093's seed of offer_group_report_mv /
+-- offer_report_org_summary_mv.
 INSERT INTO public.report_refresh_log (view_name, refreshed_at)
 VALUES ('offer_report_offer_totals_mv', NULL)
 ON CONFLICT (view_name) DO UPDATE SET refreshed_at = NULL;

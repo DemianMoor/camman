@@ -496,6 +496,192 @@ async function main() {
       `offer ${s.offer_id}: has ${s.group_rows} group rows AND attributable_sends > 0`);
   }
 
+  // ----------------------------------------------------------------- criterion 7
+  // Regression guard for the Fresh pool defect fixed by migration 0133 (see
+  // its header and docs/07-conventions.md's "Offer group report" section).
+  // 0126 silently replaced Fresh pool's definition — "sendable and never
+  // sent THIS offer" — with "no sent row in the last 90 days, across ALL
+  // offers, no opt-out filter". 0128 and 0132 each recreated
+  // offer_group_report_mv for unrelated reasons and copied the regressed
+  // subquery forward without noticing, and nothing caught it for three
+  // migrations. 7a and 7b recompute from base tables (contacts/opt_outs/
+  // offer_exposures) — re-reading the matview would prove nothing, since the
+  // matview's correctness is exactly what is in question. 7c is different in
+  // kind: a structural check on the shipped view definition, not a
+  // recomputation — see its own comment for why a count-based check alone
+  // couldn't stop this from happening a fourth time.
+
+  // --------------------------------------------------------------- criterion 7a
+  // fresh_pool excludes opt-outs and ineligible contacts, and only subtracts
+  // exposure to the ROW'S OWN offer. Recomputed using migration 0133's exact
+  // shape: sendable = messaging_status='eligible' AND NOT EXISTS a
+  // matching opt_outs row; fresh = sendable_per_group MINUS
+  // exposed_per_offer_group (subtraction, not a direct per-offer anti-join —
+  // the migration's own comment measures the direct form at 45.6s vs 9.4s
+  // here; that reasoning is unchanged for this recomputation).
+  //
+  // fresh_pool is a MATERIALIZED snapshot, frozen at its last refresh; the
+  // recomputation above runs LIVE. opt_outs and offer_exposures are both
+  // append-only, and BOTH SHRINK fresh_pool (an opt-out or a new exposure
+  // removes a contact from a group's sendable pool; nothing about ordinary
+  // elapsed time ever adds one back). So from the moment the matview is
+  // refreshed, the stored value can only drift UPWARD relative to a live
+  // recomputation — an `===` here can hold only in the instant right after
+  // refresh, which is exactly the defect 3a above was rewritten to remove.
+  // Measured minutes after this matview's own refresh: 75 rows compared, 30
+  // exact, 45 with stored > live, 0 with stored < live, max delta 13 — the
+  // matview is correct; equality was the wrong assertion.
+  //
+  // The time-independent form: stored fresh_pool must be >= the live
+  // recomputation, per (org_id, offer_id, group_id). That bound holds no
+  // matter how much time elapsed between the matview's refresh and this read
+  // — a value BELOW the live recomputation cannot be explained by ordinary
+  // drift and means the matview under-reports.
+  //
+  // ONE legitimate exception: bulk-uploading contacts into a GROUP after the
+  // matview refreshed raises the live sendable_per_group denominator, which
+  // can push the live figure above the stored one. A violation is therefore
+  // not automatically a defect — check whether the group in question had a
+  // contact upload since the matview's last refresh before treating it as
+  // one. That check is not a numeric tolerance folded into the assertion: a
+  // violation still fails loudly here; the exception only changes what you
+  // do next, not whether the assert fires.
+  //
+  // What would have to break for this to fire (net of the exception above):
+  // fresh_pool counting an opted-out or ineligible contact as fresh (0126's
+  // actual defect), or fresh_pool failing to subtract — or wrongly
+  // subtracting a DIFFERENT offer's — exposure set.
+  console.log("\n=== 7a. fresh_pool recomputed from base tables (sendable minus this offer's exposure) ===");
+  const freshCheck = await q(sql`
+    WITH sendable AS (
+      SELECT ccg.contact_group_id AS group_id, ct.org_id, ct.id AS contact_id
+      FROM contacts ct
+      JOIN contact_contact_groups ccg
+        ON ccg.contact_id = ct.id AND ccg.org_id = ct.org_id
+      WHERE ct.messaging_status = 'eligible'
+        AND NOT EXISTS (
+          SELECT 1 FROM opt_outs o
+          WHERE o.contact_id = ct.id AND o.org_id = ct.org_id
+        )
+    ),
+    sendable_per_group AS (
+      SELECT org_id, group_id, COUNT(*)::bigint AS n FROM sendable GROUP BY org_id, group_id
+    ),
+    exposed_per_offer_group AS (
+      SELECT s.org_id, e.offer_id, s.group_id, COUNT(*)::bigint AS n
+      FROM sendable s
+      JOIN offer_exposures e ON e.contact_id = s.contact_id
+      GROUP BY s.org_id, e.offer_id, s.group_id
+    )
+    SELECT m.org_id, m.offer_id, m.group_id,
+           m.fresh_pool::bigint AS stored,
+           (COALESCE(g.n, 0) - COALESCE(x.n, 0))::bigint AS recomputed
+    FROM offer_group_report_mv m
+    LEFT JOIN sendable_per_group g ON g.org_id = m.org_id AND g.group_id = m.group_id
+    LEFT JOIN exposed_per_offer_group x
+      ON x.org_id = m.org_id AND x.offer_id = m.offer_id AND x.group_id = m.group_id
+  `);
+  // Guard the guard: with zero rows the bound assert below would pass
+  // vacuously (an empty set trivially satisfies any bound).
+  assert(freshCheck.length > 0,
+    `offer_group_report_mv has rows to recompute fresh_pool against (${freshCheck.length})`);
+  const freshViolations = freshCheck.filter((r) => n(r.stored) < n(r.recomputed));
+  if (freshViolations.length > 0) console.table(freshViolations.slice(0, 15));
+  assert(freshViolations.length === 0,
+    `stored fresh_pool >= live recomputation on all ${freshCheck.length} rows ` +
+    `(${freshViolations.length} violation(s)` +
+    (freshViolations.length > 15 ? ", showing first 15 above" : "") +
+    `; before treating any violation as a defect, check whether that group had a contact upload since the matview's last refresh)`);
+
+  console.log("\n  --- below is INFORMATIONAL ONLY, not asserted, cannot fail this script ---");
+  const freshDeltas = freshCheck.map((r) => {
+    const delta = n(r.stored) - n(r.recomputed);
+    const pct = n(r.stored) > 0 ? (delta / n(r.stored)) * 100 : 0;
+    return { delta, pct };
+  });
+  const maxAbsDelta = freshDeltas.reduce((mx, d) => Math.max(mx, d.delta), 0);
+  const maxPctDelta = freshDeltas.reduce((mx, d) => Math.max(mx, d.pct), 0);
+  console.log(`  ℹ stored fresh_pool vs live recomputation across ${freshCheck.length} rows: ` +
+              `max delta ${maxAbsDelta}, max ${maxPctDelta.toFixed(3)}% of stored — opt-outs and ` +
+              `offer_exposures accumulate continuously between the matview's refresh and this read, ` +
+              `so a positive delta is expected, not a failure.`);
+
+  // --------------------------------------------------------------- criterion 7b
+  // fresh_pool is offer-scoped: the same group must be free to read
+  // differently under two different offers, since exposure is per-offer.
+  // Before the fix every group's fresh_pool was IDENTICAL across every offer
+  // it appeared under (count(DISTINCT fresh_pool) = 1 for all 12 groups,
+  // measured pre-migration) — the signature of computing fresh_pool with no
+  // offer_id join at all. This is the check that makes that shape of defect
+  // impossible to reintroduce silently.
+  //
+  // What would have to break for this to fire: fresh_pool computed without
+  // ever joining offer_exposures to offer_id — every group would then read
+  // the same number under every offer's report, and this assert catches
+  // that directly rather than inferring it from 7a alone (7a can pass on a
+  // database where no group happens to span multiple offers).
+  console.log("\n=== 7b. fresh_pool is offer-scoped (same group differs across offers) ===");
+  const perGroupAcrossOffers = await q(sql`
+    SELECT org_id, group_id,
+           count(DISTINCT offer_id)::int AS offers_covering,
+           count(DISTINCT fresh_pool)::int AS distinct_fresh_pool_values
+    FROM offer_group_report_mv
+    GROUP BY org_id, group_id
+    HAVING count(DISTINCT offer_id) > 1
+    ORDER BY offers_covering DESC
+  `);
+  if (perGroupAcrossOffers.length === 0) {
+    skip("criterion 7b", "no group appears under more than one offer on this database " +
+      "— offer-scoping cannot be exercised this way here.");
+  } else {
+    console.table(perGroupAcrossOffers.slice(0, 15));
+    const varies = perGroupAcrossOffers.filter((r) => n(r.distinct_fresh_pool_values) > 1);
+    assert(varies.length > 0,
+      `at least one multi-offer group's fresh_pool differs across offers ` +
+      `(${varies.length} of ${perGroupAcrossOffers.length} multi-offer groups vary; ` +
+      `all reading identical is the pre-0133 signature)`);
+  }
+
+  // --------------------------------------------------------------- criterion 7c
+  // Structural guard, not a recomputation. The regression this whole
+  // migration fixes happened THREE TIMES: migration 0093 defined `fresh` with
+  // an opt-out filter and an offer-scoped exposure anti-join; 0126 silently
+  // dropped both; 0128 and 0132 each recreated the matview for unrelated
+  // reasons and copied the broken version forward. Nothing caught it for
+  // three migrations — because 7a and 7b (and everything before them in this
+  // file) are COUNT-based, and counts drift for reasons that have nothing to
+  // do with a regression (see 7a's own comment on why `===` against a
+  // materialized snapshot is the wrong shape of check). A count-based check
+  // cannot catch this the moment it happens; a structural one can, since it
+  // does not depend on data at all.
+  //
+  // This reads the SHIPPED view definition and asserts its text still
+  // references both source tables the fix depends on. If a future migration
+  // rewrites the `fresh` CTE and drops either, the definition stops
+  // mentioning it and this fails immediately, independent of how much data
+  // is in the database or when anything last refreshed.
+  //
+  // Deliberately coarse: matching table names in the view's SQL text cannot
+  // prove the join/anti-join semantics are right — 7a and 7b are what
+  // exercise the semantics, with all their time-drift caveats. This only
+  // proves the two source-of-truth tables are still touched at all. That is
+  // exactly what went missing, three times, without anyone noticing.
+  console.log("\n=== 7c. offer_group_report_mv definition still references opt_outs and offer_exposures ===");
+  const viewDefRow = (await q(sql`
+    SELECT pg_get_viewdef('public.offer_group_report_mv'::regclass, true) AS def
+  `))[0];
+  const viewDef = String(viewDefRow?.def ?? "");
+  // Guard the guard: a failed/empty lookup must not make the "still
+  // references X" assertions below pass vacuously — the same trap that made
+  // criterion 5's earlier information_schema.columns version pass vacuously
+  // against a materialized view (see 5's comment).
+  assert(viewDef.length > 0,
+    `pg_get_viewdef returned a non-empty definition for offer_group_report_mv (${viewDef.length} chars)`);
+  assert(viewDef.includes("opt_outs"),
+    "offer_group_report_mv's definition still references opt_outs (the sendable/opt-out filter)");
+  assert(viewDef.includes("offer_exposures"),
+    "offer_group_report_mv's definition still references offer_exposures (the per-offer exposure anti-join)");
+
   const summaryLine = `${passed} checks passed, ${failed} failed, ${skipped} SKIPPED`;
   if (failed > 0) {
     console.log(`\n${summaryLine}.`);

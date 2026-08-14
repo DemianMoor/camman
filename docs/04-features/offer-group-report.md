@@ -47,7 +47,7 @@ an average of per-group ratios.
 | **Net profit** | `revenue - cost`. |
 | **Opt-out %** | `optouts / sends * 100`. |
 | **Sent last 7 / 30 / 90 days** | `COUNT(*)` of attributed `stage_sends` rows within the window — send rows, **not** distinct contacts, scoped to **this offer**, and (since migration 0132) tracked campaigns only. |
-| **Fresh pool** | Contacts in the group with no `status='sent'` `stage_sends` row in the last 90 days, across **all** offers and **both** link modes. No opt-out filter. |
+| **Fresh pool** | Contacts in the group that are sendable (`contacts.messaging_status = 'eligible'` AND no `opt_outs` row) AND have never been sent a campaign of **this offer** — anti-joined against `offer_exposures` per offer (migration 0133). All-time, not a window; offer-scoped, not shared across offers. |
 
 ## Tracked-only attribution and the per-contact-column limitation
 
@@ -66,11 +66,13 @@ and the org benchmark.
 tracked campaigns that targeted this group, for this offer. This is a
 narrowing from before migration 0132, which counted every in-app send —
 tracked or manual, any offer's campaign, whether or not it targeted this
-group — as long as the recipient was a group member. **Fresh pool did not
-change**: contacts in the group with no `status='sent'` `stage_sends` row in
-the last 90 days, across all offers and both link modes, with no opt-out
-filter — a rule that happened to overlap with the old Sent 7d/30d/90d
-definition and no longer does.
+group — as long as the recipient was a group member. **Fresh pool is a
+different, all-time quantity, not a window** — sendable group members
+(eligible, not opted out) never sent a campaign of *this offer*, per
+`offer_exposures` (migration 0133). It never shared the Sent 7d/30d/90d
+window; migrations 0126–0132 had silently drifted it into a 90-day,
+all-offer, opt-out-blind count that happened to look like a plausible
+variant of the Sent-90d rule. See the migration 0133 entry below.
 
 **Every metric on a group row is per-recipient, and group rows do not foot to
 the offer footer or org benchmark** — those two use a different, campaign-grain
@@ -92,7 +94,26 @@ no per-recipient row (an operator hand-recorded `campaign_stages.sms_count`).
 They appear in the footer and are called out beneath the table. Six of 21 offers
 are 100% external and render no group rows at all.
 
-## Data layer (migrations 0093, 0126, 0128, 0132)
+### Fresh pool restored to its original meaning (migration 0133)
+
+Migration 0093 defined Fresh pool as "sendable and not yet sent this offer":
+`messaging_status = 'eligible'` AND not in `opt_outs`, minus contacts already
+in `offer_exposures` for the offer being viewed. Migration 0126 silently
+replaced it with "no `status='sent'` send in the last 90 days, across **all**
+offers, no opt-out filter" — a change unrelated to that migration's stated
+purpose. 0128 and 0132 each recreated the matview and carried the drifted
+definition forward without noticing; 0132's own documentation pass then
+rewrote this doc to match the broken SQL instead of catching that the SQL
+had regressed. Measured on production before the fix: group 6 (Nerve Pain)
+reported a Fresh pool of 3,051, of which 3,034 were opted out (17 actually
+sendable), and the column both overstated worked-out groups (Memory 21,359 vs
+a correct 706) and understated fresh ones (AstroEnergy 21,340 vs a correct
+90,872) — inverting the ranking the column exists to support. Migration 0133
+restores 0093's definition: sendable AND never exposed to this offer, no time
+window. See [07-conventions.md](../07-conventions.md#offer-group-report-migrations-0093-0132-see-04-featuresoffer-group-reportmd)
+for the doc-vs-code lesson this regression is recorded under.
+
+## Data layer (migrations 0093, 0126, 0128, 0132, 0133)
 
 No Postgres stored functions exist in this app — the convention is
 `db.execute(sql\`…\`)` from a `lib/reporting/*.ts` helper. Because the
@@ -115,7 +136,9 @@ lookups.
   — per org×offer×group rollup, built **directly per-recipient** (migration
   0132) from `stage_sends` joined to `contact_contact_groups`, restricted to
   `offer_report_tracked_campaigns` — no longer derived from
-  `offer_report_campaign_econ`/`unnest(group_ids)`.
+  `offer_report_campaign_econ`/`unnest(group_ids)`. Its `fresh_pool` column is
+  computed separately (sendable contacts anti-joined against `offer_exposures`
+  per offer, migration 0133) — see "Fresh pool restored" above.
 - **`offer_report_offer_totals_mv`** (materialized, unique on `(org_id, offer_id)`,
   migration 0132) — the offer-grain footer, read directly rather than summed
   from `offer_group_report_mv`'s rows. Carries `attributable_sends` /
@@ -248,6 +271,10 @@ pin rows or foot a table; justified by the small per-offer row count).
   `db/migrations/0128_offer_report_dedup_at_grain.sql` — pointed `clicks` at
   the unified `counted_clickers` denominator and fixed its aggregation to
   dedup at each display grain (offer/org, not summed from campaign rows).
+- `db/migrations/0133_fresh_pool_offer_scoped_sendable.sql` — restores
+  `fresh_pool` to migration 0093's definition (sendable, offer-scoped,
+  no time window) after 0126/0128/0132 silently carried a regressed
+  90-day/all-offer/no-opt-out-filter version forward.
 - `db/migrations/0132_offer_report_per_recipient_attribution.sql` — per-recipient
   group-row attribution; adds `offer_report_tracked_campaigns` and
   `offer_report_offer_totals_mv`; extends the dedup-at-grain rule to every

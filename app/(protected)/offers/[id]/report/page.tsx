@@ -8,16 +8,20 @@ import { ArrowLeft, RefreshCw, Download, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
-import type { RawMetrics, GroupRawRow } from "@/lib/reporting/offer-group-report";
+import type {
+  RawMetrics,
+  GroupRawRow,
+  OfferTotals,
+} from "@/lib/reporting/offer-group-report";
 
 type ReportResponse = {
   offerName: string;
   rows: GroupRawRow[];
-  offerTotals: RawMetrics;
-  offerHasManual: boolean;
-  benchmarkHasManual: boolean;
+  offerTotals: OfferTotals;
   orgBenchmark: RawMetrics;
+  benchmarkHasManual: boolean;
   breakEvenPer1k: number | null;
+  unattributedSends: number;
   refreshedAt: string | null;
 };
 
@@ -38,9 +42,11 @@ const fmtUsd = (n: number | null) => (n == null ? "—" : usd.format(n));
 // that — 3 days ago and 6 hours ago render identically — so the age is stated
 // and flagged rather than left for the reader to compute.
 // Rows whose clicks mix a deduplicated contact count with Keitaro visit counts
-// (manual-mode stages mint no links, so there is no set to deduplicate). The
-// arithmetic is honest but the unit is mixed, and a bare number would not show
-// it. 33 of 80 cells carry this today.
+// (manual-mode stages mint no links, so there is no set to deduplicate). Since
+// migration 0132 this can only occur on the offer footer and the org benchmark:
+// a group row is built from per-recipient rows, and every manual-fallback visit
+// in this data sits on a stage that has none. Verified, not assumed -- of 938
+// sent stages, the 22 with sends but no clickers all have zero visits.
 function ManualMix() {
   return (
     <span
@@ -216,7 +222,7 @@ export default function OfferGroupReportPage() {
       header,
       ...(benchmark ? [line("All offers (org-wide)", benchmark as ViewRow)] : []),
       ...sorted.map((r) => line(r.group_name, r)),
-      ...(offerTotal ? [line("This offer · all groups", offerTotal as ViewRow)] : []),
+      ...(offerTotal ? [line("This offer · all groups", offerTotal)] : []),
     ];
     const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -292,10 +298,7 @@ export default function OfferGroupReportPage() {
             ) : null}
             {sorted.map((r) => (
               <tr key={r.group_id} className="border-t">
-                <td className="px-3 py-2">
-                  {r.group_name}
-                  {r.has_manual_stages ? <ManualMix /> : null}
-                </td>
+                <td className="px-3 py-2">{r.group_name}</td>
                 <MetricCells m={r} isGroup breakEven={breakEven} />
               </tr>
             ))}
@@ -303,7 +306,7 @@ export default function OfferGroupReportPage() {
               <tr className="border-t bg-muted/30 font-medium">
                 <td className="px-3 py-2">
                   This offer · all groups
-                  {data?.offerHasManual ? <ManualMix /> : null}
+                  {data?.offerTotals.has_manual_stages ? <ManualMix /> : null}
                 </td>
                 <MetricCells m={offerTotal} isGroup={false} breakEven={breakEven} />
               </tr>
@@ -319,16 +322,23 @@ export default function OfferGroupReportPage() {
         </table>
       </div>
 
+      {data && data.unattributedSends > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          <strong>{fmtInt(data.unattributedSends)} sends</strong>{" "}
+          ({((data.unattributedSends / Math.max(data.offerTotals.sends, 1)) * 100).toFixed(1)}%)
+          were recorded outside the app with no per-recipient detail, so they are in
+          the offer total but not in any group row.
+        </p>
+      ) : null}
+
       <p className="text-xs text-muted-foreground">
-        Clicks are counted once per person <em>at the grain of the row</em>: a contact
-        who clicked two campaigns of this offer is one clicker on the offer row, and
-        one in each group row they belong to. <strong>The Clicks column therefore does
-        not add up</strong> — the offer total is smaller than the sum of the groups,
-        because people are not additive across groups. Every other column is a plain
-        sum: a campaign targeting multiple groups is counted fully in each group, so
-        those columns may sum to more than the org-wide total. “Sent last 7/30/90d” and “Fresh
-        pool” count every in-app send (tracked or manual link mode); sends performed
-        entirely outside the app (count-only, no per-recipient record) aren’t included.
+        Every metric is counted <em>per recipient</em>: a group row covers the
+        messages actually sent to contacts in that group. Because a contact can
+        belong to several groups, <strong>the columns do not add up to the offer
+        total</strong> — the same person is one send on the offer row and one send
+        in each of their groups. “Sent last 7/30/90d” and “Fresh pool” count every
+        in-app send (tracked or manual link mode); sends performed entirely outside
+        the app aren’t included anywhere except the offer total.
       </p>
     </div>
   );

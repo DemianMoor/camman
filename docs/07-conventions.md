@@ -287,6 +287,20 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
   `oa.stage_id` instead and keeps these rows regardless. Not the grain
   difference the rest of this section describes — rows the group join can
   never reach at all.
+- **`offer_report_campaign_econ` and `offer_report_tracked_campaigns` must
+  carry `security_invoker = true`.** Without it the view runs as its owner
+  and RLS on the underlying tables does not apply, exposing every org's data
+  to anon/authenticated over PostgREST — the same class of ERROR-level
+  Supabase advisor finding migration `0113` originally closed (see the
+  Multi-tenancy section above). Migration `0113` set this on
+  `offer_report_campaign_econ`; migrations `0126` and `0128` each silently
+  reverted it by `DROP VIEW` + `CREATE VIEW` without carrying the option
+  forward, leaving that advisor ERROR live in production until migration
+  `0132` re-applied it and set it on `offer_report_tracked_campaigns` too.
+  **Any future `DROP VIEW` / `CREATE VIEW` on either object MUST re-apply
+  `security_invoker = true`, and `get_advisors` (type=security) should be
+  re-run after any view DDL** to confirm it didn't regress — don't rely on
+  memory that it was set once.
 
 ## Reports rollup (migration 0112, see [04-features/reports-rollup.md](04-features/reports-rollup.md))
 - **Bucketed by the SEND hour in ET, not the event hour.** Every metric (opt-outs, clicks, redirects, sales, cost) is attributed to the hour the message was SENT, so each rate is a batch rate ("of messages sent in hour H, X% opted out"). `date_trunc('hour', sent_at AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'` → the stored `bucket_start_utc`. Only ever done inside the bounded rolling-window build, never in a hot read.

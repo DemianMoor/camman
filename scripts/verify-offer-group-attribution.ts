@@ -150,39 +150,83 @@ async function main() {
   }
 
   // --------------------------------------------------------------- criterion 3a
-  // Σ footer == a LIVE per-org aggregate of offer_report_campaign_econ,
-  // asserted PER ORG. This is a SINGLE-SNAPSHOT comparison, not a cross-
-  // matview one: offer_report_offer_totals_mv's own `base` CTE is defined as
-  // exactly this aggregate (SUM(sends) FROM offer_report_campaign_econ WHERE
-  // offer_id IS NOT NULL GROUP BY org_id, offer_id) -- offer_report_campaign_econ
-  // is a plain VIEW, not a matview, so re-deriving it live and comparing still
-  // catches what 3a exists to catch (campaigns leaking out of the offer
-  // partition, dropped or duplicated offer rows in the totals matview) without
-  // depending on when two independently-scheduled matviews last refreshed.
+  // offer_report_offer_totals_mv is a MATERIALIZED view — frozen at its last
+  // refresh. offer_report_campaign_econ is a plain VIEW — computed LIVE, and
+  // its `sends` (stage_sends WHERE status='sent') keeps growing while
+  // production keeps sending (measured ~20/min average, 1,400–2,600/min
+  // during a send drain). An `===` between a frozen snapshot and a
+  // continuously-advancing live count cannot be made correct by swapping in a
+  // different live relation to compare against — that was the mistake in an
+  // earlier version of this criterion: it removed the dependency on ONE
+  // matview's refresh time (by comparing against a plain view) but left the
+  // other's, replacing a stale second side with a continuously-advancing one.
+  // This script's own header warns against exactly this class of mistake.
   //
-  // What this criterion does NOT do any more: assert footer + null-offer ==
-  // offer_report_org_summary_mv's benchmark as a pass/fail. That comparison
-  // crosses TWO independently-refreshed matviews with no guaranteed
-  // relationship in time. Migration 0132 does not rebuild
-  // offer_report_org_summary_mv, so immediately after apply the totals
-  // matview is seconds old while the summary matview holds the last cron
-  // snapshot -- up to 15h and tens of thousands of sends behind (the cron
-  // runs twice daily). Even against a freshly refreshed database the two
-  // matviews are rebuilt seconds apart while sends land continuously, so a
-  // real, non-zero difference is EXPECTED, not a defect. Asserting exact
-  // equality here was itself the mistake this rewrite fixes -- this script's
-  // own header warns against exactly this class of mistake. The benchmark is
-  // still read and printed below, as INFORMATIONAL context only, clearly
-  // separated from the pass/fail tally so it cannot be mistaken for one.
+  // What actually catches the defects 3a exists to catch — an offer/org row
+  // dropped or duplicated in the totals matview, or a campaign leaking across
+  // the offer_id partition — without depending on when either side was last
+  // computed:
+  //   (i)   the (org_id, offer_id) KEY SET of offer_report_offer_totals_mv
+  //         equals that of offer_report_campaign_econ WHERE offer_id IS NOT
+  //         NULL, checked in BOTH directions. A key set is a structural
+  //         property, not a moving count — it does not depend on how many
+  //         sends landed since either side was last computed.
+  //   (ii)  per org, footer_sum <= the live econ offer-scoped sum. The
+  //         matview is a frozen PREFIX of a monotonically growing live count
+  //         (sends are never un-sent), so this direction is stable no matter
+  //         how much time elapsed between the two reads — unlike `===`,
+  //         `<=` does not go stale. A violation means either data was
+  //         deleted from what offer_report_campaign_econ reads (sends is not
+  //         actually monotonic on this database) or the offer partition
+  //         genuinely leaked (the totals matview counted a send
+  //         offer_report_campaign_econ does not attribute to that offer) —
+  //         both worth failing on, neither explained by ordinary elapsed time.
+  //   (iii) no duplicate (org_id, offer_id) keys on the totals matview.
   //
-  // Offer count comes from the data, never a hardcoded 21. The row set is the
-  // UNION of org_ids across every source queried, not a LEFT JOIN driven off
-  // one table -- an org present in offer_report_offer_totals_mv (built fresh
-  // by the migration this script gates) but absent from
+  // The org benchmark (offer_report_org_summary_mv) is still read and printed
+  // below as INFORMATIONAL context, clearly separated from the pass/fail
+  // tally so it cannot be mistaken for one — it crosses TWO independently-
+  // refreshed matviews with no guaranteed relationship in time (migration
+  // 0132 does not rebuild offer_report_org_summary_mv, so immediately after
+  // apply the totals matview is seconds old while the summary matview holds
+  // the last cron snapshot, up to ~15h and tens of thousands of sends
+  // behind), so a non-zero diff there is EXPECTED, not a defect.
+  //
+  // Offer/org set comes from the data, never a hardcoded 21. The row set is
+  // the UNION of org_ids across every source queried, not a LEFT JOIN driven
+  // off one table — an org present in offer_report_offer_totals_mv (built
+  // fresh by the migration this script gates) but absent from
   // offer_report_campaign_econ's org set would otherwise vanish silently
   // instead of failing loudly. Do not "simplify" this back to a single-table
   // FROM.
-  console.log("\n=== 3a. Σ footer == live per-org offer_report_campaign_econ aggregate ===");
+  console.log("\n=== 3a. offer_report_offer_totals_mv vs live offer_report_campaign_econ: key set + monotonic bound ===");
+
+  const keyDiff = await q(sql`
+    SELECT 'totals_only' AS side, t.org_id, t.offer_id
+    FROM (SELECT DISTINCT org_id, offer_id FROM offer_report_offer_totals_mv) t
+    LEFT JOIN (
+      SELECT DISTINCT org_id, offer_id FROM offer_report_campaign_econ WHERE offer_id IS NOT NULL
+    ) e ON e.org_id = t.org_id AND e.offer_id = t.offer_id
+    WHERE e.org_id IS NULL
+    UNION ALL
+    SELECT 'econ_only' AS side, e.org_id, e.offer_id
+    FROM (SELECT DISTINCT org_id, offer_id FROM offer_report_campaign_econ WHERE offer_id IS NOT NULL) e
+    LEFT JOIN (SELECT DISTINCT org_id, offer_id FROM offer_report_offer_totals_mv) t
+      ON t.org_id = e.org_id AND t.offer_id = e.offer_id
+    WHERE t.org_id IS NULL
+    ORDER BY 1, 2, 3
+  `);
+  if (keyDiff.length > 0) console.table(keyDiff);
+  assert(
+    keyDiff.length === 0,
+    `offer_report_offer_totals_mv and offer_report_campaign_econ(offer_id IS NOT NULL) share the same ` +
+    `(org_id, offer_id) key set (${keyDiff.length} mismatched key(s)` +
+    (keyDiff.length > 0
+      ? `: ${keyDiff.map((k) => `${k.side} org=${k.org_id} offer=${k.offer_id}`).join(", ")}`
+      : "") +
+    `)`,
+  );
+
   const perOrg = await q(sql`
     WITH ids AS (
       SELECT org_id FROM offer_report_offer_totals_mv
@@ -222,18 +266,34 @@ async function main() {
     `totals matview covers ${totalOffers} offers across ${perOrg.length} orgs (asserted from data)`);
   for (const r of perOrg) {
     assert(
-      n(r.footer_sum) === n(r.econ_offer_sum),
-      `org ${r.org_id}: footer ${r.footer_sum} == live econ offer-scoped sum ${r.econ_offer_sum} ` +
-      `(same-snapshot check — offer partition is complete, no leakage/dupes)`,
+      n(r.footer_sum) <= n(r.econ_offer_sum),
+      `org ${r.org_id}: footer ${r.footer_sum} <= live econ offer-scoped sum ${r.econ_offer_sum} ` +
+      `(frozen prefix of a monotonically growing live count — a violation means deleted data or a leaked partition)`,
     );
   }
+
+  const dupes = (await q(sql`
+    SELECT count(*)::bigint AS total_rows, count(DISTINCT (org_id, offer_id))::bigint AS distinct_keys
+    FROM offer_report_offer_totals_mv
+  `))[0];
+  assert(
+    n(dupes.total_rows) === n(dupes.distinct_keys),
+    `offer_report_offer_totals_mv has no duplicate (org_id, offer_id) keys ` +
+    `(${dupes.total_rows} rows, ${dupes.distinct_keys} distinct)`,
+  );
+
   console.log("\n  --- below is INFORMATIONAL ONLY, not asserted, cannot fail this script ---");
   for (const r of perOrg) {
     const footerPlusNull = n(r.footer_sum) + n(r.econ_null_sum);
-    const diff = n(r.benchmark) - footerPlusNull;
+    const benchDiff = n(r.benchmark) - footerPlusNull;
     console.log(`  ℹ org ${r.org_id}: benchmark ${r.benchmark} vs footer+NULL-offer ${footerPlusNull} ` +
-                `(diff ${diff}) — offer_report_org_summary_mv and offer_report_offer_totals_mv refresh ` +
+                `(diff ${benchDiff}) — offer_report_org_summary_mv and offer_report_offer_totals_mv refresh ` +
                 `at different times, so a non-zero diff here is EXPECTED and is NOT a failure.`);
+    const econDelta = n(r.econ_offer_sum) - n(r.footer_sum);
+    const econDeltaPct = n(r.footer_sum) > 0 ? (econDelta / n(r.footer_sum)) * 100 : null;
+    console.log(`  ℹ org ${r.org_id}: footer ${r.footer_sum} vs live econ offer-scoped sum ${r.econ_offer_sum} ` +
+                `(delta +${econDelta}, ${econDeltaPct == null ? "n/a" : econDeltaPct.toFixed(3) + "%"}) — sends land ` +
+                `continuously between the matview's refresh and this read, so a positive delta is expected, not a failure.`);
   }
 
   // --------------------------------------------------------------- criterion 3b
@@ -279,6 +339,10 @@ async function main() {
   // are sends - attributable_sends over the same campaign set). No assertion
   // here on purpose — a particular split is not something this script should
   // pin; it exists to be read, not to pass or fail.
+  //
+  // Keyed on (org_id, offer_id), matching criterion 6 below — offer_id alone
+  // is not unique across orgs, and grouping by offer_id alone would conflate
+  // two different orgs' offer 96 into one row.
   console.log("\n=== 3b (decomposition). unattributed_sends by cause, per offer ===");
   const decomposition = await q(sql`
     WITH camp AS (
@@ -314,7 +378,7 @@ async function main() {
       GROUP BY cs.campaign_id
     ),
     classified AS (
-      SELECT camp.offer_id,
+      SELECT camp.org_id, camp.offer_id,
         CASE
           WHEN NOT camp.has_stage_sends THEN 'no_per_recipient_rows'
           WHEN camp.link_mode <> 'tracked' THEN 'non_tracked'
@@ -330,14 +394,14 @@ async function main() {
       FROM camp
       LEFT JOIN attributable_by_campaign ab ON ab.campaign_id = camp.campaign_id
     )
-    SELECT offer_id,
+    SELECT org_id, offer_id,
       COALESCE(sum(residual) FILTER (WHERE bucket = 'no_per_recipient_rows'), 0)::bigint AS no_per_recipient_rows,
       COALESCE(sum(residual) FILTER (WHERE bucket = 'non_tracked'), 0)::bigint           AS non_tracked,
       COALESCE(sum(residual) FILTER (WHERE bucket = 'tracked_empty_groups'), 0)::bigint  AS tracked_empty_groups,
       COALESCE(sum(residual) FILTER (WHERE bucket = 'remainder'), 0)::bigint             AS remainder,
       sum(residual)::bigint AS total_residual
     FROM classified
-    GROUP BY offer_id
+    GROUP BY org_id, offer_id
     ORDER BY total_residual DESC
   `);
   console.table(decomposition);

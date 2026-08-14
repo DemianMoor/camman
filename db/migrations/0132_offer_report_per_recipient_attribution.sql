@@ -82,10 +82,15 @@
 -- totals. 33 of 80 cells carried that mixed-unit flag before this.
 --
 -- ~4.9% of sends (152,929 of 3,135,015 on this basis) cannot reach any group
--- row -- sends performed entirely outside the app with a hand-recorded
--- sms_count. 6 of 21 offers are 100% external and now render NO group rows.
--- `offer_report_offer_totals_mv` exists per offer regardless, so the footer and
--- the "recorded outside the app" note still render for them.
+-- row. The decomposition in scripts/verify-offer-group-attribution.ts
+-- (criterion 3b) measures the causes rather than assuming a single one:
+-- 152,927 have NO per-recipient stage_sends row at all (sends performed
+-- entirely outside the app with a hand-recorded sms_count) and 2 come from a
+-- tracked campaign whose audience_contact_group_ids was empty (targeted no
+-- groups, so its per-recipient rows have nothing to attribute to). 6 of 21
+-- offers are 100% external and now render NO group rows. `offer_report_offer_totals_mv`
+-- exists per offer regardless, so the footer and the "recorded outside the
+-- app" note still render for them.
 --
 -- ATTRIBUTABLE REVENUE AND SALES -- same basis gap as sends, made measurable.
 -- `revenue`/`sales` in `base` come from `offer_report_campaign_econ`, sourced

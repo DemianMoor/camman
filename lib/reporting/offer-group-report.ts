@@ -171,19 +171,33 @@ export type RefreshDurations = {
 // snapshot (twice-daily cron, so potentially days) instead of just one.
 // Measured 2026-08-13: summary ~11s, group ~25s, totals ~4.5s -- ~40.5s
 // against a 300s ceiling.
+//
+// Each view's report_refresh_log row is stamped immediately after that
+// view's OWN refresh succeeds, not once at the end after all three. If the
+// LAST refresh throws -- precisely the code-before-migration case the reorder
+// above exists for -- the two that DID refresh are correctly marked fresh
+// instead of the page reporting "a refresh was missed" over data that is
+// actually seconds old.
 export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
   const t0 = Date.now();
   await db.execute(sql`refresh materialized view concurrently offer_report_org_summary_mv`);
   const t1 = Date.now();
+  await db.execute(sql`
+    update report_refresh_log set refreshed_at = now() where view_name = 'offer_report_org_summary_mv'
+  `);
+
   await db.execute(sql`refresh materialized view concurrently offer_group_report_mv`);
   const t2 = Date.now();
+  await db.execute(sql`
+    update report_refresh_log set refreshed_at = now() where view_name = 'offer_group_report_mv'
+  `);
+
   await db.execute(sql`refresh materialized view concurrently offer_report_offer_totals_mv`);
   const t3 = Date.now();
   await db.execute(sql`
-    update report_refresh_log set refreshed_at = now()
-    where view_name in ('offer_group_report_mv', 'offer_report_org_summary_mv',
-                        'offer_report_offer_totals_mv')
+    update report_refresh_log set refreshed_at = now() where view_name = 'offer_report_offer_totals_mv'
   `);
+
   return {
     summaryMs: t1 - t0,
     groupMs: t2 - t1,

@@ -72,14 +72,20 @@ the last 90 days, across all offers and both link modes, with no opt-out
 filter — a rule that happened to overlap with the old Sent 7d/30d/90d
 definition and no longer does.
 
-**Every metric is per-recipient, and the columns do not foot.** A group row
-covers the messages actually sent to contacts in that group. Because a contact
-can belong to several groups, the same send appears in each of their group rows —
-so the columns sum to more than the offer footer (+18.7% on sends, +37.5% on
-revenue for offer 96 as of 2026-08-13). The footer is read at offer grain from
-`offer_report_offer_totals_mv`, never summed from the rows. This is the same
-dedup-at-display-grain rule migration 0128 applied to clicks, extended to every
-column by migration 0132.
+**Every metric on a group row is per-recipient, and group rows do not foot to
+the offer footer or org benchmark** — those two use a different, campaign-grain
+/ provider-aggregate basis instead (`offer_report_offer_totals_mv` /
+`offer_report_org_summary_mv`, sourced from `offer_report_campaign_econ`).
+Because a contact can belong to several groups, the same send appears in each
+of their group rows, which usually pushes the group columns' sum above the
+offer footer (+18.7% on sends, +37.5% on revenue for offer 96 as of
+2026-08-13) — but the direction isn't guaranteed: six of 21 offers are 100%
+external and render no group rows at all, so their columns sum to 0 against a
+non-zero footer, and group opt-outs can fall short of the footer because
+`opt_out_attributions.stage_send_id` is nullable. The footer is read at offer
+grain from `offer_report_offer_totals_mv`, never summed from the rows. This is
+the same dedup-at-display-grain rule migration 0128 applied to clicks,
+extended to every column by migration 0132.
 
 **Sends recorded outside the app cannot reach a group row.** ~4.9% of sends have
 no per-recipient row (an operator hand-recorded `campaign_stages.sms_count`).
@@ -134,9 +140,22 @@ Full column lists and the no-RLS note are in
   outside the app has zero group rows and still needs a footer.
 - `refreshOfferGroupReport()` — runs `REFRESH MATERIALIZED VIEW CONCURRENTLY`
   on all three matviews (separate statements — `CONCURRENTLY` cannot run
-  inside an explicit transaction), `offer_report_offer_totals_mv` first so the
-  footer is never newer than the rows a reader is looking at, then stamps all
-  three `report_refresh_log` rows with `now()`.
+  inside an explicit transaction), `offer_report_offer_totals_mv` **last** —
+  not for footer freshness, but for deploy-order blast radius: this code and
+  migration 0132 are meant to deploy together (migration first, per
+  [CLAUDE.md](../../CLAUDE.md) §14), but if this code ever ships before 0132
+  applies, the `offer_report_offer_totals_mv` refresh is the statement that
+  throws (relation does not exist). With it last, the two pre-existing
+  matviews (`offer_report_org_summary_mv`, `offer_group_report_mv`) still
+  refresh and stay live before the throw ends the invocation — refreshing it
+  first would freeze all three reports at their last snapshot (twice-daily
+  cron, so potentially days) instead of just one. One side effect: the skew
+  now runs the other way — the footer can be a few seconds *newer* than the
+  group rows beside it, not older — an accepted consequence of the ordering,
+  not a defect to "fix" back. Each matview's `report_refresh_log` row is
+  stamped with `now()` immediately after that matview's own refresh succeeds
+  (not once at the end after all three), so a mid-sequence throw leaves only
+  the not-yet-refreshed matviews' rows unstamped.
 
 ## Refresh (twice-daily cron)
 
@@ -205,13 +224,21 @@ pin rows or foot a table; justified by the small per-offer row count).
 - **Header:** offer name, "data as of {formatCampaignDateTime(refreshedAt)}", a
   Refresh button (re-fetches the current matview snapshot — does **not**
   rebuild it), a CSV export button (client-side, small dataset).
-- **Footnotes (two, neither a bug):** (1) every metric is per-recipient and the
-  group columns do not foot to the offer total — a contact in several groups is
-  one send on the offer row and one send in each of their groups; (2) when
-  `unattributedSends > 0`, a note beneath the table states the count and % of
-  sends that could not be attributed to any group (recorded outside the app, or
-  from a non-tracked/untargeted campaign) — they sit in the offer total but in
-  no group row.
+- **Footnotes (three, neither a bug):** (1) when `unattributedSends > 0`, a
+  note beneath the table states the count and % of sends that could not be
+  attributed to any group (recorded outside the app, or from a
+  non-tracked/untargeted campaign) — they sit in the offer total but in no
+  group row; (2) when the offer has group rows and revenue and/or sales, a
+  coverage note states what % of the footer's revenue/sales the group rows'
+  per-recipient basis reaches (`attributable_revenue` / `attributable_sales`
+  on `offer_report_offer_totals_mv`, migration 0132) and whether that reads
+  low, high, or matches exactly — derived from the actual percentage, not
+  assumed, since the two bases aren't a whole-and-part pair and a figure above
+  100% is representable; (3) a closing note explaining group rows are counted
+  per recipient while the offer footer and org benchmark use a campaign-grain
+  basis instead, so the count and money columns do not add up to the offer
+  total — a contact in several groups is one send on the offer row and one
+  send in each of their groups.
 
 ## Files involved
 

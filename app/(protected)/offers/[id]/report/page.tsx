@@ -137,6 +137,16 @@ function netRpmClass(v: number | null, breakEven: number | null) {
 function ooClass(v: number | null) {
   return v == null ? "" : v <= 2 ? "text-emerald-600" : v <= 3 ? "text-amber-600" : "text-destructive";
 }
+// "read low" / "read high" / "match" is derived from the actual ratio, never
+// assumed: attributable_revenue/attributable_sales and revenue/sales are not
+// a whole-and-part pair (different sources, not a subset — see the comment on
+// OfferTotals in lib/reporting/offer-group-report.ts), so a coverage figure
+// above 100% is representable and does happen.
+function coverageWord(pct: number): string {
+  if (pct > 100) return "read high";
+  if (pct < 100) return "read low";
+  return "match exactly";
+}
 
 function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived; isGroup: boolean; breakEven: number | null }) {
   return (
@@ -207,11 +217,13 @@ export default function OfferGroupReportPage() {
   // Group rows compute revenue/sales per recipient (stage_sends.sale_revenue /
   // converted_at); the footer and benchmark use Keitaro's per-stage aggregate
   // instead (see attributable_revenue/attributable_sales on offer_report_offer_totals_mv,
-  // migration 0132). Coverage is <100%, so every group row's RPM/EPC/Net RPM
-  // reads a little low next to the footer/benchmark beside it — this makes
-  // that gap visible instead of silent. Both divisions guarded against a zero
-  // denominator independently: revenue and sales can each be zero while the
-  // other is not.
+  // migration 0132), so coverage is usually <100% and a group row's RPM/EPC/
+  // Net RPM usually reads a little low next to the footer/benchmark beside it
+  // — this makes that gap visible instead of silent. Revenue and sales are
+  // guarded against a zero denominator independently (each can be zero while
+  // the other is not), and each is rendered as its own conditional clause
+  // below for the same reason — an offer with sales and zero revenue (or vice
+  // versa) still has something to show.
   const revenueCoveragePct =
     data && data.offerTotals.revenue > 0
       ? (data.offerTotals.attributable_revenue / data.offerTotals.revenue) * 100
@@ -220,6 +232,15 @@ export default function OfferGroupReportPage() {
     data && data.offerTotals.sales > 0
       ? (data.offerTotals.attributable_sales / data.offerTotals.sales) * 100
       : null;
+
+  const coverageParts = [
+    revenueCoveragePct != null
+      ? `${fmtPct(revenueCoveragePct)} of this offer’s revenue (${coverageWord(revenueCoveragePct)})`
+      : null,
+    salesCoveragePct != null
+      ? `${fmtPct(salesCoveragePct)} of sales (${coverageWord(salesCoveragePct)})`
+      : null,
+  ].filter((p): p is string => p != null);
 
   function toggleSort(key: SortKey) {
     if (key === sortBy) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -352,13 +373,11 @@ export default function OfferGroupReportPage() {
         </p>
       ) : null}
 
-      {data && revenueCoveragePct != null ? (
+      {data && data.rows.length > 0 && coverageParts.length > 0 ? (
         <p className="text-xs text-muted-foreground">
-          Group rows cover {fmtPct(revenueCoveragePct)} of this offer’s revenue
-          {salesCoveragePct != null ? ` and ${fmtPct(salesCoveragePct)} of sales` : ""}{" "}
-          on a per-recipient basis; the footer and benchmark beside them use
-          the provider’s per-stage totals instead, so group rows read
-          slightly low against them.
+          Group rows cover {coverageParts.join(" and ")} on a per-recipient
+          basis; the footer and benchmark beside them use the provider’s
+          per-stage totals instead.
         </p>
       ) : null}
 
@@ -369,9 +388,9 @@ export default function OfferGroupReportPage() {
         sends are counted per campaign (tracked → stage_sends count, manual →
         recorded sms_count), and revenue/sales come from the provider’s
         per-stage totals, not individual recipients. Because a contact can
-        belong to several groups, <strong>the group columns sum to more than
-        the offer total</strong> — the same send is counted once in each of
-        that contact’s group rows. “Sent last 7/30/90d” only counts
+        belong to several groups, <strong>the count and money columns do not
+        add up to the offer total</strong> — the same send is counted once in
+        each of that contact’s group rows. “Sent last 7/30/90d” only counts
         tracked-campaign sends to this offer’s targeted groups; “Fresh pool”
         counts across every offer and both link modes, independent of
         tracking.

@@ -2,6 +2,11 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 - A brand may have more than one short domain (migration 0136, Q0) - docs/03-data-model.md
+- Drops short_domains_brand_id_uniq (0052). That constraint, not any hardcoded hostname, is what made the short domain feel fixed: short_domains, links.short_domain_id and app/r/[code] were already domain-agnostic (the redirect resolves by globally-unique code and never reads the Host header).
+- Removes a restriction; touches no rows. The single row and all 3,197,988 links verified unchanged after apply.
+- Behaviour unchanged today: kickoff's pick is already deterministic and status-scoped (WHERE brand_id = .. AND status = 'active' ORDER BY created_at, id LIMIT 1), so one row per brand still resolves identically - and B1's future pending rows are excluded by a clause that already exists.
+- The cross-brand guard short_domains_org_id_domain_unique (org_id, domain) STAYS: two brands must never share a hostname.
 2026-08-17 - campaign segments INTERSECT instead of UNION + segment-page counts exclude opt-outs - CLAUDE.md, docs/07-conventions.md, docs/04-features/audience-snapshot.md, docs/04-features/audience-segments.md
 - Selecting 2+ include-segments UNION'd them, so adding a "filter-shaped" segment (only rule an `is_not`, matching nearly the whole org) GREW the audience: 44,480 -> 507,870 measured. `buildAudienceSourceClause` is shared with `snapshotAudience`, so activation would have frozen and sent to the inflated pool - a live-send hazard, not a display bug. Segments now INTERSECT; adding one can only narrow. UNION still lives inside a segment (rule combinator `or`).
 - Two independent implementations had to change together: the INTERSECT chain in `buildAudienceSourceClause` (snapshot + draft-stage counts) and `previewAudience`, which can no longer `bool_or` a `from_segment` flag - it tags each branch with its ordinal and tests `segments_matched = <n>`. Drift between them would mean the preview no longer predicts what activation freezes.

@@ -133,6 +133,53 @@ async function main() {
   `)) as unknown as { n: number }[];
   check("rollback left no override behind", left[0].n === 0, `${left[0].n} phone(s) with an override`);
 
+  // ── Brand coherence: a cross-brand assignment must be REFUSED ──────────────
+  //
+  // Not a neutral choice. Click attribution and per-brand reporting key off the
+  // domain, so pointing one brand's number at another brand's host silently
+  // credits one brand's engagement to the other and drags sending reputation
+  // across. The guard is exercised directly (pure function, no HTTP) so the
+  // refusal is proven rather than inferred from the UI clearing the field.
+  console.log("\nBrand coherence is enforced server-side:");
+  {
+    const { verifyShortDomainAssignable } = await import("@/lib/providers/short-domain-assignment");
+    const d = (await db.execute(sql`
+      SELECT id, domain, brand_id FROM short_domains
+      WHERE org_id = ${orgId} AND status = 'active' ORDER BY id LIMIT 1
+    `)) as unknown as { id: number; domain: string; brand_id: number }[];
+    const other = brands.find((b) => b.id !== d[0]?.brand_id);
+
+    if (!d[0] || !other) {
+      check("corpus supports the cross-brand case", false,
+            "need one active domain and a second brand to prove the refusal");
+    } else {
+      const mismatch = await verifyShortDomainAssignable(orgId, d[0].id, other.id);
+      check(
+        "domain from another brand is REFUSED",
+        !mismatch.ok && mismatch.reason === "brand_mismatch",
+        `domain ${d[0].domain} (brand ${d[0].brand_id}) onto a brand-${other.id} number -> ${mismatch.ok ? "ACCEPTED" : mismatch.reason}`,
+      );
+      const matching = await verifyShortDomainAssignable(orgId, d[0].id, d[0].brand_id);
+      check(
+        "...while the SAME domain on its OWN brand is accepted (not a blanket refusal)",
+        matching.ok,
+        `domain ${d[0].domain} onto a brand-${d[0].brand_id} number -> ${matching.ok ? "accepted" : matching.reason}`,
+      );
+      const noBrand = await verifyShortDomainAssignable(orgId, d[0].id, null);
+      check(
+        "a number with NO brand cannot carry an override",
+        !noBrand.ok && noBrand.reason === "brand_mismatch",
+        `brandless number -> ${noBrand.ok ? "ACCEPTED" : noBrand.reason}`,
+      );
+      const cleared = await verifyShortDomainAssignable(orgId, null, other.id);
+      check(
+        "clearing the override (null) is always allowed",
+        cleared.ok,
+        `null -> ${cleared.ok ? "accepted" : cleared.reason}`,
+      );
+    }
+  }
+
   console.log(failures === 0 ? "\nALL PASS\n" : `\n${failures} FAILURE(S)\n`);
   await db.$client.end({ timeout: 5 });
   process.exit(failures === 0 ? 0 : 1);

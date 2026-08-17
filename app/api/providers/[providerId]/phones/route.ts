@@ -209,7 +209,11 @@ export async function POST(
   // uses. Org ownership is the multi-tenancy invariant; the active-status check
   // keeps a `pending` B1 domain off a live number, which would mint links under
   // a host that doesn't resolve — dead clicks with no error anywhere.
-  const sdCheck = await verifyShortDomainAssignable(orgId, parsed.data.short_domain_id);
+  const sdCheck = await verifyShortDomainAssignable(
+    orgId,
+    parsed.data.short_domain_id,
+    parsed.data.brand_id ?? null,
+  );
   if (!sdCheck.ok) {
     return apiError(400, sdCheck.message, API_ERROR_CODES.VALIDATION, {
       field: "short_domain_id",

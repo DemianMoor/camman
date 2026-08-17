@@ -147,7 +147,39 @@ export async function PATCH(
   // multi-tenancy invariant; the active-status check is what keeps a `pending`
   // B1 domain from being assigned to a live number, which would mint links
   // under a host that doesn't resolve — dead clicks, no error anywhere.
-  const sdCheck = await verifyShortDomainAssignable(orgId, editable.short_domain_id);
+  // Judge against the EFFECTIVE brand: a PATCH may move the number to a new
+  // brand and set an override in the same request, and the domain has to match
+  // where the number is going, not where it was.
+  //
+  // Only loaded when an override is actually in play, so the common PATCH (cost,
+  // rate, dashboard) pays no extra query.
+  let effectiveBrandId: number | null = null;
+  if (editable.short_domain_id != null) {
+    if (editable.brand_id !== undefined) {
+      effectiveBrandId = editable.brand_id;
+    } else {
+      const cur = await db
+        .select({ brand_id: provider_phones.brand_id })
+        .from(provider_phones)
+        .where(
+          and(
+            eq(provider_phones.id, phid),
+            eq(provider_phones.org_id, orgId),
+            eq(provider_phones.provider_id, pid),
+          ),
+        )
+        .limit(1);
+      if (!cur[0]) {
+        return apiError(404, "Phone not found", API_ERROR_CODES.NOT_FOUND, { entity: "provider_phone" });
+      }
+      effectiveBrandId = cur[0].brand_id;
+    }
+  }
+  const sdCheck = await verifyShortDomainAssignable(
+    orgId,
+    editable.short_domain_id,
+    effectiveBrandId,
+  );
   if (!sdCheck.ok) {
     return apiError(400, sdCheck.message, API_ERROR_CODES.VALIDATION, {
       field: "short_domain_id",

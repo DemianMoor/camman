@@ -22,20 +22,39 @@ import { short_domains } from "@/db/schema";
 //   no error anywhere. kickoff applies the same `status = 'active'` gate at send
 //   time; this stops the bad assignment being stored in the first place.
 
+//   BRAND COHERENCE stops one brand's SMS traffic minting under another brand's
+//   host. That is not a neutral choice: click attribution and per-brand
+//   reporting key off the domain, so a cross-brand assignment silently credits
+//   one brand's engagement to another, and drags one brand's sending reputation
+//   onto the other's hostname. Nobody needs it. If a real case ever appears the
+//   check gets lifted deliberately, rather than the hole sitting open by default.
+
 export type ShortDomainAssignmentResult =
   | { ok: true }
-  | { ok: false; reason: "not_found" | "not_active"; message: string };
+  | { ok: false; reason: "not_found" | "not_active" | "brand_mismatch"; message: string };
 
 // `null` clears the override (back to the brand default) and is always allowed —
 // it can only ever widen what mints successfully, never break it.
+//
+// `phoneBrandId` is the phone's EFFECTIVE brand for this request: the value
+// being set on a create or a brand-changing update, otherwise the row's current
+// brand. Callers must resolve that before calling — a PATCH that changes
+// brand_id and short_domain_id together has to be judged against the NEW brand,
+// not the old one.
 export async function verifyShortDomainAssignable(
   orgId: string,
   shortDomainId: number | null | undefined,
+  phoneBrandId: number | null | undefined,
 ): Promise<ShortDomainAssignmentResult> {
   if (shortDomainId == null) return { ok: true };
 
   const rows = await db
-    .select({ id: short_domains.id, status: short_domains.status, domain: short_domains.domain })
+    .select({
+      id: short_domains.id,
+      status: short_domains.status,
+      domain: short_domains.domain,
+      brand_id: short_domains.brand_id,
+    })
     .from(short_domains)
     .where(and(eq(short_domains.id, shortDomainId), eq(short_domains.org_id, orgId)))
     .limit(1);
@@ -51,6 +70,18 @@ export async function verifyShortDomainAssignable(
       ok: false,
       reason: "not_active",
       message: `"${row.domain}" isn't active yet. Verify it resolves to this app before assigning it to a number.`,
+    };
+  }
+  // A number with no brand cannot coherently carry an override: short_domains
+  // rows always belong to a brand, so there is nothing to match against.
+  if (phoneBrandId == null || row.brand_id !== phoneBrandId) {
+    return {
+      ok: false,
+      reason: "brand_mismatch",
+      message:
+        phoneBrandId == null
+          ? `"${row.domain}" belongs to a brand, so assign this number to that brand first.`
+          : `"${row.domain}" belongs to a different brand than this number. Links would mint under a host the number's brand doesn't own, splitting click attribution.`,
     };
   }
   return { ok: true };

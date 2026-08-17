@@ -321,6 +321,24 @@ export const sms_providers = pgTable(
     send_paused: boolean("send_paused").notNull().default(false),
     send_paused_reason: text("send_paused_reason"),
     send_paused_at: timestamp("send_paused_at", { withTimezone: true }),
+    // DELIBERATE OPERATOR POSTURE (migration 0138) — "should this account be
+    // sending right now", answered by a human. Defaults true so every existing
+    // row keeps today's behaviour; toggled from /settings/providers through its
+    // own audited endpoint, never the bulk provider form (a gate that fails
+    // OPEN cannot live on a whole-object PATCH — see docs/07-conventions.md).
+    //
+    // ⚠️ Three distinct things, never collapse them:
+    //   supports_api_send — CAPABILITY: can this row send over an API at all.
+    //   sends_enabled     — POSTURE:    should it, right now (this column).
+    //   send_paused       — LATCH:      an automated breaker tripped; needs a
+    //                                   conscious human resume.
+    sends_enabled: boolean("sends_enabled").notNull().default(true),
+    // Per-provider STOP text (migration 0138). NULL on every row today and NOT
+    // yet read by the send path — the precedence chain
+    // (provider_phones.opt_out_footer > this > campaign_stages.stop_text >
+    // 'Stop to END') lands with card 869ej8r1y / Q3. NULL everywhere is what
+    // keeps rendering byte-identical until then.
+    opt_out_footer: text("opt_out_footer"),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -2870,9 +2888,14 @@ export const send_circuit_events = pgTable(
   (table) => [
     index("send_circuit_events_provider_idx").on(table.provider_id, table.created_at),
     index("send_circuit_events_org_id_idx").on(table.org_id),
+    // Mirrors the LIVE constraint, widened twice since 0058: migration 0131
+    // added the supports_api_send go-live verbs. (This declaration had drifted
+    // — it still read `('paused','resumed')` after 0131 shipped. Migrations are
+    // hand-authored here, so nothing regenerates this; keep it in step by hand
+    // whenever the CHECK is widened.)
     check(
       "send_circuit_events_event_check",
-      sql`${table.event} IN ('paused', 'resumed')`,
+      sql`${table.event} IN ('paused', 'resumed', 'api_send_enabled', 'api_send_disabled')`,
     ),
   ],
 );

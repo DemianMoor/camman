@@ -1,0 +1,37 @@
+-- R1. Per-provider sending posture (`sends_enabled`) + per-provider opt-out
+-- footer (`opt_out_footer`).
+--
+-- STRICTLY ADDITIVE AND INERT. Nothing reads either column at the moment this
+-- lands; R2 wires the enforcement and R4 the admin panel. Applying this alone
+-- changes no behaviour whatsoever.
+--
+-- `sends_enabled` — DELIBERATE OPERATOR POSTURE. "Should this provider be
+-- sending right now?", answered by a human. NOT NULL DEFAULT true so every one
+-- of the 8 existing rows keeps today's behaviour byte-for-byte; a provider only
+-- stops sending when someone deliberately turns it off.
+--
+-- ⚠️ It is NOT `send_paused` and must never be collapsed into it.
+--     send_paused    = the AUTO-TRIPPED emergency latch (failure spikes,
+--                      opt-out-rate breaker, DLR reject rate). Requires a
+--                      conscious human resume; audited as 'paused'/'resumed'.
+--     sends_enabled  = a human's considered posture for this account.
+-- Keeping them apart is the whole point: merged, a breaker trip and an operator
+-- decision become indistinguishable in the audit trail, and "why did this stop
+-- sending" stops having an answer.
+--
+-- ⚠️ It is also NOT `supports_api_send`, which is a CAPABILITY ("can this row
+-- send over an API at all"), not a posture. A `supports_api_send=false` row is
+-- sent through by hand; a `sends_enabled=false` row is one we could send
+-- through and have chosen not to.
+--
+-- `opt_out_footer` — per-provider STOP text, ships NULL on every row.
+-- Deliberately NOT consumed by the send path here: the precedence chain
+-- (number > provider > stage.stop_text > 'Stop to END') is card 869ej8r1y / Q3.
+-- Until then every message keeps rendering from the stage's stop_text exactly
+-- as it does today, which is what NULL on every row guarantees.
+--
+-- No lock concern: sms_providers is an 8-row registry table. Both columns are
+-- added in one statement so the table is rewritten at most once.
+ALTER TABLE public.sms_providers
+  ADD COLUMN IF NOT EXISTS sends_enabled boolean NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS opt_out_footer text;

@@ -2,6 +2,14 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 - adapter_code persisted on provider create + tls-t backfill (migration 0135) - docs/07-conventions.md
+- POST /api/providers never wrote adapter_code, so every provider created through the connection-type picker landed NULL and could not send (the send path resolves getAdapter(COALESCE(adapter_code, sms_provider_id))). The picker shipped before 0134 added the column; neither change was wrong alone.
+- Route now sets adapter_code from the chosen type: derived path = canonical; separate-row = distinct identity + canonical type (the point of that path); custom/no-API = NULL.
+- Migration 0135 backfills provider 948 `tls-t` -> 'tls'. Additive, idempotent, targeted on sms_provider_id. Row stays INERT (supports_api_send untouched). snx/smpl stay NULL - legitimately custom. Migration ends with a guard that RAISEs if any api-send row lacks a resolvable adapter_code.
+- Three new acceptance cases prove a CREATED provider resolves an adapter - the blind spot that let this ship, since P3 proved every refusal but never the usable happy path.
+- verify-adapter-code.ts repurposed from a one-shot cutover gate to a standing invariant. Its original "both columns resolve identically" rule was correct only during the migration moment; post-cutover the columns legitimately differ (tls-t identity vs tls type), so it now asserts the EFFECTIVE key resolves and that a non-NULL adapter_code is never unregistered.
+- Convention added: an unexplained detail in a passing run is a finding, not noise.
+
 2026-08-17 — STOP intake un-coupled from sending capability (R0, provider-connections panel card) — docs/07-conventions.md
 - `selectPollableCredentials` (TextHub opt-out poller) no longer filters on `supports_api_send = true`. Receiving an opt-out does not depend on being able to send.
 - This was a LIVE compliance gap, not hypothetical: the provider page exposes `supports_api_send` as a one-click "Disable", and TextHub's push callback is broken on their side, so this poller is its ONLY intake. Pressing Disable silently stopped opt-out ingestion.

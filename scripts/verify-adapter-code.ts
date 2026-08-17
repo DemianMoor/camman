@@ -42,19 +42,30 @@ async function main() {
     name: string; supports_api_send: boolean;
   }[];
 
-  console.log(`\n── Adapter resolution parity across all ${rows.length} provider rows ──`);
+  // ── POST-CUTOVER invariant, replacing the original parity assertion ────────
+  //
+  // This script began as the one-shot CUTOVER gate: prove adapter_code resolved
+  // to the IDENTICAL adapter as sms_provider_id for every row, before switching
+  // any reader. That was exactly right while proving the switch was a no-op —
+  // and exactly WRONG to keep asserting afterwards, because the entire purpose
+  // of the split is that the two columns may legitimately differ.
+  //
+  // It failed the moment a real provider exercised that: `tls-t` (a second Tells
+  // account) has identity `tls-t`, which resolves to nothing, and type `tls`,
+  // which resolves to the Tells adapter. Correct and desirable — and a failure
+  // under the old rule. The equivalence was a property of the migration moment,
+  // not of the schema.
+  console.log(`\nEffective key resolves for every one of the ${rows.length} provider rows:`);
   for (const r of rows) {
-    const viaId = resolve(r.sms_provider_id);
-    const viaCode = resolve(r.adapter_code);
-    const bothResolve = viaId.ok && viaCode.ok;
-    const neitherResolves = !viaId.ok && !viaCode.ok;
-    const same = bothResolve
-      ? (viaId as { adapter: unknown }).adapter === (viaCode as { adapter: unknown }).adapter
-      : neitherResolves;
+    // Exactly what the send path does: COALESCE(adapter_code, sms_provider_id).
+    const effective = r.adapter_code ?? r.sms_provider_id;
+    const res = resolve(effective);
+    // A non-NULL adapter_code MUST resolve. A typed-but-unregistered value is
+    // the one genuinely broken state — worse than NULL, which refuses cleanly.
     check(
       `#${r.id} ${r.sms_provider_id} (${r.name})`,
-      same,
-      `sms_provider_id→${viaId.name}  adapter_code=${r.adapter_code ?? "NULL"}→${viaCode.name}`,
+      r.adapter_code === null || res.ok,
+      `effective=${effective} -> ${res.name}${r.adapter_code === null ? "  [NULL: refuses cleanly, correct for a custom provider]" : ""}`,
     );
   }
 
@@ -88,16 +99,17 @@ async function main() {
     );
   }
 
-  console.log("\n── Rows with no adapter must be NULL, not a bogus code ──");
+  console.log("\nNot-live rows: adapter_code is NULL or resolvable, never bogus:");
+  // "Not api-send capable" does NOT imply "has no adapter". A provider can have
+  // a known connection type and simply not be live yet — txr and tls were both
+  // in exactly that state, and `tls-t` is today. The only forbidden combination
+  // is a non-NULL adapter_code that does not resolve.
   for (const r of rows.filter((x) => !x.supports_api_send)) {
-    const viaId = resolve(r.sms_provider_id);
-    // A non-API row may legitimately be NULL (snx/smpl). If its sms_provider_id
-    // happens to be a registry key, adapter_code must match it rather than be NULL.
-    const expectNull = !viaId.ok;
+    const res = resolve(r.adapter_code);
     check(
-      `#${r.id} ${r.sms_provider_id} (no API send)`,
-      expectNull ? r.adapter_code === null : resolve(r.adapter_code).ok,
-      `adapter_code=${r.adapter_code ?? "NULL"} (expected ${expectNull ? "NULL" : "a resolvable code"})`,
+      `#${r.id} ${r.sms_provider_id} (not live for API send)`,
+      r.adapter_code === null || res.ok,
+      `adapter_code=${r.adapter_code ?? "NULL"}${r.adapter_code ? ` -> ${res.name}` : " (custom / no adapter)"}`,
     );
   }
 

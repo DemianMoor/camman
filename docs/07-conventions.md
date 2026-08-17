@@ -422,6 +422,19 @@ Every pending poll takes the fallback, the loop sees an empty result forever, an
 
 Use `gh pr view <n> --json statusCheckRollup,mergeStateStatus`, which exits zero regardless of check state, and **report every terminal state, not just success** — a watcher that only greps for green is silent through a failure, and silence reads as "still running". See the worktree/monitor guidance above for the general form.
 
+## An unexplained detail in a PASSING run is a finding, not noise
+
+A suite that prints `ALL PASS` is not a licence to stop reading it. Chase any number in the output you cannot immediately account for.
+
+Two defects in this workstream were found exactly that way, and neither would have been caught by the assertions:
+
+- A count line read **3** where the codebase said 2. The suite passed — the count was incidental detail printed for context. Chasing it surfaced an unknown 8th provider row, and through it the fact that **`POST /api/providers` never wrote `adapter_code`**: every provider created through the connection-type picker was landing unsendable, because the picker shipped before the column existed. No test asserted the happy path produced a *usable* row, so nothing failed.
+- A cleanup step that ran after `ALL PASS` had already printed failed silently, leaving a probe row in production. See the assert-your-teardown rule above.
+
+**The pattern in both: the assertions encoded what we thought to check, and the discrepancy was in what we happened to print.** Green means "the things I thought of are fine", never "everything is fine".
+
+So: read counts, names, and scopes in a passing run, and treat any number that contradicts your model of the system as a defect until explained. Where a check surfaces a real state you did not anticipate, fix the *assertion* rather than the data — the `tls-t` case above failed a cutover-era assertion that had become wrong, and the right response was to retire the obsolete invariant, not to null out the row.
+
 ## STOP intake is NEVER gated on a sending flag
 
 Receiving an opt-out does not depend on being able to send. A provider that is switched off, paused by a circuit breaker, or not yet live for API sending must still have its inbound STOPs ingested — **more** urgently, if anything, because a provider gets switched off precisely when something is wrong.

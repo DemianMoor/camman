@@ -66,6 +66,25 @@ const INTAKE_SELECTIONS: { name: string; run: (tx: never) => Promise<string> }[]
 ];
 
 async function main() {
+  // Pre-transaction snapshot of the sending flags, so the post-rollback check
+  // compares against what production ACTUALLY looked like rather than against a
+  // hardcoded expectation. Once /settings/providers ships, an operator may have
+  // deliberately switched an account off — restoring "all true" would be wrong,
+  // and asserting "all true" would be a false failure.
+  const baseline = (await db.execute(sql`
+    SELECT
+      count(*) FILTER (WHERE supports_api_send = false)::int AS api_off,
+      count(*) FILTER (WHERE sends_enabled = false)::int      AS sends_off,
+      count(*) FILTER (WHERE send_paused = true)::int         AS paused,
+      count(*)::int                                           AS total
+    FROM sms_providers
+  `)) as unknown as { api_off: number; sends_off: number; paused: number; total: number }[];
+  const base = baseline[0];
+  console.log(
+    `Baseline provider flags: ${base.total} rows — ` +
+      `${base.api_off} api_send off, ${base.sends_off} sends_enabled off, ${base.paused} paused`,
+  );
+
   try {
     await db.transaction(async (tx) => {
       const before: Record<string, string> = {};
@@ -79,9 +98,17 @@ async function main() {
       );
 
       // Turn OFF every sending flag on every provider.
+      //
+      // `sends_enabled` (migration 0138) joined this set deliberately. It is the
+      // operator-facing "switch this account off" control, which makes it the
+      // MOST likely flag to be flipped during an incident — precisely when
+      // inbound STOPs must keep landing. It is exactly the shape of the original
+      // defect (a one-click Disable that silently killed opt-out ingestion), so
+      // it belongs here from the day it ships, not after it bites.
       await tx.execute(sql`
         UPDATE sms_providers
         SET supports_api_send = false,
+            sends_enabled = false,
             send_paused = true,
             send_paused_reason = 'invariant-test',
             send_paused_at = now()
@@ -109,6 +136,22 @@ async function main() {
         "selectPollableCredentials source contains no sending predicate",
         !/supports_api_send|send_paused|sends_enabled|sends_paused/.test(body),
         "a sending flag reappeared in the STOP-intake credential selection",
+      );
+
+      // The rollback below restores the flags, but a test that never actually
+      // turned one off would pass every assertion above vacuously. Prove the
+      // mutation landed — specifically that sends_enabled, the flag added to
+      // this test in R2, really was false while the selections were re-run.
+      const flipped = (await tx.execute(sql`
+        SELECT count(*)::int AS n FROM sms_providers WHERE sends_enabled = false
+      `)) as unknown as { n: number }[];
+      const total = (await tx.execute(sql`
+        SELECT count(*)::int AS n FROM sms_providers
+      `)) as unknown as { n: number }[];
+      check(
+        "the sends_enabled flip actually took effect inside the tx (not a vacuous pass)",
+        total[0].n > 0 && flipped[0].n === total[0].n,
+        `${flipped[0].n} of ${total[0].n} provider rows had sends_enabled = false during the re-run`,
       );
 
       // ── The selected set must be the RIGHT set, not merely a stable one ────
@@ -143,17 +186,25 @@ async function main() {
     if (e !== ROLLBACK) throw e;
   }
 
-  // Prove the rollback actually restored production state.
+  // Prove the rollback actually restored production state — every flag compared
+  // against the PRE-transaction snapshot taken above, never against itself.
   const post = (await db.execute(sql`
-    SELECT count(*)::int AS n FROM sms_providers WHERE send_paused = true OR supports_api_send = false
-  `)) as unknown as { n: number }[];
-  const expected = (await db.execute(sql`
-    SELECT count(*)::int AS n FROM sms_providers WHERE supports_api_send = false
-  `)) as unknown as { n: number }[];
+    SELECT
+      count(*) FILTER (WHERE supports_api_send = false)::int AS api_off,
+      count(*) FILTER (WHERE sends_enabled = false)::int      AS sends_off,
+      count(*) FILTER (WHERE send_paused = true)::int         AS paused,
+      count(*)::int                                           AS total
+    FROM sms_providers
+  `)) as unknown as { api_off: number; sends_off: number; paused: number; total: number }[];
+  const p = post[0];
   check(
-    "rollback restored provider flags (no lingering test pause)",
-    post[0].n === expected[0].n,
-    `rows with a sending flag off after rollback: ${post[0].n} (expected ${expected[0].n} — the genuinely non-API rows)`,
+    "rollback restored every provider sending flag to its pre-test value",
+    p.total === base.total &&
+      p.api_off === base.api_off &&
+      p.sends_off === base.sends_off &&
+      p.paused === base.paused,
+    `before: total=${base.total} api_off=${base.api_off} sends_off=${base.sends_off} paused=${base.paused}\n` +
+      `     after:  total=${p.total} api_off=${p.api_off} sends_off=${p.sends_off} paused=${p.paused}`,
   );
   const stuck = (await db.execute(sql`
     SELECT count(*)::int AS n FROM sms_providers WHERE send_paused_reason = 'invariant-test'

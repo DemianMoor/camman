@@ -78,6 +78,13 @@ export async function findStalledStages(
       AND s.schedule_missed_at IS NULL
       AND s.slip_hold_at IS NULL
       AND (p.send_paused IS NOT TRUE)
+      -- Provider posture (0138). This detector's whole job is to suppress
+      -- alarms for stages that are HELD ON PURPOSE — which is why every other
+      -- hold predicate (campaign pause, provider pause, org switch, org
+      -- emergency stop) already appears here. A provider switched off is
+      -- exactly such a hold, so without this line turning one off would fire a
+      -- stall alert for every stage it owns.
+      AND (p.sends_enabled IS NOT FALSE)
       AND os.sends_enabled = true
       AND (os.sends_paused IS NOT TRUE)
       AND (s.sent_at IS NOT NULL OR (s.scheduled_at IS NOT NULL AND s.scheduled_at <= ${nowIso}))

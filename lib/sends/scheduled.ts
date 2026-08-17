@@ -104,6 +104,12 @@ export async function selectDueScheduledStages(
       -- A paused provider holds ALL its scheduled stages: don't even consider
       -- them, so they materialize once a human resumes.
       AND (p.send_paused IS NOT TRUE)
+      -- Operator posture (0138). IS NOT FALSE, not = true: this is a LEFT JOIN,
+      -- so a stage with no provider row yields NULL here and must stay
+      -- selectable exactly as it is today — the kickoff no_provider refusal
+      -- owns that case, not this predicate. Same NULL-tolerant shape as the
+      -- send_paused line above, for the same reason.
+      AND (p.sends_enabled IS NOT FALSE)
       -- Not yet FULLY materialized (materialized_at IS NULL): fresh stages AND
       -- partially-materialized ones (resumed here). Fully-materialized stages
       -- drop out and are drained by Phase B.
@@ -170,6 +176,9 @@ export async function selectDrainableStages(
       AND s.send_approved = true
       AND s.archived_at IS NULL
       AND (p.send_paused IS NOT TRUE)
+      -- Operator posture (0138) — mirrors Phase A's predicate above, including
+      -- the NULL tolerance for a stage with no provider row.
+      AND (p.sends_enabled IS NOT FALSE)
       -- NEVER drain a partially-materialized audience: only stages whose
       -- materialization is COMPLETE (materialized_at set) are drainable. Phase A
       -- finishes any in-progress materialization first.

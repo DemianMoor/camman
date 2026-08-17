@@ -37,6 +37,14 @@ const REFUSAL: Record<DrainRefusal, { status: number; message: string }> = {
     status: 409,
     message: "Sending is paused (hard-stop engaged) — click Proceed on Today's sends to resume",
   },
+  // NOT "paused": no breaker tripped and there is nothing to resume — an
+  // operator switched this account off. Different cause, different fix, so a
+  // different message.
+  provider_sends_disabled: {
+    status: 409,
+    message:
+      "Sending is switched off for this provider — turn it back on in Settings → Providers",
+  },
   provider_paused: {
     status: 409,
     message: "Sending is paused for this provider (circuit breaker engaged)",

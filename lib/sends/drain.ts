@@ -9,6 +9,7 @@ import {
   type DrainStopReason,
   isCampaignPaused,
   isProviderPaused,
+  isProviderSendsEnabled,
   latchPause,
   resolve24hCap,
   resolveMinuteCap,
@@ -78,6 +79,12 @@ export type DrainRefusal =
   | "send_disabled" // env SEND_ENABLED off (deploy-level backstop)
   | "send_disabled_org" // DB org_settings.sends_enabled off (daily operational switch)
   | "send_paused_org" // org_settings.sends_paused — the emergency hard-stop
+  // sms_providers.sends_enabled is off — the operator's deliberate posture for
+  // this ACCOUNT (migration 0138). Distinct from provider_paused: nothing
+  // tripped, no latch to resume, no audit of a failure — someone decided this
+  // account should not be sending. Reported separately so the operator is told
+  // which switch to flip.
+  | "provider_sends_disabled"
   | "provider_paused" // the latching circuit breaker is engaged for this provider
   | "campaign_paused" // the per-campaign latch (opt-out-rate breaker / manual)
   | "no_provider"
@@ -232,6 +239,9 @@ export async function runStageDrain(
            c.brand_id         AS brand_id,
            c.send_paused      AS campaign_send_paused,
            s.provider_phone_id AS provider_phone_id,
+           -- Operator posture for this ACCOUNT (0138). NULL when the stage has
+           -- no provider row joined, which the no_provider refusal below owns.
+           p.sends_enabled         AS sends_enabled,
            p.send_paused           AS send_paused,
            p.max_sends_per_run     AS max_sends_per_run,
            p.max_sends_per_minute  AS max_sends_per_minute,
@@ -263,6 +273,7 @@ export async function runStageDrain(
     brand_id: number | null;
     campaign_send_paused: boolean | null;
     provider_phone_id: number | null;
+    sends_enabled: boolean | null;
     send_paused: boolean | null;
     max_sends_per_run: number | null;
     max_sends_per_minute: number | null;
@@ -289,6 +300,14 @@ export async function runStageDrain(
   // screen engages it; clearing it ("Proceed") lets sending resume.
   if (await isOrgPaused(stage.org_id))
     return { ok: false, reason: "send_paused_org", ...EMPTY };
+  // Provider sending posture (0138). Sits immediately before the latch and
+  // mirrors the ORG-level ordering one level up — daily on/off switch first
+  // (send_disabled_org), emergency stop second (send_paused_org) — so "the
+  // deliberate switch is reported before the emergency one" reads the same at
+  // both scopes. `=== false` rather than falsy: a NULL here means no provider
+  // row joined at all, which the no_provider refusal below owns.
+  if (stage.sends_enabled === false)
+    return { ok: false, reason: "provider_sends_disabled", ...EMPTY };
   // Latching circuit breaker: refuse before claiming anything. A human must
   // resume via the provider UI; nothing here clears it.
   if (stage.send_paused) return { ok: false, reason: "provider_paused", ...EMPTY };
@@ -421,6 +440,18 @@ export async function runStageDrain(
     if (await isOrgPaused(orgId)) {
       halted = true;
       stopReason = "org_paused";
+      break;
+    }
+
+    // Provider posture is runtime-mutable too (0138): switching this account
+    // off in /settings/providers halts the in-flight drain at the next batch
+    // boundary. Same fresh-read treatment as the latch below, because the same
+    // property holds — an operator flipping it expects sending to stop NOW, not
+    // at the next tick. SOFT: rows stay pending and resume when it goes back on;
+    // no breaker resume is involved.
+    if (!(await isProviderSendsEnabled(dbc, providerId))) {
+      halted = true;
+      stopReason = "provider_sends_disabled";
       break;
     }
 

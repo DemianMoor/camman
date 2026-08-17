@@ -18,6 +18,10 @@ export type PreflightBlocker =
   | "stage_not_ready" // tracking ids not generated yet
   | "no_provider"
   | "provider_not_api_capable"
+  // sms_providers.sends_enabled is off (0138) — the operator's posture for this
+  // account. Mirrors the kickoff refusal of the same name so the checklist and
+  // the commit-time gate cannot disagree.
+  | "provider_sends_disabled"
   | "no_sender_number" // API-send stage has no provider_phone_id assigned
   | "no_credentials"
   | "no_short_domain";
@@ -77,6 +81,7 @@ interface MainRow {
   sms_provider_id: number | null;
   provider_phone_id: number | null;
   supports_api_send: boolean | null;
+  provider_sends_enabled: boolean | null;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -104,6 +109,7 @@ export async function preflightStageSend(
       s.sms_provider_id   AS sms_provider_id,
       s.provider_phone_id AS provider_phone_id,
       p.supports_api_send AS supports_api_send,
+      p.sends_enabled     AS provider_sends_enabled,
       s.include_no_status AS include_no_status,
       s.include_clickers  AS include_clickers,
       s.exclude_clickers  AS exclude_clickers,
@@ -192,6 +198,16 @@ export async function preflightStageSend(
       hasProvider && row.supports_api_send === true,
       "Provider supports API send",
       "provider_not_api_capable",
+    );
+    // Posture, checked after capability for the same reason kickoff does it in
+    // that order: "this provider can't API-send at all" is the more fundamental
+    // answer than "it's switched off". `=== true` so a NULL (no provider row
+    // joined) does not read as enabled — the no_provider blocker owns that case.
+    add(
+      "provider_sends_enabled",
+      hasProvider && row.provider_sends_enabled === true,
+      "Provider sending is switched on",
+      "provider_sends_disabled",
     );
     add(
       "sender",

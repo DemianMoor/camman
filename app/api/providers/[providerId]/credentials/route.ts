@@ -8,6 +8,7 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { encryptSecret } from "@/lib/crypto/secret-box";
 import { countNumberlessSendEligibleStages } from "@/lib/providers/second-account-guard";
 import { maskApiKey } from "@/lib/sends/provider-credential";
+import { getDescriptor } from "@/lib/sends/providers/registry";
 import { can } from "@/lib/permissions";
 import { providerCredentialSetSchema } from "@/lib/validators/providers";
 
@@ -25,6 +26,17 @@ async function providerInOrg(providerId: number, orgId: string) {
     .where(and(eq(sms_providers.id, providerId), eq(sms_providers.org_id, orgId)))
     .limit(1);
   return rows.length > 0;
+}
+
+// The provider row's sms_provider_id (the adapter registry key), org-scoped.
+// Null when the provider isn't in this org.
+async function providerKeyInOrg(providerId: number, orgId: string) {
+  const rows = await db
+    .select({ key: sms_providers.sms_provider_id })
+    .from(sms_providers)
+    .where(and(eq(sms_providers.id, providerId), eq(sms_providers.org_id, orgId)))
+    .limit(1);
+  return rows[0]?.key ?? null;
 }
 
 // GET — list a provider's keys, MASKED. Never returns api_key in plaintext.
@@ -46,7 +58,8 @@ export async function GET(
   if (providerId === null) {
     return apiError(400, "Invalid provider id", API_ERROR_CODES.VALIDATION, { field: "id" });
   }
-  if (!(await providerInOrg(providerId, orgId))) {
+  const providerKey = await providerKeyInOrg(providerId, orgId);
+  if (providerKey === null) {
     return apiError(404, "Provider not found", API_ERROR_CODES.NOT_FOUND, { entity: "provider" });
   }
 
@@ -99,7 +112,30 @@ export async function GET(
     };
   });
 
-  return NextResponse.json({ data });
+  // Connection-type capabilities for THIS provider row (869egmakh P2). Sent on
+  // the response the accounts UI already fetches — the alternative was a second
+  // request, or importing the adapter registry into a "use client" component,
+  // which would bundle every provider's HTTP client into the browser.
+  //
+  // Resolved with getDescriptor (registry key, alias-tolerant) so a `txh2` row
+  // reports TextHub's capabilities. Capability booleans only — no secrets, and
+  // no credentialFields (this UI edits an existing account, it doesn't create
+  // a connection type).
+  const descriptor = getDescriptor(providerKey);
+  const connection_type = descriptor
+    ? {
+        key: providerKey,
+        display_name: descriptor.displayName,
+        // A non-sending check exists for this type. False for Tells, whose only
+        // endpoint sends — the UI must say so rather than offer a check.
+        can_validate: typeof descriptor.validateCredentials === "function",
+        supports_test_send: descriptor.supportsTestSend === true,
+        supports_optout_callback_registration:
+          descriptor.supportsOptOutCallbackRegistration === true,
+      }
+    : null;
+
+  return NextResponse.json({ data, connection_type });
 }
 
 // POST — create a new credential (account) for a provider. Multi-account

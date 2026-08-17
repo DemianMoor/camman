@@ -104,6 +104,19 @@ check("txr can validate (dashboards read)", byKey.txr, true);
 // Tells has exactly one endpoint and it SENDS — no honest non-sending check.
 check("tls canNOT validate (send-only API)", byKey.tls, false);
 
+console.log("\n── Provider-specific action capabilities (P2 server-side gates) ──");
+// Both routes call TextHub's client directly, so ONLY the TextHub family may
+// have these on. If a future adapter flips one without implementing its branch
+// in the route, this fails — which is the point.
+for (const k of ["txh", "txh2"]) {
+  check(`${k}: supportsTestSend`, getDescriptor(k)!.supportsTestSend, true);
+  check(`${k}: supportsOptOutCallbackRegistration`, getDescriptor(k)!.supportsOptOutCallbackRegistration, true);
+}
+for (const k of ["ahi", "txr", "tls"]) {
+  check(`${k}: supportsTestSend NOT set`, getDescriptor(k)!.supportsTestSend, undefined);
+  check(`${k}: supportsOptOutCallbackRegistration NOT set`, getDescriptor(k)!.supportsOptOutCallbackRegistration, undefined);
+}
+
 console.log("\n── Seams declared-but-unset (no speculative values) ──");
 for (const k of ["txh", "ahi", "txr", "tls"]) {
   const d = getDescriptor(k)!;

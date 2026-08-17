@@ -61,6 +61,8 @@ Each adapter in `lib/sends/providers/` carries a static, secret-free `descriptor
 
 `credentialFields` describes what to **ask for**, never what is stored. `descriptor.validateCredentials` is the non-sending credential check behind the uniform Test-connection action.
 
+**`descriptor.notes: string[]` (R3) is the operator-facing "About this provider" copy** rendered on `/settings/providers` and served as `notes` on `GET /api/provider-types` (always an array, never null). It is **code-owned, not a DB column**, deliberately: a note describes how a connection TYPE behaves, which is a property of the adapter and changes only when the adapter does. A DB column would let the two drift, and an operator editing "TextHub returns failures as 404" would be editing a fact rather than a preference. Three rules, pinned by `scripts/test-provider-descriptors.ts`: every note must be **true of that type and verifiable from the code or a probe script** (an operator will act on it), **operationally useful** rather than adapter trivia, and **never a secret or a value** — the test rejects any credential-shaped substring and any note under 20 characters. `PER_NUMBER_RATE_NOTE` is defined once in `types.ts` and spread into all four descriptors (asserted present on each) because it is true of every type and operators reliably look for the per-second rate on the provider, where it is not: that rate lives on `provider_phones.max_sends_per_second`, and only the per-run / per-minute / 24h volume ceilings are account-level.
+
 | Connection type | `can_validate` | Non-sending check |
 |---|---|---|
 | TextHub (`txh`) | yes | inbox read (`?inbox=true`) via the existing `fetchInbox` |

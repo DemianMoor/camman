@@ -4,11 +4,22 @@
 //
 //   1. STRUCTURE. `sms_providers.sends_enabled` exists as boolean NOT NULL
 //      DEFAULT true, and `opt_out_footer` as nullable text.
-//   2. INERTNESS. Every provider row reads sends_enabled = true and
-//      opt_out_footer IS NULL, and no send-path source file references either
-//      column yet. R1 ships the columns; R2 ships the behaviour. If this script
-//      passes while a reader already exists, the "byte-identical" claim on the
-//      R1 deploy is false.
+//   2. DEFAULT POSTURE. Every provider row still reads sends_enabled = true and
+//      opt_out_footer IS NULL, so nothing is silently switched off and no STOP
+//      text has been quietly introduced ahead of the Q3 precedence chain.
+//
+// ⚠️ The third claim this script originally made — INERTNESS, that no send-path
+// file referenced either column — was a CUTOVER-ERA invariant and has been
+// RETIRED. It was correct for exactly one deploy (R1, where the columns shipped
+// unread to prove the deploy was byte-identical) and became wrong the moment R2
+// wired enforcement, which is the whole point of R2. Retiring it follows the
+// same precedent as verify-adapter-code.ts, whose txh2 assertion was inverted
+// once the cutover it guarded was complete: fix the assertion that has expired,
+// never the data that made it expire.
+//
+// It is replaced below by its INVERSE — the enforcement must now be present —
+// so this file still fails loudly if someone deletes the wiring. The detailed
+// per-gate checks live in scripts/test-provider-sends-enabled-enforcement.ts.
 //
 // Guard-grade per docs/07-conventions.md: prints its full input scope (every
 // provider row by name, and the file list it scanned), refuses to pass on an
@@ -27,17 +38,23 @@ function check(name: string, cond: boolean, detail = "") {
   console.log(`${cond ? "✓" : "✗"} ${name}${detail ? `\n     ${detail}` : ""}`);
 }
 
-// Source files that decide whether a send happens. R1 must leave every one of
-// them untouched by the new columns. Listed explicitly (not globbed) so a file
-// disappearing is a hard error below rather than a silently smaller scan.
-const SEND_PATH_FILES = [
-  "lib/sends/kickoff.ts",
-  "lib/sends/drain.ts",
-  "lib/sends/scheduled.ts",
-  "lib/sends/preflight.ts",
-  "lib/sends/send-state.ts",
-  "lib/sends/stall-detector.ts",
-  "lib/sends/circuit-breakers.ts",
+// Every send-path module that MUST enforce the provider posture flag, with the
+// provider-qualified token proving it does. Listed explicitly (not globbed) so a
+// file disappearing is a hard error rather than a silently smaller scan.
+//
+// `sends_enabled` is an AMBIGUOUS bare token — org_settings has a column of the
+// same name that the two-switch gate reads all over the send path — so every
+// pattern here is provider-qualified. A bare /\bsends_enabled\b/ would match
+// pre-existing, correct org-level lines and prove nothing.
+const ENFORCEMENT_SITES: { file: string; pattern: RegExp; what: string }[] = [
+  { file: "lib/sends/kickoff.ts", pattern: /provider_sends_disabled/, what: "kickoff refusal" },
+  { file: "lib/sends/drain.ts", pattern: /provider_sends_disabled/, what: "drain refusal" },
+  { file: "lib/sends/drain.ts", pattern: /isProviderSendsEnabled/, what: "drain per-batch re-read" },
+  { file: "lib/sends/scheduled.ts", pattern: /p\.sends_enabled IS NOT FALSE/, what: "scheduler predicate" },
+  { file: "lib/sends/preflight.ts", pattern: /provider_sends_disabled/, what: "preflight blocker" },
+  { file: "lib/sends/send-state.ts", pattern: /sends_enabled: sms_providers\.sends_enabled/, what: "send-state surface" },
+  { file: "lib/sends/stall-detector.ts", pattern: /p\.sends_enabled IS NOT FALSE/, what: "stall-detector hold predicate" },
+  { file: "lib/sends/circuit-breakers.ts", pattern: /isProviderSendsEnabled/, what: "posture re-read helper" },
 ];
 
 async function main() {
@@ -127,55 +144,37 @@ async function main() {
       : `all ${rows.length} rows NULL`,
   );
 
-  // ── 3. Inertness: source ──────────────────────────────────────────────────
+  // ── 3. Enforcement is wired (the INVERSE of R1's retired inertness check) ──
   // A missing file is an ERROR, never a skipped check — a renamed send-path
   // module must fail here rather than quietly shrink the scan.
-  //
-  // ⚠️ `sends_enabled` is an AMBIGUOUS token: org_settings has a column of the
-  // same name and the send path legitimately reads it all over (the two-switch
-  // gate). A bare /\bsends_enabled\b/ therefore matches 9 pre-existing, correct
-  // lines and would fail this check on an untouched tree. The assertion keys on
-  // PROVIDER-QUALIFIED forms only. The org-level hits are counted and printed
-  // rather than silently filtered, so the reader can see what was excluded.
-  const PROVIDER_QUALIFIED = [
-    /\bp\.sends_enabled\b/,
-    /\bsms_providers\.sends_enabled\b/,
-    /\bprovider\.sends_enabled\b/,
-    /provider_sends_disabled/,
-    /\bopt_out_footer\b/, // unambiguous — org_settings has no such column
-  ];
   const repoRoot = process.cwd();
   let scanned = 0;
-  const readers: string[] = [];
-  let orgLevelHits = 0;
-  for (const rel of SEND_PATH_FILES) {
-    const abs = path.join(repoRoot, rel);
+  const missing: string[] = [];
+  for (const site of ENFORCEMENT_SITES) {
     let src: string;
     try {
-      src = await fs.readFile(abs, "utf8");
+      src = await fs.readFile(path.join(repoRoot, site.file), "utf8");
     } catch {
-      check(`send-path file present: ${rel}`, false, "file not found — scan scope is wrong");
+      check(`enforcement file present: ${site.file}`, false, "file not found — scan scope is wrong");
+      missing.push(`${site.what} (${site.file}: unreadable)`);
       continue;
     }
     scanned++;
-    orgLevelHits += (src.match(/\bsends_enabled\b/g) ?? []).length;
-    const hit = PROVIDER_QUALIFIED.filter((re) => re.test(src));
-    if (hit.length) readers.push(`${rel} [${hit.map((r) => r.source).join(", ")}]`);
+    if (!site.pattern.test(src)) missing.push(`${site.what} (${site.file})`);
   }
-  console.log(`\nSource scope: scanned ${scanned} of ${SEND_PATH_FILES.length} send-path files`);
   console.log(
-    `     ${orgLevelHits} bare 'sends_enabled' occurrence(s) across them — expected, and all` +
-      ` org_settings (the two-switch gate). Not what this check asserts on.`,
+    `\nEnforcement scope: ${scanned} of ${ENFORCEMENT_SITES.length} site(s) readable — ` +
+      ENFORCEMENT_SITES.map((s) => s.what).join(", "),
   );
   check(
-    "every listed send-path file was readable",
-    scanned === SEND_PATH_FILES.length,
-    `${scanned}/${SEND_PATH_FILES.length}`,
+    "every enforcement site file was readable",
+    scanned === ENFORCEMENT_SITES.length,
+    `${scanned}/${ENFORCEMENT_SITES.length}`,
   );
   check(
-    "no send-path file reads the PROVIDER 0138 columns yet (R1 is inert)",
-    readers.length === 0,
-    readers.length ? `referenced in: ${readers.join(" | ")}` : "none reference them",
+    "every send-path enforcement site still references the provider posture flag",
+    missing.length === 0,
+    missing.length ? `MISSING: ${missing.join(" | ")}` : `all ${ENFORCEMENT_SITES.length} sites wired`,
   );
 
   await pgConn.end({ timeout: 5 });

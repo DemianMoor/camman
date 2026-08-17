@@ -9,6 +9,7 @@ import type {
   DlrEvent, InboundEvent, NormalizedSendParams, RawWebhook,
   SendSmsResult, SmsProviderAdapter,
 } from "./types";
+import { PER_NUMBER_RATE_NOTE } from "./types";
 
 export const texthubAdapter: SmsProviderAdapter = {
   key: "txh",
@@ -24,6 +25,19 @@ export const texthubAdapter: SmsProviderAdapter = {
         help: "From the TextHub dashboard. Used for sending and for the STOP inbox poll.",
         secret: true,
       },
+    ],
+    notes: [
+      "HTTP status codes are unreliable — a failure envelope can arrive as HTTP 404, " +
+        "and an empty inbox comes back without a status field at all. Success is judged " +
+        "from the body's status token, never the HTTP code.",
+      "Their push opt-out callback is broken on their side, so STOP intake runs by " +
+        "polling the inbox every 5 minutes. The inbox is capped at the 200 most-recent " +
+        "messages with no pagination, so a burst of more than 200 STOPs between polls " +
+        "can scroll off permanently — recover those with the inbox CSV backfill.",
+      "No delivery receipts are collected. TextHub does expose a delivery-report " +
+        "endpoint, but nothing polls or stores it, so the Delivery report shows a dash " +
+        "for this connection type rather than 0% — an absent capability, not a bad result.",
+      PER_NUMBER_RATE_NOTE,
     ],
     // The two provider-specific actions are TextHub-only because both routes
     // call TextHub's client directly (see the flag notes in types.ts).

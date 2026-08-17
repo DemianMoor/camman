@@ -19,6 +19,7 @@ import type {
   DlrEvent, InboundEvent, NormalizedSendParams, RawWebhook,
   SendSmsResult, SmsProviderAdapter,
 } from "./types";
+import { PER_NUMBER_RATE_NOTE } from "./types";
 
 // Overridable via TEXTREQUEST_API_BASE_URL for a different base without a code
 // redeploy; the adapter works out of the box even if the env var is unset.
@@ -197,6 +198,21 @@ export const textrequestAdapter: SmsProviderAdapter = {
         help: "Sent as the x-api-key header. Verifying lists the account's dashboards.",
         secret: true,
       },
+    ],
+    notes: [
+      "Text Request does NOT append an opt-out footer to API sends. The footer seen on " +
+        "messages sent from their portal is added by the portal UI, not the API — proven " +
+        "live, after the opposite was assumed. CamMan owns the footer and renders it into " +
+        "the body from the stage's STOP text; a stage whose rendered body has no opt-out " +
+        "language is refused before sending.",
+      "Unknown query parameters are silently ignored rather than rejected, so a poll " +
+        "built on a guessed parameter name believes it asked for a narrow window and " +
+        "receives the account's entire history instead. Always prove a parameter narrows " +
+        "the result set before depending on it.",
+      "Account webhooks are disconnected automatically after 10 consecutive non-2XX " +
+        "responses, and then go silent with no error. The webhook routes always answer " +
+        "200 and a poll re-checks the connection every tick and reactivates it.",
+      PER_NUMBER_RATE_NOTE,
     ],
     // Per-number settings this connection type needs (869ej8r00 Q2). Text
     // Request is dashboard-scoped: one dashboard per sending number, and the

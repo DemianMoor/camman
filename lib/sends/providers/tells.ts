@@ -37,6 +37,7 @@ import type {
   DlrEvent, InboundEvent, NormalizedSendParams, RawWebhook,
   SendSmsResult, SmsProviderAdapter,
 } from "./types";
+import { PER_NUMBER_RATE_NOTE } from "./types";
 
 // Overridable via TELLS_API_BASE_URL for a different base without a code
 // redeploy; the adapter works out of the box even if the env var is unset.
@@ -273,6 +274,22 @@ export const tellsAdapter: SmsProviderAdapter = {
     // Omitting it is the honest contract: the UI must say this connection type
     // can't be verified without sending, NOT offer a check that always passes.
     // If Tells ever ships a balance/account endpoint, add it here.
+    notes: [
+      "This key cannot be verified without sending. Tells exposes exactly one endpoint " +
+        "and it sends a message, and it validates the from-number before the key — so " +
+        "even a request crafted to avoid sending never reaches key validation. There is " +
+        "deliberately no Test connection button here; a test that cannot fail is worse " +
+        "than none.",
+      "Inbound intake is webhook-only — there is no poll to fall back on. If the webhook " +
+        "stops arriving, STOP replies stop arriving with it, and nothing errors. The " +
+        "silence monitors are the only detection layer.",
+      "Their inbound webhook body carries the LIVE API key in its Key field. CamMan " +
+        "redacts that one field before persisting the payload and before any alert, so " +
+        "the credential never reaches the database, a backup, or Telegram. If the body " +
+        "cannot be parsed it is stored as null rather than verbatim — losing an " +
+        "unparseable body beats persisting a live key.",
+      PER_NUMBER_RATE_NOTE,
+    ],
   },
   toProviderRecipient: toTellsRecipient,
   async send(p: NormalizedSendParams): Promise<SendSmsResult> {

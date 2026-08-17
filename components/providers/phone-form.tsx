@@ -48,6 +48,15 @@ type Brand = {
 };
 type BrandsListResponse = { data: Brand[]; totalCount: number };
 
+// A per-number setting declared by the provider's connection type. `name` is the
+// provider_phones column the input binds to.
+export type PhoneSettingField = {
+  name: string;
+  label: string;
+  placeholder: string | null;
+  help: string | null;
+};
+
 // A short domain this number could mint links under. `status` is carried so the
 // picker can show a pending domain as unselectable-and-why rather than hiding
 // it — an omitted row reads as "my domain didn't save" and gets re-added.
@@ -67,9 +76,16 @@ export type PhoneSubmitValues = PhoneFormValues & { provider_id?: number };
 
 export interface PhoneFormProps {
   mode: "create" | "edit";
-  /** The parent provider's sms_provider_id. Gates provider-specific fields —
-   *  the Text Request ("txr") dashboard binding only shows for that provider. */
-  providerKey?: string;
+  /** Per-number settings this provider's CONNECTION TYPE declares, resolved
+   *  server-side from adapter_code (869ej8r00 Q2) and delivered on the provider
+   *  detail response.
+   *
+   *  Replaces the old `providerKey === "txr"` gate. Two reasons that mattered:
+   *  keying on sms_provider_id meant a SECOND account of a type (the txh2 row)
+   *  would not get its type's fields; and every new provider-specific field
+   *  needed another hardcoded branch here. Empty array = this type declares
+   *  none, which is every provider except Text Request today. */
+  phoneSettingFields?: PhoneSettingField[];
   /** create mode: only `cost_per_sms` / `brand_id` are used.
    *  edit mode: `phone_number` / `number_type` are used for read-only display. */
   initialValues?: Partial<PhoneFormValues>;
@@ -86,7 +102,7 @@ export interface PhoneFormProps {
 
 export function PhoneForm({
   mode,
-  providerKey,
+  phoneSettingFields,
   initialValues,
   existingPhoneNumber,
   currentProviderId,
@@ -96,9 +112,7 @@ export function PhoneForm({
   isSubmitting,
 }: PhoneFormProps) {
   const isEdit = mode === "edit";
-  // Text Request is dashboard-scoped (one dashboard per number) — only that
-  // provider surfaces the dashboard binding field.
-  const isTextRequest = providerKey === "txr";
+  const settingFields = phoneSettingFields ?? [];
 
   // Move target — defaults to the current provider (no move). Local state, not
   // part of the zod-resolved form (which would strip an unknown key on submit).
@@ -167,9 +181,11 @@ export function PhoneForm({
   }, [watchedBrandId, domainsExec]);
 
   // Clear a stale override when the brand changes: a domain belonging to the
-  // previous brand must not survive the switch. Server-side the assignment guard
-  // would still store it (it only checks org + active), so this is the one place
-  // that enforces brand coherence — worth noting if that rule ever moves.
+  // previous brand must not survive the switch. This is the UX affordance — the
+  // server refuses a cross-brand assignment outright (`brand_mismatch` in
+  // lib/providers/short-domain-assignment.ts), so a stale value here would be
+  // rejected rather than stored. Clearing it just avoids showing the operator a
+  // selection that is about to fail.
   useEffect(() => {
     const cur = form.getValues("short_domain_id");
     if (cur != null && !domains.some((d) => d.id === cur)) {
@@ -411,35 +427,34 @@ export function PhoneForm({
         {/* Text Request only: the dashboard this number sends through. TR is
             dashboard-scoped (one dashboard per number). Use "Check connection"
             on the account to list the dashboard ids. */}
-        {isTextRequest ? (
+        {/* Per-number provider settings, rendered from the connection type's
+            descriptor. `name` matches the provider_phones column, so the field
+            binds directly. Nothing renders when the type declares none. */}
+        {settingFields.map((sf) => (
           <FormField
+            key={sf.name}
             control={form.control}
-            name="dashboard_id"
+            name={sf.name as "dashboard_id"}
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Text Request dashboard ID</FormLabel>
+                <FormLabel>{sf.label}</FormLabel>
                 <FormControl>
                   <Input
-                    placeholder="e.g. 12345"
+                    placeholder={sf.placeholder ?? ""}
                     disabled={isSubmitting}
-                    value={field.value ?? ""}
+                    value={(field.value as string | null) ?? ""}
                     onChange={(e) => {
                       const v = e.target.value.trim();
                       field.onChange(v === "" ? null : v);
                     }}
                   />
                 </FormControl>
-                <FormDescription>
-                  Text Request is dashboard-scoped — each sending number lives
-                  under one dashboard. Sends through this number are routed to
-                  this dashboard. Use &quot;Check connection&quot; on the account
-                  to list your dashboard IDs.
-                </FormDescription>
+                {sf.help ? <FormDescription>{sf.help}</FormDescription> : null}
                 <FormMessage />
               </FormItem>
             )}
           />
-        ) : null}
+        ))}
 
         <FormField
           control={form.control}

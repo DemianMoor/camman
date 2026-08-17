@@ -198,6 +198,21 @@ export const textrequestAdapter: SmsProviderAdapter = {
         secret: true,
       },
     ],
+    // Per-number settings this connection type needs (869ej8r00 Q2). Text
+    // Request is dashboard-scoped: one dashboard per sending number, and the
+    // drain resolves stage -> provider_phone -> dashboard_id at send time.
+    //
+    // Declaring it here is what removes the hardcoded `providerKey === "txr"`
+    // gate from the phone form. The field NAME must match the provider_phones
+    // column, because the form binds directly to it.
+    phoneSettingFields: [
+      {
+        name: "dashboard_id",
+        label: "Text Request dashboard ID",
+        placeholder: "e.g. 68093",
+        help: "Each Text Request dashboard maps to one sending number. Run Test connection on the account to list the dashboard IDs.",
+      },
+    ],
     // Delegates to textrequestHealthcheck below — the same client that used to
     // back the txr-only "Check connection" endpoint, which this replaced. One
     // implementation, not two. Text Request is the only provider here with real

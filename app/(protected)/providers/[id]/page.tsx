@@ -73,6 +73,13 @@ import { cn } from "@/lib/utils";
 type Provider = {
   id: number;
   sms_provider_id: string;
+  adapter_code: string | null;
+  phone_setting_fields?: {
+    name: string;
+    label: string;
+    placeholder: string | null;
+    help: string | null;
+  }[];
   name: string;
   short_link_supported: boolean;
   short_link_example: string | null;
@@ -1123,7 +1130,7 @@ export default function ProviderDetailPage() {
         <PhoneForm
           key="add"
           mode="create"
-          providerKey={provider.sms_provider_id}
+          phoneSettingFields={provider.phone_setting_fields ?? []}
           onSubmit={handleAddPhone}
           onCancel={() => setAddPhoneOpen(false)}
           isSubmitting={createPhoneApi.isLoading}
@@ -1150,7 +1157,7 @@ export default function ProviderDetailPage() {
           <PhoneForm
             key={`edit-phone-${editingPhone.id}`}
             mode="edit"
-            providerKey={provider.sms_provider_id}
+            phoneSettingFields={provider.phone_setting_fields ?? []}
             existingPhoneNumber={editingPhone.phone_number}
             currentProviderId={editingPhone.provider_id}
             providers={allProviders

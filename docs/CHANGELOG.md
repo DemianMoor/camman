@@ -2,6 +2,13 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 - Per-provider sends_enabled + opt_out_footer (migration 0138, R1) - docs/03-data-model.md
+- sms_providers.sends_enabled boolean NOT NULL DEFAULT true, sms_providers.opt_out_footer text. Additive and INERT: nothing reads either column in this deploy (R2 wires enforcement, R4 the panel). All 8 rows land sends_enabled=true / opt_out_footer=NULL, so behaviour is byte-identical.
+- Three flags, three meanings, never collapsed: supports_api_send = CAPABILITY (can it API-send at all), sends_enabled = POSTURE (should it right now, a human's call), send_paused = LATCH (a breaker tripped, needs a conscious resume). Merging posture into the latch makes a breaker trip and an operator decision indistinguishable in the audit trail.
+- opt_out_footer ships NULL everywhere and is deliberately NOT consumed by the send path; the precedence chain lands with Q3 (card 869ej8r1y).
+- Guard: scripts/verify-provider-sends-enabled-migration.ts asserts structure, asserts every row is still enabled/NULL, and scans the seven send-path modules for a PROVIDER-QUALIFIED reference to either column (a bare `sends_enabled` token matches 10 legitimate org_settings lines - the two-switch gate - so the check keys on p.sends_enabled / sms_providers.sends_enabled / provider_sends_disabled / opt_out_footer and prints the excluded org-level count).
+- Also corrects drift in db/schema.ts: the send_circuit_events_event_check declaration still read ('paused','resumed') after migration 0131 widened it with the api-send verbs.
+
 2026-08-17 - Per-number provider settings come from the descriptor (Q2) - docs/06-integrations.md
 - The phone form's hardcoded `providerKey === "txr"` gate is gone. Per-number fields are declared as `phoneSettingFields` on the adapter descriptor and resolved server-side from adapter_code, delivered as `phone_setting_fields` on the provider detail response.
 - Keyed on adapter_code, never sms_provider_id: a SECOND account of a type (the txh2 row) now gets its type's fields, which the identity-keyed gate could not do. Adding a provider-specific field no longer means another hardcoded branch in the form.

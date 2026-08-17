@@ -422,6 +422,16 @@ Every pending poll takes the fallback, the loop sees an empty result forever, an
 
 Use `gh pr view <n> --json statusCheckRollup,mergeStateStatus`, which exits zero regardless of check state, and **report every terminal state, not just success** — a watcher that only greps for green is silent through a failure, and silence reads as "still running". See the worktree/monitor guidance above for the general form.
 
+## STOP intake is NEVER gated on a sending flag
+
+Receiving an opt-out does not depend on being able to send. A provider that is switched off, paused by a circuit breaker, or not yet live for API sending must still have its inbound STOPs ingested — **more** urgently, if anything, because a provider gets switched off precisely when something is wrong.
+
+This was a real defect, not a hypothetical. `selectPollableCredentials` in `lib/sends/poll-opt-outs.ts` carried `AND p.supports_api_send = true`, and the provider page exposes that flag as a one-click **Disable**. Pressing it silently stopped TextHub opt-out ingestion — and TextHub's push callback is broken on their side, so that poller is its **only** intake. The failure is silent in the worst way: nothing errors, the poller just selects zero credentials and reports a healthy run, while the org keeps messaging people who asked it to stop.
+
+**The rule: no intake path — poller, webhook, reconciliation backstop — may reference `supports_api_send`, `send_paused`, `sends_enabled`, `sends_paused`, or any future sending posture flag in its credential/row selection.** Provider *type* is fine (a TextHub poller should select TextHub credentials); provider *sending posture* is not.
+
+Pinned by `scripts/test-stop-intake-ungated.ts`, which flips every sending flag off inside a rolled-back transaction and asserts each intake selection returns an identical, non-empty set — plus a source-level check that no sending predicate has reappeared, so a future edit fails even when the data happens to make the sets match.
+
 ## `adapter_code` is the connection TYPE; `sms_provider_id` is the row IDENTITY
 
 Migration 0134 split these apart. Before it, one column was both, and because it is `UNIQUE` a second TextHub account could not reuse `txh` — it became its own row under the invented code `txh2`, which the adapter registry then special-cased back to the TextHub adapter.

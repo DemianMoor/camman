@@ -1,7 +1,7 @@
 // Descriptor contract tests (869egmakh P1). No network, no DB — pure.
 //
 // The Ahoi cases are the VERBATIM bodies measured by scripts/probe-ahoi-badkey.ts
-// on 2026-08-14. They are the regression guard: if api19 changes its error
+// on 2026-08-17. They are the regression guard: if api19 changes its error
 // envelope, the classifier must degrade to `unknown`, never to a false `valid`.
 import {
   getAdapter,

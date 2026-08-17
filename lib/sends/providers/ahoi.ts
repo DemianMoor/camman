@@ -174,7 +174,7 @@ function buildRedactedBody(p: NormalizedSendParams): string {
 // CDR download is the only documented endpoint besides /sms/send. So the cheapest
 // authenticated read is a same-day CDR pull: read-only, no SMS, no spend.
 //
-// ⚠️ MEASURED 2026-08-14 (scripts/probe-ahoi-badkey.ts, kept as the regression
+// ⚠️ MEASURED 2026-08-17 (scripts/probe-ahoi-badkey.ts, kept as the regression
 // reference). api19 returns **HTTP 200 for every case** — valid key, wrong key,
 // bogus key, empty key — AND `Content-Type: text/html` even for the successful
 // CSV. Neither the status code nor the content type can classify. The BODY is

@@ -46,6 +46,17 @@ export async function POST(req: NextRequest) {
   // client shows this steer too, but the UI is not a boundary: a direct POST
   // must land in exactly the same place.
   let smsProviderId: string;
+  // The CONNECTION TYPE this row will be served by (migration 0134). NULL for a
+  // custom / no-API provider, which genuinely has no adapter.
+  //
+  // ⚠️ Writing this is NOT optional. The picker shipped before adapter_code
+  // existed, so for a window every provider created through it landed with
+  // adapter_code = NULL — which the send path resolves as
+  // getAdapter(COALESCE(NULL, '<row code>')) and refuses with
+  // `unknown_provider`. A provider you just created through the UI could not
+  // send, which is the exact footgun the picker exists to remove, arriving from
+  // the other direction.
+  let adapterCode: string | null = null;
   if (parsed.data.connection_type) {
     const canonical = parsed.data.connection_type;
     if (!getDescriptor(canonical)) {
@@ -105,12 +116,20 @@ export async function POST(req: NextRequest) {
         );
       }
       smsProviderId = requested;
+      // The whole point of a separate row: its IDENTITY is distinct (`tls-t`)
+      // while its TYPE is the canonical one (`tls`). Without this the row is
+      // unsendable — which is precisely how provider 948 was created.
+      adapterCode = canonical;
     } else {
-      // Derived, never typed.
+      // Derived, never typed. Identity and type coincide here.
       smsProviderId = canonical;
+      adapterCode = canonical;
     }
   } else {
-    // Custom / no-API provider: the operator names it.
+    // Custom / no-API provider: the operator names it, and there is no adapter.
+    // adapterCode stays NULL — a real state, not missing data. Such a row
+    // correctly refuses with `unknown_provider` if anything ever tries to send
+    // through it, and supports_api_send is false at creation regardless.
     smsProviderId = parsed.data.sms_provider_id!;
   }
 
@@ -121,6 +140,7 @@ export async function POST(req: NextRequest) {
         org_id: orgId,
         name: parsed.data.name,
         sms_provider_id: smsProviderId,
+        adapter_code: adapterCode,
         short_link_supported: parsed.data.short_link_supported ?? false,
         // Always OFF at creation — never client-settable. Enabling the go-live
         // gate is a deliberate, audited act via POST /api/providers/[id]/api-send.

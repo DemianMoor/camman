@@ -198,6 +198,99 @@ async function main() {
     if (r.body?.id) createdIds.push(r.body.id);
   }
 
+  // ---- RESOLVABILITY: a created provider must actually be able to send ----
+  //
+  // P3's suite proved every REFUSAL but never proved the happy path produced a
+  // USABLE row. That blind spot is exactly how provider 948 (`tls-t`) was created
+  // with adapter_code = NULL and could never send: the picker shipped before
+  // migration 0134 added the column, so nothing wrote it and nothing checked.
+  // Each case below asserts the created row RESOLVES AN ADAPTER -- or, for a
+  // custom provider, correctly resolves to the refusal path.
+  console.log("");
+  console.log("A created provider must resolve an adapter (the 948 class):");
+  if (NO_WRITES) {
+    console.log("  SKIP  --no-writes: these cases INSERT provider rows.");
+  } else {
+    const { getAdapter } = await import("@/lib/sends/providers/registry");
+    // The send path's exact resolution shape.
+    function drainResolves(row: { adapter_code: string | null; sms_provider_id: string }) {
+      const key = row.adapter_code ?? row.sms_provider_id;
+      try { return getAdapter(key).key; } catch { return null; }
+    }
+    async function fetchRow(id: number) {
+      const r = (await db.execute(sql`
+        SELECT id, sms_provider_id, adapter_code, supports_api_send
+        FROM sms_providers WHERE id = ${id}
+      `)) as unknown as { id: number; sms_provider_id: string; adapter_code: string | null; supports_api_send: boolean }[];
+      return r[0];
+    }
+
+    // (1) SEPARATE-ROW: distinct identity, canonical type. The 948 case.
+    {
+      const code = `probe-tls-${Date.now().toString().slice(-6)}`;
+      const r = await post(cookie, {
+        name: "Probe Separate Row", connection_type: "tls",
+        create_separate_row: true, sms_provider_id: code,
+      });
+      if (r.status !== 201) {
+        check("separate-row provider created", false, `HTTP ${r.status} :: ${r.body?.error ?? ""}`);
+      } else {
+        createdIds.push(r.body.id);
+        const row = await fetchRow(r.body.id);
+        check(
+          "separate-row: identity distinct, adapter_code canonical",
+          row.sms_provider_id === code && row.adapter_code === "tls",
+          `sms_provider_id=${row.sms_provider_id} adapter_code=${row.adapter_code ?? "NULL"}`,
+        );
+        check(
+          "separate-row: RESOLVES the Tells adapter (would have failed pre-fix)",
+          drainResolves(row) === "tls",
+          `resolved=${drainResolves(row) ?? "(unknown_provider refusal)"}`,
+        );
+      }
+    }
+
+    // (2) CUSTOM / no-API: must resolve to the refusal path. Correct behaviour.
+    {
+      const code = `probe-custom-${Date.now().toString().slice(-6)}`;
+      const r = await post(cookie, { name: "Probe Custom Resolvability", sms_provider_id: code });
+      if (r.status !== 201) {
+        check("custom provider created", false, `HTTP ${r.status} :: ${r.body?.error ?? ""}`);
+      } else {
+        createdIds.push(r.body.id);
+        const row = await fetchRow(r.body.id);
+        check("custom: adapter_code is NULL (correct -- no adapter exists)", row.adapter_code === null, `adapter_code=${row.adapter_code ?? "NULL"}`);
+        check("custom: resolves to the unknown_provider refusal path", drainResolves(row) === null, `resolved=${drainResolves(row) ?? "(refusal)"}`);
+        check("custom: not api-send capable", row.supports_api_send === false, `supports_api_send=${row.supports_api_send}`);
+      }
+    }
+
+    // (3) DERIVED path: only reachable for a type with NO existing row, since
+    //     picking an existing type is (correctly) refused. Reported explicitly
+    //     rather than skipped silently.
+    {
+      // `before` is the pre-run snapshot of every provider code in the org.
+      const existingCodes = new Set(before.map((r) => r.sms_provider_id));
+      const unused = ["txh", "ahi", "txr", "tls"].filter((k) => !existingCodes.has(k));
+      if (unused.length === 0) {
+        console.log("  NOTE  every connection type already has a provider row, so the derived-code");
+        console.log("        branch is unreachable without deleting one. The separate-row case above");
+        console.log("        exercises the same adapterCode assignment.");
+      } else {
+        const r = await post(cookie, { name: "Probe Derived", connection_type: unused[0] });
+        if (r.status === 201) {
+          createdIds.push(r.body.id);
+          const row = await fetchRow(r.body.id);
+          check(
+            `derived path (${unused[0]}): adapter_code set and resolves`,
+            row.adapter_code === unused[0] && drainResolves(row) === unused[0],
+            `adapter_code=${row.adapter_code ?? "NULL"} resolved=${drainResolves(row) ?? "none"}`,
+          );
+        }
+      }
+    }
+  }
+
   console.log("\n── Unknown connection type is rejected ──");
   {
     const r = await post(cookie, { name: "probe bogus", connection_type: "not-a-type" });

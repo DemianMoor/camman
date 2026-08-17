@@ -136,7 +136,31 @@ export type ProviderDescriptor = {
   // Per-number provider-specific settings (the `dashboard_id` generalization).
   // Consumer: card 869ej8r00 Q2 — blocked on adapter_code (card 869ej8qzk).
   phoneSettingFields?: FieldSpec[];
+
+  // ── Operator-facing notes (R3) ────────────────────────────────────────────
+  // The "About this provider" copy rendered on /settings/providers. CODE-OWNED,
+  // not a DB column, deliberately: these describe how a CONNECTION TYPE behaves,
+  // which is a property of the adapter and changes only when the adapter does. A
+  // DB column would let the two drift, and an operator editing "TextHub returns
+  // failures as 404" would be editing a fact, not a preference.
+  //
+  // Rules for anything added here:
+  //   • it must be TRUE of this connection type and verifiable from the code or
+  //     a probe script — this is documentation an operator will act on;
+  //   • it must be operationally USEFUL (something that changes what they do),
+  //     not adapter trivia;
+  //   • never a secret, and never a value — descriptors are secret-free.
+  notes?: string[];
 };
+
+// True of every connection type, so it is defined ONCE and spread into each
+// descriptor rather than retyped four times (or rendered as a footnote the
+// panel would have to special-case). Operators reliably look for the rate limit
+// on the provider, and it is not there.
+export const PER_NUMBER_RATE_NOTE =
+  "Per-second send rate is a property of the NUMBER, not this account: it lives on " +
+  "each sending number's max_sends_per_second. The account-level caps here are the " +
+  "per-run, per-minute and 24-hour volume ceilings.";
 
 import type { SendSmsResult } from "@/lib/sends/texthub";
 export interface SmsProviderAdapter {

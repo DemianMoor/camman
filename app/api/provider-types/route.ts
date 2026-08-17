@@ -84,6 +84,12 @@ export async function GET() {
         help: f.help ?? null,
         secret: f.secret ?? false,
       })),
+      // Operator-facing "About this provider" copy (R3). Code-owned constants,
+      // so this stays a static read with no DB round trip and no secrets — the
+      // notes describe how a connection TYPE behaves, never what is stored.
+      // Always an array (never null) so the client renders a list or nothing,
+      // with no undefined-check at the call site.
+      notes: t.descriptor.notes ?? [],
       // false ⇒ no non-sending way to prove a key for this type. The UI must say
       // so, NOT render a Test button that cannot fail (Tells today).
       can_validate: t.canValidate,

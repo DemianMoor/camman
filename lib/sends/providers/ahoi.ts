@@ -6,6 +6,7 @@ import type {
   DlrEvent, InboundEvent, NormalizedSendParams, RawWebhook,
   SendSmsResult, SmsProviderAdapter, ValidateCredentialsResult,
 } from "./types";
+import { PER_NUMBER_RATE_NOTE } from "./types";
 
 // Recon default (Phase 0). Overridable via AHOI_API_BASE_URL for a different
 // white-label account/base without a redeploy of code, but the adapter works
@@ -284,6 +285,17 @@ export const ahoiAdapter: SmsProviderAdapter = {
         help: "The `key` parameter value from the Ahoi/api19 portal.",
         secret: true,
       },
+    ],
+    notes: [
+      "The API answers HTTP 200 for everything, including authentication failures, so " +
+        "every result is read from the response body. A check that cannot recognize the " +
+        "body reports \"couldn't verify\" rather than a pass — an unrecognized envelope is " +
+        "never treated as success.",
+      "Ahoi splits messages longer than one segment on their side, so CamMan counts and " +
+        "costs the segments itself rather than relying on their count.",
+      "Ahoi enforces no opt-out suppression of its own — every STOP must be honoured by " +
+        "CamMan's own suppression list.",
+      PER_NUMBER_RATE_NOTE,
     ],
     validateCredentials: ahoiValidateCredentials,
   },

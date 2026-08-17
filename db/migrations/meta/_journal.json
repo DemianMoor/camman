@@ -974,6 +974,13 @@
       "when": 1788307200000,
       "tag": "0138_sms_providers_sends_enabled",
       "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1788393600000,
+      "tag": "0139_sends_enabled_audit_events",
+      "breakpoints": true
     }
   ]
 }

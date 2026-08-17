@@ -2889,13 +2889,17 @@ export const send_circuit_events = pgTable(
     index("send_circuit_events_provider_idx").on(table.provider_id, table.created_at),
     index("send_circuit_events_org_id_idx").on(table.org_id),
     // Mirrors the LIVE constraint, widened twice since 0058: migration 0131
-    // added the supports_api_send go-live verbs. (This declaration had drifted
-    // — it still read `('paused','resumed')` after 0131 shipped. Migrations are
-    // hand-authored here, so nothing regenerates this; keep it in step by hand
-    // whenever the CHECK is widened.)
+    // added the supports_api_send go-live verbs, 0139 the sends_enabled posture
+    // verbs. (This declaration had drifted — it still read `('paused','resumed')`
+    // after 0131 shipped. Migrations are hand-authored here, so nothing
+    // regenerates this; keep it in step by hand whenever the CHECK is widened.)
+    //
+    // Three distinct pairs, three distinct questions: did a breaker trip
+    // (paused/resumed), may this account API-send at all (api_send_*), and does
+    // the operator want it sending right now (sends_enabled_*).
     check(
       "send_circuit_events_event_check",
-      sql`${table.event} IN ('paused', 'resumed', 'api_send_enabled', 'api_send_disabled')`,
+      sql`${table.event} IN ('paused', 'resumed', 'api_send_enabled', 'api_send_disabled', 'sends_enabled_on', 'sends_enabled_off')`,
     ),
   ],
 );

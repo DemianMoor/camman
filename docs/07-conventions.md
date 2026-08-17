@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-14_
+_Last updated: 2026-08-17_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -387,7 +387,7 @@ git worktree add -b <branch> .claude/worktrees/<name> origin/main
 - **Remove that junction with `cmd //c "rmdir node_modules"`, NEVER `rm -rf`.** `rm -rf` follows the junction and deletes the main checkout's dependencies. Unlink *before* `git worktree remove`.
 - **Clean up when the branch merges:** `git worktree remove <path>` then `git worktree prune`. Stale worktrees are not free — repo-wide `npm run lint` walks every one of them.
 - Prefer explicit two-argument git forms (`git branch -m <old> <new>`) over "operate on the current branch" forms, which silently follow a `HEAD` you did not move.
-- **Run every git command as `git -C <absolute worktree path> …` — never a bare `git` relying on the shell's current directory.** Having a worktree does not protect you if the command executes somewhere else. The agent shell's cwd is **not reliably persistent between tool calls**: it can silently reset to the repo root, so a `cd <worktree> && git …` that worked in one call runs against the **shared checkout** in the next. That is how the 2026-08-14 incident happened — a `git branch -m` intended for a worktree branch renamed the shared checkout's branch instead (restored immediately; no commits or working-tree changes lost). `git -C` binds the target explicitly and is immune to cwd drift.
+- **Run every git command as `git -C <absolute worktree path> …` — never a bare `git` relying on the shell's current directory.** Having a worktree does not protect you if the command executes somewhere else. The agent shell's cwd is **not reliably persistent between tool calls**: it can silently reset to the repo root, so a `cd <worktree> && git …` that worked in one call runs against the **shared checkout** in the next. That is how the 2026-08-17 incident happened — a `git branch -m` intended for a worktree branch renamed the shared checkout's branch instead (restored immediately; no commits or working-tree changes lost). `git -C` binds the target explicitly and is immune to cwd drift.
 
 If you do disturb another branch, the fix is usually clean — a rename touches no commits and preserves upstream config, so `git branch -m <wrong> <original>` restores it. Say so plainly rather than quietly correcting it; the other session may be mid-task.
 

@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-08-14_
+_Last updated: 2026-08-17_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -70,7 +70,7 @@ Each adapter in `lib/sends/providers/` carries a static, secret-free `descriptor
 
 `txh2` is an **alias**, not a connection type: a second TextHub *account* modeled as its own provider row because `sms_provider_id` is `UNIQUE`. `getDescriptor("txh2")` resolves to the TextHub descriptor; `listConnectionTypes()` excludes it so TextHub appears exactly once in a picker. The alias set retires when `adapter_code` lands.
 
-**Ahoi's check is body-classified because nothing else works.** Measured 2026-08-14 (`scripts/probe-ahoi-badkey.ts`, kept as the regression reference): `GET /cdrs/download/csv` returns **HTTP 200 for every case** — valid, wrong, bogus and empty key — and `Content-Type: text/html` even for the successful CSV. Status and content type are both useless. Classification: body parses as JSON with `status:"error"` ⇒ invalid (key off `status`, **never** the message — a wrong key says `not logged in`, an empty one says `invalid key`); body starts with the CDR header `date,your_cost,…` ⇒ valid; anything else ⇒ **unknown**. Never classify on CSV row count — a valid key on a zero-traffic day returns 0 data rows, identical to a failure.
+**Ahoi's check is body-classified because nothing else works.** Measured 2026-08-17 (`scripts/probe-ahoi-badkey.ts`, kept as the regression reference): `GET /cdrs/download/csv` returns **HTTP 200 for every case** — valid, wrong, bogus and empty key — and `Content-Type: text/html` even for the successful CSV. Status and content type are both useless. Classification: body parses as JSON with `status:"error"` ⇒ invalid (key off `status`, **never** the message — a wrong key says `not logged in`, an empty one says `invalid key`); body starts with the CDR header `date,your_cost,…` ⇒ valid; anything else ⇒ **unknown**. Never classify on CSV row count — a valid key on a zero-traffic day returns 0 data rows, identical to a failure.
 
 ## Environment variables
 

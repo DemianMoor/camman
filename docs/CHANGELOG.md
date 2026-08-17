@@ -2,6 +2,12 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 — `sms_providers.adapter_code` split out of `sms_provider_id` (migration 0134, 869ej8qzk Part A) — docs/03-data-model.md
+- Strictly additive: one nullable column + per-row backfill (`txh`/`txh2` → `txh`; `ahi`/`txr`/`tls` → self; `snx`/`smpl` → NULL). No DROP, nothing rewritten, `sms_provider_id` untouched.
+- Backfill is spelled out per row rather than copying `sms_provider_id`, because `txh2` is exactly what a blind copy gets wrong — its adapter is TextHub's, not one called "txh2".
+- New `scripts/verify-adapter-code.ts` gates the cutover: proves resolution via `adapter_code` reaches the object-identical adapter to resolution via `sms_provider_id`, for every row. Ran green on all 7 before any code was switched.
+- Part B (collapsing the `txh2` row into `txh`) remains REJECTED — 412 campaign stages, 1.38M stage_sends, and merged circuit-breaker counters. `txh2` is a legitimate multi-account row under the 0110 model.
+
 2026-08-17 — Connection-type picker for provider creation, with explicit collision handling (869egmakh P3 — closes the card) — docs/06-integrations.md, docs/07-conventions.md
 - `POST /api/providers` now takes `connection_type`; the provider code is DERIVED from the adapter registry instead of typed. Shown read-only but visible, because the code appears in drain errors and reports.
 - ANTI-DRIFT: picking a type that already has a provider row returns 409 `connection_type_exists` with the existing rows attached — never a silently auto-suffixed code, which is exactly how `txh2` came to exist. The UI steers to "add an account to that provider". A separate row stays possible but requires `create_separate_row: true` AND an explicit distinct code, rejected if it collides with a registry key.

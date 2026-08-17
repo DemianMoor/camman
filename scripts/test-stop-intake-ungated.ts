@@ -111,6 +111,32 @@ async function main() {
         "a sending flag reappeared in the STOP-intake credential selection",
       );
 
+      // ── The selected set must be the RIGHT set, not merely a stable one ────
+      //
+      // Everything above proves the selection is INVARIANT under the sending
+      // flags. That would still pass if the predicate selected nothing, or the
+      // wrong rows, as long as it did so consistently. Migrated here from the
+      // (now retired) 0134 cutover differential, because this predicate is the
+      // one place where selecting too few rows fails SILENTLY: a TextHub row
+      // that stops being polled produces no error, just unrecorded STOPs.
+      const expected = (await tx.execute(sql`
+        SELECT pc.id FROM provider_credentials pc
+        JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
+        WHERE p.adapter_code = 'txh'
+        ORDER BY pc.id
+      `)) as unknown as { id: number }[];
+      const expectedIds = expected.map((r) => r.id).join(",");
+      check(
+        "TextHub poller selects exactly the credentials of every adapter_code='txh' row",
+        before["TextHub STOP poller (selectPollableCredentials)"] === expectedIds,
+        `selected=[${before["TextHub STOP poller (selectPollableCredentials)"]}]  expected=[${expectedIds}]`,
+      );
+      check(
+        "...and that set covers MORE THAN ONE provider row (txh + txh2)",
+        expected.length >= 2,
+        `${expected.length} credential(s) across adapter_code='txh' rows`,
+      );
+
       throw ROLLBACK;
     });
   } catch (e) {

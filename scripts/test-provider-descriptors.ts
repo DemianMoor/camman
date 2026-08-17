@@ -78,21 +78,23 @@ check(
 );
 
 console.log("\n── Registry: alias resolution + canonical list ──");
-// txh2 is an ALIAS (a second TextHub account modeled as its own provider row).
-check("getDescriptor('txh2') resolves", getDescriptor("txh2")?.displayName, "TextHub");
+// The txh2 ALIAS is GONE (retired with migration 0134's cutover). A provider row
+// is now looked up by its adapter_code, so the txh2 ROW resolves via 'txh' — and
+// the bare identity string must NOT resolve, or the alias is secretly back.
+check("getDescriptor('txh2') no longer resolves (alias retired)", getDescriptor("txh2"), null);
 check("getDescriptor('txh') resolves", getDescriptor("txh")?.displayName, "TextHub");
 check("getDescriptor('nope') is null", getDescriptor("nope"), null);
 // ...but must NOT appear as its own pickable connection type.
 const types = listConnectionTypes();
 check(
-  "listConnectionTypes excludes the txh2 alias",
+  "listConnectionTypes lists each connection type exactly once",
   types.map((t) => t.key).sort(),
   ["ahi", "tls", "txh", "txr"],
 );
 check("TextHub appears exactly once", types.filter((t) => t.descriptor.displayName === "TextHub").length, 1);
 check(
   "every adapter in the registry declares a descriptor",
-  ["txh", "txh2", "ahi", "txr", "tls"].filter((k) => !getAdapter(k).descriptor),
+  ["txh", "ahi", "txr", "tls"].filter((k) => !getAdapter(k).descriptor),
   [],
 );
 
@@ -108,7 +110,7 @@ console.log("\n── Provider-specific action capabilities (P2 server-side gate
 // Both routes call TextHub's client directly, so ONLY the TextHub family may
 // have these on. If a future adapter flips one without implementing its branch
 // in the route, this fails — which is the point.
-for (const k of ["txh", "txh2"]) {
+for (const k of ["txh"]) {
   check(`${k}: supportsTestSend`, getDescriptor(k)!.supportsTestSend, true);
   check(`${k}: supportsOptOutCallbackRegistration`, getDescriptor(k)!.supportsOptOutCallbackRegistration, true);
 }

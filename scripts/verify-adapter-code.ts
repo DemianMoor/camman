@@ -69,7 +69,7 @@ async function main() {
     );
   }
 
-  console.log("\n── The txh2 case specifically (the reason this gate exists) ──");
+  console.log("\nThe txh2 case specifically (the row this whole split exists for):");
   {
     const txh2 = rows.find((r) => r.sms_provider_id === "txh2");
     if (!txh2) {
@@ -77,14 +77,23 @@ async function main() {
     } else {
       check("txh2.adapter_code === 'txh'", txh2.adapter_code === "txh", `adapter_code=${txh2.adapter_code ?? "NULL"}`);
       const viaCode = resolve(txh2.adapter_code);
-      const viaAlias = resolve("txh2");
       const direct = resolve("txh");
+      // The ROW resolves to the same adapter object as txh, via adapter_code.
       check(
-        "txh2 resolves to the SAME adapter object via alias, adapter_code, and txh",
-        viaCode.ok && viaAlias.ok && direct.ok &&
-          (viaCode as { adapter: unknown }).adapter === (viaAlias as { adapter: unknown }).adapter &&
+        "txh2 row resolves to the SAME adapter object as txh, via adapter_code",
+        viaCode.ok && direct.ok &&
           (viaCode as { adapter: unknown }).adapter === (direct as { adapter: unknown }).adapter,
-        `alias→${viaAlias.name}  adapter_code→${viaCode.name}  txh→${direct.name}`,
+        `adapter_code=${txh2.adapter_code}->${viaCode.name}  txh->${direct.name}`,
+      );
+      // And the IDENTITY string must NOT resolve. This is the assertion that
+      // used to demand the opposite: it pinned the registry alias, which existed
+      // only to bridge the 0134 cutover. Inverted deliberately — if `txh2` starts
+      // resolving again, an alias has crept back and identity is doubling as a
+      // lookup key once more, which is the whole defect this split removed.
+      check(
+        "the bare identity string 'txh2' does NOT resolve (alias stays retired)",
+        !resolve("txh2").ok,
+        `getAdapter('txh2') -> ${resolve("txh2").name}`,
       );
     }
   }
@@ -111,6 +120,29 @@ async function main() {
       r.adapter_code === null || res.ok,
       `adapter_code=${r.adapter_code ?? "NULL"}${r.adapter_code ? ` -> ${res.name}` : " (custom / no adapter)"}`,
     );
+  }
+
+  // Migrated from the retired 0134 cutover differential: every provider that
+  // actually has stages attached must resolve, so a mis-set adapter_code shows
+  // up here rather than as a drain-time refusal on a live campaign.
+  console.log("\nEvery provider with send-eligible stages resolves an adapter:");
+  {
+    const groups = (await db.execute(sql`
+      SELECT p.sms_provider_id AS ident, p.adapter_code, count(*)::int AS stages
+      FROM campaign_stages s
+      JOIN sms_providers p ON p.id = s.sms_provider_id
+      WHERE p.supports_api_send = true
+      GROUP BY 1, 2 ORDER BY 1
+    `)) as unknown as { ident: string; adapter_code: string | null; stages: number }[];
+    check("at least one provider has send-eligible stages (non-vacuous)", groups.length > 0, `${groups.length} group(s)`);
+    for (const g of groups) {
+      const res = resolve(g.adapter_code);
+      check(
+        `${g.ident}: ${g.stages} stage(s) resolve via adapter_code`,
+        res.ok,
+        `adapter_code=${g.adapter_code ?? "NULL"} -> ${res.name}`,
+      );
+    }
   }
 
   console.log("\n── Backfill completeness: no row left undecided ──");

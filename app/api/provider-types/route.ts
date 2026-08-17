@@ -6,10 +6,7 @@ import { sms_providers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
-import {
-  listConnectionTypes,
-  registryKeysForType,
-} from "@/lib/sends/providers/registry";
+import { listConnectionTypes } from "@/lib/sends/providers/registry";
 
 // GET — the pre-built SMS connection types an operator can create a provider
 // account against, sourced from the adapter registry (869egmakh P1). This is
@@ -27,10 +24,10 @@ import {
 // this org already has, and that filter is a multi-tenancy invariant, not an
 // optimization.
 //
-// Aliases are excluded from the list (see listConnectionTypes): `txh2` is a
-// second TextHub ACCOUNT, not a connection type, and must not appear twice in
-// the picker. But it IS counted inside `existing_providers` for TextHub, via
-// registryKeysForType — otherwise "TextHub already exists" would miss it.
+// One entry per connection TYPE. A second account of an existing type (the
+// `txh2` row) is not a type and must not appear twice in the picker — but it IS
+// counted inside `existing_providers` for TextHub, because that grouping keys on
+// adapter_code, which every row of a type shares regardless of its identity code.
 export async function GET() {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -44,34 +41,38 @@ export async function GET() {
   const types = listConnectionTypes();
 
   // Which provider rows in THIS org already exist for each connection type.
-  // Alias-aware via registryKeysForType, so TextHub reports both `txh` and the
-  // `txh2` second-account row — matching only the canonical code would miss
-  // txh2 and offer to create a third TextHub row.
+  //
+  // Grouped by adapter_code — the column that IS the connection type. This used
+  // to enumerate registry keys to catch the `txh2` alias next to `txh`; with the
+  // alias retired that enumeration would return only ['txh'] and would miss the
+  // txh2 row entirely, under-reporting what already exists. adapter_code matches
+  // every row of a type whatever identity code it carries, including rows
+  // created long after this code was written.
   //
   // This drives the anti-drift steer in the create UI: "TextHub already exists
   // — add an account to it instead". The picker must never silently
   // auto-suffix a new code, which is precisely how txh2 came to exist.
-  const allKeys = [...new Set(types.flatMap((t) => registryKeysForType(t.key)))];
-  const existingRows = allKeys.length
+  const typeCodes = types.map((t) => t.key);
+  const existingRows = typeCodes.length
     ? await db
         .select({
           id: sms_providers.id,
           name: sms_providers.name,
           sms_provider_id: sms_providers.sms_provider_id,
+          adapter_code: sms_providers.adapter_code,
           status: sms_providers.status,
         })
         .from(sms_providers)
         .where(
           and(
             eq(sms_providers.org_id, orgId),
-            inArray(sms_providers.sms_provider_id, allKeys),
+            inArray(sms_providers.adapter_code, typeCodes),
           ),
         )
         .orderBy(sms_providers.id)
     : [];
 
   const data = types.map((t) => {
-    const keys = new Set(registryKeysForType(t.key));
     return {
       key: t.key,
       display_name: t.descriptor.displayName,
@@ -89,7 +90,7 @@ export async function GET() {
       // Non-empty ⇒ the happy path for "I have another account of this type" is
       // ADD A CREDENTIAL to one of these, not create a second provider row.
       existing_providers: existingRows
-        .filter((r) => keys.has(r.sms_provider_id))
+        .filter((r) => r.adapter_code === t.key)
         .map((r) => ({
           id: r.id,
           name: r.name,

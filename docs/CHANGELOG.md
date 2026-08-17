@@ -2,6 +2,13 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 - Per-number provider settings come from the descriptor (Q2) - docs/06-integrations.md
+- The phone form's hardcoded `providerKey === "txr"` gate is gone. Per-number fields are declared as `phoneSettingFields` on the adapter descriptor and resolved server-side from adapter_code, delivered as `phone_setting_fields` on the provider detail response.
+- Keyed on adapter_code, never sms_provider_id: a SECOND account of a type (the txh2 row) now gets its type's fields, which the identity-keyed gate could not do. Adding a provider-specific field no longer means another hardcoded branch in the form.
+- Resolved server-side because the phone form is a "use client" component - importing the adapter registry there would bundle every provider's HTTP client into the browser. Same reason connection_type rides on the credentials response.
+- Proven as a differential against the OLD rule (scripts/verify-phone-setting-fields.ts): all 8 provider rows produce identical field sets under both rules; the comparison is asserted non-vacuous (txr declares dashboard_id); every declared field name is verified to be a real provider_phones column; and both TextHub rows resolve identical fields despite different identities.
+- No schema change.
+
 2026-08-17 - Per-phone short domain (migration 0137, Q1) - docs/03-data-model.md, docs/07-conventions.md
 - provider_phones.short_domain_id, nullable FK to short_domains ON DELETE SET NULL (not CASCADE: removing a domain must never delete an externally-provisioned number; falling back to the brand default is the correct degradation).
 - kickoff resolution is now phone override -> brand default. The override must be org-owned AND status=active, so B1 pending rows can never be minted under.

@@ -10,6 +10,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { getDescriptor } from "@/lib/sends/providers/registry";
 import { nullIfEmpty, providerUpdateSchema } from "@/lib/validators/providers";
 
 function parseId(idParam: string) {
@@ -55,7 +56,23 @@ export async function GET(
       entity: "provider",
     });
   }
-  return NextResponse.json(rows[0]);
+  // Per-number setting fields this provider's CONNECTION TYPE declares
+  // (869ej8r00 Q2). Resolved server-side from adapter_code, because the phone
+  // form is a "use client" component and importing the adapter registry there
+  // would bundle every provider's HTTP client into the browser — the same
+  // reason connection_type rides on the credentials response.
+  //
+  // Keyed on adapter_code, never sms_provider_id: a second account of a type
+  // (the txh2 row) must get the same fields as the first.
+  const descriptor = getDescriptor(rows[0].adapter_code ?? "");
+  const phone_setting_fields = (descriptor?.phoneSettingFields ?? []).map((f) => ({
+    name: f.name,
+    label: f.label,
+    placeholder: f.placeholder ?? null,
+    help: f.help ?? null,
+  }));
+
+  return NextResponse.json({ ...rows[0], phone_setting_fields });
 }
 
 export async function PATCH(

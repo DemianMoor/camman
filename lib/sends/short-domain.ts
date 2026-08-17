@@ -208,17 +208,33 @@ export interface BrandShortDomainRow {
   domain: string;
   status: string;
   is_default: boolean;
-  link_count: number;
 }
 
 // LIST — every domain of one brand, for the management surface.
+//
+// ⚠️ DELIBERATELY CARRIES NO MINTED-LINK COUNT. It used to select
+// `(SELECT count(*) FROM links WHERE short_domain_id = d.id)` per row, purely so
+// the UI could show "N minted links" and pre-disable Delete. `links` holds
+// 3,227,905 rows and has NO index covering `short_domain_id`, so each count was
+// a parallel seq scan of the whole table (~3.1s measured). One brand's list cost
+// 6,822ms against 48ms without it, and the page issues one request per brand
+// SERIALLY — ~20.5s before anything rendered, which is also why a "Make default"
+// click appeared to do nothing: the write landed instantly and the refetch
+// behind it took twenty seconds.
+//
+// The count was never load-bearing: `deleteShortDomain` re-checks minted links
+// server-side and refuses with `domain_in_use`, so the client figure only ever
+// pre-disabled a button the server already guards. Dropping it is a 140x
+// improvement for a advisory number.
+//
+// To bring it back, add an index on `links(short_domain_id)` in its own
+// migration and re-measure — deliberately NOT done here.
 export async function listBrandShortDomains(
   dbc: DbOrTx,
   { orgId, brandId }: { orgId: string; brandId: number },
 ): Promise<BrandShortDomainRow[]> {
   return (await dbc.execute(sql`
-    SELECT d.id, d.domain, d.status, d.is_default,
-           (SELECT count(*)::int FROM links l WHERE l.short_domain_id = d.id) AS link_count
+    SELECT d.id, d.domain, d.status, d.is_default
     FROM short_domains d
     WHERE d.org_id = ${orgId} AND d.brand_id = ${brandId}
     ORDER BY d.is_default DESC, d.created_at ASC, d.id ASC

@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-17_
+_Last updated: 2026-08-18_
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 
@@ -73,6 +73,10 @@ Migration `0136` let a brand hold several short domains. The write path was not 
 2. Its clear branch ran `DELETE … WHERE org_id = … AND brand_id = …`, which post-0136 deletes **every** domain of that brand rather than the one being removed — including a `pending` row provisioned for a later activation.
 
 Neither was noticed because `scripts/verify-brand-domains.ts`, the guard that covered exactly this, had been **red on `main` since that merge and nobody re-ran it**. The lesson generalizes: *a migration that changes a cardinality assumption must re-run the guards that encode it* — see the retire-obsolete-assertions rule.
+
+**A one-to-many child turns every JOIN into a fanout risk.** The same migration that broke the write path also broke a READ: `/api/brands/list` carried `.leftJoin(short_domains, …)` whose one-row-per-brand property rested on the very index `0136` dropped, with a comment saying so. From that merge on, a brand with two domains came back **twice** — so it appeared twice in every brand dropdown in the app (nine consumers share that endpoint), `data.length` disagreed with the separately-counted `totalCount`, and `LIMIT/OFFSET` paged over duplicated rows so a brand could vanish from a later page. Fixed with `leftJoinLateral(… LIMIT 1)`, which makes the cardinality **structural** rather than dependent on an index that can be dropped again. Two rules fall out: **when a UNIQUE constraint is dropped, grep for every join that relied on it** (a comment citing the index is a find, not reassurance), and **prefer LATERAL … LIMIT 1 over a plain join for a "one child row" column**. A correlated sub-select is not a substitute in a single-FROM-table query — Drizzle renders `${brands.id}` as a bare, unqualified `"id"` that binds to the sub-select's own table and silently returns NULL; LATERAL adds the second relation that makes the correlation legal. Pinned by `scripts/verify-brand-list-no-fanout.ts`, which hits the real endpoint and **refuses to pass unless a brand with 2+ domains actually exists** (otherwise "appears exactly once" is vacuous).
+
+**A list column that feeds logic must carry the same value the send path resolves.** The old join had **no status filter at all**, which was harmless while every row was active and became wrong the moment B1 introduced `pending`: the column feeding the campaign form's SMS preview could hand it a host that can never be minted. It now selects the EFFECTIVE domain — active only, explicit default first, then oldest — matching `resolveShortDomainForSend`'s brand-level precedence, and the guard asserts that agreement per brand rather than merely that a row came back.
 
 **The rules now:**
 - **One write surface.** `/api/brands/[id]/short-domains` (+ `/[domainId]`). The brand form's single "Short domain" text field is **removed** — a list cannot be expressed in one field — and `POST/PATCH /api/brands` no longer touch `short_domains` at all; the `short_domain` key is **dropped** from the update payload rather than applied, so a stale client cannot reach a second path.

@@ -85,19 +85,25 @@ async function main() {
   check("brand scope is non-empty", brands.length > 0, `${brands.length}`);
   check("phone scope is non-empty", phones.length > 0, `${phones.length}`);
 
-  // ── 1. The three provisioned hostnames exist and are PENDING ─────────────
+  // ── 1. The three provisioned hostnames exist ─────────────────────────────
+  //
+  // ⚠️ RETIRED ASSERTIONS. This block used to also assert each host was
+  // `pending` and not a brand default. That was true of the MIGRATION's
+  // immediate aftermath and nothing more: activation is explicitly the
+  // operator's act, and B1 shipped the surface for doing it. The moment they
+  // activated (and made two of them brand defaults) the assertions became a
+  // report that the feature had been USED — a guard that fails when the product
+  // is exercised is a guard that gets ignored. Per docs/07-conventions.md the
+  // expired invariant is retired, not the data reverted.
+  //
+  // What is asserted instead is durable: the rows exist, and whatever their
+  // status, the resolution rules below hold.
   for (const host of PROVISIONED) {
     const row = domains.find((d) => d.domain === host);
-    check(`provisioned: ${host} exists`, !!row, row ? `#${row.id} brand=${row.brand_id}` : "MISSING");
     check(
-      `provisioned: ${host} is 'pending' (not activated by the migration)`,
-      row?.status === "pending",
-      `status=${row?.status ?? "n/a"}`,
-    );
-    check(
-      `provisioned: ${host} is NOT a brand default`,
-      row?.is_default === false,
-      `is_default=${row?.is_default ?? "n/a"}`,
+      `provisioned: ${host} exists`,
+      !!row,
+      row ? `#${row.id} brand=${row.brand_id} status=${row.status} is_default=${row.is_default}` : "MISSING",
     );
   }
 
@@ -166,13 +172,24 @@ async function main() {
   // ── 4. A pending domain is never mintable, even as a per-number override ──
   // Proven by actually assigning one, inside a rolled-back transaction: the
   // resolver must fall THROUGH to the brand rather than mint under it.
-  const pendingRow = domains.find((d) => d.status === "pending");
-  check("a pending domain exists to exercise", !!pendingRow, pendingRow ? `#${pendingRow.id} ${pendingRow.domain}` : "none");
+  // Self-sufficient: SYNTHESIZE a pending row inside the rolled-back
+  // transaction rather than depending on one existing. The original version
+  // required a pending domain in production, which stopped being true the moment
+  // the operator activated all three — leaving the single most important
+  // invariant here ("a pending host can never mint") untested exactly when the
+  // data stopped happening to provide a subject for it.
   const somePhone = phones[0];
-  if (pendingRow && somePhone) {
+  check("a phone exists to exercise the override path", !!somePhone, somePhone ? `#${somePhone.id}` : "none");
+  if (somePhone) {
     try {
       await db.transaction(async (tx) => {
         const dbc = tx as unknown as typeof db;
+        const made = (await tx.execute(sql`
+          INSERT INTO short_domains (org_id, brand_id, domain, status, is_default)
+          VALUES (${orgId}, ${brands[0].id}, ${"pending-probe.example"}, 'pending', false)
+          RETURNING id, brand_id
+        `)) as unknown as { id: number; brand_id: number }[];
+        const pendingRow = { id: made[0].id, brand_id: made[0].brand_id, domain: "pending-probe.example" };
         await tx.execute(sql`
           UPDATE provider_phones SET short_domain_id = ${pendingRow.id} WHERE id = ${somePhone.id}
         `);

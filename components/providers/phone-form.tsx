@@ -168,30 +168,55 @@ export function PhoneForm({
   const domainsApi = useApiCall<{ data: ShortDomainOption[] }>();
   const { execute: domainsExec } = domainsApi;
   const [domains, setDomains] = useState<ShortDomainOption[]>([]);
+  // Which brand the current `domains` array actually describes. NULL means "not
+  // loaded yet" — distinct from "loaded and empty", and that distinction is the
+  // whole fix below.
+  const [domainsFor, setDomainsFor] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (watchedBrandId == null) { setDomains([]); return; }
+      if (watchedBrandId == null) { setDomains([]); setDomainsFor(null); return; }
       const r = await domainsExec(`/api/short-domains/list?brand_id=${watchedBrandId}`);
       if (cancelled) return;
-      if (r.ok) setDomains(r.data.data);
+      if (r.ok) { setDomains(r.data.data); setDomainsFor(watchedBrandId); }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; setDomainsFor(null); };
   }, [watchedBrandId, domainsExec]);
 
   // Clear a stale override when the brand changes: a domain belonging to the
-  // previous brand must not survive the switch. This is the UX affordance — the
-  // server refuses a cross-brand assignment outright (`brand_mismatch` in
+  // previous brand must not survive the switch. The server refuses a cross-brand
+  // assignment outright (`brand_mismatch` in
   // lib/providers/short-domain-assignment.ts), so a stale value here would be
-  // rejected rather than stored. Clearing it just avoids showing the operator a
+  // rejected rather than stored; clearing it just avoids showing the operator a
   // selection that is about to fail.
+  //
+  // ⚠️ IT MUST NOT RUN BEFORE `domains` HAS LOADED. `domains` starts as [], so
+  // the original version fired on mount with an empty list, concluded the saved
+  // override "isn't in the options", and wiped it — every time the Edit-phone
+  // modal opened. That is why a saved per-number domain always redisplayed as
+  // "Brand default" even though the row was stored correctly (phone 224 really
+  // did hold short_domain_id=30). Worse than cosmetic: the cleared NULL was a
+  // real form value, so pressing Save then DELETED the override from the
+  // database — silent data loss on an unrelated edit.
+  //
+  // Guarding on `domainsFor === watchedBrandId` is what separates "not loaded
+  // yet" from "loaded, and this id is genuinely not among the options"; only the
+  // second is grounds for clearing.
   useEffect(() => {
     const cur = form.getValues("short_domain_id");
-    if (cur != null && !domains.some((d) => d.id === cur)) {
+    if (cur == null) return;
+    // No brand ⇒ no override is coherent (the server refuses one), so clear.
+    if (watchedBrandId == null) {
+      form.setValue("short_domain_id", null);
+      return;
+    }
+    // Options not yet loaded FOR THIS BRAND — say nothing, decide nothing.
+    if (domainsFor !== watchedBrandId) return;
+    if (!domains.some((d) => d.id === cur)) {
       form.setValue("short_domain_id", null);
     }
-  }, [domains, form]);
+  }, [domains, domainsFor, watchedBrandId, form]);
 
   return (
     <Form {...form}>

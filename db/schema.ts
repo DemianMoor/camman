@@ -2467,7 +2467,15 @@ export const short_domains = pgTable(
     unique("short_domains_org_id_domain_unique").on(table.org_id, table.domain),
     index("short_domains_org_id_idx").on(table.org_id),
     // One short domain per brand (migration 0052).
-    uniqueIndex("short_domains_brand_id_uniq").on(table.brand_id),
+    // A brand may have SEVERAL short domains (migration 0136 dropped the
+    // one-per-brand unique from 0052). Behaviour is unchanged until an operator
+    // adds a second one: the brand->domain pick in lib/sends/kickoff.ts is
+    // deterministic (`ORDER BY created_at, id LIMIT 1`).
+    //
+    // The cross-brand guard below stays UNIQUE on purpose: two brands must never
+    // share a hostname, or the per-brand reporting split becomes meaningless and
+    // one brand's reputation damage bleeds into another's deliverability.
+    index("short_domains_brand_id_idx").on(table.brand_id),
     check(
       "short_domains_status_check",
       sql`${table.status} IN ('active', 'archived')`,

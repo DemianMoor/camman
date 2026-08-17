@@ -2,6 +2,15 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 — Uniform Test connection + server-side gates on the two provider-specific actions (869egmakh P2) — docs/06-integrations.md, docs/07-conventions.md
+- New `POST /api/providers/[id]/credentials/[credId]/test-connection`: one descriptor-driven, non-sending check for every connection type. Returns three states (`valid`/`invalid`/`unknown`) plus optional `discovered` items. Admin+, read-only at the provider, NOT gated by SEND_ENABLED.
+- Deleted the txr-only `…/healthcheck` endpoint it supersedes. Text Request's dashboard ids moved into `discovered`, so binding a `dashboard_id` to a number still works from the same dialog — no capability lost.
+- SECURITY: `…/credentials/test` (spends money) and `…/register-callback` (mutates remote state) were gated ONLY in the client component; the routes accepted any provider's credential and fired it at TextHub's API. Both now re-check `supportsTestSend` / `supportsOptOutCallbackRegistration` from the descriptor. Proven by scripts/test-provider-action-gates.ts with real authenticated requests against Ahoi, Text Request and Tells credentials.
+- The send-test route now checks the connection type BEFORE SEND_ENABLED: a misrouted request gets the right error instead of "turn sending on", and the gate is provable without arming sending.
+- UI: `unknown` renders as its own amber state ("Couldn't verify"), never folded into pass or fail. A type with no non-sending check (Tells) shows explanatory text instead of a button — not a disabled control, and never a check that cannot fail.
+- Conventions added: date stamps come from the current date, never from data timestamps; `gh pr checks` exits non-zero while pending, so never wrap it in a fallback that maps failure to an empty result.
+- No schema change, no migration.
+
 2026-08-17 — Provider connection-type descriptors (869egmakh P1): static `descriptor` on every SMS adapter (displayName, blurb, credentialFields, three-state `validateCredentials`), `GET /api/provider-types`, registry split into alias-tolerant `getDescriptor()` + canonical `listConnectionTypes()` — docs/06-integrations.md, docs/07-conventions.md
 - Non-sending credential checks reuse existing clients rather than adding new ones: TextHub via `fetchInbox`, Text Request via `textrequestHealthcheck`, Ahoi via a same-day CDR pull. Tells deliberately has NO `validateCredentials` — its only endpoint sends.
 - `ValidateCredentialsResult` is three-state (`valid`/`invalid`/`unknown`); `unknown` must never collapse into pass or fail. Ahoi and Tells answer HTTP 200 on auth failure, so an envelope change has to degrade to "couldn't verify", not to a false green.

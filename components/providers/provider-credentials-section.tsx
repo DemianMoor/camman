@@ -59,15 +59,45 @@ type Phone = {
 
 const NONE_BRAND = "none";
 
-// TextHub-family provider keys (txh + the second-account txh2 both reuse the
-// TextHub adapter). The "Send test" action posts to a route that hardcodes
-// TextHub's sendSms + the STOP-callback registers a TextHub callback, so both
-// are only valid — and only shown — for these keys. (Gating Send test here also
-// hides the TextHub-hardcoded button for Ahoi, where it would have fired via the
-// wrong provider.)
-const TEXTHUB_KEYS = new Set(["txh", "txh2"]);
-// Text Request: the only provider with a non-sending connection check today.
-const TEXTREQUEST_KEY = "txr";
+// Which actions this provider row supports, from the adapter descriptor
+// (869egmakh P2). Served on the credentials list response so this "use client"
+// component doesn't have to import the adapter registry — that would bundle
+// every provider's HTTP client into the browser. Resolved server-side with
+// getDescriptor, so a `txh2` row correctly reports TextHub's capabilities.
+//
+// Replaces the hardcoded TEXTHUB_KEYS / TEXTREQUEST_KEY sets that used to live
+// here. Those were the ONLY gate on two money- and remote-state-touching
+// routes; the routes now re-check server-side and these flags just decide what
+// to render. The UI is not a security boundary.
+type ConnectionType = {
+  key: string;
+  display_name: string;
+  can_validate: boolean;
+  supports_test_send: boolean;
+  supports_optout_callback_registration: boolean;
+};
+
+// Result of the uniform non-sending check. THREE states — `unknown` is not a
+// soft pass and is rendered as its own thing (see resultTone below).
+type ConnCheck = {
+  state: "valid" | "invalid" | "unknown";
+  detail: string | null;
+  // Structured findings from a successful check. Text Request returns its
+  // dashboard ids here — each is 1:1 with a sending number and the operator
+  // pastes one into the number's form, so this is load-bearing, not extra.
+  discovered: { label: string; items: { id: string; name: string }[] } | null;
+  display_name: string;
+};
+
+// Visual treatment per state. `unknown` deliberately gets its own tone: amber,
+// not green and not red. Ahoi and Tells answer HTTP 200 on auth failure, so if
+// one changes its response shape the check degrades to "couldn't verify" — and
+// showing that as either a pass or a failure would be a lie in both directions.
+const CHECK_TONE: Record<ConnCheck["state"], { label: string; className: string }> = {
+  valid: { label: "Connected", className: "text-emerald-600 dark:text-emerald-400" },
+  invalid: { label: "Rejected", className: "text-destructive" },
+  unknown: { label: "Couldn't verify", className: "text-amber-600 dark:text-amber-500" },
+};
 
 function numberWord(n: number) {
   return `${n} number${n === 1 ? "" : "s"}`;
@@ -75,12 +105,14 @@ function numberWord(n: number) {
 
 export function ProviderCredentialsSection({
   providerId,
-  providerKey,
   providerName,
   canManage,
 }: {
   providerId: number;
-  providerKey: string;
+  // `providerKey` used to be passed here to drive the hardcoded TextHub /
+  // Text Request action gates. Those are gone — capabilities now arrive on the
+  // credentials list response as `connection_type` — so the prop was dead and
+  // has been dropped rather than left dangling.
   // Display name of the provider row, used only to make the API-key prompts
   // name the provider you're actually on. The FIELD has always been universal;
   // the COPY used to say "TextHub" on every provider's page, which read as a
@@ -88,9 +120,7 @@ export function ProviderCredentialsSection({
   providerName: string;
   canManage: boolean;
 }) {
-  const isTextHub = TEXTHUB_KEYS.has(providerKey);
-  const isTextRequest = providerKey === TEXTREQUEST_KEY;
-  const listApi = useApiCall<{ data: Cred[] }>();
+  const listApi = useApiCall<{ data: Cred[]; connection_type: ConnectionType | null }>();
   const brandsApi = useApiCall<{ data: Brand[] }>();
   const phonesApi = useApiCall<{ data: Phone[] }>();
   const saveApi = useApiCall<{ ok: boolean; id: number }>();
@@ -101,6 +131,7 @@ export function ProviderCredentialsSection({
   const { execute: phonesExec } = phonesApi;
 
   const [creds, setCreds] = useState<Cred[] | null>(null);
+  const [connType, setConnType] = useState<ConnectionType | null>(null);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [phones, setPhones] = useState<Phone[]>([]);
   // False until the phones fetch has resolved at least once. Both the Add
@@ -114,7 +145,10 @@ export function ProviderCredentialsSection({
     let active = true;
     void (async () => {
       const r = await listExec(`/api/providers/${providerId}/credentials`);
-      if (active && r.ok) setCreds(r.data.data);
+      if (active && r.ok) {
+        setCreds(r.data.data);
+        setConnType(r.data.connection_type);
+      }
     })();
     return () => {
       active = false;
@@ -459,20 +493,17 @@ export function ProviderCredentialsSection({
     else toast.error("TextHub didn't accept the registration");
   }
 
-  // Check connection (Text Request only): non-sending healthcheck that calls
-  // Text Request's GET /dashboards with the stored key to confirm it
-  // authenticates and to list the account's dashboards (the ids an operator
-  // binds to a sending number). No SMS, no spend.
-  const healthApi = useApiCall<{
-    ok: boolean;
-    status: number;
-    dashboards: { id: string; name: string }[];
-    error: string | null;
-  }>();
+  // Test connection — the UNIFORM non-sending check (869egmakh P2). One route
+  // for every connection type; the adapter's descriptor supplies the actual
+  // check. No SMS, no spend, no remote state change.
+  //
+  // Only rendered when connection_type.can_validate is true. When it's false
+  // (Tells: its only endpoint sends) we show explanatory text INSTEAD of a
+  // button — never a disabled control that reads as broken, and never a check
+  // that cannot fail.
+  const healthApi = useApiCall<ConnCheck>();
   const [checking, setChecking] = useState<Cred | null>(null);
-  const [healthResult, setHealthResult] = useState<
-    { ok: boolean; status: number; dashboards: { id: string; name: string }[]; error: string | null } | null
-  >(null);
+  const [healthResult, setHealthResult] = useState<ConnCheck | null>(null);
 
   function openCheck(c: Cred) {
     setChecking(c);
@@ -482,15 +513,20 @@ export function ProviderCredentialsSection({
   async function handleCheck() {
     if (!checking) return;
     const r = await healthApi.execute(
-      `/api/providers/${providerId}/credentials/${checking.id}/healthcheck`,
+      `/api/providers/${providerId}/credentials/${checking.id}/test-connection`,
+      { method: "POST" },
     );
     if (!r.ok) {
       toastApiError(r, "Connection check failed");
       return;
     }
     setHealthResult(r.data);
-    if (r.data.ok) toast.success("Connected — Text Request accepted the key");
-    else toast.error("Text Request rejected the key");
+    // Three outcomes, three toasts. `unknown` must not borrow either of the
+    // other two — the operator needs to know the answer is "we don't know",
+    // not "it works" or "it's broken".
+    if (r.data.state === "valid") toast.success(`Connected — ${r.data.display_name} accepted the key`);
+    else if (r.data.state === "invalid") toast.error(`${r.data.display_name} rejected the key`);
+    else toast.warning("Couldn't verify — unrecognized response from the provider");
   }
 
   return (
@@ -501,6 +537,19 @@ export function ProviderCredentialsSection({
           <p className="text-sm text-muted-foreground">
             Per-account API keys — key + sending numbers travel together.
           </p>
+          {/* No-check-available state. Shown INSTEAD of a Test connection button
+              when the connection type has no non-sending way to prove a key
+              (Tells: its only endpoint sends a message). Deliberately explanatory
+              text rather than a disabled button, which would read as "broken" or
+              "you lack permission" — and far better than a check that can never
+              fail, which would read as proof the key works. */}
+          {connType && !connType.can_validate ? (
+            <p className="mt-1 text-sm text-amber-600 dark:text-amber-500">
+              {connType.display_name} has no non-sending way to verify a key, so
+              there&apos;s no connection test for these accounts. A key is only
+              proven by a real send.
+            </p>
+          ) : null}
         </div>
         {canManage ? (
           <Button onClick={openAdd}>
@@ -552,30 +601,28 @@ export function ProviderCredentialsSection({
                     {canManage ? (
                       <td className="px-4 py-2">
                         <div className="flex justify-end gap-1">
-                          {/* Send test is TextHub-only: the route hardcodes
-                              TextHub's sendSms and would fire a real SMS via the
-                              wrong provider for any other key. */}
-                          {isTextHub ? (
+                          {/* Send test SPENDS MONEY and the route hardcodes
+                              TextHub's sendSms, so it stays a separate, explicitly
+                              gated action — never folded into Test connection.
+                              The route re-checks this server-side. */}
+                          {connType?.supports_test_send ? (
                             <Button variant="ghost" size="sm" onClick={() => openTest(c)}>
                               <SendHorizonal className="size-4" aria-hidden /> Send test
                             </Button>
                           ) : null}
-                          {isTextRequest ? (
+                          {/* Uniform non-sending check, any connection type whose
+                              descriptor implements one. */}
+                          {connType?.can_validate ? (
                             <Button variant="ghost" size="sm" onClick={() => openCheck(c)}>
-                              <PlugZap className="size-4" aria-hidden /> Check connection
+                              <PlugZap className="size-4" aria-hidden /> Test connection
                             </Button>
                           ) : null}
-                          {/* STOP callback is TextHub-only, same reason as Send
-                              test: the route imports registerOptOutCallback from
-                              lib/sends/texthub-optout and registers a
-                              /api/webhooks/texthub/opt-out/<token> URL. Rendered
-                              unconditionally it offered to register a TEXTHUB
-                              callback from an Ahoi / Text Request / Tells
-                              account's page, using that account's key. Text
-                              Request has its own hook registration
-                              (register-textrequest-hooks) with no button yet —
-                              tracked on ClickUp 869egmakh P2, not added here. */}
-                          {isTextHub ? (
+                          {/* STOP callback MUTATES REMOTE STATE at the provider and
+                              registers a /api/webhooks/texthub/opt-out/<token> URL,
+                              so it likewise stays separate and gated. Text Request
+                              has its own hook registration
+                              (register-textrequest-hooks) with no button yet. */}
+                          {connType?.supports_optout_callback_registration ? (
                             <Button variant="ghost" size="sm" onClick={() => openRegister(c)}>
                               <Ban className="size-4" aria-hidden /> STOP callback
                             </Button>
@@ -972,11 +1019,11 @@ export function ProviderCredentialsSection({
         className="sm:max-w-md"
       >
         <DialogHeader>
-          <DialogTitle>Check connection</DialogTitle>
+          <DialogTitle>Test connection</DialogTitle>
           <DialogDescription>
-            Verifies the &quot;{checking?.label ?? ""}&quot; account&apos;s API key with
-            Text Request and lists its dashboards. Each dashboard is 1:1 with a
-            sending number — use a dashboard ID on the number&apos;s form. No SMS is sent.
+            Verifies the &quot;{checking?.label ?? ""}&quot; account&apos;s API key with{" "}
+            {connType?.display_name ?? "the provider"}. Read-only — no SMS is sent
+            and nothing is changed at the provider.
           </DialogDescription>
         </DialogHeader>
 
@@ -985,43 +1032,48 @@ export function ProviderCredentialsSection({
             <div
               className={
                 "rounded-md border p-3 text-sm " +
-                (healthResult.ok
+                (healthResult.state === "valid"
                   ? "border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950"
-                  : "border-destructive/40 bg-destructive/5")
+                  : healthResult.state === "invalid"
+                    ? "border-destructive/40 bg-destructive/5"
+                    : // `unknown` gets its OWN treatment — amber, never green and
+                      // never red. Collapsing it either way misreports what we know.
+                      "border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950")
               }
             >
-              {healthResult.ok ? (
+              <p className={"font-medium " + CHECK_TONE[healthResult.state].className}>
+                {CHECK_TONE[healthResult.state].label}
+              </p>
+              {healthResult.detail ? (
+                <p className="mt-1 text-muted-foreground">{healthResult.detail}</p>
+              ) : null}
+              {healthResult.discovered && healthResult.discovered.items.length > 0 ? (
                 <>
-                  <p className="font-medium">Connected — key accepted.</p>
-                  {healthResult.dashboards.length > 0 ? (
-                    <>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        Dashboards (ID — name):
-                      </p>
-                      <ul className="mt-1 font-mono text-xs">
-                        {healthResult.dashboards.map((d) => (
-                          <li key={d.id}>
-                            {d.id} — {d.name}
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : (
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      No dashboards returned.
-                    </p>
-                  )}
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {healthResult.discovered.label}:
+                  </p>
+                  <ul className="mt-1 font-mono text-xs">
+                    {healthResult.discovered.items.map((it) => (
+                      <li key={it.id}>
+                        {it.id} — {it.name}
+                      </li>
+                    ))}
+                  </ul>
                 </>
-              ) : (
-                <p>
-                  Text Request rejected it{healthResult.status ? ` (HTTP ${healthResult.status})` : ""}
-                  : {healthResult.error ?? "unknown error"}
+              ) : null}
+              {healthResult.state === "unknown" ? (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  The provider answered, but not in a shape we recognize — so we
+                  can&apos;t say whether this key works. This is not a failure and
+                  not a pass. If it persists, the provider may have changed their
+                  API.
                 </p>
-              )}
+              ) : null}
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">
-              This calls Text Request once to confirm the key works. No SMS is sent.
+              Calls {connType?.display_name ?? "the provider"} once to confirm the
+              key authenticates. No SMS is sent.
             </p>
           )}
 
@@ -1041,7 +1093,7 @@ export function ProviderCredentialsSection({
                 ? "Checking…"
                 : healthResult
                   ? "Check again"
-                  : "Check connection"}
+                  : "Test connection"}
             </Button>
           </div>
         </div>

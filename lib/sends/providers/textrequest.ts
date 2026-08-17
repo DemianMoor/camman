@@ -211,6 +211,11 @@ export const textrequestAdapter: SmsProviderAdapter = {
         return {
           state: "valid",
           detail: `Key authenticated. ${n} dashboard${n === 1 ? "" : "s"} on this account.`,
+          // The dashboard ids are the point, not decoration: each is 1:1 with a
+          // sending number and the operator pastes one into the number's
+          // `dashboard_id` field. Surfacing them here is what let the old
+          // txr-only healthcheck endpoint be retired without losing anything.
+          discovered: { label: "Dashboards (ID — name)", items: r.dashboards },
         };
       }
       if (r.status === 0) {

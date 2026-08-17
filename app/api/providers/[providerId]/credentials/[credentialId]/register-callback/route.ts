@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -8,6 +8,7 @@ import { provider_credentials } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { loadCredentialContext } from "@/lib/providers/credential-context";
 import { resolveCredentialKeyById } from "@/lib/sends/provider-credential";
 import { registerOptOutCallback } from "@/lib/sends/texthub-optout";
 import { registerOptOutCallbackSchema } from "@/lib/validators/providers";
@@ -94,19 +95,37 @@ export async function POST(
 
   // Resolve the credential, org- and provider-scoped (ownership check).
   // Non-secret columns only — the key is resolved separately below.
+  const ctx = await loadCredentialContext({ orgId, providerId, credentialId });
+  if (!ctx) {
+    return apiError(404, "Credential not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "provider_credential",
+    });
+  }
+
+  // CONNECTION-TYPE GATE (869egmakh P2). This route registers a TEXTHUB opt-out
+  // callback and builds a /api/webhooks/texthub/opt-out/<token> URL, so it is
+  // only correct for the TextHub connection type. The restriction previously
+  // existed ONLY in the client component; the route itself had no reference to
+  // sms_provider_id at all, so a direct POST with any provider's credential
+  // would have shipped that key to TextHub AND minted an inbound_webhook_token
+  // on a credential whose provider never uses that webhook path.
+  if (!ctx.descriptor?.supportsOptOutCallbackRegistration) {
+    return apiError(
+      400,
+      `STOP-callback registration isn't available for ${ctx.descriptor?.displayName ?? ctx.providerName}.`,
+      API_ERROR_CODES.VALIDATION,
+      { reason: "optout_callback_unsupported", provider_key: ctx.providerKey },
+    );
+  }
+
+  // Re-read the token column for the row we just authorized.
   const cred = await db
     .select({
       id: provider_credentials.id,
       inbound_webhook_token: provider_credentials.inbound_webhook_token,
     })
     .from(provider_credentials)
-    .where(
-      and(
-        eq(provider_credentials.id, credentialId),
-        eq(provider_credentials.provider_id, providerId),
-        eq(provider_credentials.org_id, orgId),
-      ),
-    )
+    .where(eq(provider_credentials.id, ctx.credentialId))
     .limit(1);
   if (!cred[0]) {
     return apiError(404, "Credential not found", API_ERROR_CODES.NOT_FOUND, {

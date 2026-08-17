@@ -1007,7 +1007,6 @@ export default function ProviderDetailPage() {
       {canViewCredentials ? (
         <ProviderCredentialsSection
           providerId={provider.id}
-          providerKey={provider.sms_provider_id}
           providerName={provider.name}
           canManage={canManageCredentials}
         />

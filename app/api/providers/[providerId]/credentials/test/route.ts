@@ -2,9 +2,10 @@ import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { provider_credentials, provider_phones, sms_providers } from "@/db/schema";
+import { provider_phones } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { loadCredentialContext } from "@/lib/providers/credential-context";
 import { validatePhone } from "@/lib/phone-validation";
 import { resolveCredentialKeyById } from "@/lib/sends/provider-credential";
 import { sendSms, toTexthubSender } from "@/lib/sends/texthub";
@@ -35,16 +36,6 @@ export async function POST(
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
-  // Same master switch the drain obeys — no SMS leaves the system while off.
-  if (process.env.SEND_ENABLED !== "true") {
-    return apiError(
-      403,
-      "Sending is disabled (SEND_ENABLED is off). Turn it on to send a test.",
-      API_ERROR_CODES.VALIDATION,
-      { reason: "send_disabled" },
-    );
-  }
-
   const { providerId: pParam } = await params;
   const providerId = parseId(pParam);
   if (providerId === null) {
@@ -72,23 +63,52 @@ export async function POST(
 
   // Ownership pre-check, scoped to the provider + org — non-secret columns
   // only. Confirms the credential exists before we bother resolving its key.
-  const cred = await db
-    .select({ id: provider_credentials.id })
-    .from(provider_credentials)
-    .innerJoin(sms_providers, eq(sms_providers.id, provider_credentials.provider_id))
-    .where(
-      and(
-        eq(provider_credentials.id, credential_id),
-        eq(provider_credentials.provider_id, providerId),
-        eq(provider_credentials.org_id, orgId),
-        eq(sms_providers.org_id, orgId),
-      ),
-    )
-    .limit(1);
-  if (!cred[0]) {
+  const ctx = await loadCredentialContext({ orgId, providerId, credentialId: credential_id });
+  if (!ctx) {
     return apiError(404, "Credential not found", API_ERROR_CODES.NOT_FOUND, {
       entity: "provider_credential",
     });
+  }
+
+  // CONNECTION-TYPE GATE (869egmakh P2). This route calls TextHub's sendSms
+  // unconditionally, so it is only correct for the TextHub connection type.
+  // Until now the restriction lived ONLY in the client component's
+  // TEXTHUB_KEYS set — a direct POST with an Ahoi or Text Request credential
+  // would have transmitted that account's key to TextHub's API and recorded a
+  // meaningless failure. Re-checked here, from the descriptor, because the UI
+  // is not a security boundary.
+  if (!ctx.descriptor?.supportsTestSend) {
+    return apiError(
+      400,
+      `Test send isn't available for ${ctx.descriptor?.displayName ?? ctx.providerName}.`,
+      API_ERROR_CODES.VALIDATION,
+      { reason: "test_send_unsupported", provider_key: ctx.providerKey },
+    );
+  }
+
+  // SEND_ENABLED — the same master switch the drain obeys; no SMS leaves the
+  // system while it is off.
+  //
+  // ⚠️ ORDER MATTERS, and this check is deliberately AFTER the connection-type
+  // gate. Two reasons:
+  //   1. Correct error. A request naming a provider this route cannot serve is
+  //      malformed regardless of the kill switch. Answering "sending is
+  //      disabled" tells the caller to turn sending ON to fix a request that
+  //      would still be wrong afterwards.
+  //   2. Testability without arming the system. With the switch checked first,
+  //      the connection-type gate is unreachable in any environment where
+  //      SEND_ENABLED is off — so the only way to prove the gate works would be
+  //      to enable real sending, which is exactly backwards for a guard whose
+  //      job is to stop a misrouted send. Now scripts/test-provider-action-gates.ts
+  //      proves it with sending firmly off.
+  // No safety is lost: nothing between the two checks sends anything.
+  if (process.env.SEND_ENABLED !== "true") {
+    return apiError(
+      403,
+      "Sending is disabled (SEND_ENABLED is off). Turn it on to send a test.",
+      API_ERROR_CODES.VALIDATION,
+      { reason: "send_disabled" },
+    );
   }
 
   // Dual-read resolve (decrypt if encrypted, else legacy plaintext).

@@ -74,8 +74,18 @@ export type FieldSpec = {
 // failure — and the safe degradation is "couldn't verify", never a false green.
 // Surface it in the UI as its own state (e.g. "Couldn't verify — provider
 // response unrecognized"), distinct from both pass and fail.
+// Optional structured data a successful check discovered about the account.
+// Text Request's check lists the account's dashboards, and those ids are not
+// trivia — a dashboard is 1:1 with a sending number and the operator needs the
+// id to bind it on the number's form. Carrying it here keeps that capability on
+// the uniform path instead of requiring a second provider-specific endpoint.
+export type DiscoveredItems = {
+  label: string; // e.g. "Dashboards (ID — name)"
+  items: { id: string; name: string }[];
+};
+
 export type ValidateCredentialsResult =
-  | { state: "valid"; detail: string | null }
+  | { state: "valid"; detail: string | null; discovered?: DiscoveredItems }
   | { state: "invalid"; detail: string }
   | { state: "unknown"; detail: string };
 
@@ -93,6 +103,24 @@ export type ProviderDescriptor = {
   validateCredentials?: (
     fields: Record<string, string>,
   ) => Promise<ValidateCredentialsResult>;
+
+  // ── Provider-specific action capabilities (869egmakh P2) ──────────────────
+  // These gate the two pre-existing, TextHub-IMPLEMENTED routes. Both were
+  // previously gated only in the client component, so a direct request with any
+  // provider's credential reached TextHub's API regardless of who that
+  // credential belonged to. The routes now re-check these server-side.
+  //
+  // ⚠️ A flag means "the existing route works for this connection type", NOT
+  // "this provider has such a feature". The routes call TextHub's client
+  // directly; enabling a new provider means implementing its branch in the
+  // route, not flipping the flag.
+
+  // Ad-hoc single test send. SPENDS MONEY — kept separate from the non-sending
+  // Test-connection action on purpose, and still gated by SEND_ENABLED.
+  supportsTestSend?: boolean;
+  // Registering the inbound STOP callback with the provider over their API.
+  // MUTATES REMOTE STATE at the provider, so likewise a separate action.
+  supportsOptOutCallbackRegistration?: boolean;
 
   // ── Seams: declared now, intentionally unset on every adapter ─────────────
   // No speculative values — a provider only gets one when its real requirement

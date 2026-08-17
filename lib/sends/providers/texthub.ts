@@ -25,6 +25,10 @@ export const texthubAdapter: SmsProviderAdapter = {
         secret: true,
       },
     ],
+    // The two provider-specific actions are TextHub-only because both routes
+    // call TextHub's client directly (see the flag notes in types.ts).
+    supportsTestSend: true,
+    supportsOptOutCallbackRegistration: true,
     // Reuses the inbox poller's fetch rather than a second client: it already
     // encodes both TextHub quirks — HTTP codes are unreliable (a failure
     // envelope can arrive as 404) so success keys off body `status === 200`,

@@ -391,6 +391,28 @@ git worktree add -b <branch> .claude/worktrees/<name> origin/main
 
 If you do disturb another branch, the fix is usually clean — a rename touches no commits and preserves upstream config, so `git branch -m <wrong> <original>` restores it. Say so plainly rather than quietly correcting it; the other session may be mid-task.
 
+## Date stamps come from the current date, never from the data you're looking at
+
+Every `_Last updated:_` header, changelog entry, and "measured on" comment takes its date from the **current date in context**. Never from a timestamp inside the data you happen to be querying.
+
+On 2026-08-17 a whole workstream — changelog entry, two doc headers, a `MEASURED` comment on a live classifier, a test's fixture-provenance note — shipped stamped `2026-08-14`. The wrong date came from the production data being examined at the time: the most recent `stage_sends.sent_at`, the newest migration rows, the last deployment. All of those legitimately said the 14th. None of them said what day it was.
+
+**Data tells you when things happened. It does not tell you when you are.** The failure is quiet — a plausible recent date attracts no scrutiny — and it corrupts exactly the records whose only job is to establish sequence. A "measured 3 days ago" note on a classifier pinned to a live provider's response format is worse than no date at all.
+
+Related: `docs/CHANGELOG.md` is **newest-first**. Append at the top, under the intro — not at the bottom, where the same commit also put it.
+
+## `gh pr checks` exits non-zero while checks are pending — never map that to "no results"
+
+`gh pr checks` returns a **non-zero exit code when checks are pending or failing**, not only on invocation error. So the natural-looking defensive idiom is a trap:
+
+```sh
+s=$(gh pr checks "$PR" --json name,bucket || echo '[]')   # WRONG
+```
+
+Every pending poll takes the fallback, the loop sees an empty result forever, and a 15-minute watch reports **nothing at all** — indistinguishable from "no checks configured" or "still running". That happened on PR #69; the checks had in fact gone green minutes in.
+
+Use `gh pr view <n> --json statusCheckRollup,mergeStateStatus`, which exits zero regardless of check state, and **report every terminal state, not just success** — a watcher that only greps for green is silent through a failure, and silence reads as "still running". See the worktree/monitor guidance above for the general form.
+
 ## A credential check has THREE outcomes, and "unknown" must never collapse into "pass"
 
 `descriptor.validateCredentials` returns `valid` / `invalid` / **`unknown`** (`ValidateCredentialsResult`, `lib/sends/providers/types.ts`). The third state is not decoration and callers may not fold it into either of the other two.

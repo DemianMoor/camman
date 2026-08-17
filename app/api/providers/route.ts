@@ -1,12 +1,9 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { sms_providers } from "@/db/schema";
-import {
-  getDescriptor,
-  registryKeysForType,
-} from "@/lib/sends/providers/registry";
+import { getDescriptor } from "@/lib/sends/providers/registry";
 import {
   apiError,
   isUniqueViolation,
@@ -65,24 +62,31 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Alias-aware: TextHub is "already present" if EITHER txh or txh2 exists.
-    const keys = registryKeysForType(canonical);
-    const existing = keys.length
-      ? await db
-          .select({
-            id: sms_providers.id,
-            name: sms_providers.name,
-            sms_provider_id: sms_providers.sms_provider_id,
-          })
-          .from(sms_providers)
-          .where(
-            and(
-              eq(sms_providers.org_id, orgId),
-              inArray(sms_providers.sms_provider_id, keys),
-            ),
-          )
-          .orderBy(sms_providers.id)
-      : [];
+    // "Already present" is asked of the TYPE, so ask adapter_code directly.
+    //
+    // This used to enumerate registry keys (registryKeysForType) to catch the
+    // `txh2` alias alongside `txh`. With the alias retired that enumeration
+    // would return only ['txh'] and would MISS the txh2 row — the refusal would
+    // still fire because txh exists, but it would stop naming the second row,
+    // quietly losing the alias-awareness this check was built for.
+    //
+    // Querying adapter_code is strictly better than either: it matches EVERY row
+    // of this connection type whatever identity code it carries, including rows
+    // created after this code was written.
+    const existing = await db
+      .select({
+        id: sms_providers.id,
+        name: sms_providers.name,
+        sms_provider_id: sms_providers.sms_provider_id,
+      })
+      .from(sms_providers)
+      .where(
+        and(
+          eq(sms_providers.org_id, orgId),
+          eq(sms_providers.adapter_code, canonical),
+        ),
+      )
+      .orderBy(sms_providers.id);
 
     if (existing.length > 0 && !parsed.data.create_separate_row) {
       // REFUSE — and point at the right action. Adding a second account is a

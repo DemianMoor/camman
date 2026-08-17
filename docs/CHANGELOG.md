@@ -2,6 +2,15 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 - txh2 registry alias retired; COALESCE fallbacks removed (869ej8qzk Part A, step 3) - docs/07-conventions.md
+- Gate met by 40,120 live txh2 sends on the adapter_code path with zero adapter-resolution errors (247 errored attempts, all TextHub suppression, a normal `filtered` outcome).
+- Registry alias `txh2 -> texthubAdapter` deleted; ALIAS_KEYS now empty. adapter_code carries the type, so a second account of an existing type is just another row with the same adapter_code - nothing to alias.
+- COALESCE(adapter_code, sms_provider_id) fallbacks dropped from drain, kickoff (x2) and the opt-out poller. A NULL adapter_code on an api-send row is a DATA ERROR (0135 guards creation); a hard unknown_provider refusal surfaces it where a silent fallback would mask it.
+- Both "does this type already exist?" lookups (create route + /api/provider-types) switched from enumerating registry keys to querying adapter_code. Without that the collision steer would have silently stopped naming the txh2 row.
+- STOP-intake predicate `adapter_code = 'txh'` PROVEN before the change: selected credential set [2,462] under the original, interim COALESCE, and final forms - identical and non-empty. Now a permanent assertion in test-stop-intake-ungated.ts, with a guard that it spans more than one provider row.
+- registryKeysForType() removed (no consumers). verify-adapter-code-switch.ts retired - it compared against a code path that no longer exists; its two durable assertions were migrated to test-stop-intake-ungated.ts and verify-adapter-code.ts rather than deleted.
+- verify-adapter-code.ts's txh2 assertion INVERTED: the bare identity string must now NOT resolve, so an alias creeping back fails the guard.
+
 2026-08-17 - A brand may have more than one short domain (migration 0136, Q0) - docs/03-data-model.md
 - Drops short_domains_brand_id_uniq (0052). That constraint, not any hardcoded hostname, is what made the short domain feel fixed: short_domains, links.short_domain_id and app/r/[code] were already domain-agnostic (the redirect resolves by globally-unique code and never reads the Host header).
 - Removes a restriction; touches no rows. The single row and all 3,197,988 links verified unchanged after apply.

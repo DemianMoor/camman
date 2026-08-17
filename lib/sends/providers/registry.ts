@@ -12,12 +12,11 @@ export class UnknownProviderError extends Error {
 }
 
 const ADAPTERS: Record<string, SmsProviderAdapter> = {
+  // Keyed by CONNECTION TYPE (sms_providers.adapter_code), not by provider-row
+  // identity. The `txh2` alias entry that used to live here is gone: that row is
+  // a second TextHub account whose adapter_code is 'txh', so it resolves through
+  // the normal entry now. Adding a provider row no longer means editing this map.
   txh: texthubAdapter,
-  // `txh2` is a second TextHub account modeled as its own provider row
-  // ("Texthub - 621637", id 499) rather than a second credential on `txh`.
-  // It talks to the same TextHub API, so it reuses the TextHub adapter — only
-  // the resolved per-credential api_key differs.
-  txh2: texthubAdapter,
   ahi: ahoiAdapter,
   // Text Request (Phase 1 skeleton). Registered so the drain's provider seam
   // and getAdapter() recognize the key; send() is a not-implemented stub and
@@ -44,17 +43,18 @@ export function getAdapter(key: string): SmsProviderAdapter {
 // ── Connection-type descriptors (869egmakh P1) ───────────────────────────────
 // Two different questions, deliberately two different functions:
 //
-//   getDescriptor(key)   "what is THIS provider row?"  — alias-tolerant.
-//   listConnectionTypes() "what can I create?"          — canonical only.
+//   getDescriptor(code)   "what serves THIS provider row?" — takes adapter_code.
+//   listConnectionTypes() "what can I create?"             — one entry per type.
 //
-// The split exists because `txh2` is an ALIAS, not a connection type: it is a
-// second TextHub ACCOUNT that was modeled as its own provider row because
-// sms_provider_id is UNIQUE (see card 869ej8qzk). A provider row keyed `txh2`
-// must resolve to the TextHub descriptor, but "TextHub" must appear exactly
-// ONCE in a create-provider picker.
+// Both are keyed on the CONNECTION TYPE now. Callers pass a row's
+// `adapter_code`, never its `sms_provider_id`: several rows can share a type
+// (`txh` and `txh2` are both adapter_code 'txh'), and identity was only ever
+// usable as a key by accident.
 //
-// Lookup is by REGISTRY key, never `adapter.key` — the txh2 entry reuses
-// texthubAdapter, whose `.key` reports "txh" and would misattribute the row.
+// The split between the two functions survives the alias removal because they
+// still answer different questions: several provider ROWS may share one type, so
+// "what serves this row" is many-to-one while "what can I create" must list each
+// type exactly once.
 
 export type ConnectionType = {
   // The canonical registry key for this connection type (the picker's value).
@@ -66,9 +66,21 @@ export type ConnectionType = {
 };
 
 // Registry keys that are aliases of another key rather than connection types of
-// their own. Excluded from listConnectionTypes(); still resolvable via
-// getDescriptor(). Retire this once adapter_code lands (card 869ej8qzk Part A).
-const ALIAS_KEYS = new Set(["txh2"]);
+// their own — excluded from listConnectionTypes(), still resolvable via
+// getDescriptor().
+//
+// EMPTY as of migration 0134's cutover, and expected to stay that way. Aliases
+// existed only because sms_provider_id doubled as both row identity and adapter
+// key: a second TextHub account could not reuse `txh` (the column is UNIQUE), so
+// it became `txh2` and this set taught the registry to map it back. adapter_code
+// carries the type now, so a new account of an existing type is just another row
+// with the same adapter_code — nothing to alias.
+//
+// Kept rather than deleted because listConnectionTypes() still needs the concept
+// if a future provider ever ships two registry keys for one adapter. If you find
+// yourself adding to it, check first whether adapter_code should carry the
+// distinction instead.
+const ALIAS_KEYS = new Set<string>();
 
 // Descriptor for a provider row's key, or null when the key is unknown or the
 // adapter declares none. Does NOT throw — callers are usually rendering.
@@ -76,22 +88,13 @@ export function getDescriptor(key: string) {
   return ADAPTERS[key]?.descriptor ?? null;
 }
 
-// Every registry key that resolves to the SAME adapter as `key` — i.e. every
-// provider-row code that is really this connection type. For "txh" that is
-// ["txh", "txh2"], because txh2 is a second TextHub account wearing its own
-// provider row.
-//
-// This is what makes "does a provider of this type already exist?" correct:
-// matching only the canonical code would miss the txh2 row and cheerfully offer
-// to create a THIRD TextHub row. Compares adapter identity, not `adapter.key`,
-// which reports "txh" for both entries and so can't distinguish anything.
-export function registryKeysForType(key: string): string[] {
-  const target = ADAPTERS[key];
-  if (!target) return [];
-  return Object.entries(ADAPTERS)
-    .filter(([, adapter]) => adapter === target)
-    .map(([k]) => k);
-}
+// registryKeysForType() lived here. It enumerated every registry key resolving
+// to the same adapter, so "does a provider of this type already exist?" could
+// catch the `txh2` alias next to `txh`. With the alias gone it would return only
+// the canonical key and silently under-report — so both callers now query
+// sms_providers.adapter_code instead, which is the column that actually means
+// "connection type" and matches rows created after the code was written.
+// Removed rather than left as a one-element identity function.
 
 // Every distinct connection type an operator can pick, aliases excluded.
 // Sorted by display name so the picker order is stable.

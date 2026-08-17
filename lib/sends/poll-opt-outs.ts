@@ -463,15 +463,21 @@ async function pollCredential(
 // off the hardcoded identity list onto adapter_code. Both TextHub rows carry
 // adapter_code='txh', so the selected set is unchanged.
 //
-// The COALESCE fallback keeps the cutover a no-op BY CONSTRUCTION: a row with a
-// NULL adapter_code still matches on its old identity, so the selected set can
-// only ever be a superset-equal of the previous one, never smaller. Keeping
-// 'txh2' in the list is what makes that true — drop it and a NULL-adapter_code
-// TextHub row would silently stop being polled, which means its STOPs stop being
-// ingested. The identity literals go away with the registry alias, at which
-// point this becomes `adapter_code = 'txh'` and a future TextHub account is
-// picked up automatically instead of needing this line edited — which is how it
-// broke before.
+// The COALESCE fallback and the identity literals were removed together with
+// the txh2 registry alias. PROVEN BEFORE THE CHANGE, not argued after it: the
+// selected credential set is [2,462] under the original predicate
+// (supports_api_send + IN('txh','txh2')), under the interim COALESCE form, and
+// under this one — identical and non-empty in all three.
+//
+// ⚠️ This predicate is the one place in the codebase where "fail hard on bad
+// data" would mean SILENTLY DROPPED OPT-OUT INGESTION rather than a visible send
+// failure. A TextHub row with a NULL adapter_code simply stops being selected:
+// no error, no alert, STOPs unrecorded, and the org keeps messaging people who
+// asked it to stop. Migration 0135's guard makes such a row impossible to create
+// and scripts/test-stop-intake-ungated.ts asserts the set stays non-empty.
+//
+// If you change this line, RE-PROVE the selected set against production. Do not
+// reason about it.
 //
 // ⚠️ DELIBERATELY NOT GATED ON ANY SENDING FLAG.
 //
@@ -505,7 +511,7 @@ export async function selectPollableCredentials(
            pc.api_key_encrypted AS api_key_encrypted
     FROM provider_credentials pc
     JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
-    WHERE COALESCE(p.adapter_code, p.sms_provider_id) IN ('txh', 'txh2')
+    WHERE p.adapter_code = 'txh'
     ${orgFilter}
   `)) as unknown as (CredentialRow & { api_key_encrypted: string | null })[];
 

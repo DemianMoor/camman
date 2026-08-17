@@ -270,7 +270,24 @@ export const sms_providers = pgTable(
   "sms_providers",
   {
     id: serial("id").primaryKey(),
+    // The row's IDENTITY. Unique per org-wide install. Historically this also
+    // doubled as the adapter lookup key, which is why a second TextHub account
+    // had to invent the code `txh2` — the column is UNIQUE, so it could not
+    // reuse `txh`. See adapter_code below.
     sms_provider_id: text("sms_provider_id").notNull().unique(),
+    // The CONNECTION TYPE — which adapter in lib/sends/providers/ serves this
+    // row (migration 0134). Split out of sms_provider_id so identity and type
+    // stop being the same field: `txh2` is a distinct provider row whose
+    // adapter_code is 'txh'.
+    //
+    // NULL means "no API adapter" — a real state, not missing data (snx, smpl
+    // are sent through manually and carry supports_api_send = false).
+    //
+    // ⚠️ Read this, not sms_provider_id, for anything that means "what kind of
+    // provider is this". Keep reading sms_provider_id for anything that means
+    // "which account/row is this" — circuit breakers, send windows and
+    // reporting are all per-ROW and must stay that way.
+    adapter_code: text("adapter_code"),
     org_id: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),

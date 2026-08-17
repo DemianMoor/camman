@@ -2,6 +2,13 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 — STOP intake un-coupled from sending capability (R0, provider-connections panel card) — docs/07-conventions.md
+- `selectPollableCredentials` (TextHub opt-out poller) no longer filters on `supports_api_send = true`. Receiving an opt-out does not depend on being able to send.
+- This was a LIVE compliance gap, not hypothetical: the provider page exposes `supports_api_send` as a one-click "Disable", and TextHub's push callback is broken on their side, so this poller is its ONLY intake. Pressing Disable silently stopped opt-out ingestion.
+- Selected credential set is UNCHANGED today ([2,462]) — every TextHub row currently has the flag on. The change is about what happens when someone turns it off.
+- New `scripts/test-stop-intake-ungated.ts` pins the invariant across all three intake selections (TextHub poller, Ahoi CDR poller, webhook token resolution): flips every sending flag off inside a rolled-back transaction and asserts the selections are identical, plus a source check that no sending predicate reappears.
+- Convention added: STOP intake is never gated on a sending flag.
+
 2026-08-17 — Send path switched to read `adapter_code` (869ej8qzk Part A, step 2) — docs/07-conventions.md
 - Four type-meaning read sites moved off `sms_provider_id`: the drain's `provider_key` select, the kickoff API-capability gate, the kickoff opt-out-guard key, and the TextHub-family filter in the opt-out poller (`IN ('txh','txh2')` → `adapter_code = 'txh'`).
 - Identity-meaning reads deliberately UNCHANGED — circuit breakers, send windows, per-provider reporting and cost attribution are per-ACCOUNT and must not merge two accounts' counters.

@@ -473,6 +473,25 @@ async function pollCredential(
 // picked up automatically instead of needing this line edited — which is how it
 // broke before.
 //
+// ⚠️ DELIBERATELY NOT GATED ON ANY SENDING FLAG.
+//
+// This selection used to carry `AND p.supports_api_send = true`. That coupled
+// STOP INTAKE to a SENDING capability: turning API sending off for TextHub —
+// which the provider page exposes as a one-click "Disable" button — silently
+// stopped ingesting opt-outs. TextHub is the provider whose push callback is
+// broken on their side, so this poller is its ONLY intake; losing it means
+// STOPs go unrecorded and the org keeps messaging people who asked it to stop.
+//
+// Nothing about receiving an opt-out depends on being able to send. A provider
+// that is switched off, paused by a circuit breaker, or not yet live for API
+// sending must still have its inbound STOPs ingested — arguably MORE urgently,
+// since a provider gets switched off precisely when something is wrong.
+//
+// The invariant is pinned by scripts/test-stop-intake-ungated.ts: every
+// STOP-intake path must select the same credentials with every sending flag off.
+// Do not reintroduce a sending predicate here, and do not add one to any other
+// intake path.
+//
 // Exported so the credential selection is unit-testable in isolation from the
 // fetch/suppression logic.
 export async function selectPollableCredentials(
@@ -486,8 +505,7 @@ export async function selectPollableCredentials(
            pc.api_key_encrypted AS api_key_encrypted
     FROM provider_credentials pc
     JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
-    WHERE p.supports_api_send = true
-      AND COALESCE(p.adapter_code, p.sms_provider_id) IN ('txh', 'txh2')
+    WHERE COALESCE(p.adapter_code, p.sms_provider_id) IN ('txh', 'txh2')
     ${orgFilter}
   `)) as unknown as (CredentialRow & { api_key_encrypted: string | null })[];
 

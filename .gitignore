@@ -66,3 +66,4 @@ next-env.d.ts
 
 # Backfill reversal artifacts (internal ids) — never commit
 scripts/.backfill-0129-reversal.csv
+scripts/_tmp-*.ts

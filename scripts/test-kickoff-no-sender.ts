@@ -77,11 +77,26 @@ async function main() {
       const resB = await kickoffStageSend(tx as unknown as typeof db, { orgId, campaignId: b.campaignId, stageId: b.stageId });
       check("Ahoi stage WITH provider_phone_id -> not refused by no_sender_number", !(!resB.ok && resB.reason === "no_sender_number"), JSON.stringify(resB));
 
-      // Case C: TextHub stage, provider_phone_id NULL -> NOT refused (TextHub
-      // doesn't need a sender number — this is the "don't break TextHub" proof).
+      // Case C: TextHub stage, provider_phone_id NULL -> REFUSED.
+      //
+      // ⚠️ This expectation was INVERTED until 2026-08-17. It asserted "NOT
+      // refused", carrying the original Ahoi-era rule that only Ahoi needed a
+      // sender number while TextHub could fall back to its account default.
+      // That stopped being true on 2026-07-22 (the sender-number work): every
+      // API-send provider now selects its send-from number via the stage's
+      // provider_phone_id, and texthubAdapter.send() refuses outright rather
+      // than letting TextHub pick — see the "no sender number configured for
+      // this stage" branch in lib/sends/providers/texthub.ts. The kickoff guard
+      // matches it.
+      //
+      // So this test had been failing against intended behaviour for ~3.5
+      // weeks, asserting a fallback the code deliberately removed. Corrected to
+      // assert the refusal, which is the behaviour we actually want pinned:
+      // a numberless TextHub stage must be caught at kickoff, not discovered at
+      // dispatch.
       const c = await mkStage({ n: 3, providerId: texthubProv.id, providerPhoneId: null });
       const resC = await kickoffStageSend(tx as unknown as typeof db, { orgId, campaignId: c.campaignId, stageId: c.stageId });
-      check("TextHub stage with no provider_phone_id -> NOT refused (G2 proof)", !(!resC.ok && resC.reason === "no_sender_number"), JSON.stringify(resC));
+      check("TextHub stage with no provider_phone_id -> REFUSED no_sender_number", !resC.ok && resC.reason === "no_sender_number", JSON.stringify(resC));
 
       throw ROLLBACK;
     });

@@ -422,6 +422,23 @@ Every pending poll takes the fallback, the loop sees an empty result forever, an
 
 Use `gh pr view <n> --json statusCheckRollup,mergeStateStatus`, which exits zero regardless of check state, and **report every terminal state, not just success** — a watcher that only greps for green is silent through a failure, and silence reads as "still running". See the worktree/monitor guidance above for the general form.
 
+## `adapter_code` is the connection TYPE; `sms_provider_id` is the row IDENTITY
+
+Migration 0134 split these apart. Before it, one column was both, and because it is `UNIQUE` a second TextHub account could not reuse `txh` — it became its own row under the invented code `txh2`, which the adapter registry then special-cased back to the TextHub adapter.
+
+**Which column to read depends on the question you are asking:**
+
+| Question | Column |
+|---|---|
+| *What kind of provider is this? Which adapter serves it?* | `adapter_code` |
+| *Which provider row / account is this?* | `sms_provider_id` (or `id`) |
+
+Type-meaning reads — `getAdapter()` in the drain, the kickoff provider gate, the TextHub-family filter in the opt-out poller — all take `adapter_code`. Identity-meaning reads **must stay** on the row: circuit breakers, send windows, per-provider reporting and cost attribution are all per-ACCOUNT, and pointing them at `adapter_code` would silently merge two accounts' counters into one.
+
+`NULL` means "no API adapter" and is a real state, not missing data (`snx`, `smpl` are sent manually). The drain's `getAdapter(provider_key ?? "")` throws `UnknownProviderError` for `NULL` exactly as it did for an unregistered code, and the same `unknown_provider` refusal catches it — so the switch was a no-op for those rows.
+
+**The cutover was staged in three deploys on purpose**, and the shape is worth reusing for any column that something on the send path resolves against: (1) migration + backfill, with nothing reading the new column; (2) a gate proving the new column resolves to the *object-identical* adapter as the old one for every row, then switch the readers; (3) only after that is verified in production, delete the compatibility alias. Collapsing these into one deploy means a backfill error and a code change land together, with no step at which the old and new answers can be compared.
+
 ## A credential check has THREE outcomes, and "unknown" must never collapse into "pass"
 
 `descriptor.validateCredentials` returns `valid` / `invalid` / **`unknown`** (`ValidateCredentialsResult`, `lib/sends/providers/types.ts`). The third state is not decoration and callers may not fold it into either of the other two.

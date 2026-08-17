@@ -2,6 +2,14 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 — Send path switched to read `adapter_code` (869ej8qzk Part A, step 2) — docs/07-conventions.md
+- Four type-meaning read sites moved off `sms_provider_id`: the drain's `provider_key` select, the kickoff API-capability gate, the kickoff opt-out-guard key, and the TextHub-family filter in the opt-out poller (`IN ('txh','txh2')` → `adapter_code = 'txh'`).
+- Identity-meaning reads deliberately UNCHANGED — circuit breakers, send windows, per-provider reporting and cost attribution are per-ACCOUNT and must not merge two accounts' counters.
+- Proven by `scripts/verify-adapter-code-switch.ts`: old vs new query run side by side against production. Opt-out poller selects the identical credential set [2,462]; every send-eligible stage group resolves (txh 607, txh2 423 → txh, ahi 4, txr 1, tls 1); `snx`/`smpl` collapse from "unregistered code throws" to "NULL throws" — the SAME `unknown_provider` refusal, and both are non-API rows.
+- `scripts/test-provider-registry-db-keys.ts` updated to the new contract: it now asserts every api-send row's `adapter_code` resolves, and no longer pins the `txh2` registry alias — pinning it would have failed the guard on exactly the deploy that removes it.
+- Convention added: which column answers which question, and why the cutover was staged across three deploys.
+- The registry alias is NOT removed in this step; that follows once this is verified in production.
+
 2026-08-17 — `sms_providers.adapter_code` split out of `sms_provider_id` (migration 0134, 869ej8qzk Part A) — docs/03-data-model.md
 - Strictly additive: one nullable column + per-row backfill (`txh`/`txh2` → `txh`; `ahi`/`txr`/`tls` → self; `snx`/`smpl` → NULL). No DROP, nothing rewritten, `sms_provider_id` untouched.
 - Backfill is spelled out per row rather than copying `sms_provider_id`, because `txh2` is exactly what a blind copy gets wrong — its adapter is TextHub's, not one called "txh2".

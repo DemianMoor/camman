@@ -188,6 +188,13 @@ export const navGroups: NavGroup[] = [
         href: "/settings/sending",
         icon: Send,
       },
+      // Per-provider sending posture (R4). Distinct from "Sending" above, which
+      // is the ORG-wide master switch — this one is per-account.
+      {
+        label: "Providers",
+        href: "/settings/providers",
+        icon: Phone,
+      },
       {
         label: "Carrier Lookup",
         href: "/settings/lookup",

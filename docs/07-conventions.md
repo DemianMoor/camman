@@ -367,6 +367,15 @@ All three were caught, but only because the output happened to print enough deta
 - **Treat an empty or zero-item scope as a FAILURE, not a pass.** Finding zero sortable columns means the parser broke, not that everything is fine. Assert non-emptiness explicitly.
 - **Before trusting a green check, confirm what it examined.** Read the count and the names, not just the tick.
 - **Confirm the base commit before building on a branch.** `git worktree add ... origin/main` uses whatever `origin/main` was last fetched, which may be several merges stale.
+- **Cleanup must ASSERT, not hope.** Teardown runs *after* the assertions have printed `ALL PASS`, which is exactly when nobody is reading. On 2026-08-17 the provider-collision probe finished green and its cleanup then failed silently — `DELETE … WHERE id = ANY(${jsArray})` throws `ERR_INVALID_ARG_TYPE` under postgres-js (it will not bind a JS array to `ANY()`), so the `DELETE` never ran and the probe row survived in the database. Delete with scalar binds, then **re-query and fail the run if anything is left**. A teardown whose failure is invisible is worse than no teardown, because the green result actively argues that nothing was left behind.
+
+## Probes that WRITE run against the demo database, not production
+
+Read-only probes may run against production. **Anything that writes — even a self-cleaning probe row — is a production data write and falls under the standard approval carve-out: explicit per-instance OK, same as a backfill or a migration.**
+
+Default target for destructive-or-writing probes is the **`camman-v2` demo database**, not prod. The rule exists because the failure mode is not the write, it is the cleanup: see the assert-your-teardown rule above, where a "low-risk, self-cleaning" probe left a real row in the production `sms_providers` table because the delete silently no-op'd. Low risk is not no risk, and the cost of being wrong lands on live data.
+
+If a probe genuinely must run against production (it depends on real credentials, real volumes, or real provider state), ask first, keep the write set as small as possible, and verify the teardown by re-querying rather than trusting it.
 
 ## Working copy — do multi-step work in a throwaway worktree, never in `C:/AFF/camman` directly
 

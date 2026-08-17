@@ -76,6 +76,23 @@ export function getDescriptor(key: string) {
   return ADAPTERS[key]?.descriptor ?? null;
 }
 
+// Every registry key that resolves to the SAME adapter as `key` — i.e. every
+// provider-row code that is really this connection type. For "txh" that is
+// ["txh", "txh2"], because txh2 is a second TextHub account wearing its own
+// provider row.
+//
+// This is what makes "does a provider of this type already exist?" correct:
+// matching only the canonical code would miss the txh2 row and cheerfully offer
+// to create a THIRD TextHub row. Compares adapter identity, not `adapter.key`,
+// which reports "txh" for both entries and so can't distinguish anything.
+export function registryKeysForType(key: string): string[] {
+  const target = ADAPTERS[key];
+  if (!target) return [];
+  return Object.entries(ADAPTERS)
+    .filter(([, adapter]) => adapter === target)
+    .map(([k]) => k);
+}
+
 // Every distinct connection type an operator can pick, aliases excluded.
 // Sorted by display name so the picker order is stable.
 export function listConnectionTypes(): ConnectionType[] {

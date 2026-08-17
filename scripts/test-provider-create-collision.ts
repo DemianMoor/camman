@@ -1,0 +1,210 @@
+// ACCEPTANCE PROOF for 869egmakh P3: the create endpoint must never silently
+// auto-suffix a provider code when the picked connection type already exists.
+// That is precisely how `txh2` came to be, and repeating it by UI would recreate
+// the drift the whole card exists to stop.
+//
+// Real authenticated HTTP requests. Every case that WOULD create a row is either
+// expected to fail, or is cleaned up immediately afterwards.
+import "./_env-preload";
+
+import { createServerClient } from "@supabase/ssr";
+import { sql } from "drizzle-orm";
+import { db } from "@/db/client";
+
+const BASE = process.argv[2] ?? "http://localhost:3099";
+const EMAIL = process.env.TEST_USER_EMAIL ?? "";
+const PASSWORD = process.env.TEST_USER_PASSWORD ?? "";
+
+let failures = 0;
+function check(name: string, cond: boolean, detail: string) {
+  if (cond) console.log(`  PASS  ${name}\n        ${detail}`);
+  else { failures++; console.log(`  FAIL  ${name}\n        ${detail}`); }
+}
+
+async function signIn(): Promise<string> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !anonKey) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL / _ANON_KEY");
+  const jar = new Map<string, string>();
+  const supabase = createServerClient(url, anonKey, {
+    cookies: {
+      getAll: () => Array.from(jar.entries()).map(([name, value]) => ({ name, value })),
+      setAll: (cookies) => { for (const { name, value } of cookies) jar.set(name, value); },
+    },
+  });
+  const { error } = await supabase.auth.signInWithPassword({ email: EMAIL, password: PASSWORD });
+  if (error) throw new Error(`Sign-in failed: ${error.message}`);
+  return Array.from(jar.entries()).map(([n, v]) => `${n}=${v}`).join("; ");
+}
+
+async function post(cookie: string, body: unknown) {
+  const res = await fetch(`${BASE}/api/providers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", cookie },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+const createdIds: number[] = [];
+
+// Delete probe rows ONE AT A TIME with a scalar bind.
+//
+// ⚠️ Do NOT use `WHERE id = ANY(${createdIds})`. postgres-js does not bind a JS
+// array to ANY() here — it throws `ERR_INVALID_ARG_TYPE: The "string" argument
+// must be of type string... Received type number`, the DELETE never runs, and
+// the probe row is LEFT BEHIND in the database. That happened on the first run
+// of this script (row 941 `probe719813` survived and had to be removed by hand).
+// A cleanup that fails silently after the assertions have already printed
+// "ALL PASS" is worse than no cleanup, because nobody looks.
+async function cleanup() {
+  if (!createdIds.length) return;
+  for (const id of createdIds) {
+    await db.execute(sql`DELETE FROM sms_providers WHERE id = ${id}`);
+  }
+  // Verify, don't assume — the whole point of the bug above.
+  const left = (await db.execute(sql`
+    SELECT id FROM sms_providers WHERE sms_provider_id LIKE 'probe%'
+  `)) as unknown as { id: number }[];
+  if (left.length > 0) {
+    console.error(`⚠️  CLEANUP INCOMPLETE — probe rows still present: ${left.map((r) => r.id).join(", ")}`);
+    failures++;
+  } else {
+    console.log(`\nCleaned up ${createdIds.length} probe provider row(s): ${createdIds.join(", ")}`);
+  }
+}
+
+async function main() {
+  if (!EMAIL || !PASSWORD) { console.error("TEST_USER_EMAIL / TEST_USER_PASSWORD not set"); process.exit(1); }
+  const cookie = await signIn();
+  console.log(`Signed in as ${EMAIL} against ${BASE}\n`);
+
+  // Snapshot the provider codes that exist now, so we can prove nothing new
+  // appeared behind a refusal.
+  const before = (await db.execute(sql`
+    SELECT sms_provider_id FROM sms_providers ORDER BY sms_provider_id
+  `)) as unknown as { sms_provider_id: string }[];
+  const beforeCodes = before.map((r) => r.sms_provider_id).join(",");
+
+  console.log("── Picking an existing type must be REFUSED, not auto-suffixed ──");
+  for (const t of ["txh", "ahi", "txr", "tls"]) {
+    const r = await post(cookie, { name: `probe ${t}`, connection_type: t });
+    const ok =
+      r.status === 409 &&
+      r.body?.details?.reason === "connection_type_exists" &&
+      Array.isArray(r.body?.details?.existing_providers) &&
+      r.body.details.existing_providers.length > 0;
+    check(
+      `${t}: refused with a pointer at the existing row`,
+      ok,
+      `HTTP ${r.status} reason=${r.body?.details?.reason ?? "-"} existing=${(r.body?.details?.existing_providers ?? []).map((p: { sms_provider_id: string }) => p.sms_provider_id).join("|")}`,
+    );
+  }
+
+  console.log("\n── TextHub's refusal must cite txh2 too (alias-aware) ──");
+  {
+    const r = await post(cookie, { name: "probe txh alias", connection_type: "txh" });
+    const codes = (r.body?.details?.existing_providers ?? []).map((p: { sms_provider_id: string }) => p.sms_provider_id);
+    check(
+      "txh refusal lists both txh and txh2",
+      codes.includes("txh") && codes.includes("txh2"),
+      `existing=${codes.join("|")}`,
+    );
+  }
+
+  console.log("\n── Separate row requires an explicit distinct code ──");
+  {
+    const r = await post(cookie, { name: "probe no code", connection_type: "txh", create_separate_row: true });
+    check(
+      "create_separate_row without a code is rejected",
+      r.status === 400,
+      `HTTP ${r.status} :: ${r.body?.error ?? ""}`,
+    );
+  }
+  {
+    const r = await post(cookie, {
+      name: "probe reserved", connection_type: "txh",
+      create_separate_row: true, sms_provider_id: "ahi",
+    });
+    check(
+      "another type's CANONICAL code is reserved",
+      r.status === 400 && r.body?.details?.reason === "reserved_connection_code",
+      `HTTP ${r.status} reason=${r.body?.details?.reason ?? "-"}`,
+    );
+  }
+  {
+    // The reserved check must span ALIASES too, not just canonical codes —
+    // `txh2` is a registry key, so a row claiming it would be resolved to the
+    // TextHub adapter by getAdapter purely by accident.
+    const r = await post(cookie, {
+      name: "probe alias", connection_type: "ahi",
+      create_separate_row: true, sms_provider_id: "txh2",
+    });
+    check(
+      "another type's ALIAS code is reserved",
+      r.status === 400 && r.body?.details?.reason === "reserved_connection_code",
+      `HTTP ${r.status} reason=${r.body?.details?.reason ?? "-"}`,
+    );
+  }
+
+  console.log("\n── Contradictory mode fields are rejected, not silently resolved ──");
+  {
+    // (a) A derived code cannot also be dictated.
+    const r = await post(cookie, {
+      name: "probe dictated", connection_type: "txh", sms_provider_id: "mycode",
+    });
+    check(
+      "connection_type + typed code (no separate-row) is rejected",
+      r.status === 400,
+      `HTTP ${r.status} :: ${r.body?.error ?? ""}`,
+    );
+  }
+  {
+    // (c) A separate row is meaningless without a type to be a variant of.
+    const r = await post(cookie, {
+      name: "probe orphan", create_separate_row: true, sms_provider_id: "mycode2",
+    });
+    check(
+      "create_separate_row without a connection_type is rejected",
+      r.status === 400,
+      `HTTP ${r.status} :: ${r.body?.error ?? ""}`,
+    );
+  }
+
+  console.log("\n── Nothing was created behind any refusal ──");
+  {
+    const after = (await db.execute(sql`
+      SELECT sms_provider_id FROM sms_providers ORDER BY sms_provider_id
+    `)) as unknown as { sms_provider_id: string }[];
+    const afterCodes = after.map((r) => r.sms_provider_id).join(",");
+    check("provider code set unchanged", beforeCodes === afterCodes, `${after.length} rows: ${afterCodes}`);
+  }
+
+  console.log("\n── Custom / no-API provider still works (escape hatch) ──");
+  {
+    const code = `probe${Date.now().toString().slice(-6)}`;
+    const r = await post(cookie, { name: "Probe Custom", sms_provider_id: code });
+    const ok = r.status === 201 && r.body?.sms_provider_id === code;
+    check("custom provider created with the typed code", ok, `HTTP ${r.status} code=${r.body?.sms_provider_id ?? "-"}`);
+    if (r.body?.id) createdIds.push(r.body.id);
+  }
+
+  console.log("\n── Unknown connection type is rejected ──");
+  {
+    const r = await post(cookie, { name: "probe bogus", connection_type: "not-a-type" });
+    check("unknown type rejected", r.status === 400, `HTTP ${r.status} :: ${r.body?.error ?? ""}`);
+  }
+
+  await cleanup();
+
+  console.log(failures === 0 ? "\nALL PASS\n" : `\n${failures} FAILURE(S)\n`);
+  await db.$client.end({ timeout: 5 });
+  process.exit(failures === 0 ? 0 : 1);
+}
+
+main().catch(async (e) => {
+  console.error(e);
+  try { await cleanup(); } catch (ce) { console.error("cleanup also failed:", ce); }
+  try { await db.$client.end({ timeout: 5 }); } catch {}
+  process.exit(1);
+});

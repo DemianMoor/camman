@@ -100,7 +100,91 @@ const providerBaseSchema = z.object({
     .optional(),
 });
 
-export const providerCreateSchema = providerBaseSchema.superRefine(checkSendWindows);
+// Create adds the connection-type picker fields (869egmakh P3) on top of the
+// shared base.
+//
+// Two ways to create a provider row, and the difference is deliberate:
+//
+//   1. PICK A TYPE (`connection_type` set). The provider code is DERIVED from
+//      the adapter registry, never typed — that is what kills the
+//      `texthub`-vs-`txh` footgun, where a mistyped code produced a row that
+//      passed every check and then threw UnknownProviderError at drain time,
+//      after activation.
+//
+//   2. CUSTOM (`connection_type` omitted). A row with no API adapter, for
+//      providers sent through manually (snx, smpl). `sms_provider_id` is typed
+//      by the operator because there is no registry entry to derive it from.
+//
+// ⚠️ `create_separate_row` is the anti-drift control. Picking a type that
+// already has a provider row is REFUSED by default, with a pointer at the
+// existing row, because the right way to add a second account is a new
+// CREDENTIAL on that row — not a second provider. Creating a genuinely separate
+// row stays possible (txh2 is a real, legitimate instance) but must be
+// deliberate: this flag ON *and* an explicit distinct `sms_provider_id`. The
+// server never auto-suffixes a code; silent auto-suffixing by the UI is exactly
+// how txh2 came to exist.
+export const providerCreateSchema = providerBaseSchema
+  .extend({
+    // Canonical connection-type key from GET /api/provider-types.
+    connection_type: z.string().trim().min(1).max(40).optional(),
+    // Opt-in to a second provider row of a type that already exists.
+    create_separate_row: z.boolean().optional().default(false),
+    // Derived server-side when a type is picked without create_separate_row,
+    // so the client's value is ignored there rather than trusted.
+    sms_provider_id: providerBaseSchema.shape.sms_provider_id.optional(),
+  })
+  .superRefine(checkSendWindows)
+  .superRefine((data, ctx) => {
+    // Custom mode must name its own code — nothing to derive it from.
+    if (!data.connection_type && !data.sms_provider_id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sms_provider_id"],
+        message: "Pick a connection type, or enter a provider ID for a custom provider.",
+      });
+    }
+    // A deliberate second row of an existing type must carry its own distinct
+    // code. Without this the request is ambiguous and the server would have to
+    // invent one — the exact behaviour this design forbids.
+    if (data.create_separate_row && !data.sms_provider_id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sms_provider_id"],
+        message:
+          "A separate provider row of an existing type needs its own distinct provider ID.",
+      });
+    }
+    // Contradictory mode fields are REJECTED, never silently resolved.
+    //
+    // Both cases below used to fall through and quietly ignore one of the
+    // supplied fields, which is the same class of failure as auto-suffixing: the
+    // request said one thing, the row became another, and nothing told anyone.
+    // A caller who sends contradictory fields has a bug; answering 400 surfaces
+    // it instead of writing a row they didn't ask for.
+
+    // (a) A derived code cannot also be dictated. With a type picked and no
+    //     separate-row opt-in, the code comes from the registry — accepting a
+    //     typed value here would let a caller believe they chose the code.
+    if (data.connection_type && !data.create_separate_row && data.sms_provider_id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sms_provider_id"],
+        message:
+          "The provider ID is set by the connection type. Remove it, or choose to create a separate provider row.",
+      });
+    }
+    // (c) A separate row is a variant of an EXISTING type, so it is meaningless
+    //     without one. Silently treating it as a custom provider would ignore
+    //     the operator's stated intent.
+    if (data.create_separate_row && !data.connection_type) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["create_separate_row"],
+        message:
+          "A separate provider row only applies to a chosen connection type.",
+      });
+    }
+  });
 
 export const providerUpdateSchema = providerBaseSchema
   .partial()

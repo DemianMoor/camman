@@ -250,6 +250,30 @@ async function tellsSendSms(p: TellsSendParams): Promise<SendSmsResult> {
 
 export const tellsAdapter: SmsProviderAdapter = {
   key: "tls",
+  descriptor: {
+    displayName: "Tells",
+    blurb:
+      "Tells.co. The key is a `key` form parameter on a single POST endpoint; like Ahoi, failures come back as HTTP 200 with the error in the body.",
+    credentialFields: [
+      {
+        name: "api_key",
+        label: "API key",
+        placeholder: "Tells API key",
+        help: "From the Tells dashboard. Sent as the `key` form parameter.",
+        secret: true,
+      },
+    ],
+    // validateCredentials is DELIBERATELY ABSENT — Tells exposes exactly one
+    // endpoint (`sms.php`, spec §5.1) and it sends a message. There is no
+    // non-sending way to prove a key, and spending money to run a "test" is not
+    // one. Worse, Tells validates `from` BEFORE `key`, so a request crafted to
+    // avoid sending never reaches key validation at all and would report
+    // nothing useful about the credential.
+    //
+    // Omitting it is the honest contract: the UI must say this connection type
+    // can't be verified without sending, NOT offer a check that always passes.
+    // If Tells ever ships a balance/account endpoint, add it here.
+  },
   toProviderRecipient: toTellsRecipient,
   async send(p: NormalizedSendParams): Promise<SendSmsResult> {
     if (!p.senderNumber) {

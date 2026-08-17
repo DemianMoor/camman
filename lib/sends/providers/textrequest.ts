@@ -185,6 +185,47 @@ async function txrSendSms(p: NormalizedSendParams, timeoutMs = DEFAULT_TIMEOUT_M
 
 export const textrequestAdapter: SmsProviderAdapter = {
   key: "txr",
+  descriptor: {
+    displayName: "Text Request",
+    blurb:
+      "Text Request API v3. The key is an `x-api-key` header, and the account is dashboard-scoped — one dashboard per sending number.",
+    credentialFields: [
+      {
+        name: "api_key",
+        label: "API key",
+        placeholder: "Text Request API key",
+        help: "Sent as the x-api-key header. Verifying lists the account's dashboards.",
+        secret: true,
+      },
+    ],
+    // Delegates to the healthcheck that already backs the per-credential
+    // "Check connection" action — one implementation, not two. Text Request is
+    // the only provider here with real HTTP semantics, so the status code is
+    // trustworthy; an unreachable host still degrades to `unknown`.
+    async validateCredentials(fields) {
+      const apiKey = (fields.api_key ?? "").trim();
+      if (!apiKey) return { state: "invalid", detail: "No API key provided." };
+      const r = await textrequestHealthcheck(apiKey);
+      if (r.ok) {
+        const n = r.dashboards.length;
+        return {
+          state: "valid",
+          detail: `Key authenticated. ${n} dashboard${n === 1 ? "" : "s"} on this account.`,
+        };
+      }
+      if (r.status === 0) {
+        return { state: "unknown", detail: r.error ?? "Text Request did not respond." };
+      }
+      if (r.status === 401 || r.status === 403) {
+        return { state: "invalid", detail: `Text Request rejected the key (HTTP ${r.status}).` };
+      }
+      // A 5xx (or any other non-2xx) is about their service, not the key.
+      return {
+        state: "unknown",
+        detail: r.error ?? `Text Request returned HTTP ${r.status}.`,
+      };
+    },
+  },
   toProviderRecipient: toTextrequestRecipient,
   async send(p: NormalizedSendParams): Promise<SendSmsResult> {
     if (!p.senderNumber) {

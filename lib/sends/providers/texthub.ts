@@ -4,6 +4,7 @@ import {
   sendSms as rawSendSms,
   toTexthubSender,
 } from "@/lib/sends/texthub";
+import { fetchInbox } from "@/lib/sends/texthub-inbox";
 import type {
   DlrEvent, InboundEvent, NormalizedSendParams, RawWebhook,
   SendSmsResult, SmsProviderAdapter,
@@ -11,6 +12,42 @@ import type {
 
 export const texthubAdapter: SmsProviderAdapter = {
   key: "txh",
+  descriptor: {
+    displayName: "TextHub",
+    blurb:
+      "TextHub API. Every operation hits one endpoint and is selected by a query flag; the api_key rides in the query string.",
+    credentialFields: [
+      {
+        name: "api_key",
+        label: "API key",
+        placeholder: "TextHub api_key",
+        help: "From the TextHub dashboard. Used for sending and for the STOP inbox poll.",
+        secret: true,
+      },
+    ],
+    // Reuses the inbox poller's fetch rather than a second client: it already
+    // encodes both TextHub quirks — HTTP codes are unreliable (a failure
+    // envelope can arrive as 404) so success keys off body `status === 200`,
+    // and the EMPTY-inbox shape ({"response":"No new messages"}, no `status`
+    // field) is a HEALTHY poll, not a failure. Read-only, no spend: the inbox
+    // is a retained newest-first window and "claiming" is CamMan-side.
+    async validateCredentials(fields) {
+      const apiKey = (fields.api_key ?? "").trim();
+      if (!apiKey) return { state: "invalid", detail: "No API key provided." };
+      const r = await fetchInbox({ apiKey });
+      if (r.ok) {
+        return { state: "valid", detail: "Key authenticated against the TextHub inbox." };
+      }
+      // status 0 ⇒ we never got an answer, so we cannot judge the key.
+      if (r.httpStatus === 0) {
+        return { state: "unknown", detail: r.error ?? "TextHub did not respond." };
+      }
+      return {
+        state: "invalid",
+        detail: r.error ?? `TextHub rejected the key (HTTP ${r.httpStatus}).`,
+      };
+    },
+  },
   // TextHub's number is international format already — identity conversion.
   toProviderRecipient(e164: string): string {
     return e164;

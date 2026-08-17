@@ -4,7 +4,7 @@
 // form-encoded webhook bodies).
 import type {
   DlrEvent, InboundEvent, NormalizedSendParams, RawWebhook,
-  SendSmsResult, SmsProviderAdapter,
+  SendSmsResult, SmsProviderAdapter, ValidateCredentialsResult,
 } from "./types";
 
 // Recon default (Phase 0). Overridable via AHOI_API_BASE_URL for a different
@@ -169,8 +169,124 @@ function buildRedactedBody(p: NormalizedSendParams): string {
   return `POST ${ahoiBaseUrl()}/sms/send  ${body.toString()}`;
 }
 
+// --- Non-sending credential check (GET /cdrs/download/csv) --------------------
+// Ahoi has NO dedicated auth/ping endpoint — Phase 0 recon established that the
+// CDR download is the only documented endpoint besides /sms/send. So the cheapest
+// authenticated read is a same-day CDR pull: read-only, no SMS, no spend.
+//
+// ⚠️ MEASURED 2026-08-14 (scripts/probe-ahoi-badkey.ts, kept as the regression
+// reference). api19 returns **HTTP 200 for every case** — valid key, wrong key,
+// bogus key, empty key — AND `Content-Type: text/html` even for the successful
+// CSV. Neither the status code nor the content type can classify. The BODY is
+// the only discriminator:
+//     valid key  -> body begins with the CSV header `date,your_cost,…`
+//                   (117 bytes when the day has no traffic — header only)
+//     wrong key  -> {"status":"error","error":"not logged in"}
+//     empty key  -> {"status":"error","error":"invalid key","verbose":"none"}
+//
+// Two traps encoded below:
+//   1. Key off the JSON `status` field, NEVER the message string — the two
+//      failure modes use different messages for the same verdict.
+//   2. NEVER classify on CSV row count. A valid key on a zero-traffic day
+//      returns 0 data rows, which is row-identical to a failure.
+// Anything that matches neither shape is `unknown`, not a pass: if api19 ever
+// changes its envelope this must degrade to "couldn't verify", never false-green.
+
+// Same-day ET window — the cheapest possible CDR request. Inlined (rather than
+// importing computeCdrPollWindow from lib/sends/ahoi-cdr-poll.ts) to keep the
+// adapter free of that module's db/Papa/telegram imports; the drain loads this file.
+function ahoiTodayEt(): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+  }).format(new Date());
+}
+
+// Prefix-match the first two CSV columns rather than the full 14-column header:
+// tolerant of api19 appending a column, still specific enough that arbitrary
+// text can't be mistaken for a successful pull.
+const AHOI_CDR_HEADER_PREFIX = "date,your_cost,";
+
+export function classifyAhoiCdrBody(body: string): ValidateCredentialsResult {
+  const trimmed = (body ?? "").trim();
+  if (!trimmed) {
+    return { state: "unknown", detail: "Ahoi returned an empty body." };
+  }
+  // 1) JSON error envelope ⇒ the key was rejected.
+  try {
+    const parsed = JSON.parse(trimmed) as { status?: unknown; error?: unknown };
+    if (parsed && typeof parsed === "object" && parsed.status === "error") {
+      const msg = typeof parsed.error === "string" ? parsed.error : "rejected";
+      return { state: "invalid", detail: `Ahoi rejected the key: ${msg}.` };
+    }
+    // Parsed as JSON but not the known error envelope — unrecognized, not a pass.
+    return {
+      state: "unknown",
+      detail: "Ahoi returned an unrecognized JSON response.",
+    };
+  } catch {
+    // Not JSON — fall through to the CSV check.
+  }
+  // 2) CSV header ⇒ authenticated (0 data rows is normal on a quiet day).
+  if (trimmed.toLowerCase().startsWith(AHOI_CDR_HEADER_PREFIX)) {
+    return { state: "valid", detail: "Key authenticated against the Ahoi CDR export." };
+  }
+  // 3) Neither shape.
+  return {
+    state: "unknown",
+    detail: "Ahoi returned a response in an unrecognized format.",
+  };
+}
+
+async function ahoiValidateCredentials(
+  fields: Record<string, string>,
+): Promise<ValidateCredentialsResult> {
+  const apiKey = (fields.api_key ?? "").trim();
+  if (!apiKey) return { state: "invalid", detail: "No API key provided." };
+
+  const day = ahoiTodayEt();
+  const url =
+    `${ahoiBaseUrl()}/cdrs/download/csv?record_type=sms` +
+    `&startdate=${encodeURIComponent(day)}&enddate=${encodeURIComponent(day)}` +
+    `&key=${encodeURIComponent(apiKey)}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { method: "GET", signal: controller.signal });
+    const body = await res.text();
+    return classifyAhoiCdrBody(body);
+  } catch (err) {
+    // Never throw, and never guess: no answer means we cannot judge the key.
+    const aborted = err instanceof Error && err.name === "AbortError";
+    return {
+      state: "unknown",
+      detail: aborted ? "Ahoi request timed out." : "Could not reach Ahoi.",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const ahoiAdapter: SmsProviderAdapter = {
   key: "ahi",
+  descriptor: {
+    displayName: "Ahoi",
+    blurb:
+      "Ahoi, a white-label of the api19/CallAPI platform. The key is sent as a `key` parameter; the API answers HTTP 200 for everything, so results are read from the response body.",
+    credentialFields: [
+      {
+        name: "api_key",
+        label: "API key",
+        placeholder: "Ahoi api19 key",
+        help: "The `key` parameter value from the Ahoi/api19 portal.",
+        secret: true,
+      },
+    ],
+    validateCredentials: ahoiValidateCredentials,
+  },
   toProviderRecipient: toAhoiRecipient,
   async send(p: NormalizedSendParams): Promise<SendSmsResult> {
     if (!p.senderNumber) {

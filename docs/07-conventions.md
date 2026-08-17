@@ -387,8 +387,21 @@ git worktree add -b <branch> .claude/worktrees/<name> origin/main
 - **Remove that junction with `cmd //c "rmdir node_modules"`, NEVER `rm -rf`.** `rm -rf` follows the junction and deletes the main checkout's dependencies. Unlink *before* `git worktree remove`.
 - **Clean up when the branch merges:** `git worktree remove <path>` then `git worktree prune`. Stale worktrees are not free — repo-wide `npm run lint` walks every one of them.
 - Prefer explicit two-argument git forms (`git branch -m <old> <new>`) over "operate on the current branch" forms, which silently follow a `HEAD` you did not move.
+- **Run every git command as `git -C <absolute worktree path> …` — never a bare `git` relying on the shell's current directory.** Having a worktree does not protect you if the command executes somewhere else. The agent shell's cwd is **not reliably persistent between tool calls**: it can silently reset to the repo root, so a `cd <worktree> && git …` that worked in one call runs against the **shared checkout** in the next. That is how the 2026-08-14 incident happened — a `git branch -m` intended for a worktree branch renamed the shared checkout's branch instead (restored immediately; no commits or working-tree changes lost). `git -C` binds the target explicitly and is immune to cwd drift.
 
 If you do disturb another branch, the fix is usually clean — a rename touches no commits and preserves upstream config, so `git branch -m <wrong> <original>` restores it. Say so plainly rather than quietly correcting it; the other session may be mid-task.
+
+## A credential check has THREE outcomes, and "unknown" must never collapse into "pass"
+
+`descriptor.validateCredentials` returns `valid` / `invalid` / **`unknown`** (`ValidateCredentialsResult`, `lib/sends/providers/types.ts`). The third state is not decoration and callers may not fold it into either of the other two.
+
+The reason is that two of our providers — Ahoi/api19 and Tells — answer **HTTP 200 for authentication failures** and signal the real outcome only in the response body. A checker for those providers is therefore a *parser of an undocumented envelope*, and the envelope can change without notice. When it does, the classifier stops recognizing the failure shape. The only safe degradation is "we could not verify"; treating an unrecognized response as success turns a broken key into a green check, and the operator learns the truth when a campaign sends nothing.
+
+So: an unrecognized body, a non-2xx that isn't an auth rejection, a timeout, an unreachable host — all `unknown`. Only a positively-recognized success shape is `valid`, and only a positively-recognized rejection is `invalid`. `validateCredentials` must also never throw; a network error is a returned `unknown`, not an exception.
+
+The UI renders `unknown` as its own state ("Couldn't verify — provider response unrecognized"), visually distinct from both pass and fail.
+
+The related honesty rule: **a connection type with no non-sending way to prove a key gets no `validateCredentials` at all** (`can_validate: false`), and the UI says so. Tells is the current case — its only endpoint sends a message, and it validates `from` before `key`, so even a crafted non-sending request never reaches key validation. Offering a "test" that cannot fail is worse than offering none.
 
 ## A provider's own webhook payload can carry a live credential — redact before persist
 

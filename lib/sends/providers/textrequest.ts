@@ -198,10 +198,11 @@ export const textrequestAdapter: SmsProviderAdapter = {
         secret: true,
       },
     ],
-    // Delegates to the healthcheck that already backs the per-credential
-    // "Check connection" action — one implementation, not two. Text Request is
-    // the only provider here with real HTTP semantics, so the status code is
-    // trustworthy; an unreachable host still degrades to `unknown`.
+    // Delegates to textrequestHealthcheck below — the same client that used to
+    // back the txr-only "Check connection" endpoint, which this replaced. One
+    // implementation, not two. Text Request is the only provider here with real
+    // HTTP semantics, so the status code is trustworthy; an unreachable host
+    // still degrades to `unknown`.
     async validateCredentials(fields) {
       const apiKey = (fields.api_key ?? "").trim();
       if (!apiKey) return { state: "invalid", detail: "No API key provided." };

@@ -2487,7 +2487,15 @@ export const short_domains = pgTable(
       .notNull()
       .references(() => brands.id, { onDelete: "cascade" }),
     domain: text("domain").notNull(),
+    // 'active' = mintable · 'pending' = provisioned but NOT yet proven to route
+    // to the app, never mintable (migration 0140) · 'archived' = retired.
     status: text("status").notNull().default("active"),
+    // The brand's explicit default domain (migration 0140). At most one per
+    // (org, brand), enforced by the partial unique index below. 0136 let a brand
+    // hold several domains, which made the old "oldest active" pick an implicit
+    // choice the operator could not state; this makes it explicit, with the old
+    // rule kept as the fallback when nothing is flagged.
+    is_default: boolean("is_default").notNull().default(false),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -2506,9 +2514,15 @@ export const short_domains = pgTable(
     // share a hostname, or the per-brand reporting split becomes meaningless and
     // one brand's reputation damage bleeds into another's deliverability.
     index("short_domains_brand_id_idx").on(table.brand_id),
+    // AT MOST one default per brand, enforced in the DATABASE (migration 0140) —
+    // no write path can bypass it. "Exactly one" is delivered by resolution, not
+    // by this constraint: a brand with none flagged falls back to oldest-active.
+    uniqueIndex("short_domains_one_default_per_brand")
+      .on(table.org_id, table.brand_id)
+      .where(sql`${table.is_default}`),
     check(
       "short_domains_status_check",
-      sql`${table.status} IN ('active', 'archived')`,
+      sql`${table.status} IN ('active', 'pending', 'archived')`,
     ),
   ],
 );

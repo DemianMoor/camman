@@ -995,4 +995,11 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 - Replaced the guessed "may approach the 10s timeout" caveat with production measurements: selective number 80.9 ms, worst-case dominant number 1,806 ms (vs. 8,480 ms pre-index) — clears both the 10s preview timeout and the 60s `snapshotAudience` activation budget with wide margin.
 - No schema/behavior change from the docs edits themselves; see the same-commit code fixes (schema.ts check-constraint + index drift, validator id ceiling, eval doc comment, rules-panel incomplete-check alignment, provider-phones org filter, backfill script header/citation/divergence-warning) in the commit this entry ships with.
 
+2026-08-14 — Provider connection-type descriptors (869egmakh P1): static `descriptor` on every SMS adapter (displayName, blurb, credentialFields, three-state `validateCredentials`), `GET /api/provider-types`, registry split into alias-tolerant `getDescriptor()` + canonical `listConnectionTypes()` — docs/06-integrations.md, docs/07-conventions.md
+- Non-sending credential checks reuse existing clients rather than adding new ones: TextHub via `fetchInbox`, Text Request via `textrequestHealthcheck`, Ahoi via a same-day CDR pull. Tells deliberately has NO `validateCredentials` — its only endpoint sends.
+- `ValidateCredentialsResult` is three-state (`valid`/`invalid`/`unknown`); `unknown` must never collapse into pass or fail. Ahoi and Tells answer HTTP 200 on auth failure, so an envelope change has to degrade to "couldn't verify", not to a false green.
+- Ahoi classifier pinned to bodies measured by `scripts/probe-ahoi-badkey.ts` (kept as the regression reference): HTTP 200 + `text/html` for every case, so the body is the only discriminator; key off JSON `status`, never the message; never classify on CSV row count.
+- Convention added: run git as `git -C <absolute worktree path>` — the agent shell's cwd is not reliably persistent between calls and a relative command can execute against the shared checkout.
+- No schema change, no migration. Behavior additive: the descriptor field is optional and nothing reads it yet outside the new endpoint.
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

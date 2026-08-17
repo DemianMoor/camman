@@ -49,9 +49,74 @@ export type InboundEvent = {
   cost: string | null;
 };
 
+// ── Connection-type descriptor (869egmakh P1) ────────────────────────────────
+// Static, secret-free metadata describing what a connection type IS and what it
+// needs, so the provider-create UI can be driven by the adapter registry instead
+// of a free-text code the operator has to know. Never contains a credential.
+
+// One operator-entered field. Used for BOTH credential fields and per-number
+// setting fields — a credential field is just a field with `secret: true`.
+export type FieldSpec = {
+  name: string;        // wire key, e.g. "api_key"
+  label: string;
+  placeholder?: string;
+  help?: string;
+  secret?: boolean;    // true ⇒ masked in UI, never echoed back by the API
+};
+
+// THREE states, deliberately. `unknown` is NOT a soft failure and must never be
+// collapsed into `valid` or `invalid` by a caller or by the UI — it means the
+// provider answered in a shape we do not recognize, so we genuinely do not know.
+//
+// This exists because two of our providers (Ahoi/api19, Tells) return HTTP 200
+// for authentication failures and signal the real outcome only in the body. If
+// one of them changes its error envelope, the classifier stops recognizing the
+// failure — and the safe degradation is "couldn't verify", never a false green.
+// Surface it in the UI as its own state (e.g. "Couldn't verify — provider
+// response unrecognized"), distinct from both pass and fail.
+export type ValidateCredentialsResult =
+  | { state: "valid"; detail: string | null }
+  | { state: "invalid"; detail: string }
+  | { state: "unknown"; detail: string };
+
+export type ProviderDescriptor = {
+  displayName: string;
+  blurb: string;
+  // Everything needed to authenticate one account. All four providers today
+  // take exactly one opaque secret; the array shape is what lets a future
+  // provider need account_id + secret without a schema change.
+  credentialFields: FieldSpec[];
+  // Non-sending reachability + auth check for a set of entered/stored field
+  // values. Omitted ⇒ this connection type cannot be verified without sending,
+  // and the UI must say so rather than offering a test that can't fail.
+  // MUST NOT throw: network/timeout is a `unknown`, not an exception.
+  validateCredentials?: (
+    fields: Record<string, string>,
+  ) => Promise<ValidateCredentialsResult>;
+
+  // ── Seams: declared now, intentionally unset on every adapter ─────────────
+  // No speculative values — a provider only gets one when its real requirement
+  // is known. Absent behaves exactly as today.
+
+  // Footer wording this connection type REQUIRES. Consumer: card 869ej8r1y Q3
+  // (precedence number.opt_out_footer > this > stage.stop_text > 'Stop to END').
+  defaultOptOutFooter?: string;
+  // True ⇒ the provider appends its own opt-out text, so CamMan must append
+  // NOTHING and the kickoff gate validates against the provider's known text.
+  // Consumer: card 869ej8r1y Q3.
+  appendsOwnOptOut?: boolean;
+  // Per-number provider-specific settings (the `dashboard_id` generalization).
+  // Consumer: card 869ej8r00 Q2 — blocked on adapter_code (card 869ej8qzk).
+  phoneSettingFields?: FieldSpec[];
+};
+
 import type { SendSmsResult } from "@/lib/sends/texthub";
 export interface SmsProviderAdapter {
   key: "txh" | "ahi" | "txr" | "tls";
+  // Optional so adding it broke no adapter at introduction; every adapter that
+  // exists today sets it. Read it through the registry's getDescriptor(), which
+  // is keyed on the REGISTRY key — `adapter.key` misreports for the txh2 alias.
+  descriptor?: ProviderDescriptor;
   send(p: NormalizedSendParams): Promise<SendSmsResult>;
   buildRedactedRequest(p: NormalizedSendParams): string;
   toProviderRecipient(e164: string): string;

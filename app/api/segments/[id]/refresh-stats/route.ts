@@ -115,11 +115,28 @@ export async function POST(
     .limit(1);
 
   let ruleFilteredCount: number | null = null;
+  // The engagement counters default to the manual-membership figures computed
+  // above. When the segment has active rules those are meaningless — manual
+  // membership is usually empty, so a rule-based segment reported 0 opt-outs /
+  // 0 clickers no matter what its audience actually contained. Recompute them
+  // over the FULL audience in that case, on the same basis as
+  // `rule_filtered_count` so the tiles reconcile:
+  //   audience (sendable) + opt_out_count = full audience.
+  // On timeout we keep the manual figures — the columns are NOT NULL, and a
+  // stale-but-real number beats persisting a zero.
+  let optOutCount = counts.opt_out_count;
+  let optInCount = counts.opt_in_count;
+  let clickerCount = counts.clicker_count;
   if (activeRules.length > 0) {
     const r = await previewSegmentAudienceCount(segmentId, orgId);
     // On timeout (truncated), leave null so the UI can show "—" rather
     // than persist a misleading stale value.
     ruleFilteredCount = r.truncated ? null : r.count;
+    if (!r.truncated) {
+      optOutCount = r.opt_out_count ?? optOutCount;
+      optInCount = r.opt_in_count ?? optInCount;
+      clickerCount = r.clicker_count ?? clickerCount;
+    }
   }
 
   const updated = await db
@@ -128,18 +145,18 @@ export async function POST(
       segment_id: segmentId,
       org_id: orgId,
       total_count: counts.total_count,
-      opt_out_count: counts.opt_out_count,
-      opt_in_count: counts.opt_in_count,
-      clicker_count: counts.clicker_count,
+      opt_out_count: optOutCount,
+      opt_in_count: optInCount,
+      clicker_count: clickerCount,
       rule_filtered_count: ruleFilteredCount,
     })
     .onConflictDoUpdate({
       target: segment_stats.segment_id,
       set: {
         total_count: counts.total_count,
-        opt_out_count: counts.opt_out_count,
-        opt_in_count: counts.opt_in_count,
-        clicker_count: counts.clicker_count,
+        opt_out_count: optOutCount,
+        opt_in_count: optInCount,
+        clicker_count: clickerCount,
         rule_filtered_count: ruleFilteredCount,
         updated_at: drizzleSql`now()`,
       },

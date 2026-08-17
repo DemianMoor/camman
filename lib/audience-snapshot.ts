@@ -18,32 +18,43 @@ import { buildSegmentAudienceClause } from "./segment-rules-eval";
 // Compose the audience-source set (contact_ids, before status filters /
 // opt-out / in-use exclusion) from the two selection dimensions:
 //
-//   * segments — OR'd together (a contact in ANY selected segment qualifies)
+//   * segments — INTERSECT'd together (a contact must be in EVERY selected
+//     segment). Each additional segment can only NARROW the audience.
 //   * contact groups — OR'd together (a contact in ANY selected group)
 //
-// The two dimensions INTERSECT when both are present: a contact must be in a
-// selected segment AND a selected group. When only one dimension is
+// The two dimensions INTERSECT when both are present: a contact must be in
+// every selected segment AND in a selected group. When only one dimension is
 // populated, that side is used alone (the empty dimension is ignored, not
 // treated as "match nothing"). Each `segmentBranch` must already be a plain
-// `SELECT contact_id …` (callers subquery-wrap the rule clauses) so the UNION
-// here can't be mis-parenthesized by a segment clause's own set operators.
+// `SELECT contact_id …` (callers subquery-wrap the rule clauses) so the set
+// operators here can't be mis-parenthesized by a segment clause's own.
+//
+// Segments AND-ing together is deliberate (changed 2026-08-17): a "filter-
+// shaped" segment such as a lone `is_not` rule matches nearly the whole org,
+// so OR-ing it in swamped the audience instead of narrowing it. To OR two
+// audiences together, model it as rules inside ONE segment (rule combinator
+// `or`) — that's the layer that still supports UNION. Kept in lockstep with
+// previewAudience's `segments_matched` membership test; if these two diverge
+// the preview stops predicting what activation snapshots.
 function buildAudienceSourceClause(
   segmentBranches: SQL[],
   groupClause: SQL | null,
   excludeUnion: SQL | null = null,
 ): SQL {
-  const segmentUnion =
+  // All-INTERSECT chain: same operator throughout, so left-associativity is
+  // unambiguous and no per-step parens are needed.
+  const segmentIntersect =
     segmentBranches.length > 0
       ? segmentBranches.reduce((acc, branch, i) =>
-          i === 0 ? branch : drizzleSql`${acc} UNION ${branch}`,
+          i === 0 ? branch : drizzleSql`${acc} INTERSECT ${branch}`,
         )
       : null;
-  // Positive base P: include ∩ group when both, else whichever side is present.
+  // Positive base P: segments ∩ group when both, else whichever side is present.
   // hasAnySource guards the callers, so at least one side is non-null here.
   const positive =
-    segmentUnion && groupClause
-      ? drizzleSql`(${segmentUnion}) INTERSECT (${groupClause})`
-      : ((segmentUnion ?? groupClause) as SQL);
+    segmentIntersect && groupClause
+      ? drizzleSql`(${segmentIntersect}) INTERSECT (${groupClause})`
+      : ((segmentIntersect ?? groupClause) as SQL);
   // Subtract the exclude-mode segments (migration 0114). No-op when none.
   if (excludeUnion) {
     return drizzleSql`(${positive}) EXCEPT (${excludeUnion})`;
@@ -569,7 +580,7 @@ export async function computeStageAudienceCountForDraft(
   const splitTotal = stageFilters.split_total ?? null;
   const splitActive = splitIndex !== null && splitTotal !== null;
 
-  // Mirror previewAudience's source composition — segments OR together,
+  // Mirror previewAudience's source composition — segments AND together,
   // groups OR together, the two dimensions INTERSECT when both are present.
   // The group set doubles as the is_not universe restriction when both
   // dimensions are present (perf — see buildSegmentAudienceClause).
@@ -1061,8 +1072,8 @@ export async function previewAudience(
     : drizzleSql``;
   const carrierCol = hasCarrierFilter ? drizzleSql`, pc.carrier_norm` : drizzleSql``;
   // When BOTH dimensions are selected the audience is their INTERSECTION:
-  // a contact must be in a selected segment AND a selected group. With only
-  // one dimension populated, that side stands alone (no intersection).
+  // a contact must be in EVERY selected segment AND in a selected group. With
+  // only one dimension populated, that side stands alone (no intersection).
   const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
 
   // Group side, built first so it can double as the is_not universe
@@ -1073,23 +1084,29 @@ export async function previewAudience(
   const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
   const restrictUniverse = bothSides ? groupClause! : undefined;
 
-  // Per-source clauses tagged with from_segment / from_group / from_exclude_segment
-  // markers so the aggregate query can attribute each contact to a source and
-  // apply the include/exclude membership rule. UNION ALL because the GROUP BY
-  // downstream dedupes via BOOL_OR.
+  // Per-source clauses tagged with segment_ord / from_group /
+  // from_exclude_segment markers so the aggregate query can attribute each
+  // contact to a source and apply the include/exclude membership rule. UNION
+  // ALL because the GROUP BY downstream dedupes.
+  //
+  // Each include-segment branch carries its ORDINAL rather than a boolean:
+  // segments AND together, so the membership test is "matched every selected
+  // segment", which needs a distinct count, not a BOOL_OR. Group and
+  // exclude branches carry a NULL ordinal so they never inflate that count
+  // (count(distinct …) ignores NULLs).
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) => buildSegmentAudienceClause(id, orgId, restrictUniverse)),
   );
   const segmentBranches = perSegmentClauses.map(
-    (clause) => drizzleSql`
-      SELECT contact_id, true::boolean AS from_segment, false::boolean AS from_group, false::boolean AS from_exclude_segment
+    (clause, i) => drizzleSql`
+      SELECT contact_id, ${i}::int AS segment_ord, false::boolean AS from_group, false::boolean AS from_exclude_segment
       FROM (${clause}) seg_inner
     `,
   );
   const groupBranches = groupClause
     ? [
         drizzleSql`
-          SELECT contact_id, false::boolean AS from_segment, true::boolean AS from_group, false::boolean AS from_exclude_segment
+          SELECT contact_id, null::int AS segment_ord, true::boolean AS from_group, false::boolean AS from_exclude_segment
           FROM (${groupClause}) grp_inner
         `,
       ]
@@ -1107,7 +1124,7 @@ export async function previewAudience(
   );
   const excludeBranches = perExcludeClauses.map(
     (clause) => drizzleSql`
-      SELECT contact_id, false::boolean AS from_segment, false::boolean AS from_group, true::boolean AS from_exclude_segment
+      SELECT contact_id, null::int AS segment_ord, false::boolean AS from_group, true::boolean AS from_exclude_segment
       FROM (${clause}) exc_inner
     `,
   );
@@ -1121,6 +1138,13 @@ export async function previewAudience(
   // populated: include ∩ group when both, else whichever side is present.
   const hasInc = segmentIds.length > 0;
   const hasGrp = contactGroupIds.length > 0;
+  // Segments AND together: a contact counts as "from segments" only when it
+  // matched EVERY selected segment. This is the preview-side mirror of
+  // buildAudienceSourceClause's INTERSECT chain — the two MUST agree or the
+  // preview stops predicting what activation actually snapshots.
+  const fromSegmentExpr = hasInc
+    ? drizzleSql`(s.segments_matched = ${segmentIds.length}::int)`
+    : drizzleSql`false`;
   const positiveExpr =
     hasInc && hasGrp
       ? drizzleSql`(q.from_segment and q.from_group)`
@@ -1135,7 +1159,7 @@ export async function previewAudience(
     sources as (
       select
         contact_id,
-        bool_or(from_segment) as from_segment,
+        count(distinct segment_ord) as segments_matched,
         bool_or(from_group) as from_group,
         bool_or(from_exclude_segment) as from_exclude_segment
       from unionized
@@ -1145,7 +1169,7 @@ export async function previewAudience(
     flagged as (
       select
         s.contact_id,
-        s.from_segment,
+        ${fromSegmentExpr} as from_segment,
         s.from_group,
         s.from_exclude_segment,
         (oo_set.contact_id is not null) as has_opt_out,

@@ -11,6 +11,12 @@
 // NO injected sender — the real production resolution path — for both known
 // live keys.
 //
+// ⚠️ UPDATED FOR MIGRATION 0134. The key the drain resolves is now
+// `adapter_code`, NOT `sms_provider_id` — those are different columns since the
+// identity/type split. Asserting the old column would keep passing only while
+// the `txh2` registry alias exists, and would then fail the moment that alias is
+// removed, which is precisely the deploy this test is supposed to protect.
+//
 // Run: npx tsx scripts/test-provider-registry-db-keys.ts
 import { config } from "dotenv";
 import { resolve } from "node:path";
@@ -31,20 +37,28 @@ async function main() {
   if (!dbUrl) throw new Error("DATABASE_URL is not set");
   const sql = postgres(dbUrl, { prepare: false, max: 1 });
 
-  console.log("DB-key coverage (every api-send provider's REAL sms_provider_id):");
-  const rows = await sql<{ sms_provider_id: string }[]>`
-    SELECT sms_provider_id FROM sms_providers WHERE supports_api_send = true
+  console.log("DB-key coverage (every api-send provider's REAL adapter_code):");
+  const rows = await sql<{ sms_provider_id: string; adapter_code: string | null }[]>`
+    SELECT sms_provider_id, adapter_code FROM sms_providers WHERE supports_api_send = true
   `;
   check("at least one api-send provider row exists", rows.length > 0, `found ${rows.length}`);
   for (const row of rows) {
-    const key = row.sms_provider_id;
-    // The leftover duplicate Ahoi provider row (sms_provider_id='ahoi', id
-    // 332 — a pre-re-key seed artifact) has been removed (Issue 2
-    // reconciliation); every remaining supports_api_send row is a real key
-    // the registry is expected to serve, so no special-case skip is needed.
+    // An api-send row with a NULL adapter_code cannot send at all: the drain
+    // would call getAdapter("") and refuse with `unknown_provider`. Catch that
+    // as its own failure rather than letting it fall through as "unresolvable".
+    check(
+      `${row.sms_provider_id}: adapter_code is set`,
+      row.adapter_code !== null,
+      "supports_api_send=true but adapter_code IS NULL — this provider cannot send",
+    );
+    if (row.adapter_code === null) continue;
     let threw: unknown = null;
-    try { getAdapter(key); } catch (e) { threw = e; }
-    check(`getAdapter('${key}') resolves (real DB key)`, threw === null, String(threw));
+    try { getAdapter(row.adapter_code); } catch (e) { threw = e; }
+    check(
+      `getAdapter('${row.adapter_code}') resolves (adapter_code of ${row.sms_provider_id})`,
+      threw === null,
+      String(threw),
+    );
   }
   await sql.end();
 
@@ -59,12 +73,12 @@ async function main() {
   try { ahiFn = resolveSenderForStage("ahi"); } catch (e) { ahiThrew = e; }
   check("resolveSenderForStage('ahi') resolves to a function", typeof ahiFn === "function", ahiThrew ? String(ahiThrew) : "");
 
-  // txh2 = second TextHub account modeled as its own provider row (id 499);
-  // reuses the TextHub adapter, so it must resolve like a real live key.
-  let txh2Threw: unknown = null;
-  let txh2Fn: unknown = null;
-  try { txh2Fn = resolveSenderForStage("txh2"); } catch (e) { txh2Threw = e; }
-  check("resolveSenderForStage('txh2') resolves to a function", typeof txh2Fn === "function", txh2Threw ? String(txh2Threw) : "");
+  // The txh2 ROW (id 499, the second TextHub account) is covered by the
+  // data-driven adapter_code loop above, which is what the drain actually
+  // passes. Deliberately NOT asserting `resolveSenderForStage("txh2")` here:
+  // that tests the registry ALIAS, which exists only until it is removed in the
+  // final step of the 0134 cutover. Pinning the alias would make this guard fail
+  // on exactly the deploy it is meant to protect.
 
   let bogusThrew: unknown = null;
   try { resolveSenderForStage("bogus"); } catch (e) { bogusThrew = e; }

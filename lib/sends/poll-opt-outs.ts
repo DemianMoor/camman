@@ -453,14 +453,20 @@ async function pollCredential(
 
 // This poller only knows how to talk to TextHub's inbox endpoint
 // (api.texthub.com/...?inbox=true) — it fires each credential's api_key at
-// that URL. Scoped to the TextHub family (sms_provider_id IN ('txh','txh2') —
-// 'txh2' is a second TextHub account modeled as its own provider row, id 499,
-// same inbox API) so a different api-send-capable provider (e.g. Ahoi —
-// sms_provider_id = 'ahi', which has its own opt-out intake, see
-// lib/sends/ahoi-optout.ts / ahoi-dlr-optout.ts / ahoi-inbound.ts) never gets
-// its key thrown at TextHub's endpoint (404 -> false "poller FAILED" alert;
-// regression fixed 2026-07-15). Exported so the credential selection is
-// unit-testable in isolation from the fetch/suppression logic.
+// that URL. Scoped to the TextHub CONNECTION TYPE (`adapter_code = 'txh'`) so a
+// different api-send-capable provider (e.g. Ahoi, which has its own opt-out
+// intake — see lib/sends/ahoi-optout.ts / ahoi-dlr-optout.ts / ahoi-inbound.ts)
+// never gets its key thrown at TextHub's endpoint (404 -> false "poller FAILED"
+// alert; regression fixed 2026-07-15).
+//
+// This filter asks "what KIND of provider is this", so migration 0134 moved it
+// off the hardcoded identity list `sms_provider_id IN ('txh','txh2')` and onto
+// adapter_code. Both rows carry adapter_code='txh', so the selected set is
+// unchanged — and a future TextHub account is now picked up automatically
+// instead of needing this literal edited, which is how it broke before.
+//
+// Exported so the credential selection is unit-testable in isolation from the
+// fetch/suppression logic.
 export async function selectPollableCredentials(
   database: Executor,
   orgId?: string,
@@ -473,7 +479,7 @@ export async function selectPollableCredentials(
     FROM provider_credentials pc
     JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
     WHERE p.supports_api_send = true
-      AND p.sms_provider_id IN ('txh', 'txh2')
+      AND p.adapter_code = 'txh'
     ${orgFilter}
   `)) as unknown as (CredentialRow & { api_key_encrypted: string | null })[];
 

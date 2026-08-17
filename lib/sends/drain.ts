@@ -214,7 +214,11 @@ export async function runStageDrain(
 
   const ctx = (await dbc.execute(sql`
     SELECT s.sms_provider_id AS provider_id,
-           p.sms_provider_id AS provider_key,
+           -- CONNECTION TYPE, not the row identity (migration 0134). This is
+           -- what getAdapter() resolves, so it must be adapter_code: the txh2
+           -- row is a TextHub-type account and previously only resolved via a
+           -- registry alias entry keyed on its identity.
+           p.adapter_code AS provider_key,
            s.send_approved    AS send_approved,
            c.id               AS campaign_id,
            c.org_id           AS org_id,

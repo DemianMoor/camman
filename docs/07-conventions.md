@@ -425,6 +425,20 @@ Every pending poll takes the fallback, the loop sees an empty result forever, an
 
 Use `gh pr view <n> --json statusCheckRollup,mergeStateStatus`, which exits zero regardless of check state, and **report every terminal state, not just success** — a watcher that only greps for green is silent through a failure, and silence reads as "still running". See the worktree/monitor guidance above for the general form.
 
+## Verification tooling gets guard-grade treatment - it is not throwaway
+
+The scripts that check the work fail in the same ways the work does, and a broken checker is worse than no checker because it reports success. Over one session, verification tooling produced: a watcher that ran 15 minutes and emitted nothing (a `|| echo '[]'` fallback swallowed every poll, because `gh pr checks` exits non-zero while checks are pending); a success test that matched `api.github.com` inside an *error* URL and declared a failed PR creation successful; a 10-minute poll loop that measured nothing because it piped to standalone `jq`, which is not installed; and an `eslint $FILES` with an empty `FILES` that silently linted the entire repo and reported 216 unrelated problems.
+
+None of these were wrong about the system. All of them were wrong about themselves.
+
+**Rules, same bar as production guards:**
+
+- **A missing binary or an empty variable is an ERROR, never an empty result.** `jq` absent, `FILES` empty, a command not found - fail loudly. Prefer `gh --jq` over piping to `jq`; check the variable is non-empty before using it to select what gets checked.
+- **Print the input scope.** How many items, which ones, over what window. A count you can sanity-check is what catches the empty-variable case.
+- **Assert non-empty before asserting equal.** Two empty sets are equal. A non-empty baseline check belongs above every comparison.
+- **Never map a failure to a benign value.** `|| echo '[]'`, `2>/dev/null` on the thing you are measuring, a `catch` returning a default - each converts "I could not tell" into "nothing to report".
+- **Match success on a positive signal, not the absence of a known error string.** A URL, an exit code, a parsed field - not "does the output contain the word I expect".
+
 ## An unexplained detail in a PASSING run is a finding, not noise
 
 A suite that prints `ALL PASS` is not a licence to stop reading it. Chase any number in the output you cannot immediately account for.

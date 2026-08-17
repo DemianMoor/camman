@@ -12,6 +12,7 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { verifyShortDomainAssignable } from "@/lib/providers/short-domain-assignment";
 import { providerPhoneUpdateSchema } from "@/lib/validators/provider-phones";
 
 function parseId(idParam: string) {
@@ -53,6 +54,7 @@ export async function GET(
       number_type: provider_phones.number_type,
       max_sends_per_second: provider_phones.max_sends_per_second,
       dashboard_id: provider_phones.dashboard_id,
+      short_domain_id: provider_phones.short_domain_id,
       status: provider_phones.status,
       archived_at: provider_phones.archived_at,
       created_at: provider_phones.created_at,
@@ -140,6 +142,18 @@ export async function PATCH(
   // specially below; the rest map straight to columns.
   const { provider_id: targetProviderId, confirm_move, ...editable } =
     parsed.data;
+
+  // Short-domain override: verify BEFORE writing. Org ownership is the
+  // multi-tenancy invariant; the active-status check is what keeps a `pending`
+  // B1 domain from being assigned to a live number, which would mint links
+  // under a host that doesn't resolve — dead clicks, no error anywhere.
+  const sdCheck = await verifyShortDomainAssignable(orgId, editable.short_domain_id);
+  if (!sdCheck.ok) {
+    return apiError(400, sdCheck.message, API_ERROR_CODES.VALIDATION, {
+      field: "short_domain_id",
+      reason: sdCheck.reason,
+    });
+  }
 
   const updates: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(editable)) {

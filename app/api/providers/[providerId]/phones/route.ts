@@ -10,6 +10,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { verifyShortDomainAssignable } from "@/lib/providers/short-domain-assignment";
 import { validatePhone } from "@/lib/phone-validation";
 import { providerPhoneCreateSchema } from "@/lib/validators/provider-phones";
 
@@ -104,6 +105,7 @@ export async function GET(
       number_type: provider_phones.number_type,
       max_sends_per_second: provider_phones.max_sends_per_second,
       dashboard_id: provider_phones.dashboard_id,
+      short_domain_id: provider_phones.short_domain_id,
       status: provider_phones.status,
       archived_at: provider_phones.archived_at,
       created_at: provider_phones.created_at,
@@ -203,6 +205,18 @@ export async function POST(
     localNumber = validation.local_number;
   }
 
+  // Short-domain override: verify BEFORE writing, same guard the PATCH route
+  // uses. Org ownership is the multi-tenancy invariant; the active-status check
+  // keeps a `pending` B1 domain off a live number, which would mint links under
+  // a host that doesn't resolve — dead clicks with no error anywhere.
+  const sdCheck = await verifyShortDomainAssignable(orgId, parsed.data.short_domain_id);
+  if (!sdCheck.ok) {
+    return apiError(400, sdCheck.message, API_ERROR_CODES.VALIDATION, {
+      field: "short_domain_id",
+      reason: sdCheck.reason,
+    });
+  }
+
   try {
     const [created] = await db
       .insert(provider_phones)
@@ -218,6 +232,7 @@ export async function POST(
         number_type: parsed.data.number_type,
         max_sends_per_second: parsed.data.max_sends_per_second ?? null,
         dashboard_id: parsed.data.dashboard_id ?? null,
+        short_domain_id: parsed.data.short_domain_id ?? null,
         status: "active",
       })
       .returning();

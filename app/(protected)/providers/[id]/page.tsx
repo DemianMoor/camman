@@ -110,6 +110,7 @@ type Phone = {
   number_type: NumberType;
   max_sends_per_second: number | null;
   dashboard_id: string | null;
+  short_domain_id: number | null;
   status: PhoneStatus;
   archived_at: string | null;
   created_at: string;
@@ -499,6 +500,7 @@ export default function ProviderDetailPage() {
       brand_id: values.brand_id,
       max_sends_per_second: values.max_sends_per_second ?? null,
       dashboard_id: values.dashboard_id ?? null,
+      short_domain_id: values.short_domain_id ?? null,
     };
     if (isMove) {
       patch.provider_id = values.provider_id;
@@ -1164,6 +1166,7 @@ export default function ProviderDetailPage() {
               brand_id: editingPhone.brand_id,
               max_sends_per_second: editingPhone.max_sends_per_second,
               dashboard_id: editingPhone.dashboard_id,
+              short_domain_id: editingPhone.short_domain_id,
             }}
             onSubmit={handleEditPhone}
             onCancel={() => setEditingPhone(null)}

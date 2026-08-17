@@ -43,6 +43,11 @@ export const providerPhoneCreateSchema = z
     // The UI only surfaces this field for the txr provider; other providers
     // never send it. Null when unset.
     dashboard_id: z.string().trim().min(1).max(128).nullable().optional(),
+    // Per-number short-domain override (migration 0137). Null = no override:
+    // links mint under the campaign brand's domain, which is what every number
+    // did before this existed. The route verifies the domain belongs to the
+    // caller's org and is active before storing it.
+    short_domain_id: z.number().int().positive().nullable().optional(),
   })
   .superRefine((data, ctx) => {
     // Short codes have a fixed numeric shape; phone numbers are validated
@@ -71,6 +76,9 @@ export const providerPhoneUpdateSchema = z
     // Text Request only (see create schema). Editable so a number's dashboard
     // binding can be corrected; null clears it.
     dashboard_id: z.string().trim().min(1).max(128).nullable().optional(),
+    // Per-number short-domain override (migration 0137). Null clears it, which
+    // returns the number to the brand default rather than breaking minting.
+    short_domain_id: z.number().int().positive().nullable().optional(),
     // Move the number to a different provider (reassigns provider_id in place;
     // clears the number's account link). When it differs from the current
     // provider and not-yet-sent stages reference the number, the route returns
@@ -86,6 +94,7 @@ export const providerPhoneUpdateSchema = z
       data.brand_id !== undefined ||
       data.max_sends_per_second !== undefined ||
       data.dashboard_id !== undefined ||
+      data.short_domain_id !== undefined ||
       data.provider_id !== undefined,
     { message: "At least one field must be provided" },
   );

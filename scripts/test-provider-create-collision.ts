@@ -127,9 +127,47 @@ async function main() {
       create_separate_row: true, sms_provider_id: "ahi",
     });
     check(
-      "a reserved connection-type code is rejected",
+      "another type's CANONICAL code is reserved",
       r.status === 400 && r.body?.details?.reason === "reserved_connection_code",
       `HTTP ${r.status} reason=${r.body?.details?.reason ?? "-"}`,
+    );
+  }
+  {
+    // The reserved check must span ALIASES too, not just canonical codes —
+    // `txh2` is a registry key, so a row claiming it would be resolved to the
+    // TextHub adapter by getAdapter purely by accident.
+    const r = await post(cookie, {
+      name: "probe alias", connection_type: "ahi",
+      create_separate_row: true, sms_provider_id: "txh2",
+    });
+    check(
+      "another type's ALIAS code is reserved",
+      r.status === 400 && r.body?.details?.reason === "reserved_connection_code",
+      `HTTP ${r.status} reason=${r.body?.details?.reason ?? "-"}`,
+    );
+  }
+
+  console.log("\n── Contradictory mode fields are rejected, not silently resolved ──");
+  {
+    // (a) A derived code cannot also be dictated.
+    const r = await post(cookie, {
+      name: "probe dictated", connection_type: "txh", sms_provider_id: "mycode",
+    });
+    check(
+      "connection_type + typed code (no separate-row) is rejected",
+      r.status === 400,
+      `HTTP ${r.status} :: ${r.body?.error ?? ""}`,
+    );
+  }
+  {
+    // (c) A separate row is meaningless without a type to be a variant of.
+    const r = await post(cookie, {
+      name: "probe orphan", create_separate_row: true, sms_provider_id: "mycode2",
+    });
+    check(
+      "create_separate_row without a connection_type is rejected",
+      r.status === 400,
+      `HTTP ${r.status} :: ${r.body?.error ?? ""}`,
     );
   }
 

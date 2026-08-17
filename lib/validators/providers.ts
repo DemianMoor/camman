@@ -154,6 +154,36 @@ export const providerCreateSchema = providerBaseSchema
           "A separate provider row of an existing type needs its own distinct provider ID.",
       });
     }
+    // Contradictory mode fields are REJECTED, never silently resolved.
+    //
+    // Both cases below used to fall through and quietly ignore one of the
+    // supplied fields, which is the same class of failure as auto-suffixing: the
+    // request said one thing, the row became another, and nothing told anyone.
+    // A caller who sends contradictory fields has a bug; answering 400 surfaces
+    // it instead of writing a row they didn't ask for.
+
+    // (a) A derived code cannot also be dictated. With a type picked and no
+    //     separate-row opt-in, the code comes from the registry — accepting a
+    //     typed value here would let a caller believe they chose the code.
+    if (data.connection_type && !data.create_separate_row && data.sms_provider_id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sms_provider_id"],
+        message:
+          "The provider ID is set by the connection type. Remove it, or choose to create a separate provider row.",
+      });
+    }
+    // (c) A separate row is a variant of an EXISTING type, so it is meaningless
+    //     without one. Silently treating it as a custom provider would ignore
+    //     the operator's stated intent.
+    if (data.create_separate_row && !data.connection_type) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["create_separate_row"],
+        message:
+          "A separate provider row only applies to a chosen connection type.",
+      });
+    }
   });
 
 export const providerUpdateSchema = providerBaseSchema

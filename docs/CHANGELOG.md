@@ -2,6 +2,17 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 — Connection-type picker for provider creation, with explicit collision handling (869egmakh P3 — closes the card) — docs/06-integrations.md, docs/07-conventions.md
+- `POST /api/providers` now takes `connection_type`; the provider code is DERIVED from the adapter registry instead of typed. Shown read-only but visible, because the code appears in drain errors and reports.
+- ANTI-DRIFT: picking a type that already has a provider row returns 409 `connection_type_exists` with the existing rows attached — never a silently auto-suffixed code, which is exactly how `txh2` came to exist. The UI steers to "add an account to that provider". A separate row stays possible but requires `create_separate_row: true` AND an explicit distinct code, rejected if it collides with a registry key.
+- The existence check is alias-aware (`registryKeysForType`): asking for TextHub reports both `txh` and `txh2`. A canonical-code-only check would have missed txh2 and offered a third TextHub row.
+- `GET /api/provider-types` gained org-scoped `existing_providers`; it is no longer a purely static endpoint and its header comment was corrected to say so.
+- New `POST /api/provider-types/[key]/validate` checks credential values not yet stored (provider-create time). Same descriptor check, same three states, nothing persisted.
+- SCOPE CHANGE: "Test before saving" on the create form is NOT built. Provider creation and credential creation stay separate — the operator lands on the provider page where Test connection works against a real stored account. Avoids coupling two creates in one transaction for a second way to add a key.
+- "Custom / no API" escape hatch retained for adapter-less rows (snx, smpl).
+- Conventions added: cleanup must assert rather than hope (a teardown that fails after ALL PASS is invisible); probes that WRITE run against the camman-v2 demo DB by default, prod writes need explicit approval like any other production data write.
+- No schema change, no migration.
+
 2026-08-17 — Uniform Test connection + server-side gates on the two provider-specific actions (869egmakh P2) — docs/06-integrations.md, docs/07-conventions.md
 - New `POST /api/providers/[id]/credentials/[credId]/test-connection`: one descriptor-driven, non-sending check for every connection type. Returns three states (`valid`/`invalid`/`unknown`) plus optional `discovered` items. Admin+, read-only at the provider, NOT gated by SEND_ENABLED.
 - Deleted the txr-only `…/healthcheck` endpoint it supersedes. Text Request's dashboard ids moved into `discovered`, so binding a `dashboard_id` to a number still works from the same dialog — no capability lost.

@@ -1,7 +1,12 @@
+import { and, eq, inArray } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { sms_providers } from "@/db/schema";
+import {
+  getDescriptor,
+  registryKeysForType,
+} from "@/lib/sends/providers/registry";
 import {
   apiError,
   isUniqueViolation,
@@ -36,13 +41,86 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ── Connection type → provider code (869egmakh P3) ─────────────────────────
+  // Resolve the code the row will carry, and enforce the anti-drift rule. The
+  // client shows this steer too, but the UI is not a boundary: a direct POST
+  // must land in exactly the same place.
+  let smsProviderId: string;
+  if (parsed.data.connection_type) {
+    const canonical = parsed.data.connection_type;
+    if (!getDescriptor(canonical)) {
+      return apiError(400, "Unknown connection type", API_ERROR_CODES.VALIDATION, {
+        field: "connection_type",
+      });
+    }
+
+    // Alias-aware: TextHub is "already present" if EITHER txh or txh2 exists.
+    const keys = registryKeysForType(canonical);
+    const existing = keys.length
+      ? await db
+          .select({
+            id: sms_providers.id,
+            name: sms_providers.name,
+            sms_provider_id: sms_providers.sms_provider_id,
+          })
+          .from(sms_providers)
+          .where(
+            and(
+              eq(sms_providers.org_id, orgId),
+              inArray(sms_providers.sms_provider_id, keys),
+            ),
+          )
+          .orderBy(sms_providers.id)
+      : [];
+
+    if (existing.length > 0 && !parsed.data.create_separate_row) {
+      // REFUSE — and point at the right action. Adding a second account is a
+      // credential on the existing row; a second provider row fragments the
+      // per-provider circuit breakers, send windows and reporting, which is the
+      // cost txh2 already imposes.
+      const first = existing[0];
+      return apiError(
+        409,
+        `${getDescriptor(canonical)!.displayName} already exists as provider "${first.sms_provider_id}". Add a new account to it instead of creating a second provider.`,
+        API_ERROR_CODES.CONFLICT,
+        {
+          reason: "connection_type_exists",
+          connection_type: canonical,
+          existing_providers: existing,
+        },
+      );
+    }
+
+    if (parsed.data.create_separate_row) {
+      // Deliberate separate row: the operator supplies the code (the validator
+      // already required it). It must not collide with a registry key, or
+      // getAdapter would resolve the new row to an adapter by accident.
+      const requested = parsed.data.sms_provider_id!;
+      if (getDescriptor(requested)) {
+        return apiError(
+          400,
+          `"${requested}" is a reserved connection-type code. Choose a distinct provider ID.`,
+          API_ERROR_CODES.VALIDATION,
+          { field: "sms_provider_id", reason: "reserved_connection_code" },
+        );
+      }
+      smsProviderId = requested;
+    } else {
+      // Derived, never typed.
+      smsProviderId = canonical;
+    }
+  } else {
+    // Custom / no-API provider: the operator names it.
+    smsProviderId = parsed.data.sms_provider_id!;
+  }
+
   try {
     const [created] = await db
       .insert(sms_providers)
       .values({
         org_id: orgId,
         name: parsed.data.name,
-        sms_provider_id: parsed.data.sms_provider_id,
+        sms_provider_id: smsProviderId,
         short_link_supported: parsed.data.short_link_supported ?? false,
         // Always OFF at creation — never client-settable. Enabling the go-live
         // gate is a deliberate, audited act via POST /api/providers/[id]/api-send.

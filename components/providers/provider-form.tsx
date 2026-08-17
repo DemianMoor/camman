@@ -1,10 +1,20 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Loader2 } from "lucide-react";
 import { type Control, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
   Form,
   FormControl,
@@ -42,6 +52,30 @@ export interface ProviderFormProps {
   isSubmitting?: boolean;
 }
 
+// Sentinel for the escape hatch. Not a registry key — a provider row with no
+// adapter at all (snx, smpl), sent through manually.
+const CUSTOM_TYPE = "__custom__";
+
+type ConnectionTypeOption = {
+  key: string;
+  display_name: string;
+  blurb: string;
+  can_validate: boolean;
+  credential_fields: {
+    name: string;
+    label: string;
+    placeholder: string | null;
+    help: string | null;
+    secret: boolean;
+  }[];
+  existing_providers: {
+    id: number;
+    name: string;
+    sms_provider_id: string;
+    status: string;
+  }[];
+};
+
 export function ProviderForm({
   mode,
   initialValues,
@@ -78,10 +112,59 @@ export function ProviderForm({
   // form state — that's the whole point of the carve-out.
   const apiSendEnabled = supportsApiSend;
 
+  // ── Connection type (create only, 869egmakh P3) ────────────────────────────
+  const typesApi = useApiCall<{ data: ConnectionTypeOption[] }>();
+  const { execute: typesExec } = typesApi;
+  const [types, setTypes] = useState<ConnectionTypeOption[]>([]);
+  const [typesLoading, setTypesLoading] = useState(!isEdit);
+  const [connectionType, setConnectionType] = useState<string>("");
+  const [separateRow, setSeparateRow] = useState(false);
+
+  useEffect(() => {
+    if (isEdit) return;
+    let active = true;
+    void (async () => {
+      const r = await typesExec("/api/provider-types");
+      if (!active) return;
+      if (r.ok) setTypes(r.data.data);
+      setTypesLoading(false);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [isEdit, typesExec]);
+
+  const isKnownType = connectionType !== "" && connectionType !== CUSTOM_TYPE;
+  const selectedType = types.find((t) => t.key === connectionType) ?? null;
+  const collidingProviders = isKnownType ? (selectedType?.existing_providers ?? []) : [];
+
+  function handleTypeChange(next: string) {
+    setConnectionType(next);
+    setSeparateRow(false);
+    // Clear any typed code when moving to a derived type, so a leftover value
+    // can't be submitted for a type that derives its own.
+    if (next !== CUSTOM_TYPE) form.setValue("sms_provider_id", "");
+  }
+
+  // Submit through a wrapper so the connection-type decision travels with the
+  // payload. The SERVER derives the final code and re-enforces the collision
+  // rule — this only tells it which path the operator chose.
+  async function handleSubmit(values: ProviderFormValues) {
+    if (isEdit) return onSubmit(values);
+    await onSubmit({
+      ...values,
+      connection_type: isKnownType ? connectionType : undefined,
+      create_separate_row: isKnownType && separateRow ? true : undefined,
+      // Derived server-side; don't send a stale typed value.
+      sms_provider_id:
+        isKnownType && !separateRow ? undefined : values.sms_provider_id,
+    });
+  }
+
   return (
     <Form {...form}>
       <form
-        onSubmit={form.handleSubmit(onSubmit)}
+        onSubmit={form.handleSubmit(handleSubmit)}
         className="grid gap-4"
         noValidate
       >
@@ -103,28 +186,123 @@ export function ProviderForm({
           )}
         />
 
+        {/* ── Connection type (create only) ────────────────────────────────
+            Replaces the free-text provider ID. Typing `texthub` instead of
+            `txh` used to produce a provider row that passed every check and
+            then threw UnknownProviderError at drain time, after the campaign
+            was activated and scheduled. Picking a type removes the guess. */}
+        {!isEdit ? (
+          <FormItem>
+            <FormLabel required>Connection type</FormLabel>
+            <Select
+              value={connectionType}
+              onValueChange={handleTypeChange}
+              disabled={isSubmitting || typesLoading}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder={typesLoading ? "Loading…" : "Pick a connection type"} />
+              </SelectTrigger>
+              <SelectContent>
+                {types.map((t) => (
+                  <SelectItem key={t.key} value={t.key}>
+                    {t.display_name}
+                    {t.existing_providers.length > 0 ? " — already added" : ""}
+                  </SelectItem>
+                ))}
+                <SelectItem value={CUSTOM_TYPE}>Custom / no API</SelectItem>
+              </SelectContent>
+            </Select>
+            <FormDescription>
+              {selectedType?.blurb ??
+                "Choose “Custom / no API” for a provider you send through manually."}
+            </FormDescription>
+          </FormItem>
+        ) : null}
+
+        {/* Collision steer. Picking a type that already has a provider row is
+            refused by default and points at the right action: a second ACCOUNT
+            on the existing provider, not a second provider row. A second row
+            fragments that provider's circuit breakers, send windows and
+            reporting — the cost txh2 already imposes. */}
+        {!isEdit && collidingProviders.length > 0 ? (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-900 dark:bg-amber-950">
+            <p className="font-medium text-amber-700 dark:text-amber-400">
+              {selectedType?.display_name} is already set up
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              It exists as{" "}
+              {collidingProviders.map((p, i) => (
+                <span key={p.id}>
+                  {i > 0 ? ", " : ""}
+                  <Link
+                    href={`/providers/${p.id}`}
+                    className="font-mono underline underline-offset-2"
+                  >
+                    {p.sms_provider_id}
+                  </Link>
+                </span>
+              ))}
+              . To use another {selectedType?.display_name} account, add an{" "}
+              <strong>account</strong> to that provider — its key and sending
+              numbers travel together — rather than creating a second provider.
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button type="button" variant="outline" size="sm" asChild>
+                <Link href={`/providers/${collidingProviders[0].id}`}>
+                  Go to {collidingProviders[0].sms_provider_id} accounts
+                </Link>
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setSeparateRow((v) => !v)}
+                disabled={isSubmitting}
+              >
+                {separateRow ? "Cancel separate provider" : "Create separate provider row anyway"}
+              </Button>
+            </div>
+            {separateRow ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                A separate row is occasionally right, but it splits this
+                provider&apos;s pacing caps and reporting in two. It needs its own
+                distinct provider ID below — nothing is auto-generated.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Provider ID. Derived and READ-ONLY when a type is picked (the code is
+            load-bearing in drain errors and reports, so it stays visible);
+            editable only for a custom provider or a deliberate separate row. */}
         <FormField
           control={form.control}
           name="sms_provider_id"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel required>Provider ID</FormLabel>
-              <FormControl>
-                <Input
-                  placeholder="sendnexus"
-                  disabled={isEdit || isSubmitting}
-                  readOnly={isEdit}
-                  {...field}
-                />
-              </FormControl>
-              <FormDescription>
-                {isEdit
-                  ? "Provider ID can't be changed after creation."
-                  : "Letters, digits, hyphens, and underscores only."}
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
+          render={({ field }) => {
+            const derived = !isEdit && isKnownType && !separateRow;
+            return (
+              <FormItem>
+                <FormLabel required={!derived}>Provider ID</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder={isKnownType ? "" : "sendnexus"}
+                    disabled={isEdit || derived || isSubmitting}
+                    readOnly={isEdit || derived}
+                    {...field}
+                    value={derived ? connectionType : (field.value ?? "")}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {isEdit
+                    ? "Provider ID can't be changed after creation."
+                    : derived
+                      ? "Set by the connection type. Shown because this code appears in send errors and reports."
+                      : "Letters, digits, hyphens, and underscores only."}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            );
+          }}
         />
 
         <FormField

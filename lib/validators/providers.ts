@@ -217,6 +217,36 @@ export const providerApiSendSchema = z.object({
 
 export type ProviderApiSendInput = z.infer<typeof providerApiSendSchema>;
 
+// The `sends_enabled` posture switch (migration 0138, R4). Its own endpoint and
+// its own audit row for the same reason `supports_api_send` and `send_paused`
+// have theirs: it decides whether an account sends, and a field like that must
+// not be reachable from a whole-object form that re-submits every key with no
+// concurrency check. Deliberately NOT added to providerBaseSchema — the bulk
+// PATCH must not be able to carry it even if a client sends one.
+export const providerSendsEnabledSchema = z.object({
+  enabled: z.boolean(),
+  reason: z.string().trim().max(200).optional(),
+});
+
+export type ProviderSendsEnabledInput = z.infer<typeof providerSendsEnabledSchema>;
+
+// Per-provider STOP text (migration 0138, R4). Stored but NOT yet consumed by
+// the send path — the precedence chain (number > provider > stage.stop_text >
+// 'Stop to END') is card 869ej8r1y / Q3. Empty string normalizes to NULL so
+// "cleared" is one value, not two: NULL is what makes the chain fall through to
+// the stage's stop_text, and an empty string would be a different, meaningless
+// state that the Q3 chain would then have to special-case.
+export const providerOptOutFooterSchema = z.object({
+  opt_out_footer: z
+    .string()
+    .trim()
+    .max(160)
+    .nullable()
+    .transform((v) => (v == null || v.length === 0 ? null : v)),
+});
+
+export type ProviderOptOutFooterInput = z.infer<typeof providerOptOutFooterSchema>;
+
 export type ProviderCreateInput = z.infer<typeof providerCreateSchema>;
 export type ProviderUpdateInput = z.infer<typeof providerUpdateSchema>;
 export type ProviderFormValues = z.input<typeof providerCreateSchema>;

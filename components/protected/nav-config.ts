@@ -195,6 +195,13 @@ export const navGroups: NavGroup[] = [
         href: "/settings/providers",
         icon: Phone,
       },
+      // Brand short domains (B1). The only write surface for them — the brand
+      // form's single text field was removed, since a brand may hold several.
+      {
+        label: "Short Domains",
+        href: "/settings/short-domains",
+        icon: LinkIcon,
+      },
       {
         label: "Carrier Lookup",
         href: "/settings/lookup",

@@ -10,18 +10,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
-import { applyBrandShortDomain } from "@/lib/sends/short-domain";
 import { brandUpdateSchema, nullIfEmpty } from "@/lib/validators/brands";
-
-class ShortDomainError extends Error {
-  constructor(
-    public status: number,
-    public reason: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -29,14 +18,21 @@ function parseId(idParam: string) {
   return n;
 }
 
-// The brand's current short domain (from short_domains), for response shaping.
+// The brand's EFFECTIVE short domain, for response shaping only (the list
+// column). Mirrors the send path's brand-level precedence — explicit default
+// first, then oldest active — so the brands list shows the host that would
+// actually be minted under rather than an arbitrary row. Pending rows are
+// excluded because they are not mintable.
 async function brandShortDomain(
   dbc: typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0],
   orgId: string,
   brandId: number,
 ): Promise<string | null> {
   const rows = (await dbc.execute(drizzleSql`
-    SELECT domain FROM short_domains WHERE org_id = ${orgId} AND brand_id = ${brandId} LIMIT 1
+    SELECT domain FROM short_domains
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND status = 'active'
+    ORDER BY is_default DESC, created_at ASC, id ASC
+    LIMIT 1
   `)) as unknown as { domain: string }[];
   return rows[0]?.domain ?? null;
 }
@@ -117,10 +113,6 @@ export async function PATCH(
   // Drizzle's .set rejects entirely-empty objects, but the schema already
   // refuses those. Strip undefined keys so we don't overwrite with NULL.
   // For the three optional string fields, empty string means "clear it" → NULL.
-  // short_domain lives in a separate table — pull it out of the brand-column
-  // updates and handle it via the upsert helper.
-  const { short_domain: shortDomainInput, ...brandFields } = parsed.data;
-
   const updates: Record<string, unknown> = {};
   const NULLABLE_OPTIONAL = new Set([
     "short_link_base",
@@ -128,7 +120,15 @@ export async function PATCH(
     "avatar_url",
     "color",
   ]);
-  for (const [k, v] of Object.entries(brandFields)) {
+  // ⚠️ short_domain is NO LONGER WRITABLE HERE — it is DROPPED, not applied, so
+  // a stale client that still sends the key cannot reach a second write path.
+  // Brand domains are list-shaped since migration 0136 and are managed through
+  // their own surface (/api/brands/[id]/short-domains). The old in-line upsert
+  // was broken outright by 0136 (ON CONFLICT against an index it had dropped)
+  // and its clear branch deleted EVERY domain of the brand.
+  const NOT_WRITABLE_HERE = new Set(["short_domain"]);
+  for (const [k, v] of Object.entries(parsed.data)) {
+    if (NOT_WRITABLE_HERE.has(k)) continue;
     if (v === undefined) continue;
     updates[k] = NULLABLE_OPTIONAL.has(k) ? nullIfEmpty(v as string) : v;
   }
@@ -153,20 +153,6 @@ export async function PATCH(
       }
       if (!row) return null;
 
-      if (shortDomainInput !== undefined) {
-        const r = await applyBrandShortDomain(tx, {
-          orgId,
-          brandId,
-          rawDomain: shortDomainInput,
-        });
-        if (!r.ok) {
-          throw new ShortDomainError(
-            r.reason === "invalid_domain" ? 400 : 409,
-            r.reason,
-            r.message,
-          );
-        }
-      }
       return { ...row, short_domain: await brandShortDomain(tx, orgId, brandId) };
     });
 
@@ -177,14 +163,6 @@ export async function PATCH(
     }
     return NextResponse.json(result);
   } catch (err) {
-    if (err instanceof ShortDomainError) {
-      return apiError(
-        err.status,
-        err.message,
-        err.status === 409 ? API_ERROR_CODES.CONFLICT : API_ERROR_CODES.VALIDATION,
-        { reason: err.reason },
-      );
-    }
     if (isUniqueViolation(err)) {
       return apiError(
         409,

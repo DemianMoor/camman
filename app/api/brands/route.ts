@@ -9,20 +9,20 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
-import { applyBrandShortDomain } from "@/lib/sends/short-domain";
 import { brandCreateSchema, nullIfEmpty } from "@/lib/validators/brands";
 
-// Thrown inside the brand transaction to surface a specific short-domain
-// failure as the right HTTP error after rollback.
-class ShortDomainError extends Error {
-  constructor(
-    public status: number,
-    public reason: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+// ⚠️ Brand creation NO LONGER WRITES A SHORT DOMAIN.
+//
+// It used to call applyBrandShortDomain, a one-row upsert that migration 0136
+// broke outright (`ON CONFLICT (brand_id)` against an index 0136 had dropped ⇒
+// Postgres 42P10, so creating a brand WITH a short domain 500'd). Since 0136 a
+// brand may hold several domains, so a single field on the create form cannot
+// express the shape at all.
+//
+// Domains are now managed through their own surface —
+// POST /api/brands/[id]/short-domains — which adds them as `pending` and leaves
+// activation as a deliberate act. There is exactly ONE write path; this route is
+// not a second one.
 
 export async function POST(req: NextRequest) {
   const auth = await requireApiMembership();
@@ -65,30 +65,12 @@ export async function POST(req: NextRequest) {
         })
         .returning();
 
-      const r = await applyBrandShortDomain(tx, {
-        orgId,
-        brandId: b.id,
-        rawDomain: parsed.data.short_domain,
-      });
-      if (!r.ok) {
-        throw new ShortDomainError(
-          r.reason === "invalid_domain" ? 400 : 409,
-          r.reason,
-          r.message,
-        );
-      }
-      return { ...b, short_domain: r.domain };
+      // A new brand starts with no short domain. Add one from the brand's
+      // Short domains section afterwards; it lands `pending` until activated.
+      return { ...b, short_domain: null };
     });
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
-    if (err instanceof ShortDomainError) {
-      return apiError(
-        err.status,
-        err.message,
-        err.status === 409 ? API_ERROR_CODES.CONFLICT : API_ERROR_CODES.VALIDATION,
-        { reason: err.reason },
-      );
-    }
     if (isUniqueViolation(err)) {
       return apiError(
         409,

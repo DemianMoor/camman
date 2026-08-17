@@ -6,6 +6,7 @@ import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { CODE_LENGTH, mintLinksBatch } from "@/lib/links/mint-link";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
+import { resolveShortDomainForSend } from "@/lib/sends/resolve-short-domain";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
 import { countSegments, hasOptOutLanguage, MAX_SEGMENTS } from "@/lib/sends/segments";
 import { buildStageSms } from "@/lib/sends/stage-sms";
@@ -268,47 +269,22 @@ export async function kickoffStageSend(
     });
     if (!hasCred) return { ok: false, reason: "no_credentials" };
 
-    // Short-domain resolution, in precedence order (migration 0137):
+    // Short-domain resolution now lives in ONE place — resolveShortDomainForSend
+    // (lib/sends/short-domain.ts) — so the send path and the verifier cannot
+    // drift. Precedence: per-number override (0137) > brand default (0140) >
+    // brand's oldest active (the pre-0140 rule). Every layer requires
+    // status='active', so a `pending` domain is never mintable.
     //
-    //   1. the STAGE'S SENDING NUMBER's override (provider_phones.short_domain_id)
-    //   2. the campaign BRAND's domain — deterministic, stable order
-    //
-    // A number-level override lets one sending number mint under a different
-    // host without moving the whole brand, which is what a per-number reputation
-    // split needs.
-    //
-    // ⚠️ BYTE-IDENTICAL FOR EXISTING DATA. Every pre-0137 row has
-    // short_domain_id NULL, so branch 1 selects nothing and branch 2 runs the
-    // exact query that was here before — same predicate, same ORDER BY, same
-    // LIMIT. Asserted by scripts/verify-per-phone-domain.ts, which compares the
-    // resolved (id, domain) for every real phone against the brand-only result.
-    //
-    // The override is still required to be ACTIVE and to belong to this org. A
-    // pending or archived domain (B1 inserts new ones as 'pending') must never be
-    // mintable, so it falls through to the brand default rather than failing —
-    // the same status gate the brand branch has always applied.
-    let sd = (await dbc.execute(sql`
-      SELECT d.id, d.domain
-      FROM provider_phones ph
-      JOIN short_domains d ON d.id = ph.short_domain_id
-      WHERE ph.id = ${row.provider_phone_id}
-        AND ph.org_id = ${orgId}
-        AND d.org_id = ${orgId}
-        AND d.status = 'active'
-      LIMIT 1
-    `)) as unknown as { id: number; domain: string }[];
-
-    if (!sd[0]) {
-      // Brand default — unchanged from pre-0137.
-      sd = (await dbc.execute(sql`
-        SELECT id, domain FROM short_domains
-        WHERE org_id = ${orgId} AND brand_id = ${row.brand_id} AND status = 'active'
-        ORDER BY created_at ASC, id ASC
-        LIMIT 1
-      `)) as unknown as { id: number; domain: string }[];
-    }
-    if (!sd[0]) return { ok: false, reason: "no_short_domain" };
-    shortDomain = sd[0];
+    // ⚠️ BYTE-IDENTICAL FOR EXISTING DATA, asserted for every real phone/brand
+    // pair by scripts/verify-brand-domain-resolution.ts against a separate
+    // transcription of the pre-B1 rule.
+    const sd = await resolveShortDomainForSend(dbc, {
+      orgId,
+      brandId: row.brand_id,
+      providerPhoneId: row.provider_phone_id,
+    });
+    if (!sd) return { ok: false, reason: "no_short_domain" };
+    shortDomain = sd;
 
     // Bug 3 fix: mint against the stage's stored Full URL — the exact value the
     // operator controls — NOT a server-side rebuild. But trust it ONLY when it

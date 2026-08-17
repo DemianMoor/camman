@@ -103,29 +103,13 @@ export function BrandForm({
           )}
         />
 
-        <FormField
-          control={form.control}
-          name="short_domain"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Short domain</FormLabel>
-              <FormControl>
-                <Input
-                  placeholder="go.brand.co"
-                  disabled={isSubmitting}
-                  {...field}
-                  value={field.value ?? ""}
-                />
-              </FormControl>
-              <FormDescription>
-                The brand&apos;s short-link host (bare hostname, no http:// or
-                path). Tracked links mint under this. One per brand; leave empty
-                to clear.
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
+        {/* The "Short domain" text input that lived here is GONE. A brand may
+            hold several short domains (migration 0136), so a single field could
+            not express the shape — and the upsert behind it was broken outright
+            by that same migration. Domains are managed on their own surface
+            (Settings → Short domains), where each is added as `pending` and
+            activated deliberately. Removing the field is what guarantees no
+            second write path survives. */}
 
         <FormField
           control={form.control}

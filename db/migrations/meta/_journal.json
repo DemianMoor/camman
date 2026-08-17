@@ -981,6 +981,13 @@
       "when": 1788393600000,
       "tag": "0139_sends_enabled_audit_events",
       "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1788480000000,
+      "tag": "0140_short_domains_pending_and_default",
+      "breakpoints": true
     }
   ]
 }

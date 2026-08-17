@@ -28,7 +28,6 @@ type DomainRow = {
   domain: string;
   status: string;
   is_default: boolean;
-  link_count: number;
 };
 
 type BrandRow = { id: number; name: string; brand_id: string };
@@ -59,15 +58,17 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
   useEffect(() => {
     let active = true;
     void (async () => {
+      // PARALLEL, not a serial for-loop. Each request is independent, and the
+      // serial version multiplied the per-brand latency by the brand count —
+      // which is what turned a slow query into a page that took ~20s to paint.
+      const results = await Promise.all(
+        brands.map(async (b) => [b.id, await listExec(`/api/brands/${b.id}/short-domains`)] as const),
+      );
+      if (!active) return;
       const out: Record<number, DomainRow[]> = {};
-      for (const b of brands) {
-        const r = await listExec(`/api/brands/${b.id}/short-domains`);
-        if (r.ok) out[b.id] = r.data.data;
-      }
-      if (active) {
-        setByBrand(out);
-        setLoaded(true);
-      }
+      for (const [id, r] of results) if (r.ok) out[id] = r.data.data;
+      setByBrand(out);
+      setLoaded(true);
     })();
     return () => {
       active = false;
@@ -75,6 +76,18 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
   }, [tick, brands, listExec]);
 
   const refresh = useCallback(() => setTick((n) => n + 1), []);
+
+  // Apply a mutation's outcome to local state IMMEDIATELY, then refetch to
+  // reconcile. The refetch alone used to be the only feedback, and while it was
+  // slow (see listBrandShortDomains) a successful click looked like it had done
+  // nothing at all. Even now that the refetch is fast, a mutation whose result
+  // is already known should not wait on a round trip to become visible.
+  const patchLocal = useCallback(
+    (brandId: number, fn: (rows: DomainRow[]) => DomainRow[]) => {
+      setByBrand((prev) => ({ ...prev, [brandId]: fn(prev[brandId] ?? []) }));
+    },
+    [],
+  );
 
   async function addDomain(brandId: number) {
     const domain = (drafts[brandId] ?? "").trim();
@@ -103,6 +116,14 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
       toastApiError(r, "Couldn't change that domain's status");
       return;
     }
+    // Mirror the server's rule: deactivating also clears is_default.
+    patchLocal(brandId, (rows) =>
+      rows.map((d) =>
+        d.id === row.id
+          ? { ...d, status, is_default: status === "active" ? d.is_default : false }
+          : d,
+      ),
+    );
     toast.success(status === "active" ? `${row.domain} is active` : `${row.domain} deactivated`);
     refresh();
   }
@@ -117,6 +138,11 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
       toastApiError(r, "Couldn't set the brand default");
       return;
     }
+    // The badge moves NOW. Exactly one default per brand, mirroring the DB
+    // constraint, so the previous holder is cleared in the same update.
+    patchLocal(brandId, (rows) =>
+      rows.map((d) => ({ ...d, is_default: d.id === row.id })),
+    );
     toast.success(`${row.domain} is now the brand default`);
     refresh();
   }
@@ -126,9 +152,14 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
       method: "DELETE",
     });
     if (!r.ok) {
+      // Includes the server's `domain_in_use` refusal, which is now the ONLY
+      // signal that a domain has minted links (the pre-emptive disable went
+      // away with the count). toastApiError surfaces the server's message
+      // verbatim: "…has minted links and can't be removed. Deactivate it instead."
       toastApiError(r, "Couldn't remove that domain");
       return;
     }
+    patchLocal(brandId, (rows) => rows.filter((d) => d.id !== row.id));
     toast.success(`${row.domain} removed`);
     refresh();
   }
@@ -183,10 +214,6 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
                           Brand default
                         </Badge>
                       ) : null}
-                      <span className="text-xs text-muted-foreground">
-                        {row.link_count.toLocaleString()} minted link
-                        {row.link_count === 1 ? "" : "s"}
-                      </span>
 
                       <div className="ml-auto flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">Active</span>
@@ -217,15 +244,17 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
                         >
                           Make default
                         </Button>
+                        {/* No longer pre-disabled on a minted-link count: that
+                            count cost a full seq scan of a 3.2M-row table per
+                            domain (see listBrandShortDomains). The server
+                            re-checks and refuses with `domain_in_use`, and the
+                            refusal is surfaced as a toast — the guard is real
+                            either way, only the pre-emptive greying is gone. */}
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={!canManage || mutateApi.isLoading || row.link_count > 0}
-                          title={
-                            row.link_count > 0
-                              ? "Has minted links — deactivate instead of removing"
-                              : undefined
-                          }
+                          disabled={!canManage || mutateApi.isLoading}
+                          title="Remove this domain (refused if it has minted links)"
                           onClick={() => setConfirmDelete({ brandId: b.id, row })}
                         >
                           <Trash2 className="h-3.5 w-3.5" />

@@ -69,17 +69,26 @@ async function main() {
   check("corpus is non-empty (comparison is not vacuous)", phones.length > 0 && brands.length > 0,
         `${phones.length} phones, ${brands.length} brands`);
 
-  // The property that makes this safe to ship: nothing overrides yet.
+  // ⚠️ RETIRED ASSERTION. This block used to assert that NO phone carried an
+  // override — "the property that makes this safe to ship", which was true only
+  // while Q1 was brand new and nobody had used it. An operator assigning a
+  // per-number domain IS the feature, so the check became an alarm that fires
+  // when the product is used. Per docs/07-conventions.md the expired invariant
+  // is retired and replaced by the durable pair, asserted below:
+  //
+  //   phone WITHOUT an override     -> resolves exactly as brand-only did
+  //   phone WITH an ACTIVE override -> resolves to that override
   const overriding = phones.filter((p) => p.short_domain_id !== null);
-  check(
-    "no existing phone has an override set (so today's behaviour is the whole surface)",
-    overriding.length === 0,
-    overriding.length ? `UNEXPECTED overrides on: ${overriding.map((p) => p.id).join(", ")}` : "0 of " + phones.length,
+  console.log(
+    `  ${overriding.length} of ${phones.length} phone(s) carry an override` +
+      (overriding.length ? `: ${overriding.map((p) => `#${p.id}->${p.short_domain_id}`).join(", ")}` : ""),
   );
 
-  console.log("\nByte-identical resolution across every (phone, brand) pair:");
+  console.log("\nOverride-free phones must still resolve identically to brand-only:");
   let compared = 0, diffs = 0;
   for (const p of phones) {
+    // A phone WITH an override is expected to differ — that is the point of Q1.
+    if (p.short_domain_id !== null) continue;
     for (const b of brands) {
       const before = await brandOnly(orgId, b.id);
       const after = await withOverride(orgId, b.id, p.id);
@@ -90,7 +99,43 @@ async function main() {
       }
     }
   }
-  check(`all ${compared} (phone, brand) pairs resolve identically`, diffs === 0, `${diffs} difference(s)`);
+  check(
+    `all ${compared} (override-free phone, brand) pairs resolve identically to brand-only`,
+    diffs === 0 && compared > 0,
+    compared === 0
+      ? "NO override-free phone remains — this comparison would be vacuous"
+      : `${diffs} difference(s)`,
+  );
+
+  // The other half of the durable invariant: an ACTIVE override must WIN. Without
+  // this, retiring the "nothing overrides" assertion would have left the feature
+  // itself unasserted.
+  let ovChecked = 0;
+  let ovWrong = 0;
+  for (const p of overriding) {
+    const row = (await db.execute(sql`
+      SELECT id, domain, status FROM short_domains WHERE id = ${p.short_domain_id}
+    `)) as unknown as { id: number; domain: string; status: string }[];
+    // A PENDING override is covered by verify-brand-domain-resolution.ts, which
+    // asserts it falls through; only an ACTIVE one is expected to win here.
+    if (!row[0] || row[0].status !== "active") continue;
+    const resolved = await withOverride(orgId, p.brand_id as number, p.id);
+    ovChecked++;
+    if (resolved?.id !== row[0].id) {
+      ovWrong++;
+      console.log(
+        `  WRONG phone ${p.id}: override #${row[0].id} ${row[0].domain} -> resolved ${fmt(resolved)}`,
+      );
+    }
+  }
+  console.log(`  ${ovChecked} phone(s) with an ACTIVE override checked`);
+  check(
+    "every phone with an ACTIVE override resolves to that override",
+    ovWrong === 0,
+    ovChecked === 0
+      ? "none present — the override-free half above carried the comparison"
+      : `${ovChecked} checked, ${ovWrong} wrong`,
+  );
 
   // Also cover the numberless-stage path (provider_phone_id NULL).
   console.log("\nNumberless stages (provider_phone_id NULL) are unaffected:");
@@ -131,7 +176,14 @@ async function main() {
   const left = (await db.execute(sql`
     SELECT count(*)::int AS n FROM provider_phones WHERE short_domain_id IS NOT NULL
   `)) as unknown as { n: number }[];
-  check("rollback left no override behind", left[0].n === 0, `${left[0].n} phone(s) with an override`);
+  // Compared against the PRE-test count, never against zero: real overrides
+  // legitimately exist now, and asserting zero would both fail and imply the
+  // wrong repair (deleting an operator's assignment).
+  check(
+    "rollback left the override count exactly as it was",
+    left[0].n === overriding.length,
+    `before=${overriding.length} after=${left[0].n}`,
+  );
 
   // ── Brand coherence: a cross-brand assignment must be REFUSED ──────────────
   //

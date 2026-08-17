@@ -300,10 +300,13 @@ function AudiencePanel({
           {counts.rule_matched.toLocaleString()}
         </span>
         <span className="mx-2 text-muted-foreground">·</span>
-        <span className="font-medium">Total audience:</span>{" "}
+        <span className="font-medium">Sendable audience:</span>{" "}
         <span className="font-mono tabular-nums font-semibold">
           {counts.total.toLocaleString()}
         </span>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Opt-outs are excluded — this is the audience a campaign draws from.
+        </p>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -656,7 +659,7 @@ export default function SegmentDetailPage() {
           />
           {segment.active_rules_count > 0 ? (
             <StatCard
-              label="Audience (manual + rules)"
+              label="Audience (sendable)"
               value={
                 segment.stats.rule_filtered_count !== null
                   ? segment.stats.rule_filtered_count
@@ -665,7 +668,7 @@ export default function SegmentDetailPage() {
             />
           ) : null}
           <StatCard
-            label="Opt-Outs"
+            label="Opt-Outs excluded"
             value={segment.stats.opt_out_count}
             tone="red"
           />

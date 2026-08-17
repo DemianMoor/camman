@@ -920,6 +920,7 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
     contactGroupsLoading,
     audienceLocked,
     anySubmitting,
+    watchedSegments,
     watchedExcludeSegments,
     segmentPickerValue,
     segmentModes,
@@ -965,6 +966,14 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
               onToggleMode={onToggleSegmentMode}
               disabled={audienceLocked || anySubmitting}
             />
+            {watchedSegments.length > 1 ? (
+              <p className="text-xs text-muted-foreground">
+                Included segments <span className="font-medium">narrow</span> each
+                other — a contact must match{" "}
+                <span className="font-medium">all {watchedSegments.length}</span>{" "}
+                to be in the audience.
+              </p>
+            ) : null}
             {watchedExcludeSegments.length > 0 ? (
               <p className="text-xs text-muted-foreground">
                 Excluded segments are subtracted from the group / included-segment

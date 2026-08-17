@@ -13,7 +13,10 @@ import {
 } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
-import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
+import {
+  buildSegmentAudienceClause,
+  excludeOptOutsFromAudience,
+} from "@/lib/segment-rules-eval";
 
 // Full-audience export for a segment: UNION of manual segment_contacts
 // membership and contacts matching all active rules. Distinct from
@@ -74,7 +77,13 @@ export async function GET(
   // shape change must update both. (It already gates correctly on
   // active=true via that helper; we just call it for its side effect of
   // assembling the rule predicate fragment when there are rules.)
-  const ruleClause = await buildSegmentAudienceClause(segmentIdNum, orgId);
+  // Opt-outs dropped: this CSV is uploaded straight into a provider tool, so
+  // exporting a suppressed number is a compliance problem, not just a count
+  // mismatch. Same basis as the Audience tab and the header tile.
+  const ruleClause = excludeOptOutsFromAudience(
+    await buildSegmentAudienceClause(segmentIdNum, orgId),
+    orgId,
+  );
 
   type Row = {
     phone_number: string;

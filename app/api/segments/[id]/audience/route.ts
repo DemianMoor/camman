@@ -10,7 +10,10 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
-import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
+import {
+  buildSegmentAudienceClause,
+  excludeOptOutsFromAudience,
+} from "@/lib/segment-rules-eval";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -72,7 +75,15 @@ export async function GET(
   // The membership filter is enforced in the SQL: 'manual' restricts to
   // rows where segment_contacts has the contact; 'rule-matched' is the
   // complement. 'all' is the unrestricted UNION.
-  const audienceClause = await buildSegmentAudienceClause(segmentIdNum, orgId);
+  //
+  // Opt-outs are dropped so this tab lists (and counts) the SENDABLE audience
+  // — the same basis as the header's audience tile and as a campaign's "From
+  // segments". Listing contacts here that no campaign can ever send to is what
+  // made ~10K contacts look like they vanished at campaign-build time.
+  const audienceClause = excludeOptOutsFromAudience(
+    await buildSegmentAudienceClause(segmentIdNum, orgId),
+    orgId,
+  );
   const searchClause = listParams.search
     ? drizzleSql`AND c.phone_number ILIKE ${`%${listParams.search}%`}`
     : drizzleSql``;

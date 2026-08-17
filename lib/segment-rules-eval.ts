@@ -521,14 +521,65 @@ export async function buildSegmentAudienceClause(
   `));
 }
 
-// Helper for the rules preview endpoint and refresh-stats endpoint:
-// runs the audience clause with a hard statement_timeout, returns the
-// count or null on timeout.
+// Drop opt-outs from a segment audience clause (which is always a plain
+// `SELECT contact_id …` — see gateEligible). SEGMENT-PAGE READ PATHS ONLY.
+//
+// Why not inside buildSegmentAudienceClause: the campaign audience path
+// deliberately keeps opt-outs in its source set so `previewAudience` can
+// report `excluded_for_optout` before stripping them in `qualifies`, and the
+// snapshot path already anti-joins them once against a temp table with real
+// row stats. Folding an extra anti-join into every segment branch would
+// duplicate that work in the perf-critical activation path for no gain.
+//
+// Applying it here makes the segment page report the same SENDABLE audience a
+// campaign draws from. Without it the page shows a figure no campaign can ever
+// reach — opt-outs are never sendable — which read as ~10K contacts silently
+// disappearing between the segment page and the campaign form.
+export function excludeOptOutsFromAudience(audience: SQL, orgId: string): SQL {
+  return drizzleSql`
+    SELECT oo_a.contact_id
+    FROM (${audience}) oo_a
+    WHERE NOT EXISTS (
+      SELECT 1 FROM opt_outs oo
+      WHERE oo.contact_id = oo_a.contact_id
+        AND oo.org_id = ${orgId}::uuid
+    )
+  `;
+}
+
+export interface SegmentAudienceCounts {
+  /**
+   * The SENDABLE audience — full audience minus opt-outs. This is the figure
+   * the segment page shows, and it reconciles with a campaign's "From
+   * segments". Null on timeout.
+   */
+  count: number | null;
+  /** Full audience (manual ∪ rule matches) BEFORE opt-out suppression. */
+  total: number | null;
+  /**
+   * Engagement counters over the FULL audience (one consistent basis, so
+   * `count` + `opt_out_count` = `total`). Null on timeout. These replace the
+   * older manual-membership-only counters, which read 0 for every rule-based
+   * segment — a segment literally named "Clickers …" reported `Clickers 0`.
+   */
+  opt_out_count: number | null;
+  opt_in_count: number | null;
+  clicker_count: number | null;
+  truncated: boolean;
+  durationMs: number;
+}
+
+// Helper for the rules preview endpoint and refresh-stats endpoint: runs the
+// audience clause with a hard statement_timeout and returns the sendable count
+// plus the engagement counters, or nulls on timeout. One pass over the audience
+// — the status sets are deduped into CTEs and LEFT JOINed (hash joins) rather
+// than probed per row with correlated EXISTS, matching the campaign preview's
+// flagSetCtes/flagJoins shape.
 export async function previewSegmentAudienceCount(
   segmentId: number,
   orgId: string,
   timeoutMs = 10_000,
-): Promise<{ count: number | null; truncated: boolean; durationMs: number }> {
+): Promise<SegmentAudienceCounts> {
   const clause = await buildSegmentAudienceClause(segmentId, orgId);
   const start = Date.now();
   try {
@@ -540,13 +591,36 @@ export async function previewSegmentAudienceCount(
       await tx.execute(
         drizzleSql.raw(`SET LOCAL statement_timeout = ${ms}`),
       );
-      const rows = (await tx.execute(
-        drizzleSql`SELECT count(*)::int AS count FROM (${clause}) sub`,
-      )) as unknown as { count: number }[];
-      return rows[0]?.count ?? 0;
+      const rows = (await tx.execute(drizzleSql`
+        with audience as (${clause}),
+        oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid),
+        oi_set as (select distinct contact_id from opt_ins where org_id = ${orgId}::uuid),
+        cl_set as (select distinct contact_id from clickers where org_id = ${orgId}::uuid)
+        select
+          count(*)::int as total,
+          count(*) filter (where oo_set.contact_id is null)::int as count,
+          count(*) filter (where oo_set.contact_id is not null)::int as opt_out_count,
+          count(*) filter (where oi_set.contact_id is not null)::int as opt_in_count,
+          count(*) filter (where cl_set.contact_id is not null)::int as clicker_count
+        from audience a
+        left join oo_set on oo_set.contact_id = a.contact_id
+        left join oi_set on oi_set.contact_id = a.contact_id
+        left join cl_set on cl_set.contact_id = a.contact_id
+      `)) as unknown as {
+        total: number;
+        count: number;
+        opt_out_count: number;
+        opt_in_count: number;
+        clicker_count: number;
+      }[];
+      return Array.isArray(rows) ? rows[0] : null;
     });
     return {
-      count: result,
+      count: result?.count ?? 0,
+      total: result?.total ?? 0,
+      opt_out_count: result?.opt_out_count ?? 0,
+      opt_in_count: result?.opt_in_count ?? 0,
+      clicker_count: result?.clicker_count ?? 0,
       truncated: false,
       durationMs: Date.now() - start,
     };
@@ -556,7 +630,15 @@ export async function previewSegmentAudienceCount(
     // lives on err.cause (drizzle wraps the driver error), so detect it via the
     // cause chain — a message-only check re-throws a timeout we mean to degrade.
     if (isStatementTimeout(err)) {
-      return { count: null, truncated: true, durationMs };
+      return {
+        count: null,
+        total: null,
+        opt_out_count: null,
+        opt_in_count: null,
+        clicker_count: null,
+        truncated: true,
+        durationMs,
+      };
     }
     throw err;
   }

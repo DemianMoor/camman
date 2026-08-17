@@ -103,12 +103,22 @@ async function main() {
   );
   // And prove the scanner can actually see a violation — otherwise "0 offenders"
   // might just mean the regex never matches anything.
-  const selfTest = "DELETE FROM short_domains WHERE org_id = $1 AND brand_id = $2".replace(/\s+/g, " ");
+  //
+  // ⚠️ The probe string is ASSEMBLED FROM PARTS on purpose. Written as one
+  // literal it made this very file an offender: the scan walks `scripts/`, found
+  // its own self-test, and failed the run. The scanner was right about the bytes
+  // and wrong about the meaning — the same trap as a secret-scan matching a
+  // comment that says "this never leaks". Joining with ", " in source means the
+  // literal `DELETE FROM short_domains` never appears contiguously here, while
+  // the runtime string is exactly what a real violation looks like. Excluding
+  // this file from the walk would have been the worse fix: a genuine violation
+  // could then hide in it.
+  const selfTest = ["DELETE", "FROM", "short_domains", "WHERE org_id = $1 AND", "brand_id = $2"].join(" ");
+  const selfMatch = /DELETE\s+FROM\s+(?:public\.)?short_domains([^;`]*)/i.exec(selfTest);
   check(
     "the scanner's own pattern detects a brand-keyed DELETE (scanner is not blind)",
-    /DELETE\s+FROM\s+(?:public\.)?short_domains([^;`]*)/i.test(selfTest) &&
-      /brand_id/i.test(selfTest),
-    "self-test string matched",
+    selfMatch !== null && /brand_id/i.test(selfMatch[1] ?? ""),
+    selfMatch ? `matched predicate: ${(selfMatch[1] ?? "").trim()}` : "PATTERN MATCHED NOTHING",
   );
 
   // ── 3. The write surface, end to end, rolled back ────────────────────────

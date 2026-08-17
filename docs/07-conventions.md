@@ -65,6 +65,22 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - **`parseListParams` clamps `pageSize` to 100 — silently.** Requesting more is truncated with no error, so a caller asking for 200 and rendering "everything it got" quietly hides rows (the stage creative picker did exactly this). Endpoints whose callers legitimately need a whole bounded set pass `parseListParams(req, { maxPageSize })`, and the client must compare `data.length` against `totalCount` and **tell the user** when it was clipped.
 - **Large list counts are capped, not exact.** An exact `count(*)` over an org's contacts is inherently O(rows) (~670 ms at 752K — an index doesn't help, proven). `/api/contacts/list` counts at most `COUNT_CAP+1` (10,000) via a `LIMIT` subquery: exact under the cap, `countApprox:true` + `totalCount:COUNT_CAP` (UI shows "N+") over it. Paging no longer depends on the total — the page query fetches `pageSize+1` and returns `hasMore`, which drives `DataTable`'s Next button (optional `hasMore` / `totalCountApprox` props; omit them and a list keeps exact-count `of Y` behavior). Narrowing filters (search, segment, group, the opt-out/in/clicker views) return under the cap, so their counts stay exact. Apply this pattern to any other list that grows large; don't reintroduce an unbounded `count(*)`.
 
+## Brand short domains are LIST-shaped — there is exactly one write surface, and no brand-wide mutation
+
+Migration `0136` let a brand hold several short domains. The write path was not updated with it, and both halves of the old `applyBrandShortDomain` helper became wrong:
+
+1. It ended in `INSERT … ON CONFLICT (brand_id) DO UPDATE`, but `0136` **dropped `short_domains_brand_id_uniq`** — the index that conflict target infers from. Postgres refused to plan the statement (`42P10: there is no unique or exclusion constraint matching the ON CONFLICT specification`), so **saving a brand's short domain 500'd in production from the day 0136 landed**.
+2. Its clear branch ran `DELETE … WHERE org_id = … AND brand_id = …`, which post-0136 deletes **every** domain of that brand rather than the one being removed — including a `pending` row provisioned for a later activation.
+
+Neither was noticed because `scripts/verify-brand-domains.ts`, the guard that covered exactly this, had been **red on `main` since that merge and nobody re-ran it**. The lesson generalizes: *a migration that changes a cardinality assumption must re-run the guards that encode it* — see the retire-obsolete-assertions rule.
+
+**The rules now:**
+- **One write surface.** `/api/brands/[id]/short-domains` (+ `/[domainId]`). The brand form's single "Short domain" text field is **removed** — a list cannot be expressed in one field — and `POST/PATCH /api/brands` no longer touch `short_domains` at all; the `short_domain` key is **dropped** from the update payload rather than applied, so a stale client cannot reach a second path.
+- **Add always lands `pending`.** A newly registered hostname has not been proven to route to the app. Conflict target is `(org_id, domain)` — the unique that still exists — and a conflict is **REFUSED** ("already registered to *brand*"), never `DO NOTHING` or `DO UPDATE`: silently adopting a hostname another brand registered would move that brand's minting.
+- **Every mutation is keyed on the domain row's id.** Activate / deactivate / set-default / delete all take an id. **There must never be a brand-wide DELETE again** — `scripts/verify-brand-domains.ts` asserts at *source* level, repo-wide, that no `DELETE FROM short_domains` whose predicate mentions `brand_id` exists anywhere, plus a self-test proving that scanner can actually see a violation. (The probe string is assembled from parts, because written as one literal it made the guard file its own offender — a scanner right about the bytes and wrong about the meaning.)
+- **Deactivating clears `is_default`,** and set-default refuses a non-active row. A pending domain as brand default would mean activation silently redirects the whole brand's minting; activate and choose are two deliberate acts.
+- **Delete keeps the minted-links guard**, now scoped to the single row: a domain with minted links can only be deactivated, never removed, or its links are orphaned.
+
 ## Feature flags
 - `lib/feature-flags.ts` `ENTITY_AVAILABILITY` is the single source for "is this entity built?". Flip a new entity's flag to `true` **last**, after schema+API+UI work. Gate cross-entity fetches on `isEntityAvailable()` (no speculative 404s).
 

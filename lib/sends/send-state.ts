@@ -32,6 +32,11 @@ export async function getSendState(orgId: string) {
       name: sms_providers.name,
       color: sms_providers.color,
       supports_api_send: sms_providers.supports_api_send,
+      // Operator posture (0138) — surfaced so the send-state strip can say
+      // "this account is switched off" instead of leaving a silently-idle
+      // provider looking healthy. Distinct from send_paused below, which is the
+      // tripped-breaker latch.
+      sends_enabled: sms_providers.sends_enabled,
       send_paused: sms_providers.send_paused,
       send_paused_reason: sms_providers.send_paused_reason,
       send_paused_at: sms_providers.send_paused_at,
@@ -103,6 +108,13 @@ export async function getSendState(orgId: string) {
         reason: p.send_paused_reason,
         at: p.send_paused_at,
       })),
+    // Deliberately a SEPARATE list from paused_providers, not merged into it: a
+    // switched-off account and a tripped breaker need different words and
+    // different actions from the operator (flip a switch vs. investigate, then
+    // consciously resume). Empty today — every row ships enabled.
+    disabled_providers: providers
+      .filter((p) => !p.sends_enabled)
+      .map((p) => ({ id: p.id, name: p.name })),
     today: { sent_today: sentToday, cap_24h: cap24h },
     stuck_count: stuckCount,
   };

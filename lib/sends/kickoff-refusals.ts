@@ -20,6 +20,14 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     status: 400,
     message: "The stage's SMS provider isn't enabled for API sending",
   },
+  // Names the exact control to flip. Deliberately worded so it can't be
+  // mistaken for the circuit breaker ("paused") — nothing tripped here; someone
+  // switched this account off, and switching it back on is all that's needed.
+  provider_sends_disabled: {
+    status: 409,
+    message:
+      "Sending is switched off for this provider — turn it back on in Settings → Providers",
+  },
   no_credentials: {
     status: 400,
     message: "The stage's SMS provider has no API credentials configured",

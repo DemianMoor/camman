@@ -49,6 +49,13 @@ export type DrainStopReason =
   | "rate_24h" // 24h ceiling — SOFT, retry next tick
   | "org_disabled" // DB master switch flipped off mid-run — SOFT, retry next tick
   | "org_paused" // emergency hard-stop engaged mid-run — SOFT, resumes on Proceed
+  // Provider sending posture (sms_providers.sends_enabled) turned off mid-run.
+  // SOFT, and deliberately DISTINCT from "paused": nothing broke and no latch
+  // was tripped — an operator decided this account should not be sending. Rows
+  // stay pending and resume the moment it is switched back on, with no
+  // circuit-breaker resume required. Folding it into "paused" would report a
+  // human decision as a breaker trip.
+  | "provider_sends_disabled"
   // Provider send window (quiet hours) closed. SOFT by design: the rows stay
   // pending and the next tick INSIDE the window resumes them. Nothing failed —
   // we simply must not be sending at this hour.
@@ -108,6 +115,25 @@ export async function isProviderPaused(dbc: DbOrTx, providerId: number): Promise
     SELECT send_paused FROM sms_providers WHERE id = ${providerId} LIMIT 1
   `)) as unknown as { send_paused: boolean }[];
   return r[0]?.send_paused === true;
+}
+
+// Re-read the operator's sending posture fresh, for exactly the same reason
+// isProviderPaused does: the column is runtime-mutable from /settings/providers,
+// so a fresh read per batch is what makes switching a provider off a TRUE
+// mid-run kill rather than something that takes effect on the next tick.
+//
+// Fails CLOSED on a missing row: no provider row ⇒ not enabled. A drain whose
+// provider vanished mid-run must stop, not keep sending. (isProviderPaused
+// fails open on a missing row for the mirror-image reason — an absent row is
+// not evidence of a tripped breaker — so the two are asymmetric on purpose.)
+export async function isProviderSendsEnabled(
+  dbc: DbOrTx,
+  providerId: number,
+): Promise<boolean> {
+  const r = (await dbc.execute(sql`
+    SELECT sends_enabled FROM sms_providers WHERE id = ${providerId} LIMIT 1
+  `)) as unknown as { sends_enabled: boolean }[];
+  return r[0]?.sends_enabled === true;
 }
 
 // Successful-send count for ONE provider within the trailing window (seconds).

@@ -53,6 +53,13 @@ export type KickoffRefusal =
   | "stage_not_ready"
   | "no_provider"
   | "provider_not_api_capable"
+  // sms_providers.sends_enabled is off (migration 0138) — the operator's
+  // deliberate posture for this account. Refused HERE, before materializing, so
+  // a switched-off provider never inserts a stage_sends row it cannot dispatch;
+  // the same reasoning as the no_sender_number guard below. Sits after the
+  // capability gate because capability is the more fundamental fact: a row that
+  // cannot API-send at all should say so, not "sending is turned off".
+  | "provider_sends_disabled"
   | "no_credentials"
   | "no_short_domain"
   | "no_destination"
@@ -222,11 +229,22 @@ export async function kickoffStageSend(
     if (row.sms_provider_id == null) return { ok: false, reason: "no_provider" };
 
     const provider = (await dbc.execute(sql`
-      SELECT supports_api_send, adapter_code AS provider_key FROM sms_providers
+      SELECT supports_api_send, sends_enabled, adapter_code AS provider_key
+      FROM sms_providers
       WHERE id = ${row.sms_provider_id} AND org_id = ${orgId} LIMIT 1
-    `)) as unknown as { supports_api_send: boolean; provider_key: string }[];
+    `)) as unknown as {
+      supports_api_send: boolean;
+      sends_enabled: boolean;
+      provider_key: string;
+    }[];
     if (!provider[0]?.supports_api_send) {
       return { ok: false, reason: "provider_not_api_capable" };
+    }
+    // Operator posture (0138). Capability is checked first (above) because a row
+    // that can't API-send at all should say exactly that; only then does "and it
+    // is currently switched off" become the useful answer.
+    if (provider[0].sends_enabled !== true) {
+      return { ok: false, reason: "provider_sends_disabled" };
     }
     providerKey = provider[0].provider_key;
 

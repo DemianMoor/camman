@@ -824,6 +824,18 @@ export const provider_phones = pgTable(
     // is unconfirmed in Phase 0 (integer vs GUID) and TEXT holds either without
     // a wrong-type migration. NULL for every other provider.
     dashboard_id: text("dashboard_id"),
+    // Per-number short-domain override (migration 0137). NULL — the value on
+    // every pre-existing row — means "no override, use the campaign brand's
+    // domain", which is exactly what kickoff did before this column existed.
+    //
+    // ON DELETE SET NULL, not CASCADE: removing a short domain must never delete
+    // a sending number. The number is expensive and externally provisioned; the
+    // domain assignment is cheap metadata, and falling back to the brand default
+    // is the correct degradation.
+    short_domain_id: integer("short_domain_id").references(
+      () => short_domains.id,
+      { onDelete: "set null" },
+    ),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })

@@ -960,6 +960,13 @@
       "when": 1788134400000,
       "tag": "0136_short_domains_multi_per_brand",
       "breakpoints": true
+    },
+    {
+      "idx": 137,
+      "version": "7",
+      "when": 1788220800000,
+      "tag": "0137_provider_phones_short_domain",
+      "breakpoints": true
     }
   ]
 }

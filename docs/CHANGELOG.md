@@ -2,6 +2,14 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-17 - Per-phone short domain (migration 0137, Q1) - docs/03-data-model.md, docs/07-conventions.md
+- provider_phones.short_domain_id, nullable FK to short_domains ON DELETE SET NULL (not CASCADE: removing a domain must never delete an externally-provisioned number; falling back to the brand default is the correct degradation).
+- kickoff resolution is now phone override -> brand default. The override must be org-owned AND status=active, so B1 pending rows can never be minted under.
+- BYTE-IDENTICAL for existing data, proven as a differential rather than asserted: 35 phones x 3 brands = 105 pairs resolved both ways (new two-branch logic vs the exact pre-0137 brand-only query), 0 differences; numberless stages identical across all brands; plus a rolled-back simulation proving the override is not dead code.
+- Assignment guard shared by the phone create and update routes (lib/providers/short-domain-assignment.ts) so ownership and status rules cannot drift between them.
+- New GET /api/short-domains/list?brand_id= feeds the picker. Returns pending rows WITH their status rather than filtering them out - an omitted row reads as "my domain did not save" and gets re-added.
+- Convention added: verification tooling gets guard-grade treatment - print input scope, assert non-empty, fail loudly on a missing binary or empty variable.
+
 2026-08-17 - txh2 registry alias retired; COALESCE fallbacks removed (869ej8qzk Part A, step 3) - docs/07-conventions.md
 - Gate met by 40,120 live txh2 sends on the adapter_code path with zero adapter-resolution errors (247 errored attempts, all TextHub suppression, a normal `filtered` outcome).
 - Registry alias `txh2 -> texthubAdapter` deleted; ALIAS_KEYS now empty. adapter_code carries the type, so a second account of an existing type is just another row with the same adapter_code - nothing to alias.

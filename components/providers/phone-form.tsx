@@ -48,6 +48,16 @@ type Brand = {
 };
 type BrandsListResponse = { data: Brand[]; totalCount: number };
 
+// A short domain this number could mint links under. `status` is carried so the
+// picker can show a pending domain as unselectable-and-why rather than hiding
+// it — an omitted row reads as "my domain didn't save" and gets re-added.
+type ShortDomainOption = {
+  id: number;
+  domain: string;
+  brand_id: number;
+  status: string;
+};
+
 type ProviderOption = { id: number; name: string };
 
 const UNASSIGNED = "__unassigned__";
@@ -111,6 +121,7 @@ export function PhoneForm({
       brand_id: initialValues?.brand_id ?? null,
       max_sends_per_second: initialValues?.max_sends_per_second ?? null,
       dashboard_id: initialValues?.dashboard_id ?? null,
+      short_domain_id: initialValues?.short_domain_id ?? null,
     },
   });
 
@@ -134,6 +145,37 @@ export function PhoneForm({
       cancelled = true;
     };
   }, [brandsAvailable, brandsApi.execute]);
+
+  // Short domains for the SELECTED brand (migration 0137). Re-fetched when the
+  // brand changes, because the override only makes sense within the brand whose
+  // campaigns this number sends for — offering another brand's host would mint
+  // links on a domain that brand doesn't control.
+  const watchedBrandId = form.watch("brand_id");
+  const domainsApi = useApiCall<{ data: ShortDomainOption[] }>();
+  const { execute: domainsExec } = domainsApi;
+  const [domains, setDomains] = useState<ShortDomainOption[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (watchedBrandId == null) { setDomains([]); return; }
+      const r = await domainsExec(`/api/short-domains/list?brand_id=${watchedBrandId}`);
+      if (cancelled) return;
+      if (r.ok) setDomains(r.data.data);
+    })();
+    return () => { cancelled = true; };
+  }, [watchedBrandId, domainsExec]);
+
+  // Clear a stale override when the brand changes: a domain belonging to the
+  // previous brand must not survive the switch. Server-side the assignment guard
+  // would still store it (it only checks org + active), so this is the one place
+  // that enforces brand coherence — worth noting if that rule ever moves.
+  useEffect(() => {
+    const cur = form.getValues("short_domain_id");
+    if (cur != null && !domains.some((d) => d.id === cur)) {
+      form.setValue("short_domain_id", null);
+    }
+  }, [domains, form]);
 
   return (
     <Form {...form}>
@@ -437,6 +479,59 @@ export function PhoneForm({
                 </Select>
                 <FormDescription>
                   Associate this number with a brand for reporting.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            );
+          }}
+        />
+
+        {/* Short-domain override (migration 0137). Sits after Brand because it
+            is scoped to it: only the selected brand's domains are offered, and
+            changing the brand clears a stale pick. Leaving it on the default
+            reproduces today's behaviour exactly — the brand's own domain. */}
+        <FormField
+          control={form.control}
+          name="short_domain_id"
+          render={({ field }) => {
+            const value = field.value == null ? UNASSIGNED : String(field.value);
+            const active = domains.filter((d) => d.status === "active");
+            const pending = domains.filter((d) => d.status !== "active");
+            return (
+              <FormItem>
+                <FormLabel>Short domain</FormLabel>
+                <Select
+                  value={value}
+                  onValueChange={(v) => field.onChange(v === UNASSIGNED ? null : Number(v))}
+                  disabled={isSubmitting || watchedBrandId == null}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Brand default" />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value={UNASSIGNED}>Brand default</SelectItem>
+                    {active.map((d) => (
+                      <SelectItem key={d.id} value={String(d.id)}>
+                        {d.domain}
+                      </SelectItem>
+                    ))}
+                    {/* Pending domains are shown but NOT selectable: hiding them
+                        makes a just-added domain look like it failed to save. */}
+                    {pending.map((d) => (
+                      <SelectItem key={d.id} value={String(d.id)} disabled>
+                        {d.domain} — not verified yet
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormDescription>
+                  {watchedBrandId == null
+                    ? "Pick a brand first — short domains belong to a brand."
+                    : active.length === 0
+                      ? "This brand has no verified short domain yet. Tracked sends need one."
+                      : "Leave on Brand default unless this number should mint links under a different host."}
                 </FormDescription>
                 <FormMessage />
               </FormItem>

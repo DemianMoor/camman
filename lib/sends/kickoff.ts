@@ -250,14 +250,45 @@ export async function kickoffStageSend(
     });
     if (!hasCred) return { ok: false, reason: "no_credentials" };
 
-    // Deterministic short-domain pick: active, brand-scoped, stable order so a
-    // brand always mints under the same domain.
-    const sd = (await dbc.execute(sql`
-      SELECT id, domain FROM short_domains
-      WHERE org_id = ${orgId} AND brand_id = ${row.brand_id} AND status = 'active'
-      ORDER BY created_at ASC, id ASC
+    // Short-domain resolution, in precedence order (migration 0137):
+    //
+    //   1. the STAGE'S SENDING NUMBER's override (provider_phones.short_domain_id)
+    //   2. the campaign BRAND's domain — deterministic, stable order
+    //
+    // A number-level override lets one sending number mint under a different
+    // host without moving the whole brand, which is what a per-number reputation
+    // split needs.
+    //
+    // ⚠️ BYTE-IDENTICAL FOR EXISTING DATA. Every pre-0137 row has
+    // short_domain_id NULL, so branch 1 selects nothing and branch 2 runs the
+    // exact query that was here before — same predicate, same ORDER BY, same
+    // LIMIT. Asserted by scripts/verify-per-phone-domain.ts, which compares the
+    // resolved (id, domain) for every real phone against the brand-only result.
+    //
+    // The override is still required to be ACTIVE and to belong to this org. A
+    // pending or archived domain (B1 inserts new ones as 'pending') must never be
+    // mintable, so it falls through to the brand default rather than failing —
+    // the same status gate the brand branch has always applied.
+    let sd = (await dbc.execute(sql`
+      SELECT d.id, d.domain
+      FROM provider_phones ph
+      JOIN short_domains d ON d.id = ph.short_domain_id
+      WHERE ph.id = ${row.provider_phone_id}
+        AND ph.org_id = ${orgId}
+        AND d.org_id = ${orgId}
+        AND d.status = 'active'
       LIMIT 1
     `)) as unknown as { id: number; domain: string }[];
+
+    if (!sd[0]) {
+      // Brand default — unchanged from pre-0137.
+      sd = (await dbc.execute(sql`
+        SELECT id, domain FROM short_domains
+        WHERE org_id = ${orgId} AND brand_id = ${row.brand_id} AND status = 'active'
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+      `)) as unknown as { id: number; domain: string }[];
+    }
     if (!sd[0]) return { ok: false, reason: "no_short_domain" };
     shortDomain = sd[0];
 

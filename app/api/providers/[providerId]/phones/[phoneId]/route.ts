@@ -12,6 +12,7 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { verifyShortDomainAssignable } from "@/lib/providers/short-domain-assignment";
 import { providerPhoneUpdateSchema } from "@/lib/validators/provider-phones";
 
 function parseId(idParam: string) {
@@ -53,6 +54,7 @@ export async function GET(
       number_type: provider_phones.number_type,
       max_sends_per_second: provider_phones.max_sends_per_second,
       dashboard_id: provider_phones.dashboard_id,
+      short_domain_id: provider_phones.short_domain_id,
       status: provider_phones.status,
       archived_at: provider_phones.archived_at,
       created_at: provider_phones.created_at,
@@ -140,6 +142,50 @@ export async function PATCH(
   // specially below; the rest map straight to columns.
   const { provider_id: targetProviderId, confirm_move, ...editable } =
     parsed.data;
+
+  // Short-domain override: verify BEFORE writing. Org ownership is the
+  // multi-tenancy invariant; the active-status check is what keeps a `pending`
+  // B1 domain from being assigned to a live number, which would mint links
+  // under a host that doesn't resolve — dead clicks, no error anywhere.
+  // Judge against the EFFECTIVE brand: a PATCH may move the number to a new
+  // brand and set an override in the same request, and the domain has to match
+  // where the number is going, not where it was.
+  //
+  // Only loaded when an override is actually in play, so the common PATCH (cost,
+  // rate, dashboard) pays no extra query.
+  let effectiveBrandId: number | null = null;
+  if (editable.short_domain_id != null) {
+    if (editable.brand_id !== undefined) {
+      effectiveBrandId = editable.brand_id;
+    } else {
+      const cur = await db
+        .select({ brand_id: provider_phones.brand_id })
+        .from(provider_phones)
+        .where(
+          and(
+            eq(provider_phones.id, phid),
+            eq(provider_phones.org_id, orgId),
+            eq(provider_phones.provider_id, pid),
+          ),
+        )
+        .limit(1);
+      if (!cur[0]) {
+        return apiError(404, "Phone not found", API_ERROR_CODES.NOT_FOUND, { entity: "provider_phone" });
+      }
+      effectiveBrandId = cur[0].brand_id;
+    }
+  }
+  const sdCheck = await verifyShortDomainAssignable(
+    orgId,
+    editable.short_domain_id,
+    effectiveBrandId,
+  );
+  if (!sdCheck.ok) {
+    return apiError(400, sdCheck.message, API_ERROR_CODES.VALIDATION, {
+      field: "short_domain_id",
+      reason: sdCheck.reason,
+    });
+  }
 
   const updates: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(editable)) {

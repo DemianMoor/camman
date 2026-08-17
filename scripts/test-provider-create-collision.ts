@@ -12,6 +12,13 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 
 const BASE = process.argv[2] ?? "http://localhost:3099";
+// --no-writes runs ONLY the cases that are refusals, which by definition create
+// nothing. Use it when the target shares the production database — a Vercel
+// preview does. Every provider row this org has is real, so the one case that
+// actually inserts (the custom / no-API escape hatch) is skipped rather than
+// writing a probe row to prod and trusting teardown. See 07-conventions.md:
+// probes that WRITE run against the demo database, prod writes need approval.
+const NO_WRITES = process.argv.includes("--no-writes");
 const EMAIL = process.env.TEST_USER_EMAIL ?? "";
 const PASSWORD = process.env.TEST_USER_PASSWORD ?? "";
 
@@ -181,7 +188,9 @@ async function main() {
   }
 
   console.log("\n── Custom / no-API provider still works (escape hatch) ──");
-  {
+  if (NO_WRITES) {
+    console.log("  SKIP  --no-writes: this case INSERTS a provider row, and this target shares the production DB.");
+  } else {
     const code = `probe${Date.now().toString().slice(-6)}`;
     const r = await post(cookie, { name: "Probe Custom", sms_provider_id: code });
     const ok = r.status === 201 && r.body?.sms_provider_id === code;

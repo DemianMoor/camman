@@ -60,10 +60,19 @@ async function main() {
         VALUES (${orgId}, ${"gs-camp-" + sfx}, ${"g"}, 'active', 'tracked', ${brand[0].id}) RETURNING id
       `)) as unknown as { id: number }[];
       const campaignId = camp[0].id;
-      // Click-armed stage: approved, due, materialized (pending rows), sent_at NULL.
+      // Click-armed stage: approved, due, FULLY materialized, sent_at NULL.
+      //
+      // ⚠️ materialized_at MUST be set. Since migration 0089 (resumable
+      // materialization) it — not the mere existence of stage_sends rows — is the
+      // completeness signal: scheduler Phase A selects only `materialized_at IS
+      // NULL` (to finish building) and Phase B drains only `materialized_at IS
+      // NOT NULL`. A stage with pending rows but a NULL stamp therefore falls
+      // BETWEEN both phases and is invisible to the scheduler, which is exactly
+      // why this fixture had been failing on main with `considered: 0` — the
+      // fixture predates 0089 and was never updated with it.
       const st = (await tx.execute(sql`
-        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, sms_provider_id, send_approved, scheduled_at)
-        VALUES (${orgId}, ${campaignId}, 1, ${cre[0].id}, ${prov[0].id}, true, ${SCHEDULED}) RETURNING id
+        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, sms_provider_id, send_approved, scheduled_at, materialized_at)
+        VALUES (${orgId}, ${campaignId}, 1, ${cre[0].id}, ${prov[0].id}, true, ${SCHEDULED}, ${SCHEDULED}) RETURNING id
       `)) as unknown as { id: number }[];
       const stageId = st[0].id;
       const contact = (await tx.execute(sql`INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}, ${"+1555" + sfx}) RETURNING id`)) as unknown as { id: string }[];

@@ -442,19 +442,49 @@ async function main() {
       // 08:00–21:00 window. There is no way to express "never send" in these
       // columns, which is exactly how the first draft of this test passed
       // vacuously at midday.
+      //
+      // ⚠️⚠️ clock_timestamp(), NOT now(). `now()` IS transaction_timestamp() and
+      // is FROZEN at the transaction's start — and this whole suite runs inside
+      // ONE transaction. By the time this case ran, real time had moved minutes
+      // past the frozen value, so `now_min + 1` was already in the PAST and the
+      // "closed" window was wide OPEN: the drain correctly sent, and the
+      // assertion below failed. That is what made this case red on main
+      // (measured: `now()` unchanged across 65s while clock_timestamp advanced).
+      // Any time-sensitive fixture inside a long transaction has this bug.
+      //
+      // The +5 minute offset (rather than +1) is deliberate slack: the fixture
+      // rows below take a moment to insert, and a start of exactly now_min+1
+      // would re-open the window if that crossed a single minute boundary. Five
+      // minutes is far beyond the fixture's cost and still leaves a valid band
+      // (1379 + 5 = 1384 < 1439). The late-evening branch needs no slack — its
+      // window ENDS at now_min, so the passage of time only moves further
+      // outside it.
       await tx.execute(sql`
         WITH m AS (
-          SELECT (EXTRACT(HOUR FROM now() AT TIME ZONE 'America/New_York') * 60
-                + EXTRACT(MINUTE FROM now() AT TIME ZONE 'America/New_York'))::int AS now_min
+          SELECT (EXTRACT(HOUR FROM clock_timestamp() AT TIME ZONE 'America/New_York') * 60
+                + EXTRACT(MINUTE FROM clock_timestamp() AT TIME ZONE 'America/New_York'))::int AS now_min
         )
         UPDATE sms_providers p
-        SET send_window_weekday_start = CASE WHEN m.now_min < 1380 THEN m.now_min + 1 ELSE 0 END,
+        SET send_window_weekday_start = CASE WHEN m.now_min < 1380 THEN m.now_min + 5 ELSE 0 END,
             send_window_weekday_end   = CASE WHEN m.now_min < 1380 THEN 1439 ELSE m.now_min END,
-            send_window_weekend_start = CASE WHEN m.now_min < 1380 THEN m.now_min + 1 ELSE 0 END,
+            send_window_weekend_start = CASE WHEN m.now_min < 1380 THEN m.now_min + 5 ELSE 0 END,
             send_window_weekend_end   = CASE WHEN m.now_min < 1380 THEN 1439 ELSE m.now_min END
         FROM m
         WHERE p.id = ${winProv}
       `);
+      // Print the band actually built, so a future failure says WHICH window was
+      // in force rather than only that something sent. A bare assertion here is
+      // what made the original defect take a transaction-semantics detour to
+      // diagnose.
+      const winRow = (await tx.execute(sql`
+        SELECT send_window_weekday_start AS s, send_window_weekday_end AS e,
+               (EXTRACT(HOUR FROM clock_timestamp() AT TIME ZONE 'America/New_York') * 60
+              + EXTRACT(MINUTE FROM clock_timestamp() AT TIME ZONE 'America/New_York'))::int AS now_min
+        FROM sms_providers WHERE id = ${winProv}
+      `)) as unknown as { s: number; e: number; now_min: number }[];
+      console.log(
+        `  window built: [${winRow[0].s}, ${winRow[0].e}) ET · current minute ${winRow[0].now_min} (outside)`,
+      );
       const winStage = await mkStage(winProv);
       for (let i = 0; i < 3; i++) await addPending(winStage, await mkContact(), `w${i}`);
       let winSendCalls = 0;

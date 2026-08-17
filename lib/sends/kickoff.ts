@@ -222,7 +222,7 @@ export async function kickoffStageSend(
     if (row.sms_provider_id == null) return { ok: false, reason: "no_provider" };
 
     const provider = (await dbc.execute(sql`
-      SELECT supports_api_send, adapter_code AS provider_key FROM sms_providers
+      SELECT supports_api_send, COALESCE(adapter_code, sms_provider_id) AS provider_key FROM sms_providers
       WHERE id = ${row.sms_provider_id} AND org_id = ${orgId} LIMIT 1
     `)) as unknown as { supports_api_send: boolean; provider_key: string }[];
     if (!provider[0]?.supports_api_send) {
@@ -490,7 +490,7 @@ async function resolveProviderKeyForGuard(
 ): Promise<string | null> {
   if (providerId == null) return null;
   const rows = (await dbc.execute(sql`
-    SELECT adapter_code AS key FROM sms_providers
+    SELECT COALESCE(adapter_code, sms_provider_id) AS key FROM sms_providers
     WHERE id = ${providerId} AND org_id = ${orgId} LIMIT 1
   `)) as unknown as { key: string | null }[];
   return rows[0]?.key ?? null;

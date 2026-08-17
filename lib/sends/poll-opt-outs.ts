@@ -460,10 +460,18 @@ async function pollCredential(
 // alert; regression fixed 2026-07-15).
 //
 // This filter asks "what KIND of provider is this", so migration 0134 moved it
-// off the hardcoded identity list `sms_provider_id IN ('txh','txh2')` and onto
-// adapter_code. Both rows carry adapter_code='txh', so the selected set is
-// unchanged — and a future TextHub account is now picked up automatically
-// instead of needing this literal edited, which is how it broke before.
+// off the hardcoded identity list onto adapter_code. Both TextHub rows carry
+// adapter_code='txh', so the selected set is unchanged.
+//
+// The COALESCE fallback keeps the cutover a no-op BY CONSTRUCTION: a row with a
+// NULL adapter_code still matches on its old identity, so the selected set can
+// only ever be a superset-equal of the previous one, never smaller. Keeping
+// 'txh2' in the list is what makes that true — drop it and a NULL-adapter_code
+// TextHub row would silently stop being polled, which means its STOPs stop being
+// ingested. The identity literals go away with the registry alias, at which
+// point this becomes `adapter_code = 'txh'` and a future TextHub account is
+// picked up automatically instead of needing this line edited — which is how it
+// broke before.
 //
 // Exported so the credential selection is unit-testable in isolation from the
 // fetch/suppression logic.
@@ -479,7 +487,7 @@ export async function selectPollableCredentials(
     FROM provider_credentials pc
     JOIN sms_providers p ON p.id = pc.provider_id AND p.org_id = pc.org_id
     WHERE p.supports_api_send = true
-      AND p.adapter_code = 'txh'
+      AND COALESCE(p.adapter_code, p.sms_provider_id) IN ('txh', 'txh2')
     ${orgFilter}
   `)) as unknown as (CredentialRow & { api_key_encrypted: string | null })[];
 

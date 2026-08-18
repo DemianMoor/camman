@@ -467,9 +467,26 @@ async function main() {
   // The AND statement is a SETTLED DECISION and must appear on BOTH screens. An
   // operator meets the two controls on different days, and the failure mode of
   // not knowing they compose is an empty audience with no visible cause.
+  //
+  // NAME THE SCREEN THE ROUTE ACTUALLY RENDERS. The first version of this guard
+  // asserted campaign-form-fields.tsx and passed - while both campaign routes
+  // render campaign-editor-page.tsx, which has its own copy of the carrier
+  // filter. CampaignFormFields is DEAD render code (campaign-form.tsx is
+  // imported only for its AudienceFilters type), so the sentence was on a
+  // screen no operator can reach and a green guard said otherwise. The route
+  // -> component link is asserted below so this cannot rot silently again.
+  const routeSrc = await fs.readFile(
+    path.join(process.cwd(), "app/(protected)/campaigns/new/page.tsx"),
+    "utf8",
+  );
+  check(
+    "the campaign route still renders CampaignEditorPage (the guarded screen)",
+    /CampaignEditorPage/.test(routeSrc),
+    "if this moves, the AND-statement guard below is pointing at the wrong file",
+  );
   for (const [f, label] of [
     ["components/providers/phone-form.tsx", "phone settings"],
-    ["components/campaigns/campaign-form-fields.tsx", "campaign audience"],
+    ["components/campaigns/campaign-editor-page.tsx", "campaign audience (live editor)"],
   ] as [string, string][]) {
     const src = await fs.readFile(path.join(process.cwd(), f), "utf8");
     const flat = src.replace(/\s+/g, " ");

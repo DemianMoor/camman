@@ -1146,6 +1146,19 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
             Empty = every carrier. When set, only the selected carriers qualify;
             never-looked-up (unidentified) numbers are excluded.
           </p>
+          {/* THE AND STATEMENT (Q4). Mirrored on the number's settings, under
+              Carrier policy. This filter is frozen into the audience pool at
+              activation and says WHO THE CAMPAIGN IS FOR; the number's policy
+              is evaluated when each stage materializes and says WHAT THAT
+              NUMBER MAY CARRY. Without this sentence, the empty audience
+              produced by a contradiction between them looks like a pool bug. */}
+          <p className="text-xs text-muted-foreground">
+            This filter and the sending number&apos;s own carrier policy are
+            combined with <strong>AND</strong>: a contact must be allowed by
+            both. Neither one widens the other, so if this campaign targets a
+            carrier the stage&apos;s number has turned off, that stage&apos;s
+            audience is empty.
+          </p>
         </div>
       </CardContent>
     </Card>

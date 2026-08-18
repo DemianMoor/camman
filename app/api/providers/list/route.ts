@@ -20,6 +20,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { getDescriptor } from "@/lib/sends/providers/registry";
 
 const SORT_COLUMNS = {
   name: sms_providers.name,
@@ -71,6 +72,16 @@ export async function GET(req: NextRequest) {
         avatar_url: sms_providers.avatar_url,
         color: sms_providers.color,
         status: sms_providers.status,
+        // Q3 footer chain: the provider-level candidate, plus the connection
+        // type so the preview can consult descriptor.appendsOwnOptOut. Both are
+        // needed even when no sending number is selected yet, which is why they
+        // ride here rather than only on the phones list.
+        opt_out_footer: sms_providers.opt_out_footer,
+        adapter_code: sms_providers.adapter_code,
+        // `appends_own_opt_out` is derived from adapter_code below rather than
+        // sent as a registry import: the stage form is a "use client" component
+        // and importing lib/sends/providers/registry there would bundle every
+        // provider's HTTP client into the browser (the rule R4 established).
         // Surfaced so the stage form can warn when a scheduled time falls
         // outside the provider's auto-send window (see lib/quiet-hours.ts).
         send_window_weekday_start: sms_providers.send_window_weekday_start,
@@ -100,8 +111,17 @@ export async function GET(req: NextRequest) {
       .where(where),
   ]);
 
+  // Derive the descriptor flag server-side (see the note on the select above).
+  // NULL adapter_code = a custom/manual provider with no adapter, which appends
+  // nothing — false, not "unknown".
+  const data = rows.map((r) => ({
+    ...r,
+    appends_own_opt_out:
+      (r.adapter_code ? getDescriptor(r.adapter_code)?.appendsOwnOptOut : false) === true,
+  }));
+
   return NextResponse.json({
-    data: rows,
+    data,
     totalCount: countRows[0]?.count ?? 0,
     page: params.page,
     pageSize: params.pageSize,

@@ -1,0 +1,28 @@
+-- Q3. Per-NUMBER opt-out footer — the most specific level of the footer chain.
+--
+-- STRICTLY ADDITIVE, SHIPS NULL EVERYWHERE. NULL means "this number states no
+-- preference", so the chain falls through to the provider, then the stage, then
+-- the built-in default. Every existing row is therefore unchanged by this
+-- migration on its own.
+--
+-- The full precedence, once this ships (lib/sends/opt-out-footer.ts):
+--
+--   provider_phones.opt_out_footer      <- THIS column, most specific
+--   sms_providers.opt_out_footer        <- migration 0138
+--   campaign_stages.stop_text           <- what every message uses today
+--   'Stop to END'                       <- built-in floor
+--
+-- ⚠️ NO UI THIS RUN, deliberately. Per-number footer editing lands with the
+-- Q4/Q5 settings work. The column exists so the resolution chain is complete
+-- and testable end to end rather than having a hole in its most specific slot —
+-- a chain with a missing level invites a later implementer to "temporarily"
+-- resolve around it.
+--
+-- ⚠️ This column is COMPLIANCE-BEARING. Whatever wins the chain is the opt-out
+-- language that ships on a real SMS, and the kickoff gate validates the WINNER
+-- rather than any single field — so a value set here must contain a STOP
+-- keyword or the stage is refused at kickoff (missing_opt_out_language).
+--
+-- No lock concern: provider_phones is a small registry table (35 rows).
+ALTER TABLE public.provider_phones
+  ADD COLUMN IF NOT EXISTS opt_out_footer text;

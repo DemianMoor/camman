@@ -105,6 +105,11 @@ export async function GET(
       number_type: provider_phones.number_type,
       max_sends_per_second: provider_phones.max_sends_per_second,
       dashboard_id: provider_phones.dashboard_id,
+      // Q3 number-level opt-out footer candidate. NULL = no preference at this
+      // level; the preview falls through to the provider, then the stage. No UI
+      // writes it this run (per-number footer editing lands with Q4/Q5) — it is
+      // surfaced so the preview resolves the SAME chain the send path does.
+      opt_out_footer: provider_phones.opt_out_footer,
       short_domain_id: provider_phones.short_domain_id,
       // The phone's own override resolved to a DOMAIN STRING, and only when
       // ACTIVE — a pending host is never mintable, so it must reach the client

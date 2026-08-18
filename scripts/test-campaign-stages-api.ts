@@ -832,13 +832,31 @@ async function main() {
 
   } finally {
     console.log("\nCleanup");
-    try {
-      for (const cid of createdCampaignIds) {
-        // Stages cascade with the campaign.
-        await db.delete(campaigns).where(eq(campaigns.id, cid));
+    // ⚠️ EVERY step runs independently, and every id is checked before use.
+    //
+    // This block used to be one straight-line try: the first delete ran
+    // `where id = undefined` (an id had been pushed from a response that never
+    // carried one), postgres-js threw UNDEFINED_VALUE, and because the block
+    // had only a `finally` the exception aborted every REMAINING delete —
+    // including the brands at the end. Three "Stage Test Brand" rows were left
+    // in production that way. A teardown that stops at its first failure leaks
+    // silently, because the crash surfaces AFTER the assertions have printed.
+    const step = async (label: string, fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+      } catch (e) {
+        console.log(`  cleanup step FAILED (${label}): ${(e as Error).message.split("\n")[0]}`);
       }
-      for (const cid of createdCreativeIds) {
-        await db.delete(creatives).where(eq(creatives.id, cid));
+    };
+    const realIds = (ids: number[]) => ids.filter((v) => Number.isInteger(v) && v > 0);
+    const orNone = (ids: number[]) => (ids.length ? ids : [-1]);
+    try {
+      for (const cid of realIds(createdCampaignIds)) {
+        // Stages cascade with the campaign.
+        await step(`campaign ${cid}`, () => db.delete(campaigns).where(eq(campaigns.id, cid)));
+      }
+      for (const cid of realIds(createdCreativeIds)) {
+        await step(`creative ${cid}`, () => db.delete(creatives).where(eq(creatives.id, cid)));
       }
       if (insertedPhones.length > 0) {
         await db
@@ -856,22 +874,52 @@ async function main() {
           .delete(contacts)
           .where(inArray(contacts.phone_number, insertedPhones));
       }
-      for (const sid of createdSegmentIds) {
-        await db.delete(segments).where(eq(segments.id, sid));
+      for (const sid of realIds(createdSegmentIds)) {
+        await step(`segment ${sid}`, () => db.delete(segments).where(eq(segments.id, sid)));
       }
-      for (const gid of createdGroupIds) {
-        await db.delete(contact_groups).where(eq(contact_groups.id, gid));
+      for (const gid of realIds(createdGroupIds)) {
+        await step(`contact_group ${gid}`, () => db.delete(contact_groups).where(eq(contact_groups.id, gid)));
       }
-      for (const oid of createdOfferIds) {
-        await db.delete(offers).where(eq(offers.id, oid));
+      for (const oid of realIds(createdOfferIds)) {
+        await step(`offer ${oid}`, () => db.delete(offers).where(eq(offers.id, oid)));
       }
-      for (const nid of createdNetworkIds) {
-        await db.delete(affiliate_networks).where(eq(affiliate_networks.id, nid));
+      for (const nid of realIds(createdNetworkIds)) {
+        await step(`network ${nid}`, () => db.delete(affiliate_networks).where(eq(affiliate_networks.id, nid)));
       }
-      for (const bid of createdBrandIds) {
-        await db.delete(brands).where(eq(brands.id, bid));
+      for (const bid of realIds(createdBrandIds)) {
+        await step(`brand ${bid}`, () => db.delete(brands).where(eq(brands.id, bid)));
       }
-      console.log("  cleanup complete");
+
+      // RESIDUE VERIFICATION — re-query EVERY entity type this suite creates and
+      // report what survived. "cleanup complete" is a claim; this is the check.
+      // It enumerates all seven types rather than a sample, because the leak it
+      // exists to catch was precisely a type nobody thought to look at.
+      const residue: string[] = [];
+      const survivors = async (label: string, fn: () => Promise<{ length: number }>) => {
+        try {
+          const rows = await fn();
+          if (rows.length > 0) residue.push(`${label}: ${rows.length}`);
+        } catch (e) {
+          residue.push(`${label}: COULD NOT VERIFY (${(e as Error).message.split("\n")[0]})`);
+        }
+      };
+      await survivors("campaigns", () => db.select({ id: campaigns.id }).from(campaigns).where(inArray(campaigns.id, orNone(realIds(createdCampaignIds)))));
+      await survivors("creatives", () => db.select({ id: creatives.id }).from(creatives).where(inArray(creatives.id, orNone(realIds(createdCreativeIds)))));
+      await survivors("segments", () => db.select({ id: segments.id }).from(segments).where(inArray(segments.id, orNone(realIds(createdSegmentIds)))));
+      await survivors("contact_groups", () => db.select({ id: contact_groups.id }).from(contact_groups).where(inArray(contact_groups.id, orNone(realIds(createdGroupIds)))));
+      await survivors("offers", () => db.select({ id: offers.id }).from(offers).where(inArray(offers.id, orNone(realIds(createdOfferIds)))));
+      await survivors("affiliate_networks", () => db.select({ id: affiliate_networks.id }).from(affiliate_networks).where(inArray(affiliate_networks.id, orNone(realIds(createdNetworkIds)))));
+      await survivors("brands", () => db.select({ id: brands.id }).from(brands).where(inArray(brands.id, orNone(realIds(createdBrandIds)))));
+      if (insertedPhones.length > 0) {
+        await survivors("contacts", () => db.select({ id: contacts.id }).from(contacts).where(inArray(contacts.phone_number, insertedPhones)));
+      }
+
+      if (residue.length > 0) {
+        console.log(`  ⚠️ RESIDUE LEFT IN THE DATABASE: ${residue.join(" · ")}`);
+        failed++;
+      } else {
+        console.log("  cleanup complete — residue verified across all entity types");
+      }
     } finally {
       await pg.end({ timeout: 5 });
     }

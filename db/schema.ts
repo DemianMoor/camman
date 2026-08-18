@@ -850,6 +850,12 @@ export const provider_phones = pgTable(
     // a sending number. The number is expensive and externally provisioned; the
     // domain assignment is cheap metadata, and falling back to the brand default
     // is the correct degradation.
+    // Per-NUMBER opt-out footer (migration 0141) — the most specific level of
+    // the footer chain: number > provider (0138) > campaign_stages.stop_text >
+    // 'Stop to END'. NULL = "no preference at this level", which is every row
+    // today. COMPLIANCE-BEARING: the winner of the chain is the opt-out
+    // language that actually ships, and the kickoff gate validates the winner.
+    opt_out_footer: text("opt_out_footer"),
     short_domain_id: integer("short_domain_id").references(
       () => short_domains.id,
       { onDelete: "set null" },

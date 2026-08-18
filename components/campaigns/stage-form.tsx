@@ -58,6 +58,10 @@ import {
   buildRepresentativeTrackedLinkUrl,
   pickEffectiveShortDomain,
 } from "@/lib/links/tracked-link";
+import {
+  describeOptOutFooterLevel,
+  resolveOptOutFooter,
+} from "@/lib/sends/opt-out-footer";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   appendParamName,
@@ -122,6 +126,11 @@ type Provider = {
   name: string;
   color: string | null;
   status: string;
+  // Q3 footer chain: the provider-level candidate, and whether this connection
+  // type appends its own opt-out text (derived server-side from the adapter
+  // descriptor — the registry must not be imported into a client component).
+  opt_out_footer: string | null;
+  appends_own_opt_out: boolean;
   // Auto-send window bounds (minute-of-day ET); null = default window. Used to
   // warn when a scheduled time falls in this provider's quiet hours.
   send_window_weekday_start: number | null;
@@ -138,6 +147,8 @@ type ProviderPhone = {
   // domain string and ONLY when active (B2). null = no override, fall back to
   // the brand. This is the preview's phone-level candidate.
   short_domain: string | null;
+  // Q3: the number-level opt-out footer candidate. null = no preference here.
+  opt_out_footer: string | null;
 };
 type SalesPage = { label: string; url: string };
 type BrandInfo = {
@@ -660,11 +671,23 @@ export function StageForm({
   //  - tracked + no short domain → none (a warning is shown instead of a fake link)
   //  - manual → the pasted Short URL
   const previewLinkUrl = isTracked ? (trackedLinkPreview ?? "") : trimmedShortUrl;
+  // ⚠️ Q3: the preview composes from the RESOLVED footer, not from the stage's
+  // STOP-text field. The sending number and the provider account both out-rank
+  // it, so previewing the raw field would show the operator a message that is
+  // not the one that ships — and, because the footer sits inside the counted
+  // body, would also mis-count its segments. Ranked by the same function the
+  // send path uses (lib/sends/opt-out-footer.ts).
+  const resolvedFooter = resolveOptOutFooter({
+    numberFooter: selectedPhone?.opt_out_footer,
+    providerFooter: selectedProvider?.opt_out_footer,
+    stageStopText: watchedStopText,
+    providerAppendsOwnOptOut: selectedProvider?.appends_own_opt_out === true,
+  });
   const assembledSms = buildStageSms({
     brandName,
     creativeText: selectedCreative?.text,
     linkUrl: previewLinkUrl,
-    stopText: watchedStopText,
+    stopText: resolvedFooter.text,
   });
   const segments = useMemo(
     () => calculateSmsSegments(assembledSms),
@@ -1330,6 +1353,35 @@ export function StageForm({
                     <FormControl>
                       <Input disabled={isSubmitting} {...field} />
                     </FormControl>
+                    {/* ⚠️ Q3: this field is the STAGE level of the opt-out
+                        footer chain, and the sending number and provider
+                        account both out-rank it. When one of them wins, say so
+                        HERE — an operator editing a box whose value will not
+                        ship is the exact failure this surfaces. */}
+                    {resolvedFooter.level !== "stage" ? (
+                      <FormDescription className="text-amber-700 dark:text-amber-400">
+                        {resolvedFooter.appendedByProvider ? (
+                          <>
+                            Not used — {describeOptOutFooterLevel(resolvedFooter.level)}, so
+                            CamMan adds no opt-out line of its own.
+                          </>
+                        ) : (
+                          <>
+                            Not used — the footer comes from{" "}
+                            {describeOptOutFooterLevel(resolvedFooter.level)}:{" "}
+                            <span className="font-medium">
+                              &ldquo;{resolvedFooter.text}&rdquo;
+                            </span>
+                            . That is what the preview counts and what ships.
+                          </>
+                        )}
+                      </FormDescription>
+                    ) : (
+                      <FormDescription>
+                        Shipped as the message&apos;s opt-out line. A sending number or
+                        provider account can override it.
+                      </FormDescription>
+                    )}
                     <FormMessage />
                   </FormItem>
                 )}

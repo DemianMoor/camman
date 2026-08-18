@@ -988,6 +988,13 @@
       "when": 1788480000000,
       "tag": "0140_short_domains_pending_and_default",
       "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1788566400000,
+      "tag": "0141_provider_phones_opt_out_footer",
+      "breakpoints": true
     }
   ]
 }

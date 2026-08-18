@@ -4,7 +4,11 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
-import { CODE_LENGTH, mintLinksBatch } from "@/lib/links/mint-link";
+import { mintLinksBatch } from "@/lib/links/mint-link";
+import {
+  buildRepresentativeTrackedLinkUrl,
+  buildTrackedLinkUrl,
+} from "@/lib/links/tracked-link";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { resolveShortDomainForSend } from "@/lib/sends/resolve-short-domain";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
@@ -336,7 +340,7 @@ export async function kickoffStageSend(
       : buildStageSms({
           brandName,
           creativeText: row.creative_text,
-          linkUrl: `https://${shortDomain!.domain}/r/${"X".repeat(CODE_LENGTH)}`,
+          linkUrl: buildRepresentativeTrackedLinkUrl(shortDomain!.domain),
           stopText: row.stop_text,
         });
   // CamMan renders the opt-out footer INTO the body (via stop_text); no provider
@@ -473,7 +477,7 @@ export async function kickoffStageSend(
             renderedText: buildStageSms({
               brandName,
               creativeText: row.creative_text!,
-              linkUrl: `https://${sd.domain}/r/${link.code}`,
+              linkUrl: buildTrackedLinkUrl(sd.domain, link.code),
               stopText: row.stop_text,
             }),
             leadId: t.sendToken,

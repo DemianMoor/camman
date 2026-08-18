@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -106,6 +106,17 @@ export async function GET(
       max_sends_per_second: provider_phones.max_sends_per_second,
       dashboard_id: provider_phones.dashboard_id,
       short_domain_id: provider_phones.short_domain_id,
+      // The phone's own override resolved to a DOMAIN STRING, and only when
+      // ACTIVE — a pending host is never mintable, so it must reach the client
+      // as null rather than as a candidate the preview could rank. This is the
+      // preview's phone-level candidate; without it the preview could not see
+      // the stage's override at all and counted segments against the brand's
+      // host instead (B2).
+      short_domain: drizzleSql<string | null>`(
+        SELECT d.domain FROM short_domains d
+        WHERE d.id = ${provider_phones.short_domain_id} AND d.status = 'active'
+        LIMIT 1
+      )`,
       status: provider_phones.status,
       archived_at: provider_phones.archived_at,
       created_at: provider_phones.created_at,

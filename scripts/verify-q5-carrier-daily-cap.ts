@@ -65,25 +65,60 @@ async function main() {
     "a hard stop would demand a manual breaker resume for an expected daily event",
   );
 
-  const orgRow = (await db.execute(sql`SELECT id FROM organizations LIMIT 1`)) as unknown as { id: string }[];
-  const orgId = orgRow[0].id;
-
   // Pick a real stage that HAS a sending number, so the pending-rows half of
   // the check is exercised against a real shape rather than a fabricated one.
+  //
+  // ⚠️ THE ORG COMES FROM THE STAGE. An earlier version took it from
+  // `SELECT id FROM organizations LIMIT 1` — unordered, so it could name a
+  // DIFFERENT org than the stage it then wrote rows against, and every
+  // org-scoped assertion below would have been quietly measuring nothing. It
+  // also returned a different value on two consecutive runs, which is how it
+  // was noticed. Derive scope from the subject, never from an arbitrary row.
+  //
+  // A CONTACT is carried too: stage_sends.contact_id is NOT NULL, so the probe
+  // rows have to reference a real one.
   const stageRow = (await db.execute(sql`
-    SELECT s.id AS stage_id, s.provider_phone_id, pp.phone_number
+    SELECT s.id AS stage_id, s.campaign_id, c.org_id, s.provider_phone_id, pp.phone_number,
+           c.org_id AS scope_org
     FROM campaign_stages s
     JOIN provider_phones pp ON pp.id = s.provider_phone_id
     JOIN campaigns c ON c.id = s.campaign_id
-    WHERE c.org_id = ${orgId}::uuid AND s.provider_phone_id IS NOT NULL
+    WHERE s.provider_phone_id IS NOT NULL
     ORDER BY s.id DESC LIMIT 1
-  `)) as unknown as { stage_id: number; provider_phone_id: number; phone_number: string }[];
+  `)) as unknown as {
+    stage_id: number; campaign_id: number; org_id: string;
+    provider_phone_id: number; phone_number: string;
+  }[];
   check("a real stage with a sending number exists", stageRow.length > 0, stageRow[0] ? `stage ${stageRow[0].stage_id} on #${stageRow[0].provider_phone_id}` : "none");
   if (!stageRow[0]) {
     await pgConn.end({ timeout: 5 });
     process.exit(1);
   }
-  const { stage_id: stageId, provider_phone_id: phoneId } = stageRow[0];
+  const {
+    stage_id: stageId, campaign_id: campaignId, org_id: orgId,
+    provider_phone_id: phoneId,
+  } = stageRow[0];
+
+  // stage_sends carries a UNIQUE (stage_id, contact_id) over live rows, so each
+  // probe row needs its OWN contact — and one this stage does not already hold,
+  // or the probe collides with real data instead of testing anything.
+  const PROBE_ROWS = 10;
+  const contactRows = (await db.execute(sql`
+    SELECT ct.id FROM contacts ct
+    WHERE ct.org_id = ${orgId}::uuid
+      AND NOT EXISTS (SELECT 1 FROM stage_sends x WHERE x.stage_id = ${stageId} AND x.contact_id = ct.id)
+    ORDER BY ct.id LIMIT ${PROBE_ROWS}
+  `)) as unknown as { id: string }[];
+  check(
+    "enough unused contacts exist for the probe rows",
+    contactRows.length === PROBE_ROWS,
+    `${contactRows.length}/${PROBE_ROWS}`,
+  );
+  if (contactRows.length < PROBE_ROWS) {
+    await pgConn.end({ timeout: 5 });
+    process.exit(1);
+  }
+  const cid = contactRows.map((r) => r.id);
 
   // (0) NOTHING CONFIGURED FOR THIS NUMBER ⇒ no breach. Checked before we
   // synthesize anything, so it describes the real, current state.
@@ -115,50 +150,74 @@ async function main() {
       const CARRIER = "Verizon";
       const OTHER = "AT&T";
 
-      // A pending row on each carrier for this stage, so the pending-rows half
-      // of the condition has something to find. contact_id/lead_id are left
-      // NULL — this row never reaches a send path; it is rolled back.
+      // ⚠️ MEASURE A BASELINE, DO NOT ASSUME A CLEAN SLATE.
+      //
+      // The first version of this bar asserted `sent_today === 3` after
+      // inserting three probe sends, and read 998 — because number #224 had
+      // ALREADY sent 995 real messages to Verizon today. The counter was
+      // correct; the assertion assumed an empty day. Every claim below is
+      // therefore a DELTA against what the number has really sent today, which
+      // also makes the bar independent of when in the day it runs.
+      const sentToday = async (carrier: string) => {
+        const r = (await tx.execute(sql`
+          SELECT count(*)::int AS n FROM stage_sends ss
+          WHERE ss.provider_phone_id = ${phoneId}
+            AND ss.carrier_norm = ${carrier}
+            AND ss.status = 'sent'
+            AND ss.sent_at >= date_trunc('day', now() AT TIME ZONE ${CAMPAIGN_TIMEZONE}) AT TIME ZONE ${CAMPAIGN_TIMEZONE}
+            AND ss.sent_at <  (date_trunc('day', now() AT TIME ZONE ${CAMPAIGN_TIMEZONE}) + interval '1 day') AT TIME ZONE ${CAMPAIGN_TIMEZONE}
+        `)) as unknown as { n: number }[];
+        return Number(r[0].n);
+      };
+      const base = await sentToday(CARRIER);
+      console.log(`\nBASELINE — number #${phoneId} has really sent ${base.toLocaleString()} message(s) to ${CARRIER} today (ET)`);
+
+      // A pending row on each carrier, so the pending-rows half of the
+      // condition has something to find.
       await tx.execute(sql`
-        INSERT INTO stage_sends (stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text)
-        VALUES (${stageId}, '+15550000001', 'pending', ${CARRIER}, ${phoneId}, 'q5 probe'),
-               (${stageId}, '+15550000002', 'pending', ${OTHER},   ${phoneId}, 'q5 probe')
+        INSERT INTO stage_sends (org_id, campaign_id, contact_id, stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text)
+        VALUES (${orgId}::uuid, ${campaignId}, ${cid[0]}::uuid, ${stageId}, '+15550000001', 'pending', ${CARRIER}, ${phoneId}, 'q5 probe'),
+               (${orgId}::uuid, ${campaignId}, ${cid[1]}::uuid, ${stageId}, '+15550000002', 'pending', ${OTHER},   ${phoneId}, 'q5 probe')
       `);
 
-      // 3 sends TODAY (ET) and 3 sends YESTERDAY (just before ET midnight).
-      // A rolling-24h counter would see some of yesterday's; a CALENDAR-day
-      // counter must see exactly the 3 from today. That difference is bar (1).
+      // 3 sends one minute AFTER today's ET midnight, and 3 one minute BEFORE
+      // it (i.e. yesterday). A rolling-24h counter would count all six; an ET
+      // CALENDAR-day counter must count exactly the three from today. That
+      // difference is bar (1), and it is measured as a delta.
       await tx.execute(sql`
-        INSERT INTO stage_sends (stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text, sent_at)
-        SELECT ${stageId}, '+1555000100' || g, 'sent', ${CARRIER}, ${phoneId}, 'q5 probe',
+        INSERT INTO stage_sends (org_id, campaign_id, contact_id, stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text, sent_at)
+        SELECT ${orgId}::uuid, ${campaignId}, c.id::uuid, ${stageId}, '+155500010' || c.g, 'sent', ${CARRIER}, ${phoneId}, 'q5 probe',
                date_trunc('day', now() AT TIME ZONE ${CAMPAIGN_TIMEZONE}) AT TIME ZONE ${CAMPAIGN_TIMEZONE} + interval '1 minute'
-        FROM generate_series(1, 3) g
+        FROM (VALUES (${cid[2]}, 1), (${cid[3]}, 2), (${cid[4]}, 3)) AS c(id, g)
       `);
       await tx.execute(sql`
-        INSERT INTO stage_sends (stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text, sent_at)
-        SELECT ${stageId}, '+1555000200' || g, 'sent', ${CARRIER}, ${phoneId}, 'q5 probe',
+        INSERT INTO stage_sends (org_id, campaign_id, contact_id, stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text, sent_at)
+        SELECT ${orgId}::uuid, ${campaignId}, c.id::uuid, ${stageId}, '+155500020' || c.g, 'sent', ${CARRIER}, ${phoneId}, 'q5 probe',
                date_trunc('day', now() AT TIME ZONE ${CAMPAIGN_TIMEZONE}) AT TIME ZONE ${CAMPAIGN_TIMEZONE} - interval '1 minute'
-        FROM generate_series(1, 3) g
+        FROM (VALUES (${cid[5]}, 1), (${cid[6]}, 2), (${cid[7]}, 3)) AS c(id, g)
       `);
 
-      // ── (1) CALENDAR DAY, NOT ROLLING 24h ────────────────────────────────
-      // Cap of 3: today's 3 reach it exactly. If the counter were rolling-24h
-      // it would count 6 and the numbers below would read 6/3.
+      // ── (1) ET CALENDAR DAY, NOT ROLLING 24h ─────────────────────────────
+      const afterProbe = await sentToday(CARRIER);
+      console.log(
+        `\n(1) inserted 3 sends just AFTER ET midnight today and 3 just BEFORE it (yesterday)`,
+      );
+      check(
+        "(1) the counter moved by exactly +3 — it counts TODAY only, not a rolling 24h",
+        afterProbe === base + 3,
+        `${base} -> ${afterProbe} (delta ${afterProbe - base}); a rolling-24h counter would read delta 6`,
+      );
+
       await tx.execute(sql`
         INSERT INTO phone_carrier_limits (org_id, provider_phone_id, carrier_norm, allowed, daily_limit)
-        VALUES (${orgId}::uuid, ${phoneId}, ${CARRIER}, true, 3)
+        VALUES (${orgId}::uuid, ${phoneId}, ${CARRIER}, true, ${afterProbe})
       `);
       const atCap = await findCarrierCapBreaches(tx, { orgId, providerPhoneId: phoneId, stageId });
       const v = atCap.find((b) => b.carrier_norm === CARRIER);
-      console.log(`\n(1) cap ${CARRIER} at 3 · 3 sent today (ET) + 3 sent just before ET midnight yesterday`);
       check(
-        "(1) the counter sees TODAY's sends only — an ET calendar day, not a rolling 24h",
-        !!v && v.sent_today === 3,
-        v ? `sent_today=${v.sent_today} (a rolling-24h counter would read 6)` : "no breach reported at all",
-      );
-      check(
-        "(1) reaching the cap exactly (sent == limit) is a breach",
-        !!v && v.daily_limit === 3,
-        v ? describeCarrierCapBreaches([v]) : "none",
+        "(1) reaching the cap EXACTLY (sent == limit) is a breach",
+        !!v && v.sent_today === afterProbe && v.daily_limit === afterProbe,
+        v ? describeCarrierCapBreaches([v]) : "no breach reported at all",
       );
       check(
         "(1) the breach names its pending rows",
@@ -166,14 +225,28 @@ async function main() {
         v ? `${v.pending_rows} pending on ${CARRIER}` : "none",
       );
 
-      // ── (2) SURGICAL: only carriers with pending rows, only capped ones ──
+      // ── (2) SURGICAL: capped AND still-pending only ──────────────────────
       check(
         "(2) an UNCAPPED carrier on the same number is not breached",
         !atCap.some((b) => b.carrier_norm === OTHER),
         `breached: [${atCap.map((b) => b.carrier_norm).join(", ")}]`,
       );
-      // Remove the pending rows for the capped carrier: the cap is still
-      // reached, but nothing is waiting on it, so the drain must NOT stop.
+      // One UNDER the cap must not stop.
+      await tx.execute(sql`
+        UPDATE phone_carrier_limits SET daily_limit = ${afterProbe + 1}
+        WHERE provider_phone_id = ${phoneId} AND carrier_norm = ${CARRIER} AND org_id = ${orgId}::uuid
+      `);
+      const under = await findCarrierCapBreaches(tx, { orgId, providerPhoneId: phoneId, stageId });
+      check(
+        "(2) one short of the cap does NOT stop",
+        !under.some((b) => b.carrier_norm === CARRIER),
+        `${afterProbe} sent, limit ${afterProbe + 1} — breached: [${under.map((b) => b.carrier_norm).join(", ")}]`,
+      );
+      // Cap reached again, but with no pending rows on that carrier.
+      await tx.execute(sql`
+        UPDATE phone_carrier_limits SET daily_limit = ${afterProbe}
+        WHERE provider_phone_id = ${phoneId} AND carrier_norm = ${CARRIER} AND org_id = ${orgId}::uuid
+      `);
       await tx.execute(sql`
         DELETE FROM stage_sends
         WHERE stage_id = ${stageId} AND status = 'pending' AND carrier_norm = ${CARRIER}
@@ -185,22 +258,11 @@ async function main() {
         !noPending.some((b) => b.carrier_norm === CARRIER),
         "an exhausted carrier must not halt a stage whose remaining rows are on another carrier",
       );
-
-      // ── UNDER the cap ────────────────────────────────────────────────────
+      // Put a pending row back for the fault injections below.
       await tx.execute(sql`
-        INSERT INTO stage_sends (stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text)
-        VALUES (${stageId}, '+15550000003', 'pending', ${CARRIER}, ${phoneId}, 'q5 probe')
+        INSERT INTO stage_sends (org_id, campaign_id, contact_id, stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text)
+        VALUES (${orgId}::uuid, ${campaignId}, ${cid[8]}::uuid, ${stageId}, '+15550000003', 'pending', ${CARRIER}, ${phoneId}, 'q5 probe')
       `);
-      await tx.execute(sql`
-        UPDATE phone_carrier_limits SET daily_limit = 4
-        WHERE provider_phone_id = ${phoneId} AND carrier_norm = ${CARRIER} AND org_id = ${orgId}::uuid
-      `);
-      const under = await findCarrierCapBreaches(tx, { orgId, providerPhoneId: phoneId, stageId });
-      check(
-        "(2) one short of the cap does NOT stop (3 sent, limit 4)",
-        !under.some((b) => b.carrier_norm === CARRIER),
-        `breached: [${under.map((b) => b.carrier_norm).join(", ")}]`,
-      );
 
       // ── FAULT INJECTION ──────────────────────────────────────────────────
       console.log("\nFAULT INJECTION — the harness must be able to go red:");
@@ -210,8 +272,8 @@ async function main() {
       `);
       const over = await findCarrierCapBreaches(tx, { orgId, providerPhoneId: phoneId, stageId });
       check(
-        "#1 lowering the limit below the count DOES breach (the comparison is live)",
-        over.some((b) => b.carrier_norm === CARRIER && b.sent_today === 3 && b.daily_limit === 1),
+        "#1 a limit far below the count DOES breach (the comparison is live)",
+        over.some((b) => b.carrier_norm === CARRIER && b.sent_today === afterProbe && b.daily_limit === 1),
         describeCarrierCapBreaches(over) || "no breach — the check is inert",
       );
       // A cap on ANOTHER number must not leak into this one.
@@ -230,16 +292,16 @@ async function main() {
       }
       // Rows that are not 'sent' must not count toward the cap.
       await tx.execute(sql`
-        INSERT INTO stage_sends (stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text, sent_at)
-        VALUES (${stageId}, '+15550000900', 'skipped_duplicate', ${CARRIER}, ${phoneId}, 'q5 probe',
+        INSERT INTO stage_sends (org_id, campaign_id, contact_id, stage_id, phone, status, carrier_norm, provider_phone_id, rendered_text, sent_at)
+        VALUES (${orgId}::uuid, ${campaignId}, ${cid[9]}::uuid, ${stageId}, '+15550000900', 'skipped_duplicate', ${CARRIER}, ${phoneId}, 'q5 probe',
                 date_trunc('day', now() AT TIME ZONE ${CAMPAIGN_TIMEZONE}) AT TIME ZONE ${CAMPAIGN_TIMEZONE} + interval '2 minutes')
       `);
-      const afterSkip = await findCarrierCapBreaches(tx, { orgId, providerPhoneId: phoneId, stageId });
       check(
         "#3 a non-'sent' row does not count toward the cap",
-        afterSkip.find((b) => b.carrier_norm === CARRIER)?.sent_today === 3,
-        `sent_today=${afterSkip.find((b) => b.carrier_norm === CARRIER)?.sent_today} (a skipped row is not a message)`,
+        (await sentToday(CARRIER)) === afterProbe,
+        `still ${afterProbe} — a skipped row is not a message`,
       );
+
 
       // ── (4) THE INDEX IS ACTUALLY USED ───────────────────────────────────
       // A once-per-batch check that seq-scans stage_sends would be a tax on
@@ -310,7 +372,12 @@ async function main() {
     /stopReason = "carrier_daily_cap"/.test(drain),
     "a bare halt with no reason is indistinguishable from 'nothing to send'",
   );
-  const policy = await fs.readFile(path.join(process.cwd(), "lib/sends/carrier-policy.ts"), "utf8");
+  // ⚠️ STRIP COMMENTS FIRST. The un-stripped version of this check failed
+  // against correct code: carrier-policy.ts's own comment explains that the
+  // boundary is never written as `sent_at AT TIME ZONE`, and the guard
+  // matched that sentence. A checker must not read the prose about itself.
+  const policyRaw = await fs.readFile(path.join(process.cwd(), "lib/sends/carrier-policy.ts"), "utf8");
+  const policy = strip(policyRaw);
   check(
     "the day boundary is a timestamptz RANGE, not a functional predicate on sent_at",
     /ss\.sent_at >= day\.day_start/.test(policy) && !/sent_at AT TIME ZONE/.test(policy),
@@ -318,7 +385,7 @@ async function main() {
   );
   check(
     "the bounded overshoot is documented where the cap is defined",
-    /overshoot/i.test(policy) && /batchSize/.test(policy),
+    /overshoot/i.test(policyRaw) && /batchSize/.test(policyRaw),
     "an undocumented soft ceiling reads as an exact one",
   );
 

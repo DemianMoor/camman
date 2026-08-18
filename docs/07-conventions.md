@@ -146,6 +146,23 @@ Precedence, most specific first — one function, `resolveOptOutFooter` ([lib/se
 - **A source guard names a FILE; only the route proves it is the SCREEN.** The AND-statement guard first pointed at `components/campaigns/campaign-form-fields.tsx` and passed — while both campaign routes render `campaign-editor-page.tsx`, which carries its own copy of the carrier filter. `CampaignFormFields` is **dead render code** (`campaign-form.tsx` is imported only for its `AudienceFilters` type), so the sentence sat on a screen no operator can reach behind a green check. It was caught by opening the page. Any guard asserting user-visible copy must also assert the **route → component** link, as this one now does.
 - **The AND statement appears on BOTH screens, and that is asserted.** The campaign audience form and the number's Carrier policy section each say the two filters combine with AND and that neither widens the other. An operator meets the two controls on different days, and the failure mode of not knowing they compose is an empty audience with no visible cause. Source-guarded on both files.
 
+## Per-carrier daily caps are ET CALENDAR days with a bounded overshoot (Q5, migration 0143)
+
+`phone_carrier_limits.daily_limit` is the most messages one NUMBER may send to one CARRIER in a day. Five properties, all deliberate:
+
+- **The day is an ET CALENDAR day, not a rolling 24 hours.** It resets at midnight `America/New_York` rather than decaying gradually. This is *not* the same thing as the existing `rate_24h` ceiling — that is a **rolling throughput** limit on the provider **account**; this is a **per-number, per-carrier allowance**. They coexist and keep **separate `stopReason`s**, because reporting one as the other sends an operator to the wrong control.
+- **Checked ONCE PER BATCH, at the batch gate, before the claim.** Same position and shape as `rate_minute` / `rate_24h`. Checking after the claim would leave rows stuck in `sending`; checking per message would be a query per message on the hot path.
+- **SOFT.** `carrier_daily_cap` is deliberately absent from `isHardStop` — rows stay `pending`, nothing latches, and the next tick resumes on its own (immediately if another carrier is free, otherwise after ET midnight). A daily allowance running out is an expected event, not a breaker trip needing a human resume.
+- **Surgical.** It only fires for a capped carrier that **still has pending rows on this stage**. Without that condition, an exhausted cap on VoIP would halt a stage whose remaining recipients are all Verizon — and every other stage on that number for the rest of the day.
+- **BOUNDED OVERSHOOT — it is a soft ceiling, not an exact one.** Mid-batch accounting is **explicitly not built**: once a batch is claimed it is sent in full without re-counting, so a carrier can exceed its limit by at most `batchSize - 1` (49 at the default 50), and only on the batch that crosses it. Making it exact costs a query per message; that is a decision to take deliberately, never a silent tightening.
+
+**The day boundary is passed as a timestamptz RANGE**, never as a functional expression over `sent_at`. Such a predicate cannot use `stage_sends_phone_carrier_sent_day_idx` (migration 0143) and turns a once-per-batch check into a sequential scan of a 1.4M-row table — paid by every drain in the org, capped or not. The guard asserts the query plan names that index, not merely that some index was used.
+
+**Two lessons from building its proof**, both general:
+
+- **Measure a baseline; never assume a clean slate.** The first version of bar (1) inserted three probe sends and asserted `sent_today === 3`. It read **998** — number #224 had really sent 995 messages to Verizon that day. The counter was right and the assertion was wrong. Every claim is now a **delta** against real traffic, which also makes the bar independent of what time of day it runs.
+- **A checker must not read the prose about itself.** The guard forbidding the functional form failed against correct code, because `carrier-policy.ts`'s own comment explains that the boundary is never written that way — and the guard matched that sentence. Strip comments before asserting on source.
+
 ## Corpus harnesses re-derive from FROZEN inputs only
 
 A harness that rebuilds historical output and compares it byte-for-byte is only as sound as its inputs. Three rules, each learned the expensive way on 2026-08-18:

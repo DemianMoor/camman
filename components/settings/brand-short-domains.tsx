@@ -28,6 +28,9 @@ type DomainRow = {
   domain: string;
   status: string;
   is_default: boolean;
+  /** Minted links on this host (migration 0144 made this affordable again).
+   *  Advisory: Delete is enforced server-side with `domain_in_use`. */
+  link_count: number;
 };
 
 type BrandRow = { id: number; name: string; brand_id: string };
@@ -152,10 +155,11 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
       method: "DELETE",
     });
     if (!r.ok) {
-      // Includes the server's `domain_in_use` refusal, which is now the ONLY
-      // signal that a domain has minted links (the pre-emptive disable went
-      // away with the count). toastApiError surfaces the server's message
-      // verbatim: "…has minted links and can't be removed. Deactivate it instead."
+      // The server's `domain_in_use` refusal remains the REAL guard; the
+      // pre-emptive disable above is only a courtesy and can be stale by a
+      // link minted between the fetch and the click. toastApiError surfaces the
+      // server's message verbatim: "…has minted links and can't be removed.
+      // Deactivate it instead."
       toastApiError(r, "Couldn't remove that domain");
       return;
     }
@@ -214,6 +218,15 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
                           Brand default
                         </Badge>
                       ) : null}
+                      {/* Minted-link count — back since migration 0144 indexed
+                          links.short_domain_id. It answers the operator's real
+                          question before they click Delete: is anything already
+                          pointing at this host? */}
+                      <span className="text-xs text-muted-foreground">
+                        {row.link_count === 0
+                          ? "no links minted"
+                          : `${row.link_count.toLocaleString()} link${row.link_count === 1 ? "" : "s"} minted`}
+                      </span>
 
                       <div className="ml-auto flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">Active</span>
@@ -244,17 +257,21 @@ export function BrandShortDomains({ brands }: { brands: BrandRow[] }) {
                         >
                           Make default
                         </Button>
-                        {/* No longer pre-disabled on a minted-link count: that
-                            count cost a full seq scan of a 3.2M-row table per
-                            domain (see listBrandShortDomains). The server
-                            re-checks and refuses with `domain_in_use`, and the
-                            refusal is surfaced as a toast — the guard is real
-                            either way, only the pre-emptive greying is gone. */}
+                        {/* Pre-disabled again on the minted-link count, which
+                            migration 0144 made affordable. This is a COURTESY,
+                            not the guard: `deleteShortDomain` re-checks
+                            server-side and refuses with `domain_in_use`, and
+                            that refusal is surfaced verbatim as a toast. If the
+                            count is ever stale the server still says no. */}
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={!canManage || mutateApi.isLoading}
-                          title="Remove this domain (refused if it has minted links)"
+                          disabled={!canManage || mutateApi.isLoading || row.link_count > 0}
+                          title={
+                            row.link_count > 0
+                              ? `${row.link_count.toLocaleString()} link${row.link_count === 1 ? " has" : "s have"} been minted on this host — deactivate it instead`
+                              : "Remove this domain"
+                          }
                           onClick={() => setConfirmDelete({ brandId: b.id, row })}
                         >
                           <Trash2 className="h-3.5 w-3.5" />

@@ -104,14 +104,68 @@ async function main() {
   );
 
   const phoneFooters = (await db.execute(sql`
-    SELECT count(*) FILTER (WHERE opt_out_footer IS NOT NULL)::int AS set_count, count(*)::int AS total
-    FROM provider_phones
-  `)) as unknown as { set_count: number; total: number }[];
-  console.log(`  provider_phones.opt_out_footer set on ${phoneFooters[0].set_count} of ${phoneFooters[0].total} numbers`);
+    SELECT pp.id, pp.phone_number, pp.opt_out_footer
+    FROM provider_phones pp
+    WHERE pp.opt_out_footer IS NOT NULL
+    ORDER BY pp.id
+  `)) as unknown as { id: number; phone_number: string; opt_out_footer: string }[];
+  const phoneTotal = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM provider_phones
+  `)) as unknown as { n: number }[];
+  console.log(
+    `  provider_phones.opt_out_footer set on ${phoneFooters.length} of ${phoneTotal[0].n} numbers`,
+  );
+  for (const r of phoneFooters) {
+    console.log(`     #${r.id} ${r.phone_number}: ${JSON.stringify(r.opt_out_footer)}`);
+  }
+  // ⚠️ THIS USED TO ASSERT "ships NULL everywhere", which was true on the day
+  // 0141 landed and stops being true the moment the per-number footer UI is
+  // used — a countdown, not a guard. What is asserted instead is what stays
+  // true: the number level out-ranks EVERYTHING, so any value set here is the
+  // opt-out wording that ships, and the kickoff gate refuses the stage if it
+  // carries no STOP keyword. "Nobody has set one" is reported; "anything set is
+  // sendable" is enforced.
+  const badPhoneFooter = phoneFooters.filter((r) => !hasOptOutLanguage(r.opt_out_footer));
   check(
-    "the new number-level column ships NULL everywhere",
-    phoneFooters[0].set_count === 0,
-    `${phoneFooters[0].set_count} set`,
+    "every NUMBER-level footer that exists contains a STOP keyword",
+    badPhoneFooter.length === 0,
+    badPhoneFooter.length
+      ? `NON-COMPLIANT on: ${badPhoneFooter.map((r) => `#${r.id} ${JSON.stringify(r.opt_out_footer)}`).join(", ")}`
+      : `${phoneFooters.length} configured, ${phoneTotal[0].n} numbers total`,
+  );
+
+
+  // ── THE REWRITTEN NUMBER-LEVEL GUARD MUST BE ABLE TO GO RED ──────────────
+  // Synthesized in a transaction and rolled back: nothing is configured.
+  const RB_PHONE = Symbol("rollback");
+  try {
+    await db.transaction(async (tx) => {
+      const victim = (await tx.execute(sql`
+        SELECT id FROM provider_phones ORDER BY id LIMIT 1
+      `)) as unknown as { id: number }[];
+      await tx.execute(sql`
+        UPDATE provider_phones SET opt_out_footer = 'No more texts' WHERE id = ${victim[0].id}
+      `);
+      const probe = (await tx.execute(sql`
+        SELECT opt_out_footer FROM provider_phones WHERE id = ${victim[0].id}
+      `)) as unknown as { opt_out_footer: string | null }[];
+      check(
+        "a NON-COMPLIANT number-level footer would be CAUGHT (the check discriminates)",
+        !hasOptOutLanguage(probe[0].opt_out_footer ?? ""),
+        `injected ${JSON.stringify(probe[0].opt_out_footer)} on #${victim[0].id} — the live check would fail on this`,
+      );
+      throw RB_PHONE;
+    });
+  } catch (e) {
+    if (e !== RB_PHONE) throw e;
+  }
+  const phoneAfter = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM provider_phones WHERE opt_out_footer IS NOT NULL
+  `)) as unknown as { n: number }[];
+  check(
+    "self-test rolled back — number-level footers are exactly as this run found them",
+    phoneAfter[0].n === phoneFooters.length,
+    `before=${phoneFooters.length} after=${phoneAfter[0].n}`,
   );
 
   // ── (A) BYTE-IDENTICAL for NULL-footer providers ─────────────────────────

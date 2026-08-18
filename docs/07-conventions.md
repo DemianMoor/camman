@@ -163,6 +163,20 @@ Precedence, most specific first — one function, `resolveOptOutFooter` ([lib/se
 - **Measure a baseline; never assume a clean slate.** The first version of bar (1) inserted three probe sends and asserted `sent_today === 3`. It read **998** — number #224 had really sent 995 messages to Verizon that day. The counter was right and the assertion was wrong. Every claim is now a **delta** against real traffic, which also makes the bar independent of what time of day it runs.
 - **A checker must not read the prose about itself.** The guard forbidding the functional form failed against correct code, because `carrier-policy.ts`'s own comment explains that the boundary is never written that way — and the guard matched that sentence. Strip comments before asserting on source.
 
+## A guard that goes red on correct use is a countdown, not a guard
+
+The recurring failure in this repo is an assertion that describes **the state on the day a migration shipped** — "the table ships EMPTY", "the column is NULL everywhere", "every row has `sends_enabled = true`". Each is true when written and expires the first time an operator uses the feature it covers, which is the entire point of having built it. A suite with a known-red check in it stops being read at all.
+
+`scripts/verify-provider-sends-enabled-migration.ts` was **already red on clean `main`** when this sweep ran: it asserted `opt_out_footer IS NULL` on every provider row, and Q3 had gone live with `tls` carrying `"Reply STOP to quit"`.
+
+The rewrite has three parts, and all three are required:
+
+- **REPORT the live configuration** — print which rows are configured and with what. A run must still show what state it ran against.
+- **ASSERT the durable invariant instead.** Not *"nobody has set a footer"* but ***"anything set is sendable"*** — a footer without a STOP keyword does not degrade gracefully, it REFUSES every stage on that account. Not *"`sends_enabled` is true everywhere"* but *"`sends_enabled` is a real boolean everywhere"*, which is what keeps `IS NOT FALSE` and `= true` agreeing across the six enforcement sites. The durable form is usually **stronger** than the one it replaces, because it keeps holding after the feature is used.
+- **PROVE IT CAN GO RED, from synthesized state in a rolled-back transaction.** A durable invariant that today's data satisfies by accident is indistinguishable from one that is never evaluated. Inject the offending row, assert the check would catch it, roll back, and re-query to confirm nothing survived.
+
+**Never bend the data back to satisfy a stale assertion.** Retire the assertion and replace it with the invariant.
+
 ## Corpus harnesses re-derive from FROZEN inputs only
 
 A harness that rebuilds historical output and compares it byte-for-byte is only as sound as its inputs. Three rules, each learned the expensive way on 2026-08-18:

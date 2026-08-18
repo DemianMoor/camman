@@ -24,7 +24,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { isEntityAvailable } from "@/lib/feature-flags";
+import { NAMED_CARRIERS } from "@/lib/sends/carrier-policy";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import { cn } from "@/lib/utils";
@@ -72,7 +75,22 @@ type ProviderOption = { id: number; name: string };
 const UNASSIGNED = "__unassigned__";
 
 /** Edit submit may carry a move target (`provider_id`) alongside the field edits. */
-export type PhoneSubmitValues = PhoneFormValues & { provider_id?: number };
+/** One row of a number's per-carrier policy. `allowed=false` excludes that
+ *  carrier from the number's audience; `daily_limit` is the Q5 cap. */
+export type CarrierLimit = {
+  carrier_norm: string;
+  allowed: boolean;
+  daily_limit: number | null;
+};
+
+/** Edit submit may carry a move target and the number's carrier policy
+ *  alongside the field edits. Both live outside the zod-resolved form — the
+ *  resolver strips unknown keys on submit. */
+export type PhoneSubmitValues = PhoneFormValues & {
+  provider_id?: number;
+  allow_unknown_carrier?: boolean;
+  carrier_limits?: CarrierLimit[];
+};
 
 export interface PhoneFormProps {
   mode: "create" | "edit";
@@ -95,6 +113,11 @@ export interface PhoneFormProps {
   currentProviderId?: number;
   /** edit mode: providers the picker lists — INCLUDES the current one (its default label). */
   providers?: ProviderOption[];
+  /** edit mode: the number's stored `allow_unknown_carrier` (Q4). */
+  initialAllowUnknownCarrier?: boolean;
+  /** edit mode: the number's stored carrier policy rows (Q4). Absent carrier =
+   *  allowed and uncapped, so an empty array is a complete, meaningful state. */
+  initialCarrierLimits?: CarrierLimit[];
   onSubmit: (values: PhoneSubmitValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
@@ -107,6 +130,8 @@ export function PhoneForm({
   existingPhoneNumber,
   currentProviderId,
   providers,
+  initialAllowUnknownCarrier,
+  initialCarrierLimits,
   onSubmit,
   onCancel,
   isSubmitting,
@@ -119,6 +144,38 @@ export function PhoneForm({
   const [targetProviderId, setTargetProviderId] = useState<number | undefined>(
     currentProviderId,
   );
+
+  // ── Q4 carrier policy ──────────────────────────────────────────────────
+  // Local state for the same reason as targetProviderId: the zod resolver
+  // strips keys it does not know, so a policy carried inside the form values
+  // would validate and then vanish before submit.
+  //
+  // Seeded ONCE from props (the dialog is remounted per phone via a `key`), so
+  // there is no effect that could re-run on a later render and overwrite the
+  // operator's edits with the stored values.
+  const [allowUnknownCarrier, setAllowUnknownCarrier] = useState(
+    initialAllowUnknownCarrier !== false,
+  );
+  // Kept as the FULL row set, not just a list of blocked names, so a Q5 daily
+  // cap on a carrier survives an allow-list edit instead of being replaced away
+  // by this form's own save.
+  const [carrierLimits, setCarrierLimits] = useState<CarrierLimit[]>(
+    () => initialCarrierLimits ?? [],
+  );
+  const isCarrierAllowed = (carrier: string) =>
+    carrierLimits.find((r) => r.carrier_norm === carrier)?.allowed !== false;
+  function setCarrierAllowed(carrier: string, allowed: boolean) {
+    setCarrierLimits((prev) => {
+      const existing = prev.find((r) => r.carrier_norm === carrier);
+      if (existing) {
+        return prev.map((r) =>
+          r.carrier_norm === carrier ? { ...r, allowed } : r,
+        );
+      }
+      return [...prev, { carrier_norm: carrier, allowed, daily_limit: null }];
+    });
+  }
+  const blockedCarriers = NAMED_CARRIERS.filter((c) => !isCarrierAllowed(c));
 
   // In edit mode we hide phone_number/number_type from validation by using the
   // update schema (which omits them). In create mode we use the create schema.
@@ -223,7 +280,14 @@ export function PhoneForm({
       <form
         onSubmit={form.handleSubmit((values) =>
           onSubmit(
-            isEdit ? { ...values, provider_id: targetProviderId } : values,
+            isEdit
+              ? {
+                  ...values,
+                  provider_id: targetProviderId,
+                  allow_unknown_carrier: allowUnknownCarrier,
+                  carrier_limits: carrierLimits,
+                }
+              : values,
           ),
         )}
         className="grid gap-4"
@@ -578,6 +642,92 @@ export function PhoneForm({
             );
           }}
         />
+
+        {/* ── Q4: per-number carrier policy ─────────────────────────────
+            Edit mode only: the policy rows are keyed on the phone id, which
+            does not exist until the number is created. A new number therefore
+            starts fully permissive — which is the same state every existing
+            number ships in. */}
+        {isEdit ? (
+          <>
+            <Separator />
+            <div className="grid gap-3">
+              <div>
+                <FormLabel>Carrier policy</FormLabel>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Turn a carrier off and this number stops texting contacts on
+                  it. Contacts are dropped when the audience is built, so they
+                  never enter the send at all.
+                </p>
+              </div>
+
+              <div className="grid gap-2 rounded-md border p-3">
+                {NAMED_CARRIERS.map((carrier) => (
+                  <label
+                    key={carrier}
+                    className="flex items-center justify-between gap-3 text-sm"
+                  >
+                    <span>{carrier}</span>
+                    <Switch
+                      checked={isCarrierAllowed(carrier)}
+                      onCheckedChange={(v) => setCarrierAllowed(carrier, v)}
+                      disabled={isSubmitting}
+                      aria-label={`Allow ${carrier}`}
+                    />
+                  </label>
+                ))}
+              </div>
+
+              <div className="flex items-start justify-between gap-3 rounded-md border p-3">
+                <div>
+                  <p className="text-sm">Unknown carriers</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Covers contacts we looked up but could not identify, ones
+                    still awaiting a carrier mapping, and ones never looked up.
+                    All three move together — the question is only whether this
+                    number may text people whose carrier we do not know.
+                  </p>
+                </div>
+                <Switch
+                  checked={allowUnknownCarrier}
+                  onCheckedChange={setAllowUnknownCarrier}
+                  disabled={isSubmitting}
+                  aria-label="Allow unknown carriers"
+                />
+              </div>
+
+              {/* THE AND STATEMENT. Mirrored word-for-word on the campaign
+                  audience screen, because an operator who sets a campaign
+                  carrier filter and an operator who sets a number policy are
+                  usually the same person on different days — and the failure
+                  mode (an empty audience nobody can explain) is silent. */}
+              <p className="text-xs text-muted-foreground">
+                A campaign&apos;s own carrier filter and this list are combined
+                with <strong>AND</strong>: a contact must be allowed by both.
+                Neither one widens the other, so if a campaign targets a carrier
+                this number has turned off, the audience for that stage is
+                empty.
+              </p>
+
+              {blockedCarriers.length > 0 || !allowUnknownCarrier ? (
+                <p className="text-xs text-muted-foreground">
+                  This number will not text:{" "}
+                  <strong>
+                    {[
+                      ...blockedCarriers,
+                      ...(allowUnknownCarrier ? [] : ["unknown carriers"]),
+                    ].join(", ")}
+                  </strong>
+                  .
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  No carrier restrictions — this number texts every carrier.
+                </p>
+              )}
+            </div>
+          </>
+        ) : null}
 
         <div className="flex items-center justify-end gap-2 pt-2">
           <Button

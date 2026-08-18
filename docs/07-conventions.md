@@ -123,6 +123,29 @@ Precedence, most specific first — one function, `resolveOptOutFooter` ([lib/se
 
 **The preview names the winning level.** The stage form composes from the resolved footer and, when the stage level loses, says which level won and what text will ship. An operator editing a box whose value will never appear on the wire is the failure this surfaces.
 
+## Per-number carrier policy (Q4, migration 0142) — absent row means ALLOWED
+
+`phone_carrier_limits` is an **exception list**, not an allow-list in the "only these are permitted" sense. One row per `(number, carrier)`:
+
+| State | Meaning |
+|---|---|
+| no row | allowed, uncapped |
+| `allowed = false` | this carrier is excluded from this number's audience |
+| `daily_limit = NULL` | uncapped |
+| `daily_limit = N` | at most N sends per **ET calendar day** (Q5) |
+
+**Absence must never be read as denial.** The clause is written as an anti-join (`NOT EXISTS` a disallowing row) precisely so an empty table is a no-op; a membership test would mute every number in the org the moment the table shipped. The empty-table no-op is itself an acceptance test in `scripts/verify-q4-carrier-allowlist.ts`.
+
+- **Enforced at MATERIALIZATION, never as a skip at drain.** An excluded contact must not become a `stage_sends` row: a row that exists but is skipped later still appears in reconciliation, in the pool/attempted arithmetic, and in the operator's sense of who the stage is for. The audience is where to say no.
+- **Every send-path recipient query must pass the policy** — kickoff, preflight, the preflight breakdown, and the **CSV export**. The export especially: an exported row is a manual send, so omitting the policy there would route the restriction around itself. Asserted at source level by the guard.
+- **The campaign-level `carrier_filter` and the per-number allow-list AND together.** They are different questions — the campaign filter is frozen into `campaign_audience_pool` at activation and says *who the campaign is for*; the number policy is evaluated live at materialization and says *what this number may carry*. Each can only narrow, so order is irrelevant, and a campaign selecting a carrier the number forbids yields an **empty** audience (the number's NO wins). Proven in the guard.
+- **`allow_unknown_carrier` (on `provider_phones`, default true) covers all three unknown-ish buckets together** — `Unknown` (looked up, undetermined), `Unmapped` (awaiting an admin mapping) and `Unidentified` (never looked up). They stay **distinct in the data** because they mean different things for reporting and for the lookup pipeline; they are **one switch in the UI** because the operator's question is only ever "may this number text people whose carrier we do not know?". A NULL `carrier_norm` is treated as unknown — we cannot demonstrate the carrier is permitted. Never default this to false: unknown must never silently suppress.
+- **Exclusions are reported per carrier** in the preflight breakdown (`excluded.carrier`), not as one total — "excluded 4,102" is unactionable, "excluded 4,102 Verizon" is not.
+- **One write surface, one transaction.** The policy rows and `allow_unknown_carrier` are edited together on the number's Edit dialog and land in a **single `PATCH`** that writes the column and replaces the rows inside one `db.transaction`. A split write can save the toggle while the allow-list fails, leaving a number in a state the operator never chose. `carrier_limits` is **replace-all**: the payload is the number's complete desired policy, so a carrier omitted from it ends with no row — and no row is what "allowed and uncapped" means. Rows that neither deny nor cap are dropped before insert, so counting rows still answers "is this number configured?".
+- **The carrier vocabulary is closed and DB-owned.** `CARRIER_NORMS` mirrors the `carrier_mappings_carrier_norm_check` constraint, and the guard asserts the two still agree — a widened constraint would otherwise leave the UI unable to express a policy for the new carrier, silently. `NAMED_CARRIERS` (the individually-toggleable ones) is that list minus the unknown buckets.
+- **A source guard names a FILE; only the route proves it is the SCREEN.** The AND-statement guard first pointed at `components/campaigns/campaign-form-fields.tsx` and passed — while both campaign routes render `campaign-editor-page.tsx`, which carries its own copy of the carrier filter. `CampaignFormFields` is **dead render code** (`campaign-form.tsx` is imported only for its `AudienceFilters` type), so the sentence sat on a screen no operator can reach behind a green check. It was caught by opening the page. Any guard asserting user-visible copy must also assert the **route → component** link, as this one now does.
+- **The AND statement appears on BOTH screens, and that is asserted.** The campaign audience form and the number's Carrier policy section each say the two filters combine with AND and that neither widens the other. An operator meets the two controls on different days, and the failure mode of not knowing they compose is an empty audience with no visible cause. Source-guarded on both files.
+
 ## Corpus harnesses re-derive from FROZEN inputs only
 
 A harness that rebuilds historical output and compares it byte-for-byte is only as sound as its inputs. Three rules, each learned the expensive way on 2026-08-18:

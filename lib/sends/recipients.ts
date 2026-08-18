@@ -21,6 +21,8 @@ export interface StageEligibilityOverlay {
   excludePriorOffer: boolean;
 }
 
+import { carrierPolicyClause, type CarrierPolicy } from "@/lib/sends/carrier-policy";
+
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // The stage-level audience toggles + split partition that narrow the frozen
@@ -64,6 +66,12 @@ export function stageRecipientsSql(opts: {
   limit?: number;
   offset?: number;
   eligibility?: StageEligibilityOverlay;
+  // Q4 per-number carrier allow-list. OMITTED ⇒ the clause is a literal TRUE,
+  // so every existing caller is byte-for-byte unchanged. Callers on the SEND
+  // path (kickoff, preflight, export) MUST pass it, or the audience they show
+  // stops matching the audience that materializes — asserted at source level by
+  // scripts/verify-q4-carrier-allowlist.ts.
+  carrierPolicy?: CarrierPolicy;
   // Resumable materialization: when set, exclude contacts that ALREADY have a
   // LIVE stage_sends row for this stage (any status EXCEPT 'rejected'), so a
   // windowed/interrupted kickoff re-run materializes only the REMAINING
@@ -178,6 +186,10 @@ export function stageRecipientsSql(opts: {
         e.contact_id
       from eligible e
       inner join contacts c on c.id = e.contact_id
+      -- Q4: the sending NUMBER's carrier policy. ANDs with the campaign-level
+      -- carrier filter, which was already frozen into campaign_audience_pool at
+      -- activation — each can only narrow, so a contact must satisfy both.
+      where ${carrierPolicyClause(opts.carrierPolicy, opts.orgId, sql`c.carrier_norm`)}
     )
     select contact_id, phone_number, messaging_status, carrier_norm
     from qualified
@@ -202,6 +214,7 @@ export async function countStageRecipients(
     orgId: string;
     filters: StageRecipientFilters;
     eligibility?: StageEligibilityOverlay;
+    carrierPolicy?: CarrierPolicy;
   },
 ): Promise<number> {
   const inner = stageRecipientsSql(opts);
@@ -221,6 +234,7 @@ export async function enumerateStageRecipients(
     orgId: string;
     filters: StageRecipientFilters;
     eligibility?: StageEligibilityOverlay;
+    carrierPolicy?: CarrierPolicy;
     excludeMaterializedStageId?: number;
   },
 ): Promise<StageRecipientRow[]> {

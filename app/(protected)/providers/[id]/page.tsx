@@ -21,6 +21,7 @@ import { DataTable } from "@/components/data-table";
 import { LiveSendingBanner } from "@/components/sends/live-sending-banner";
 import {
   PhoneForm,
+  type CarrierLimit,
   type PhoneFormValues,
   type PhoneSubmitValues,
 } from "@/components/providers/phone-form";
@@ -118,6 +119,10 @@ type Phone = {
   max_sends_per_second: number | null;
   dashboard_id: string | null;
   short_domain_id: number | null;
+  // Q4 per-number carrier policy, delivered with the phone so the Edit dialog
+  // hydrates from one request.
+  allow_unknown_carrier: boolean;
+  carrier_limits: CarrierLimit[];
   status: PhoneStatus;
   archived_at: string | null;
   created_at: string;
@@ -508,6 +513,15 @@ export default function ProviderDetailPage() {
       max_sends_per_second: values.max_sends_per_second ?? null,
       dashboard_id: values.dashboard_id ?? null,
       short_domain_id: values.short_domain_id ?? null,
+      // Q4 carrier policy. BOTH halves must be listed here explicitly — this
+      // object is hand-built, so a field the form collects but this literal
+      // omits is validated, dropped, and answered with a 200 and a success
+      // toast while the database never changes. That has happened twice on this
+      // exact patch (max_sends_per_second and dashboard_id); a source guard in
+      // scripts/verify-q4-carrier-allowlist.ts now asserts these two keys are
+      // present.
+      allow_unknown_carrier: values.allow_unknown_carrier ?? true,
+      carrier_limits: values.carrier_limits ?? [],
     };
     if (isMove) {
       patch.provider_id = values.provider_id;
@@ -1175,6 +1189,8 @@ export default function ProviderDetailPage() {
               dashboard_id: editingPhone.dashboard_id,
               short_domain_id: editingPhone.short_domain_id,
             }}
+            initialAllowUnknownCarrier={editingPhone.allow_unknown_carrier}
+            initialCarrierLimits={editingPhone.carrier_limits ?? []}
             onSubmit={handleEditPhone}
             onCancel={() => setEditingPhone(null)}
             isSubmitting={updatePhoneApi.isLoading}

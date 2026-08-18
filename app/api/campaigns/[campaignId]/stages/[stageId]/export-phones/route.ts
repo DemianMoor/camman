@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql as drizzleSql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 
@@ -87,6 +87,7 @@ export async function GET(
       creative_id: campaign_stages.creative_id,
       offer_id: campaigns.offer_id,
       exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
+      provider_phone_id: campaign_stages.provider_phone_id,
     })
     .from(campaign_stages)
     .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
@@ -124,6 +125,21 @@ export async function GET(
   const splitIndex = stage.split_index ?? null;
   const splitTotal = stage.split_total ?? null;
 
+  // Q4: the exported CSV is a MANUAL SEND, so it must obey the same per-number
+  // carrier policy the pipeline enforces. Exporting a contact this number may
+  // not text would route the restriction around itself — the operator would
+  // simply paste the row into the provider's tool.
+  const phoneCarrierRows = stage.provider_phone_id
+    ? ((await db.execute(drizzleSql`
+        SELECT allow_unknown_carrier FROM provider_phones
+        WHERE id = ${stage.provider_phone_id} AND org_id = ${orgId} LIMIT 1
+      `)) as unknown as { allow_unknown_carrier: boolean }[])
+    : [];
+  const carrierPolicy = {
+    providerPhoneId: stage.provider_phone_id ?? null,
+    allowUnknownCarrier: phoneCarrierRows[0]?.allow_unknown_carrier !== false,
+  };
+
   const rowSource = chunkedQuery({
     fetchChunk: async (offset, chunkLimit) => {
       const remaining =
@@ -147,6 +163,7 @@ export async function GET(
             splitIndex,
             splitTotal,
           },
+          carrierPolicy,
           // Same content-dedup the send pipeline applies — an exported CSV is a
           // manual send, so it must not re-send a creative/offer a lead already
           // got. (Export still writes nothing to the ledger; externally-sent

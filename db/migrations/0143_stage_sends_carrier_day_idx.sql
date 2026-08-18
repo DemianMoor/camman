@@ -1,0 +1,36 @@
+-- Q5. Supporting index for the per-carrier DAILY CAP counter.
+--
+-- The cap asks one question, once per drain batch: how many messages has THIS
+-- NUMBER already sent to THIS CARRIER during the current ET calendar day?
+--
+--   SELECT count(*) FROM stage_sends
+--   WHERE provider_phone_id = $1 AND carrier_norm = $2 AND status = 'sent'
+--     AND sent_at >= <ET midnight> AND sent_at < <next ET midnight>
+--
+-- Without an index this is a seq scan of stage_sends (1.4M+ rows in prod) on
+-- EVERY batch of EVERY drain — a cost paid by every number in the org whether
+-- or not it has a cap. The leading (provider_phone_id, carrier_norm) columns
+-- serve the equality, and sent_at trailing serves the day range, so the whole
+-- predicate is one index range scan.
+--
+-- PARTIAL on status = 'sent'. The cap counts what actually went out; pending,
+-- sending, skipped_* and rejected rows are not messages. Restricting the index
+-- to 'sent' also keeps it a fraction of the table's size, and — because the
+-- predicate is an equality on a column the query also filters — Postgres can
+-- prove the index applies.
+--
+-- NOTE ON THE DAY BOUNDARY: the query passes ET midnight as a computed
+-- timestamptz range rather than wrapping sent_at in AT TIME ZONE. A functional
+-- predicate on sent_at would make this index unusable. See
+-- lib/sends/carrier-policy.ts.
+--
+-- ⚠️ BUILD IT CONCURRENTLY IN PRODUCTION FIRST:
+--     npx tsx scripts/apply-carrier-day-index-concurrent.ts
+-- then run db:migrate — the IF NOT EXISTS below no-ops and the migration is
+-- still recorded in the chain. stage_sends is large and HOT; a plain CREATE
+-- INDEX takes ACCESS EXCLUSIVE and would block live sending for the duration.
+-- CONCURRENTLY cannot run inside drizzle-kit's migration transaction, which is
+-- why the file carries the plain form. Same pattern as 0101 and 0109.
+CREATE INDEX IF NOT EXISTS stage_sends_phone_carrier_sent_day_idx
+  ON public.stage_sends (provider_phone_id, carrier_norm, sent_at)
+  WHERE status = 'sent';

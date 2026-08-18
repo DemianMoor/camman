@@ -1,5 +1,8 @@
 import { sql, type SQL } from "drizzle-orm";
 
+import type { db } from "@/db/client";
+import { CAMPAIGN_TIMEZONE, CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
+
 // Q4 — the per-NUMBER carrier allow-list, as ONE clause shared by every path
 // that resolves a stage's audience.
 //
@@ -107,4 +110,114 @@ export interface CarrierPolicyRow {
   carrier_norm: string;
   allowed: boolean;
   daily_limit: number | null;
+}
+
+// ── Q5: per-carrier DAILY CAP ────────────────────────────────────────────────
+//
+// `phone_carrier_limits.daily_limit` is the most messages this NUMBER may send
+// to this CARRIER in one day. Four decisions are load-bearing:
+//
+// 1. THE DAY IS AN ET CALENDAR DAY, NOT A ROLLING 24 HOURS. A carrier cap is a
+//    reputation/compliance instrument an operator reasons about as "per day",
+//    and the org already anchors every campaign time to ET
+//    (lib/campaign-timezone.ts). It therefore RESETS AT ET MIDNIGHT — it does
+//    not decay gradually the way the existing `rate_24h` rolling ceiling does.
+//    The two coexist and mean different things; do not merge them.
+//
+// 2. THE BOUNDARY IS PASSED AS A TIMESTAMPTZ RANGE, never as
+//    `sent_at AT TIME ZONE 'America/New_York'`. A functional predicate on
+//    sent_at cannot use stage_sends_phone_carrier_sent_day_idx (migration 0143)
+//    and turns a once-per-batch check into a seq scan of a 1.4M-row table.
+//
+// 3. ENFORCED ONCE PER BATCH, AT THE BATCH BOUNDARY, as a SOFT stop — the same
+//    shape as the `rate_minute` / `rate_24h` ceilings it sits beside. Rows stay
+//    `pending`, nothing is latched, and the next tick resumes automatically
+//    (immediately if another carrier is free, or after ET midnight if not).
+//
+// 4. MID-BATCH ACCOUNTING IS DELIBERATELY NOT BUILT, so the cap is a SOFT
+//    CEILING WITH BOUNDED OVERSHOOT. Once a batch is claimed it is sent in
+//    full; the count is not decremented per row. The overshoot is therefore at
+//    most `batchSize - 1` messages beyond the limit for a given carrier (49
+//    with the default batch size of 50), and only on the batch that crosses it.
+//    Making it exact would mean re-counting per row inside the send loop — a
+//    query per message on the hot path — for a guarantee a carrier cap does not
+//    need. If an exact cap is ever required, that is the cost to accept, and it
+//    should be a deliberate decision rather than a silent tightening here.
+
+/** One carrier whose daily cap is already reached for a number. */
+export interface CarrierCapBreach {
+  carrier_norm: string;
+  daily_limit: number;
+  sent_today: number;
+  /** Rows on this stage still waiting that would go to this carrier. */
+  pending_rows: number;
+}
+
+/**
+ * Carriers that are AT or OVER their daily cap for `providerPhoneId` right now,
+ * counted over the current ET calendar day, and that STILL HAVE PENDING ROWS on
+ * this stage.
+ *
+ * The pending-rows condition is what keeps the cap surgical: a cap reached on
+ * VoIP must not stop a stage whose remaining recipients are all on Verizon.
+ * Without it, one exhausted carrier would halt every send from the number for
+ * the rest of the ET day.
+ *
+ * Returns [] when the number has no caps at all — the common case, and one
+ * cheap indexed lookup on an empty child table.
+ */
+export async function findCarrierCapBreaches(
+  dbc: typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0],
+  opts: { orgId: string; providerPhoneId: number | null; stageId: number },
+): Promise<CarrierCapBreach[]> {
+  if (opts.providerPhoneId == null) return [];
+  const rows = (await dbc.execute(sql`
+    WITH day AS (
+      -- ET midnight today and tomorrow, as timestamptz. Computed in SQL from
+      -- now() so a long-running process cannot carry a stale day across the
+      -- boundary, and expressed as a RANGE so the partial index applies.
+      SELECT
+        date_trunc('day', now() AT TIME ZONE ${CAMPAIGN_TIMEZONE}) AT TIME ZONE ${CAMPAIGN_TIMEZONE} AS day_start,
+        (date_trunc('day', now() AT TIME ZONE ${CAMPAIGN_TIMEZONE}) + interval '1 day') AT TIME ZONE ${CAMPAIGN_TIMEZONE} AS day_end
+    )
+    SELECT pcl.carrier_norm,
+           pcl.daily_limit,
+           (
+             SELECT count(*)::int FROM stage_sends ss, day
+             WHERE ss.provider_phone_id = ${opts.providerPhoneId}
+               AND ss.carrier_norm = pcl.carrier_norm
+               AND ss.status = 'sent'
+               AND ss.sent_at >= day.day_start
+               AND ss.sent_at <  day.day_end
+           ) AS sent_today,
+           (
+             SELECT count(*)::int FROM stage_sends p
+             WHERE p.stage_id = ${opts.stageId}
+               AND p.status = 'pending'
+               AND p.carrier_norm = pcl.carrier_norm
+           ) AS pending_rows
+    FROM phone_carrier_limits pcl
+    WHERE pcl.provider_phone_id = ${opts.providerPhoneId}
+      AND pcl.org_id = ${opts.orgId}::uuid
+      AND pcl.daily_limit IS NOT NULL
+  `)) as unknown as CarrierCapBreach[];
+  return rows
+    .map((r) => ({
+      carrier_norm: r.carrier_norm,
+      daily_limit: Number(r.daily_limit),
+      sent_today: Number(r.sent_today),
+      pending_rows: Number(r.pending_rows),
+    }))
+    .filter((r) => r.sent_today >= r.daily_limit && r.pending_rows > 0);
+}
+
+/** Operator-facing one-liner for the drain's stop summary. */
+export function describeCarrierCapBreaches(breaches: CarrierCapBreach[]): string {
+  return breaches
+    .map(
+      (b) =>
+        `${b.carrier_norm} ${b.sent_today}/${b.daily_limit} sent today (${CAMPAIGN_TIMEZONE_LABEL} calendar day), ` +
+        `${b.pending_rows} row(s) still pending`,
+    )
+    .join("; ");
 }

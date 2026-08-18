@@ -59,7 +59,15 @@ export type DrainStopReason =
   // Provider send window (quiet hours) closed. SOFT by design: the rows stay
   // pending and the next tick INSIDE the window resumes them. Nothing failed —
   // we simply must not be sending at this hour.
-  | "outside_send_window";
+  | "outside_send_window"
+  // Q5: a per-carrier DAILY cap on the sending number is reached for a carrier
+  // that still has pending rows on this stage. SOFT and distinct from
+  // `rate_24h`: that one is a ROLLING 24-hour throughput ceiling per provider
+  // ACCOUNT, this one is a per-NUMBER, per-CARRIER allowance that resets at ET
+  // midnight. Reporting either as the other would send an operator to the wrong
+  // control. Rows stay pending; the next tick resumes them once another
+  // carrier's rows are reachable or the ET day rolls over.
+  | "carrier_daily_cap";
 
 export function isHardStop(reason: DrainStopReason): boolean {
   return reason === "paused" || reason === "failure_spike" || reason === "pacing_tripwire";

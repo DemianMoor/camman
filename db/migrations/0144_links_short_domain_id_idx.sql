@@ -1,0 +1,28 @@
+-- Restore the per-domain minted-link count on /settings/short-domains by giving
+-- it an index to use.
+--
+-- The count was REMOVED in #88 because it had none. `links` holds 3.28M rows
+-- and nothing covered `short_domain_id`, so each per-domain count was a
+-- parallel sequential scan of the whole table. Measured on brand 8 (3 domains)
+-- immediately before this migration:
+--
+--     Seq Scan on links … rows=3282050, loops=3
+--     Execution Time: 12574.525 ms
+--
+-- and the page issues one request per brand, serially at the time — which is
+-- how a successful "Make default" appeared to do nothing for 20 seconds.
+--
+-- Non-partial: every link row belongs to a domain, and the count must include
+-- rows for a domain in any status (a `pending` host with links is exactly the
+-- case Delete must refuse). A partial index would silently under-count.
+--
+-- ⚠️ BUILD IT CONCURRENTLY IN PRODUCTION FIRST:
+--     npx tsx scripts/apply-links-short-domain-index-concurrent.ts
+-- then run db:migrate — the IF NOT EXISTS below then no-ops and the migration
+-- stays recorded in the chain. `links` is large and is written on EVERY tracked
+-- send; a plain CREATE INDEX takes ACCESS EXCLUSIVE and would block minting for
+-- the whole build. CONCURRENTLY cannot run inside drizzle-kit's migration
+-- transaction, which is why this file carries the plain form. Same pattern as
+-- 0101, 0109 and 0143.
+CREATE INDEX IF NOT EXISTS links_short_domain_id_idx
+  ON public.links (short_domain_id);

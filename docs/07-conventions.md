@@ -123,6 +123,17 @@ Precedence, most specific first — one function, `resolveOptOutFooter` ([lib/se
 
 **The preview names the winning level.** The stage form composes from the resolved footer and, when the stage level loses, says which level won and what text will ship. An operator editing a box whose value will never appear on the wire is the failure this surfaces.
 
+## Corpus harnesses re-derive from FROZEN inputs only
+
+A harness that rebuilds historical output and compares it byte-for-byte is only as sound as its inputs. Three rules, each learned the expensive way on 2026-08-18:
+
+- **The corpus is what was SENT, not what was materialized.** `stage_sends.rendered_text IS NOT NULL` also matches rows that were built and then **recalled** (`status='rejected'`, `sent_at IS NULL`) or are still `pending` — drafts that never reached a handset. Filter on `sent_at IS NOT NULL`. Measured: 75,125 materialized vs **29,396 actually sent** in the same window, and the gap contained a recalled batch whose stage had since been legitimately re-pointed at a different creative. That produced **77 phantom mismatches** and a hard stop on a bar that was, in fact, clean.
+- **A live FK an operator can edit is not a valid comparison source.** `campaign_stages.creative_id` moves; `rendered_text` does not. Where an input has no frozen copy, either exclude the affected rows or decompose the comparison so the *builders'* output is still asserted. The Q3 harness decomposes: a difference confined to the brand+creative line is EXCLUDED as input drift, while a difference in the **link or footer line is never excused** — those are what the builders produce. That keeps footer coverage on every row instead of dropping whole rows whenever a creative was touched.
+- **Exclusions are output, never silent.** Print the excluded count and the reason next to the result. A bar that quietly drops rows is indistinguishable from one that had nothing to check.
+- **Re-state corpus size on every run.** It is not a constant: this one more than doubled mid-workstream (29,917 → 75,125 materialized) while live sending continued, so any "corpus-proven" claim is true only of the snapshot it ran against.
+
+⚠️ A timestamp pin (`exclude rows whose inputs changed after sent_at`) is the obvious design and **is not available here** — there is no `updated_at` on `creatives`, `campaign_stages`, `brands` or `short_domains`. Check before designing around one.
+
 ## Prod-writing test suites must enumerate and clean EVERY entity type they create
 
 A teardown that stops at its first failure leaks silently, because the crash surfaces *after* the assertions have printed their result — which is when nobody is reading.

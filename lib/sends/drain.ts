@@ -257,7 +257,11 @@ export async function runStageDrain(
            p.send_window_weekday_start AS send_window_weekday_start,
            p.send_window_weekday_end   AS send_window_weekday_end,
            p.send_window_weekend_start AS send_window_weekend_start,
-           p.send_window_weekend_end   AS send_window_weekend_end
+           p.send_window_weekend_end   AS send_window_weekend_end,
+           p.name                      AS provider_name,
+           c.name                      AS campaign_name,
+           s.stage_number              AS stage_number,
+           s.label                     AS stage_label
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
@@ -284,6 +288,10 @@ export async function runStageDrain(
     send_window_weekend_start: number | null;
     send_window_weekend_end: number | null;
     sender_number: string | null;
+    provider_name: string | null;
+    campaign_name: string | null;
+    stage_number: number | null;
+    stage_label: string | null;
   }[];
 
   const stage = ctx[0];
@@ -787,8 +795,9 @@ export async function runStageDrain(
     await notifyTelegram(
       `🛑 Send circuit breaker TRIPPED\n` +
         `reason: ${stopReason}\n` +
-        `provider: ${providerId} (org ${orgId})\n` +
-        `stage: ${opts.stageId} · sent ${sent}, failed ${failed}, filtered ${filtered}, stuck ${stuck}, remaining ${remaining}\n` +
+        `provider: ${stage.provider_name ?? stage.provider_key ?? String(providerId)}\n` +
+        `campaign: "${stage.campaign_name ?? String(stage.campaign_id)}" · stage ${stage.stage_number != null ? `#${stage.stage_number}` : `id ${opts.stageId}`}${stage.stage_label ? ` "${stage.stage_label}"` : ""}\n` +
+        `sent ${sent}, failed ${failed}, filtered ${filtered}, stuck ${stuck}, remaining ${remaining}\n` +
         `Sending is now PAUSED for this provider — resume manually after fixing the cause.`,
     );
   }
@@ -815,7 +824,7 @@ export async function runStageDrain(
         );
       }
       for (const trip of rec.trips) {
-        await notifyTelegram(optOutBreakerAlertText(trip.campaignId, null, trip.result)).catch(() => {});
+        await notifyTelegram(optOutBreakerAlertText(trip.campaignId, stage.campaign_name ?? null, trip.result)).catch(() => {});
       }
     } catch (e) {
       console.error("[textrequest-send-reject] failed to record send-time opt-outs:", e);
@@ -828,7 +837,8 @@ export async function runStageDrain(
   if (skippedDuplicate > 0) {
     await notifyTelegram(
       `⚠️ Send dedup: ${skippedDuplicate} number(s) SKIPPED (already messaged within 1h)\n` +
-        `stage: ${opts.stageId} · provider ${providerId} (org ${orgId})\n` +
+        `provider: ${stage.provider_name ?? stage.provider_key ?? String(providerId)}\n` +
+        `campaign: "${stage.campaign_name ?? String(stage.campaign_id)}" · stage ${stage.stage_number != null ? `#${stage.stage_number}` : `id ${opts.stageId}`}${stage.stage_label ? ` "${stage.stage_label}"` : ""}\n` +
         `sent ${sent}, skipped_duplicate ${skippedDuplicate}, remaining ${remaining}\n` +
         `These were excluded from sending, not opted out. Review the stage if unexpected.`,
     );

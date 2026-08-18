@@ -134,6 +134,9 @@ interface MainRow {
   creative_text: string | null;
   creative_allow_multi_segment: boolean;
   exclude_prior_offer_contacts: boolean;
+  campaign_name: string | null;
+  stage_number: number | null;
+  label: string | null;
 }
 
 export async function kickoffStageSend(
@@ -175,7 +178,10 @@ export async function kickoffStageSend(
       s.parent_stage_id          AS parent_stage_id,
       cr.text                    AS creative_text,
       cr.allow_multi_segment     AS creative_allow_multi_segment,
-      c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts
+      c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
+      c.name                         AS campaign_name,
+      s.stage_number                 AS stage_number,
+      s.label                        AS label
     FROM campaigns c
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
     LEFT JOIN brands b ON b.id = c.brand_id
@@ -369,7 +375,7 @@ export async function kickoffStageSend(
         `would be REFUSED: rendered body has no opt-out language (STOP). Not enforced for non-txr yet.`,
     );
     void notifyTelegram(
-      `⚠️ Opt-out guard (DRY-RUN): stage ${stageId} / campaign ${campaignId} — provider ${guardKey ?? "unknown"} ` +
+      `⚠️ Opt-out guard (DRY-RUN): campaign "${row.campaign_name ?? String(campaignId)}" · stage ${row.stage_number != null ? `#${row.stage_number}` : `id ${stageId}`}${row.label ? ` "${row.label}"` : ""} — provider ${guardKey ?? "unknown"} ` +
         `has NO opt-out language ("STOP") in the rendered body. Enforcement is txr-only for now; this counts toward ` +
         `the 30-day dry-run before enabling it for other providers. Add opt-out text to the stage's stop_text.`,
     ).catch(() => {});
@@ -397,6 +403,7 @@ export async function kickoffStageSend(
       excludePriorOffer: row.exclude_prior_offer_contacts,
     },
     excludeMaterializedStageId: stageId,
+    campaignName: row.campaign_name ?? null,
   });
 
   if (recipients.length === 0) {

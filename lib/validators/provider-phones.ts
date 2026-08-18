@@ -83,6 +83,24 @@ export const providerPhoneUpdateSchema = z
     short_domain_id: z.number().int().positive().nullable().optional(),
     // Q4: may this number text contacts whose carrier we could not determine?
     allow_unknown_carrier: z.boolean().optional(),
+    // Per-number opt-out footer (migration 0141) — the MOST SPECIFIC level of
+    // the footer chain (number > account > stage > default).
+    //
+    // COMPLIANCE-BEARING: whatever wins the chain is the opt-out wording that
+    // ships, and the kickoff gate validates the winner. A value set here must
+    // contain a STOP keyword or every stage sending from this number is refused
+    // with `missing_opt_out_language`. Nullable so an operator can clear it and
+    // fall back to the account, which is NOT the same as setting it to "".
+    opt_out_footer: z
+      .string()
+      .trim()
+      .max(160, "Opt-out text must be 160 characters or fewer")
+      .nullable()
+      .optional()
+      // "" and "   " mean NO PREFERENCE, not an empty footer. resolveOptOutFooter
+      // already treats whitespace-only as absent; normalising here keeps the
+      // column from storing a value that reads as set but behaves as unset.
+      .transform((v) => (v == null || v.trim() === "" ? null : v.trim())),
     // Q4: this number's per-carrier policy rows, REPLACE-ALL. The payload is
     // the complete desired state for the number — carriers omitted from it end
     // up with no row, which means allowed and uncapped. Sent in the same PATCH
@@ -130,6 +148,7 @@ export const providerPhoneUpdateSchema = z
       data.max_sends_per_second !== undefined ||
       data.dashboard_id !== undefined ||
       data.allow_unknown_carrier !== undefined ||
+      data.opt_out_footer !== undefined ||
       data.carrier_limits !== undefined ||
       data.short_domain_id !== undefined ||
       data.provider_id !== undefined,

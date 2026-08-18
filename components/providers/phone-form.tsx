@@ -91,6 +91,9 @@ export type PhoneSubmitValues = PhoneFormValues & {
   provider_id?: number;
   allow_unknown_carrier?: boolean;
   carrier_limits?: CarrierLimit[];
+  /** Per-number opt-out footer (migration 0141). `null` clears the override and
+   *  returns the number to the account's text. */
+  opt_out_footer?: string | null;
 };
 
 export interface PhoneFormProps {
@@ -116,6 +119,16 @@ export interface PhoneFormProps {
   providers?: ProviderOption[];
   /** edit mode: the number's stored `allow_unknown_carrier` (Q4). */
   initialAllowUnknownCarrier?: boolean;
+  /** edit mode: the number's stored opt-out footer (migration 0141). */
+  initialOptOutFooter?: string | null;
+  /** The account-level footer this number would fall back to, and the account's
+   *  name — shown as the placeholder so the operator can see what they are
+   *  overriding rather than guessing. */
+  providerOptOutFooter?: string | null;
+  providerName?: string | null;
+  /** True when the connection type appends its OWN opt-out text, in which case
+   *  nothing set here (or anywhere) is used. */
+  providerAppendsOwnOptOut?: boolean;
   /** edit mode: the number's stored carrier policy rows (Q4). Absent carrier =
    *  allowed and uncapped, so an empty array is a complete, meaningful state. */
   initialCarrierLimits?: CarrierLimit[];
@@ -131,7 +144,11 @@ export function PhoneForm({
   existingPhoneNumber,
   currentProviderId,
   providers,
+  providerOptOutFooter,
+  providerName,
+  providerAppendsOwnOptOut,
   initialAllowUnknownCarrier,
+  initialOptOutFooter,
   initialCarrierLimits,
   onSubmit,
   onCancel,
@@ -156,6 +173,14 @@ export function PhoneForm({
   // operator's edits with the stored values.
   const [allowUnknownCarrier, setAllowUnknownCarrier] = useState(
     initialAllowUnknownCarrier !== false,
+  );
+  // Per-number opt-out footer (0141). Outside the zod form for the same reason
+  // as the carrier policy: it lives on the UPDATE schema only, and the create
+  // resolver would strip it on submit. Seeded once — the dialog is remounted
+  // per phone via a `key`, so no effect can later overwrite an operator's edit
+  // with the stored value (the bug that used to wipe the short-domain override).
+  const [optOutFooter, setOptOutFooter] = useState<string>(
+    initialOptOutFooter ?? "",
   );
   // Kept as the FULL row set, not just a list of blocked names, so a Q5 daily
   // cap on a carrier survives an allow-list edit instead of being replaced away
@@ -304,6 +329,10 @@ export function PhoneForm({
                   provider_id: targetProviderId,
                   allow_unknown_carrier: allowUnknownCarrier,
                   carrier_limits: carrierLimits,
+                  // "" means NO PREFERENCE, not an empty footer — send null so
+                  // the column clears and the chain falls through.
+                  opt_out_footer:
+                    optOutFooter.trim() === "" ? null : optOutFooter.trim(),
                 }
               : values,
           ),
@@ -660,6 +689,74 @@ export function PhoneForm({
             );
           }}
         />
+
+        {/* Per-number opt-out footer (migration 0141). Same shape as the
+            short-domain override above it: leaving it empty INHERITS, and the
+            inherited value is shown rather than implied. Edit mode only — the
+            chain is a property of a number that already exists. */}
+        {isEdit
+          ? (() => {
+              const inherited = (providerOptOutFooter ?? "").trim();
+              const own = optOutFooter.trim();
+              // What this number will actually send, by the same precedence the
+              // send path uses. The stage level is not knowable here (a number
+              // is not bound to one stage), so the honest statement stops at
+              // "falls through to the stage's STOP text".
+              const winner = providerAppendsOwnOptOut
+                ? "provider_appends"
+                : own
+                  ? "number"
+                  : inherited
+                    ? "provider"
+                    : "stage";
+              return (
+                <FormItem>
+                  <FormLabel>Opt-out text</FormLabel>
+                  <FormControl>
+                    <Input
+                      placeholder={
+                        providerAppendsOwnOptOut
+                          ? "Not used — this provider appends its own"
+                          : inherited
+                            ? `${inherited}  (from ${providerName ?? "the account"})`
+                            : "Falls through to the stage's STOP text"
+                      }
+                      disabled={isSubmitting || providerAppendsOwnOptOut}
+                      value={optOutFooter}
+                      onChange={(e) => setOptOutFooter(e.target.value)}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {providerAppendsOwnOptOut ? (
+                      <>
+                        {providerName ?? "This provider"} appends its own opt-out
+                        wording, so nothing set here is sent.
+                      </>
+                    ) : winner === "number" ? (
+                      <>
+                        This number&apos;s own opt-out text{" "}
+                        <strong>replaces</strong> the account&apos;s and the
+                        stage&apos;s on every message sent from it. It must
+                        contain a STOP keyword, or those stages are refused.
+                      </>
+                    ) : winner === "provider" ? (
+                      <>
+                        Leave empty to use {providerName ?? "the account"}&apos;s
+                        opt-out text (shown above). Set it only if this number
+                        must say something different.
+                      </>
+                    ) : (
+                      <>
+                        Leave empty to fall through to each stage&apos;s own STOP
+                        text. Set it only if this number must say something
+                        different on every message.
+                      </>
+                    )}
+                  </FormDescription>
+                </FormItem>
+              );
+            })()
+          : null}
 
         {/* ── Q4: per-number carrier policy ─────────────────────────────
             Edit mode only: the policy rows are keyed on the phone id, which

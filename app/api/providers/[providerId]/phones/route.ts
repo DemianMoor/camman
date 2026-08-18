@@ -111,6 +111,30 @@ export async function GET(
       // surfaced so the preview resolves the SAME chain the send path does.
       opt_out_footer: provider_phones.opt_out_footer,
       short_domain_id: provider_phones.short_domain_id,
+      // Q4 per-number carrier policy. Both halves travel with the phone so the
+      // Edit dialog hydrates from ONE request — a second fetch on dialog-open
+      // would race the form's defaultValues and redisplay a saved policy as
+      // empty, which is exactly how the short-domain override silently cleared
+      // itself (see the guard comment in components/providers/phone-form.tsx).
+      allow_unknown_carrier: provider_phones.allow_unknown_carrier,
+      // The number's policy rows, aggregated. '[]' — not NULL — when the number
+      // has none, so the client never has to distinguish "no policy" from "not
+      // loaded"; absence of a row already means allowed and uncapped.
+      carrier_limits: drizzleSql<
+        { carrier_norm: string; allowed: boolean; daily_limit: number | null }[]
+      >`(
+        SELECT coalesce(
+          json_agg(json_build_object(
+            'carrier_norm', pcl.carrier_norm,
+            'allowed', pcl.allowed,
+            'daily_limit', pcl.daily_limit
+          ) ORDER BY pcl.carrier_norm),
+          '[]'::json
+        )
+        FROM phone_carrier_limits pcl
+        WHERE pcl.provider_phone_id = ${provider_phones.id}
+          AND pcl.org_id = ${provider_phones.org_id}
+      )`,
       // The phone's own override resolved to a DOMAIN STRING, and only when
       // ACTIVE — a pending host is never mintable, so it must reach the client
       // as null rather than as a candidate the preview could rank. This is the

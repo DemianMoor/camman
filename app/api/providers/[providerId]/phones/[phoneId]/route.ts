@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -187,10 +187,17 @@ export async function PATCH(
     });
   }
 
+  // `carrier_limits` is a CHILD TABLE, not a column on provider_phones. Pull it
+  // out before the column loop, which would otherwise try to SET a column that
+  // does not exist.
+  const carrierLimits = editable.carrier_limits;
+
   const updates: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(editable)) {
     if (v === undefined) continue;
-    if (k === "brand_id") {
+    if (k === "carrier_limits") {
+      continue;
+    } else if (k === "brand_id") {
       updates[k] = v ?? null;
     } else if (k === "cost_per_sms") {
       updates[k] = String(v);
@@ -264,7 +271,10 @@ export async function PATCH(
 
   // Nothing to change (e.g. provider_id equals the current provider and no
   // other fields) — return the current row rather than issue an empty UPDATE.
-  if (Object.keys(updates).length === 0) {
+  // A patch may legitimately carry ONLY carrier_limits (an allow-list edit
+  // that touched no phone column), in which case there is nothing to SET but
+  // there IS something to write — so this early return must not swallow it.
+  if (Object.keys(updates).length === 0 && carrierLimits === undefined) {
     const current = await db
       .select()
       .from(provider_phones)
@@ -284,17 +294,61 @@ export async function PATCH(
     return NextResponse.json(current[0]);
   }
 
-  const updated = await db
-    .update(provider_phones)
-    .set(updates)
-    .where(
-      and(
-        eq(provider_phones.id, phid),
-        eq(provider_phones.provider_id, pid),
-        eq(provider_phones.org_id, orgId),
-      ),
-    )
-    .returning();
+  // ONE transaction for the phone's own columns and its carrier policy rows.
+  // Two requests (or two statements outside a transaction) would let the
+  // unknown-carrier switch save while the allow-list failed, leaving the number
+  // in a state the operator never chose and cannot see.
+  const updated = await db.transaction(async (tx) => {
+    const rows = Object.keys(updates).length
+      ? await tx
+          .update(provider_phones)
+          .set(updates)
+          .where(
+            and(
+              eq(provider_phones.id, phid),
+              eq(provider_phones.provider_id, pid),
+              eq(provider_phones.org_id, orgId),
+            ),
+          )
+          .returning()
+      : await tx
+          .select()
+          .from(provider_phones)
+          .where(
+            and(
+              eq(provider_phones.id, phid),
+              eq(provider_phones.provider_id, pid),
+              eq(provider_phones.org_id, orgId),
+            ),
+          )
+          .limit(1);
+    if (!rows[0]) return rows;
+
+    if (carrierLimits !== undefined) {
+      // REPLACE-ALL: the payload is the number's complete desired policy.
+      // Delete-then-insert rather than upsert-and-diff, because an omitted
+      // carrier must end with NO row — and no row is what "allowed and
+      // uncapped" means. Both statements are org- AND phone-scoped.
+      await tx.execute(drizzleSql`
+        DELETE FROM phone_carrier_limits
+        WHERE provider_phone_id = ${phid} AND org_id = ${orgId}::uuid
+      `);
+      // Only rows that actually SAY something are stored. `allowed = true` with
+      // no cap is identical to no row at all, so writing it would grow the
+      // table without changing any audience and make "is this number
+      // configured?" unanswerable by counting rows.
+      const meaningful = carrierLimits.filter(
+        (r) => r.allowed === false || (r.daily_limit ?? null) !== null,
+      );
+      for (const r of meaningful) {
+        await tx.execute(drizzleSql`
+          INSERT INTO phone_carrier_limits (org_id, provider_phone_id, carrier_norm, allowed, daily_limit)
+          VALUES (${orgId}::uuid, ${phid}, ${r.carrier_norm}, ${r.allowed}, ${r.daily_limit ?? null})
+        `);
+      }
+    }
+    return rows;
+  });
 
   if (!updated[0]) {
     return apiError(404, "Phone not found", API_ERROR_CODES.NOT_FOUND, {

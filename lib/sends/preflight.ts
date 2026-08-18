@@ -90,6 +90,7 @@ interface MainRow {
   behavioral_tier: number | null;
   parent_stage_id: number | null;
   sender_max_sends_per_second: number | null;
+  allow_unknown_carrier: boolean | null;
 }
 
 export async function preflightStageSend(
@@ -117,7 +118,8 @@ export async function preflightStageSend(
       s.split_total       AS split_total,
       s.behavioral_tier   AS behavioral_tier,
       s.parent_stage_id   AS parent_stage_id,
-      pp.max_sends_per_second AS sender_max_sends_per_second
+      pp.max_sends_per_second AS sender_max_sends_per_second,
+      pp.allow_unknown_carrier AS allow_unknown_carrier
     FROM campaigns c
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
     LEFT JOIN creatives cr ON cr.id = s.creative_id
@@ -168,6 +170,13 @@ export async function preflightStageSend(
           creativeId: row.creative_id ?? null,
           offerId: row.offer_id ?? null,
           excludePriorOffer: row.exclude_prior_offer_contacts,
+        },
+        // Q4: the same carrier policy kickoff will apply, so the previewed
+        // recipient count equals what materializes. Omitting it here would make
+        // the checklist promise an audience the send would not produce.
+        carrierPolicy: {
+          providerPhoneId: row.provider_phone_id,
+          allowUnknownCarrier: row.allow_unknown_carrier !== false,
         },
       })}
     ) q

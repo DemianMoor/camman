@@ -42,6 +42,11 @@ export interface PreflightBreakdown {
     content_dedup: number; // saw-this-creative / prior-offer
     lane: number; // behavioral tier/aliveness (lane children only)
     dedup_1h_predicted: number; // would be skipped_duplicate at dispatch (estimate)
+    // Q4: contacts dropped by THIS NUMBER's carrier allow-list, per carrier.
+    // Empty object = no carrier policy applied (the default everywhere today).
+    // Reported per carrier rather than as one total because "excluded 4,102"
+    // tells an operator nothing actionable — "excluded 4,102 T-Mobile" does.
+    carrier: Record<string, number>;
   };
   estimated_drain_seconds: number | null;
   sender_sends_per_second: number | null;
@@ -65,6 +70,8 @@ interface CfgRow {
   creative_id: number | null;
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
+  provider_phone_id: number | null;
+  allow_unknown_carrier: boolean | null;
 }
 
 export async function computePreflightBreakdown(
@@ -79,8 +86,10 @@ export async function computePreflightBreakdown(
   const cfgRows = (await dbc.execute(sql`
     SELECT s.include_no_status, s.include_clickers, s.exclude_clickers,
            s.split_index, s.split_total, s.behavioral_tier, s.parent_stage_id,
-           s.creative_id, c.offer_id, c.exclude_prior_offer_contacts
+           s.creative_id, c.offer_id, c.exclude_prior_offer_contacts,
+           s.provider_phone_id, pp.allow_unknown_carrier
     FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
+    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
     WHERE s.id = ${stageId} AND c.id = ${campaignId} AND c.org_id = ${orgId}::uuid
     LIMIT 1
   `)) as unknown as CfgRow[];
@@ -92,13 +101,21 @@ export async function computePreflightBreakdown(
     pool_total: 0,
     materialized_audience: materialized,
     predicted_sends: materialized,
-    excluded: { opt_out: 0, stage_filter: 0, split: 0, content_dedup: 0, lane: 0, dedup_1h_predicted: 0 },
+    excluded: { opt_out: 0, stage_filter: 0, split: 0, content_dedup: 0, lane: 0, dedup_1h_predicted: 0, carrier: {} },
     estimated_drain_seconds: pf.estimated_drain_seconds,
     sender_sends_per_second: pf.sender_sends_per_second,
     blockers: pf.blockers,
     red: { no_audience: materialized === 0, all_dedup_predicted: false, has_blocker: pf.blockers.length > 0 },
   };
   if (!cfg) return empty;
+
+  // Q4: the same carrier policy kickoff enforces. Every recipient query in this
+  // breakdown must use it, or the numbers describe an audience the send will
+  // not produce.
+  const carrierPolicy = {
+    providerPhoneId: cfg.provider_phone_id,
+    allowUnknownCarrier: cfg.allow_unknown_carrier !== false,
+  };
 
   const filters: StageRecipientFilters = {
     includeNoStatus: cfg.include_no_status,
@@ -137,6 +154,7 @@ export async function computePreflightBreakdown(
           parentStageId: cfg.parent_stage_id ?? null,
         },
         eligibility,
+        carrierPolicy,
       })}
     ) r
     WHERE EXISTS (
@@ -149,6 +167,56 @@ export async function computePreflightBreakdown(
   `)) as unknown as { n: number }[];
   const dedup1h = Number(dedupRows[0]?.n ?? 0);
   const predicted = Math.max(0, materialized - dedup1h);
+
+  // 6. Q4 per-carrier exclusions: contacts that pass every other gate but are
+  //    dropped by THIS NUMBER's carrier policy. Computed as the difference
+  //    between the recipient query WITHOUT the policy and WITH it, grouped by
+  //    carrier — so the figure is exactly "who this number may not text",
+  //    attributable per carrier rather than as one opaque total.
+  //
+  //    Skipped entirely when the stage has no sending number, and cheap when
+  //    the policy is empty (the WITHOUT/WITH queries are then identical and the
+  //    anti-join finds nothing).
+  const carrierExcluded: Record<string, number> = {};
+  if (carrierPolicy.providerPhoneId != null) {
+    const rows = (await dbc.execute(sql`
+      SELECT carrier_norm, count(*)::int AS n FROM (
+        ${stageRecipientsSql({
+          campaignId,
+          orgId,
+          filters: {
+            ...filters,
+            behavioralTier: cfg.behavioral_tier ?? null,
+            parentStageId: cfg.parent_stage_id ?? null,
+          },
+          eligibility,
+        })}
+      ) unrestricted
+      WHERE NOT EXISTS (
+        SELECT 1 FROM (
+          ${stageRecipientsSql({
+            campaignId,
+            orgId,
+            filters: {
+              ...filters,
+              behavioralTier: cfg.behavioral_tier ?? null,
+              parentStageId: cfg.parent_stage_id ?? null,
+            },
+            eligibility,
+            carrierPolicy,
+          })}
+        ) restricted
+        WHERE restricted.contact_id = unrestricted.contact_id
+      )
+      GROUP BY carrier_norm
+      ORDER BY count(*) DESC
+    `)) as unknown as { carrier_norm: string | null; n: number }[];
+    for (const r of rows) {
+      // A NULL carrier is reported under its own label rather than dropped —
+      // an unlabelled exclusion is the kind an operator never notices.
+      carrierExcluded[r.carrier_norm ?? "(no carrier)"] = Number(r.n);
+    }
+  }
 
   return {
     computed_at: new Date().toISOString(),
@@ -163,6 +231,7 @@ export async function computePreflightBreakdown(
       content_dedup: recon.excluded_dedup,
       lane: laneExcluded,
       dedup_1h_predicted: dedup1h,
+      carrier: carrierExcluded,
     },
     estimated_drain_seconds: pf.estimated_drain_seconds,
     sender_sends_per_second: pf.sender_sends_per_second,

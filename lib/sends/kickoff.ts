@@ -133,6 +133,8 @@ interface MainRow {
   // Migration 0112: the send-from number's per-SMS rate, snapshotted onto each
   // stage_sends row so reporting cost survives later edits to the phone/rate.
   provider_cost_per_sms: string | null;
+  // Q4: the sending number's unknown-carrier switch (migration 0142).
+  allow_unknown_carrier: boolean | null;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -178,6 +180,7 @@ export async function kickoffStageSend(
       s.sms_provider_id          AS sms_provider_id,
       s.provider_phone_id        AS provider_phone_id,
       pp.cost_per_sms            AS provider_cost_per_sms,
+      pp.allow_unknown_carrier   AS allow_unknown_carrier,
       s.include_no_status        AS include_no_status,
       s.include_clickers         AS include_clickers,
       s.exclude_clickers         AS exclude_clickers,
@@ -451,6 +454,13 @@ export async function kickoffStageSend(
       creativeId: row.creative_id ?? null,
       offerId: row.offer_id ?? null,
       excludePriorOffer: row.exclude_prior_offer_contacts,
+    },
+    // Q4: the sending NUMBER's carrier allow-list, applied HERE so an excluded
+    // contact never becomes a stage_sends row. ANDs with the campaign-level
+    // carrier filter already frozen into the pool.
+    carrierPolicy: {
+      providerPhoneId: row.provider_phone_id,
+      allowUnknownCarrier: row.allow_unknown_carrier !== false,
     },
     excludeMaterializedStageId: stageId,
   });

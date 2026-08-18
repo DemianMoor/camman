@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { CARRIER_NORMS } from "@/lib/sends/carrier-policy";
+
 // Provider phone validators.
 //
 // On create, `phone_number` is the raw user input — the API normalizes it via
@@ -79,6 +81,39 @@ export const providerPhoneUpdateSchema = z
     // Per-number short-domain override (migration 0137). Null clears it, which
     // returns the number to the brand default rather than breaking minting.
     short_domain_id: z.number().int().positive().nullable().optional(),
+    // Q4: may this number text contacts whose carrier we could not determine?
+    allow_unknown_carrier: z.boolean().optional(),
+    // Q4: this number's per-carrier policy rows, REPLACE-ALL. The payload is
+    // the complete desired state for the number — carriers omitted from it end
+    // up with no row, which means allowed and uncapped. Sent in the same PATCH
+    // as the phone's own columns so the two land in ONE transaction; a separate
+    // endpoint would let the toggle save while the allow-list failed.
+    //
+    // `daily_limit` is carried here (not just `allowed`) so the Q5 cap edits
+    // through the same replace-all and neither field can wipe the other.
+    carrier_limits: z
+      .array(
+        z.object({
+          carrier_norm: z.enum(CARRIER_NORMS),
+          allowed: z.boolean(),
+          daily_limit: z.number().int().positive().nullable().optional(),
+        }),
+      )
+      .max(CARRIER_NORMS.length)
+      .optional()
+      .superRefine((rows, ctx) => {
+        if (!rows) return;
+        const seen = new Set<string>();
+        for (const r of rows) {
+          if (seen.has(r.carrier_norm)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `Duplicate carrier in carrier_limits: ${r.carrier_norm}`,
+            });
+          }
+          seen.add(r.carrier_norm);
+        }
+      }),
     // Move the number to a different provider (reassigns provider_id in place;
     // clears the number's account link). When it differs from the current
     // provider and not-yet-sent stages reference the number, the route returns
@@ -94,6 +129,8 @@ export const providerPhoneUpdateSchema = z
       data.brand_id !== undefined ||
       data.max_sends_per_second !== undefined ||
       data.dashboard_id !== undefined ||
+      data.allow_unknown_carrier !== undefined ||
+      data.carrier_limits !== undefined ||
       data.short_domain_id !== undefined ||
       data.provider_id !== undefined,
     { message: "At least one field must be provided" },

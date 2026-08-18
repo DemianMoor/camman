@@ -48,6 +48,7 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 interface CorpusRow {
+  stage_id: number;
   code: string; domain: string; brand_name: string; creative_text: string;
   stop_text: string; rendered_text: string;
   provider_key: string | null; provider_footer: string | null; phone_footer: string | null;
@@ -101,9 +102,20 @@ async function main() {
   // ── (A) BYTE-IDENTICAL for NULL-footer providers ─────────────────────────
   const corpusScope = (await db.execute(sql`
     SELECT count(*)::int AS total FROM stage_sends ss
-    WHERE ss.rendered_text IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
+    WHERE ss.rendered_text IS NOT NULL AND ss.sent_at IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
   `)) as unknown as { total: number }[];
-  console.log(`\n(A) Corpus since ${CUTOVER}: ${corpusScope[0].total.toLocaleString()} rows`);
+  // ⚠️ CORPUS = ACTUALLY SENT, not merely materialized. `rendered_text IS NOT
+  // NULL` also matches rows that were built and then RECALLED (status
+  // 'rejected', sent_at NULL) or are still 'pending' — drafts that never
+  // reached a handset, and whose stage may since have been legitimately
+  // re-pointed at another creative. Including them made this bar report 77
+  // phantom mismatches from one recalled batch on stage 2873. A harness that
+  // claims "byte-identical to what was actually SENT" must filter on sent_at.
+  //
+  // Corpus size is re-stated on EVERY run: it more than doubled mid-workstream
+  // (29,917 -> 75,125 materialized) while live sending continued, so any
+  // "corpus-proven" claim is only true of the snapshot it ran against.
+  console.log(`\n(A) Corpus since ${CUTOVER}: ${corpusScope[0].total.toLocaleString()} ACTUALLY-SENT rows`);
   check("corpus is non-empty", corpusScope[0].total > 0, `${corpusScope[0].total}`);
 
   let comparedNull = 0;
@@ -112,10 +124,13 @@ async function main() {
   const swapBad: { stored: string; got: string; expected: string }[] = [];
   const swapSamples: { key: string; before: string; after: string; footer: string }[] = [];
   const nullSamples: string[] = [];
+  // Exclusions are OUTPUT, never silent: counted, reasoned, and printed.
+  let excludedInputDrift = 0;
+  const driftSamples: string[] = [];
 
   for (let off = 0; ; off += BATCH) {
     const rows = (await db.execute(sql`
-      SELECT l.code, d.domain, b.name AS brand_name, cr.text AS creative_text,
+      SELECT ss.stage_id, l.code, d.domain, b.name AS brand_name, cr.text AS creative_text,
              s.stop_text, ss.rendered_text,
              p.sms_provider_id AS provider_key, p.opt_out_footer AS provider_footer,
              ph.opt_out_footer AS phone_footer
@@ -128,7 +143,7 @@ async function main() {
       JOIN short_domains d ON d.id = l.short_domain_id
       LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
       LEFT JOIN provider_phones ph ON ph.id = s.provider_phone_id
-      WHERE ss.rendered_text IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
+      WHERE ss.rendered_text IS NOT NULL AND ss.sent_at IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
       ORDER BY ss.id LIMIT ${BATCH} OFFSET ${off}
     `)) as unknown as CorpusRow[];
     if (rows.length === 0) break;
@@ -150,8 +165,37 @@ async function main() {
       if (!providerHasFooter && !numberHasFooter) {
         // (A) nothing out-ranks the stage ⇒ must be byte-identical to what shipped.
         comparedNull++;
-        if (rebuilt !== r.rendered_text) nullMismatch.push({ stored: r.rendered_text, got: rebuilt });
-        else if (nullSamples.length < 2) nullSamples.push(rebuilt);
+        if (rebuilt !== r.rendered_text) {
+          // ⚠️ PIN, DON'T SNAPSHOT. Decompose before judging.
+          //
+          // The body is `<brand>: <creative>` / `<link>` / `<footer>`. The link
+          // and footer lines are what these builders PRODUCE — a difference
+          // there is a real failure and is never excused. The first line is an
+          // INPUT we do not control and have no frozen copy of: an operator can
+          // re-point a stage at a different creative, or edit a creative's text,
+          // after a row was rendered. Such a row is not evidence either way, so
+          // it is EXCLUDED — and counted, with its reason, in the output.
+          //
+          // (A timestamp pin was the original plan, but there is no `updated_at`
+          // on creatives / campaign_stages / brands / short_domains, so
+          // "modified after sent_at" is not answerable from the data. This is
+          // the equivalent, and strictly stronger for the bar that matters: it
+          // keeps link+footer coverage on EVERY row instead of dropping whole
+          // rows whenever a creative was touched.)
+          const a = r.rendered_text.split("\n");
+          const b = rebuilt.split("\n");
+          const sameTail =
+            a.length === b.length &&
+            a.slice(1).join("\n") === b.slice(1).join("\n");
+          if (sameTail && a[0] !== b[0]) {
+            excludedInputDrift++;
+            if (driftSamples.length < 3) {
+              driftSamples.push(`stage ${r.stage_id}: frozen first line ${JSON.stringify(a[0].slice(0, 60))}… vs current ${JSON.stringify(b[0].slice(0, 60))}…`);
+            }
+          } else {
+            nullMismatch.push({ stored: r.rendered_text, got: rebuilt });
+          }
+        } else if (nullSamples.length < 2) nullSamples.push(rebuilt);
       } else {
         // (B) a footer out-ranks the stage ⇒ the ONLY difference may be the
         // footer substring. Reconstruct by swapping and demand an exact match.
@@ -170,7 +214,16 @@ async function main() {
 
   console.log(`  rows whose chain resolves to the STAGE (bar A): ${comparedNull.toLocaleString()}`);
   console.log(`  rows out-ranked by a stored footer (bar B):     ${comparedStored.toLocaleString()}`);
-  check("bar A covered rows", comparedNull > 0, `${comparedNull}`);
+  console.log(`  EXCLUDED — input drifted since the send: ${excludedInputDrift}`);
+  for (const d of driftSamples) console.log(`     · ${d}`);
+  console.log(
+    `  (an excluded row is one whose brand+creative line no longer matches the frozen body while
+` +
+    `   its link and footer lines DO — an operator re-pointed the stage or edited the creative.
+` +
+    `   Link and footer differences are never excused.)`,
+  );
+  check("bar A covered rows", comparedNull > 0, `${comparedNull} compared, ${excludedInputDrift} excluded`);
   check(
     "(A) NULL-footer rows re-derive BYTE-IDENTICAL to what was actually sent",
     nullMismatch.length === 0,

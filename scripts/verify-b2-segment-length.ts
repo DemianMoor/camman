@@ -67,7 +67,7 @@ async function main() {
     LEFT JOIN creatives cr ON cr.id = s.creative_id
     LEFT JOIN links l ON l.id = ss.link_id
     LEFT JOIN short_domains d ON d.id = l.short_domain_id
-    WHERE ss.rendered_text IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
+    WHERE ss.rendered_text IS NOT NULL AND ss.sent_at IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
   `)) as unknown as {
     total: number; domains: number; missing_link: number; missing_creative: number;
   }[];
@@ -76,11 +76,18 @@ async function main() {
     FROM stage_sends ss
     JOIN links l ON l.id = ss.link_id
     JOIN short_domains d ON d.id = l.short_domain_id
-    WHERE ss.rendered_text IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
+    WHERE ss.rendered_text IS NOT NULL AND ss.sent_at IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
     GROUP BY d.domain, length(d.domain) ORDER BY count(*) DESC
   `)) as unknown as { domain: string; host_len: number; n: number }[];
 
-  console.log(`\nCORPUS SCOPE — stage_sends.rendered_text since ${CUTOVER}`);
+  // ⚠️ ACTUALLY-SENT ONLY. `rendered_text IS NOT NULL` also matches rows that
+  // were materialized and then RECALLED (status 'rejected', sent_at NULL) or are
+  // still 'pending' — drafts that never reached a handset, whose stage may since
+  // have been re-pointed at a different creative. That produced 77 phantom
+  // mismatches here on 2026-08-18. A corpus harness re-derives from FROZEN inputs
+  // only; a live FK an operator can edit is not a valid comparison source.
+  // Corpus size is re-stated on every run.
+  console.log(`\nCORPUS SCOPE — stage_sends.rendered_text, ACTUALLY SENT, since ${CUTOVER}`);
   console.log(`  rows: ${scope[0].total.toLocaleString()}  ·  distinct hosts: ${scope[0].domains}`);
   for (const h of perHost) {
     console.log(`     ${h.domain} (${h.host_len} chars): ${h.n.toLocaleString()} rows`);
@@ -121,7 +128,7 @@ async function main() {
       JOIN creatives cr ON cr.id = s.creative_id
       JOIN links l ON l.id = ss.link_id
       JOIN short_domains d ON d.id = l.short_domain_id
-      WHERE ss.rendered_text IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
+      WHERE ss.rendered_text IS NOT NULL AND ss.sent_at IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
       ORDER BY ss.id
       LIMIT ${BATCH} OFFSET ${off}
     `)) as unknown as CorpusRow[];
@@ -237,7 +244,7 @@ async function main() {
     JOIN creatives cr ON cr.id = s.creative_id
     JOIN links l ON l.id = ss.link_id
     JOIN short_domains d ON d.id = l.short_domain_id
-    WHERE ss.rendered_text IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
+    WHERE ss.rendered_text IS NOT NULL AND ss.sent_at IS NOT NULL AND ss.created_at >= ${CUTOVER}::timestamptz
     ORDER BY d.domain
   `)) as unknown as {
     domain: string; brand_name: string; creative_text: string;

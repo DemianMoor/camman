@@ -134,6 +134,20 @@ A harness that rebuilds historical output and compares it byte-for-byte is only 
 
 ⚠️ A timestamp pin (`exclude rows whose inputs changed after sent_at`) is the obvious design and **is not available here** — there is no `updated_at` on `creatives`, `campaign_stages`, `brands` or `short_domains`. Check before designing around one.
 
+## A corpus assertion must name the WORLD-STATE it models, and pick its cohort accordingly
+
+**A bar that cannot survive its own feature going live is modeling the past.** Every re-derivation harness compares stored output against output rebuilt by *today's* code. That comparison silently assumes the stored rows were produced by the same code — true only until the feature ships. From then on the corpus holds **two populations**, and one assertion cannot be right about both.
+
+Q3 is the worked example. Bar (B) asserted that a body on a footer-configured account differs from today's build *only by the swapped footer substring* — a correct statement about rows rendered **before** the chain shipped, and a false one about rows rendered **after**, whose stored bytes already carry the resolved footer. The first 997 real `tls` sends turned the bar red **because the feature was working**.
+
+The fix is a cohort split, and it has three rules:
+
+- **Split on an EXTERNAL fact, never on the data being judged.** The boundary is the production go-live instant (`Q3_LIVE_AT` — the prod deployment's `success` status). Inferring it from the bodies ("rows ending with the account footer are the post-chain ones") would sort every row into the branch that passes and leave a bar that cannot fail.
+- **Split on the timestamp that names the code which produced the bytes.** `rendered_text` is INSERTed once at **materialization** and only READ at drain, so `stage_sends.created_at` is the render time. `sent_at` is stamped later, at dispatch — a stage materialized before go-live and drained after it carries pre-chain bytes under a post-chain `sent_at`. That population is real and is not small: **667 corpus rows** on the run that established this. The harness counts and prints them every run, so a future "simplification" to `sent_at` is confronted with the number of rows it would misclassify.
+- **State every cohort's size on every run, including the empty ones.** An empty cohort proves nothing and must say so rather than reporting a pass; it is never folded into the other cohort's count. Non-vacuity of the bar as a whole is itself a `check()`, so "the corpus proved nothing today" cannot pass unnoticed.
+
+**Each model must be shown to FAIL on the world it does not describe** (fault injections #5/#6). Otherwise the split is decoration and one model is quietly doing both jobs. Synthesize those bodies rather than drawing them from the corpus, so the proof holds when a cohort is empty.
+
 ## Prod-writing test suites must enumerate and clean EVERY entity type they create
 
 A teardown that stops at its first failure leaks silently, because the crash surfaces *after* the assertions have printed their result — which is when nobody is reading.

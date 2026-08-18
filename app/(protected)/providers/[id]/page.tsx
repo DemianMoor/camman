@@ -85,6 +85,12 @@ type Provider = {
   short_link_supported: boolean;
   short_link_example: string | null;
   supports_api_send: boolean;
+  // The ACCOUNT level of the opt-out footer chain (migration 0138), and whether
+  // this connection type appends its own wording (in which case nothing CamMan
+  // stores is sent). Both are shown on the number's Opt-out text field so an
+  // operator can see what they are overriding.
+  opt_out_footer: string | null;
+  appends_own_opt_out?: boolean;
   send_window_weekday_start: number | null;
   send_window_weekday_end: number | null;
   send_window_weekend_start: number | null;
@@ -123,6 +129,8 @@ type Phone = {
   // hydrates from one request.
   allow_unknown_carrier: boolean;
   carrier_limits: CarrierLimit[];
+  // Per-number opt-out footer (0141) — the most specific level of the chain.
+  opt_out_footer: string | null;
   status: PhoneStatus;
   archived_at: string | null;
   created_at: string;
@@ -522,6 +530,10 @@ export default function ProviderDetailPage() {
       // present.
       allow_unknown_carrier: values.allow_unknown_carrier ?? true,
       carrier_limits: values.carrier_limits ?? [],
+      // Per-number opt-out footer (0141). Explicit null clears it and returns
+      // the number to the account's text — omitting the key would leave a
+      // cleared box silently saved as "unchanged".
+      opt_out_footer: values.opt_out_footer ?? null,
     };
     if (isMove) {
       patch.provider_id = values.provider_id;
@@ -1189,6 +1201,10 @@ export default function ProviderDetailPage() {
               dashboard_id: editingPhone.dashboard_id,
               short_domain_id: editingPhone.short_domain_id,
             }}
+            initialOptOutFooter={editingPhone.opt_out_footer}
+            providerOptOutFooter={provider.opt_out_footer}
+            providerName={provider.name}
+            providerAppendsOwnOptOut={provider.appends_own_opt_out === true}
             initialAllowUnknownCarrier={editingPhone.allow_unknown_carrier}
             initialCarrierLimits={editingPhone.carrier_limits ?? []}
             onSubmit={handleEditPhone}

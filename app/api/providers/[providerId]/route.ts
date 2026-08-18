@@ -72,7 +72,14 @@ export async function GET(
     help: f.help ?? null,
   }));
 
-  return NextResponse.json({ ...rows[0], phone_setting_fields });
+  // Whether this CONNECTION TYPE appends its own opt-out wording. Derived from
+  // the descriptor exactly as /api/providers/list does — the number's Opt-out
+  // text field disables itself and says so, rather than letting an operator
+  // type wording that will never be sent. NULL adapter_code = a custom/manual
+  // provider with no adapter, which appends nothing: false, not "unknown".
+  const appends_own_opt_out = descriptor?.appendsOwnOptOut === true;
+
+  return NextResponse.json({ ...rows[0], phone_setting_fields, appends_own_opt_out });
 }
 
 export async function PATCH(

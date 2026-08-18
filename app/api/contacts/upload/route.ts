@@ -11,6 +11,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { bumpContactOrgStats } from "@/lib/contact-stats";
 import { can } from "@/lib/permissions";
 import { validatePhonesBatch } from "@/lib/phone-validation";
 import { contactBulkUploadSchema } from "@/lib/validators/contacts";
@@ -267,6 +268,11 @@ export async function POST(req: NextRequest) {
     groups_applied,
     updated_contacts: updatedContactIds.size,
   };
+
+  // W2 Task 1: real-time rollup increment for new contacts.
+  if (inserted_count > 0) {
+    await bumpContactOrgStats(db, orgId, { total: inserted_count });
+  }
 
   return NextResponse.json(summary, { status: 201 });
 }

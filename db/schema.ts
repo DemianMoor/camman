@@ -3725,3 +3725,29 @@ export const phone_carrier_limits = pgTable(
 
 export type PhoneCarrierLimit = typeof phone_carrier_limits.$inferSelect;
 export type NewPhoneCarrierLimit = typeof phone_carrier_limits.$inferInsert;
+
+// W2 Task 1: contact_org_stats rollup (migration 0145).
+// One row per org, holding pre-computed scalar counts for the contacts page and
+// dashboard. Eliminates the full-table GROUP BY and six uncapped COUNT(*)s on
+// every contacts-page load. Scalar counts are maintained by real-time writer
+// increments; carrier_breakdown JSONB is refreshed by the 1-min cron.
+export const contact_org_stats = pgTable("contact_org_stats", {
+  org_id: uuid("org_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  total_count: integer("total_count").notNull().default(0),
+  archived_count: integer("archived_count").notNull().default(0),
+  opt_out_count: integer("opt_out_count").notNull().default(0),
+  // Per-reason breakdown {opt_out, scrubbed, bounced, suppressed} — non-distinct.
+  opt_out_by_reason: jsonb("opt_out_by_reason")
+    .notNull()
+    .default({ opt_out: 0, scrubbed: 0, bounced: 0, suppressed: 0 }),
+  opt_in_count: integer("opt_in_count").notNull().default(0),
+  clicker_count: integer("clicker_count").notNull().default(0),
+  // JSONB updated by the 1-min cron; null until first run.
+  // Shape: { by_line_type, by_carrier_norm, by_messaging_status }
+  carrier_breakdown: jsonb("carrier_breakdown"),
+  updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ContactOrgStats = typeof contact_org_stats.$inferSelect;

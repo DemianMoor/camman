@@ -6,10 +6,15 @@ import { contacts } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import {
+  isContactStatsRollupEnabled,
+  readContactOrgStats,
+} from "@/lib/contact-stats";
 
-// Org-scoped base-mix aggregate over contacts: counts by line_type, carrier_norm,
-// and messaging_status. Single DB round-trip (grouped by all three, reduced in JS).
-// Permission: contacts.view.
+// Org-scoped carrier/line-type/messaging-status breakdown.
+// W2 Task 1: reads from contact_org_stats rollup when ROLLUP_CONTACT_STATS != "0"
+// (the default). Set ROLLUP_CONTACT_STATS=0 in Vercel env to revert to the live
+// full-table GROUP BY (631ms seq scan) instantly.
 export async function GET() {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -19,6 +24,15 @@ export async function GET() {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
+  if (isContactStatsRollupEnabled()) {
+    const { carrier, updatedAt } = await readContactOrgStats(db, orgId);
+    if (carrier !== null) {
+      return NextResponse.json({ ...carrier, stats_as_of: updatedAt });
+    }
+    // Rollup row not yet populated — fall through to live query for the first load.
+  }
+
+  // Live aggregate path (feature-flag off or rollup not yet seeded).
   const rows = await db
     .select({
       line_type: contacts.line_type,

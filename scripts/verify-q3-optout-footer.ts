@@ -39,6 +39,16 @@ import { hasOptOutLanguage } from "@/lib/sends/segments";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 
 const CUTOVER = "2026-08-17T12:21:28Z";
+
+// The moment the Q3 footer chain went LIVE in production: the prod deployment
+// of 7ec9c4a (GitHub deployment 5961313557, state `success` at this instant).
+//
+// ⚠️ An EXTERNAL fact, deliberately NOT derived from the bodies being judged. A
+// boundary inferred from the text ("rows ending with the provider footer are
+// the post-chain ones") would make this bar unfalsifiable — every row would
+// land in the branch that passes.
+const Q3_LIVE_AT = "2026-08-18T11:01:47Z";
+const Q3_LIVE_MS = new Date(Q3_LIVE_AT).getTime();
 const BATCH = 5000;
 
 let failed = 0;
@@ -49,6 +59,11 @@ function check(name: string, cond: boolean, detail = "") {
 
 interface CorpusRow {
   stage_id: number;
+  // WHEN THE BODY WAS RENDERED — the discriminator for which world-state a row
+  // belongs to. `rendered_text` is INSERTed once by kickoff at materialization
+  // and only ever READ at drain, so `created_at` names the code that produced
+  // it. `sent_at` does NOT: it is stamped later, at dispatch.
+  created_at: string;
   code: string; domain: string; brand_name: string; creative_text: string;
   stop_text: string; rendered_text: string;
   provider_key: string | null; provider_footer: string | null; phone_footer: string | null;
@@ -118,10 +133,37 @@ async function main() {
   console.log(`\n(A) Corpus since ${CUTOVER}: ${corpusScope[0].total.toLocaleString()} ACTUALLY-SENT rows`);
   check("corpus is non-empty", corpusScope[0].total > 0, `${corpusScope[0].total}`);
 
+  // -- WHICH TIMESTAMP DECIDES THE COHORT ----------------------------------
+  // A body is rendered at MATERIALIZATION and dispatched later, so a stage
+  // materialized before the chain shipped and drained after it carries
+  // pre-chain bytes under a post-chain `sent_at`. Those rows are counted here
+  // and the number is printed on every run: it is exactly how many rows a
+  // `sent_at`-based split would place in the wrong world.
+  const straddleRows = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM stage_sends ss
+    WHERE ss.rendered_text IS NOT NULL AND ss.sent_at IS NOT NULL
+      AND ss.created_at >= ${CUTOVER}::timestamptz
+      AND ss.created_at < ${Q3_LIVE_AT}::timestamptz
+      AND ss.sent_at   >= ${Q3_LIVE_AT}::timestamptz
+  `)) as unknown as { n: number }[];
+  const straddlers = straddleRows[0].n;
+  console.log(
+    `    cohort discriminator = RENDER time (stage_sends.created_at) vs Q3 go-live ${Q3_LIVE_AT}`,
+  );
+  console.log(
+    `    ${straddlers.toLocaleString()} corpus row(s) rendered BEFORE go-live were sent AFTER it` +
+      ` - the rows a sent_at split would misclassify`,
+  );
+
   let comparedNull = 0;
-  let comparedStored = 0;
+  // Bar (B) splits by WORLD-STATE. A row rendered before the chain shipped and
+  // a row rendered after it are evidence for two different claims, and only one
+  // model fits each — see the block above the split for the reasoning.
+  let comparedStoredPre = 0;
+  let comparedStoredPost = 0;
   const nullMismatch: { stored: string; got: string }[] = [];
   const swapBad: { stored: string; got: string; expected: string }[] = [];
+  const postBad: { stage_id: number; stored: string; got: string }[] = [];
   const swapSamples: { key: string; before: string; after: string; footer: string }[] = [];
   const nullSamples: string[] = [];
   // Exclusions are OUTPUT, never silent: counted, reasoned, and printed.
@@ -130,7 +172,7 @@ async function main() {
 
   for (let off = 0; ; off += BATCH) {
     const rows = (await db.execute(sql`
-      SELECT ss.stage_id, l.code, d.domain, b.name AS brand_name, cr.text AS creative_text,
+      SELECT ss.stage_id, ss.created_at, l.code, d.domain, b.name AS brand_name, cr.text AS creative_text,
              s.stop_text, ss.rendered_text,
              p.sms_provider_id AS provider_key, p.opt_out_footer AS provider_footer,
              ph.opt_out_footer AS phone_footer
@@ -197,15 +239,46 @@ async function main() {
           }
         } else if (nullSamples.length < 2) nullSamples.push(rebuilt);
       } else {
-        // (B) a footer out-ranks the stage ⇒ the ONLY difference may be the
-        // footer substring. Reconstruct by swapping and demand an exact match.
-        comparedStored++;
-        const expected = r.rendered_text.endsWith(r.stop_text)
-          ? r.rendered_text.slice(0, r.rendered_text.length - r.stop_text.length) + resolved.text
-          : "<stored body does not end with its stage stop_text>";
-        if (rebuilt !== expected) swapBad.push({ stored: r.rendered_text, got: rebuilt, expected });
-        else if (swapSamples.length < 3) {
-          swapSamples.push({ key: r.provider_key ?? "?", before: r.rendered_text, after: rebuilt, footer: resolved.text });
+        // ── (B) a footer out-ranks the stage. WHICH ASSERTION IS CORRECT
+        //    DEPENDS ON WHEN THE BODY WAS RENDERED. ────────────────────────
+        //
+        // PRE-CHAIN (rendered before Q3 shipped): the stored body carries the
+        //   stage's stop_text, because nothing could out-rank it yet. Today's
+        //   builder resolves the account footer instead, so the only admissible
+        //   difference is that substring — SWAP and demand an exact match.
+        //
+        // POST-CHAIN (rendered after Q3 shipped): the chain was already live
+        //   when this body was built, so the stored bytes ALREADY carry the
+        //   resolved footer. The correct assertion is plain BYTE-IDENTITY;
+        //   applying the swap-model here compares the body against a stop_text
+        //   it never contained and reports a mismatch that is really the
+        //   feature working. (Measured: this is exactly what happened — 997
+        //   `tls` rows, the first real sends under the chain, turned the bar
+        //   red the moment Q3 went live.)
+        //
+        // A row rendered post-chain whose body still ends with the STAGE's
+        // stop_text would mean the account footer was configured AFTER that
+        // send. That is not excused here: it is left to fail loudly and be
+        // diagnosed, because the alternative — a carve-out no run exercises —
+        // is how a compliance bar quietly stops being able to fail.
+        const renderedUnderChain = new Date(r.created_at).getTime() >= Q3_LIVE_MS;
+        if (renderedUnderChain) {
+          comparedStoredPost++;
+          if (rebuilt !== r.rendered_text) {
+            postBad.push({ stage_id: r.stage_id, stored: r.rendered_text, got: rebuilt });
+          } else if (swapSamples.length < 3) {
+            swapSamples.push({ key: `${r.provider_key ?? "?"} (post-chain)`, before: r.rendered_text, after: rebuilt, footer: resolved.text });
+          }
+        } else {
+          comparedStoredPre++;
+          const endsWithStop = r.rendered_text.endsWith(r.stop_text);
+          const expected = endsWithStop
+            ? r.rendered_text.slice(0, r.rendered_text.length - r.stop_text.length) + resolved.text
+            : `<pre-chain body does not end with its stage stop_text ${JSON.stringify(r.stop_text)} — it should, nothing could out-rank the stage before ${Q3_LIVE_AT}>`;
+          if (rebuilt !== expected) swapBad.push({ stored: r.rendered_text, got: rebuilt, expected });
+          else if (swapSamples.length < 3) {
+            swapSamples.push({ key: `${r.provider_key ?? "?"} (pre-chain, swapped)`, before: r.rendered_text, after: rebuilt, footer: resolved.text });
+          }
         }
       }
     }
@@ -213,7 +286,10 @@ async function main() {
   }
 
   console.log(`  rows whose chain resolves to the STAGE (bar A): ${comparedNull.toLocaleString()}`);
-  console.log(`  rows out-ranked by a stored footer (bar B):     ${comparedStored.toLocaleString()}`);
+  console.log(
+    `  rows out-ranked by a stored footer (bar B):     ${(comparedStoredPre + comparedStoredPost).toLocaleString()}` +
+      `  [pre-chain ${comparedStoredPre.toLocaleString()} | post-chain ${comparedStoredPost.toLocaleString()}]`,
+  );
   console.log(`  EXCLUDED — input drifted since the send: ${excludedInputDrift}`);
   for (const d of driftSamples) console.log(`     · ${d}`);
   console.log(
@@ -231,27 +307,57 @@ async function main() {
       ? `${comparedNull.toLocaleString()} rows, 0 mismatches`
       : `${nullMismatch.length} MISMATCH(ES) — first:\n     stored : ${JSON.stringify(nullMismatch[0].stored)}\n     rebuilt: ${JSON.stringify(nullMismatch[0].got)}`,
   );
-  // ⚠️ (B) over the CORPUS is NOT OBSERVABLE and must not be reported as a
-  // pass. Every historical send predates the stored footers — `tls` has never
-  // dispatched — so `comparedStored` is 0 and "0 bad out of 0" proves nothing.
-  // Reported honestly here; the REAL, non-vacuous proof of (B) is (B') below,
-  // which renders live stages on the footer-configured provider and shows the
-  // before/after plus the gate verdict on the new text.
-  if (comparedStored > 0) {
+  // ⚠️ BAR (B) IS TWO CLAIMS, NOT ONE, AND EACH IS REPORTED SEPARATELY.
+  //
+  // Both cohorts are stated on every run even when empty. A cohort that is
+  // empty proves nothing and says so; it is never reported as a pass, and it is
+  // never silently folded into the other one's count.
+  if (comparedStoredPre > 0) {
     check(
-      "(B) footer-overridden rows differ ONLY by the swapped footer substring",
+      "(B-pre) PRE-CHAIN rows differ from today's build ONLY by the swapped footer substring",
       swapBad.length === 0,
       swapBad.length === 0
-        ? `${comparedStored.toLocaleString()} rows`
-        : `${swapBad.length} bad — first:\n     got     : ${JSON.stringify(swapBad[0].got)}\n     expected: ${JSON.stringify(swapBad[0].expected)}`,
+        ? `${comparedStoredPre.toLocaleString()} rows rendered before ${Q3_LIVE_AT}`
+        : `${swapBad.length} bad of ${comparedStoredPre.toLocaleString()} — first:
+     got     : ${JSON.stringify(swapBad[0].got)}
+     expected: ${JSON.stringify(swapBad[0].expected)}`,
     );
   } else {
     console.log(
-      "· (B) over the corpus: NOT OBSERVABLE — no historical send was made through a\n" +
-        "     footer-configured provider, so a 0-of-0 comparison would be vacuous.\n" +
-        "     (B') below carries this bar against live stages instead.",
+      `· (B-pre) NOT OBSERVABLE — 0 corpus rows on a footer-configured account were
+` +
+        `     rendered before ${Q3_LIVE_AT}, so a 0-of-0 swap comparison would be vacuous.
+` +
+        `     (B') below carries the before/after against live stages instead.`,
     );
   }
+  if (comparedStoredPost > 0) {
+    check(
+      "(B-post) POST-CHAIN rows re-derive BYTE-IDENTICAL to what was actually sent",
+      postBad.length === 0,
+      postBad.length === 0
+        ? `${comparedStoredPost.toLocaleString()} rows rendered under the live chain, 0 mismatches`
+        : `${postBad.length} MISMATCH(ES) of ${comparedStoredPost.toLocaleString()} — first (stage ${postBad[0].stage_id}):
+     stored : ${JSON.stringify(postBad[0].stored)}
+     rebuilt: ${JSON.stringify(postBad[0].got)}`,
+    );
+  } else {
+    console.log(
+      `· (B-post) NOT OBSERVABLE — nothing has yet been SENT on a footer-configured
+` +
+        `     account since ${Q3_LIVE_AT}. This cohort becomes the primary evidence for (B)
+` +
+        `     as soon as it does, and (B-pre) shrinks to history.`,
+    );
+  }
+  // Non-vacuity of bar (B) as a whole: at least one cohort must carry rows, or
+  // the corpus half of this bar is proving nothing at all and (B') is the only
+  // evidence there is. Stated as a check so it cannot pass unnoticed.
+  check(
+    "bar B is non-vacuous over the corpus (at least one cohort has rows)",
+    comparedStoredPre + comparedStoredPost > 0,
+    `pre=${comparedStoredPre} post=${comparedStoredPost}`,
+  );
   for (const s of nullSamples) console.log(`   (A) sample unchanged: ${JSON.stringify(s)}`);
   for (const s of swapSamples) {
     console.log(`   (B) ${s.key} BEFORE: ${JSON.stringify(s.before)}`);
@@ -383,6 +489,39 @@ async function main() {
     "#4 a longer footer really moves the segment count (counts are footer-sensitive)",
     longer.characters > shorter.characters && longer.segments > shorter.segments,
     `${shorter.characters}ch/${shorter.segments}seg -> ${longer.characters}ch/${longer.segments}seg`,
+  );
+
+  // #5/#6 THE COHORT SPLIT IS LOAD-BEARING. Each model is applied to the world
+  // it does NOT describe and must come out wrong. If either of these passed,
+  // the split would be decoration and one model would be silently doing both
+  // jobs. Synthesized bodies, not corpus rows, so this holds on an empty
+  // corpus and on any future data.
+  const fiStage = "Stop to END";
+  const fiAccount = "Reply STOP to quit";
+  const fiLink = buildRepresentativeTrackedLinkUrl("gdkn.org");
+  const fiResolved = resolveOptOutFooter({ providerFooter: fiAccount, stageStopText: fiStage });
+  // What today's builder produces for both worlds (the chain is live now).
+  const fiRebuilt = buildStageSms({ brandName: "B", creativeText: "hello", linkUrl: fiLink, stopText: fiResolved.text });
+  // A body rendered BEFORE the chain: carries the stage's stop_text.
+  const fiPreStored = buildStageSms({ brandName: "B", creativeText: "hello", linkUrl: fiLink, stopText: fiStage });
+  // A body rendered AFTER it: already carries the resolved account footer.
+  const fiPostStored = fiRebuilt;
+  const swapOf = (stored: string) =>
+    stored.endsWith(fiStage) ? stored.slice(0, stored.length - fiStage.length) + fiResolved.text : "<no stop_text tail>";
+  check(
+    "#5 byte-identity applied to a PRE-chain body FAILS (why that cohort needs the swap model)",
+    fiRebuilt !== fiPreStored && fiRebuilt === swapOf(fiPreStored),
+    `stored ${JSON.stringify(fiPreStored)} vs rebuilt ${JSON.stringify(fiRebuilt)}`,
+  );
+  check(
+    "#6 the swap model applied to a POST-chain body FAILS (why that cohort needs byte-identity)",
+    swapOf(fiPostStored) !== fiRebuilt && fiPostStored === fiRebuilt,
+    `swap-model expected ${JSON.stringify(swapOf(fiPostStored))}, actual stored ${JSON.stringify(fiPostStored)}`,
+  );
+  check(
+    "#7 the post-chain comparison detects a one-character drift in a stored body",
+    fiPostStored !== fiPostStored.replace("quit", "quiT"),
+    "byte comparison is sensitive on the footer line",
   );
 
   // ── SOURCE GUARD ─────────────────────────────────────────────────────────

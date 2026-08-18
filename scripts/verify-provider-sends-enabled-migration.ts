@@ -31,6 +31,7 @@ import path from "node:path";
 
 import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
+import { hasOptOutLanguage } from "@/lib/sends/segments";
 
 let failed = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -126,22 +127,102 @@ async function main() {
   // Non-empty before equal: an empty table would satisfy "every row is true".
   check("provider scope is non-empty", rows.length > 0, `${rows.length} rows`);
 
+  // ⚠️ WHAT THESE TWO CHECKS USED TO SAY, AND WHY THEY DO NOT SAY IT ANY MORE.
+  //
+  // They asserted `sends_enabled = true` on every row and `opt_out_footer IS
+  // NULL` on every row — a correct description of the day migration 0138
+  // shipped, when both columns were inert. Both expire the first time an
+  // operator uses the feature they cover, which is the entire point of having
+  // built it. The footer one was ALREADY RED on clean main: Q3 went live and
+  // the `tls` account carries "Reply STOP to quit".
+  //
+  // A guard that goes red on correct use is not a guard, it is a countdown, and
+  // a suite with a known-red check in it stops being read at all. The live
+  // configuration is REPORTED above; what is asserted here is what stays true
+  // no matter how the operator configures things.
   const notEnabled = rows.filter((r) => r.sends_enabled !== true);
+  console.log(
+    `     sends_enabled off on: ${notEnabled.length ? notEnabled.map((r) => `#${r.id} ${r.sms_provider_id}`).join(", ") : "none"}`,
+  );
+  // DURABLE: the column is NOT NULL, so it must be a real boolean on every row.
+  // A NULL here would make `IS NOT FALSE` and `= true` disagree across the six
+  // enforcement sites — the exact hazard the LEFT JOIN convention exists for.
   check(
-    "every provider row has sends_enabled = true (behaviour unchanged)",
-    rows.length > 0 && notEnabled.length === 0,
-    notEnabled.length
-      ? `off on: ${notEnabled.map((r) => `#${r.id} ${r.sms_provider_id}`).join(", ")}`
-      : `all ${rows.length} rows enabled`,
+    "sends_enabled is a real boolean on every row (never NULL)",
+    rows.length > 0 && rows.every((r) => r.sends_enabled === true || r.sends_enabled === false),
+    `${rows.length} rows checked`,
   );
 
-  const withFooter = rows.filter((r) => r.opt_out_footer != null);
+  const withFooter = rows.filter((r) => (r.opt_out_footer ?? "").trim().length > 0);
+  console.log(
+    `     opt_out_footer set on: ${withFooter.length ? withFooter.map((r) => `#${r.id} ${r.sms_provider_id}=${JSON.stringify(r.opt_out_footer)}`).join(", ") : "none"}`,
+  );
+  // DURABLE, and COMPLIANCE-BEARING: an account footer out-ranks the stage's
+  // STOP text on every message sent through that account, and the kickoff gate
+  // validates the winner. A value here without a STOP keyword does not degrade
+  // gracefully — it REFUSES every stage on the account. So the invariant is not
+  // "nobody has set one", it is "anything set is sendable".
+  const badFooter = withFooter.filter((r) => !hasOptOutLanguage(r.opt_out_footer!));
   check(
-    "every provider row has opt_out_footer IS NULL (STOP text unchanged)",
-    withFooter.length === 0,
-    withFooter.length
-      ? `set on: ${withFooter.map((r) => `#${r.id} ${r.sms_provider_id}`).join(", ")}`
-      : `all ${rows.length} rows NULL`,
+    "every provider footer that EXISTS contains a STOP keyword",
+    badFooter.length === 0,
+    badFooter.length
+      ? `NON-COMPLIANT on: ${badFooter.map((r) => `#${r.id} ${r.sms_provider_id}=${JSON.stringify(r.opt_out_footer)}`).join(", ")}`
+      : `${withFooter.length} configured footer(s) checked`,
+  );
+  // And the column still means what it meant: whitespace is not a footer.
+  const blankish = rows.filter((r) => r.opt_out_footer != null && r.opt_out_footer.trim() === "");
+  check(
+    "no provider row stores a whitespace-only footer (that reads as set, behaves as unset)",
+    blankish.length === 0,
+    blankish.map((r) => `#${r.id} ${r.sms_provider_id}`).join(", ") || `${rows.length} rows checked`,
+  );
+
+
+  // ── THE REWRITTEN GUARD MUST BE ABLE TO GO RED ───────────────────────────
+  //
+  // A durable invariant is worthless if today's data happens to satisfy it by
+  // accident. The offending state is SYNTHESIZED IN A TRANSACTION AND ROLLED
+  // BACK, so this proves the check discriminates without configuring anything.
+  console.log("\nSELF-TEST — synthesized offending state, rolled back:");
+  const RB = Symbol("rollback");
+  try {
+    await db.transaction(async (tx) => {
+      const victim = rows[0];
+      await tx.execute(sql`
+        UPDATE sms_providers SET opt_out_footer = 'No more messages' WHERE id = ${victim.id}
+      `);
+      const probe = (await tx.execute(sql`
+        SELECT id, sms_provider_id, opt_out_footer FROM sms_providers WHERE id = ${victim.id}
+      `)) as unknown as { id: number; sms_provider_id: string; opt_out_footer: string | null }[];
+      check(
+        "a NON-COMPLIANT provider footer would be CAUGHT (STOP-keyword check discriminates)",
+        !hasOptOutLanguage(probe[0].opt_out_footer ?? ""),
+        `injected ${JSON.stringify(probe[0].opt_out_footer)} on #${victim.id} — the live check would fail on this`,
+      );
+      await tx.execute(sql`
+        UPDATE sms_providers SET opt_out_footer = '   ' WHERE id = ${victim.id}
+      `);
+      const blank = (await tx.execute(sql`
+        SELECT opt_out_footer FROM sms_providers WHERE id = ${victim.id}
+      `)) as unknown as { opt_out_footer: string | null }[];
+      check(
+        "a WHITESPACE-ONLY provider footer would be CAUGHT",
+        blank[0].opt_out_footer != null && blank[0].opt_out_footer.trim() === "",
+        "reads as set, behaves as unset — the live check would fail on this",
+      );
+      throw RB;
+    });
+  } catch (e) {
+    if (e !== RB) throw e;
+  }
+  const restored = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM sms_providers WHERE opt_out_footer IS NOT NULL
+  `)) as unknown as { n: number }[];
+  check(
+    "self-test rolled back — provider footers are exactly as this run found them",
+    restored[0].n === withFooter.length,
+    `before=${withFooter.length} after=${restored[0].n}`,
   );
 
   // ── 3. Enforcement is wired (the INVERSE of R1's retired inertness check) ──

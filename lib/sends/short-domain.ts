@@ -208,33 +208,39 @@ export interface BrandShortDomainRow {
   domain: string;
   status: string;
   is_default: boolean;
+  /** Minted links on this host. Advisory — Delete is enforced server-side. */
+  link_count: number;
 }
 
 // LIST — every domain of one brand, for the management surface.
 //
-// ⚠️ DELIBERATELY CARRIES NO MINTED-LINK COUNT. It used to select
-// `(SELECT count(*) FROM links WHERE short_domain_id = d.id)` per row, purely so
-// the UI could show "N minted links" and pre-disable Delete. `links` holds
-// 3,227,905 rows and has NO index covering `short_domain_id`, so each count was
-// a parallel seq scan of the whole table (~3.1s measured). One brand's list cost
-// 6,822ms against 48ms without it, and the page issues one request per brand
-// SERIALLY — ~20.5s before anything rendered, which is also why a "Make default"
-// click appeared to do nothing: the write landed instantly and the refetch
-// behind it took twenty seconds.
+// CARRIES THE MINTED-LINK COUNT AGAIN, and only because migration 0144 gave it
+// an index. The history matters, because the count was removed once already:
 //
-// The count was never load-bearing: `deleteShortDomain` re-checks minted links
-// server-side and refuses with `domain_in_use`, so the client figure only ever
-// pre-disabled a button the server already guards. Dropping it is a 140x
-// improvement for a advisory number.
+//   before 0144  Seq Scan on links (3.28M rows) per domain — 12,574 ms for
+//                brand 8's three domains, and the page fetched one brand at a
+//                time, so ~20.5 s passed before anything rendered. A successful
+//                "Make default" looked like it had done nothing.
+//   after  0144  Index Only Scan using links_short_domain_id_idx —
+//                623 ms warm for the same three domains. 20x.
 //
-// To bring it back, add an index on `links(short_domain_id)` in its own
-// migration and re-measure — deliberately NOT done here.
+// ⚠️ THE COST SCALES WITH LINK VOLUME, NOT WITH DOMAIN COUNT. Brand 8's busiest
+// host alone carries 1,093,095 links and the count walks every index entry, so
+// this figure will keep growing. It is affordable today because the page
+// fetches brands in PARALLEL (#88), making wall-clock the slowest brand rather
+// than their sum. If it becomes slow again, cap it (exact up to N, "N+" beyond)
+// rather than removing it a second time — and re-measure, do not assume.
+//
+// Still NOT load-bearing: `deleteShortDomain` re-checks minted links
+// server-side and refuses with `domain_in_use`. This figure only pre-disables a
+// button the server already guards, and tells the operator why.
 export async function listBrandShortDomains(
   dbc: DbOrTx,
   { orgId, brandId }: { orgId: string; brandId: number },
 ): Promise<BrandShortDomainRow[]> {
   return (await dbc.execute(sql`
-    SELECT d.id, d.domain, d.status, d.is_default
+    SELECT d.id, d.domain, d.status, d.is_default,
+           (SELECT count(*)::int FROM links l WHERE l.short_domain_id = d.id) AS link_count
     FROM short_domains d
     WHERE d.org_id = ${orgId} AND d.brand_id = ${brandId}
     ORDER BY d.is_default DESC, d.created_at ASC, d.id ASC

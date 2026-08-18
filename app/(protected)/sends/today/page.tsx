@@ -22,6 +22,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { formatPhoneInternational } from "@/lib/phone-validation";
 import {
   STAGE_STATUS_META,
   STAGE_STATUS_ORDER,
@@ -68,10 +69,17 @@ type PausedCampaign = {
   held_messages: number;
 };
 
+type PreparedByPhone = {
+  phone_number: string | null;
+  number_type: string | null;
+  count: number;
+};
+
 type FleetResponse = {
   data: FleetStage[];
   counts: Partial<Record<StageOperationalStatus, number>>;
   paused_campaigns: PausedCampaign[];
+  prepared_by_phone: PreparedByPhone[];
 };
 
 type SendState = {
@@ -310,6 +318,41 @@ export default function FleetTodayPage() {
               <p className="text-[11px] text-muted-foreground">
                 Messages prepared across today&apos;s stages.
               </p>
+              {fleet && fleet.prepared_by_phone.length > 0 ? (
+                <div className="pt-1">
+                  <p className="mb-1 text-[11px] font-medium text-muted-foreground">
+                    By number
+                  </p>
+                  <div className="space-y-0.5">
+                    {fleet.prepared_by_phone.map((row, i) => (
+                      <div
+                        key={i}
+                        className="flex items-baseline justify-between gap-2 text-[11px] text-muted-foreground"
+                      >
+                        <span className="truncate font-mono">
+                          {row.phone_number
+                            ? formatPhoneInternational(row.phone_number)
+                            : "(no phone)"}
+                          {row.number_type ? (
+                            <span className="ml-1 opacity-60">
+                              {row.number_type === "10dlc"
+                                ? "10DLC"
+                                : row.number_type === "toll_free"
+                                  ? "TF"
+                                  : row.number_type === "short_code"
+                                    ? "SC"
+                                    : row.number_type}
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="shrink-0 tabular-nums">
+                          {row.count.toLocaleString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
             {sendState ? (
               <VolumeCapsMeter

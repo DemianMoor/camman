@@ -856,6 +856,11 @@ export const provider_phones = pgTable(
     // today. COMPLIANCE-BEARING: the winner of the chain is the opt-out
     // language that actually ships, and the kickoff gate validates the winner.
     opt_out_footer: text("opt_out_footer"),
+    // Q4: may this number text contacts whose carrier we could not determine?
+    // Covers all three unknown-ish buckets ('Unknown', 'Unmapped',
+    // 'Unidentified') with one switch. TRUE on every row = today's behaviour.
+    // Never default this to false — unknown must never silently suppress.
+    allow_unknown_carrier: boolean("allow_unknown_carrier").notNull().default(true),
     short_domain_id: integer("short_domain_id").references(
       () => short_domains.id,
       { onDelete: "set null" },
@@ -3680,3 +3685,43 @@ export const counted_clickers = pgTable(
 );
 
 export type CountedClicker = typeof counted_clickers.$inferSelect;
+
+// Q4/Q5 — per-NUMBER carrier policy (migration 0142). One row per
+// (number, carrier); an ABSENT row means allowed and uncapped, which is what
+// makes the empty table a no-op against today's behaviour.
+//
+//   allowed = false     -> excluded from this number's audience at MATERIALIZATION
+//   daily_limit = NULL  -> uncapped
+//   daily_limit = N     -> at most N sends to this carrier per ET CALENDAR DAY
+//                          (Q5 — distinct from the rolling-24h circuit breaker)
+export const phone_carrier_limits = pgTable(
+  "phone_carrier_limits",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    provider_phone_id: integer("provider_phone_id")
+      .notNull()
+      .references(() => provider_phones.id, { onDelete: "cascade" }),
+    carrier_norm: text("carrier_norm").notNull(),
+    allowed: boolean("allowed").notNull().default(true),
+    daily_limit: integer("daily_limit"),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("phone_carrier_limits_phone_carrier_uniq").on(
+      table.org_id,
+      table.provider_phone_id,
+      table.carrier_norm,
+    ),
+    index("phone_carrier_limits_phone_idx").on(table.provider_phone_id),
+    check(
+      "phone_carrier_limits_daily_limit_positive",
+      sql`${table.daily_limit} IS NULL OR ${table.daily_limit} > 0`,
+    ),
+  ],
+);
+
+export type PhoneCarrierLimit = typeof phone_carrier_limits.$inferSelect;
+export type NewPhoneCarrierLimit = typeof phone_carrier_limits.$inferInsert;

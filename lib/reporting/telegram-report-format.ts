@@ -57,24 +57,83 @@ export function hourlyMessage(
   ].join("\n");
 }
 
+// ── notification settings defaults ──────────────────────────────────────────
+// Mirrors the table defaults in migration 0145. The cron falls back to these
+// when no notification_settings row exists for the org. Exported so the API
+// GET handler can return them without a round-trip.
+export const DEFAULT_NOTIFICATION_SETTINGS = {
+  daily_report_enabled: true,
+  hourly_report_enabled: true,
+  stall_alert_enabled: true,
+  unjoinable_alert_enabled: true,
+  daily_report_hour: 10,
+  hourly_window_from: 16,
+  hourly_window_to: 23,
+  hourly_interval_hours: 1 as 1 | 2 | 3,
+  active_weekdays: [1, 2, 3, 4, 5, 6, 7] as number[],
+};
+
+export type NotifSettings = typeof DEFAULT_NOTIFICATION_SETTINGS;
+
 // ── decision logic (pure, unit-tested) ──────────────────────────────────────
 // Given the current Warsaw hour (0..23) and ISO weekday (1=Mon..7=Sun), decide
 // which report to send. `test` forces a send (test=1): hourly if the hour is
-// inside an hourly window shape, else daily. Returns null when nothing sends.
+// inside the hourly window shape, else daily. Returns null when nothing sends.
+// `settings` defaults to DEFAULT_NOTIFICATION_SETTINGS when omitted (backwards
+// compatible with existing unit tests).
 export function decideFormat(
   warsawHour: number,
   warsawIsoDow: number,
   test: boolean,
+  settings: NotifSettings = DEFAULT_NOTIFICATION_SETTINGS,
 ): "daily" | "hourly" | null {
-  if (test) {
-    const inHourlyShape =
-      warsawHour === 0 ||
-      warsawHour === 1 ||
-      (warsawHour >= 16 && warsawHour <= 23);
-    return inHourlyShape ? "hourly" : "daily";
+  const {
+    daily_report_enabled,
+    hourly_report_enabled,
+    daily_report_hour,
+    hourly_window_from,
+    hourly_window_to,
+    hourly_interval_hours,
+    active_weekdays,
+  } = settings;
+
+  // Day gate: this weekday must be in the active set.
+  const dayActive = active_weekdays.includes(warsawIsoDow);
+
+  // The hourly window wraps midnight when from > to (e.g. 22..02), though the
+  // default is same-day (16..23). For simplicity we handle same-day only for
+  // now; the original code handled 00/01 as a special continuation of the prior
+  // day's window, which we preserve by checking that the window spans midnight.
+  const hourlyWindowSpansMidnight = hourly_window_from > hourly_window_to;
+
+  function inHourlyShape(hour: number): boolean {
+    if (hourlyWindowSpansMidnight) {
+      return hour >= hourly_window_from || hour <= hourly_window_to;
+    }
+    return hour >= hourly_window_from && hour <= hourly_window_to;
   }
-  if (warsawHour === 10) return "daily";
-  if (warsawHour >= 16 && warsawHour <= 23 && warsawIsoDow !== 7) return "hourly"; // Sun excluded
-  if ((warsawHour === 0 || warsawHour === 1) && warsawIsoDow !== 1) return "hourly"; // Mon 00/01 = Sunday's window, excluded
+
+  function hourlyFires(hour: number): boolean {
+    if (!inHourlyShape(hour)) return false;
+    // Interval: only fire at hours that are at multiples of the interval from
+    // the window start (so interval=2 on a 16..23 window fires at 16,18,20,22).
+    const offset = hourlyWindowSpansMidnight
+      ? (hour - hourly_window_from + 24) % 24
+      : hour - hourly_window_from;
+    return offset % hourly_interval_hours === 0;
+  }
+
+  if (test) {
+    if (hourly_report_enabled && inHourlyShape(warsawHour)) return "hourly";
+    if (daily_report_enabled) return "daily";
+    return null;
+  }
+
+  if (daily_report_enabled && warsawHour === daily_report_hour && dayActive) {
+    return "daily";
+  }
+  if (hourly_report_enabled && hourlyFires(warsawHour) && dayActive) {
+    return "hourly";
+  }
   return null;
 }

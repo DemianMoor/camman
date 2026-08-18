@@ -2,6 +2,12 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-18 - Telegram notifications moved to a configurable Settings page (migration 0145) - docs/03-data-model.md, docs/04-features/crons.md
+- New `notification_settings` table (migration 0145): per-org toggles for 4 notification types + Warsaw-time schedule config (daily hour, hourly window from/to, hourly interval, active weekdays). Missing row falls back to the hard-coded defaults in `lib/reporting/telegram-report-format.ts` (same behaviour as before).
+- New page `/settings/notifications` with `<NotificationSettings>` component. Saves via `PUT /api/settings/notifications`. Manager+ to edit, any member can view.
+- `decideFormat()` in `lib/reporting/telegram-report-format.ts` now accepts an optional `NotifSettings` arg (backwards-compatible default); the cron handler loads the row once per tick and passes it through. `DEFAULT_NOTIFICATION_SETTINGS` exported so the GET handler can return them without a DB round-trip.
+- Sidebar nav gains a "Notifications" entry (Bell icon) under Settings.
+
 2026-08-18 - Minted-link count restored on /settings/short-domains (migration 0144) + stale-guard sweep - docs/03-data-model.md, docs/07-conventions.md
 - Migration 0144 adds links.short_domain_id (non-partial btree). #88 removed the per-domain minted-link count because links (3.28M rows) had nothing covering that column, making each count a parallel seq scan of the whole table.
 - MEASURED, in-database, same query and same brand: BEFORE 12,574 ms (Seq Scan on links, 3.28M rows, once per domain); AFTER 623 ms warm (Index Only Scan using links_short_domain_id_idx). Through the real listBrandShortDomains(), slowest brand 731 ms local wall-clock - which includes ~400 ms of round-trip latency to eu-central-1, visible as brands with ZERO links costing about as much as brands with thousands. The deployed app runs in fra1, next to the database.

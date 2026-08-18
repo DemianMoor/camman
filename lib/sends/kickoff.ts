@@ -12,6 +12,11 @@ import {
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { resolveShortDomainForSend } from "@/lib/sends/resolve-short-domain";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
+import { getDescriptor } from "@/lib/sends/providers/registry";
+import {
+  optOutGateSubject,
+  resolveOptOutFooter,
+} from "@/lib/sends/opt-out-footer";
 import { countSegments, hasOptOutLanguage, MAX_SEGMENTS } from "@/lib/sends/segments";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
@@ -117,6 +122,10 @@ interface MainRow {
   short_url: string | null;
   full_url: string | null;
   stop_text: string;
+  // Q3 footer-chain candidates. NULL at either level = "no preference here".
+  phone_opt_out_footer: string | null;
+  provider_opt_out_footer: string | null;
+  sms_provider_adapter_code: string | null;
   sales_page_label: string | null;
   utm_tag_ids: number[];
   sms_provider_id: number | null;
@@ -161,6 +170,9 @@ export async function kickoffStageSend(
       s.short_url                AS short_url,
       s.full_url                 AS full_url,
       s.stop_text                AS stop_text,
+      pp.opt_out_footer          AS phone_opt_out_footer,
+      prov.opt_out_footer        AS provider_opt_out_footer,
+      prov.adapter_code          AS sms_provider_adapter_code,
       s.sales_page_label         AS sales_page_label,
       s.utm_tag_ids              AS utm_tag_ids,
       s.sms_provider_id          AS sms_provider_id,
@@ -181,6 +193,7 @@ export async function kickoffStageSend(
     LEFT JOIN brands b ON b.id = c.brand_id
     LEFT JOIN creatives cr ON cr.id = s.creative_id
     LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
+    LEFT JOIN sms_providers prov ON prov.id = s.sms_provider_id AND prov.org_id = c.org_id
     WHERE c.id = ${campaignId} AND c.org_id = ${orgId}
     LIMIT 1
   `)) as unknown as MainRow[];
@@ -190,6 +203,23 @@ export async function kickoffStageSend(
 
   const mode: "manual" | "tracked" = row.link_mode === "tracked" ? "tracked" : "manual";
   const brandName = row.brand_name ?? "";
+
+  // ---- Q3: resolve the opt-out footer ONCE, here, and use the winner for
+  // BOTH the rendered body and the compliance gate. Resolving per-call-site
+  // would let the gate validate one string while a different one shipped.
+  //
+  // `appendsOwnOptOut` comes from the connection type's descriptor; no adapter
+  // sets it today, so `providerAppendsOwnOptOut` is false for every real stage
+  // and the chain reduces to number > provider > stage > default.
+  const providerDescriptor = row.sms_provider_adapter_code
+    ? getDescriptor(row.sms_provider_adapter_code)
+    : null;
+  const footer = resolveOptOutFooter({
+    numberFooter: row.phone_opt_out_footer,
+    providerFooter: row.provider_opt_out_footer,
+    stageStopText: row.stop_text,
+    providerAppendsOwnOptOut: providerDescriptor?.appendsOwnOptOut === true,
+  });
   if (!row.creative_text) return { ok: false, reason: "no_creative" };
 
   // HARD GUARD: a stage with no send date is NEVER sent. A null scheduled_at is
@@ -224,7 +254,7 @@ export async function kickoffStageSend(
       brandName,
       creativeText: row.creative_text,
       linkUrl: row.short_url,
-      stopText: row.stop_text,
+      stopText: footer.text,
     });
   } else {
     // Tracked: enforce readiness + resolve provider/credential/domain/destination.
@@ -341,10 +371,11 @@ export async function kickoffStageSend(
           brandName,
           creativeText: row.creative_text,
           linkUrl: buildRepresentativeTrackedLinkUrl(shortDomain!.domain),
-          stopText: row.stop_text,
+          stopText: footer.text,
         });
-  // CamMan renders the opt-out footer INTO the body (via stop_text); no provider
-  // appends one on API sends, so representativeText IS the on-wire text.
+  // CamMan renders the opt-out footer INTO the body — the RESOLVED footer, which
+  // may come from the number, the provider or the stage (Q3) — so
+  // representativeText IS the on-wire text, including its true length.
   const segCheck = countSegments(representativeText);
   if (segCheck.segments > MAX_SEGMENTS) {
     return { ok: false, reason: "segment_ceiling_exceeded" };
@@ -354,13 +385,38 @@ export async function kickoffStageSend(
   }
 
   // ---- Opt-out-language guard (compliance backstop). Every message MUST carry
-  // opt-out language — CamMan owns the footer; no provider appends one on API
-  // sends. Checked against the effective on-wire body. ENFORCED for txr now;
+  // opt-out language. CamMan owns the footer unless a connection type declares
+  // appendsOwnOptOut (no adapter does today). Checked against the RESOLVED
+  // winner — see the gate note below. ENFORCED for txr now;
   // other API providers run DRY (log + best-effort alert, no refusal) for a
   // 30-day observation window before enforcement is widened.
-  if (!hasOptOutLanguage(representativeText)) {
+  //
+  // ⚠️ Q3: the subject of this check is THE TEXT THAT SHIPS. Before the footer
+  // chain existed, the rendered body always carried campaign_stages.stop_text,
+  // so checking the body and checking stop_text were the same thing. They are
+  // not any more — a number- or provider-level footer out-ranks the stage — and
+  // validating a field that LOST the resolution would pass a message whose
+  // actual opt-out wording was never inspected. optOutGateSubject returns the
+  // rendered body when CamMan appends, or the provider's KNOWN appended text
+  // when the provider does, and reports `verifiable: false` when a provider
+  // claims to append but declares no known wording. Unverifiable FAILS CLOSED:
+  // a compliance gate that cannot demonstrate a STOP keyword must refuse.
+  const gate = optOutGateSubject({
+    renderedBody: representativeText,
+    resolved: footer,
+    providerKnownAppendedText: providerDescriptor?.defaultOptOutFooter,
+  });
+  if (!gate.verifiable || !hasOptOutLanguage(gate.subject)) {
     const guardKey =
       providerKey ?? (await resolveProviderKeyForGuard(dbc, row.sms_provider_id, orgId));
+    // An unverifiable provider-appended footer is refused for EVERY provider,
+    // not just txr: the dry-run carve-out below exists for stages whose own
+    // wording is missing, which an operator can fix by editing text. There is
+    // no operator fix for "this connection type says it appends something we
+    // have never seen", so it cannot be waved through.
+    if (!gate.verifiable) {
+      return { ok: false, reason: "missing_opt_out_language" };
+    }
     if (guardKey === "txr") {
       return { ok: false, reason: "missing_opt_out_language" };
     }
@@ -478,7 +534,7 @@ export async function kickoffStageSend(
               brandName,
               creativeText: row.creative_text!,
               linkUrl: buildTrackedLinkUrl(sd.domain, link.code),
-              stopText: row.stop_text,
+              stopText: footer.text,
             }),
             leadId: t.sendToken,
             carrierNorm: t.carrierNorm,

@@ -288,15 +288,16 @@ export function ProviderConnections() {
                     Save
                   </Button>
                 </div>
-                {/* An editable field that silently does nothing is a trap. Say
-                    exactly what it does today. */}
+                {/* LIVE since Q3. This text ships on real messages sent through
+                    this account, so the copy has to say so plainly — the previous
+                    "stored but not yet applied" caveat would now be a lie. */}
                 <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
                   <Info className="mt-0.5 h-3 w-3 shrink-0" />
                   <span>
-                    Stored, but <strong>not yet applied to outgoing messages</strong>. Every
-                    message still takes its opt-out wording from the stage&apos;s STOP text.
-                    This value becomes active when the per-provider footer chain ships; until
-                    then, leaving it empty and setting it here read the same on the wire.
+                    <strong>Live.</strong> Set, this replaces the stage&apos;s STOP text on
+                    every message sent through this account — and it must contain the word
+                    STOP, or those stages are refused at send time. Leave it empty and each
+                    stage uses its own STOP text.
                   </span>
                 </p>
               </div>

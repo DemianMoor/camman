@@ -103,6 +103,38 @@ Before B2 the string was built in two places that disagreed twice over:
 - **Any API field feeding a preview must resolve by the SAME rule as the send path.** The campaign-detail `brand.short_domain` subquery ordered by `created_at` alone and ignored `is_default`; it now orders `is_default DESC, created_at, id`, matching the resolver's brand branch. The provider-phones list gained `short_domain` — the number's own override resolved to a string, active-only — because without it the preview could not see the override at all.
 - **Regression bar, pinned by [`scripts/verify-b2-segment-length.ts`](../scripts/verify-b2-segment-length.ts):** every `stage_sends.rendered_text` row since the adapter_code cutover must re-derive **byte-identical** through the new builders (29,917/29,917 at the time of writing, segment distribution unchanged), a host change must alter the body by **exactly** the domain substring, and preview and send path must resolve the same domain for every tracked stage. The harness carries **three fault injections** — a corrupted host, a length-sensitivity probe, and a wrong preview candidate — because a green run is only evidence if the harness can go red.
 
+## The opt-out footer is a CHAIN, and the compliance gate validates the WINNER (Q3)
+
+Precedence, most specific first — one function, `resolveOptOutFooter` ([lib/sends/opt-out-footer.ts](../lib/sends/opt-out-footer.ts)):
+
+| Level | Source | Added |
+|---|---|---|
+| number | `provider_phones.opt_out_footer` | migration 0141 |
+| account | `sms_providers.opt_out_footer` | migration 0138 |
+| stage | `campaign_stages.stop_text` | what shipped before Q3 |
+| floor | `'Stop to END'` | built-in |
+
+- **The creative is deliberately NOT in the chain** — copy and compliance text stay apart.
+- **`descriptor.defaultOptOutFooter` is a UI seed/suggestion, never a runtime candidate.** Its only runtime role is as the reference text when validating a provider that appends its own footer — a check, not a choice.
+- **`descriptor.appendsOwnOptOut` out-ranks every candidate**: CamMan then appends *nothing*, because two opt-out instructions in one message is worse than either alone. `buildStageSms` omits the footer line entirely rather than leaving a trailing blank line. No adapter sets the flag today — the mechanism ships, the values do not.
+- **A whitespace-only field states no preference** and falls through. Treating it as a value would ship a message whose opt-out line is invisible.
+
+**⚠️ THE GATE'S SUBJECT IS THE TEXT THAT SHIPS.** Before the chain existed, the rendered body always carried `stop_text`, so "check the body" and "check `stop_text`" were the same thing. They are not any more. `optOutGateSubject` returns the rendered body when CamMan appends, or the provider's **known** appended text when the provider does — and reports `verifiable: false` when a connection type claims to append but declares no known wording. **Unverifiable fails CLOSED, for every provider, with no dry-run carve-out**: the carve-out exists for a stage whose own wording is missing, which an operator can fix by editing text; there is no operator fix for "this type says it appends something we have never seen". Pinned by `scripts/verify-q3-optout-footer.ts`, which proves a *compliant stage field cannot rescue a non-compliant winning footer* — exactly the hole a field-based gate would leave.
+
+**The preview names the winning level.** The stage form composes from the resolved footer and, when the stage level loses, says which level won and what text will ship. An operator editing a box whose value will never appear on the wire is the failure this surfaces.
+
+## Prod-writing test suites must enumerate and clean EVERY entity type they create
+
+A teardown that stops at its first failure leaks silently, because the crash surfaces *after* the assertions have printed their result — which is when nobody is reading.
+
+`scripts/test-campaign-stages-api.ts` did exactly this: one delete ran `where id = undefined` (an id pushed from a response that never carried one), postgres-js threw `UNDEFINED_VALUE`, and because the block had only a `finally` the exception aborted every remaining delete — including the brands at the end. **Three `Stage Test Brand` rows sat in production** as a result, and the run that created them reported its residue check as clean because that check looked at campaigns and stages and never thought to look at brands.
+
+**The rules:**
+- **Every cleanup step runs independently** (wrap each in its own try/catch that logs and continues). One failure must not cancel the rest.
+- **Validate every id before using it in a predicate.** `Number.isInteger(v) && v > 0` — an `undefined` id is a bug in the suite, not a row to delete.
+- **Residue verification enumerates ALL entity types the suite creates, not a sample.** The leak this exists to catch is precisely a type nobody thought to check. Surviving rows are a FAILURE of the run, not a log line.
+- Deletes use scalar binds, never `ANY(${jsArray})` — that throws under postgres-js and the delete silently never runs.
+
 ## Feature flags
 - `lib/feature-flags.ts` `ENTITY_AVAILABILITY` is the single source for "is this entity built?". Flip a new entity's flag to `true` **last**, after schema+API+UI work. Gate cross-entity fetches on `isEntityAvailable()` (no speculative 404s).
 

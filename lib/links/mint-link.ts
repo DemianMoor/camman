@@ -39,7 +39,12 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 // unique index is the hard guarantee, the retry loop the safety net.
 const CODE_ALPHABET =
   "23456789abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ";
-export const CODE_LENGTH = 7;
+// Re-exported from the pure, client-safe module so the generator and every
+// length estimate (previews included) move together. Declared there because
+// this file imports node:crypto + nanoid and therefore cannot be pulled into a
+// "use client" component.
+export { TRACKED_CODE_LENGTH as CODE_LENGTH } from "./tracked-link";
+import { TRACKED_CODE_LENGTH as CODE_LENGTH } from "./tracked-link";
 const generateCode = customAlphabet(CODE_ALPHABET, CODE_LENGTH);
 const MAX_CODE_ATTEMPTS = 5;
 

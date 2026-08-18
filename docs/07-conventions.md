@@ -85,6 +85,24 @@ Neither was noticed because `scripts/verify-brand-domains.ts`, the guard that co
 - **Deactivating clears `is_default`,** and set-default refuses a non-active row. A pending domain as brand default would mean activation silently redirects the whole brand's minting; activate and choose are two deliberate acts.
 - **Delete keeps the minted-links guard**, now scoped to the single row: a domain with minted links can only be deactivated, never removed, or its links are orphaned.
 
+## The tracked link is built ONCE — the host is inside the counted body (B2)
+
+`https://<host>/r/<code>` sits **inside** the SMS body that gets counted, so any disagreement about which host wins silently moves the GSM-7 segment boundary. `gdkn.org` is 8 characters and `g.guidekn.com` is 13: the same creative can preview as one segment and send as two — at double the cost, with nothing on screen to show it.
+
+Before B2 the string was built in two places that disagreed twice over:
+
+| | stage form (preview) | kickoff (send) |
+|---|---|---|
+| host | `campaign.brand.short_domain` — **brand only**, blind to the stage's per-number override | `resolveShortDomainForSend` — override first |
+| code length | the literal `"XXXXXXX"` with a comment promising it equalled `CODE_LENGTH` | `"X".repeat(CODE_LENGTH)` |
+
+**The rules now:**
+- **[`lib/links/tracked-link.ts`](../lib/links/tracked-link.ts) is the only place a tracked link is constructed** — `buildTrackedLinkUrl(domain, code)` and `buildRepresentativeTrackedLinkUrl(domain)`. It is PURE and CLIENT-SAFE on purpose: `mint-link.ts` pulls in `node:crypto` + `nanoid` and so cannot be imported from a `"use client"` component, which is exactly why the form hardcoded its own copy of the length. `TRACKED_CODE_LENGTH` lives there and `mint-link.ts` imports it, so the generator and every estimate move together. A promise in a comment is not a constraint.
+- **`pickEffectiveShortDomain` is the only place the precedence is expressed** (number override > brand default > oldest active). The server resolver runs the DB lookups and then calls it; the stage form receives both candidates over the API and calls the same function. Ranking lives in one function so the two data paths cannot disagree about the winner.
+- **Every candidate must be `status='active'` before it is ranked.** A pending host is never mintable, so it reaches the ranker as `null` rather than as something to rank.
+- **Any API field feeding a preview must resolve by the SAME rule as the send path.** The campaign-detail `brand.short_domain` subquery ordered by `created_at` alone and ignored `is_default`; it now orders `is_default DESC, created_at, id`, matching the resolver's brand branch. The provider-phones list gained `short_domain` — the number's own override resolved to a string, active-only — because without it the preview could not see the override at all.
+- **Regression bar, pinned by [`scripts/verify-b2-segment-length.ts`](../scripts/verify-b2-segment-length.ts):** every `stage_sends.rendered_text` row since the adapter_code cutover must re-derive **byte-identical** through the new builders (29,917/29,917 at the time of writing, segment distribution unchanged), a host change must alter the body by **exactly** the domain substring, and preview and send path must resolve the same domain for every tracked stage. The harness carries **three fault injections** — a corrupted host, a length-sensitivity probe, and a wrong preview candidate — because a green run is only evidence if the harness can go red.
+
 ## Feature flags
 - `lib/feature-flags.ts` `ENTITY_AVAILABILITY` is the single source for "is this entity built?". Flip a new entity's flag to `true` **last**, after schema+API+UI work. Gate cross-entity fetches on `isEntityAvailable()` (no speculative 404s).
 

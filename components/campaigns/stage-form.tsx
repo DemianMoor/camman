@@ -54,6 +54,10 @@ import { isOutsideSendWindow } from "@/lib/quiet-hours";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
+import {
+  buildRepresentativeTrackedLinkUrl,
+  pickEffectiveShortDomain,
+} from "@/lib/links/tracked-link";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   appendParamName,
@@ -130,6 +134,10 @@ type ProviderPhone = {
   phone_number: string;
   cost_per_sms: string;
   status: string;
+  // The number's own short-domain override, already resolved server-side to a
+  // domain string and ONLY when active (B2). null = no override, fall back to
+  // the brand. This is the preview's phone-level candidate.
+  short_domain: string | null;
 };
 type SalesPage = { label: string; url: string };
 type BrandInfo = {
@@ -594,9 +602,9 @@ export function StageForm({
   const trimmedShortUrl = (watchedShortUrl ?? "").trim();
 
   // Tracked mode: the real link is minted per-recipient at kickoff, so we
-  // preview a REPRESENTATIVE link of the exact shape + length —
-  // https://<brand active short domain>/r/<7-char code> (CODE_LENGTH=7) — so
-  // the character/segment count is exact. No minting happens here.
+  // preview a REPRESENTATIVE link of the exact shape + length, built by the
+  // SAME helper kickoff uses (buildRepresentativeTrackedLinkUrl), so the
+  // character/segment count is exact. No minting happens here.
   const isTracked = campaign.link_mode === "tracked";
 
   // Scheduled-send gating (tracked/API campaigns only):
@@ -629,10 +637,23 @@ export function StageForm({
     }
   })();
 
-  const brandShortDomain = campaign.brand?.short_domain ?? null;
-  const TRACKED_CODE_PLACEHOLDER = "XXXXXXX"; // 7 chars = mint CODE_LENGTH
-  const trackedLinkPreview = brandShortDomain
-    ? `https://${brandShortDomain}/r/${TRACKED_CODE_PLACEHOLDER}`
+  // ⚠️ THE STAGE's effective domain, not the brand's.
+  //
+  // This used to read `campaign.brand.short_domain` and hardcode the code
+  // length as the literal "XXXXXXX". Both were wrong. The brand's host ignores
+  // the stage's per-number override, and the link sits INSIDE the counted body:
+  // gdkn.org is 8 characters and g.guidekn.com is 13, so a stage sending on an
+  // overridden number could preview 1 segment and send 2 — double cost, nothing
+  // on screen. Ranking is delegated to pickEffectiveShortDomain, the same
+  // function resolveShortDomainForSend uses on the send path, so the two cannot
+  // disagree; the length comes from the shared builder rather than a literal.
+  const selectedPhone = phones.find((p) => p.id === watchedPhoneId) ?? null;
+  const effectiveShortDomain = pickEffectiveShortDomain({
+    phoneOverrideDomain: selectedPhone?.short_domain,
+    brandDefaultDomain: campaign.brand?.short_domain,
+  });
+  const trackedLinkPreview = effectiveShortDomain
+    ? buildRepresentativeTrackedLinkUrl(effectiveShortDomain)
     : null;
   // Which link line the preview composes with:
   //  - tracked + brand has a short domain → the representative tracked link

@@ -107,12 +107,20 @@ export async function GET(
         id: brands.id,
         name: brands.name,
         color: brands.color,
-        // Brand's active short domain (for the tracked-mode SMS preview), via
-        // subquery to keep the single-row shape. NULL when none is set.
+        // The brand's EFFECTIVE short domain — the tracked-mode SMS preview's
+        // BRAND-LEVEL candidate. Single-row via subquery.
+        //
+        // ⚠️ `is_default DESC` first. This ordering must match the brand branch
+        // of resolveShortDomainForSend exactly: it used to order by created_at
+        // alone, so once a brand held two active domains with a non-oldest
+        // default, the preview counted its segments against a DIFFERENT host
+        // than the one the send path mints under — and the link sits inside the
+        // counted body, so that silently shifts the segment boundary. NULL when
+        // the brand has no active domain.
         short_domain: drizzleSql<string | null>`(
           SELECT sd.domain FROM short_domains sd
           WHERE sd.brand_id = ${brands.id} AND sd.status = 'active'
-          ORDER BY sd.created_at ASC, sd.id ASC LIMIT 1
+          ORDER BY sd.is_default DESC, sd.created_at ASC, sd.id ASC LIMIT 1
         )`,
       },
       offer: {

@@ -27,6 +27,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { isEntityAvailable } from "@/lib/feature-flags";
+import { CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
 import { NAMED_CARRIERS } from "@/lib/sends/carrier-policy";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
@@ -176,6 +177,23 @@ export function PhoneForm({
     });
   }
   const blockedCarriers = NAMED_CARRIERS.filter((c) => !isCarrierAllowed(c));
+  // Q5 daily cap. Null = uncapped, which is also what "no row" means.
+  const carrierDailyLimit = (carrier: string) =>
+    carrierLimits.find((r) => r.carrier_norm === carrier)?.daily_limit ?? null;
+  function setCarrierDailyLimit(carrier: string, daily_limit: number | null) {
+    setCarrierLimits((prev) => {
+      const existing = prev.find((r) => r.carrier_norm === carrier);
+      if (existing) {
+        return prev.map((r) =>
+          r.carrier_norm === carrier ? { ...r, daily_limit } : r,
+        );
+      }
+      return [...prev, { carrier_norm: carrier, allowed: true, daily_limit }];
+    });
+  }
+  const cappedCarriers = NAMED_CARRIERS.filter(
+    (c) => isCarrierAllowed(c) && carrierDailyLimit(c) != null,
+  );
 
   // In edit mode we hide phone_number/number_type from validation by using the
   // update schema (which omits them). In create mode we use the create schema.
@@ -662,20 +680,49 @@ export function PhoneForm({
               </div>
 
               <div className="grid gap-2 rounded-md border p-3">
-                {NAMED_CARRIERS.map((carrier) => (
-                  <label
-                    key={carrier}
-                    className="flex items-center justify-between gap-3 text-sm"
-                  >
-                    <span>{carrier}</span>
-                    <Switch
-                      checked={isCarrierAllowed(carrier)}
-                      onCheckedChange={(v) => setCarrierAllowed(carrier, v)}
-                      disabled={isSubmitting}
-                      aria-label={`Allow ${carrier}`}
-                    />
-                  </label>
-                ))}
+                {NAMED_CARRIERS.map((carrier) => {
+                  const allowed = isCarrierAllowed(carrier);
+                  return (
+                    <div
+                      key={carrier}
+                      className="flex items-center justify-between gap-3 text-sm"
+                    >
+                      <span className={allowed ? "" : "text-muted-foreground line-through"}>
+                        {carrier}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        {/* Daily cap (Q5). Hidden when the carrier is off —
+                            capping a carrier this number may not text at all is
+                            a contradiction, and offering the box invites it. */}
+                        {allowed ? (
+                          <Input
+                            type="number"
+                            min="1"
+                            step="1"
+                            placeholder="No cap"
+                            aria-label={`${carrier} daily cap`}
+                            className="h-8 w-28"
+                            disabled={isSubmitting}
+                            value={carrierDailyLimit(carrier) ?? ""}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setCarrierDailyLimit(
+                                carrier,
+                                v === "" ? null : Number(v),
+                              );
+                            }}
+                          />
+                        ) : null}
+                        <Switch
+                          checked={allowed}
+                          onCheckedChange={(v) => setCarrierAllowed(carrier, v)}
+                          disabled={isSubmitting}
+                          aria-label={`Allow ${carrier}`}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
 
               <div className="flex items-start justify-between gap-3 rounded-md border p-3">
@@ -720,11 +767,27 @@ export function PhoneForm({
                   </strong>
                   .
                 </p>
-              ) : (
+              ) : cappedCarriers.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
                   No carrier restrictions — this number texts every carrier.
                 </p>
-              )}
+              ) : null}
+
+              {cappedCarriers.length > 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  Daily cap:{" "}
+                  <strong>
+                    {cappedCarriers
+                      .map((c) => `${c} ${carrierDailyLimit(c)}/day`)
+                      .join(", ")}
+                  </strong>
+                  . Counted per{" "}
+                  {CAMPAIGN_TIMEZONE_LABEL} calendar day and reset at midnight{" "}
+                  {CAMPAIGN_TIMEZONE_LABEL} — not a rolling 24 hours. Sending
+                  pauses for that carrier when the cap is reached and resumes on
+                  its own; a batch already in flight can go slightly over.
+                </p>
+              ) : null}
             </div>
           </>
         ) : null}

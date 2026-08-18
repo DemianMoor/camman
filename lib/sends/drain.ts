@@ -17,6 +17,10 @@ import {
   resolveSendsPerSecond,
   shouldTripFailureSpike,
 } from "@/lib/sends/circuit-breakers";
+import {
+  describeCarrierCapBreaches,
+  findCarrierCapBreaches,
+} from "@/lib/sends/carrier-policy";
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
 import { isOutsideSendWindow, type ProviderSendWindow } from "@/lib/quiet-hours";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
@@ -119,6 +123,9 @@ export interface DrainResult {
   // Why an in-flight drain stopped before draining the stage (null = ran to
   // natural completion or hit the soft pacing cap with rows still pending).
   stopReason?: DrainStopReason | null;
+  /** Q5: which carrier(s) hit a daily cap, with counts. Set only when
+   *  `stopReason === "carrier_daily_cap"`. */
+  carrierCapDetail?: string | null;
   // True when THIS invocation latched the provider pause (hard stop). A human
   // must consciously resume via the provider UI.
   pausedNow?: boolean;
@@ -162,6 +169,7 @@ const EMPTY = {
   stuck: 0,
   remaining: 0,
   stopReason: null,
+  carrierCapDetail: null,
   pausedNow: false,
 };
 
@@ -390,6 +398,9 @@ export async function runStageDrain(
   let processed = 0;
   let halted = false;
   let stopReason: DrainStopReason | null = null;
+  // Populated only by the Q5 carrier-cap stop, so the summary can name WHICH
+  // carrier ran out and by how much rather than just the reason code.
+  let carrierCapDetail: string | null = null;
 
   // Provider quiet-hours config, read once per drain from the stage context and
   // evaluated fresh against the clock on every batch (see the gate block below).
@@ -493,6 +504,33 @@ export async function runStageDrain(
     }
     if (ceilingBreached(await countSentSince(dbc, orgId, providerId, 86_400), cap24h)) {
       stopReason = "rate_24h";
+      break;
+    }
+
+    // Q5 PER-CARRIER DAILY CAP — soft, ET CALENDAR day, checked ONCE PER BATCH.
+    //
+    // Distinct from rate_24h directly above it: that is a ROLLING 24-hour
+    // throughput ceiling on the provider ACCOUNT; this is a per-NUMBER,
+    // per-CARRIER allowance that resets at ET midnight. Both can stop a run and
+    // they send the operator to different controls, so they keep separate
+    // stopReasons.
+    //
+    // Only fires when a capped carrier still has PENDING rows on this stage —
+    // an exhausted cap on VoIP must not halt a stage whose remaining recipients
+    // are all Verizon.
+    //
+    // ⚠️ SOFT CEILING WITH BOUNDED OVERSHOOT. The claim below takes a whole
+    // batch and sends it without re-counting, so a carrier can exceed its limit
+    // by at most `batchSize - 1` on the batch that crosses it. Mid-batch
+    // accounting is deliberately not built — see lib/sends/carrier-policy.ts.
+    const capBreaches = await findCarrierCapBreaches(dbc, {
+      orgId,
+      providerPhoneId: stage.provider_phone_id,
+      stageId: opts.stageId,
+    });
+    if (capBreaches.length > 0) {
+      carrierCapDetail = describeCarrierCapBreaches(capBreaches);
+      stopReason = "carrier_daily_cap";
       break;
     }
 
@@ -846,6 +884,10 @@ export async function runStageDrain(
     stuck,
     remaining,
     stopReason,
+    // Q5: which carrier ran out, and by how much. Only set when stopReason is
+    // "carrier_daily_cap". A bare reason code makes an operator go looking for
+    // the cap; this names it and its count.
+    carrierCapDetail,
     pausedNow,
   };
 }

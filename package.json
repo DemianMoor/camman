@@ -9,7 +9,9 @@
     "lint": "eslint",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "db:seed": "npx tsx scripts/db-seed.ts",
+    "db:reset": "npx tsx scripts/db-seed.ts --force"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

@@ -1,6 +1,6 @@
 # 08 — Local Setup
 
-_Last updated: 2026-07-16_
+_Last updated: 2026-08-19_
 
 Clone-to-running on Windows (PowerShell). Adapt paths/shell as needed; the repo lives at `c:\AFF\camman`.
 
@@ -33,7 +33,35 @@ Fill at minimum (see [06-integrations.md](06-integrations.md) for every variable
 
 > `.env.local` is gitignored — never commit it. Never commit populated secrets.
 
-## 3. Database migrations
+## 3. Seed the staging database (camman-v2)
+
+`db:seed` builds a deterministic dataset on any already-migrated database.
+`db:reset` wipes the seed org (cascade) and re-seeds — for when staging has drifted.
+
+Both scripts **refuse to run unless `SEED_TARGET=staging` is set** in `.env.local`.
+Add it only for the staging database; never set it on a `.env.local` that points at production.
+
+```powershell
+# .env.local — staging only
+SEED_TARGET=staging
+```
+
+```powershell
+npm run db:seed    # first-time seed (idempotent: skips if already seeded)
+npm run db:reset   # wipe seed org → re-seed from scratch
+```
+
+What gets created:
+- Auth user `seed@camman-staging.local` / `SeedPass123!` (trigger creates org + member)
+- 1 affiliate network, brand, offer; 1 SMS provider + phone
+- 5 creatives (creative 5 has `allow_multi_segment = true` for multi-segment UI testing)
+- 1 contact group; 500 generated contacts (`+1555XXXXXXX`)
+- 3 campaigns (completed/active/draft), 4 stages, 500 stage_sends
+- 14 days of `report_stage_hour` + `report_group_hour` rows so report charts render
+
+Requires `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `DATABASE_URL` to all be set.
+
+## 4. Database migrations
 Migrations are **hand-authored** and **not** auto-applied. Apply them against the `DATABASE_URL` in `.env.local`:
 ```powershell
 npm run db:migrate                                    # drizzle-kit migrate
@@ -44,7 +72,7 @@ npx tsx scripts/verify-migration-integrity.ts         # confirm the chain is cle
 
 > ⚠️ Local dev and production point at the **same** Supabase project today (CLAUDE.md §14). Migrations you apply locally affect prod data. Be deliberate.
 
-## 4. Run the dev server
+## 5. Run the dev server
 ```powershell
 npm run dev
 ```
@@ -52,12 +80,12 @@ Open http://localhost:3000 (or your configured port). The dev server uses Turbop
 
 > If you restart and hit "Another next dev server is already running" on Windows, the prior process didn't die — find and kill it (`taskkill /PID <pid> /F`) before restarting (see project memory).
 
-## 5. First login
+## 6. First login
 - Sign up at `/signup`; verify the email (Supabase sends a link).
 - The `handle_new_user()` trigger auto-creates your org + makes you `owner`.
 - You land on `/dashboard`.
 
-## 6. Useful scripts (`scripts/`, run with `npx tsx`)
+## 7. Useful scripts (`scripts/`, run with `npx tsx`)
 | Script | Purpose |
 |--------|---------|
 | `verify-migration-integrity.ts` | compare DB-recorded migration hashes vs files (read-only) |
@@ -66,7 +94,7 @@ Open http://localhost:3000 (or your configured port). The dev server uses Turbop
 | `verify-mint.ts`, `verify-drain.ts`, `verify-credentials.ts`, `verify-geoip-cache.ts`, `verify-poll-opt-outs.ts`, `verify-brand-domains.ts` | targeted send/link-pipeline checks |
 | `test-*-api.ts` | API test suites (need `TEST_USER_EMAIL`/`TEST_USER_PASSWORD` set temporarily against a running dev server) |
 
-## 7. Exercising cron endpoints locally
+## 8. Exercising cron endpoints locally
 Cron jobs are plain route handlers. Call them with the Bearer secret:
 ```powershell
 curl.exe -H "Authorization: Bearer $env:CRON_SECRET" http://localhost:3000/api/clicks/score-pending
@@ -79,7 +107,7 @@ curl.exe -H "Authorization: Bearer $env:CRON_SECRET" "http://localhost:3000/api/
 ```
 Read what landed: `GET /api/keitaro/results?campaign_id=<id>`.
 
-## 8. Build & lint
+## 9. Build & lint
 ```powershell
 npm run lint
 npm run build

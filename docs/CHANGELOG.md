@@ -2,6 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-19 — Reactivate from completed: added "Reactivate" to the campaigns-list 3-dots menu and fixed bulk-status to allow completed → active — docs/04-features/campaigns-stages-creatives.md
 2026-08-19 — Completed campaigns can now be reactivated (completed → active); `completed` is no longer a terminal status — docs/04-features/campaigns-stages-creatives.md
 
 2026-08-19 - Segment purchase rules + behavioural converted tier now use the same sale definition as the reports - docs/04-features/audience-segments.md, docs/04-features/behavioral-lanes.md, docs/03-data-model.md, docs/07-conventions.md

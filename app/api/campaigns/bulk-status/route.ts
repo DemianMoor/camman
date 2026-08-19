@@ -16,7 +16,8 @@ import { can, type Permission } from "@/lib/permissions";
 
 // Supported target statuses. 'draft' is the restore target (archived →
 // draft), mirroring the single /restore endpoint. 'active' here means
-// resume (paused → active), NOT activate (draft → active).
+// resume (paused → active) OR reactivate (completed → active), NOT
+// activate (draft → active) which requires an audience snapshot.
 const BULK_TARGETS = [
   "paused",
   "active",
@@ -36,7 +37,7 @@ const bulkStatusSchema = z.object({
 // missing — see header comment.
 function isAllowed(from: string, to: BulkTarget): boolean {
   if (to === "paused") return from === "active";
-  if (to === "active") return from === "paused";
+  if (to === "active") return from === "paused" || from === "completed";
   if (to === "completed") return from === "active" || from === "paused";
   if (to === "archived") return from !== "archived";
   if (to === "draft") return from === "archived"; // restore

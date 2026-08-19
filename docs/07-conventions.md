@@ -206,6 +206,20 @@ The fix is a cohort split, and it has three rules:
 
 **Each model must be shown to FAIL on the world it does not describe** (fault injections #5/#6). Otherwise the split is decoration and one model is quietly doing both jobs. Synthesize those bodies rather than drawing them from the corpus, so the proof holds when a cohort is empty.
 
+## Cleaning test data from production: delete by ID, never by pattern
+
+A fixture cleanup is a hard delete against live data, so the shape of the query matters more than its brevity.
+
+- **Resolve ids first, then delete by explicit id.** `scripts/cleanup-stage-test-fixtures.ts` hardcodes every id it removes. Deleting by pattern (`offer_id LIKE 'STG-O-%'`) is shorter and re-evaluates at run time against rows nobody reviewed.
+- **The near-miss that proves it.** `scripts/test-campaign-stages-api.ts` mints fixture contacts as `+15107<unique><nn>`. A cleanup keyed on `phone_number LIKE '+15107%'` matches **451 real contacts in area code 510 (Oakland)**, **400 of which have genuinely sent messages**. The pattern was indistinguishable from the fixture rule; only checking send history separated them. **Any contact that has ever had a `stage_sends` row is a real person**, whatever its number looks like — assert that before deleting contacts, and never infer "fixture" from a phone prefix alone.
+- **Signature-check every id immediately before deleting.** Ids get recycled and rows get renamed, so a list approved yesterday may denote something else today. Re-read each target and abort the whole run on a mismatch.
+- **Make it re-runnable.** Check that everything which *still exists* matches, not that everything exists. The first run of this cleanup deleted nine of ten row types and left the contacts behind; a pre-flight demanding the full set then refused to finish its own job. An already-deleted row is success.
+- **Dry-run by default**, `--apply` to act.
+
+⚠️ **`ANY(${jsArray})` does not work through Drizzle's `sql` template.** The array is flattened into positional params, so a one-element list arrives as a scalar and postgres-js throws `ERR_INVALID_ARG_TYPE`; a `::int[]` cast does not help because the shape is already wrong. Render the list instead (`IN (${sql.raw(ids.join(","))})`) **with a validator that throws on any value that is not a clean integer or UUID**, and only for hardcoded constants. This repo has already lost a cleanup to that exact failure — the delete threw, the enclosing block swallowed it, and a probe row survived in production while the run reported success.
+
+**The residue check is the point.** It caught this run leaving 10 contacts behind after every delete step had printed a tick. Re-query **every** type after deleting, fail loudly on survivors, and assert that the data which must be untouched still has its expected count.
+
 ## Prod-writing test suites must enumerate and clean EVERY entity type they create
 
 A teardown that stops at its first failure leaks silently, because the crash surfaces *after* the assertions have printed their result — which is when nobody is reading.

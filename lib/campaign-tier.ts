@@ -1,10 +1,13 @@
 import { sql, type SQL } from "drizzle-orm";
 
+import { purchasedClause } from "@/lib/sale-attribution";
+
 // A contact's CURRENT high-water behavioral tier WITHIN one campaign:
 //   0 = ignored        — no qualifying signal (see "absence" note below)
 //   1 = clicked        — a CLEAN click on a link belonging to this campaign
 //   2 = reached_offer  — a stage_sends row with offer_reached_at set
-//   3 = converted      — a stage_sends row with sale_status = 'sale'
+//   3 = converted      — a stage_sends row with a non-rejected conversion
+//                        (lib/sale-attribution.ts — NOT sale_status='sale')
 //
 // "Clean click" = NOT bot/prefetch/suspect, byte-for-byte the same definition
 // the click report uses for its clean count (lib/links/click-report.ts:
@@ -62,12 +65,13 @@ export function campaignTierExpr(campaignId: number, orgId: string): SQL {
         AND ss.offer_reached_at IS NOT NULL
 
       UNION ALL
-      -- tier 3: converted (a sale attributed to this recipient)
+      -- tier 3: converted (a non-rejected conversion attributed to this
+      -- recipient). Shared definition — see lib/sale-attribution.ts.
       SELECT ss.contact_id AS contact_id, 3 AS tier
       FROM stage_sends ss
       WHERE ss.campaign_id = ${campaignId}::int
         AND ss.org_id = ${orgId}::uuid
-        AND ss.sale_status = 'sale'
+        AND ${purchasedClause()}
     ) signals
     GROUP BY contact_id
   `;

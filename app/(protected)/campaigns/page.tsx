@@ -646,6 +646,12 @@ export default function CampaignsPage() {
               t: "complete",
               icon: <CheckCircle2 className="size-4" aria-hidden />,
             });
+          if (c.status === "completed" && canActivate)
+            transitions.push({
+              label: "Reactivate",
+              t: "reactivate",
+              icon: <Play className="size-4" aria-hidden />,
+            });
 
           if (
             !showEdit &&

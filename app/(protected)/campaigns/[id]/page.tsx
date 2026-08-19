@@ -1510,6 +1510,12 @@ export default function CampaignDetailPage() {
       t: "complete",
       icon: <CheckCircle2 className="size-4" aria-hidden />,
     });
+  if (campaign.status === "completed" && canActivate)
+    possibleCampaignTransitions.push({
+      label: "Reactivate",
+      t: "reactivate",
+      icon: <Play className="size-4" aria-hidden />,
+    });
 
   const memberLabel = (userId: string | null) => {
     if (!userId) return null;

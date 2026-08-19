@@ -29,7 +29,7 @@ const TRANSITIONS: Record<string, ReadonlySet<string>> = {
   draft: new Set(["active"]),
   active: new Set(["paused", "completed"]),
   paused: new Set(["active", "completed"]),
-  completed: new Set<string>(), // terminal except via restore
+  completed: new Set(["active"]), // can be reactivated
   archived: new Set<string>(),
 };
 
@@ -42,6 +42,7 @@ function permissionFor(from: string, to: string): Permission | null {
   )
     return "campaigns.pause";
   if (to === "completed") return "campaigns.complete";
+  if (from === "completed" && to === "active") return "campaigns.activate";
   return null;
 }
 

@@ -17,6 +17,7 @@ export type CampaignTransition =
   | "pause"
   | "resume"
   | "complete"
+  | "reactivate"
   | "archive";
 
 // Per-transition copy. Centralized so the same wording appears wherever a
@@ -46,8 +47,14 @@ const COPY: Record<
   complete: {
     title: "Mark this campaign complete?",
     description:
-      "Completed campaigns are read-only and no further stages can be created or sent. You can archive a completed campaign to hide it from the active list.",
+      "No further stages will send. You can reactivate the campaign later if needed, or archive it to remove it from the active list.",
     confirmLabel: "Mark complete",
+  },
+  reactivate: {
+    title: "Reactivate this campaign?",
+    description:
+      "The campaign returns to active with its existing frozen audience. New stages can be created and sent.",
+    confirmLabel: "Reactivate",
   },
   archive: {
     title: "Archive this campaign?",
@@ -118,6 +125,7 @@ export function transitionToStatus(t: CampaignTransition): string {
   switch (t) {
     case "activate":
     case "resume":
+    case "reactivate":
       return "active";
     case "pause":
       return "paused";

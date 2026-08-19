@@ -1,12 +1,12 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-07-30_
+_Last updated: 2026-08-19_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
 
 ## 2. Key concepts / entities
-- `campaigns` — status machine `draft → active → paused → completed → archived`; `link_mode` manual/tracked; audience recipe (see [audience-snapshot.md](audience-snapshot.md)).
+- `campaigns` — status machine `draft → active ⇄ paused → completed ⇄ active; completed → archived`; `link_mode` manual/tracked; audience recipe (see [audience-snapshot.md](audience-snapshot.md)). `completed` is no longer terminal — see reactivation below.
 - `campaign_stages` — `stage_number` (trigger-assigned), creative + provider + phone, URLs, schedule, result counters, A/B split fields.
 - `creatives` — many-to-many with offers via `creative_offers`; cached spam columns.
 - `campaign_tracking_counters` — atomic per-(org,brand,offer,day) sequence.
@@ -16,6 +16,7 @@ The campaign core: a **campaign** is a long-running container with a frozen audi
 ### Campaign lifecycle
 - Drafts save with **zero required fields** (CLAUDE.md §10b). Status transitions go through `app/api/campaigns/[campaignId]/status/route.ts`, each gated by a transition-specific permission (`campaigns.activate`/`pause`/`complete`/`archive`/`restore`).
 - `draft → active` snapshots the audience in-transaction (see [audience-snapshot.md](audience-snapshot.md)).
+- **`completed → active` (reactivation):** the audience pool remains frozen from the original activation — no re-snapshot. New stages can be created and scheduled normally. Requires `campaigns.activate`. The "Reactivate" action appears in the campaign-detail transitions menu for completed campaigns.
 - FK to brand/offer is `ON DELETE RESTRICT` — can't delete a brand/offer used by a campaign.
 
 ### Upload contacts onto a draft campaign (`POST /api/campaigns/[campaignId]/upload-contacts`)

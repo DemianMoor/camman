@@ -6,6 +6,10 @@ import { clickers, contacts, opt_ins, opt_outs } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import {
+  isContactStatsRollupEnabled,
+  readContactOrgStats,
+} from "@/lib/contact-stats";
 
 export type ContactBaseStats = {
   total: number;
@@ -27,6 +31,8 @@ export type ContactBaseStats = {
   clicker_count: number;
 };
 
+// W2 Task 1: reads from contact_org_stats rollup when ROLLUP_CONTACT_STATS != "0".
+// Set ROLLUP_CONTACT_STATS=0 in Vercel env to revert to the live aggregate path.
 export async function GET() {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -36,6 +42,15 @@ export async function GET() {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
+  if (isContactStatsRollupEnabled()) {
+    const { base, updatedAt } = await readContactOrgStats(db, orgId);
+    if (updatedAt !== null) {
+      return NextResponse.json({ ...base, stats_as_of: updatedAt });
+    }
+    // Rollup row not yet seeded — fall through to live query.
+  }
+
+  // Live aggregate path (feature-flag off or rollup not yet seeded).
   const [activeRow, archivedRow, optOutRow, optOutByReason, optInRow, clickerRow] =
     await Promise.all([
       db

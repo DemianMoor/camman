@@ -13,6 +13,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { bumpContactOrgStats } from "@/lib/contact-stats";
 import { can } from "@/lib/permissions";
 import { importOptOutsWithAttribution } from "@/lib/sends/import-optout-attribution";
 import {
@@ -187,6 +188,16 @@ export async function POST(req: NextRequest) {
       });
     },
   });
+
+  // W2 Task 1: real-time rollup increment for new opt-outs.
+  // The upload inserts opt_out rows with the default reason='opt_out';
+  // the 1-min cron recomputes the full breakdown.
+  if (summary.inserted > 0) {
+    await bumpContactOrgStats(db, orgId, {
+      opt_out: summary.inserted,
+      opt_out_by_reason: { opt_out: summary.inserted },
+    });
+  }
 
   return NextResponse.json(summary, { status: 201 });
 }

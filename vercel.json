@@ -75,6 +75,10 @@
     {
       "path": "/api/cron/tells-monitors",
       "schedule": "23 * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-contact-stats",
+      "schedule": "* * * * *"
     }
   ]
 }

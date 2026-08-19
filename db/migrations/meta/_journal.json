@@ -1016,6 +1016,13 @@
       "when": 1788825600000,
       "tag": "0144_links_short_domain_id_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1788912000000,
+      "tag": "0145_contact_org_stats",
+      "breakpoints": true
     }
   ]
 }

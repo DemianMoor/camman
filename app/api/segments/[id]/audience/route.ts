@@ -34,9 +34,11 @@ function parseMembership(raw: string | null): Membership {
 // add/remove still goes through the existing /contacts endpoints, and
 // rule-matched membership is changed by editing the rules.
 //
-// Returns one row per contact with phone_number, joined_at,
-// membership_type, and the contact's other group memberships so the UI
-// can show context badges without an N+1 fan-out.
+// W2 Task 4: evaluates the audience ONCE using a CTE + window function
+// count(*) OVER () so rows and total count come from a single DB pass.
+// Previously the audience clause was materialised twice (one SELECT for
+// rows + one SELECT for count), doubling the work on segments whose rules
+// touch the full contacts table.
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -72,14 +74,6 @@ export async function GET(
   const sp = req.nextUrl.searchParams;
   const membership = parseMembership(sp.get("membership_type"));
 
-  // The membership filter is enforced in the SQL: 'manual' restricts to
-  // rows where segment_contacts has the contact; 'rule-matched' is the
-  // complement. 'all' is the unrestricted UNION.
-  //
-  // Opt-outs are dropped so this tab lists (and counts) the SENDABLE audience
-  // — the same basis as the header's audience tile and as a campaign's "From
-  // segments". Listing contacts here that no campaign can ever send to is what
-  // made ~10K contacts look like they vanished at campaign-build time.
   const audienceClause = excludeOptOutsFromAudience(
     await buildSegmentAudienceClause(segmentIdNum, orgId),
     orgId,
@@ -94,46 +88,51 @@ export async function GET(
         ? drizzleSql`AND sc.contact_id IS NULL`
         : drizzleSql``;
 
-  // Inline LIMIT/OFFSET for paging. Numbers are bounded by parseListParams
-  // (capped at 200 by default).
   const limit = listParams.pageSize;
   const offset = listParams.page * listParams.pageSize;
 
-  // The CTE materializes the UNION audience once, then the outer query
-  // joins it back to contacts + segment_contacts + the other-groups
-  // aggregate. We use json_agg for the other_groups so each contact
-  // returns one row with a json array — cheaper than a separate fan-out
-  // query.
+  // Single evaluation: the audience CTE is materialised once. Window functions
+  // compute all three count buckets (total, manual, rule-matched) in the same
+  // pass, then LIMIT/OFFSET selects the visible page. No second round-trip.
   const rows = (await db.execute(drizzleSql`
-    with audience as (${audienceClause})
-    select
-      c.id as contact_id,
-      c.phone_number,
-      sc.created_at as joined_at,
-      case when sc.contact_id is not null then 'manual' else 'rule-matched' end as membership_type,
-      coalesce(
-        (
-          select json_agg(json_build_object(
-            'id', cg.id,
-            'name', cg.name,
-            'color', cg.color
-          ))
-          from contact_contact_groups ccg
-          inner join contact_groups cg on cg.id = ccg.contact_group_id
-          where ccg.contact_id = c.id and ccg.org_id = ${orgId}::uuid
-        ),
-        '[]'::json
-      ) as other_groups
-    from audience a
-    inner join contacts c on c.id = a.contact_id
-    left join segment_contacts sc
-      on sc.contact_id = a.contact_id
-     and sc.segment_id = ${segmentIdNum}::int
-     and sc.org_id = ${orgId}::uuid
-    where 1=1
-      ${searchClause}
-      ${membershipClause}
-    order by sc.created_at desc nulls last, c.id
+    with audience as (${audienceClause}),
+    joined as (
+      select
+        c.id as contact_id,
+        c.phone_number,
+        sc.created_at as joined_at,
+        case when sc.contact_id is not null then 'manual' else 'rule-matched' end as membership_type,
+        coalesce(
+          (
+            select json_agg(json_build_object(
+              'id', cg.id,
+              'name', cg.name,
+              'color', cg.color
+            ))
+            from contact_contact_groups ccg
+            inner join contact_groups cg on cg.id = ccg.contact_group_id
+            where ccg.contact_id = c.id and ccg.org_id = ${orgId}::uuid
+          ),
+          '[]'::json
+        ) as other_groups,
+        -- Window-function counts over the filtered set — computed once.
+        count(*) filter (where 1=1)
+          over ()::int as total_count,
+        count(*) filter (where sc.contact_id is not null)
+          over ()::int as manual_count
+      from audience a
+      inner join contacts c on c.id = a.contact_id
+      left join segment_contacts sc
+        on sc.contact_id = a.contact_id
+       and sc.segment_id = ${segmentIdNum}::int
+       and sc.org_id = ${orgId}::uuid
+      where 1=1
+        ${searchClause}
+        ${membershipClause}
+    )
+    select *
+    from joined
+    order by joined_at desc nulls last, contact_id
     limit ${limit}
     offset ${offset}
   `)) as unknown as {
@@ -142,35 +141,16 @@ export async function GET(
     joined_at: string | null;
     membership_type: "manual" | "rule-matched";
     other_groups: { id: number; name: string; color: string | null }[];
+    total_count: number;
+    manual_count: number;
   }[];
 
-  // Total count of the FULL audience under the same filters. Wrap the
-  // CTE result in a count() — Postgres optimizes this fine for pools
-  // under ~1M.
-  const countRows = (await db.execute(drizzleSql`
-    with audience as (${audienceClause})
-    select count(*)::int as total,
-      count(*) filter (
-        where exists (
-          select 1 from segment_contacts sc
-          where sc.contact_id = audience.contact_id
-            and sc.segment_id = ${segmentIdNum}::int
-            and sc.org_id = ${orgId}::uuid
-        )
-      )::int as manual_count
-    from audience
-    inner join contacts c on c.id = audience.contact_id
-    where 1=1
-      ${searchClause}
-  `)) as unknown as { total: number; manual_count: number }[];
-
-  const total = countRows[0]?.total ?? 0;
-  const manualCount = countRows[0]?.manual_count ?? 0;
+  // The window counts come from any row (they're identical across the page).
+  // Use 0 when the page is empty (no contacts match the filter).
+  const total = Number(rows[0]?.total_count ?? 0);
+  const manualCount = Number(rows[0]?.manual_count ?? 0);
   const ruleMatchedCount = total - manualCount;
 
-  // After applying the membership filter, surface the matching slice's
-  // count so the UI can show "N of M". When filter is 'all', this equals
-  // total.
   const filteredTotal =
     membership === "manual"
       ? manualCount

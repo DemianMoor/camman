@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-19 — Completed campaigns can now be reactivated (completed → active); `completed` is no longer a terminal status — docs/04-features/campaigns-stages-creatives.md
+
 2026-08-19 - Segment purchase rules + behavioural converted tier now use the same sale definition as the reports - docs/04-features/audience-segments.md, docs/04-features/behavioral-lanes.md, docs/03-data-model.md, docs/07-conventions.md
 - ROOT CAUSE: `stage_sends.sale_status` stores the network's raw Keitaro postback status. The network fires `lead` for PAID conversions and effectively never `sale` (only 2 `sale` rows org-wide, both stage 587 on 2026-06-24). The reporting paths already compensate - lib/keitaro/poll.ts counts every conversion row as a sale, lib/reporting/rollup.ts uses `converted_at IS NOT NULL` - but lib/segment-rules-eval.ts and lib/campaign-tier.ts tested `sale_status = 'sale'`.
 - IMPACT: the `Buyers_ALL` segment resolved to **2** contacts against **835** real buyers; `Clickers excl Buyers` excluded 2 instead of 837, so ~825 known buyers were being targeted as non-buyers. Campaign-tier lane 3 (Converted) was unreachable entirely. All 852 `lead` rows carry real payout revenue ($57,168 total, avg $67.10) - they are buyers.

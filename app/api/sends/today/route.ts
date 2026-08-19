@@ -158,11 +158,11 @@ export async function GET() {
     SELECT
       pp.phone_number,
       pp.number_type,
-      count(*) FILTER (WHERE ss.status NOT IN ('rejected', 'skipped_opted_out'))::int AS count
-    FROM stage_sends ss
+      count(*) FILTER (WHERE stage_sends.status NOT IN ('rejected', 'skipped_opted_out'))::int AS count
+    FROM stage_sends
     LEFT JOIN provider_phones pp
-      ON pp.id = ss.provider_phone_id AND pp.org_id = ${orgId}
-    WHERE ss.org_id = ${orgId} AND ${inArray(stage_sends.stage_id, stageIds)}
+      ON pp.id = stage_sends.provider_phone_id AND pp.org_id = ${orgId}
+    WHERE stage_sends.org_id = ${orgId} AND ${inArray(stage_sends.stage_id, stageIds)}
     GROUP BY pp.phone_number, pp.number_type
     ORDER BY count DESC
   `)) as unknown as {

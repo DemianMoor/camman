@@ -236,6 +236,7 @@ export async function enumerateStageRecipients(
     eligibility?: StageEligibilityOverlay;
     carrierPolicy?: CarrierPolicy;
     excludeMaterializedStageId?: number;
+    campaignName?: string | null;
   },
 ): Promise<StageRecipientRow[]> {
   const rows = (await dbc.execute(
@@ -256,7 +257,7 @@ export async function enumerateStageRecipients(
         .join(", ")}`,
     );
     void notifyTelegram(
-      `🛑 Send guard: ${leaked.length} landline/not_applicable contact(s) leaked into a send set (campaign ${opts.campaignId}) and were SKIPPED. An upstream audience gate leaked — investigate.`,
+      `🛑 Send guard: ${leaked.length} landline/not_applicable contact(s) leaked into a send set (campaign "${opts.campaignName ?? String(opts.campaignId)}") and were SKIPPED. An upstream audience gate leaked — investigate.`,
     );
     return rows.filter((r) => r.messaging_status !== "not_applicable");
   }

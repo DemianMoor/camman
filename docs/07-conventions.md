@@ -1,6 +1,21 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-18_
+_Last updated: 2026-08-19_
+
+## "Made a purchase" has exactly one definition (2026-08-19)
+
+`stage_sends.sale_status` stores the affiliate network's **raw Keitaro postback status**, verbatim. This account's network fires `lead` for PAID conversions and effectively never sends `sale`. Therefore:
+
+- **A buyer is `sale_status IN ('lead','sale')`** — any conversion that was not *rejected*. `rejected` is a refund / chargeback / fraud screen and is never a purchase.
+- **The predicate lives in one place**: `purchasedClause()` in [`lib/sale-attribution.ts`](../lib/sale-attribution.ts). Never inline `sale_status = 'sale'` again — that test finds essentially nobody.
+- Consumers: the three `made_purchase*` segment rules ([`lib/segment-rules-eval.ts`](../lib/segment-rules-eval.ts)) and the converted tier of the behavioural lanes ([`lib/campaign-tier.ts`](../lib/campaign-tier.ts)).
+
+The reporting surfaces already counted any conversion as a sale — [`lib/keitaro/poll.ts`](../lib/keitaro/poll.ts) does `agg.sales += 1` per conversion row, [`lib/reporting/rollup.ts`](../lib/reporting/rollup.ts) uses `(converted_at IS NOT NULL)`. The targeting side did not, so **the same 854 conversions read as 887 "Sales" on every report and 2 buyers in segments**, and `Clickers excl Buyers` excluded 2 people instead of 837 — i.e. 825 known buyers were being messaged as non-buyers.
+
+⭐ **The lesson generalises: a metric that is displayed and a metric that drives targeting are the same metric.** When a reporting path compensates for a quirk of an external feed, every other consumer of that column must be found and given the same compensation, or the two silently disagree — and the targeting side fails *quietly*, because an under-counted audience still returns rows and still sends.
+
+Guard: [`scripts/verify-purchase-rule-definition.ts`](../scripts/verify-purchase-rule-definition.ts) (read-only; the one write is a synthesized `rejected` conversion inside a rolled-back transaction). It asserts the rule count **equals the live non-rejected-conversion count** rather than a frozen number, so it does not expire as sales accumulate, and it flips a synthesized row `rejected` → `lead` to prove the bar can actually go red.
+
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
 

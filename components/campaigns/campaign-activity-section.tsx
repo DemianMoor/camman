@@ -503,7 +503,7 @@ function MessagesPanel({
                             }
                           >
                             {r.sale_status}
-                            {r.sale_status === "sale" && r.sale_revenue
+                            {r.sale_status !== "rejected" && r.sale_revenue
                               ? ` · $${Number(r.sale_revenue).toFixed(2)}`
                               : ""}
                           </Badge>

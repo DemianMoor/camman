@@ -137,9 +137,11 @@ export const RULE_TYPES = {
     value_shape: "offer_id",
   },
   // Purchase (sale) rules — mirror the clicker scoping (any / brand / offer).
-  // A contact "made a purchase" when they have ≥1 stage_sends row with
-  // sale_status='sale' (NOT 'lead' or 'rejected'). Empty org-wide until real
-  // sales accumulate. See lib/segment-rules-eval.ts.
+  // A contact "made a purchase" when they have ≥1 stage_sends row carrying a
+  // NON-REJECTED conversion, i.e. sale_status IN ('lead','sale'). The network
+  // pays out on `lead` postbacks, so `lead` IS a purchase — see
+  // lib/sale-attribution.ts for the shared definition and why, and
+  // lib/segment-rules-eval.ts for the SQL.
   made_purchase: {
     label: "Made a purchase (any)",
     operators: ["is", "is_not"],

@@ -5,6 +5,7 @@ import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
+import { purchasedClause } from "@/lib/sale-attribution";
 import { segment_rules, segments } from "@/db/schema";
 
 import {
@@ -116,10 +117,12 @@ function ruleInnerQuery(
     case "is_clicker_for_offer":
       return drizzleSql`SELECT contact_id FROM clickers WHERE org_id = ${orgId}::uuid AND offer_id = ${Number(v)}::int`;
     case "made_purchase":
-      // A buyer: ≥1 send row stamped sale_status='sale' (not 'lead'/'rejected').
-      // DISTINCT because a contact can have many send rows. Empty until real
-      // sales accumulate (SEND_ENABLED gated). Partial index stage_sends_sale_status_idx.
-      return drizzleSql`SELECT DISTINCT contact_id FROM stage_sends WHERE org_id = ${orgId}::uuid AND sale_status = 'sale'`;
+      // A buyer: ≥1 send row carrying a non-rejected conversion. `purchasedClause`
+      // is the shared definition — see lib/sale-attribution.ts for why this is
+      // NOT `sale_status = 'sale'` (the network pays out on `lead` postbacks).
+      // DISTINCT because a contact can have many send rows. Partial index
+      // stage_sends_sale_status_idx.
+      return drizzleSql`SELECT DISTINCT ss.contact_id FROM stage_sends ss WHERE ss.org_id = ${orgId}::uuid AND ${purchasedClause()}`;
     case "made_purchase_for_brand":
       // Brand scope: join to the campaign that owns the send. brand lives on
       // campaigns, not stage_sends.
@@ -128,7 +131,7 @@ function ruleInnerQuery(
         FROM stage_sends ss
         JOIN campaigns ca ON ca.id = ss.campaign_id
         WHERE ss.org_id = ${orgId}::uuid
-          AND ss.sale_status = 'sale'
+          AND ${purchasedClause()}
           AND ca.brand_id = ${Number(v)}::int
       `;
     case "made_purchase_for_offer":
@@ -137,7 +140,7 @@ function ruleInnerQuery(
         FROM stage_sends ss
         JOIN campaigns ca ON ca.id = ss.campaign_id
         WHERE ss.org_id = ${orgId}::uuid
-          AND ss.sale_status = 'sale'
+          AND ${purchasedClause()}
           AND ca.offer_id = ${Number(v)}::int
       `;
     case "reached_offer":

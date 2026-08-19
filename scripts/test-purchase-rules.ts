@@ -16,7 +16,9 @@ import { contacts, segments } from "../db/schema";
 //   1. EMPTY-DATA CASE — with zero sales, a made_purchase rule resolves to
 //      manual membership only (preview = manual_count). An empty preview is
 //      "no buyers yet", NOT a bug.
-//   2. Only sale_status='sale' counts — 'lead', 'rejected', and NULL never do.
+//   2. A PAID conversion counts — 'lead' AND 'sale' both do, because the
+//      network pays out on 'lead' postbacks (lib/sale-attribution.ts).
+//      'rejected' (refund/chargeback) and NULL never do.
 // Plus brand/offer scoping mirrors the clicker rules.
 
 async function main() {
@@ -297,7 +299,8 @@ async function main() {
     // offer B), one stage each, and stage_sends rows with mixed statuses:
     //   Brand A / Offer A:
     //     ext0 = 'sale', ext1 = 'sale', man0 = 'sale'  (3 buyers, 1 manual)
-    //     ext2 = 'lead', ext3 = 'rejected', ext4 = NULL (must NOT count)
+    //     ext2 = 'lead'  (a PAID conversion — MUST count)
+    //     ext3 = 'rejected', ext4 = NULL (must NOT count)
     //   Brand B / Offer B:
     //     ext5 = 'sale'  (scoping check)
     // ====================================================================
@@ -358,14 +361,14 @@ async function main() {
     // Buyers across the org: ext0, ext1, man0 (brand A) + ext5 (brand B) = 4
     // distinct, 1 of which (man0) is already a manual member.
     console.log(
-      "\n[P1] made_purchase (any): manual(5) ∪ buyers{ext0,ext1,man0,ext5} = 8",
+      "\n[P1] made_purchase (any): manual(5) ∪ buyers{ext0,ext1,ext2,man0,ext5} = 9",
     );
     const p1 = await createRule(seg.id, "made_purchase", null);
     const p1Count = await previewCount(seg.id);
-    // If 'lead'/'rejected'/NULL leaked in, ext2/ext3/ext4 would push this to 11.
+    // If 'rejected'/NULL leaked in, ext3/ext4 would push this to 11.
     check(
-      "[P1] count = 8 (only 'sale' counts — lead/rejected/NULL excluded)",
-      p1Count === 8,
+      "[P1] count = 9 (lead+sale both count — rejected/NULL excluded)",
+      p1Count === 9,
       `got ${p1Count}`,
     );
 
@@ -384,11 +387,11 @@ async function main() {
     await deleteRule(seg.id, p1);
 
     console.log(
-      "\n[P2] made_purchase_for_brand (A): manual(5) ∪ {ext0,ext1,man0} = 7",
+      "\n[P2] made_purchase_for_brand (A): manual(5) ∪ {ext0,ext1,ext2,man0} = 8",
     );
     const p2 = await createRule(seg.id, "made_purchase_for_brand", brandAId);
     const p2Count = await previewCount(seg.id);
-    check("[P2] count = 7", p2Count === 7, `got ${p2Count}`);
+    check("[P2] count = 8", p2Count === 8, `got ${p2Count}`);
     await deleteRule(seg.id, p2);
 
     console.log(
@@ -400,11 +403,11 @@ async function main() {
     await deleteRule(seg.id, p3);
 
     console.log(
-      "\n[P4] made_purchase_for_offer (A): manual(5) ∪ {ext0,ext1,man0} = 7",
+      "\n[P4] made_purchase_for_offer (A): manual(5) ∪ {ext0,ext1,ext2,man0} = 8",
     );
     const p4 = await createRule(seg.id, "made_purchase_for_offer", offerAId);
     const p4Count = await previewCount(seg.id);
-    check("[P4] count = 7", p4Count === 7, `got ${p4Count}`);
+    check("[P4] count = 8", p4Count === 8, `got ${p4Count}`);
     await deleteRule(seg.id, p4);
 
     console.log(

@@ -101,7 +101,7 @@ async function main() {
           ((select contact_id from clickers where org_id = ${orgId}::uuid)
            except
            (select distinct contact_id from stage_sends
-              where org_id = ${orgId}::uuid and sale_status = 'sale'))
+              where org_id = ${orgId}::uuid and sale_status in ('lead','sale')))
         ) combined
       ) elig_s
       inner join contacts elig_c on elig_c.id = elig_s.contact_id
@@ -179,7 +179,7 @@ async function main() {
           ((select contact_id from clickers where org_id = ${orgId}::uuid)
            except
            (select distinct contact_id from stage_sends
-              where org_id = ${orgId}::uuid and sale_status = 'sale'))
+              where org_id = ${orgId}::uuid and sale_status in ('lead','sale')))
         ) combined
       ) elig_s
       inner join contacts elig_c on elig_c.id = elig_s.contact_id
@@ -290,7 +290,7 @@ async function main() {
           ((select contact_id from clickers where org_id = ${orgId}::uuid)
            except
            (select distinct contact_id from stage_sends
-              where org_id = ${orgId}::uuid and sale_status = 'sale'))
+              where org_id = ${orgId}::uuid and sale_status in ('lead','sale')))
         ) combined
       ) elig_s
       inner join contacts elig_c on elig_c.id = elig_s.contact_id

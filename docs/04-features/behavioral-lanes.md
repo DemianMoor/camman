@@ -1,6 +1,6 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-07-07_
+_Last updated: 2026-08-19_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
@@ -14,6 +14,8 @@ their current high-water tier.
 > `SEND_ENABLED` gate** (and the per-org `sends_enabled` switch) — no live send
 > has fired, so lane preview counts are 0 until real sends accumulate.
 
+> **Tier 3 was unreachable before 2026-08-19.** It tested `sale_status = 'sale'`, but the affiliate network fires `lead`-status postbacks for paid conversions, so no contact ever entered the converted lane (2 rows org-wide, both from one stage on 2026-06-24). The lane now shares the same sale definition as the segment purchase rules and the reports.
+
 ## The tier model
 
 A contact's tier within a campaign is a **high-water mark** (only goes up):
@@ -23,7 +25,7 @@ A contact's tier within a campaign is a **high-water mark** (only goes up):
 | 0 | Ignored | no qualifying click |
 | 1 | Clicked | a CLEAN click (not bot/prefetch/suspect) on a link in this campaign |
 | 2 | Reached offer | a `stage_sends` row with `offer_reached_at` set |
-| 3 | Converted | a `stage_sends` row with `sale_status = 'sale'` |
+| 3 | Converted | a `stage_sends` row with a non-rejected conversion — `purchasedClause()` in [`lib/sale-attribution.ts`](../../lib/sale-attribution.ts), i.e. `sale_status IN ('lead','sale')` |
 
 Tier 3 (**converted**) **exits** the sequence — there is no tier-3 lane. Lanes
 match on **exact** tier (a contact at tier 2 is in the tier-2 lane only), so the

@@ -50,8 +50,6 @@ CREATE INDEX IF NOT EXISTS phone_carrier_limits_phone_idx
 -- bundle). SELECT-only, mirroring stage_sends.
 ALTER TABLE public.phone_carrier_limits ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
-DROP POLICY IF EXISTS "phone_carrier_limits_select_own_org" ON public.phone_carrier_limits;
---> statement-breakpoint
 CREATE POLICY "phone_carrier_limits_select_own_org"
   ON public.phone_carrier_limits FOR SELECT
   USING (org_id = public.current_org_id());

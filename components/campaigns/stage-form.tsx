@@ -1655,7 +1655,14 @@ export function StageForm({
           {/* ============ Right aside: previews + results ============ */}
           <aside className="grid min-w-0 gap-2 lg:sticky lg:top-4 lg:self-start">
             {/* SMS preview */}
-            <Card size="sm">
+            <Card
+              size="sm"
+              className={
+                selectedCreative && segments.segments > 1
+                  ? "border-red-400 bg-red-50 dark:border-red-700 dark:bg-red-950/40"
+                  : undefined
+              }
+            >
               <CardContent className="grid gap-1.5 p-2.5 text-sm">
                 <div className="flex items-center justify-between">
                   <div className="text-xs uppercase text-muted-foreground">

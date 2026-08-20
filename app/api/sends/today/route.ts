@@ -98,7 +98,7 @@ export async function GET() {
   }[];
 
   if (rows.length === 0) {
-    return NextResponse.json({ data: [], counts: {}, paused_campaigns: [] });
+    return NextResponse.json({ data: [], counts: {}, paused_campaigns: [], prepared_by_phone: [] });
   }
 
   // Materialization counts for exactly these stages (single grouped query).
@@ -151,6 +151,31 @@ export async function GET() {
       },
     ]),
   );
+
+  // Per-number breakdown of prepared messages for today's stages (excludes
+  // audit-only 'rejected' / 'skipped_opted_out' rows, same filter as total).
+  const phoneRows = (await db.execute(sql`
+    SELECT
+      pp.phone_number,
+      pp.number_type,
+      count(*) FILTER (WHERE stage_sends.status NOT IN ('rejected', 'skipped_opted_out'))::int AS count
+    FROM stage_sends
+    LEFT JOIN provider_phones pp
+      ON pp.id = stage_sends.provider_phone_id AND pp.org_id = ${orgId}
+    WHERE stage_sends.org_id = ${orgId} AND ${inArray(stage_sends.stage_id, stageIds)}
+    GROUP BY pp.phone_number, pp.number_type
+    ORDER BY count DESC
+  `)) as unknown as {
+    phone_number: string | null;
+    number_type: string | null;
+    count: number;
+  }[];
+
+  const prepared_by_phone = phoneRows.map((r) => ({
+    phone_number: r.phone_number,
+    number_type: r.number_type,
+    count: Number(r.count),
+  }));
 
   const data = rows.map((r) => {
     const counts = countsByStage.get(Number(r.stage_id)) ?? {
@@ -236,5 +261,6 @@ export async function GET() {
     data,
     counts,
     paused_campaigns: summarizePausedCampaigns(data),
+    prepared_by_phone,
   });
 }

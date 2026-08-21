@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-21_
+_Last updated: 2026-08-22_
 
 ## "Made a purchase" has exactly one definition (2026-08-19)
 
@@ -624,6 +624,38 @@ Read-only probes may run against production. **Anything that writes — even a s
 Default target for destructive-or-writing probes is the **`camman-v2` demo database**, not prod. The rule exists because the failure mode is not the write, it is the cleanup: see the assert-your-teardown rule above, where a "low-risk, self-cleaning" probe left a real row in the production `sms_providers` table because the delete silently no-op'd. Low risk is not no risk, and the cost of being wrong lands on live data.
 
 If a probe genuinely must run against production (it depends on real credentials, real volumes, or real provider state), ask first, keep the write set as small as possible, and verify the teardown by re-querying rather than trusting it.
+
+## Test fixtures — never a live entity, and never production for a write
+
+Two rules, both learned the same way: on 2026-08-21 a smoke test of the new brand → number
+guard PATCHed **stage 3031**, a draft behavioural child on the **active** campaign 902, to prove
+the guard rejected a cross-brand number. It did not reject — the stage already carried that
+number, so the grandfathering path correctly skipped the check — and the request instead changed
+`provider_phone_id` 114 → 27 and nulled `sms_provider_id`. The new guard then refused to put the
+original number back (the pair was now "changing"), so restoring it took a hand-written SQL
+`UPDATE` against production.
+
+**1. Never mutate a live or active-campaign entity as a test fixture.** Prove the behaviour with
+a request that must be **REJECTED** — a 4xx writes nothing by construction, so the test is
+inherently safe and needs no cleanup. When a write genuinely must happen, use an **archived or
+completed** entity with zero `stage_sends` rows, and record its exact prior values *before* the
+call so a restore is possible.
+
+Corollary, and the part that actually bit: **a passing 2xx is not evidence the guard ran.** A
+grandfathered path, an absent field, or a short-circuit all produce the same 200 as a working
+allow. Before reading a 2xx as "allowed", confirm the code path you meant to exercise was
+actually entered — here, that the pair was changing at all.
+
+**2. A smoke test that must WRITE runs against the `camman-v2` preview database, never
+production.** That is what it is for — see [preview-environment.md](preview-environment.md). It is
+disposable, structurally identical to production, and carries synthetic data. Production is for
+**read-only** verification: `SELECT`s, and API calls whose expected outcome is a rejection.
+
+The same discipline applies to the residue check afterwards. A restore is not finished when the
+row looks right — re-verify the surrounding invariants too (here: the count of stages on the
+number, that no row was left with a phone but a NULL provider, and that the pending send-row
+counts were untouched), because the failure you caused is rarely the only thing your request
+touched.
 
 ## Working copy — do multi-step work in a throwaway worktree, never in `C:/AFF/camman` directly
 

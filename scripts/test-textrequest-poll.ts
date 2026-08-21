@@ -257,6 +257,15 @@ async function main() {
         calls.some((c) => c.direction === "S") && calls.some((c) => c.direction === "R"),
         JSON.stringify(calls),
       );
+      // The page budget is per-direction, but the FUNCTION budget (maxDuration
+      // 60s) is shared, and outbound is the big side: 10,000 rows takes several
+      // ticks to drain. Walking outbound first would mean STOP intake never gets
+      // a turn during a large campaign - the opposite of the split's purpose.
+      check(
+        "walk: inbound is walked FIRST so a big outbound window cannot starve STOP intake",
+        calls.findIndex((c) => c.direction === "R") < calls.findIndex((c) => c.direction === "S"),
+        JSON.stringify(calls),
+      );
       check(
         "walk: every request is newest-first (sort=desc), not the oldest-first default",
         calls.length > 0 && calls.every((c) => c.sort === "desc"),

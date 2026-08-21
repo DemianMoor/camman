@@ -322,12 +322,19 @@ export async function pollTxrMessages(
 
   // Outbound and inbound get their OWN walk, and their own page budget, so they
   // can never compete for one: a big campaign must not push a STOP reply out of
-  // the read. Flattened to (dashboard x direction) pairs rather than nested so
+  // the read. INBOUND RUNS FIRST, and that ordering is load-bearing: the page
+  // budget is per-direction but the function budget (maxDuration 60s) is shared,
+  // and outbound is the big side — a 10K-message campaign takes several ticks
+  // to drain (measured 2026-08-20: five ticks, ~1,000-3,000 rows each, each one
+  // killed at 60s mid-walk). Outbound first would mean STOP intake never gets a
+  // turn for the whole campaign, which is the opposite of the split's purpose.
+  // Inbound is the small side (239 rows against 10,000 on 2026-08-21) and the
+  // compliance-critical one, so it goes first and always completes. Flattened to (dashboard x direction) pairs rather than nested so
   // the row handling below keeps its shape. `message_direction` is honored
   // server-side (verified live), but TR SILENTLY IGNORES unknown params, so the
   // per-row direction checks below remain the real guard — if the filter ever
   // stopped working, both walks would just see every row and capture dedupes.
-  const walks = targets.flatMap((t) => (["S", "R"] as const).map((direction) => ({ t, direction })));
+  const walks = targets.flatMap((t) => (["R", "S"] as const).map((direction) => ({ t, direction })));
   const dashboardsSeen = new Set<string>();
 
   for (const { t, direction } of walks) {

@@ -2,6 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-21 — Text Request messages poll walks inbound BEFORE outbound: the per-direction page budget did not protect STOP intake from the shared 60s function budget — docs/06-integrations.md, docs/04-features/crons.md
 2026-08-21 — Text Request messages poll: page_size 500->1000 (TR clamps at 1000), explicit newest-first `sort=desc` with an unsorted fallback, and outbound/inbound walked separately so a large campaign cannot crowd STOP replies out of the page budget — docs/06-integrations.md, docs/04-features/crons.md
 2026-08-19 — Reactivate from completed: added "Reactivate" to the campaigns-list 3-dots menu and fixed bulk-status to allow completed → active — docs/04-features/campaigns-stages-creatives.md
 2026-08-19 — Completed campaigns can now be reactivated (completed → active); `completed` is no longer a terminal status — docs/04-features/campaigns-stages-creatives.md

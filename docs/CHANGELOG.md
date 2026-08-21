@@ -2,6 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-08-21 — Only ONE Vercel project may run `db:migrate` on preview builds: `vercel-build` now also requires `RUN_PREVIEW_MIGRATIONS=1` (set on project `camman` -> Preview). Two projects build every PR commit and both raced to migrate the shared camman-v2 database; observed on PR #108 (migration 0146), where redeploying the identical commit passed. Also documents that a preview build alone applies a migration to the demo DB, and closes the campaign_circuit_events RLS "Known gap" (fixed by 0146) — docs/preview-environment.md (first committed here; was untracked), docs/CHANGELOG.md
 2026-08-21 — Text Request messages poll walks inbound BEFORE outbound: the per-direction page budget did not protect STOP intake from the shared 60s function budget — docs/06-integrations.md, docs/04-features/crons.md
 2026-08-21 — Text Request messages poll: page_size 500->1000 (TR clamps at 1000), explicit newest-first `sort=desc` with an unsorted fallback, and outbound/inbound walked separately so a large campaign cannot crowd STOP replies out of the page budget — docs/06-integrations.md, docs/04-features/crons.md
 2026-08-19 — Reactivate from completed: added "Reactivate" to the campaigns-list 3-dots menu and fixed bulk-status to allow completed → active — docs/04-features/campaigns-stages-creatives.md

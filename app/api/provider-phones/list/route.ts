@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull, or } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
@@ -19,14 +19,25 @@ export async function GET(request: Request) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
+  const sp = new URL(request.url).searchParams;
+
   // Opt-in: the segment-rules editor needs archived numbers so a rule
   // referencing one still renders its label instead of going blank.
-  const includeArchived =
-    new URL(request.url).searchParams.get("include_archived") === "1";
+  const includeArchived = sp.get("include_archived") === "1";
+
+  // Brand → numbers (Drip Phase 1, item 1a). When set, return only numbers
+  // usable by that brand: the brand's own numbers PLUS any number with no
+  // brand (shared — see lib/api/brand-number-guard.ts, "ABSENT = ALLOWED").
+  // Omitted ⇒ org-wide, byte-identical to the pre-1a response, which is what
+  // the segment-rules editor still needs (it labels rules across every brand).
+  const brandParam = sp.get("brand_id");
+  const brandFilter =
+    brandParam != null && /^\d+$/.test(brandParam) ? Number(brandParam) : null;
 
   const rows = await db
     .select({
       id: provider_phones.id,
+      brand_id: provider_phones.brand_id,
       phone_number: provider_phones.phone_number,
       number_type: provider_phones.number_type,
       status: provider_phones.status,
@@ -45,12 +56,17 @@ export async function GET(request: Request) {
       ),
     )
     .where(
-      includeArchived
-        ? eq(provider_phones.org_id, orgId)
-        : and(
-            eq(provider_phones.org_id, orgId),
-            eq(provider_phones.status, "active"),
-          ),
+      and(
+        eq(provider_phones.org_id, orgId),
+        includeArchived ? undefined : eq(provider_phones.status, "active"),
+        // brand's own numbers OR shared (NULL brand). Zero-width when unset.
+        brandFilter !== null
+          ? or(
+              eq(provider_phones.brand_id, brandFilter),
+              isNull(provider_phones.brand_id),
+            )
+          : undefined,
+      ),
     )
     .orderBy(asc(sms_providers.name), asc(provider_phones.phone_number));
 

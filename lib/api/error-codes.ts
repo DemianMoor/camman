@@ -17,6 +17,9 @@ export const API_ERROR_CODES = {
   RATE_LIMITED: "rate_limited",
   INTERNAL: "internal",
   TRACKING_ID_IMMUTABLE: "tracking_id_immutable",
+  // The chosen sending number is registered to a different brand than the
+  // campaign's. Write-time only — see lib/api/brand-number-guard.ts.
+  PHONE_BRAND_MISMATCH: "phone_brand_mismatch",
 } as const;
 
 export type ApiErrorCode =

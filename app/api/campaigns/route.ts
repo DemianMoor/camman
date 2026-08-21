@@ -19,6 +19,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import { snapshotAudience } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { generateCampaignSlug } from "@/lib/campaign-helpers";
@@ -177,6 +178,20 @@ export async function POST(req: NextRequest) {
         API_ERROR_CODES.VALIDATION,
         { field: "default_provider_phone_id" },
       );
+    }
+    // Brand → numbers (1a). A NEW campaign must pair a number with its own
+    // brand; there is nothing to grandfather on create.
+    const mismatch = await checkPhoneBrandMatch(db, {
+      orgId,
+      providerPhoneId: input.default_provider_phone_id,
+      campaignBrandId: input.brand_id ?? null,
+    });
+    if (mismatch) {
+      return apiError(400, mismatch.message, API_ERROR_CODES.PHONE_BRAND_MISMATCH, {
+        field: "default_provider_phone_id",
+        phone_brand_id: mismatch.phoneBrandId,
+        campaign_brand_id: mismatch.campaignBrandId,
+      });
     }
   }
   const segmentIds = input.audience_segment_ids ?? [];

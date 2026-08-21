@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray, sql as drizzleSql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, isNull, or, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -77,6 +77,18 @@ export async function GET(
     eq(provider_phones.provider_id, pid),
     inArray(provider_phones.status, requestedStatuses),
   ];
+  // Brand → numbers (Drip Phase 1, item 1a). When set, narrow to numbers usable
+  // by that brand: the brand's own PLUS any with no brand (shared — see
+  // lib/api/brand-number-guard.ts, "ABSENT = ALLOWED"). Omitted ⇒ unchanged,
+  // which is what the provider settings page needs (it manages every number).
+  const brandParam = sp.get("brand_id");
+  if (brandParam != null && /^\d+$/.test(brandParam)) {
+    const brandClause = or(
+      eq(provider_phones.brand_id, Number(brandParam)),
+      isNull(provider_phones.brand_id),
+    );
+    if (brandClause) conditions.push(brandClause);
+  }
   if (searchParam) {
     conditions.push(ilike(provider_phones.phone_number, `%${searchParam}%`));
   }

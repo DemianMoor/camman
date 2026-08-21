@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import {
@@ -82,6 +83,33 @@ export async function POST(
     });
   }
   const source = sourceRow[0];
+
+  // Brand → numbers (1a). A duplicate CREATES a stage, so it is held to the
+  // create rule, not the grandfathering rule — copying a legacy mismatched
+  // stage would otherwise mint new mismatches indefinitely and make the whole
+  // check decorative.
+  //
+  // ⚠️ OPERATIONAL BITE: this is the one place 1a changes an existing habit.
+  // Rolling a daily campaign forward by duplicating yesterday's stage now fails
+  // for a campaign whose number belongs to another brand (today: Guide Kin
+  // campaigns on phone 114, a LumZen number). The fix is to give the campaign a
+  // number of its own brand; the error names both brands. If this proves too
+  // disruptive before a replacement number exists, deleting this one block
+  // restores the old behavior without touching anything else.
+  {
+    const mismatch = await checkPhoneBrandMatch(db, {
+      orgId,
+      providerPhoneId: source.provider_phone_id,
+      campaignBrandId: campaignRow[0].brand_id,
+    });
+    if (mismatch) {
+      return apiError(400, mismatch.message, API_ERROR_CODES.PHONE_BRAND_MISMATCH, {
+        field: "provider_phone_id",
+        phone_brand_id: mismatch.phoneBrandId,
+        campaign_brand_id: mismatch.campaignBrandId,
+      });
+    }
+  }
 
   // stage_number is filled in by the BEFORE INSERT trigger; cast around
   // the Drizzle type that demands it.

@@ -19,6 +19,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
 import { can } from "@/lib/permissions";
 import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
@@ -236,6 +237,9 @@ export async function PATCH(
       status: campaigns.status,
       assigned_to_user_id: campaigns.assigned_to_user_id,
       brand_id: campaigns.brand_id,
+      // Needed by the brand → numbers grandfathering test (1a): an existing
+      // mismatched pair stays editable unless the pair itself is changing.
+      default_provider_phone_id: campaigns.default_provider_phone_id,
       offer_id: campaigns.offer_id,
       tracking_id: campaigns.tracking_id,
       created_at: campaigns.created_at,
@@ -353,6 +357,43 @@ export async function PATCH(
         API_ERROR_CODES.VALIDATION,
         { field: "default_provider_phone_id" },
       );
+    }
+  }
+
+  // Brand → numbers (1a). GRANDFATHERED: only checked when the patch actually
+  // changes the brand or the number. An existing mismatched campaign stays
+  // fully editable otherwise — four active campaigns are in exactly that state
+  // by product ruling, and re-validating an untouched pair would lock them.
+  {
+    const nextBrandId =
+      input.brand_id !== undefined ? input.brand_id ?? null : current[0].brand_id;
+    const nextPhoneId =
+      input.default_provider_phone_id !== undefined
+        ? input.default_provider_phone_id ?? null
+        : current[0].default_provider_phone_id;
+    if (
+      pairIsChanging({
+        nextPhoneId: input.default_provider_phone_id,
+        currentPhoneId: current[0].default_provider_phone_id,
+        nextBrandId: input.brand_id,
+        currentBrandId: current[0].brand_id,
+      })
+    ) {
+      const mismatch = await checkPhoneBrandMatch(db, {
+        orgId,
+        providerPhoneId: nextPhoneId,
+        campaignBrandId: nextBrandId,
+      });
+      if (mismatch) {
+        return apiError(400, mismatch.message, API_ERROR_CODES.PHONE_BRAND_MISMATCH, {
+          field:
+            input.brand_id !== undefined && input.brand_id !== current[0].brand_id
+              ? "brand_id"
+              : "default_provider_phone_id",
+          phone_brand_id: mismatch.phoneBrandId,
+          campaign_brand_id: mismatch.campaignBrandId,
+        });
+      }
     }
   }
 

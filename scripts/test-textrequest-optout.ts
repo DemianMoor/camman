@@ -124,6 +124,16 @@ async function main() {
       }
 
       const dashboardId = `d${sfx}`;
+      // Phone 114 (dashboard 68093) is CONFIGURED and live in production, so the
+      // pollers resolve it alongside this fixture's dashboard. Every fake fetcher
+      // answers only for the fixture's dashboard, otherwise these counts describe
+      // the org's live config instead of the behaviour under test — which is what
+      // silently turned this file red on main.
+      type Ctx = { dashboardId: string; direction?: "S" | "R" };
+      const onlyFixture =
+        <T>(empty: T, f: (o: Ctx) => Promise<T>) =>
+        async (o: Ctx) =>
+          o.dashboardId === dashboardId ? f(o) : empty;
       await tx.execute(sql`
         INSERT INTO provider_phones (org_id, provider_id, phone_number, dashboard_id, credential_id, number_type, status)
         VALUES (${orgId}, ${prov.id}, ${"+1844" + sfx.slice(0, 7)}, ${dashboardId}, ${cred.id}, 'toll_free', 'active')`);
@@ -284,7 +294,10 @@ async function main() {
       ];
       const pr = await pollTxrMessages(tx as unknown as typeof db, {
         orgId,
-        fetchMessages: async () => ({ ok: true as const, items: inboundRows, totalItems: inboundRows.length }),
+        fetchMessages: onlyFixture({ ok: true as const, items: [], totalItems: 0 }, async (o) => {
+          const items = o.direction ? inboundRows.filter((r) => r.message_direction === o.direction) : inboundRows;
+          return { ok: true as const, items, totalItems: items.length };
+        }),
       });
       check("poll saw 2 inbound rows", pr.inbound_seen === 2, JSON.stringify(pr));
       check("poll captured both", pr.inbound_captured === 2, JSON.stringify(pr));
@@ -295,7 +308,10 @@ async function main() {
       check("poll-sourced opt_out tagged textrequest_messages_poll", pollOptOut[0]?.source === "textrequest_messages_poll", JSON.stringify(pollOptOut));
       const prAgain = await pollTxrMessages(tx as unknown as typeof db, {
         orgId,
-        fetchMessages: async () => ({ ok: true as const, items: inboundRows, totalItems: inboundRows.length }),
+        fetchMessages: onlyFixture({ ok: true as const, items: [], totalItems: 0 }, async (o) => {
+          const items = o.direction ? inboundRows.filter((r) => r.message_direction === o.direction) : inboundRows;
+          return { ok: true as const, items, totalItems: items.length };
+        }),
       });
       check("re-poll: both inbound rows deduped by GUID", prAgain.inbound_dupe === 2 && prAgain.inbound_captured === 0, JSON.stringify(prAgain));
 
@@ -309,7 +325,11 @@ async function main() {
       ];
       const cr = await pollTxrOptedOutContacts(tx as unknown as typeof db, {
         orgId,
-        fetchContacts: async () => ({ ok: true as const, items: contactRows, totalItems: contactRows.length }),
+        fetchContacts: onlyFixture({ ok: true as const, items: [], totalItems: 0 }, async () => ({
+          ok: true as const,
+          items: contactRows,
+          totalItems: contactRows.length,
+        })),
       });
       check("contacts poll: both rows actionable", cr.actionable === 2, JSON.stringify(cr));
       check("contacts poll: the known one is skipped without a row", cr.already_recorded === 1, JSON.stringify(cr));
@@ -320,7 +340,11 @@ async function main() {
       check("contacts-poll opt_out tagged textrequest_contacts_poll", cOptOut[0]?.source === "textrequest_contacts_poll", JSON.stringify(cOptOut));
       const crAgain = await pollTxrOptedOutContacts(tx as unknown as typeof db, {
         orgId,
-        fetchContacts: async () => ({ ok: true as const, items: contactRows, totalItems: contactRows.length }),
+        fetchContacts: onlyFixture({ ok: true as const, items: [], totalItems: 0 }, async () => ({
+          ok: true as const,
+          items: contactRows,
+          totalItems: contactRows.length,
+        })),
       });
       check("re-poll: nothing new (both already recorded)", crAgain.suppressed === 0 && crAgain.already_recorded === 2, JSON.stringify(crAgain));
 

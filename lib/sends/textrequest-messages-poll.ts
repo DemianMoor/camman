@@ -30,12 +30,19 @@ const DEFAULT_LOOKBACK_HOURS = 6;
 // Small forward skew so a message written a second ago (or a slight clock skew
 // between us and Text Request) is never just outside the window's end.
 const END_SKEW_MINUTES = 5;
-// 500 was accepted live; TR documents no maximum. Bigger pages = fewer requests.
-const PAGE_SIZE = 500;
-// Hard ceiling on pages per (dashboard, tick). At PAGE_SIZE=500 this is 10K
-// messages — far above a realistic 6-hour window for one sending number, and a
-// backstop against an unbounded loop if `meta.total_items` ever misbehaves.
-// Hitting it is reported (result.truncated + a Telegram alert), never silent.
+// TR silently CLAMPS page_size at 1000: asking for 2000 or 5000 returns 1000
+// rows and echoes meta.page_size=1000 (verified live 2026-08-21). 1000 is
+// therefore the ceiling worth asking for — half the requests per tick, and
+// double the effective page-cap headroom.
+const PAGE_SIZE = 1000;
+// Hard ceiling on pages per (dashboard, DIRECTION, tick). Outbound and inbound
+// are walked separately, so each gets its OWN budget: 20 x 1000 = 20K messages
+// per direction. The separation is the point — on 2026-08-21 dashboard 68093
+// sent 10,000 messages in 46 minutes and overflowed the shared 10K budget at 21
+// pages; under one budget a big campaign can push STOP replies out of the read.
+// Also a backstop against an unbounded loop if `meta.total_items` ever
+// misbehaves. Hitting it is reported (result.truncated + a Telegram alert),
+// never silent.
 const MAX_PAGES = 20;
 
 // TR emits UTC timestamps with NO timezone designator ("2026-07-25T09:39:35.227").
@@ -99,6 +106,7 @@ export type TxrMessagesFetcher = (opts: {
   page: number;
   pageSize: number;
   direction?: "S" | "R";
+  sort?: "desc";
 }) => Promise<TxrMessagesPage>;
 
 async function realFetchTxrMessages(opts: {
@@ -108,6 +116,7 @@ async function realFetchTxrMessages(opts: {
   page: number;
   pageSize: number;
   direction?: "S" | "R";
+  sort?: "desc";
 }): Promise<TxrMessagesPage> {
   try {
     const u = new URL(`${textrequestBaseUrl()}/dashboards/${encodeURIComponent(opts.dashboardId)}/messages`);
@@ -123,6 +132,12 @@ async function realFetchTxrMessages(opts: {
     // Server-side direction filter (the documented spelling is
     // `message_direction`; a bare `direction` is ignored).
     if (opts.direction) u.searchParams.set("message_direction", opts.direction);
+    // Newest-first. Also absent from TR's OpenAPI spec, but honored live AND
+    // validated as an enum: an unrecognized value is rejected with HTTP 400
+    // rather than silently ignored (verified 2026-08-21). So if TR ever drops
+    // it, this fails LOUDLY into the unsorted fallback in pollTxrMessages
+    // instead of quietly handing us the wrong end of the window.
+    if (opts.sort) u.searchParams.set("sort", opts.sort);
 
     const res = await fetch(u.toString(), {
       method: "GET",
@@ -144,17 +159,35 @@ async function realFetchTxrMessages(opts: {
   }
 }
 
-// Page order, and why it runs BACKWARDS: TR documents (and live confirms)
-// "Messages will always be sorted from oldest to newest", with no honored sort
-// parameter. Under a page cap, walking forward would keep the OLDEST messages
-// and drop the NEWEST — backwards for a backstop, whose whole job is to catch
-// what just happened. So we read page 0 for `meta.total_items`, then walk from
-// the LAST page down. If the cap bites, what's dropped is the oldest slice of
-// the window, which earlier ticks already covered.
+// Page order. Both planners walk NEWEST-first, because a backstop's whole job is
+// to catch what just happened: if the cap bites, what gets dropped must be the
+// OLDEST slice of the window, which earlier ticks already covered.
+//
+// planTxrSortedWalk is the primary path. With `sort=desc` the API hands us
+// newest-first, so page 0 IS the newest page and the walk runs forward. That
+// also makes the walk independent of `meta.total_items` being exactly right:
+// a miscount can cost a page at the tail, never the newest data.
+//
+// planTxrPageWalk is the fallback for a refused `sort`. TR's default order is
+// documented (and live-confirmed) as oldest->newest, so newest-first there
+// means reading page 0 for `meta.total_items` and walking the LAST page down.
 //
 // Rows can shift between requests if new messages arrive mid-walk (page
 // boundaries move). That's accepted: capture is idempotent, windows overlap
-// tick-to-tick, and a row missed once is picked up next tick.
+// tick-to-tick, and a row missed once is picked up next tick. Under sort=desc
+// the shift is strictly older-ward, into pages the walk has not read yet, so
+// it costs a re-read and never a skip.
+export function planTxrSortedWalk(totalItems: number, pageSize: number, maxPages: number): {
+  pages: number[];
+  truncated: boolean;
+} {
+  if (totalItems <= 0) return { pages: [], truncated: false };
+  const pageCount = Math.ceil(totalItems / pageSize);
+  const pages: number[] = [];
+  for (let p = 0; p < pageCount && pages.length < maxPages; p++) pages.push(p);
+  return { pages, truncated: pageCount > maxPages };
+}
+
 export function planTxrPageWalk(totalItems: number, pageSize: number, maxPages: number): {
   pages: number[];
   truncated: boolean;
@@ -181,6 +214,7 @@ export interface TxrMessagesPollResult {
   inbound_dupe: number; // same message GUID already captured (webhook got it first)
   inbound_suppressed: number; // resulted in a real opt-out
   truncated: boolean; // a page cap bit somewhere
+  sort_fallbacks: number; // walks that had to drop `sort=desc` and read oldest-first
   error: string | null;
 }
 
@@ -281,43 +315,70 @@ export async function pollTxrMessages(
     inbound_dupe: 0,
     inbound_suppressed: 0,
     truncated: false,
+    sort_fallbacks: 0,
     error: null,
   };
   const breakerTrips: { campaignId: number; result: OptOutRateCheckResult }[] = [];
 
-  for (const t of targets) {
-    res.dashboards_polled++;
+  // Outbound and inbound get their OWN walk, and their own page budget, so they
+  // can never compete for one: a big campaign must not push a STOP reply out of
+  // the read. Flattened to (dashboard x direction) pairs rather than nested so
+  // the row handling below keeps its shape. `message_direction` is honored
+  // server-side (verified live), but TR SILENTLY IGNORES unknown params, so the
+  // per-row direction checks below remain the real guard — if the filter ever
+  // stopped working, both walks would just see every row and capture dedupes.
+  const walks = targets.flatMap((t) => (["S", "R"] as const).map((direction) => ({ t, direction })));
+  const dashboardsSeen = new Set<string>();
 
-    // Page 0 first, purely to learn total_items for the backwards walk.
-    const head = await fetchMessages({
-      apiKey: t.api_key,
-      dashboardId: t.dashboard_id,
-      window,
-      page: 0,
-      pageSize,
-    });
+  for (const { t, direction } of walks) {
+    if (!dashboardsSeen.has(t.dashboard_id)) {
+      dashboardsSeen.add(t.dashboard_id);
+      res.dashboards_polled++;
+    }
+    const label = direction === "S" ? "outbound" : "inbound";
+    const req = { apiKey: t.api_key, dashboardId: t.dashboard_id, window, pageSize, direction };
+
+    // Ask for newest-first explicitly instead of relying on TR's default order,
+    // so page 0 is the newest page whatever meta.total_items says. Page 0
+    // doubles as the head request that sizes the walk.
+    let sort: "desc" | undefined = "desc";
+    let head = await fetchMessages({ ...req, page: 0, sort });
+    if (!head.ok) {
+      // `sort` is undocumented. If TR ever rejects it (it 400s an unrecognized
+      // value) degrade to the documented oldest-first order and the backwards
+      // walk rather than letting a compliance backstop go dark. Counted, so a
+      // permanent silent downgrade is still visible in the cron response.
+      const unsorted = await fetchMessages({ ...req, page: 0 });
+      if (unsorted.ok) {
+        res.sort_fallbacks++;
+        sort = undefined;
+        head = unsorted;
+      }
+    }
     if (!head.ok) {
       res.error = head.error;
       await notifyTelegram(
         `⚠️ Text Request messages poll FAILED (DLR reconcile backstop down)\n` +
-          `error: ${head.error}\ncredential ${t.credential_id} · dashboard ${t.dashboard_id}`,
+          `error: ${head.error}\ncredential ${t.credential_id} · dashboard ${t.dashboard_id} (${label})`,
       ).catch(() => {});
       continue;
     }
 
-    const walk = planTxrPageWalk(head.totalItems, pageSize, maxPages);
+    const walk = sort
+      ? planTxrSortedWalk(head.totalItems, pageSize, maxPages)
+      : planTxrPageWalk(head.totalItems, pageSize, maxPages);
     if (walk.truncated) {
       res.truncated = true;
       // Never a silent cap: say exactly what was skipped and why.
       const pagesTotal = Math.ceil(head.totalItems / pageSize);
       console.warn(
-        `[textrequest-messages-poll] page cap hit — dashboard ${t.dashboard_id}: ` +
+        `[textrequest-messages-poll] page cap hit — dashboard ${t.dashboard_id} (${label}): ` +
           `${head.totalItems} messages across ${pagesTotal} pages, reading the newest ${maxPages}. ` +
           `Oldest ${pagesTotal - maxPages} page(s) skipped (already covered by earlier ticks).`,
       );
       await notifyTelegram(
         `⚠️ Text Request messages poll hit its page cap\n` +
-          `dashboard ${t.dashboard_id}: ${head.totalItems} messages in the ${
+          `dashboard ${t.dashboard_id} (${label}): ${head.totalItems} messages in the ${
             opts?.lookbackHours ?? DEFAULT_LOOKBACK_HOURS
           }h window (${pagesTotal} pages, cap ${maxPages}).\n` +
           `Newest pages were read; oldest skipped. Consider a shorter lookback or a higher cap.`,
@@ -325,11 +386,12 @@ export async function pollTxrMessages(
     }
 
     for (const page of walk.pages) {
-      // Page 0's rows are already in hand from the head request.
+      // Page 0's rows are already in hand from the head request — under
+      // sort=desc it is the first page of the walk, so it is always reusable.
       const pageRes =
-        page === 0 && walk.pages.length === 1
+        page === 0 && (sort || walk.pages.length === 1)
           ? head
-          : await fetchMessages({ apiKey: t.api_key, dashboardId: t.dashboard_id, window, page, pageSize });
+          : await fetchMessages({ ...req, page, sort });
       if (!pageRes.ok) {
         res.error = pageRes.error;
         console.warn(

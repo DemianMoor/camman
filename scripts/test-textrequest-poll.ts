@@ -22,8 +22,10 @@ import {
   computeTxrMessagesWindow,
   parseTxrUtcTimestamp,
   planTxrPageWalk,
+  planTxrSortedWalk,
   pollTxrMessages,
   type TxrMessageRow,
+  type TxrMessagesFetcher,
 } from "@/lib/sends/textrequest-messages-poll";
 
 // Alerts are best-effort and this box has a REAL bot token in .env.local — clear
@@ -72,7 +74,28 @@ check(
   JSON.stringify(dstWin),
 );
 
-console.log("\n— pure: backwards page walk —");
+console.log("\n— pure: sorted (newest-first) page walk —");
+check(
+  "sorted walk: empty collection -> no pages",
+  JSON.stringify(planTxrSortedWalk(0, 1000, 20)) === JSON.stringify({ pages: [], truncated: false }),
+);
+check(
+  "sorted walk: single partial page -> [0], not truncated",
+  JSON.stringify(planTxrSortedWalk(3, 1000, 20)) === JSON.stringify({ pages: [0], truncated: false }),
+);
+check(
+  "sorted walk: pages run FORWARD (0,1,2) because sort=desc puts newest on page 0",
+  JSON.stringify(planTxrSortedWalk(2400, 1000, 20).pages) === JSON.stringify([0, 1, 2]),
+);
+const sortedCap = planTxrSortedWalk(25000, 1000, 20);
+check("sorted walk: cap bites -> truncated flag set", sortedCap.truncated === true, JSON.stringify(sortedCap));
+check(
+  "sorted walk: cap keeps the NEWEST pages (0..19) and drops the oldest",
+  sortedCap.pages.length === 20 && sortedCap.pages[0] === 0 && sortedCap.pages[19] === 19,
+  JSON.stringify(sortedCap.pages),
+);
+
+console.log("\n— pure: backwards page walk (unsorted fallback) —");
 check("empty collection -> no pages", JSON.stringify(planTxrPageWalk(0, 500, 20)) === JSON.stringify({ pages: [], truncated: false }));
 check(
   "single partial page -> [0], not truncated",
@@ -127,10 +150,10 @@ async function main() {
         throw ROLLBACK;
       }
 
-      // A txr sending number bound to that credential + a dashboard. The real
-      // phone 114 has dashboard_id/credential_id still NULL (go-live config), so
-      // the poll finds nothing in production yet — exactly the safe no-op we
-      // want. This fixture is what a CONFIGURED number looks like.
+      // A txr sending number bound to that credential + a dashboard. Phone 114
+      // (dashboard 68093) is configured and LIVE in production now, so the poll
+      // resolves it too; `onlyFixture` below keeps this fixture's counts
+      // independent of that. This is what a CONFIGURED number looks like.
       const dashboardId = `d${sfx}`;
       await tx.execute(sql`
         INSERT INTO provider_phones (org_id, provider_id, phone_number, dashboard_id, credential_id, number_type, status)
@@ -161,10 +184,28 @@ async function main() {
         // INBOUND -> not the DLR table's business (Phase 4 owns it)
         { dashboard_phone: "18449903688", customer_phone: "13155860004", customer_friendly_name: null, segments_count: 1, message_id: `guid-inbound-${sfx}`, body: "STOP", message_direction: "R", message_timestamp_utc: "2026-07-25T11:03:00", delivery_status: null, delivery_error: null },
       ];
-      const fetchMessages = async () => ({ ok: true as const, items: rows, totalItems: rows.length });
+      // Phone 114 is CONFIGURED in production now (dashboard 68093), so the poll
+      // resolves it alongside this fixture's dashboard. Every fake fetcher must
+      // answer only for the fixture's dashboard — otherwise these counts
+      // describe the org's live config instead of the behaviour under test,
+      // which is what silently turned this file red on main.
+      const onlyFixture =
+        (f: TxrMessagesFetcher): TxrMessagesFetcher =>
+        async (o) =>
+          o.dashboardId === dashboardId ? f(o) : { ok: true as const, items: [], totalItems: 0 };
+
+      // The real API filters by `message_direction` server-side, so the fixture
+      // does too — otherwise each direction walk would see every row and the
+      // counts below would be describing a fixture artifact, not the poll.
+      const fetchMessages = onlyFixture(async (o) => {
+        const items = o.direction ? rows.filter((r) => r.message_direction === o.direction) : rows;
+        return { ok: true as const, items, totalItems: items.length };
+      });
 
       const r1 = await pollTxrMessages(tx as unknown as typeof db, { orgId, fetchMessages });
-      check("poll: 1 dashboard polled", r1.dashboards_polled === 1, JSON.stringify(r1));
+      // >= 1, not === 1: the org also has the real configured dashboard. The row
+      // counts below stay exact because every fetcher answers only for ours.
+      check("poll: the fixture dashboard was polled", r1.dashboards_polled >= 1, JSON.stringify(r1));
       check("poll: only outbound-with-status counted (2 of 4)", r1.outbound_with_status === 2, JSON.stringify(r1));
       check("poll: 2 captured", r1.captured === 2, JSON.stringify(r1));
       check("poll: 1 matched to its stage_send", r1.matched === 1, JSON.stringify(r1));
@@ -195,7 +236,7 @@ async function main() {
       const changed: TxrMessageRow[] = [{ ...rows[0]!, delivery_status: "undelivered", delivery_error: "2100" }];
       const r3 = await pollTxrMessages(tx as unknown as typeof db, {
         orgId,
-        fetchMessages: async () => ({ ok: true as const, items: changed, totalItems: 1 }),
+        fetchMessages: onlyFixture(async () => ({ ok: true as const, items: changed, totalItems: 1 })),
       });
       check("state change (delivered -> undelivered) is captured, not deduped", r3.captured === 1, JSON.stringify(r3));
       const errRow = (await tx.execute(sql`
@@ -203,19 +244,102 @@ async function main() {
         WHERE message_id = ${knownMsgId} AND status = 'undelivered'`)) as unknown as { status: string; error_code: string | null }[];
       check("delivery_error lands in error_code (2100)", errRow[0]?.error_code === "2100", JSON.stringify(errRow[0]));
 
+      // ---- the request shape the walk asks TR for ----
+      const calls: { direction?: string; sort?: string; page: number; pageSize: number }[] = [];
+      const recorder = onlyFixture(async (o) => {
+        calls.push({ direction: o.direction, sort: o.sort, page: o.page, pageSize: o.pageSize });
+        const items = o.direction ? rows.filter((r) => r.message_direction === o.direction) : rows;
+        return { ok: true as const, items, totalItems: items.length };
+      });
+      await pollTxrMessages(tx as unknown as typeof db, { orgId, fetchMessages: recorder });
+      check(
+        "walk: outbound and inbound are asked for SEPARATELY (own page budget each)",
+        calls.some((c) => c.direction === "S") && calls.some((c) => c.direction === "R"),
+        JSON.stringify(calls),
+      );
+      check(
+        "walk: every request is newest-first (sort=desc), not the oldest-first default",
+        calls.length > 0 && calls.every((c) => c.sort === "desc"),
+        JSON.stringify(calls),
+      );
+      check(
+        "walk: default page size is 1000 — TR silently clamps anything larger",
+        calls.length > 0 && calls.every((c) => c.pageSize === 1000),
+        JSON.stringify(calls),
+      );
+
+      // ---- the crowd-out fix: a 10K outbound blast must not starve STOP intake ----
+      // This is the alert from 2026-08-21 in miniature: outbound overflows the
+      // page cap while an inbound STOP sits in the same window. Before the
+      // direction split they shared one budget and the STOP could be dropped.
+      const stopRow: TxrMessageRow = {
+        dashboard_phone: "18449903688", customer_phone: "13155870001", customer_friendly_name: null,
+        segments_count: 1, message_id: `guid-stop-${sfx}`, body: "STOP", message_direction: "R",
+        message_timestamp_utc: "2026-07-25T11:10:00", delivery_status: null, delivery_error: null,
+      };
+      const blastRow: TxrMessageRow = { ...rows[1]!, message_id: `guid-blast-${sfx}` };
+      const rBlast = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        maxPages: 1,
+        pageSize: 1,
+        fetchMessages: onlyFixture(async (o) =>
+          o.direction === "R"
+            ? { ok: true as const, items: [stopRow], totalItems: 1 }
+            : { ok: true as const, items: [blastRow], totalItems: 5000 },
+        ),
+      });
+      check(
+        "blast: an outbound overflow still lets the inbound STOP through",
+        rBlast.inbound_captured === 1 && rBlast.inbound_suppressed === 1,
+        JSON.stringify(rBlast),
+      );
+      check("blast: the outbound truncation is still reported", rBlast.truncated === true, JSON.stringify(rBlast));
+
+      // ---- defense: TR SILENTLY IGNORES unknown params, so never trust the
+      // server-side filter alone. If message_direction stopped being honored,
+      // both walks would see every row — that must not double-process anything.
+      const ignoreS: TxrMessageRow = { ...rows[0]!, message_id: `guid-ign-s-${sfx}` };
+      const ignoreR: TxrMessageRow = { ...stopRow, message_id: `guid-ign-r-${sfx}`, customer_phone: "13155870002" };
+      const rIgnored = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        fetchMessages: onlyFixture(async () => ({ ok: true as const, items: [ignoreS, ignoreR], totalItems: 2 })),
+      });
+      check(
+        "unfiltered: each row is processed exactly once across both walks",
+        rIgnored.captured === 1 && rIgnored.dupe === 1 && rIgnored.inbound_captured === 1 && rIgnored.inbound_dupe === 1,
+        JSON.stringify(rIgnored),
+      );
+
+      // ---- `sort` is undocumented; if TR ever rejects it the backstop must
+      // degrade to the old oldest-first arithmetic, not go dark.
+      const fallbackRow: TxrMessageRow = { ...rows[0]!, message_id: `guid-fallback-${sfx}` };
+      const rFallback = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        fetchMessages: onlyFixture(async (o) =>
+          o.sort
+            ? { ok: false as const, error: "HTTP 400" }
+            : { ok: true as const, items: [fallbackRow], totalItems: 1 },
+        ),
+      });
+      check(
+        "sort rejected: falls back to the unsorted walk instead of capturing nothing",
+        rFallback.captured === 1 && rFallback.sort_fallbacks > 0,
+        JSON.stringify(rFallback),
+      );
+
       // Truncation is reported, never silent.
       const rTrunc = await pollTxrMessages(tx as unknown as typeof db, {
         orgId,
         maxPages: 1,
         pageSize: 1,
-        fetchMessages: async () => ({ ok: true as const, items: [rows[1]!], totalItems: 50 }),
+        fetchMessages: onlyFixture(async () => ({ ok: true as const, items: [rows[1]!], totalItems: 50 })),
       });
       check("page cap sets truncated=true", rTrunc.truncated === true, JSON.stringify(rTrunc));
 
       // A fetch failure must not throw out of the poll.
       const rFail = await pollTxrMessages(tx as unknown as typeof db, {
         orgId,
-        fetchMessages: async () => ({ ok: false as const, error: "HTTP 500" }),
+        fetchMessages: onlyFixture(async () => ({ ok: false as const, error: "HTTP 500" })),
       });
       check("fetch failure is reported, not thrown", rFail.error === "HTTP 500" && rFail.captured === 0, JSON.stringify(rFail));
 
@@ -232,7 +356,7 @@ async function main() {
       ];
       const health = await checkTxrWebhookHealth(tx as unknown as typeof db, {
         orgId,
-        listHooks: async () => ({ ok: true as const, status: 200, hooks, error: null }),
+        listHooks: async (_k, d) => ({ ok: true as const, status: 200, hooks: d === dashboardId ? hooks : [], error: null }),
         reactivate: async (_k, _d, id) => {
           reactivated.push(id);
           return { ok: true as const, status: 204, error: null };
@@ -243,18 +367,24 @@ async function main() {
       check("health: it was reactivated", health.reactivated === 1 && reactivated.join() === "1", JSON.stringify(reactivated));
       check("health: a third party's disconnected hook is NOT touched", !reactivated.includes(3));
       check("health: is_connected=null is left alone", !reactivated.includes(4));
-      check("health: nothing reported missing (all 3 required events present)", health.missing.length === 0, JSON.stringify(health.missing));
+      check(
+        "health: nothing reported missing (all 3 required events present)",
+        !health.missing.some((m) => m.startsWith(`${dashboardId}:`)),
+        JSON.stringify(health.missing),
+      );
 
       // Missing-event reporting (the normal pre-go-live state).
       reactivated = [];
       const health2 = await checkTxrWebhookHealth(tx as unknown as typeof db, {
         orgId,
-        listHooks: async () => ({ ok: true as const, status: 200, hooks: [], error: null }),
+        listHooks: async () => ({ ok: true as const, status: 200, hooks: [], error: null }), // no hooks anywhere
         reactivate: async () => ({ ok: true as const, status: 204, error: null }),
       });
       check(
         "health: with no hooks registered, all 3 required events are reported missing",
-        health2.missing.length === 3 && health2.missing.every((m) => m.startsWith(`${dashboardId}:`)),
+        ["msg_received", "contact_updated", "msg_status_updated"].every((e) =>
+          health2.missing.includes(`${dashboardId}:${e}`),
+        ),
         JSON.stringify(health2.missing),
       );
       check("health: missing hooks are NOT an alert-worthy disconnect", health2.disconnected === 0);

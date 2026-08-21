@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-19_
+_Last updated: 2026-08-21_
 
 ## "Made a purchase" has exactly one definition (2026-08-19)
 
@@ -141,6 +141,56 @@ Precedence, most specific first — one function, `resolveOptOutFooter` ([lib/se
 `""` and whitespace mean **no preference**, never an empty footer — an empty box submits `null` so the column clears and the chain falls through. Storing `""` would read as set and behave as unset.
 
 **The preview names the winning level.** The stage form composes from the resolved footer and, when the stage level loses, says which level won and what text will ship. An operator editing a box whose value will never appear on the wire is the failure this surfaces.
+
+## Brand → sending number (Drip Phase 1 item 1a) — WRITE-TIME ONLY, and grandfathered
+
+A stage's `provider_phone_id`, and a campaign's `default_provider_phone_id`, must be a number
+registered to **that campaign's brand**. A Guide Kin campaign may not send from a LumZen number.
+The rule lives in one place — [lib/api/brand-number-guard.ts](../lib/api/brand-number-guard.ts)
+(`checkPhoneBrandMatch`) — and is called from five write paths: campaign POST/PATCH, stage
+POST/PATCH, and stage **duplicate**. Error code `phone_brand_mismatch`; the message names the
+number and BOTH brands.
+
+- **Enforced on WRITE only — never at send, and never as a DB constraint.** This was an explicit
+  product ruling (2026-08-21), not an oversight. 16 existing stages already pair phone 114
+  (`+18449903688`, a LumZen number) with campaigns of both brands, three of them carrying 33,578
+  materialized `stage_sends` rows scheduled to dispatch. Blocking at send time would strand real
+  messages; a DB CHECK would make those rows unwritable and break unrelated edits. The audience
+  for this rule is the operator choosing a number, not the drain.
+- **GRANDFATHERED via `pairIsChanging`.** UPDATE paths only validate when the patch actually
+  changes the brand or the number — `undefined` (absent from the patch) is not a change; an
+  explicit `null` is. An existing mismatched stage or campaign stays fully editable (rename,
+  reschedule, change creative) as long as the pair itself is untouched. Re-validating an
+  untouched legacy pair would turn a targeted rule into a blanket edit-lock on four active
+  campaigns.
+- **CREATE paths are not grandfathered**, and that includes **stage duplicate** — a duplicate
+  makes a new stage, so copying a legacy mismatched stage would mint new mismatches indefinitely
+  and make the check decorative. This is the one place the rule changes an existing habit:
+  rolling a daily campaign forward by duplicating yesterday's stage now fails until the campaign
+  has a number of its own brand.
+- **ABSENT = ALLOWED, twice over** — the same shape as the per-number carrier policy above:
+  no number chosen ⇒ nothing to check; campaign has no brand yet ⇒ nothing to match against
+  (drafts save with zero required fields); **the NUMBER has no brand ⇒ treated as shared, usable
+  by any brand.** The last is inert today (all 37 active numbers carry a `brand_id`) but is the
+  only safe reading — a NULL brand on a number must never mean "matches nothing", which would
+  mute the number entirely.
+- **The pickers are an affordance, not the enforcement.** Both list endpoints take an optional
+  `brand_id` (`/api/provider-phones/list` for the campaign default; `/api/providers/[id]/phones`
+  for the stage picker) returning the brand's own numbers **plus** shared ones. Omitting the
+  param is unchanged org-wide behaviour, which the segment-rules editor still relies on to label
+  rules across every brand. The API is what rejects; the filter just stops the operator picking
+  something that would be rejected.
+- **This does NOT constrain which credential a number sends through.** `resolveKeyForStage`
+  resolves purely via `provider_phones.credential_id` and never reads the phone's `brand_id`, so
+  a number tagged to brand A but bound to brand B's provider account still passes this check.
+  Today that pairing exists (phone 114 → credential 565, LumZen's Text Request account) and
+  1a closes it for Guide Kin only as a side effect of the number being LumZen-tagged. If
+  credential↔brand alignment matters, it needs its own check.
+- Guard: [scripts/test-brand-number-guard.ts](../scripts/test-brand-number-guard.ts). It asserts
+  **both directions** against the real production mismatch (a guard that rejected everything, or
+  allowed everything, would pass a one-sided test), proves the shared-number case against a
+  synthesized-then-rolled-back row, and **exits non-zero if the legacy mismatch is ever cleaned
+  up** rather than passing on an empty world.
 
 ## Per-number carrier policy (Q4, migration 0142) — absent row means ALLOWED
 

@@ -11,6 +11,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
@@ -313,6 +314,9 @@ export async function PATCH(
     .select({
       tracking_id: campaign_stages.tracking_id,
       creative_id: campaign_stages.creative_id,
+      // Brand -> numbers (1a) grandfathering: an existing mismatched stage
+      // stays editable unless the number itself is changing.
+      current_provider_phone_id: campaign_stages.provider_phone_id,
       stage_number: campaign_stages.stage_number,
       sales_page_label: campaign_stages.sales_page_label,
       utm_tag_ids: campaign_stages.utm_tag_ids,
@@ -341,6 +345,32 @@ export async function PATCH(
     });
   }
   const current = existing[0];
+
+  // Brand -> numbers (1a). GRANDFATHERED: only when this PATCH actually changes
+  // the stage's number. The campaign's brand cannot change from this route, so
+  // the number is the only side that can move. An existing mismatched stage
+  // stays editable (rename, reschedule, change creative) by product ruling.
+  if (
+    pairIsChanging({
+      nextPhoneId: input.provider_phone_id,
+      currentPhoneId: current.current_provider_phone_id,
+      nextBrandId: undefined,
+      currentBrandId: current.campaign_brand_id,
+    })
+  ) {
+    const mismatch = await checkPhoneBrandMatch(db, {
+      orgId,
+      providerPhoneId: input.provider_phone_id,
+      campaignBrandId: current.campaign_brand_id,
+    });
+    if (mismatch) {
+      return apiError(400, mismatch.message, API_ERROR_CODES.PHONE_BRAND_MISMATCH, {
+        field: "provider_phone_id",
+        phone_brand_id: mismatch.phoneBrandId,
+        campaign_brand_id: mismatch.campaignBrandId,
+      });
+    }
+  }
 
   // Reject moving a stage's schedule into the past. Only when the value actually
   // CHANGES — the form always echoes scheduled_at, so an unrelated edit to a

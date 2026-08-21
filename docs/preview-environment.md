@@ -99,12 +99,23 @@ A new Vercel project, a fork, or a misconfigured preview will therefore fail lou
 missing column rather than quietly migrating a database it should not touch. An opt-out flag
 (`SKIP_PREVIEW_MIGRATIONS`) would have made every new environment a migrator by default.
 
-**Both conditions are load-bearing — do not simplify the `$VERCEL_ENV` check away.**
-`RUN_PREVIEW_MIGRATIONS` is currently scoped `preview,production` on `camman`, so the
-`$VERCEL_ENV = "preview"` test is the only thing preventing a **production** deploy from
-running `db:migrate`. That would violate the rule in CLAUDE.md §14 that migrations are never
-auto-applied on deploy. Narrowing the variable to Preview only would remove that dependency;
-until then, the two conditions must stay ANDed.
+**Keep both conditions ANDed.** `RUN_PREVIEW_MIGRATIONS` is scoped to **Preview only** on
+`camman` (narrowed 2026-08-21 21:20 UTC; it briefly shipped as `preview,production`), so
+production deploys now fail the check twice over — the variable is absent *and*
+`$VERCEL_ENV` is `production`. Two independent guards, neither load-bearing alone.
+
+Do not "simplify" either one away. Dropping the `$VERCEL_ENV` test would make the whole
+protection rest on an env-var scope that is edited in a dashboard, with no trace in the repo
+and no review; a production deploy running `db:migrate` would violate the rule in CLAUDE.md
+§14 that migrations are never auto-applied on deploy.
+
+Verify the scope from the API, not from a build log — behaviour is byte-identical under
+either scope (preview migrates, production skips), so no log can distinguish them:
+
+```sh
+curl -s "https://api.vercel.com/v9/projects/camman/env?decrypt=false" \
+  -H "Authorization: Bearer $VERCEL_TOKEN" | grep -o 'RUN_PREVIEW_MIGRATIONS[^}]*'
+```
 
 ## Why previews cannot send
 

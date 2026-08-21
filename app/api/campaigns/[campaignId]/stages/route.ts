@@ -18,6 +18,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import {
   computeStageAudienceCountsBatch,
   computeStageAudienceCountsBatchForDraft,
@@ -86,6 +87,8 @@ export async function GET(
       id: campaigns.id,
       status: campaigns.status,
       link_mode: campaigns.link_mode,
+      // Brand → numbers (1a): the stage's number must belong to this brand.
+      brand_id: campaigns.brand_id,
       audience_segment_ids: campaigns.audience_segment_ids,
       audience_exclude_segment_ids: campaigns.audience_exclude_segment_ids,
       audience_contact_group_ids: campaigns.audience_contact_group_ids,
@@ -520,6 +523,20 @@ export async function POST(
         API_ERROR_CODES.VALIDATION,
         { field: "provider_phone_id" },
       );
+    }
+    // Brand → numbers (1a). A NEW stage must pair its number with the parent
+    // campaign's brand; there is nothing to grandfather on create.
+    const mismatch = await checkPhoneBrandMatch(db, {
+      orgId,
+      providerPhoneId: input.provider_phone_id,
+      campaignBrandId: campaignRow[0].brand_id,
+    });
+    if (mismatch) {
+      return apiError(400, mismatch.message, API_ERROR_CODES.PHONE_BRAND_MISMATCH, {
+        field: "provider_phone_id",
+        phone_brand_id: mismatch.phoneBrandId,
+        campaign_brand_id: mismatch.campaignBrandId,
+      });
     }
   }
 

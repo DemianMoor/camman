@@ -16,6 +16,8 @@ export type BrandOption = Info & { short_domain: string | null };
 // Powers the campaign form's "Default send-from number" picker.
 export type ActivePhone = {
   id: number;
+  // Brand → numbers (1a). NULL = shared, usable by any brand.
+  brand_id: number | null;
   phone_number: string;
   number_type: string;
   provider_id: number;
@@ -196,12 +198,6 @@ export function useCampaignFormState(props: CampaignFormProps) {
       if (r.ok) setMembers(r.data.data);
     })();
   }, [membersApi.execute]);
-  useEffect(() => {
-    (async () => {
-      const r = await phonesApi.execute("/api/provider-phones/list");
-      if (r.ok) setActivePhones(r.data.data);
-    })();
-  }, [phonesApi.execute]);
 
   // RHF setup
   const form = useForm<CampaignFormValues>({
@@ -238,6 +234,26 @@ export function useCampaignFormState(props: CampaignFormProps) {
   // Watched fields for live enablement + audience preview
   const watchedName = form.watch("name");
   const watchedBrandId = form.watch("brand_id");
+
+  // Brand → numbers (1a): the "Default send-from number" picker only offers
+  // numbers usable by the selected brand (its own, plus any shared/NULL-brand
+  // number). Re-fetches when the brand changes; with no brand selected it stays
+  // org-wide, since there is nothing to scope to yet and the server accepts the
+  // pairing in that case too.
+  //
+  // Server-side filter rather than a client-side one so the list cannot drift
+  // from what POST/PATCH will accept — the API is the enforcement, this is the
+  // affordance.
+  useEffect(() => {
+    (async () => {
+      const url =
+        watchedBrandId != null
+          ? `/api/provider-phones/list?brand_id=${watchedBrandId}`
+          : "/api/provider-phones/list";
+      const r = await phonesApi.execute(url);
+      if (r.ok) setActivePhones(r.data.data);
+    })();
+  }, [phonesApi.execute, watchedBrandId]);
   const watchedLinkMode = form.watch("link_mode");
   const watchedOfferId = form.watch("offer_id");
   const watchedSegments = form.watch("audience_segment_ids");

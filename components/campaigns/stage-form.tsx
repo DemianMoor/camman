@@ -540,8 +540,15 @@ export function StageForm({
     }
     let cancelled = false;
     (async () => {
+      // Brand → numbers (1a): only numbers usable by the parent campaign's
+      // brand (its own, plus any shared/NULL-brand number). Scoped server-side
+      // so the picker cannot offer something the stage POST/PATCH would reject.
+      // A campaign with no brand yet stays unscoped — there is nothing to match
+      // against, and the API accepts that pairing too.
+      const brandQs =
+        campaign.brand?.id != null ? `&brand_id=${campaign.brand.id}` : "";
       const r = await phonesApi.execute(
-        `/api/providers/${watchedProviderId}/phones?status=active`,
+        `/api/providers/${watchedProviderId}/phones?status=active${brandQs}`,
       );
       if (cancelled) return;
       if (r.ok) {
@@ -569,7 +576,7 @@ export function StageForm({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [watchedProviderId, phonesApi.execute]);
+  }, [watchedProviderId, phonesApi.execute, campaign.brand?.id]);
 
   // Auto-select dropdowns that have exactly one option when creating a
   // new stage. Edit mode is intentionally skipped so we don't override

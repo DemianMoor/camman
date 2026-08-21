@@ -1023,6 +1023,13 @@
       "when": 1788912000000,
       "tag": "0145_contact_org_stats",
       "breakpoints": true
+    },
+    {
+      "idx": 146,
+      "version": "7",
+      "when": 1788998400000,
+      "tag": "0146_contact_org_stats_campaign_circuit_events_rls",
+      "breakpoints": true
     }
   ]
 }

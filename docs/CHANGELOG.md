@@ -1261,4 +1261,25 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   allowed (shared number, no number), and that a landing-page stage is not warned about.
 - No schema or behavior change; test coverage only. — docs updated: docs/07-conventions.md
 
+## 2026-08-23 — Drip Phase 2: partner lead intake (zero sends)
+
+- Migrations **0152–0154**: `partner_keys`, `lead_inbox`, `partner_key_usage`, `alert_state`.
+  Applied preview-first to camman-v2 with a 43-check write test, then production; integrity OK,
+  security advisor 0 ERRORs.
+- New public endpoint `POST /api/intake/leads/[token]` — the fifth instance of the provider-webhook
+  auth pattern. Captures raw and returns 202; no lookups, no contacts, no sends, no inline
+  processing.
+- Partner secret is **hashed (SHA-256), not encrypted**, and travels in a header so it is
+  structurally absent from what we persist. Not bcrypt/argon2 — a CPU DoS at the specced burst.
+- First DB-backed rate limiter in the project, and the first state-transition-gated alert
+  (`alert_state`). Both put the decision in the SQL statement rather than in a read-then-write.
+- `/settings/partners` UI (create / rotate / disable / sandbox), `partner_keys.view|manage`
+  permissions, and `docs/partners/lead-intake.md` generated from `lib/intake/fields.ts`.
+- Backlog alert deliberately deferred to Phase 3: nothing consumes the inbox yet, so it would fire
+  by construction.
+- Commits the four previously-untracked Drip recon docs and corrects the stale "Known gap" in
+  preview-environment.md that migration 0146 closed.
+  — docs updated: docs/03-data-model.md, docs/04-features/partner-lead-intake.md,
+  docs/06-integrations.md, docs/07-conventions.md, docs/preview-environment.md, docs/partners/
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

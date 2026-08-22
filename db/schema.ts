@@ -3958,3 +3958,177 @@ export type OfferLandingPage = typeof offer_landing_pages.$inferSelect;
 
 export type ContactAttributeImportMapping =
   typeof contact_attribute_import_mappings.$inferSelect;
+
+// ===========================================================================
+// Drip Phase 2 — partner lead intake (migrations 0152-0154)
+// ===========================================================================
+
+// Per-partner intake credential. The fifth instance of the webhook auth pattern
+// the four provider webhooks already use.
+//
+// ⚠️ `token` is PLAINTEXT and indexed; `secret_hash` is a one-way SHA-256. The
+// token is an ADDRESSING value resolved by equality (hashing it would make
+// resolution a seq scan); the secret is what AUTHENTICATES. Unlike
+// provider_credentials, the secret is NOT encrypted: CamMan never replays it, so
+// there is nothing to decrypt, and a hash survives a key rotation and leaks
+// nothing in a database dump. See migration 0152 for the full reasoning.
+export const partner_keys = pgTable(
+  "partner_keys",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    partner_slug: text("partner_slug").notNull(),
+    name: text("name").notNull(),
+    token: text("token").notNull(),
+    secret_hash: text("secret_hash").notNull(),
+    secret_last4: text("secret_last4"),
+    // 'force' overrides whatever the partner sends; 'default' fills a gap only.
+    interest_tag_mode: text("interest_tag_mode").notNull().default("default"),
+    interest_tag: text("interest_tag"),
+    field_mapping: jsonb("field_mapping").notNull().default({}),
+    // Defaults TRUE: a credential handed to a third party must not do real work
+    // the instant it exists.
+    sandbox: boolean("sandbox").notNull().default(true),
+    rate_per_sec: integer("rate_per_sec").notNull().default(10),
+    rate_per_day: integer("rate_per_day").notNull().default(50000),
+    max_payload_bytes: integer("max_payload_bytes").notNull().default(262144),
+    status: text("status").notNull().default("active"),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    created_by: uuid("created_by"),
+    rotated_at: timestamp("rotated_at", { withTimezone: true }),
+    last_seen_at: timestamp("last_seen_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("partner_keys_token_uniq").on(table.token),
+    uniqueIndex("partner_keys_org_slug_uniq").on(table.org_id, table.partner_slug),
+    index("partner_keys_org_status_idx").on(table.org_id, table.status),
+    check(
+      "partner_keys_interest_tag_mode_check",
+      sql`${table.interest_tag_mode} IN ('force', 'default')`,
+    ),
+    check(
+      "partner_keys_force_needs_tag_check",
+      sql`${table.interest_tag_mode} <> 'force' OR ${table.interest_tag} IS NOT NULL`,
+    ),
+    check("partner_keys_status_check", sql`${table.status} IN ('active', 'disabled')`),
+    check("partner_keys_rate_per_sec_check", sql`${table.rate_per_sec} > 0`),
+    check("partner_keys_rate_per_day_check", sql`${table.rate_per_day} > 0`),
+    check(
+      "partner_keys_max_payload_bytes_check",
+      sql`${table.max_payload_bytes} BETWEEN 1024 AND 4194304`,
+    ),
+  ],
+);
+
+// Raw partner-lead capture. Written by the intake endpoint and nothing else;
+// Phase 3's enrichment worker is the only thing that will mutate status.
+//
+// ⚠️ `dedup_key` is NULLABLE with a PARTIAL unique index, not NOT NULL UNIQUE.
+// The key is (partner_key_id, phone, received_minute) and phone is exactly what
+// can be missing — NOT NULL would make a malformed lead impossible to insert,
+// rejecting the leads most worth capturing. Phone-less leads are stored with
+// status='rejected' and a populated `error` instead.
+export const lead_inbox = pgTable(
+  "lead_inbox",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // RESTRICT, not CASCADE: deleting a key with leads behind it must fail
+    // loudly. The UI offers disable, not delete.
+    partner_key_id: integer("partner_key_id")
+      .notNull()
+      .references(() => partner_keys.id, { onDelete: "restrict" }),
+    // Denormalized so provenance survives a rename of the key above.
+    partner_slug: text("partner_slug").notNull(),
+    received_at: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    raw: jsonb("raw").notNull(),
+    // NULL until Phase 3. Phase 2 normalizes nothing.
+    normalized: jsonb("normalized"),
+    phone_e164: text("phone_e164"),
+    interest_tag: text("interest_tag"),
+    sandbox: boolean("sandbox").notNull().default(false),
+    status: text("status").notNull().default("received"),
+    processed_at: timestamp("processed_at", { withTimezone: true }),
+    error: text("error"),
+    dedup_key: text("dedup_key"),
+  },
+  (table) => [
+    uniqueIndex("lead_inbox_dedup_uniq")
+      .on(table.partner_key_id, table.dedup_key)
+      .where(sql`${table.dedup_key} IS NOT NULL`),
+    index("lead_inbox_status_received_idx").on(table.status, table.received_at),
+    index("lead_inbox_org_partner_received_idx").on(
+      table.org_id,
+      table.partner_key_id,
+      table.received_at.desc(),
+    ),
+    check(
+      "lead_inbox_status_check",
+      sql`${table.status} IN ('received', 'processed', 'rejected', 'landline', 'duplicate')`,
+    ),
+  ],
+);
+
+// DB-backed rate-limit counters. Shared state is the only thing that works in
+// serverless — lib/api/rate-limit.ts is per-instance and says so itself.
+//
+// ⚠️ Units differ by window_kind and this is load-bearing:
+//   'sec'       counts REQUESTS   (burst contract)
+//   'day'       counts LEADS      (volume contract — a 500-lead batch costs 500)
+//   'auth_fail' counts failed secret checks on a RESOLVED token
+export const partner_key_usage = pgTable(
+  "partner_key_usage",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    partner_key_id: integer("partner_key_id")
+      .notNull()
+      .references(() => partner_keys.id, { onDelete: "cascade" }),
+    window_kind: text("window_kind").notNull(),
+    window_start: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (table) => [
+    primaryKey({
+      name: "partner_key_usage_pk",
+      columns: [table.partner_key_id, table.window_kind, table.window_start],
+    }),
+    index("partner_key_usage_org_kind_window_idx").on(
+      table.org_id,
+      table.window_kind,
+      table.window_start.desc(),
+    ),
+    check(
+      "partner_key_usage_window_kind_check",
+      sql`${table.window_kind} IN ('sec', 'day', 'auth_fail')`,
+    ),
+    check("partner_key_usage_count_check", sql`${table.count} >= 0`),
+  ],
+);
+
+// State-transition gating for alerts. notifyTelegram() is stateless and fires on
+// every call; nothing in the codebase suppressed repeat alerts before this (the
+// breakers only avoid storms as a side effect of latching). Only a TRANSITION
+// into 'firing' notifies.
+export const alert_state = pgTable(
+  "alert_state",
+  {
+    alert_key: text("alert_key").primaryKey(),
+    // Nullable: some alerts are global rather than per-org.
+    org_id: uuid("org_id").references(() => organizations.id, { onDelete: "cascade" }),
+    state: text("state").notNull(),
+    since: timestamp("since", { withTimezone: true }).notNull().defaultNow(),
+    last_notified_at: timestamp("last_notified_at", { withTimezone: true }),
+  },
+  (table) => [check("alert_state_state_check", sql`${table.state} IN ('ok', 'firing')`)],
+);
+
+export type PartnerKey = typeof partner_keys.$inferSelect;
+export type LeadInbox = typeof lead_inbox.$inferSelect;

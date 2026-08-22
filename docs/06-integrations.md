@@ -86,6 +86,23 @@ Provider creation does **not** collect a credential: creation and credential ent
 
 **Ahoi's check is body-classified because nothing else works.** Measured 2026-08-17 (`scripts/probe-ahoi-badkey.ts`, kept as the regression reference): `GET /cdrs/download/csv` returns **HTTP 200 for every case** — valid, wrong, bogus and empty key — and `Content-Type: text/html` even for the successful CSV. Status and content type are both useless. Classification: body parses as JSON with `status:"error"` ⇒ invalid (key off `status`, **never** the message — a wrong key says `not logged in`, an empty one says `invalid key`); body starts with the CDR header `date,your_cost,…` ⇒ valid; anything else ⇒ **unknown**. Never classify on CSV row count — a valid key on a zero-traffic day returns 0 data rows, identical to a failure.
 
+## Inbound: partner lead intake (Drip Phase 2)
+
+`POST /api/intake/leads/[token]` is a **public, unauthenticated-by-session** endpoint that partners
+post leads to. It is not an outbound integration — no third-party service is called — but it is an
+externally reachable surface, so it belongs here.
+
+| | |
+|---|---|
+| Auth | opaque path token (`partner_keys.token`) + a secret in `Authorization: Bearer` or `X-Partner-Secret`, compared constant-time against a SHA-256 hash |
+| Credentials live in | `partner_keys`, managed at `/settings/partners`. **No env var** — keys are per-partner rows, minted in the UI |
+| Rate limit | per key, DB-backed (`partner_key_usage`): requests/second and leads/ET-day |
+| Payload cap | per key (`max_payload_bytes`, default 256 KB), checked before the body is read |
+| Side effects | one INSERT into `lead_inbox`. **No sends, no lookups, no contact writes** |
+| Partner-facing doc | [docs/partners/lead-intake.md](partners/lead-intake.md), generated from `lib/intake/fields.ts` |
+
+See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
+
 ## Environment variables
 
 | Variable | Scope | Purpose |

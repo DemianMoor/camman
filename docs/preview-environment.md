@@ -1,6 +1,6 @@
 # Preview environment (Vercel previews + `camman-v2` database)
 
-_Last updated: 2026-08-21_
+_Last updated: 2026-08-22_
 
 Vercel preview deployments of CamMan run against a **separate, disposable Supabase
 database**, so a branch can be clicked through without touching production data and
@@ -60,63 +60,6 @@ Note the schema was **not** produced by replaying the migration chain from scrat
 that chain does not currently replay cleanly (migration 0113 depends on a table only
 a backfill script creates). Rebuild by copying production's schema, not by replaying.
 
-## Which project applies migrations (and why only one may)
-
-**A preview build applies migrations.** `package.json`:
-
-```
-"vercel-build": "if [ \"$VERCEL_ENV\" = \"preview\" ] && [ \"$RUN_PREVIEW_MIGRATIONS\" = \"1\" ]; then npm run db:migrate; fi && next build"
-```
-
-So opening a PR that adds a migration is by itself enough to apply it to this database —
-nobody has to run anything. That is deliberate (it is what lets a branch be clicked through),
-but combined with the demo sharing this database it is also the mechanism by which an
-unfinished agent migration reaches the demo. See the warning above.
-
-**`RUN_PREVIEW_MIGRATIONS` exists because TWO Vercel projects build every commit of every PR
-against this repo**, and both get `VERCEL_ENV=preview`:
-
-| project | preview `DATABASE_URL` | migrates? |
-|---|---|---|
-| `camman` | camman-v2 DB (separate `preview`-scoped entry) | **yes** — `RUN_PREVIEW_MIGRATIONS=1` on its Preview scope |
-| `camman-v2` | camman-v2 DB (one entry targeting `production,preview`) | no — the variable is not set there |
-
-Before the gate, both raced to `db:migrate` on the one database. Observed on PR #108
-(migration 0146): `camman-v2` failed ~0.9s into `db:migrate` while `camman` applied the
-migration successfully a minute later; redeploying the **identical commit** then passed,
-which is what proved contention rather than bad migration content. Before that PR
-`camman-v2` had succeeded on 12 consecutive deployments — it only ever failed when a PR
-actually introduced a migration.
-
-`camman` is the project that keeps migrating because its preview is the one a branch is
-actually opened on, so it is the one that must have the schema its branch expects.
-`camman-v2`'s production (demo) target never migrated anyway — `VERCEL_ENV=production`
-fails the first condition — so the demo database has always depended on `camman` previews
-for its schema. The gate does not change that; it only stops the second racer.
-
-**The gate is opt-in on purpose.** An unset `RUN_PREVIEW_MIGRATIONS` means *do not migrate*.
-A new Vercel project, a fork, or a misconfigured preview will therefore fail loudly on a
-missing column rather than quietly migrating a database it should not touch. An opt-out flag
-(`SKIP_PREVIEW_MIGRATIONS`) would have made every new environment a migrator by default.
-
-**Keep both conditions ANDed.** `RUN_PREVIEW_MIGRATIONS` is scoped to **Preview only** on
-`camman` (narrowed 2026-08-21 21:20 UTC; it briefly shipped as `preview,production`), so
-production deploys now fail the check twice over — the variable is absent *and*
-`$VERCEL_ENV` is `production`. Two independent guards, neither load-bearing alone.
-
-Do not "simplify" either one away. Dropping the `$VERCEL_ENV` test would make the whole
-protection rest on an env-var scope that is edited in a dashboard, with no trace in the repo
-and no review; a production deploy running `db:migrate` would violate the rule in CLAUDE.md
-§14 that migrations are never auto-applied on deploy.
-
-Verify the scope from the API, not from a build log — behaviour is byte-identical under
-either scope (preview migrates, production skips), so no log can distinguish them:
-
-```sh
-curl -s "https://api.vercel.com/v9/projects/camman/env?decrypt=false" \
-  -H "Authorization: Bearer $VERCEL_TOKEN" | grep -o 'RUN_PREVIEW_MIGRATIONS[^}]*'
-```
-
 ## Why previews cannot send
 
 Three independent barriers, any one of which is sufficient:
@@ -161,17 +104,9 @@ applying first, rather than linking a page that would error.
 
 ## Known gap — CLOSED 2026-08-21
 
-`public.campaign_circuit_events` had **RLS disabled in production**, as did
-`public.contact_org_stats` (migration 0145). Both were oversights rather than decisions —
-`send_circuit_events`, the provider-level sibling of `campaign_circuit_events`, has carried
-an org-scoped SELECT policy since 0085.
-
-Fixed by **migration 0146** (PR #108): RLS enabled on both, each with a SELECT-only
-`org_id = public.current_org_id()` policy and no write policies. The Supabase security
-advisor's `rls_disabled_in_public` ERRORs went 2 → 0.
-
-The note above assumed a policy was needed to keep the circuit breaker writing. That was not
-the reason: every writer is the server's privileged Drizzle connection (`DATABASE_URL`),
-which authenticates as the database role and bypasses RLS, as does `service_role`. The policy
-is needed for the org-scoped **reads**, and write policies were deliberately omitted so
-anon/authenticated lose INSERT/UPDATE/DELETE/TRUNCATE entirely.
+`public.campaign_circuit_events` used to have **RLS disabled in production**, an
+oversight in migration 0119 (its sibling `send_circuit_events` had it on since 0085).
+**Fixed by migration 0146**, together with `contact_org_stats`: RLS enabled plus a
+SELECT-only `org_id = public.current_org_id()` policy on both, no write policies. The
+breaker's writes are unaffected because every writer is the server's `DATABASE_URL`
+connection, which bypasses RLS. The Supabase security advisor now reports **0 ERRORs**.

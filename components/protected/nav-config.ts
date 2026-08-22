@@ -4,6 +4,7 @@ import {
   CalendarClock,
   CheckCheck,
   FolderTree,
+  KeyRound,
   Layers,
   LayoutDashboard,
   LinkIcon,
@@ -15,11 +16,11 @@ import {
   Send,
   ShoppingBag,
   Tag,
+  type LucideIcon,
   UserCheck,
   UserCog,
   UserMinus,
   Users,
-  type LucideIcon,
 } from "lucide-react";
 
 import { isEntityAvailable } from "@/lib/feature-flags";
@@ -206,6 +207,13 @@ export const navGroups: NavGroup[] = [
         label: "Carrier Lookup",
         href: "/settings/lookup",
         icon: Phone,
+      },
+      // Partner intake credentials (Drip P2). Leads captured through these keys
+      // are stored raw and processed by nothing until Phase 3 — the page says so.
+      {
+        label: "Partner Keys",
+        href: "/settings/partners",
+        icon: KeyRound,
       },
       {
         label: "User Management",

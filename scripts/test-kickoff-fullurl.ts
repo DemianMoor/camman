@@ -44,7 +44,22 @@ async function main() {
       const prov = await one<{ id: number }>(sql`
         INSERT INTO sms_providers (sms_provider_id, org_id, name, supports_api_send)
         VALUES (${"ku-" + sfx}, ${orgId}, ${"ku"}, true) RETURNING id`);
-      await tx.execute(sql`INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key) VALUES (${orgId}, ${prov.id}, NULL, ${"k"})`);
+      const cred = await one<{ id: number }>(sql`
+        INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key)
+        VALUES (${orgId}, ${prov.id}, NULL, ${"k"}) RETURNING id`);
+      // ⚠️ FIXTURE REPAIR (2026-08-22). This test was RED on main before 1b — and
+      // had been for a while. It creates a supports_api_send provider, and the
+      // `no_sender_number` guard (added later, in the Ahoi Section-2 work)
+      // refuses any such stage with no provider_phone_id. The fixture predated
+      // that guard, so kickoff returned `no_sender_number` and all three
+      // assertions failed without ever reaching the thing under test.
+      // Verified by running this same file against origin/main code: identical
+      // 3 failures. Giving the stage a real sending number restores what the
+      // test is actually for.
+      const phone = await one<{ id: number }>(sql`
+        INSERT INTO provider_phones (org_id, provider_id, brand_id, phone_number, status, cost_per_sms, credential_id)
+        VALUES (${orgId}, ${prov.id}, ${brand.id}, ${"+1999" + sfx.slice(-7)}, 'active', 0, ${cred.id})
+        RETURNING id`);
       const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status) VALUES (${"ku-cre-" + sfx}, ${orgId}, ${"hi {link}"}, 'active') RETURNING id`);
       const camp = await one<{ id: number }>(sql`
         INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id, tracking_id)
@@ -52,9 +67,9 @@ async function main() {
       const campaignId = camp.id;
       const stage = await one<{ id: number }>(sql`
         INSERT INTO campaign_stages
-          (org_id, campaign_id, stage_number, creative_id, sms_provider_id, send_approved,
+          (org_id, campaign_id, stage_number, creative_id, sms_provider_id, provider_phone_id, send_approved,
            tracking_id, full_url, include_no_status, stop_text, scheduled_at)
-        VALUES (${orgId}, ${campaignId}, 1, ${cre.id}, ${prov.id}, true,
+        VALUES (${orgId}, ${campaignId}, 1, ${cre.id}, ${prov.id}, ${phone.id}, true,
            ${TRACKING}, ${FULL_URL}, true, ${"STOP"}, now()) RETURNING id`);
       const stageId = stage.id;
 

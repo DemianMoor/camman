@@ -1562,7 +1562,17 @@ export const segment_rules = pgTable(
         'is_in_contact_group',
         'phone_type',
         'carrier',
-        'sent_from_provider_phone'
+        'sent_from_provider_phone',
+        -- contact_attributes rules (0147 table, 0148 widens this CHECK)
+        'gender',
+        'age_band',
+        'income_band',
+        'has_kids',
+        'is_married',
+        'contact_state',
+        'contact_country',
+        'interest_tag',
+        'partner_slug'
       )`,
     ),
     check(

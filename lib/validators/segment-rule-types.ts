@@ -15,7 +15,20 @@ export type ValueShape =
   | "campaign_use_period"
   | "phone_type_set"
   | "carrier_set"
-  | "provider_phone_set";
+  | "provider_phone_set"
+  // contact_attributes sets (migration 0147). All five are string subsets, so
+  // one validator shape (isStringSubsetOf) covers them; they are separate
+  // shapes rather than one generic "text_set" so the ALLOWED VALUES are part of
+  // the type and a typo cannot validate.
+  | "gender_set"
+  | "age_band_set"
+  | "income_band_set"
+  | "yes_no_set"
+  // Free-text set: state / country / interest_tag / partner_slug. Deliberately
+  // open — interest tags are explicitly extensible and partner slugs are
+  // created per partner — so this validates SHAPE (non-empty array of non-empty
+  // strings, bounded) rather than membership.
+  | "text_set";
 
 // Value sets for the carrier/line-type rules (migration 0098). Stored in the
 // rule's `value` as a non-empty array of these codes. 'landline' is intentionally
@@ -89,6 +102,71 @@ export function isProviderPhoneSet(v: unknown): v is ProviderPhoneSet {
 // Stored in the rule's `value` as the code string (e.g. "1w"). The code →
 // SQL interval mapping lives server-side in lib/segment-rules-eval.ts so the
 // only thing crossing the wire / persisted is the opaque code.
+// ── contact_attributes value sets (Drip P1 1c, migration 0147) ───────────────
+// These MIRROR the DB CHECK constraints on contact_attributes. If a constraint
+// is ever widened, widen the list here in the same migration or the UI silently
+// cannot express the new value.
+export const GENDER_VALUES = ["male", "female", "other"] as const;
+export type GenderValue = (typeof GENDER_VALUES)[number];
+
+export const INCOME_BAND_VALUES = [
+  "lt_25k",
+  "25k_50k",
+  "50k_75k",
+  "75k_100k",
+  "100k_150k",
+  "gte_150k",
+] as const;
+export type IncomeBandValue = (typeof INCOME_BAND_VALUES)[number];
+
+// ⚠️ AGE BANDS START AT 18. There is no under-18 band and there must never be
+// one: the emitter applies a hard `dob <= <ET today> - 18 years` floor
+// INDEPENDENTLY of the selected band, so adding a younger band here would
+// produce a rule that matches nobody rather than a rule that messages minors —
+// but the floor is the guarantee, not this list.
+export const AGE_BAND_VALUES = [
+  "18_24",
+  "25_34",
+  "35_44",
+  "45_54",
+  "55_64",
+  "65_plus",
+] as const;
+export type AgeBandValue = (typeof AGE_BAND_VALUES)[number];
+
+// Each band's INCLUSIVE age bounds. `maxAge: null` = open-ended (65+).
+// The emitter turns these into a dob RANGE — it never computes a per-row age.
+export const AGE_BAND_BOUNDS: Record<AgeBandValue, { minAge: number; maxAge: number | null }> = {
+  "18_24": { minAge: 18, maxAge: 24 },
+  "25_34": { minAge: 25, maxAge: 34 },
+  "35_44": { minAge: 35, maxAge: 44 },
+  "45_54": { minAge: 45, maxAge: 54 },
+  "55_64": { minAge: 55, maxAge: 64 },
+  "65_plus": { minAge: 65, maxAge: null },
+};
+
+// kids / married are booleans in the column but a SET in the rule, so an
+// operator can say "either" explicitly. Selecting both means "known either
+// way", which still excludes NULL (unknown) — that is the intended reading.
+export const YES_NO_VALUES = ["yes", "no"] as const;
+export type YesNoValue = (typeof YES_NO_VALUES)[number];
+
+// Free-text set guard for state / country / interest_tag / partner_slug.
+// Bounded so a rule value cannot become an unbounded blob: 200 entries is far
+// past any real use (50 states, ~250 countries) and 128 chars past any real tag.
+export const TEXT_SET_MAX_ITEMS = 200;
+export const TEXT_SET_MAX_LEN = 128;
+export function isTextSet(v: unknown): v is string[] {
+  return (
+    Array.isArray(v) &&
+    v.length > 0 &&
+    v.length <= TEXT_SET_MAX_ITEMS &&
+    v.every(
+      (x) => typeof x === "string" && x.trim().length > 0 && x.length <= TEXT_SET_MAX_LEN,
+    )
+  );
+}
+
 export const CAMPAIGN_USE_PERIODS = [
   { code: "1d", label: "1 day" },
   { code: "3d", label: "3 days" },
@@ -279,6 +357,56 @@ export const RULE_TYPES = {
     label: "Sent from phone number",
     operators: ["is", "is_not"],
     value_shape: "provider_phone_set",
+  },
+
+  // === contact_attributes (Drip P1 1c, migration 0147) =======================
+  // All nine evaluate against the 1:1 contact_attributes table. A contact with
+  // NO attributes row matches NONE of them — absence is not a match, in either
+  // direction, which is what keeps `is_not` conservative (see the emitter).
+  gender: {
+    label: "Gender is one of",
+    operators: ["is", "is_not"],
+    value_shape: "gender_set",
+  },
+  age_band: {
+    label: "Age band is one of",
+    operators: ["is", "is_not"],
+    value_shape: "age_band_set",
+  },
+  income_band: {
+    label: "Income band is one of",
+    operators: ["is", "is_not"],
+    value_shape: "income_band_set",
+  },
+  has_kids: {
+    label: "Has kids",
+    operators: ["is", "is_not"],
+    value_shape: "yes_no_set",
+  },
+  is_married: {
+    label: "Married",
+    operators: ["is", "is_not"],
+    value_shape: "yes_no_set",
+  },
+  contact_state: {
+    label: "State is one of",
+    operators: ["is", "is_not"],
+    value_shape: "text_set",
+  },
+  contact_country: {
+    label: "Country is one of",
+    operators: ["is", "is_not"],
+    value_shape: "text_set",
+  },
+  interest_tag: {
+    label: "Interest tag is one of",
+    operators: ["is", "is_not"],
+    value_shape: "text_set",
+  },
+  partner_slug: {
+    label: "Partner is one of",
+    operators: ["is", "is_not"],
+    value_shape: "text_set",
   },
 } as const satisfies Record<string, RuleTypeSpec>;
 

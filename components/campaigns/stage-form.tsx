@@ -53,6 +53,7 @@ import { isEntityAvailable } from "@/lib/feature-flags";
 import { isOutsideSendWindow } from "@/lib/quiet-hours";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { buildLandingPageUrl } from "@/lib/landing-page-url";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import {
   buildRepresentativeTrackedLinkUrl,
@@ -82,6 +83,8 @@ export interface StageFormValues {
   sms_provider_id: number | null;
   provider_phone_id: number | null;
   sales_page_label: string;
+  // 1b: WHICH PAGE, not which URL. "" = none (legacy path).
+  landing_page_id: string;
   // Optional URLs. short_url is rendered into the SMS preview on its
   // own line between creative text and stop text; full_url is tracking
   // metadata only (not sent).
@@ -156,6 +159,18 @@ type BrandInfo = {
   name: string;
   color: string | null;
   short_domain: string | null;
+  // 1b: normalized bare host for this brand's landing pages. NULL ⇒ slug-based
+  // landing pages cannot be used on this brand.
+  landing_host?: string | null;
+};
+type LandingPageOption = {
+  id: number;
+  title: string;
+  kind: "slug" | "external_url";
+  slug: string | null;
+  external_url: string | null;
+  is_default: boolean;
+  status: string;
 };
 type OfferInfo = {
   id: number;
@@ -305,6 +320,7 @@ export function buildStageCreateBody(
     sms_provider_id: values.sms_provider_id,
     provider_phone_id: values.provider_phone_id,
     sales_page_label: values.sales_page_label || undefined,
+    landing_page_id: values.landing_page_id ? Number(values.landing_page_id) : null,
     short_url: values.short_url.trim() || undefined,
     full_url: values.full_url.trim() || undefined,
     utm_tag_ids: values.utm_tag_ids,
@@ -326,6 +342,7 @@ const DEFAULT_VALUES: StageFormValues = {
   sms_provider_id: null,
   provider_phone_id: null,
   sales_page_label: "",
+  landing_page_id: "",
   short_url: "",
   full_url: "",
   utm_tag_ids: [],
@@ -481,6 +498,35 @@ export function StageForm({
   const watchedIncludeClickers = form.watch("include_clickers");
   const watchedExcludeClickers = form.watch("exclude_clickers");
   const watchedSalesPageLabel = form.watch("sales_page_label");
+  const watchedLandingPageId = form.watch("landing_page_id");
+
+  // 1b: landing pages for the campaign's offer. The stage stores WHICH PAGE;
+  // the URL is built at MINT time from the campaign's brand, so re-branding the
+  // campaign self-corrects the link. The preview below is read-only for exactly
+  // that reason — the stored value is an id, not a URL.
+  const [landingPages, setLandingPages] = useState<LandingPageOption[]>([]);
+  const landingPagesApi = useApiCall<{ data: LandingPageOption[] }>();
+  useEffect(() => {
+    const offerId = campaign.offer?.id;
+    if (!offerId) { setLandingPages([]); return; }
+    (async () => {
+      const r = await landingPagesApi.execute(`/api/offers/${offerId}/landing-pages`);
+      if (r.ok) setLandingPages(r.data.data);
+    })();
+  }, [landingPagesApi.execute, campaign.offer?.id]);
+
+  const selectedLandingPage = landingPages.find(
+    (p) => String(p.id) === watchedLandingPageId,
+  );
+  // Built with the SAME function the send path mints with, so the operator can
+  // never approve one URL and have the recipient receive another.
+  const landingPreview = selectedLandingPage
+    ? buildLandingPageUrl({
+        page: selectedLandingPage,
+        landingHost: campaign.brand?.landing_host ?? null,
+        trackingId: campaignTrackingId ? `${campaignTrackingId}_s?_c?` : null,
+      })
+    : null;
   const watchedFullUrl = form.watch("full_url");
   const watchedFullUrlAuto = form.watch("full_url_auto");
   const watchedScheduledAt = form.watch("scheduled_at");
@@ -1286,10 +1332,58 @@ export function StageForm({
 
                 <FormField
                   control={form.control}
+                  name="landing_page_id"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Landing page</FormLabel>
+                    <Select
+                      value={field.value === "" ? NONE : field.value}
+                      onValueChange={(v) => field.onChange(v === NONE ? "" : v)}
+                      disabled={isSubmitting || landingPages.length === 0}
+                    >
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue
+                            placeholder={
+                              landingPages.length === 0
+                                ? "No landing pages on this offer"
+                                : "Use the legacy URL below"
+                            }
+                          />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value={NONE}>None — use the URL below</SelectItem>
+                        {landingPages
+                          .filter((p) => p.status === "active")
+                          .map((p) => (
+                            <SelectItem key={p.id} value={String(p.id)}>
+                              {p.title}
+                              {p.kind === "slug" ? ` · /lp/${p.slug}` : " · external"}
+                              {p.is_default ? " (default)" : ""}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                    {landingPreview && (
+                      <p className="text-muted-foreground mt-1 break-all font-mono text-xs">
+                        {landingPreview.ok ? (
+                          <>Sends to <span className="text-foreground">{landingPreview.url}</span> — built from this campaign&apos;s brand when the link is created, so re-branding updates it automatically.</>
+                        ) : (
+                          <span className="text-destructive">{landingPreview.message}</span>
+                        )}
+                      </p>
+                    )}
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
                   name="sales_page_label"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Sales page</FormLabel>
+                    <FormLabel>Sales page {watchedLandingPageId ? "(unused — a landing page is selected)" : ""}</FormLabel>
                     <Select
                       value={field.value === "" ? NONE : field.value}
                       onValueChange={(v) =>

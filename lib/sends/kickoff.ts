@@ -18,6 +18,7 @@ import {
   resolveOptOutFooter,
 } from "@/lib/sends/opt-out-footer";
 import { countSegments, hasOptOutLanguage, MAX_SEGMENTS } from "@/lib/sends/segments";
+import { buildLandingPageUrl, isBrandLandingHost } from "@/lib/landing-page-url";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   buildStageFullUrl,
@@ -94,7 +95,14 @@ export type KickoffRefusal =
   // tripping the failure-spike breaker on a pure config problem. Gated to
   // providers that actually need one (currently just Ahoi) — TextHub's
   // number is bound to the api_key account-side, not per-stage.
-  | "no_sender_number";
+  | "no_sender_number"
+  // 1b: the stage points at a landing page row that no longer resolves (deleted
+  // mid-flight). A hard stop -- silently falling back to the stored full_url
+  // would ship a URL the operator did not choose.
+  | "landing_page_missing"
+  // 1b: kind='slug' but the campaign's brand has no landing_host. Refusing is
+  // the point -- guessing a host ships a 404 that kills attribution.
+  | "brand_missing_landing_host";
 
 export type KickoffResult =
   | {
@@ -127,6 +135,13 @@ interface MainRow {
   provider_opt_out_footer: string | null;
   sms_provider_adapter_code: string | null;
   sales_page_label: string | null;
+  // 1b (0150). NULL ⇒ legacy: build from sales_pages / stored full_url.
+  landing_page_id: number | null;
+  landing_page_kind: string | null;
+  landing_page_slug: string | null;
+  landing_page_external_url: string | null;
+  landing_page_status: string | null;
+  brand_landing_host: string | null;
   utm_tag_ids: number[];
   sms_provider_id: number | null;
   provider_phone_id: number | null;
@@ -179,6 +194,12 @@ export async function kickoffStageSend(
       prov.opt_out_footer        AS provider_opt_out_footer,
       prov.adapter_code          AS sms_provider_adapter_code,
       s.sales_page_label         AS sales_page_label,
+      s.landing_page_id          AS landing_page_id,
+      lp.kind                    AS landing_page_kind,
+      lp.slug                    AS landing_page_slug,
+      lp.external_url            AS landing_page_external_url,
+      lp.status                  AS landing_page_status,
+      b.landing_host             AS brand_landing_host,
       s.utm_tag_ids              AS utm_tag_ids,
       s.sms_provider_id          AS sms_provider_id,
       s.provider_phone_id        AS provider_phone_id,
@@ -200,6 +221,7 @@ export async function kickoffStageSend(
     FROM campaigns c
     JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
     LEFT JOIN brands b ON b.id = c.brand_id
+    LEFT JOIN offer_landing_pages lp ON lp.id = s.landing_page_id AND lp.org_id = c.org_id
     LEFT JOIN creatives cr ON cr.id = s.creative_id
     LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
     LEFT JOIN sms_providers prov ON prov.id = s.sms_provider_id AND prov.org_id = c.org_id
@@ -337,14 +359,60 @@ export async function kickoffStageSend(
     // (…/lp/knd8_62_…), minting a 404 and silently killing attribution — the
     // exact bug this guards against. A malformed / bare / non-carrying full_url
     // falls back to the canonical rebuild, which attaches tracking under sub_id3.
+    // ── 1b: landing page takes precedence, CONSTRUCTED AT MINT TIME ──────────
+    //
+    // When the stage carries a landing_page_id the destination is built HERE,
+    // from the CAMPAIGN'S BRAND AS IT IS RIGHT NOW — not from anything frozen at
+    // save time. That is the whole point of 1b: on 2026-08-22 campaigns 902 and
+    // 923 were re-branded and every stage kept pointing at the old brand's
+    // pages, because the destination was a frozen absolute URL. Building it late
+    // makes a rebrand self-correcting.
+    //
+    // A refusal here is a HARD STOP, never a silent fallback to the stored
+    // full_url: if the operator chose a page and we cannot honour it, shipping
+    // some other URL is worse than not sending.
+    if (row.landing_page_id != null) {
+      if (!row.landing_page_kind) return { ok: false, reason: "landing_page_missing" };
+      const built = buildLandingPageUrl({
+        page: {
+          id: row.landing_page_id,
+          kind: row.landing_page_kind as "slug" | "external_url",
+          slug: row.landing_page_slug,
+          external_url: row.landing_page_external_url,
+          status: row.landing_page_status ?? "active",
+        },
+        landingHost: row.brand_landing_host,
+        trackingId: row.stage_tracking_id,
+        // UTM tags reach external_url destinations only; buildLandingPageUrl
+        // drops them on /lp/ (single-param rule).
+        utmTags: null,
+      });
+      if (!built.ok) {
+        console.error(
+          `[kickoff] stage ${stageId}: landing page refused (${built.reason}) — ${built.message}`,
+        );
+        return {
+          ok: false,
+          reason:
+            built.reason === "brand_missing_landing_host"
+              ? "brand_missing_landing_host"
+              : "invalid_destination",
+        };
+      }
+      destinationUrl = built.url;
+    }
+
+    // ── Legacy path (landing_page_id NULL) — EXACTLY today's behaviour ────────
     const storedFull = (row.full_url ?? "").trim();
     const storedCarriesTracking =
       !!row.stage_tracking_id && storedFull.includes(row.stage_tracking_id);
     const storedGuideknWellFormed =
       !isGuideknLpUrl(storedFull) ||
       validateDestination(storedFull, row.stage_tracking_id) === null;
-    destinationUrl =
-      storedCarriesTracking && storedGuideknWellFormed ? storedFull : "";
+    if (!destinationUrl) {
+      destinationUrl =
+        storedCarriesTracking && storedGuideknWellFormed ? storedFull : "";
+    }
     if (!destinationUrl) {
       const ctxResult = await loadStageUrlContext({
         orgId,
@@ -354,10 +422,26 @@ export async function kickoffStageSend(
         dbc,
       });
       if (!ctxResult.ok) return { ok: false, reason: "stage_not_ready" };
+      // ⚠️ 1b: NEVER append UTM tags to a /lp/ destination on a brand landing
+      // host. The canonical shape allows exactly ONE query param (sub_id3),
+      // which already carries tracking — and the tag that would be appended
+      // here emits the literal `subid3=sub_id3`, which is the "unsubstituted
+      // placeholder" defect validateDestination names and the single row that
+      // fails the 0151 CHECK. Before this, re-deriving any of the 261 UTM-tagged
+      // /lp/ stages would have produced a destination the very next line
+      // rejects as invalid_destination. Tags still apply everywhere else.
+      const landingHosts = (await dbc.execute(sql`
+        SELECT landing_host FROM brands
+        WHERE org_id = ${orgId} AND landing_host IS NOT NULL
+      `)) as unknown as { landing_host: string }[];
+      const base = ctxResult.ctx.salesPageUrl ?? "";
+      const onLandingHost =
+        isBrandLandingHost(base, landingHosts.map((b) => b.landing_host)) ||
+        /\/lp\//i.test(base);
       destinationUrl = buildStageFullUrl({
-        salesPageUrl: ctxResult.ctx.salesPageUrl,
+        salesPageUrl: base,
         trackingId: row.stage_tracking_id,
-        utmTags: ctxResult.ctx.utmTags,
+        utmTags: onLandingHost ? null : ctxResult.ctx.utmTags,
       });
     }
     if (!destinationUrl) return { ok: false, reason: "no_destination" };

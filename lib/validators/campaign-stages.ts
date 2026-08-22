@@ -27,6 +27,11 @@ const stageBaseSchema = z.object({
     .union([z.string().trim().max(80), z.literal("")])
     .nullable()
     .optional(),
+  // 1b (0150). WHICH PAGE, not which URL — the destination is constructed at
+  // MINT time from the campaign's brand at that moment, so re-branding the
+  // campaign self-corrects the link. NULL ⇒ exactly today's behaviour (build
+  // from sales_page_label / the stored full_url).
+  landing_page_id: z.number().int().positive().nullable().optional(),
   // Optional URLs. short_url is rendered into the SMS preview; full_url
   // is tracking metadata only. Length caps are loose because providers
   // vary on what they'll shorten — we don't second-guess them here.

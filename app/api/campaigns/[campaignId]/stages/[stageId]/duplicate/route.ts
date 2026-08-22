@@ -124,6 +124,11 @@ export async function POST(
     creative_id: source.creative_id,
     sms_provider_id: source.sms_provider_id,
     provider_phone_id: source.provider_phone_id,
+    // 1b: a copy carries the landing PAGE, not a frozen URL. The duplicate's
+    // destination is re-constructed at mint time from ITS campaign's brand, so
+    // copying a stage into a differently-branded campaign lands on the right
+    // host automatically.
+    landing_page_id: source.landing_page_id,
     sales_page_label: source.sales_page_label,
     short_url: source.short_url,
     full_url: source.full_url,

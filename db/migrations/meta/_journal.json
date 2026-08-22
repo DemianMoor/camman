@@ -1051,6 +1051,20 @@
       "when": 1789257600000,
       "tag": "0149_contact_attribute_import_mappings",
       "breakpoints": true
+    },
+    {
+      "idx": 150,
+      "version": "7",
+      "when": 1789344000000,
+      "tag": "0150_offer_landing_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 151,
+      "version": "7",
+      "when": 1789430400000,
+      "tag": "0151_link_destinations_brand_host_shape",
+      "breakpoints": true
     }
   ]
 }

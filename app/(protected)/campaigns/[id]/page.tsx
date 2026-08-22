@@ -204,6 +204,8 @@ type Stage = {
   sales_page_label: string | null;
   short_url: string | null;
   full_url: string | null;
+  // 1b: WHICH PAGE the stage points at; the URL is built at mint time.
+  landing_page_id: number | null;
   utm_tag_ids: number[] | null;
   stop_text: string;
   include_clickers: boolean;

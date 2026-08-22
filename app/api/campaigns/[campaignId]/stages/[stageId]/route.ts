@@ -12,6 +12,7 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
+import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
@@ -114,6 +115,7 @@ export async function GET(
       sales_page_label: campaign_stages.sales_page_label,
       short_url: campaign_stages.short_url,
       full_url: campaign_stages.full_url,
+      landing_page_id: campaign_stages.landing_page_id,
       utm_tag_ids: campaign_stages.utm_tag_ids,
       stop_text: campaign_stages.stop_text,
       include_clickers: campaign_stages.include_clickers,
@@ -287,6 +289,20 @@ export async function PATCH(
         API_ERROR_CODES.VALIDATION,
         { field: "provider_phone_id" },
       );
+    }
+  }
+
+  // 1b: same guard as POST. Only runs when the patch actually touches the
+  // landing page — an untouched stage stays editable even if its page was
+  // disabled later, matching the 1a grandfathering discipline.
+  if (input.landing_page_id !== undefined) {
+    const refusal = await checkStageLandingPage(db, {
+      orgId,
+      campaignId: cid,
+      landingPageId: input.landing_page_id,
+    });
+    if (refusal) {
+      return apiError(400, refusal.message, LANDING_PAGE_INVALID_CODE, { field: refusal.field });
     }
   }
 

@@ -111,7 +111,18 @@ export const brands = pgTable(
     short_link_base: text("short_link_base"),
     // Brand main website — target for a future bare-root redirect (short domain
     // hit at "/"). Full URL; nullable.
+    //
+    // ⚠️ NOT normalized and NOT usable for building landing URLs: the three live
+    // brands carry https://www.guidekn.com, https://www.lumzen.co/ and
+    // https://fitsyou.net/ — mixed trailing slash, mixed www. It is also
+    // consumed VERBATIM by lib/links/root-redirect.ts. Use landing_host below.
     website: text("website"),
+    // Normalized bare host for this brand's LANDING pages (migration 0150), e.g.
+    // "www.guidekn.com". Builds https://<landing_host>/lp/<slug> for
+    // offer_landing_pages of kind='slug'. Distinct from `website` (bare-root
+    // redirect target) and from short_domains (the host of the link inside the
+    // SMS). NULL ⇒ this brand cannot use slug-based landing pages.
+    landing_host: text("landing_host"),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -1895,6 +1906,12 @@ export const campaign_stages = pgTable(
     // the creative text and the stop text.
     short_url: text("short_url"),
     full_url: text("full_url"),
+    // Drip P1 1b (0150). NULL ⇒ EXACTLY today's behaviour: build from
+    // offers.sales_pages / the stored full_url. When set, the destination is
+    // CONSTRUCTED AT MINT TIME from the campaign's brand, so a rebrand
+    // self-corrects. ON DELETE SET NULL — deleting a page degrades the stage to
+    // the legacy path, never deletes it.
+    landing_page_id: integer("landing_page_id"),
     // Ordered list of utm_tags.id selected for this stage's Full URL
     // link-builder. The selected tags append `&<label>=<value_source>` to
     // full_url (see lib/stage-url.ts). Stored as an ordered jsonb int array;
@@ -3896,6 +3913,48 @@ export const contact_attribute_import_mappings = pgTable(
     ),
   ],
 );
+
+// ── offer_landing_pages (Drip P1 1b, migration 0150) ─────────────────────────
+// WHICH PAGE a stage points at, not WHICH URL. The URL is constructed at MINT
+// time from the campaign's brand, so re-branding a campaign self-corrects its
+// links instead of silently orphaning them (observed in production 2026-08-22:
+// campaigns 902 and 923 were re-branded and every stage kept the old brand's
+// pages).
+export const offer_landing_pages = pgTable(
+  "offer_landing_pages",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    // 'slug'         -> https://<brand.landing_host>/lp/<slug>
+    // 'external_url' -> the stored URL verbatim, any brand
+    kind: text("kind").notNull().default("slug"),
+    slug: text("slug"),
+    external_url: text("external_url"),
+    is_default: boolean("is_default").notNull().default(false),
+    status: text("status").notNull().default("active"),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("offer_landing_pages_org_offer_idx").on(table.org_id, table.offer_id),
+    check("offer_landing_pages_kind_check", sql`${table.kind} IN ('slug', 'external_url')`),
+    check("offer_landing_pages_status_check", sql`${table.status} IN ('active', 'disabled')`),
+    check(
+      "offer_landing_pages_shape_check",
+      sql`(${table.kind} = 'slug' AND ${table.slug} IS NOT NULL AND ${table.external_url} IS NULL) OR (${table.kind} = 'external_url' AND ${table.external_url} IS NOT NULL AND ${table.slug} IS NULL)`,
+    ),
+    // An underscore is the signature of the tracking-id-in-path bug 0094 stops.
+    check("offer_landing_pages_slug_shape_check", sql`${table.slug} IS NULL OR ${table.slug} ~ '^[a-z0-9]+$'`),
+  ],
+);
+
+export type OfferLandingPage = typeof offer_landing_pages.$inferSelect;
 
 export type ContactAttributeImportMapping =
   typeof contact_attribute_import_mappings.$inferSelect;

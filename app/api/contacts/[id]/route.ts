@@ -2,11 +2,18 @@ import { and, eq, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
-import { contacts } from "@/db/schema";
+import {
+  contact_attributes,
+  contact_contact_groups,
+  contact_groups,
+  contacts,
+  opt_outs,
+} from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { contactUpdateSchema } from "@/lib/validators/contacts";
+import { ageBandFromDob, ageFromDob } from "@/lib/contact-attributes";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -40,7 +47,56 @@ export async function GET(
       entity: "contact",
     });
   }
-  return NextResponse.json(rows[0]);
+
+  // Attributes (0147) + group membership + suppression state, for the detail
+  // page. Separate small queries rather than one wide LEFT JOIN: groups are
+  // 1:N, so joining would fan the contact row out and every scalar would need
+  // de-duplicating. Each of these is an indexed single-key lookup.
+  const [attrRows, groupRows, optOutRows] = await Promise.all([
+    db
+      .select()
+      .from(contact_attributes)
+      .where(
+        and(
+          eq(contact_attributes.contact_id, id),
+          eq(contact_attributes.org_id, orgId),
+        ),
+      )
+      .limit(1),
+    db
+      .select({ id: contact_groups.id, name: contact_groups.name, color: contact_groups.color })
+      .from(contact_contact_groups)
+      .innerJoin(
+        contact_groups,
+        eq(contact_groups.id, contact_contact_groups.contact_group_id),
+      )
+      .where(
+        and(
+          eq(contact_contact_groups.contact_id, id),
+          eq(contact_contact_groups.org_id, orgId),
+        ),
+      ),
+    db
+      .select({ reason: opt_outs.reason, created_at: opt_outs.created_at })
+      .from(opt_outs)
+      .where(and(eq(opt_outs.contact_id, id), eq(opt_outs.org_id, orgId)))
+      .limit(5),
+  ]);
+
+  const attrs = attrRows[0] ?? null;
+  return NextResponse.json({
+    ...rows[0],
+    // null (not {}) when the contact has no attributes row — the page shows
+    // "no attributes recorded" rather than a grid of blanks, and the two
+    // states are genuinely different.
+    attributes: attrs,
+    // Derived at READ time, never stored — the same rule the age_band segment
+    // rule follows. Anchored to the ET calendar date, matching the send path.
+    age: attrs?.dob ? ageFromDob(attrs.dob) : null,
+    age_band: attrs?.dob ? ageBandFromDob(attrs.dob) : null,
+    groups: groupRows,
+    opt_outs: optOutRows,
+  });
 }
 
 export async function PATCH(

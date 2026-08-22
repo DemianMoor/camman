@@ -625,6 +625,66 @@ Default target for destructive-or-writing probes is the **`camman-v2` demo datab
 
 If a probe genuinely must run against production (it depends on real credentials, real volumes, or real provider state), ask first, keep the write set as small as possible, and verify the teardown by re-querying rather than trusting it.
 
+## A segment rule type must be registered in SEVEN places, not four
+
+This section previously said FOUR. Building the `contact_attributes` rule types (0147/0148) found
+three more, and the two new ones are the dangerous ones.
+
+| # | place | file |
+|---|---|---|
+| 1 | `RULE_TYPES` | [lib/validators/segment-rule-types.ts](../lib/validators/segment-rule-types.ts) |
+| 2 | `validateValueByShape` | [lib/validators/segment-rules.ts](../lib/validators/segment-rules.ts) |
+| 3 | `isRuleComplete` | [lib/segment-rules-eval.ts](../lib/segment-rules-eval.ts) |
+| 4 | `verifyValueOwnership` | [lib/api/segment-rule-value-ownership.ts](../lib/api/segment-rule-value-ownership.ts) |
+| **5** | **the SQL emitter** (`buildRuleClause`) | `lib/segment-rules-eval.ts` |
+| **6** | **`segment_rules_rule_type_check`** | a DB CHECK — needs a MIGRATION |
+| **7** | the same CHECK mirrored | [db/schema.ts](../db/schema.ts) |
+
+**Miss 5 and the rule saves, renders, and matches NOBODY** — it validates all the way through and
+then falls into the emitter's `default` branch, which returns a contradiction.
+
+**Miss 6 and the rule is UNCREATABLE**: it passes Zod, passes ownership, renders in the UI, and
+Postgres rejects the INSERT with a `check_violation`. This is the same failure that shipped
+`phone_type` / `carrier` uncreatable in 0098, one layer deeper — and nothing asserted these lists
+agreed until [scripts/test-segment-rule-type-registration.ts](../scripts/test-segment-rule-type-registration.ts),
+which compares RULE_TYPES ↔ `db/schema.ts` ↔ the live DB constraint in both directions. **It must
+be green before any rule-type PR merges.**
+
+Places 2, 3 and 4 all fall through to a `typeof value === "number"` test, so a **set-shaped** value
+(array/object) is silently mishandled unless explicitly branched — that has not changed.
+
+⚠️ **A `is_not` rule dropped by `isRuleComplete` turns "nobody" into "EVERYBODY"** under `EXCEPT`.
+`isRuleComplete` must stay identical-or-stronger than what the emitter accepts.
+
+## contact_attributes — age is DERIVED, and under-18 is scoped to the rule
+
+- **`contact_attributes` is 1:1 with `contacts`** (`contact_id` IS the PK, migration 0147). No
+  column was added to `contacts`. Populated only by drip intake and mapped CSV uploads; there is
+  **no backfill**.
+- **Phone is the identity; everything there is an attribute.** `email` has **no unique constraint** —
+  partners legitimately submit shared addresses, and a unique index would make an import FAIL on a
+  duplicate rather than update it.
+- **Age is NEVER stored.** Bands are a **RANGE on `dob`**, computed once per query:
+  `dob > ET_today - (maxAge+1) years AND dob <= ET_today - minAge years`. A per-row
+  `EXTRACT(YEAR FROM age(dob))` is not sargable and kills `contact_attributes_org_dob_idx`. Same
+  technique as the per-carrier daily cap (0143). Anchored to the **ET calendar date**, like the rest
+  of the send path. `lib/contact-attributes.ts` holds the read-side twin of that arithmetic — the
+  two must agree, or a displayed band contradicts a targeted one.
+- **Under-18 is scoped to the `age_band` rule, NOT global.** Inside it a NULL `dob` matches nothing
+  and a hard 18-year floor applies independently of the band chosen (so a future band edit cannot
+  lower it). ⚠️ **A GLOBAL "unknown dob = minor" filter would exclude 100% of the audience** —
+  measured 2026-08-22 there were 815,426 contacts and **zero** with a `dob`. If a global minor gate
+  is ever added its form is *"exclude where `dob` is KNOWN and under 18"*.
+- **`1970-01-01` normalizes to NULL at the write boundary.** The `CHECK (dob > '1900-01-01')` cannot
+  catch it — that is a legitimate birthdate — so `normalizeDob` is the only thing that does. Storing
+  it would manufacture a 56-year-old cohort out of blank spreadsheet cells.
+- **The attribute CSV import UPDATES existing contacts and NEVER creates one.** A mis-mapped column
+  can mangle attributes but can never grow the audience. Unmatched phones are reported, not
+  inserted. It is a **separate endpoint** from the four `PhoneUploadForm` flows on purpose — adding
+  a mode to that shared component would have risked contacts/opt-outs/opt-ins/clickers for no
+  shared behaviour. Only MAPPED fields are written (`COALESCE(EXCLUDED.x, ca.x)`), so a CSV without
+  a `state` column does not blank a state we already know.
+
 ## Test fixtures — never a live entity, and never production for a write
 
 Two rules, both learned the same way: on 2026-08-21 a smoke test of the new brand → number

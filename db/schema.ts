@@ -3868,3 +3868,34 @@ export const contact_attributes = pgTable(
 
 export type ContactAttributes = typeof contact_attributes.$inferSelect;
 export type NewContactAttributes = typeof contact_attributes.$inferInsert;
+
+// ── contact_attribute_import_mappings (0149) ─────────────────────────────────
+// Saved column -> field mappings for attribute CSV uploads. Mirrors
+// result_import_mappings in shape, minus sms_provider_id (an attribute CSV has
+// no provider dimension) and status_value_map (attributes have no status).
+export const contact_attribute_import_mappings = pgTable(
+  "contact_attribute_import_mappings",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    is_default: boolean("is_default").notNull().default(false),
+    // { "<csv column header>": "<contact_attributes field>" }
+    mapping: jsonb("mapping").$type<Record<string, string>>().notNull(),
+    // Nullable + SET NULL: a saved mapping must outlive the person who made it.
+    created_by: uuid("created_by"),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      "contact_attribute_import_mappings_mapping_nonempty_check",
+      sql`jsonb_typeof(${table.mapping}) = 'object' AND ${table.mapping} <> '{}'::jsonb`,
+    ),
+  ],
+);
+
+export type ContactAttributeImportMapping =
+  typeof contact_attribute_import_mappings.$inferSelect;

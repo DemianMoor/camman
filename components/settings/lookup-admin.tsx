@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpDown,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Loader2,
   RefreshCw,
 } from "lucide-react";
@@ -187,6 +189,7 @@ type StatGroup = {
   opt_outs: number;
   sendable: number;
   remaining: number;
+  by_carrier?: Record<string, number>;
 };
 type StatSummary = Omit<StatGroup, "group_id" | "name"> & { groups: number };
 type LookupStats = {
@@ -216,6 +219,16 @@ function LookupStatsSection() {
   const [groupPreview, setGroupPreview] = useState<GroupLookupPreview | null>(null);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const [confirmText, setConfirmText] = useState("");
+  const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set());
+
+  function toggleExpand(groupId: number) {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -391,9 +404,11 @@ function LookupStatsSection() {
 
             {/* Per-group sortable table */}
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[720px] border-collapse text-sm">
+              <table className="w-full min-w-[760px] border-collapse text-sm">
                 <thead>
                   <tr className="border-b text-xs text-muted-foreground">
+                    {/* expand toggle column */}
+                    <th className="w-6 px-1 py-2" aria-label="Expand carriers" />
                     {cols.map((c) => (
                       <th
                         key={c.key}
@@ -430,65 +445,109 @@ function LookupStatsSection() {
                   {sortedGroups.map((g) => {
                     const needsLookup =
                       g.total > 0 && g.remaining / g.total > UNLOOKED_FLAG_RATIO;
+                    const isExpanded = expandedGroups.has(g.group_id);
+                    const carrierEntries = Object.entries(g.by_carrier ?? {});
                     return (
-                      <tr
-                        key={g.group_id}
-                        className={cn(
-                          "border-b",
-                          needsLookup ? "bg-amber-50" : "",
-                        )}
-                      >
-                        <td className="px-2 py-2 text-left font-medium">
-                          {g.name}
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">
-                          {num(g.total)}
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">
-                          {num(g.looked_up)}
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">
-                          {g.coverage_pct}%
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums text-muted-foreground">
-                          {num(g.telnyx)} / {num(g.manual)}
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">
-                          {num(g.landlines)}
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">
-                          {num(g.sendable)}
-                        </td>
-                        <td className="px-2 py-2 text-right tabular-nums">
-                          <span
+                      <React.Fragment key={g.group_id}>
+                        <tr
+                          className={cn(
+                            isExpanded ? "" : "border-b",
+                            needsLookup ? "bg-amber-50" : "",
+                          )}
+                        >
+                          <td className="px-1 py-2 text-center">
+                            {carrierEntries.length > 0 ? (
+                              <button
+                                type="button"
+                                onClick={() => toggleExpand(g.group_id)}
+                                className="inline-flex items-center text-muted-foreground hover:text-foreground"
+                                aria-label={isExpanded ? "Collapse carrier breakdown" : "Expand carrier breakdown"}
+                              >
+                                {isExpanded ? (
+                                  <ChevronDown className="size-3.5" aria-hidden />
+                                ) : (
+                                  <ChevronRight className="size-3.5" aria-hidden />
+                                )}
+                              </button>
+                            ) : null}
+                          </td>
+                          <td className="px-2 py-2 text-left font-medium">
+                            {g.name}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums">
+                            {num(g.total)}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums">
+                            {num(g.looked_up)}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums">
+                            {g.coverage_pct}%
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums text-muted-foreground">
+                            {num(g.telnyx)} / {num(g.manual)}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums">
+                            {num(g.landlines)}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums">
+                            {num(g.sendable)}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums">
+                            <span
+                              className={cn(
+                                "inline-flex items-center gap-1",
+                                needsLookup ? "font-semibold text-amber-800" : "",
+                              )}
+                            >
+                              {needsLookup ? (
+                                <AlertTriangle className="size-3.5" aria-hidden />
+                              ) : null}
+                              {num(g.remaining)}
+                            </span>
+                          </td>
+                          <td className="px-2 py-2 text-right">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2 text-xs"
+                              onClick={() => openGroupLookup(g.group_id)}
+                              disabled={g.remaining === 0 || groupDialogOpen}
+                              title={
+                                g.remaining === 0
+                                  ? "Nothing to look up — fully covered"
+                                  : "Enqueue this group's un-looked-up numbers"
+                              }
+                            >
+                              Look up
+                            </Button>
+                          </td>
+                        </tr>
+                        {isExpanded && carrierEntries.length > 0 ? (
+                          <tr
                             className={cn(
-                              "inline-flex items-center gap-1",
-                              needsLookup ? "font-semibold text-amber-800" : "",
+                              "border-b",
+                              needsLookup ? "bg-amber-50/60" : "bg-muted/30",
                             )}
                           >
-                            {needsLookup ? (
-                              <AlertTriangle className="size-3.5" aria-hidden />
-                            ) : null}
-                            {num(g.remaining)}
-                          </span>
-                        </td>
-                        <td className="px-2 py-2 text-right">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 px-2 text-xs"
-                            onClick={() => openGroupLookup(g.group_id)}
-                            disabled={g.remaining === 0 || groupDialogOpen}
-                            title={
-                              g.remaining === 0
-                                ? "Nothing to look up — fully covered"
-                                : "Enqueue this group's un-looked-up numbers"
-                            }
-                          >
-                            Look up
-                          </Button>
-                        </td>
-                      </tr>
+                            {/* +1 for the expand column, +1 for the actions column */}
+                            <td colSpan={cols.length + 2} className="px-4 pb-2.5 pt-1">
+                              <div className="flex flex-wrap gap-2">
+                                {carrierEntries.map(([carrier, count]) => (
+                                  <span
+                                    key={carrier}
+                                    className="inline-flex items-center gap-1.5 rounded-md border bg-background px-2 py-1 text-xs"
+                                  >
+                                    <span className="font-medium">{carrier}</span>
+                                    <span className="tabular-nums text-muted-foreground">
+                                      {num(count)}
+                                    </span>
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </React.Fragment>
                     );
                   })}
                 </tbody>

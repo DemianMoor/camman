@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-22_
+_Last updated: 2026-08-23_
 
 ## "Made a purchase" has exactly one definition (2026-08-19)
 
@@ -753,6 +753,67 @@ Guarded by the rebrand section of
 warning and the block **agree** (a warning that disagrees with what is enforced is worse than no
 warning), that a shared NULL-brand number and a stage with no number are both left alone, and that
 a stage on a landing page is not warned about because mint-time construction self-corrects it.
+
+## Rate limiting and counters — put the decision IN the statement
+
+`lib/api/rate-limit.ts` is an **in-memory** token bucket and cannot enforce anything in serverless;
+its own header says so ("the effective rate is instance_count * limit"). Any real limit needs shared
+state, which means the database.
+
+**The counter shape matters more than it looks.** The allocation shape used by
+`campaign_tracking_counters` increments unconditionally:
+
+```sql
+ON CONFLICT (...) DO UPDATE SET next_seq = next_seq + 1 RETURNING (next_seq - 1)
+```
+
+Used as a **limiter** that is wrong in a way an allow-path test cannot see: a client hammering while
+already over the limit keeps incrementing, so **rejected requests burn the quota**. Put the decision
+in the statement instead:
+
+```sql
+ON CONFLICT (...) DO UPDATE SET count = count + $n
+  WHERE count + $n <= $limit
+RETURNING count
+```
+
+No row returned ⇒ refused, atomically, with nothing consumed. **⚠️ The `INSERT` branch is not
+covered by that `WHERE`** — the first call of a window inserts unguarded, so the caller must
+pre-check size. Both halves are asserted in `scripts/test-intake-schema.ts` (the refusal is checked
+by *absence of a row* AND by the counter being unchanged afterwards).
+
+The same construction gives **state-transition-gated alerts**: `WHERE alert_state.state <> $new`
+returns a row only when the state actually changes. Before `alert_state` (0154) nothing in the
+codebase suppressed repeat alerts — `notifyTelegram` is stateless and the breakers only avoid storms
+as a side effect of latching. **Whatever resets the condition must also clear the alert**, or the
+next genuine incident is silent; partner-key rotation does this explicitly.
+
+## Hash vs encrypt a credential — ask whether you must REPLAY it
+
+`lib/crypto/secret-box.ts` (AES-256-GCM, `PROVIDER_CREDENTIALS_KEY`) exists because
+`provider_credentials` must be **replayed** to a provider. A credential that is only ever
+**verified** — a partner intake secret — should be **hashed**, not encrypted: a dump then yields
+nothing, and rotating the master key does not break every partner.
+
+**⚠️ For a high-entropy machine-generated secret, use a fast hash (SHA-256), not bcrypt/argon2.**
+Slow KDFs defend low-entropy human passwords against offline brute force; 256 bits of
+`randomBytes` has nothing to stretch. At 50 req/s, bcrypt cost-10 costs ~5 CPU-seconds per
+wall-clock second — a self-inflicted DoS on a function billed by CPU time.
+
+Related: an **addressing** value (a lookup token) stays plaintext and indexed; only the
+**authenticating** value is hashed. Hashing the token would turn resolution into a seq scan.
+
+## Capture-raw endpoints: store what fails, too
+
+An intake that drops malformed payloads at the edge makes a broken partner integration invisible.
+`lead_inbox` stores rejects with `status='rejected'` and an `error`, and its `dedup_key` is
+**nullable with a partial unique index** precisely so a lead with no parseable phone can still be
+written. A `NOT NULL UNIQUE` dedup key would reject exactly the leads most worth keeping.
+
+**⚠️ Multi-row `INSERT ... ON CONFLICT DO UPDATE` requires intra-batch dedup.** Postgres raises
+`21000` ("cannot affect row a second time") if one statement conflict-updates the same row twice, so
+one repeated key inside a 500-row batch would fail the entire call. Collapse duplicates before the
+statement and re-expand results to the caller's original order.
 
 ## Test fixtures — never a live entity, and never production for a write
 

@@ -38,6 +38,11 @@ export type Permission =
   | "provider_phones.restore"
   | "provider_credentials.view"
   | "provider_credentials.manage"
+  // Partner intake keys are the same class of thing as a provider
+  // credential — they grant an outside party write access — so they carry
+  // the same split: manager+ may look, admin+ may mint and rotate.
+  | "partner_keys.view"
+  | "partner_keys.manage"
   | "routing_types.view"
   | "routing_types.create"
   | "routing_types.update"
@@ -230,6 +235,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "provider_phones.archive",
   "provider_phones.restore",
   "provider_credentials.view",
+  "partner_keys.view",
   "routing_types.create",
   "routing_types.update",
   "routing_types.archive",
@@ -276,6 +282,7 @@ const adminPerms: ReadonlySet<Permission> = new Set([
   ...managerPerms,
   "users.manage",
   "provider_credentials.manage",
+  "partner_keys.manage",
 ]);
 
 const ownerPerms: ReadonlySet<Permission> = new Set([

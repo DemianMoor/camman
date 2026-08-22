@@ -350,6 +350,22 @@ Two pre-aggregated **hourly-bucket** fact tables feeding five reports (by number
 
 > **Identity FKs only** (`org_id`/`stage_id`/`campaign_id`/`contact_group_id`, all `ON DELETE CASCADE`). Denormalized dimension keys are snapshots — deliberately NOT FK'd (same as `stage_sends.carrier_norm` and the `0093` matviews). No RLS on the fact tables; reads go through a server-side helper that filters `org_id` (same posture as the `0093` matviews). Partial index `(bucket_start_utc) WHERE settled=false` keeps the rolling-window settle sweep cheap at scale.
 
+
+### Partner lead intake (migrations 0152–0154, Drip Phase 2)
+
+Raw capture for partner-submitted leads. **Nothing consumes these tables yet** — Phase 2 stores and returns; the Phase 3 enrichment worker is the only thing that will move a row out of `status='received'`. See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
+
+| Table | Grain / keys | Notes |
+|---|---|---|
+| `partner_keys` | PK(`id`), UNIQUE(`token`), UNIQUE(`org_id`,`partner_slug`) | One credential per partner. `token` is **plaintext and indexed** (addressing — it is resolved by equality before any org context exists); `secret_hash` is a **one-way SHA-256** (authentication). `sandbox` defaults **true**. Carries the per-key contract: `rate_per_sec`, `rate_per_day`, `max_payload_bytes`, `field_mapping` JSONB, `interest_tag` + `interest_tag_mode` (`force`/`default`). RLS + SELECT-only org policy |
+| `lead_inbox` | PK(`id`), partial UNIQUE(`partner_key_id`,`dedup_key`) `WHERE dedup_key IS NOT NULL` | The raw payload in `raw` JSONB, plus addressing columns (`phone_e164`, `interest_tag`, `sandbox`). `normalized` stays NULL until Phase 3. `status` ∈ `received`/`processed`/`rejected`/`landline`/`duplicate`; index `(status, received_at)` is the worker's queue scan. `partner_slug` is denormalized and the FK is **ON DELETE RESTRICT** so provenance survives a rename and a key with leads cannot be deleted. RLS + SELECT-only org policy |
+| `partner_key_usage` | PK(`partner_key_id`,`window_kind`,`window_start`) | Rate-limit counters. **Units differ by `window_kind`**: `sec` counts REQUESTS, `day` counts LEADS, `auth_fail` counts failed secret checks on a resolved token. `day`/`auth_fail` windows start at the **ET** calendar day. RLS + SELECT-only org policy |
+| `alert_state` | PK(`alert_key`) | Generic state-transition gate for alerts (`ok`/`firing`). **Infra table: RLS on, NO policies**, same posture as `cron_locks`/`geoip_cache` |
+
+> **⚠️ `dedup_key` is nullable by design.** The key is `(partner_key_id, phone, received_minute)` and phone is exactly what a malformed payload lacks; `NOT NULL` would make such a lead impossible to insert, rejecting the leads most worth capturing. Phone-less leads are stored with `status='rejected'` and a populated `error`.
+
+> **⚠️ The rate-limit upsert carries a `WHERE` on its `DO UPDATE`**, so a refusal touches nothing and `RETURNING` yields no row. The bare counter shape (`campaign_tracking_counters`) increments unconditionally, which would let rejected retries burn a partner's daily quota. The `INSERT` branch is **not** covered by that guard, so the route pre-checks batch size — see [07-conventions.md](07-conventions.md).
+
 ## Triggers & DB-side logic (in migrations, not Drizzle)
 - **`handle_new_user()`** (`0001`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row.
 - **`current_org_id()`** (`0001`): SECURITY DEFINER, backs RLS policies.

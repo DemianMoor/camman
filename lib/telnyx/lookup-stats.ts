@@ -34,6 +34,7 @@ export interface GroupStat {
   opt_outs: number; // NON-landline opt-outs (disjoint from landlines)
   sendable: number;
   remaining: number; // total - looked_up (the "needs a lookup run" number)
+  by_carrier?: Record<string, number>; // carrier_norm → contact count within this group; absent on old cache entries
 }
 
 export type StatsSummary = Omit<GroupStat, "group_id" | "name"> & {
@@ -118,7 +119,33 @@ export async function computeLookupGroupStats(
     GROUP BY cg.id, cg.name
     ORDER BY total DESC`);
 
+  // Carrier breakdown per group — separate query so the main query's FILTER
+  // aggregates stay clean (adding carrier_norm to the GROUP BY would multiply rows).
+  const carrierRows = await db.execute<{
+    group_id: number;
+    carrier_norm: string;
+    count: number;
+  }>(sql`
+    SELECT
+      cg.id AS group_id,
+      c.carrier_norm,
+      COUNT(*)::int AS count
+    FROM contact_contact_groups ccg
+    JOIN contacts c ON c.id = ccg.contact_id
+    JOIN contact_groups cg ON cg.id = ccg.contact_group_id
+    WHERE ccg.org_id = ${orgId}::uuid AND cg.status = 'active'
+    GROUP BY cg.id, c.carrier_norm
+    ORDER BY cg.id, COUNT(*) DESC`);
+
+  const carrierByGroup = new Map<number, Record<string, number>>();
+  for (const r of carrierRows) {
+    const gid = n(r.group_id);
+    if (!carrierByGroup.has(gid)) carrierByGroup.set(gid, {});
+    carrierByGroup.get(gid)![r.carrier_norm] = n(r.count);
+  }
+
   const groups: GroupStat[] = groupRows.map((r) => {
+    const gid = n(r.group_id);
     const g = {
       total: n(r.total),
       looked_up: n(r.looked_up),
@@ -130,11 +157,12 @@ export async function computeLookupGroupStats(
     };
     assertReconciles(`group "${r.name}" (${r.group_id})`, g);
     return {
-      group_id: n(r.group_id),
+      group_id: gid,
       name: r.name,
       ...g,
       coverage_pct: coverage(g.looked_up, g.total),
       remaining: g.total - g.looked_up,
+      by_carrier: carrierByGroup.get(gid) ?? {},
     };
   });
 

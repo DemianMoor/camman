@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-08-19_
+_Last updated: 2026-08-22_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -68,6 +68,7 @@ erDiagram
   brands ||--o{ short_domains : "1 per brand"
 
   contacts ||--o{ contact_contact_groups : tagged
+  contacts ||--o| contact_attributes : "attributes (1:1, 0147)"
   contact_groups ||--o{ contact_contact_groups : tags
   contacts ||--o{ segment_contacts : "manual member"
   segments ||--o{ segment_contacts : contains
@@ -233,6 +234,7 @@ erDiagram
 | `contacts` | `id uuid`, `phone_number`, `is_archived` | UNIQUE(org_id, phone_number); millions-scale |
 | `contact_groups` | `contact_group_id` (text uniq) | tags (renamed from `segment_groups` in 0031) |
 | `contact_contact_groups` | PK(contact_id, contact_group_id) | M:N tag junction |
+| `contact_attributes` | **PK `contact_id`** (1:1), `org_id`, name/address/`state`/`country`/`email`, `gender`, `income_band`, `kids`, `married`, `dob`, `interest_tag`, `partner_slug`, `source`, `extra jsonb` | migration 0147. Everything about a PERSON that is not their phone. **No column added to `contacts`.** **Age is NEVER stored** — derived from a `dob` RANGE at query time (ET calendar date). `email` has **no unique constraint** — phone is the identity. Starts empty; **no backfill**. |
 | `opt_outs` | `contact_id`, `reason` opt_out/scrubbed/bounced/suppressed, `source` | append-only; **any** reason excludes from future snapshots |
 | `opt_out_brands` / `opt_out_providers` | (opt_out_id, brand_id/provider_id) | scope junctions; `opt_out` reason is brand-scoped, scrubbed/bounced/suppressed are universal |
 | `opt_ins` | `contact_id`, `brand_id`, `provider_id`, `source` | single brand/provider per row |

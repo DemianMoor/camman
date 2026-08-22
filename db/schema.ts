@@ -3751,3 +3751,110 @@ export const contact_org_stats = pgTable("contact_org_stats", {
 });
 
 export type ContactOrgStats = typeof contact_org_stats.$inferSelect;
+
+// ── contact_attributes (Drip Phase 1 item 1c, migration 0147) ────────────────
+// 1:1 with contacts. Everything we know about a PERSON that is not their phone
+// number: name, address, demographics, and the drip provenance fields
+// (interest_tag, partner_slug). `contacts` itself carries no such column — it is
+// phone + enrichment + status only — so this table adds a whole dimension
+// without touching that hot, 815K-row, 386MB table.
+//
+// PHONE IS THE IDENTITY; everything here is an attribute. Notably `email` has NO
+// unique constraint: partners legitimately submit shared addresses, and a unique
+// index would make an import FAIL on a duplicate instead of updating.
+//
+// AGE IS NEVER STORED. `dob` is the only temporal fact; age and age-band are
+// derived at query time from a dob RANGE (see lib/validators/segment-rule-types.ts
+// and the age_band emitter in lib/segment-rules-eval.ts). A stored age is wrong
+// the day after it is written.
+export const contact_attributes = pgTable(
+  "contact_attributes",
+  {
+    // The 1:1 is structural — contact_id IS the primary key. No surrogate id,
+    // so a second attribute row for one contact is impossible by construction.
+    contact_id: uuid("contact_id")
+      .primaryKey()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    // Carried even though it is reachable through contacts: every RLS policy and
+    // the hot segment-eval path filter on it directly, and joining through
+    // contacts purely to satisfy the policy would put a join in that path.
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+
+    first_name: text("first_name"),
+    last_name: text("last_name"),
+    address: text("address"),
+    state: text("state"),
+    country: text("country"),
+    // Stored normalized (lowercase, trimmed) at the write boundary. No unique
+    // constraint — see the header note.
+    email: text("email"),
+    gender: text("gender"),
+    // Coded, not display text, so labels can be reworded without a data
+    // migration. CHECK-constrained: an unconstrained column would let an import
+    // write "50-75k" and silently match no rule.
+    income_band: text("income_band"),
+    kids: boolean("kids"),
+    married: boolean("married"),
+    // ⚠️ 1970-01-01 (epoch-as-blank) is normalized to NULL at intake and in the
+    // CSV mapping. The CHECK below CANNOT catch it — 1970-01-01 is a legitimate
+    // birthdate — so the write boundary is the only thing that closes it.
+    // Storing it would silently manufacture a 56-year-old cohort out of blanks.
+    dob: date("dob"),
+    // Deliberately NOT CHECK-constrained: interest tags are explicitly
+    // extensible (ACA / Medicare / Home_Services are only the initial set) and
+    // partner slugs are created per partner. Validated in Zod at the write
+    // boundary so adding one is config, not a migration.
+    interest_tag: text("interest_tag"),
+    partner_slug: text("partner_slug"),
+    // Which pipeline wrote this row: 'drip_intake', 'csv_upload', ...
+    source: text("source"),
+
+    // Fields not yet defined. No GIN index until a query needs one.
+    extra: jsonb("extra").notNull().default({}),
+
+    // No created_at: the contact's own already answers "when did we first see
+    // this person", and a second, subtly different creation timestamp invites
+    // the two to be confused in reporting.
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("contact_attributes_org_idx").on(table.org_id),
+    // The two dimensions Drip routes on: interest_tag is the REQUIRED drip
+    // audience field, partner_slug the optional filter. Hot by design.
+    index("contact_attributes_org_interest_idx").on(table.org_id, table.interest_tag),
+    index("contact_attributes_org_partner_idx").on(table.org_id, table.partner_slug),
+    // Highest-cardinality optional filter.
+    index("contact_attributes_org_state_idx").on(table.org_id, table.state),
+    // Load-bearing for age bands: the band predicate is a RANGE on dob
+    // (dob > today - N years AND dob <= today - M years), which this serves.
+    // It would be useless if age were computed per row.
+    index("contact_attributes_org_dob_idx").on(table.org_id, table.dob),
+    // NO index on gender / kids / married / country / income_band: 2-6 distinct
+    // values over hundreds of thousands of rows means Postgres seq-scans
+    // regardless, and a btree there taxes the intake write path for nothing.
+    // They are used in COMBINATION with a selective rule, and the segment
+    // evaluator INTERSECTs per-branch sets, so the selective branch drives
+    // the plan.
+    check(
+      "contact_attributes_income_band_check",
+      sql`${table.income_band} IS NULL OR ${table.income_band} IN ('lt_25k','25k_50k','50k_75k','75k_100k','100k_150k','gte_150k')`,
+    ),
+    check(
+      "contact_attributes_gender_check",
+      sql`${table.gender} IS NULL OR ${table.gender} IN ('male','female','other')`,
+    ),
+    // Floor against import garbage (year 0001) and future dates. Does NOT and
+    // cannot exclude 1970-01-01 — see the dob comment above.
+    check(
+      "contact_attributes_dob_sane_check",
+      sql`${table.dob} IS NULL OR (${table.dob} > DATE '1900-01-01' AND ${table.dob} <= CURRENT_DATE)`,
+    ),
+  ],
+);
+
+export type ContactAttributes = typeof contact_attributes.$inferSelect;
+export type NewContactAttributes = typeof contact_attributes.$inferInsert;

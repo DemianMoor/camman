@@ -190,7 +190,10 @@ number and BOTH brands.
   **both directions** against the real production mismatch (a guard that rejected everything, or
   allowed everything, would pass a one-sided test), proves the shared-number case against a
   synthesized-then-rolled-back row, and **exits non-zero if the legacy mismatch is ever cleaned
-  up** rather than passing on an empty world.
+  up** rather than passing on an empty world. It also carries the **rebrand rule** below: a
+  synthesized campaign is moved between two brands inside a rolled-back transaction and the SAME
+  stage is asserted clean before and stale after, so a `isStageNumberBrandStale` that always
+  answered the same way fails. Live rows are never mutated — per the fixture rule below.
 
 ## Per-number carrier policy (Q4, migration 0142) — absent row means ALLOWED
 
@@ -744,6 +747,12 @@ follows. `computeBrandChangeImpact` (the warning) and `isStageNumberBrandStale` 
 one query so the warning can never disagree with what is enforced. **This closes the 1a gap** that
 the two production rebrands realised: 1a grandfathers by "the (brand, number) pair is not changing",
 which is right for the campaign row and silent about its stages.
+
+Guarded by the rebrand section of
+[scripts/test-brand-number-guard.ts](../scripts/test-brand-number-guard.ts), which asserts the
+warning and the block **agree** (a warning that disagrees with what is enforced is worse than no
+warning), that a shared NULL-brand number and a stage with no number are both left alone, and that
+a stage on a landing page is not warned about because mint-time construction self-corrects it.
 
 ## Test fixtures — never a live entity, and never production for a write
 

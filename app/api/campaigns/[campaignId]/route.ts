@@ -109,6 +109,9 @@ export async function GET(
         id: brands.id,
         name: brands.name,
         color: brands.color,
+        // 1b: the stage form's read-only landing-URL preview builds from this
+        // with the SAME function the send path mints with.
+        landing_host: brands.landing_host,
         // The brand's EFFECTIVE short domain — the tracked-mode SMS preview's
         // BRAND-LEVEL candidate. Single-row via subquery.
         //

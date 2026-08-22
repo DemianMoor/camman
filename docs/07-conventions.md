@@ -685,6 +685,66 @@ Places 2, 3 and 4 all fall through to a `typeof value === "number"` test, so a *
   shared behaviour. Only MAPPED fields are written (`COALESCE(EXCLUDED.x, ca.x)`), so a CSV without
   a `state` column does not blank a state we already know.
 
+## Stage destinations are built at MINT time from the campaign's brand (1b, 0150/0151)
+
+A stage stores **which page** (`campaign_stages.landing_page_id`), not which URL. The destination is
+constructed when links are minted, from the campaign's brand **at that moment**.
+
+**Why.** On 2026-08-22 campaigns 902 (Guide Kin→LumZen) and 923 (FitsYou→LumZen) were re-branded in
+production and every one of their stages kept pointing at the OLD brand's landing pages — because
+the destination was a frozen absolute URL. Building it late makes a rebrand self-correcting. It also
+collapses the duplication operators maintain by hand today: offer 58 carries `gdkn-Monks`,
+`lmzn-Monks` and `fty-Monks` — the same page once per brand.
+
+- **`landing_page_id` NULL ⇒ EXACTLY today's behaviour** (build from `offers.sales_pages` / the
+  stored `full_url`). No backfill; all 1,198 pre-existing stages stay NULL, including the 11 flagged
+  for manual review.
+- **`brands.landing_host` is a separate column, NOT derived from `brands.website`.** `website` is
+  unnormalized — `https://www.guidekn.com`, `https://www.lumzen.co/`, `https://fitsyou.net/` (mixed
+  `www.`, mixed trailing slash) — so prefixing `www.` yields `www.www.guidekn.com` for two brands and
+  using it as-is gives FitsYou a host that differs from the `www.fitsyou.net` production actually
+  mints. `website` is ALSO consumed verbatim by `lib/links/root-redirect.ts`, so normalizing it in
+  place would change the bare-root redirect. **A brand with NULL `landing_host` cannot use a
+  `kind='slug'` page** — refusing beats guessing, because a wrong host ships a 404 that silently
+  kills attribution.
+- **`kind='external_url'` is used verbatim for any brand** and needs no landing host.
+- **`buildLandingPageUrl` is PURE and shared** by the stage editor's read-only preview and the send
+  path's mint. If they diverged, an operator could approve one URL while the recipient receives
+  another.
+- **No DELETE on a landing page.** Deleting one would `SET NULL` and silently drop its stages back to
+  the legacy path. Disable instead — the slug stays reserved (the unique index is NOT filtered on
+  status), so links already in the wild keep meaning what they meant.
+- **A page's `kind` is immutable.** Flipping a live page between slug and external_url would change
+  where every stage already pointing at it sends, including approved ones.
+
+### UTM tags never reach an `/lp/` destination
+
+The canonical shape allows exactly ONE query param (`sub_id3`), which already carries tracking. The
+one UTM tag configured in this org is `tag_id: "subid3", value_source: "sub_id3"` — appending it
+emits the literal `subid3=sub_id3`, which is precisely the "unsubstituted template placeholder"
+defect `validateDestination` names and the single row that fails the 0151 CHECK.
+
+⚠️ This also fixed a **pre-existing latent break**: 261 stages carry UTM tags on `/lp/` destinations,
+and re-deriving any of them in auto mode would have produced a URL the very next line rejects as
+`invalid_destination`. Tags still apply to `external_url` destinations, where no shape rule exists.
+
+### Re-branding a campaign
+
+Allowed, and it reports what went stale (`brand_change_impact` on the PATCH response):
+
+| what | self-corrects? | behaviour |
+|---|---|---|
+| landing-page destination | **yes** — built at mint from the brand | nothing to do |
+| sending number | **no** — a deliberate per-stage choice | **approval/activation BLOCKED** until changed |
+| legacy absolute `full_url` | no | **warn only** |
+
+⚠️ **The number block is WRITE-TIME ONLY, never send-time.** An already-approved stage with
+materialized rows keeps sending — blocking at dispatch would strand real messages, the same rule 1a
+follows. `computeBrandChangeImpact` (the warning) and `isStageNumberBrandStale` (the block) share
+one query so the warning can never disagree with what is enforced. **This closes the 1a gap** that
+the two production rebrands realised: 1a grandfathers by "the (brand, number) pair is not changing",
+which is right for the campaign row and silent about its stages.
+
 ## Test fixtures — never a live entity, and never production for a write
 
 Two rules, both learned the same way: on 2026-08-21 a smoke test of the new brand → number

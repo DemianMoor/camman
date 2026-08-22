@@ -163,6 +163,7 @@ export async function GET(
       sales_page_label: campaign_stages.sales_page_label,
       short_url: campaign_stages.short_url,
       full_url: campaign_stages.full_url,
+      landing_page_id: campaign_stages.landing_page_id,
       utm_tag_ids: campaign_stages.utm_tag_ids,
       stop_text: campaign_stages.stop_text,
       include_clickers: campaign_stages.include_clickers,

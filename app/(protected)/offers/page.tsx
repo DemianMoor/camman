@@ -14,6 +14,7 @@ import {
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
+import { LandingPagesPanel } from "@/components/offers/landing-pages-panel";
 import { OfferForm, type OfferFormValues } from "@/components/offers/offer-form";
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
@@ -719,6 +720,13 @@ export default function OffersPage() {
             onCancel={() => setEditing(null)}
             isSubmitting={updateApi.isLoading}
           />
+        ) : null}
+        {/* 1b: landing pages live on EDIT only — a page needs an offer id, and
+            an offer does not have one until it is created. */}
+        {editing ? (
+          <div className="mt-6 border-t pt-4">
+            <LandingPagesPanel offerId={editing.id} canEdit={canUpdate} />
+          </div>
         ) : null}
       </FormDialog>
 

@@ -50,6 +50,7 @@ export interface EditableStage {
   sms_provider_id: number | null;
   provider_phone_id: number | null;
   sales_page_label: string | null;
+  landing_page_id: number | null;
   short_url: string | null;
   full_url: string | null;
   utm_tag_ids: number[] | null;
@@ -238,6 +239,7 @@ export function StageInlineEditor({
         sms_provider_id: stage.sms_provider_id,
         provider_phone_id: stage.provider_phone_id,
         sales_page_label: stage.sales_page_label ?? "",
+        landing_page_id: stage.landing_page_id != null ? String(stage.landing_page_id) : "",
         short_url: stage.short_url ?? "",
         full_url: stage.full_url ?? "",
         utm_tag_ids: stage.utm_tag_ids ?? [],

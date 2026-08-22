@@ -19,6 +19,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
+import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
 import {
   computeStageAudienceCountsBatch,
   computeStageAudienceCountsBatchForDraft,
@@ -540,6 +541,19 @@ export async function POST(
     }
   }
 
+  // 1b: landing page must belong to this campaign's offer, be active, and (for
+  // kind='slug') have a brand landing_host to build from.
+  {
+    const refusal = await checkStageLandingPage(db, {
+      orgId,
+      campaignId: cid,
+      landingPageId: input.landing_page_id,
+    });
+    if (refusal) {
+      return apiError(400, refusal.message, LANDING_PAGE_INVALID_CODE, { field: refusal.field });
+    }
+  }
+
   // Resolve the Full URL build context (offer base_url/postfix, sales page
   // URL, selected UTM tags) — also the FK ownership check for utm_tag_ids.
   const utmTagIds = input.utm_tag_ids ?? [];
@@ -588,6 +602,7 @@ export async function POST(
     creative_id: input.creative_id ?? null,
     sms_provider_id: input.sms_provider_id ?? null,
     provider_phone_id: input.provider_phone_id ?? null,
+    landing_page_id: input.landing_page_id ?? null,
     sales_page_label: nullIfEmpty(input.sales_page_label),
     short_url: nullIfEmpty(input.short_url),
     // When full_url_auto, full_url is (re)built in the transaction below

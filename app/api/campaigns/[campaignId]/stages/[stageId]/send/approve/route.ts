@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import { campaign_stages } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { isStageNumberBrandStale } from "@/lib/api/campaign-brand-change";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 
@@ -47,6 +48,21 @@ export async function POST(
     return apiError(400, "`approved` must be a boolean", API_ERROR_CODES.VALIDATION, {
       field: "approved",
     });
+  }
+
+  // 1b rebrand guard: a stage whose sending number belongs to a different brand
+  // than its campaign cannot be APPROVED. Write-time only — an already-approved
+  // stage with materialized rows keeps sending, because blocking at dispatch
+  // would strand real messages (the same rule 1a follows).
+  //
+  // Only checked when approving. UN-approving a stale stage must always work —
+  // that is the operator's way out.
+  if (approved) {
+    const stale = await isStageNumberBrandStale(db, { orgId, stageId });
+    if (stale.stale) {
+      return apiError(400, stale.message ?? "Stage number does not match the campaign's brand",
+        API_ERROR_CODES.PHONE_BRAND_MISMATCH, { field: "provider_phone_id" });
+    }
   }
 
   const updated = await db

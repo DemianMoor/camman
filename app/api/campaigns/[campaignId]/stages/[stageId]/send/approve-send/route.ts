@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { isStageNumberBrandStale } from "@/lib/api/campaign-brand-change";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { runStageDrainAndRecord } from "@/lib/sends/drain-and-record";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
@@ -96,6 +97,17 @@ export async function POST(
       API_ERROR_CODES.FORBIDDEN,
       { reason: "send_now_requires_drain" },
     );
+  }
+
+  // 1b rebrand guard, BEFORE materialization. This route materializes and only
+  // then approves, so checking afterwards would leave a fully-materialized stage
+  // behind on a refusal. Write-time only, same as the plain approve route.
+  {
+    const stale = await isStageNumberBrandStale(db, { orgId, stageId });
+    if (stale.stale) {
+      return apiError(400, stale.message ?? "Stage number does not match the campaign's brand",
+        API_ERROR_CODES.PHONE_BRAND_MISMATCH, { field: "provider_phone_id" });
+    }
   }
 
   // Explicit send-now on a not-yet-scheduled stage: stamp the send date to NOW

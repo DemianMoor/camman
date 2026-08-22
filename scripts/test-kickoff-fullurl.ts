@@ -1,6 +1,15 @@
 // Bug 3 (primary): the send kickoff must mint the link against the stage's stored
 // Full URL — what the operator controls in the UI — not a server-side rebuild.
 // Asserts the minted link destination equals full_url exactly. Rolled-back tx.
+//
+// ⚠️ SCOPE NARROWED BY 1b (migration 0150). This now pins the LEGACY path
+// specifically: the fixture stage leaves `landing_page_id` NULL, so kickoff
+// takes the stored-full_url branch and "minted == stored full_url" still holds
+// exactly as before. When a stage DOES carry a landing_page_id the destination
+// is constructed at MINT time from the campaign's brand and this invariant
+// deliberately does NOT apply — that path is covered by
+// scripts/test-landing-page-mint.ts. Keep both: the legacy branch is what the
+// 1,198 existing stages still use.
 // Run: npx tsx scripts/test-kickoff-fullurl.ts
 import "./_env-preload";
 import { sql } from "drizzle-orm";

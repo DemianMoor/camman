@@ -20,6 +20,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
+import { computeBrandChangeImpact } from "@/lib/api/campaign-brand-change";
 import { can } from "@/lib/permissions";
 import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
@@ -501,6 +502,29 @@ export async function PATCH(
       return apiError(404, "Campaign not found", API_ERROR_CODES.NOT_FOUND, {
         entity: "campaign",
       });
+    }
+
+    // 1b: a brand change is ALLOWED, but it can leave the campaign's stages
+    // pointing at the old brand's assets. Report what went stale so the editor
+    // can warn, using the SAME query the approve-time block enforces — a warning
+    // that could disagree with the block would be worse than none.
+    //
+    //   • numbers   — cannot self-correct; approval of those stages is BLOCKED
+    //                 until the number is changed.
+    //   • landing   — self-corrects (built at mint time from the brand), nothing
+    //                 to report.
+    //   • legacy    — a frozen absolute full_url cannot self-correct: warn only.
+    const brandChanged =
+      input.brand_id !== undefined && (input.brand_id ?? null) !== current[0].brand_id;
+    if (brandChanged) {
+      const impact = await computeBrandChangeImpact(db, {
+        orgId,
+        campaignId,
+        newBrandId: input.brand_id ?? null,
+      });
+      if (impact.staleNumberStages.length > 0 || impact.legacyDestinationStages.length > 0) {
+        return NextResponse.json({ ...updated, brand_change_impact: impact });
+      }
     }
     return NextResponse.json(updated);
   } catch (err) {

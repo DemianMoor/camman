@@ -63,4 +63,20 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     status: 400,
     message: "This provider needs a sending number — assign a provider phone to this stage before sending",
   },
+  // 1b (0150). The stage points at a landing page that no longer resolves —
+  // deleted between save and send. A hard stop: falling back to the stored
+  // full_url would ship a URL the operator did not choose.
+  landing_page_missing: {
+    status: 400,
+    message:
+      "This stage's landing page no longer exists — pick a landing page again before sending",
+  },
+  // 1b (0150). kind='slug' needs the campaign brand's landing host to build
+  // https://<landing_host>/lp/<slug>. Guessing one would ship a 404 that
+  // silently kills attribution, so this refuses instead.
+  brand_missing_landing_host: {
+    status: 400,
+    message:
+      "This campaign's brand has no landing host set — set it on the brand, or use an external-URL landing page",
+  },
 };

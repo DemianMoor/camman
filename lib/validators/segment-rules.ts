@@ -1,14 +1,19 @@
 import { z } from "zod";
 
 import {
+  AGE_BAND_VALUES,
   CARRIER_VALUES,
+  GENDER_VALUES,
   getValueShapeForRuleType,
+  INCOME_BAND_VALUES,
   isCampaignUsePeriod,
   isProviderPhoneSet,
   isStringSubsetOf,
+  isTextSet,
   isValidOperatorForRuleType,
   PHONE_TYPE_VALUES,
   RULE_TYPE_KEYS,
+  YES_NO_VALUES,
   type ValueShape,
 } from "./segment-rule-types";
 
@@ -55,6 +60,21 @@ function validateValueByShape(shape: ValueShape, value: unknown): boolean {
       // the editor keeps a half-made selection local until a number is picked
       // (same contract as phone_type_set / carrier_set).
       return isProviderPhoneSet(value);
+    // contact_attributes sets (0147). Membership-checked against the same lists
+    // the DB CHECK constraints enforce, so an invalid code is rejected here
+    // rather than becoming a rule that silently matches nobody.
+    case "gender_set":
+      return isStringSubsetOf(value, GENDER_VALUES);
+    case "age_band_set":
+      return isStringSubsetOf(value, AGE_BAND_VALUES);
+    case "income_band_set":
+      return isStringSubsetOf(value, INCOME_BAND_VALUES);
+    case "yes_no_set":
+      return isStringSubsetOf(value, YES_NO_VALUES);
+    // Open set (state / country / interest_tag / partner_slug): validates SHAPE
+    // and bounds, not membership — tags and slugs are extensible by design.
+    case "text_set":
+      return isTextSet(value);
     default:
       return false;
   }

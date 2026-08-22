@@ -43,7 +43,23 @@ export async function verifyValueOwnership(
 
   // String-set shapes carry no entity reference — the enum members are
   // validated by the Zod refinement, so there is nothing to own.
-  if (shape === "phone_type_set" || shape === "carrier_set") {
+  //
+  // ⚠️ These MUST be listed explicitly. The fall-through at the bottom of this
+  // function assumes a numeric entity id, so an unlisted set-shaped value is
+  // silently mishandled — exactly how phone_type / carrier (0098) shipped
+  // uncreatable. The contact_attributes shapes (0147) are the same class:
+  // gender / age_band / income_band / yes_no are closed enums checked by Zod,
+  // and text_set (state / country / interest_tag / partner_slug) is free text
+  // with NO owning entity at all — an interest tag is a label, not a row.
+  if (
+    shape === "phone_type_set" ||
+    shape === "carrier_set" ||
+    shape === "gender_set" ||
+    shape === "age_band_set" ||
+    shape === "income_band_set" ||
+    shape === "yes_no_set" ||
+    shape === "text_set"
+  ) {
     return { ok: true };
   }
 

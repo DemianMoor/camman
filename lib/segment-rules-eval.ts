@@ -9,14 +9,21 @@ import { purchasedClause } from "@/lib/sale-attribution";
 import { segment_rules, segments } from "@/db/schema";
 
 import {
+  AGE_BAND_BOUNDS,
+  AGE_BAND_VALUES,
   CARRIER_VALUES,
+  GENDER_VALUES,
   getValueShapeForRuleType,
+  INCOME_BAND_VALUES,
   isCampaignUsePeriod,
   isProviderPhoneSet,
   isStringSubsetOf,
+  isTextSet,
   PHONE_TYPE_VALUES,
+  YES_NO_VALUES,
 } from "./validators/segment-rule-types";
 import type {
+  AgeBandValue,
   CampaignUsePeriod,
   RuleType,
 } from "./validators/segment-rule-types";
@@ -68,6 +75,26 @@ function isRuleComplete(rule: {
   }
   if (shape === "provider_phone_set") {
     return isProviderPhoneSet(rule.value);
+  }
+  // contact_attributes sets (0147). Same trap as above: without these the
+  // numeric fall-through rejects every one of them, the rule is treated as
+  // INCOMPLETE and silently dropped from evaluation — and under EXCEPT a
+  // dropped `is_not` rule turns "nobody" into "EVERYBODY". This test must stay
+  // identical-or-stronger than what the emitter accepts.
+  if (shape === "gender_set") {
+    return isStringSubsetOf(rule.value, GENDER_VALUES);
+  }
+  if (shape === "age_band_set") {
+    return isStringSubsetOf(rule.value, AGE_BAND_VALUES);
+  }
+  if (shape === "income_band_set") {
+    return isStringSubsetOf(rule.value, INCOME_BAND_VALUES);
+  }
+  if (shape === "yes_no_set") {
+    return isStringSubsetOf(rule.value, YES_NO_VALUES);
+  }
+  if (shape === "text_set") {
+    return isTextSet(rule.value);
   }
   return (
     typeof rule.value === "number" &&
@@ -315,6 +342,37 @@ function ruleInnerQuery(
           AND provider_phone_id = ANY(${drizzleSql.raw(intArrayLiteral(set.phone_ids))})
       `;
     }
+    // ── contact_attributes (0147) ────────────────────────────────────────
+    // All nine share one shape: a bare `SELECT contact_id` joined to contacts
+    // for the eligible gate, so the set-arithmetic combiner can INTERSECT /
+    // EXCEPT it exactly like every other rule.
+    //
+    // ⚠️ A contact with NO attributes row matches NONE of these. That is the
+    // whole reason `is_not` stays conservative: under EXCEPT, `is_not gender
+    // is male` removes only people we positively know are male — it does not
+    // sweep in the ~815K contacts we know nothing about.
+    case "gender":
+      return attributeSetClause(orgId, "gender", isStringSubsetOf(v, GENDER_VALUES) ? v : []);
+    case "income_band":
+      return attributeSetClause(orgId, "income_band", isStringSubsetOf(v, INCOME_BAND_VALUES) ? v : []);
+    case "contact_state":
+      return attributeSetClause(orgId, "state", isTextSet(v) ? v : []);
+    case "contact_country":
+      return attributeSetClause(orgId, "country", isTextSet(v) ? v : []);
+    case "interest_tag":
+      return attributeSetClause(orgId, "interest_tag", isTextSet(v) ? v : []);
+    case "partner_slug":
+      return attributeSetClause(orgId, "partner_slug", isTextSet(v) ? v : []);
+    case "has_kids":
+      return attributeBoolClause(orgId, "kids", isStringSubsetOf(v, YES_NO_VALUES) ? v : []);
+    case "is_married":
+      return attributeBoolClause(orgId, "married", isStringSubsetOf(v, YES_NO_VALUES) ? v : []);
+    case "age_band": {
+      // ⚠️ NEVER a per-row age(): the band is turned into a RANGE on dob so
+      // contact_attributes_org_dob_idx applies. See ageBandClause.
+      const bands = isStringSubsetOf(v, AGE_BAND_VALUES) ? (v as AgeBandValue[]) : [];
+      return ageBandClause(orgId, bands);
+    }
     default: {
       // Should be unreachable — server-side validation rejects unknown
       // rule_types before they ever get persisted. Defensive: return a
@@ -324,6 +382,93 @@ function ruleInnerQuery(
       return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
     }
   }
+}
+
+// ── contact_attributes emitter helpers (0147) ────────────────────────────────
+//
+// Shared shape for every attribute rule. The JOIN to contacts applies the
+// eligible gate, matching what phone_type / carrier do — a landline must not
+// reappear through an attribute rule. It costs one PK lookup per row.
+//
+// The column name is interpolated with drizzleSql.raw and therefore must NEVER
+// come from user input: every call site passes a hard-coded literal below.
+function attributeBase(orgId: string): SQL {
+  return drizzleSql`
+    FROM contact_attributes ca
+    JOIN contacts c ON c.id = ca.contact_id
+    WHERE ca.org_id = ${orgId}::uuid
+      AND c.messaging_status = 'eligible'`;
+}
+
+// Set membership over a TEXT attribute column. An empty set yields a
+// contradiction rather than matching everything — an incomplete rule must
+// never widen an audience (isRuleComplete already drops it upstream; this is
+// defense in depth for the same invariant).
+function attributeSetClause(orgId: string, column: string, set: readonly string[]): SQL {
+  if (set.length === 0) return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
+  return drizzleSql`
+    SELECT ca.contact_id ${attributeBase(orgId)}
+      AND ca.${drizzleSql.raw(column)} = ANY(${drizzleSql.raw(textArrayLiteral([...set]))})
+  `;
+}
+
+// yes/no set over a BOOLEAN column. Selecting BOTH means "known either way",
+// which still excludes NULL (unknown) — the intended reading, and the reason
+// this is a set rather than a tri-state.
+function attributeBoolClause(orgId: string, column: string, set: readonly string[]): SQL {
+  const wants: boolean[] = [];
+  if (set.includes("yes")) wants.push(true);
+  if (set.includes("no")) wants.push(false);
+  if (wants.length === 0) return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
+  const literal = `ARRAY[${wants.map((b) => (b ? "true" : "false")).join(",")}]::boolean[]`;
+  return drizzleSql`
+    SELECT ca.contact_id ${attributeBase(orgId)}
+      AND ca.${drizzleSql.raw(column)} = ANY(${drizzleSql.raw(literal)})
+  `;
+}
+
+// ── Age bands ───────────────────────────────────────────────────────────────
+//
+// ⚠️ THE BAND IS A RANGE ON dob, NEVER A PER-ROW AGE.
+//
+//   ✗ EXTRACT(YEAR FROM age(ca.dob)) BETWEEN 25 AND 34
+//       a function of dob and now() evaluated per row — not sargable, so
+//       contact_attributes_org_dob_idx can never be used.
+//   ✓ ca.dob > <ET today> - INTERVAL '35 years'
+//     AND ca.dob <= <ET today> - INTERVAL '25 years'
+//
+// Same technique as the per-carrier daily cap (migration 0143), which passes an
+// ET day as a timestamptz RANGE rather than applying a function to sent_at.
+//
+// The anchor is the ET CALENDAR DATE, matching the rest of the send path, not
+// the server's UTC date.
+//
+// ⚠️ THE 18-YEAR FLOOR IS APPLIED INDEPENDENTLY of the selected bands. It is
+// redundant with the band ranges today (the lowest band starts at 18) and that
+// is deliberate: a future band edit cannot lower it, and it is one line to
+// audit. It also does the NULL work for free — `NULL <= date` is NULL, not
+// true, so an unknown dob matches nothing without a separate IS NOT NULL.
+//
+// Scope note: this is the age_band RULE's floor, not a global minor gate.
+// A global "unknown dob = minor" filter would exclude every contact that has no
+// attributes row at all — see docs/03-data-model.md and the P2/P3 cards.
+const ET_TODAY = `(now() AT TIME ZONE 'America/New_York')::date`;
+
+function ageBandClause(orgId: string, bands: readonly AgeBandValue[]): SQL {
+  if (bands.length === 0) return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
+  // age >= minAge  ⇔  dob <= ET_today - minAge years
+  // age <= maxAge  ⇔  dob >  ET_today - (maxAge + 1) years
+  const ranges = bands.map((b) => {
+    const { minAge, maxAge } = AGE_BAND_BOUNDS[b];
+    const upper = `ca.dob <= ${ET_TODAY} - INTERVAL '${minAge} years'`;
+    if (maxAge === null) return `(${upper})`;
+    return `(${upper} AND ca.dob > ${ET_TODAY} - INTERVAL '${maxAge + 1} years')`;
+  });
+  return drizzleSql`
+    SELECT ca.contact_id ${attributeBase(orgId)}
+      AND ca.dob <= ${drizzleSql.raw(ET_TODAY)} - INTERVAL '18 years'
+      AND (${drizzleSql.raw(ranges.join(" OR "))})
+  `;
 }
 
 // Build the SQL fragment that represents this segment's effective audience

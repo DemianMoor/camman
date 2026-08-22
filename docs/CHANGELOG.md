@@ -1251,4 +1251,14 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 - Replaced the guessed "may approach the 10s timeout" caveat with production measurements: selective number 80.9 ms, worst-case dominant number 1,806 ms (vs. 8,480 ms pre-index) — clears both the 10s preview timeout and the 60s `snapshotAudience` activation budget with wide margin.
 - No schema/behavior change from the docs edits themselves; see the same-commit code fixes (schema.ts check-constraint + index drift, validator id ceiling, eval doc comment, rules-panel incomplete-check alignment, provider-phones org filter, backfill script header/citation/divergence-warning) in the commit this entry ships with.
 
+## 2026-08-22 — rebrand rule folded into 1a's guard set
+
+- `scripts/test-brand-number-guard.ts` now covers `isStageNumberBrandStale` and
+  `computeBrandChangeImpact` (the 1b rebrand rule), which shipped enforced in both approval routes
+  and the campaign PATCH but had no guard. The section models a rebrand on a synthesized campaign
+  inside a rolled-back transaction and asserts the SAME stage is clean before and stale after — so
+  a function that always answered one way fails. Also asserts warning/block agreement, absent =
+  allowed (shared number, no number), and that a landing-page stage is not warned about.
+- No schema or behavior change; test coverage only. — docs updated: docs/07-conventions.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

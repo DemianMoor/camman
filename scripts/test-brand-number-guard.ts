@@ -7,6 +7,10 @@ import {
   checkPhoneBrandMatch,
   pairIsChanging,
 } from "@/lib/api/brand-number-guard";
+import {
+  computeBrandChangeImpact,
+  isStageNumberBrandStale,
+} from "@/lib/api/campaign-brand-change";
 
 // Guard for the brand → sending-number rule (Drip Phase 1, item 1a).
 //
@@ -203,6 +207,124 @@ async function main() {
     pairIsChanging({ nextPhoneId: null, currentPhoneId: 114, nextBrandId: undefined, currentBrandId: 8 }),
     true,
   );
+
+
+  // ── The rebrand rule (1b ruling, folded into 1a's guard set) ──────────────
+  //
+  // A campaign's brand MAY change. What must not happen is the change silently
+  // leaving its stages on the old brand's number. 1a alone cannot catch this: it
+  // grandfathers by "the (brand, number) pair is not changing", which is true of
+  // the campaign row and says nothing about its stages — exactly how campaigns
+  // 902 and 923 were re-branded in production on 2026-08-22 with stale stages.
+  //
+  // ⭐ Asserted on a SYNTHESIZED, ROLLED-BACK world, not on live rows. Per the
+  // standing rule, a live or active-campaign entity is never a test fixture.
+  // Synthesizing also lets the guard PROVE IT CAN GO RED: the same stage is
+  // asserted clean under one brand and stale under another, so a function that
+  // always returned `stale:false` (or always `true`) fails here.
+  console.log("\nrebrand rule — a stale sending number blocks approval:");
+  const brandRows = (await db.execute(sql`
+    SELECT id FROM brands WHERE org_id = ${orgId} AND status = 'active' ORDER BY id LIMIT 2
+  `)) as unknown as { id: number }[];
+  if (brandRows.length < 2) {
+    console.log("  FAIL  needs two active brands to model a rebrand");
+    failures++;
+  } else {
+    const brandA = brandRows[0].id;
+    const brandB = brandRows[1].id;
+    console.log(`        modelling a rebrand from brand ${brandA} to brand ${brandB}`);
+
+    const probe: Record<string, unknown> = {};
+    let rebrandRolledBack = false;
+    try {
+      await db.transaction(async (tx) => {
+        const prov = (await tx.execute(sql`
+          SELECT provider_id FROM provider_phones WHERE org_id = ${orgId} LIMIT 1
+        `)) as unknown as { provider_id: number }[];
+        const providerId = prov[0].provider_id;
+        const uniq = String(Date.now()).slice(-6);
+
+        const mkPhone = async (brandId: number | null, tag: string) =>
+          ((await tx.execute(sql`
+            INSERT INTO provider_phones (org_id, provider_id, brand_id, phone_number, status, cost_per_sms)
+            VALUES (${orgId}, ${providerId}, ${brandId}, ${"+1998" + tag + uniq}, 'active', 0)
+            RETURNING id`)) as unknown as { id: number }[])[0].id;
+
+        const phoneA = await mkPhone(brandA, "1");
+        const phoneShared = await mkPhone(null, "2");
+
+        const camp = ((await tx.execute(sql`
+          INSERT INTO campaigns (org_id, slug, name, status, brand_id)
+          VALUES (${orgId}, ${"rbp-" + uniq}, 'rebrand probe', 'draft', ${brandA})
+          RETURNING id`)) as unknown as { id: number }[])[0].id;
+
+        const mkStage = async (n: number, phoneId: number | null, fullUrl: string | null) =>
+          ((await tx.execute(sql`
+            INSERT INTO campaign_stages (org_id, campaign_id, stage_number, provider_phone_id, full_url)
+            VALUES (${orgId}, ${camp}, ${n}, ${phoneId}, ${fullUrl})
+            RETURNING id`)) as unknown as { id: number }[])[0].id;
+
+        const stageOnA = await mkStage(1, phoneA, "https://www.example.com/lp/x?sub_id3=T");
+        const stageShared = await mkStage(2, phoneShared, null);
+        const stageNoNumber = await mkStage(3, null, null);
+
+        // Before the rebrand: consistent.
+        probe.beforeStale = (await isStageNumberBrandStale(tx, { orgId, stageId: stageOnA })).stale;
+
+        // The rebrand: the campaign moves to brand B. The stage's number does not.
+        await tx.execute(sql`UPDATE campaigns SET brand_id = ${brandB} WHERE id = ${camp}`);
+        const after = await isStageNumberBrandStale(tx, { orgId, stageId: stageOnA });
+        probe.afterStale = after.stale;
+        probe.afterNamesBothBrands =
+          !!after.message && /registered to/.test(after.message) && /brand is now/.test(after.message);
+
+        // "Absent = allowed" — the same reading 1a and the carrier policy use.
+        probe.sharedNumberStale = (await isStageNumberBrandStale(tx, { orgId, stageId: stageShared })).stale;
+        probe.noNumberStale = (await isStageNumberBrandStale(tx, { orgId, stageId: stageNoNumber })).stale;
+
+        // The warning must AGREE with the block. A warning that disagrees with
+        // what is actually enforced is worse than no warning at all.
+        const toB = await computeBrandChangeImpact(tx, { orgId, campaignId: camp, newBrandId: brandB });
+        const toA = await computeBrandChangeImpact(tx, { orgId, campaignId: camp, newBrandId: brandA });
+        const toNull = await computeBrandChangeImpact(tx, { orgId, campaignId: camp, newBrandId: null });
+        probe.impactToBListsStage = toB.staleNumberStages.some((s) => s.stage_id === stageOnA);
+        probe.impactToAIsClean = !toA.staleNumberStages.some((s) => s.stage_id === stageOnA);
+        probe.impactNullEmpty = toNull.staleNumberStages.length === 0;
+        probe.impactSkipsSharedNumber = !toB.staleNumberStages.some((s) => s.stage_id === stageShared);
+        probe.impactSkipsNoNumber = !toB.staleNumberStages.some((s) => s.stage_id === stageNoNumber);
+
+        // The destination half: a legacy frozen URL is warned about; a stage with
+        // no frozen URL is not, because mint-time construction self-corrects.
+        probe.legacyUrlWarned = toB.legacyDestinationStages.some((s) => s.stage_id === stageOnA);
+        probe.noUrlNotWarned = !toB.legacyDestinationStages.some((s) => s.stage_id === stageNoNumber);
+
+        tx.rollback();
+      });
+    } catch (e) {
+      const ctor = (e as { constructor?: { name?: string } })?.constructor?.name;
+      if (ctor === "TransactionRollbackError") rebrandRolledBack = true;
+      else throw e;
+    }
+
+    check("consistent stage before the rebrand ⇒ not stale", probe.beforeStale, false);
+    check("SAME stage after the rebrand ⇒ stale (proves it can go RED)", probe.afterStale, true);
+    check("message names the number's brand and the campaign's new brand", probe.afterNamesBothBrands, true);
+    check("shared (NULL-brand) number ⇒ not stale (absent = allowed)", probe.sharedNumberStale, false);
+    check("stage with no number ⇒ not stale (nothing to mismatch)", probe.noNumberStale, false);
+    check("impact→new brand lists the stale stage", probe.impactToBListsStage, true);
+    check("impact→its own brand lists nothing (not a blanket reject)", probe.impactToAIsClean, true);
+    check("impact→NULL brand is empty (nothing to match against)", probe.impactNullEmpty, true);
+    check("impact skips a shared number", probe.impactSkipsSharedNumber, true);
+    check("impact skips a stage with no number", probe.impactSkipsNoNumber, true);
+    check("legacy frozen full_url IS warned about", probe.legacyUrlWarned, true);
+    check("stage with no destination is NOT warned about", probe.noUrlNotWarned, true);
+    check("rebrand probe rolled back (nothing persisted)", rebrandRolledBack, true);
+
+    const residue = (await db.execute(sql`
+      SELECT count(*)::int AS n FROM campaigns WHERE org_id = ${orgId} AND slug LIKE 'rbp-%'
+    `)) as unknown as { n: number }[];
+    check("no probe campaign left behind", residue[0]?.n, 0);
+  }
 
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
   process.exit(failures === 0 ? 0 : 1);

@@ -1044,6 +1044,13 @@
       "when": 1789171200000,
       "tag": "0148_segment_rules_contact_attribute_types",
       "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1789257600000,
+      "tag": "0149_contact_attribute_import_mappings",
+      "breakpoints": true
     }
   ]
 }

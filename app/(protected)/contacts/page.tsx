@@ -5,6 +5,7 @@ import { format } from "date-fns";
 import {
   ArchiveRestore,
   Archive as ArchiveIcon,
+  ArrowUpRight,
   Check,
   Copy,
   MoreHorizontal,
@@ -12,11 +13,14 @@ import {
   Plus,
   ShieldX,
   Trash2,
+  Upload,
   Users,
 } from "lucide-react";
+import Link from "next/link";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
+import { AttributeImportForm } from "@/components/contacts/attribute-import-form";
 import { ContactStatusImportForm } from "@/components/contacts/contact-status-import-form";
 import { DataTable } from "@/components/data-table";
 import { ExportButton } from "@/components/export-button";
@@ -604,6 +608,7 @@ export default function ContactsPage() {
   const canDelete = can("contacts.delete");
 
   const [statusImportOpen, setStatusImportOpen] = useState(false);
+  const [attrImportOpen, setAttrImportOpen] = useState(false);
 
   async function handleConfirm() {
     if (!confirming) return;
@@ -692,7 +697,23 @@ export default function ContactsPage() {
       {
         id: "phone_number",
         header: "Phone Number",
-        cell: ({ row }) => <PhoneCell contact={row.original} />,
+        // Copy-on-click stays the primary action (it is what this column was
+        // for); the arrow is the opt-in route to the detail page, so adding
+        // navigation does not take away the click behaviour people rely on.
+        cell: ({ row }) => (
+          <div className="flex items-center gap-2">
+            <PhoneCell contact={row.original} />
+            <Link
+              href={`/contacts/${row.original.id}`}
+              onClick={(e) => e.stopPropagation()}
+              className="text-muted-foreground hover:text-foreground shrink-0"
+              aria-label="Open contact"
+              title="Open contact"
+            >
+              <ArrowUpRight className="size-3.5" aria-hidden />
+            </Link>
+          </div>
+        ),
         enableSorting: true,
       },
       {
@@ -900,6 +921,11 @@ export default function ContactsPage() {
           {canImportStatuses ? (
             <Button variant="outline" onClick={() => setStatusImportOpen(true)}>
               <ShieldX className="size-4" aria-hidden /> Import statuses
+            </Button>
+          ) : null}
+          {canUpload ? (
+            <Button variant="outline" onClick={() => setAttrImportOpen(true)}>
+              <Upload className="size-4" aria-hidden /> Import attributes
             </Button>
           ) : null}
           {canUpload ? (
@@ -1204,6 +1230,30 @@ export default function ContactsPage() {
               enableLookup
             />
           )}
+      </FormDialog>
+
+      {/* Import attributes dialog (Drip P1 1c). Separate from the status and
+          audience uploads: this UPDATES attributes on existing contacts and
+          never creates one, so it cannot grow the audience. */}
+      <FormDialog
+        open={attrImportOpen}
+        onOpenChange={setAttrImportOpen}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
+      >
+        <DialogHeader>
+          <DialogTitle>Import contact attributes</DialogTitle>
+          <DialogDescription>
+            Map CSV columns to contact fields and update attributes in bulk. One column must
+            be the phone number — it identifies the contact. Save a mapping to reuse it for the
+            same partner&apos;s next export.
+          </DialogDescription>
+        </DialogHeader>
+        <AttributeImportForm
+          onDone={() => {
+            setAttrImportOpen(false);
+            void refetch();
+          }}
+        />
       </FormDialog>
 
       {/* Import statuses dialog */}

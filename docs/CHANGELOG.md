@@ -1277,6 +1277,10 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   permissions, and `docs/partners/lead-intake.md` generated from `lib/intake/fields.ts`.
 - Backlog alert deliberately deferred to Phase 3: nothing consumes the inbox yet, so it would fire
   by construction.
+- `scripts/verify-intake-production.ts` proves the deployed endpoint against production: valid
+  sandbox key -> 202 + row, bad secret -> 401 + no row, 501-item batch -> 413 + no row,
+  rate-limit refusal -> 429 with the counter unchanged. Every probe asserts the DATABASE, not
+  just the status code. Gated behind `INTAKE_PROD_PROBE=yes`; cleans up by id and residue-checks.
 - Commits the four previously-untracked Drip recon docs and corrects the stale "Known gap" in
   preview-environment.md that migration 0146 closed.
   — docs updated: docs/03-data-model.md, docs/04-features/partner-lead-intake.md,

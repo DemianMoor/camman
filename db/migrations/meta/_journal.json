@@ -1114,6 +1114,34 @@
       "when": 1790035200000,
       "tag": "0158_lookup_drip_cap_and_queue_priority",
       "breakpoints": true
+    },
+    {
+      "idx": 159,
+      "version": "7",
+      "when": 1790121600000,
+      "tag": "0159_campaigns_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 160,
+      "version": "7",
+      "when": 1790208000000,
+      "tag": "0160_drip_campaign_configs",
+      "breakpoints": true
+    },
+    {
+      "idx": 161,
+      "version": "7",
+      "when": 1790294400000,
+      "tag": "0161_drip_journeys",
+      "breakpoints": true
+    },
+    {
+      "idx": 162,
+      "version": "7",
+      "when": 1790380800000,
+      "tag": "0162_org_settings_drip_flags",
+      "breakpoints": true
     }
   ]
 }

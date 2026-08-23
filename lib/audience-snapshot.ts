@@ -4,6 +4,7 @@ import { sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { inUseSetBody, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
 
 import { campaignTierExpr } from "./campaign-tier";
@@ -127,16 +128,20 @@ function buildGroupMembershipClause(
 function flagSetCtes(
   orgId: string,
   offerExposureOfferId?: number | null,
+  // ⚠️ Drip posture (ruling G2/R14). DEFAULTS FALSE, and the default is the
+  // safe one: with it false the emitted `iu_set` is byte-identical to what this
+  // function emitted before Phase 4, so regular-campaign activation plans are
+  // unchanged BY CONSTRUCTION rather than by measurement. Always-UNION-ing an
+  // empty drip branch was measured at +13% plan cost and rejected. The body
+  // itself lives in lib/drip/in-use.ts so the SEGMENT-level in-use definition
+  // (lib/segment-rules-eval.ts) cannot drift from this one.
+  dripPostureOn = false,
 ): SQL {
   const base = drizzleSql`
     oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid),
     oi_set as (select distinct contact_id from opt_ins where org_id = ${orgId}::uuid),
     cl_set as (select distinct contact_id from clickers where org_id = ${orgId}::uuid),
-    iu_set as (
-      select distinct p.contact_id
-      from campaign_audience_pool p
-      join campaigns ca on ca.id = p.campaign_id
-      where p.org_id = ${orgId}::uuid and ca.status = 'active'
+    iu_set as (${inUseSetBody(orgId, dripPostureOn)}
     )`;
   if (offerExposureOfferId == null) return base;
   return drizzleSql`${base},
@@ -358,6 +363,7 @@ async function buildAudienceSourceSql(
 function buildQualifierFromRelation(
   input: AudiencePreviewInput,
   candidateRelation: SQL,
+  dripPostureOn = false,
 ): SQL {
   const { orgId, filters } = input;
   const includeNoStatus = filters.include_no_status === true;
@@ -382,7 +388,7 @@ function buildQualifierFromRelation(
   const useOfferExposure = offerExposureId != null;
 
   return drizzleSql`
-    with ${flagSetCtes(orgId, offerExposureId)},
+    with ${flagSetCtes(orgId, offerExposureId, dripPostureOn)},
     flagged as (
       select
         cand.contact_id,
@@ -604,6 +610,9 @@ export async function computeStageAudienceCountForDraft(
     orgId,
     filters.carrier_filter,
   );
+  // Drip posture (G2/R14). Read once per call; false means the emitted
+  // in-use CTE is byte-identical to pre-Phase-4.
+  const dripPostureOn = await isDripPostureOn(orgId);
 
   // Row-number partitioning over the qualified set so splits are as
   // equal as possible. Mirrors the active-pool path.
@@ -611,7 +620,7 @@ export async function computeStageAudienceCountForDraft(
     with sources as (
       select distinct contact_id from (${source}) u
     ),
-    ${flagSetCtes(orgId)},
+    ${flagSetCtes(orgId, null, dripPostureOn)},
     flagged as (
       select
         s.contact_id,
@@ -826,13 +835,16 @@ export async function computeStageAudienceCountsBatchForDraft(
     filters,
     excludeInUse,
   });
+  // Drip posture (G2/R14). Read once per call; false means the emitted
+  // in-use CTE is byte-identical to pre-Phase-4.
+  const dripPostureOn = await isDripPostureOn(orgId);
   const stagesCte = buildStagesCte(stages);
 
   const rows = (await db.execute(drizzleSql`
     with sources as (
       select distinct contact_id from (${source}) u
     ),
-    ${flagSetCtes(orgId)},
+    ${flagSetCtes(orgId, null, dripPostureOn)},
     -- MATERIALIZED is load-bearing: the source set-ops (segment-rule SQL) are
     -- expensive. Computing the flagged set once and reusing it across the
     -- per-stage cross-join keeps the batch at one source evaluation. Without it
@@ -1154,6 +1166,10 @@ export async function previewAudience(
           ? drizzleSql`q.from_group`
           : drizzleSql`false`;
 
+  // Drip posture (G2/R14). Read once per call; false means the emitted
+  // in-use CTE is byte-identical to pre-Phase-4.
+  const dripPostureOn = await isDripPostureOn(orgId);
+
   const rows = (await db.execute(drizzleSql`
     with unionized as (${unionedWithSources}),
     sources as (
@@ -1165,7 +1181,7 @@ export async function previewAudience(
       from unionized
       group by contact_id
     ),
-    ${flagSetCtes(orgId, offerExposureId)},
+    ${flagSetCtes(orgId, offerExposureId, dripPostureOn)},
     flagged as (
       select
         s.contact_id,
@@ -1331,9 +1347,11 @@ export async function snapshotAudience(
   //
   // The prior-offer exclusion is deliberately NOT part of this statement — it
   // runs below, against the materialized+ANALYZEd result. See the comment there.
+  const dripPostureOn = await isDripPostureOn(input.orgId);
   const qualifying = buildQualifierFromRelation(
     { ...input, excludePriorOffer: false },
     drizzleSql`audience_candidates`,
+    dripPostureOn,
   );
   await runner.execute(drizzleSql`
     create temp table audience_qualified on commit drop as ${qualifying}
@@ -1492,6 +1510,7 @@ export async function computeStageEligibilityPreview(
       filters: draft.filters,
       excludeInUse: draft.excludeInUse,
     });
+    const dripPostureOn = await isDripPostureOn(orgId);
     const includeNoStatus = draft.filters.include_no_status === true;
     const includeOptIn = draft.filters.include_opt_in === true;
     const includeClickers = draft.filters.include_clickers === true;
@@ -1500,7 +1519,7 @@ export async function computeStageEligibilityPreview(
     // No split here — applied post-dedup in the final query (see above).
     qualifying = drizzleSql`
       with sources as (select distinct contact_id from (${source}) u),
-      ${flagSetCtes(orgId)},
+      ${flagSetCtes(orgId, null, dripPostureOn)},
       flagged as (
         select
           s.contact_id,

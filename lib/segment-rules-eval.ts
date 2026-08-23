@@ -4,6 +4,7 @@ import { and, asc, eq, sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { dripInUseSubquery, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
 import { purchasedClause } from "@/lib/sale-attribution";
 import { segment_rules, segments } from "@/db/schema";
@@ -516,6 +517,8 @@ export async function buildSegmentAudienceClause(
     .where(and(eq(segments.id, segmentId), eq(segments.org_id, orgId)))
     .limit(1);
   const excludeInUse = segRow[0]?.exclude_in_use === true;
+  // Posture read once; false ⇒ pre-Phase-4 SQL, byte for byte.
+  const dripPostureOn = excludeInUse ? await isDripPostureOn(orgId) : false;
 
   const allRules = await db
     .select({
@@ -544,8 +547,23 @@ export async function buildSegmentAudienceClause(
   // when the segment's exclude_in_use_contacts flag is on. Note we read
   // from campaign_audience_pool directly; that table holds frozen
   // snapshots independent of opt-out activity.
+  //
+  // ⚠️ THE DRIP BRANCH MUST MATCH THE CAMPAIGN-LEVEL DEFINITION (ruling G2).
+  // There are two independent in-use definitions — this one (the per-segment
+  // flag) and `iu_set` in lib/audience-snapshot.ts (the campaign-level flag).
+  // Before drip they agreed by coincidence. Adding drip journeys to only one
+  // would give two different answers to "is this contact in use?" from one
+  // product, so both call the SAME builder in lib/drip/in-use.ts, and it is
+  // emitted only when drip posture is on — with posture off this function
+  // produces exactly the SQL it produced before Phase 4.
   function applyInUseExclusion(audience: SQL): SQL {
     if (!excludeInUse) return audience;
+    const drip = dripInUseSubquery(orgId, dripPostureOn);
+    const dripBranch = drip
+      ? drizzleSql`
+      EXCEPT
+      ${drip}`
+      : drizzleSql``;
     return drizzleSql`
       ${audience}
       EXCEPT
@@ -554,7 +572,7 @@ export async function buildSegmentAudienceClause(
       INNER JOIN campaigns ca ON ca.id = p.campaign_id
       WHERE p.org_id = ${orgId}::uuid
         AND ca.org_id = ${orgId}::uuid
-        AND ca.status = 'active'
+        AND ca.status = 'active'${dripBranch}
     `;
   }
 

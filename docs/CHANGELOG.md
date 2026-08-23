@@ -1299,6 +1299,11 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   the order of any existing caller — asserted by a mixed-queue test, not assumed.
 - `/api/cron/drip-monitors` (a **different** job) watches the sweeper's heartbeat, the `received`
   backlog and the `awaiting_lookup` pile **separately**, plus the Telnyx top-up alert.
+- `scripts/verify-drip-enrichment-production.ts` proves the DEPLOYED pipeline: a sandbox lead
+  (full pipeline, sandbox group only, counted only as `sandbox`), a real lead on a seeded
+  cache-hit number (no Telnyx call, `lookups_spent` 0), and a forced landline (no contact,
+  counter increments, row removed). Synthetic +1999 numbers only — no real contact is touched.
+  Gated behind `DRIP_PROD_PROBE=yes`; cleans up by id and residue-checks.
 - Balance floor default $50 is load-bearing: 7-day lookup spend is $0.00, so the historical half of
   the alert would never fire.
   — docs updated: docs/03-data-model.md, docs/04-features/drip-lead-enrichment.md,

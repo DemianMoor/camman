@@ -160,7 +160,7 @@ async function main() {
 
       // Two events with NULL inbox_id must coexist — the partial index must not
       // collapse them.
-      for (const _ of [1, 2]) {
+      for (let i = 0; i < 2; i++) {
         await tx.execute(sql`
           INSERT INTO lead_events (org_id, contact_id, partner_key_id, partner_slug, received_at, inbox_id)
           VALUES (${orgId}, ${contactId}, ${keyId}, 'p3', now(), NULL)`);

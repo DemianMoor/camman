@@ -16,7 +16,11 @@ import { loadLookupSettings, type LookupSettingsRow } from "./settings";
 // bounded set of numbers reaches the same queue, and reusing an allowed value
 // keeps this a no-schema-change feature. Widen the CHECK (a migration) later if
 // distinct batch labels become worth it.
-export type LookupTrigger = "upload" | "backfill" | "csv_update";
+// Must stay in lockstep with lookup_batches_trigger_check (widened in
+// migration 0155 to add "drip_intake"). The DB rejects anything not in the
+// CHECK with an opaque 23514, so a value that only exists here is a runtime
+// failure, not a type error.
+export type LookupTrigger = "upload" | "backfill" | "csv_update" | "drip_intake";
 
 export interface EnqueueResult {
   batchId: string;

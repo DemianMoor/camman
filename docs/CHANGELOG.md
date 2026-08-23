@@ -1309,4 +1309,32 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   — docs updated: docs/03-data-model.md, docs/04-features/drip-lead-enrichment.md,
   docs/07-conventions.md
 
+## 2026-08-23 — Drip Phase 4: campaigns + routing (zero sends)
+
+- Migrations **0159-0163**: `campaigns.type`, `drip_campaign_configs` (1:1), `drip_journeys`,
+  `org_settings` drip flags, and a correction making `drip_journeys.campaign_id` nullable for
+  `unroutable` only. Preview-first on camman-v2 (30-check write test), then production; integrity
+  OK, advisor clean.
+- **R14 exit gate PASSED.** The drip branch is emitted into the in-use CTE **only when drip posture
+  is on**, so with posture off the builder returns character-for-character the pre-Phase-4 SQL and
+  the regular-campaign activation plan is identical *by construction*. Always-UNION-ing an empty
+  branch was measured at +13% (9,959 -> 11,292) and rejected. `scripts/test-drip-in-use-sql-shape.ts`
+  freezes the old text and asserts both directions.
+- **G2 covers BOTH in-use definitions** — `iu_set` (campaign flag) and `applyInUseExclusion`
+  (segment flag) — via one shared builder in `lib/drip/in-use.ts`, so they cannot drift.
+- `drip_journeys` carries a partial unique on `(org_id, contact_id) WHERE state IN
+  ('routed','active')`: **one campaign per contact is a database invariant**, not a property of the
+  routing code, and a completed journey frees the contact for re-entry.
+- Routing worker (`/api/cron/drip-routing`, 1-min, posture-gated) and the **"why not routed"** tool
+  share ONE evaluator, so the tool reports the router's actual decision rather than a second
+  opinion. skip-if-missing is reported as `missing`, not `mismatch` — different fixes.
+- Three caps, three windows, labelled apart in the UI: `campaign_cap` (lifetime, live),
+  `routing_daily_admission_cap` (per ET day, live), `daily_cap` (sends per ET day, **not enforced
+  until P5** and the UI says so).
+- Fixes **R25**: the duplicate route's explicit `values()` literal silently dropped `type`. It now
+  carries type AND copies the config — type alone would give a drip campaign with no config, which
+  the router skips.
+  — docs updated: docs/03-data-model.md, docs/04-features/drip-campaigns-routing.md,
+  docs/07-conventions.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

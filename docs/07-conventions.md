@@ -754,6 +754,59 @@ warning and the block **agree** (a warning that disagrees with what is enforced 
 warning), that a shared NULL-brand number and a stage with no number are both left alone, and that
 a stage on a landing page is not warned about because mint-time construction self-corrects it.
 
+## Two definitions of the same thing will drift — give them one builder
+
+"Contacts in use" was defined independently in two places: `iu_set` in
+[lib/audience-snapshot.ts](../lib/audience-snapshot.ts) (the campaign-level flag) and
+`applyInUseExclusion` in [lib/segment-rules-eval.ts](../lib/segment-rules-eval.ts) (the per-segment
+flag). They agreed only by coincidence — both read `campaign_audience_pool` for active campaigns.
+Adding drip journeys to one would have given two answers to one question from one product.
+
+Both now call `lib/drip/in-use.ts`. **When you find two implementations of one concept, the fix is
+one builder, not two careful edits.**
+
+## To prove a change is invisible, make the SQL identical — then pin it
+
+R14 required that adding drip leave regular-campaign activation UNCHANGED. Measuring "close enough"
+was not it: always-UNION-ing an empty drip branch preserved the subplan exactly but added an outer
+dedup pass, **+13% plan cost**. Emitting the branch **only when the feature is switched on** makes
+the off-path byte-identical by construction, which needs no re-justification at future reviews.
+
+**That guarantee is invisible in the code**, so `scripts/test-drip-in-use-sql-shape.ts` freezes the
+pre-change text as a literal and compares. It asserts BOTH directions — off must equal the frozen
+text, on must actually emit the branch — because a one-sided test would pass if the feature were
+never wired at all.
+
+## Make the central rule an INVARIANT, not a property of the code
+
+"A lead is routed to exactly one campaign" is enforced by a partial unique index
+(`drip_journeys (org_id, contact_id) WHERE state IN ('routed','active')`), not by the routing
+worker. Everything else about routing is policy in code that can be raced, retried, or called twice.
+The worker can therefore be optimistic and treat a `23505` as "lost the race, skip" — **it is
+allowed to be optimistic precisely because the index is pessimistic.**
+
+Partial, so a terminal journey frees the contact for re-entry — asserted in BOTH directions, since
+an index that only ever refused would pass a one-sided test while breaking re-entry forever.
+
+## A debugging tool must call the code it explains
+
+The "why not routed" tool calls the same `evaluateLeadRouting` the router calls. A separate
+explain-path is a second implementation of the rules, and the first time the two drift the tool
+confidently explains a decision that never happened. It also does not short-circuit: knowing a lead
+failed the tag check tells you nothing about whether it would also fail three other rules once you
+fix the tag.
+
+**Report the third state.** A filter the campaign set but the lead has no value for is `missing`,
+not `mismatch` — one is fixed by the partner sending the field, the other by changing the targeting.
+
+## Caps over different windows need different names
+
+Drip carries three: lifetime journeys, journeys admitted per ET day, and sends per ET day. They are
+not interchangeable — a journey routed at 23:50 ET sends the next day — so enforcing a send cap
+against journeys would have two caps fighting over one field. They are named apart in the schema,
+the reason JSONB and the UI, and **the UI states which are live and which is not**: a cap that
+silently does nothing looks like protection.
+
 ## A worker that parks a row must be able to un-park it
 
 `lead_inbox` has a `received` -> `awaiting_lookup` -> `processed` path, and the claim only re-picks

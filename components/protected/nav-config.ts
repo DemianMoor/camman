@@ -13,6 +13,7 @@ import {
   Network,
   Phone,
   Route,
+  Search,
   Send,
   ShoppingBag,
   Tag,
@@ -214,6 +215,13 @@ export const navGroups: NavGroup[] = [
         label: "Partner Keys",
         href: "/settings/partners",
         icon: KeyRound,
+      },
+      // The drip routing debugger. Lives under Settings because it is an
+      // operator tool, not a campaign surface.
+      {
+        label: "Why Not Routed",
+        href: "/drip/why-not-routed",
+        icon: Search,
       },
       {
         label: "User Management",

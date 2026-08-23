@@ -270,6 +270,10 @@ export async function POST(req: NextRequest) {
             slug,
             human_id: nullIfEmpty(input.human_id),
             name: resolvedName,
+            // ⚠️ Explicit values() literal — a field not named here silently
+            // takes its default. Omitting this would make every campaign
+            // 'regular' regardless of what the operator chose.
+            ...(input.type ? { type: input.type } : {}),
             notes: nullIfEmpty(input.notes),
             brand_id: input.brand_id ?? null,
             offer_id: input.offer_id ?? null,

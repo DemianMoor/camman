@@ -1286,4 +1286,22 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   — docs updated: docs/03-data-model.md, docs/04-features/partner-lead-intake.md,
   docs/06-integrations.md, docs/07-conventions.md, docs/preview-environment.md, docs/partners/
 
+## 2026-08-23 — Drip Phase 3: lead enrichment worker (zero sends)
+
+- Migrations **0155-0158**: `awaiting_lookup` + `drip_intake` CHECK widening, `lead_events`,
+  `lead_intake_daily`, `drip_daily_cap`/`balance_floor_usd`/`lookup_queue.priority`. Preview-first
+  on camman-v2 (31-check write test), then production; integrity OK, advisor 0 ERRORs.
+- `/api/cron/lead-enrichment` (1-min) drains `lead_inbox` under `withCronLease`. Two passes, because
+  the Telnyx worker is a synchronous poll with nothing to call back.
+- **Only landline is discarded**; voip and unknown are processed like mobile and counted separately,
+  matching the existing documented policy. Discarding is irreversible and already paid for.
+- **`lookup_queue.priority`** fixes measured head-of-line blocking (p95 111 min) without changing
+  the order of any existing caller — asserted by a mixed-queue test, not assumed.
+- `/api/cron/drip-monitors` (a **different** job) watches the sweeper's heartbeat, the `received`
+  backlog and the `awaiting_lookup` pile **separately**, plus the Telnyx top-up alert.
+- Balance floor default $50 is load-bearing: 7-day lookup spend is $0.00, so the historical half of
+  the alert would never fire.
+  — docs updated: docs/03-data-model.md, docs/04-features/drip-lead-enrichment.md,
+  docs/07-conventions.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

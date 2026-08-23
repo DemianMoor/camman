@@ -4132,3 +4132,116 @@ export const alert_state = pgTable(
 
 export type PartnerKey = typeof partner_keys.$inferSelect;
 export type LeadInbox = typeof lead_inbox.$inferSelect;
+
+// ===========================================================================
+// Drip Phase 3 — enrichment (migrations 0155-0158)
+// ===========================================================================
+
+// One row per lead that became a contact. `contacts` says a person exists;
+// this says WHEN they arrived, FROM WHOM, and under WHICH tag — which is what
+// the ">1 week in the system re-qualifies as a new drip lead" rule reads and
+// what Phase 7 reports per partner.
+//
+// ⚠️ inbox_id is ON DELETE SET NULL, not cascade. Landline leads are counted and
+// then removed from lead_inbox; a cascading FK would delete the lead event with
+// them — the exact evidence this table exists to preserve.
+//
+// ⚠️ The partial UNIQUE on inbox_id is what makes the sweeper crash-safe: a
+// re-run after a crash between "write event" and "mark processed" is a no-op
+// rather than a second event for the same arrival.
+export const lead_events = pgTable(
+  "lead_events",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    partner_key_id: integer("partner_key_id")
+      .notNull()
+      .references(() => partner_keys.id, { onDelete: "restrict" }),
+    partner_slug: text("partner_slug").notNull(),
+    interest_tag: text("interest_tag"),
+    // The PARTNER's arrival time, not when we processed it.
+    received_at: timestamp("received_at", { withTimezone: true }).notNull(),
+    inbox_id: uuid("inbox_id").references(() => lead_inbox.id, { onDelete: "set null" }),
+    sandbox: boolean("sandbox").notNull().default(false),
+    // Stamped per ruling G19: voip and unknown are processed like mobile, so
+    // Phase 4 can filter per campaign rather than the call being made
+    // irreversibly at intake.
+    line_type: text("line_type"),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("lead_events_inbox_uniq")
+      .on(table.inbox_id)
+      .where(sql`${table.inbox_id} IS NOT NULL`),
+    index("lead_events_org_contact_received_idx").on(
+      table.org_id,
+      table.contact_id,
+      table.received_at.desc(),
+    ),
+    index("lead_events_org_partner_received_idx").on(
+      table.org_id,
+      table.partner_key_id,
+      table.received_at.desc(),
+    ),
+  ],
+);
+
+// Per-partner, per-ET-day outcome counters.
+//
+// ⚠️ This exists because the ROWS DO NOT SURVIVE: landline leads are counted and
+// then deleted from lead_inbox, so without this Phase 7 could not answer "how
+// many numbers did this partner send, and how many were unusable?". Written in
+// the SAME transaction as the delete — no window where a lead is neither a row
+// nor a count.
+//
+// SANDBOX IS EXCLUSIVE: a sandbox lead increments `sandbox` and nothing else, so
+// real partner volume needs no filtering.
+//
+// `lookups_spent` counts TELNYX CALLS (cache misses), not leads — cost is per
+// call, and counting leads would overstate spend by whatever the cache served.
+export const lead_intake_daily = pgTable(
+  "lead_intake_daily",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    partner_key_id: integer("partner_key_id")
+      .notNull()
+      .references(() => partner_keys.id, { onDelete: "cascade" }),
+    // ET calendar day, resolved in application code — never a functional
+    // predicate on a timestamp.
+    day_et: date("day_et").notNull(),
+    received: integer("received").notNull().default(0),
+    mobile: integer("mobile").notNull().default(0),
+    voip: integer("voip").notNull().default(0),
+    unknown: integer("unknown").notNull().default(0),
+    landline: integer("landline").notNull().default(0),
+    rejected: integer("rejected").notNull().default(0),
+    duplicate: integer("duplicate").notNull().default(0),
+    sandbox: integer("sandbox").notNull().default(0),
+    lookups_spent: integer("lookups_spent").notNull().default(0),
+  },
+  (table) => [
+    primaryKey({
+      name: "lead_intake_daily_pk",
+      columns: [table.partner_key_id, table.day_et],
+    }),
+    index("lead_intake_daily_org_day_idx").on(table.org_id, table.day_et.desc()),
+    check(
+      "lead_intake_daily_nonneg_check",
+      sql`${table.received} >= 0 AND ${table.mobile} >= 0 AND ${table.voip} >= 0
+          AND ${table.unknown} >= 0 AND ${table.landline} >= 0 AND ${table.rejected} >= 0
+          AND ${table.duplicate} >= 0 AND ${table.sandbox} >= 0 AND ${table.lookups_spent} >= 0`,
+    ),
+  ],
+);
+
+export type LeadEvent = typeof lead_events.$inferSelect;
+export type LeadIntakeDaily = typeof lead_intake_daily.$inferSelect;

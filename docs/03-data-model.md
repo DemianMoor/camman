@@ -366,6 +366,20 @@ Raw capture for partner-submitted leads. **Nothing consumes these tables yet** �
 
 > **⚠️ The rate-limit upsert carries a `WHERE` on its `DO UPDATE`**, so a refusal touches nothing and `RETURNING` yields no row. The bare counter shape (`campaign_tracking_counters`) increments unconditionally, which would let rejected retries burn a partner's daily quota. The `INSERT` branch is **not** covered by that guard, so the route pre-checks batch size — see [07-conventions.md](07-conventions.md).
 
+
+### Drip lead enrichment (migrations 0155-0158, Phase 3)
+
+The consumer side of [partner intake](#partner-lead-intake-migrations-01520154-drip-phase-2). See [04-features/drip-lead-enrichment.md](04-features/drip-lead-enrichment.md).
+
+| Table | Grain / keys | Notes |
+|---|---|---|
+| `lead_events` | PK(`id`), partial UNIQUE(`inbox_id`) `WHERE inbox_id IS NOT NULL` | One row per lead that became a contact — WHEN it arrived, FROM WHOM, under WHICH tag. Backs the ">1 week in the system re-qualifies" rule and Phase 7 reporting. **`inbox_id` is `ON DELETE SET NULL`, not cascade**: landline leads are deleted from `lead_inbox` and a cascade would destroy the evidence. The partial UNIQUE makes the sweeper crash-safe |
+| `lead_intake_daily` | PK(`partner_key_id`, `day_et`) | Per-partner, per-**ET**-day outcome counters: `received`, `mobile`, `voip`, `unknown`, `landline`, `rejected`, `duplicate`, `sandbox`, `lookups_spent`. Exists because **the rows do not survive** — written in the same transaction as the delete. `sandbox` is **exclusive** of every other column; `lookups_spent` counts Telnyx **calls**, not leads |
+
+Also: `lead_inbox.status` gains `awaiting_lookup`; `lookup_batches.trigger` gains `drip_intake`; `lookup_settings` gains `drip_daily_cap` (ET day) + `balance_floor_usd`; `lookup_queue` gains `priority` (default 0 = today's ordering).
+
+> **⚠️ Two day boundaries.** The account-global lookup cap resets at **Warsaw** midnight = **18:00 ET**, inside the drip window; the drip sub-cap resets at ET midnight. Anything showing either must say which.
+
 ## Triggers & DB-side logic (in migrations, not Drizzle)
 - **`handle_new_user()`** (`0001`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row.
 - **`current_org_id()`** (`0001`): SECURITY DEFINER, backs RLS policies.

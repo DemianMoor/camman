@@ -754,6 +754,32 @@ warning and the block **agree** (a warning that disagrees with what is enforced 
 warning), that a shared NULL-brand number and a stage with no number are both left alone, and that
 a stage on a landing page is not warned about because mint-time construction self-corrects it.
 
+## A worker that parks a row must be able to un-park it
+
+`lead_inbox` has a `received` -> `awaiting_lookup` -> `processed` path, and the claim only re-picks
+an `awaiting_lookup` row **once its lookup is complete**. So a row parked in that status without
+ever being enqueued is stranded silently, forever. When the drip lookup sub-cap is exhausted the
+sweeper therefore leaves the row as `received` — untouched except for the saved `normalized`
+payload — so the next tick reclaims it naturally.
+
+**The general rule: before moving a row into a waiting state, check what condition moves it OUT.**
+If that condition is created by the same step you just skipped, the row will never leave.
+
+## Alerts must ship WITH their consumer, and must be cleared by whatever fixes them
+
+An alert whose condition is true by construction trains people to ignore it. The drip backlog alert
+was deliberately held back from Phase 2 — nothing drained `lead_inbox` in that phase, so
+"unprocessed for > 10 min" would have fired on the first lead and never cleared. It shipped in
+Phase 3 alongside the sweeper.
+
+Equally: a state-transition-gated alert that nobody resets latches `firing` and silences the NEXT
+incident. Partner-key rotation clears the auth-failure alert; a recovered Telnyx balance clears the
+top-up alert.
+
+**Related failure: distinct causes must not share a counter.** The drip monitor counts `received`
+backlog separately from `awaiting_lookup`, because the first means the sweeper is dead and the
+second means the Telnyx side is stuck. Summed, a stalled lookup hides inside a healthy-looking inbox.
+
 ## Rate limiting and counters — put the decision IN the statement
 
 `lib/api/rate-limit.ts` is an **in-memory** token bucket and cannot enforce anything in serverless;

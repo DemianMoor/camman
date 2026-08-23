@@ -186,7 +186,14 @@ async function claimQueueBatch(size: number): Promise<ClaimedRow[]> {
       SELECT id FROM lookup_queue
       WHERE status = 'pending'
         AND (attempts = 0 OR updated_at < now() - make_interval(secs => ${RETRY_COOLDOWN_SECONDS}))
-      ORDER BY created_at, id
+      -- ⚠️ priority DESC FIRST (migration 0158). The queue is ACCOUNT-GLOBAL and
+      -- was strict FIFO, so a bulk upload of 200K numbers put every later drip
+      -- lead behind the whole batch: measured p50 42 min, p95 111 min against a
+      -- "1-2 minute reaction" target. Everything except drip enqueues at the
+      -- default 0, so with one distinct value in the table this ordering is
+      -- byte-identical to the old created_at, id ordering — asserted by the
+      -- mixed-queue case in scripts/test-drip-enrichment-schema.ts, not assumed.
+      ORDER BY priority DESC, created_at, id
       LIMIT ${size}
       FOR UPDATE SKIP LOCKED
     )

@@ -33,6 +33,16 @@ export interface HeartbeatExpectation {
 }
 
 export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
+  // The drip lead-enrichment sweeper (Phase 3). Watched by /api/cron/drip-monitors,
+  // never by itself — a job that checks its own liveness is silent in exactly the
+  // case that matters. Runs every minute, so 1 hour is ~60 missed runs: generous
+  // enough that a deploy or a transient failure does not page anyone, and far
+  // short of a working day.
+  leadEnrichment: {
+    job_name: "lead-enrichment",
+    max_age_hours: 1,
+    label: "drip lead enrichment sweeper (1-min)",
+  },
   epcMonitors: {
     job_name: "epc-monitors",
     max_age_hours: 24 * 16, // weekly cadence, ~2 missed runs

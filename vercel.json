@@ -79,6 +79,14 @@
     {
       "path": "/api/cron/refresh-contact-stats",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/lead-enrichment",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/drip-monitors",
+      "schedule": "6,21,36,51 * * * *"
     }
   ]
 }

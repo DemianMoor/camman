@@ -4356,9 +4356,13 @@ export const drip_journeys = pgTable(
     org_id: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    campaign_id: integer("campaign_id")
-      .notNull()
-      .references(() => campaigns.id, { onDelete: "cascade" }),
+    // ⚠️ NULLABLE, and only for state='unroutable' (migration 0163). An
+    // unroutable lead matched nothing, so naming a campaign would inflate that
+    // campaign's journey count and mislead the "why not routed" tool. The CHECK
+    // keeps it mandatory for every other state.
+    campaign_id: integer("campaign_id").references(() => campaigns.id, {
+      onDelete: "cascade",
+    }),
     contact_id: uuid("contact_id")
       .notNull()
       .references(() => contacts.id, { onDelete: "cascade" }),
@@ -4396,6 +4400,10 @@ export const drip_journeys = pgTable(
     check(
       "drip_journeys_state_check",
       sql`${table.state} IN ('routed', 'active', 'completed', 'exited', 'unroutable')`,
+    ),
+    check(
+      "drip_journeys_campaign_required_check",
+      sql`${table.state} = 'unroutable' OR ${table.campaign_id} IS NOT NULL`,
     ),
   ],
 );

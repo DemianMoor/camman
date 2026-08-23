@@ -110,6 +110,7 @@ export async function GET(req: NextRequest) {
         slug: campaigns.slug,
         human_id: campaigns.human_id,
         name: campaigns.name,
+        type: campaigns.type,
         notes: campaigns.notes,
         brand_id: campaigns.brand_id,
         offer_id: campaigns.offer_id,

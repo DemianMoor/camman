@@ -1803,6 +1803,11 @@ export const campaigns = pgTable(
     exclude_prior_offer_contacts: boolean("exclude_prior_offer_contacts")
       .notNull()
       .default(false),
+    // ⚠️ Drip Phase 4. NOT NULL DEFAULT 'regular' so a missing or unreadable
+    // value can never be read as drip — the same fail-toward-existing-behaviour
+    // direction R13 mandates for the opt-out breaker. Callers that build an
+    // explicit values() literal (the duplicate route) MUST carry it.
+    type: text("type").notNull().default("regular"),
     start_date: date("start_date"),
     end_date: date("end_date"),
     status: text("status").notNull().default("draft"),
@@ -3012,6 +3017,18 @@ export const org_settings = pgTable("org_settings", {
   // re-reads it every batch, so engaging it halts any in-flight send and refuses
   // new ones until someone clicks Proceed. Default FALSE (not paused).
   sends_paused: boolean("sends_paused").notNull().default(false),
+  // Drip runtime flags (G9). THREE questions kept apart: capability lives in
+  // ENTITY_AVAILABILITY, posture is drip_enabled, latch is drip_paused.
+  // Merging posture into the latch makes a breaker trip and a human decision
+  // indistinguishable. Posture also gates whether the drip branch is EMITTED
+  // into the in-use CTEs, which is what keeps R14 identical-by-construction.
+  drip_enabled: boolean("drip_enabled").notNull().default(false),
+  drip_enabled_updated_by: uuid("drip_enabled_updated_by"),
+  drip_enabled_updated_at: timestamp("drip_enabled_updated_at", { withTimezone: true }),
+  drip_paused: boolean("drip_paused").notNull().default(false),
+  drip_paused_reason: text("drip_paused_reason"),
+  drip_paused_at: timestamp("drip_paused_at", { withTimezone: true }),
+  drip_paused_by: uuid("drip_paused_by"),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })
@@ -4245,3 +4262,151 @@ export const lead_intake_daily = pgTable(
 
 export type LeadEvent = typeof lead_events.$inferSelect;
 export type LeadIntakeDaily = typeof lead_intake_daily.$inferSelect;
+
+// ===========================================================================
+// Drip Phase 4 — campaigns + routing (migrations 0159-0162)
+// ===========================================================================
+
+// Drip-only campaign settings, 1:1 with a drip campaign (PK = campaign_id, so a
+// second config row is impossible by construction — same structural choice as
+// contact_attributes in 1c).
+//
+// ⚠️ THREE CAPS, THREE WINDOWS, deliberately named apart:
+//   campaign_cap                — LIFETIME journeys, enforced at ROUTING
+//   daily_cap                   — SENDS per ET day; stored but INERT in P4,
+//                                 enforced at send time in P5 where it belongs
+//   routing_daily_admission_cap — journeys admitted per ET day; NULL = unlimited
+// They cannot be one number: a journey routed at 23:50 ET sends the NEXT day.
+export const drip_campaign_configs = pgTable(
+  "drip_campaign_configs",
+  {
+    campaign_id: integer("campaign_id")
+      .primaryKey()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    interest_tag: text("interest_tag").notNull(),
+    partner_key_id: integer("partner_key_id").references(() => partner_keys.id, {
+      onDelete: "set null",
+    }),
+    // Hard window: eligible when received_at ∈ [start_at, end_at).
+    start_at: timestamp("start_at", { withTimezone: true }),
+    end_at: timestamp("end_at", { withTimezone: true }),
+    daily_cap: integer("daily_cap"),
+    campaign_cap: integer("campaign_cap"),
+    routing_daily_admission_cap: integer("routing_daily_admission_cap"),
+    // Lower wins; ties broken by the most recently created campaign.
+    priority: integer("priority").notNull().default(100),
+    // gender / age_band / state / country / income_band / kids / married.
+    // One JSONB rather than seven columns: the rule is uniform (skip-if-missing)
+    // and the set is explicitly extensible, so columns would mean a migration
+    // per new filter. The CARRIER filter is NOT here — drip reuses
+    // campaigns.audience_filters.carrier_filter.
+    filters: jsonb("filters").notNull().default({}),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("drip_campaign_configs_org_tag_idx").on(table.org_id, table.interest_tag),
+    index("drip_campaign_configs_org_priority_idx").on(
+      table.org_id,
+      table.priority,
+      table.campaign_id.desc(),
+    ),
+    check(
+      "drip_campaign_configs_window_check",
+      sql`${table.end_at} IS NULL OR ${table.start_at} IS NULL OR ${table.end_at} > ${table.start_at}`,
+    ),
+    check(
+      "drip_campaign_configs_daily_cap_check",
+      sql`${table.daily_cap} IS NULL OR ${table.daily_cap} > 0`,
+    ),
+    check(
+      "drip_campaign_configs_campaign_cap_check",
+      sql`${table.campaign_cap} IS NULL OR ${table.campaign_cap} > 0`,
+    ),
+    check(
+      "drip_campaign_configs_admission_cap_check",
+      sql`${table.routing_daily_admission_cap} IS NULL OR ${table.routing_daily_admission_cap} > 0`,
+    ),
+    check(
+      "drip_campaign_configs_interest_tag_check",
+      sql`length(btrim(${table.interest_tag})) > 0`,
+    ),
+  ],
+);
+
+// One lead's assignment to exactly one drip campaign.
+//
+// ⭐ THE PARTIAL UNIQUE ON (org_id, contact_id) IS THE POINT. "Routed to exactly
+// ONE campaign" is the central rule of the drip spec, and everything else —
+// tag match, filters, priority, tie-break — is POLICY in code that can be raced
+// or called twice. This index makes it an INVARIANT: a second live journey is
+// refused by the database. The routing code therefore treats a unique violation
+// as "lost the race, skip", and may be optimistic precisely because the index is
+// pessimistic. Partial on the live states so a completed or exited journey frees
+// the contact for re-entry, which the >1-week rule requires.
+export const drip_journeys = pgTable(
+  "drip_journeys",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // ⚠️ NULLABLE, and only for state='unroutable' (migration 0163). An
+    // unroutable lead matched nothing, so naming a campaign would inflate that
+    // campaign's journey count and mislead the "why not routed" tool. The CHECK
+    // keeps it mandatory for every other state.
+    campaign_id: integer("campaign_id").references(() => campaigns.id, {
+      onDelete: "cascade",
+    }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    lead_event_id: uuid("lead_event_id")
+      .notNull()
+      .references(() => lead_events.id, { onDelete: "cascade" }),
+    state: text("state").notNull().default("routed"),
+    routed_at: timestamp("routed_at", { withTimezone: true }).notNull().defaultNow(),
+    // Why this campaign won and what was skipped. Read by the "why not routed"
+    // tool. Carries creative_check:"deferred_p5" in Phase 4 — the creative half
+    // of the same-offer-same-creative rule has no operand until drip stages exist.
+    reason: jsonb("reason").notNull().default({}),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("drip_journeys_lead_event_uniq").on(table.lead_event_id),
+    uniqueIndex("drip_journeys_one_live_per_contact_uniq")
+      .on(table.org_id, table.contact_id)
+      .where(sql`state IN ('routed', 'active')`),
+    index("drip_journeys_org_campaign_state_idx").on(
+      table.org_id,
+      table.campaign_id,
+      table.state,
+    ),
+    index("drip_journeys_org_state_routed_idx").on(
+      table.org_id,
+      table.state,
+      table.routed_at.desc(),
+    ),
+    index("drip_journeys_org_contact_idx").on(
+      table.org_id,
+      table.contact_id,
+      table.routed_at.desc(),
+    ),
+    check(
+      "drip_journeys_state_check",
+      sql`${table.state} IN ('routed', 'active', 'completed', 'exited', 'unroutable')`,
+    ),
+    check(
+      "drip_journeys_campaign_required_check",
+      sql`${table.state} = 'unroutable' OR ${table.campaign_id} IS NOT NULL`,
+    ),
+  ],
+);
+
+export type DripCampaignConfig = typeof drip_campaign_configs.$inferSelect;
+export type DripJourney = typeof drip_journeys.$inferSelect;

@@ -250,6 +250,17 @@ function Inner({
   const activateApi = useApiCall<{ id: number; audience_snapshot_count: number }>();
   const updateApi = useApiCall<{ id: number }>();
 
+  // Campaign type, chosen at CREATE only (Drip Phase 4). Lives HERE, in the
+  // component that owns the submit, and is passed down to SetupCard which
+  // renders the control — SetupCard is a child, so state declared there is not
+  // in scope for buildCreateBody.
+  //
+  // Not editable after creation: flipping an existing campaign would leave it
+  // with the other type's semantics mid-flight, and the drip settings live in a
+  // separate table. Defaults 'regular', the same fail-toward-existing-behaviour
+  // direction the column default takes.
+  const [campaignType, setCampaignType] = useState<"regular" | "drip">("regular");
+
   function goBack() {
     if (isEdit && campaignId) {
       router.push(`/campaigns/${campaignId}`);
@@ -262,7 +273,7 @@ function Inner({
     const result = await createApi.execute("/api/campaigns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildCreateBody(values, true)),
+      body: JSON.stringify(buildCreateBody(values, true, campaignType)),
     });
     if (!result.ok) {
       toastApiError(result, "Couldn't save draft");
@@ -276,7 +287,7 @@ function Inner({
     const result = await activateApi.execute("/api/campaigns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildCreateBody(values, false)),
+      body: JSON.stringify(buildCreateBody(values, false, campaignType)),
     });
     if (!result.ok) {
       toastApiError(result, "Couldn't activate campaign");
@@ -461,7 +472,12 @@ function Inner({
         {/* Body */}
         <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
           <div className="grid min-w-0 gap-4">
-            <SetupCard state={state} trackingId={trackingId ?? null} />
+            <SetupCard
+              state={state}
+              trackingId={trackingId ?? null}
+              campaignType={campaignType}
+              setCampaignType={setCampaignType}
+            />
             <AudienceCard state={state} />
           </div>
           <aside className="grid gap-3">
@@ -484,9 +500,13 @@ function Inner({
 function SetupCard({
   state,
   trackingId,
+  campaignType,
+  setCampaignType,
 }: {
   state: CampaignFormState;
   trackingId: string | null;
+  campaignType: "regular" | "drip";
+  setCampaignType: (t: "regular" | "drip") => void;
 }) {
   const {
     form,
@@ -538,6 +558,31 @@ function SetupCard({
       </CardHeader>
       <CardContent className="grid gap-3 p-4">
         <div className="grid gap-3 md:grid-cols-3">
+          {!isEdit && (
+            <FormItem>
+              <FormLabel required>Campaign type</FormLabel>
+              <div className="flex gap-2">
+                {(["regular", "drip"] as const).map((t) => (
+                  <Button
+                    key={t}
+                    type="button"
+                    size="sm"
+                    variant={campaignType === t ? "default" : "outline"}
+                    disabled={anySubmitting}
+                    onClick={() => setCampaignType(t)}
+                  >
+                    {t === "regular" ? "Regular" : "Drip"}
+                  </Button>
+                ))}
+              </div>
+              <p className="text-muted-foreground text-xs">
+                {campaignType === "drip"
+                  ? "Processes leads as they arrive from partners. Its drip settings are configured on the campaign page after saving. Cannot be changed later."
+                  : "Sends to a frozen audience snapshot. Cannot be changed later."}
+              </p>
+            </FormItem>
+          )}
+
           <FormField
             control={form.control}
             name="name"
@@ -1568,6 +1613,7 @@ function BackHeader({ title }: { title: string }) {
 function buildCreateBody(
   values: CampaignFormValues,
   saveAsDraft: boolean,
+  campaignType?: "regular" | "drip",
 ): Record<string, unknown> {
   return {
     name: values.name.trim(),
@@ -1590,6 +1636,8 @@ function buildCreateBody(
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
     save_as_draft: saveAsDraft,
+    // Explicit: the create route's values() literal only sets what it is given.
+    ...(campaignType ? { type: campaignType } : {}),
   };
 }
 

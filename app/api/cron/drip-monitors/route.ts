@@ -39,7 +39,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const leased = await withCronLease("drip-monitors", async () => {
     const monitors = await runDripMonitors();
     // The dead-man half: is the sweeper's own heartbeat stale?
-    const heartbeats = await checkHeartbeats(db, [HEARTBEAT_JOBS.leadEnrichment]);
+    const heartbeats = await checkHeartbeats(db, [
+      HEARTBEAT_JOBS.leadEnrichment,
+      HEARTBEAT_JOBS.dripRouting,
+    ]);
     return { ...monitors, heartbeats };
   });
 

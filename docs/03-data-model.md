@@ -380,6 +380,20 @@ Also: `lead_inbox.status` gains `awaiting_lookup`; `lookup_batches.trigger` gain
 
 > **⚠️ Two day boundaries.** The account-global lookup cap resets at **Warsaw** midnight = **18:00 ET**, inside the drip window; the drip sub-cap resets at ET midnight. Anything showing either must say which.
 
+
+### Drip campaigns + routing (migrations 0159-0163, Phase 4)
+
+See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.md).
+
+| Table | Grain / keys | Notes |
+|---|---|---|
+| `campaigns.type` | — | `'regular'` (default) or `'drip'`. The **only** column this phase adds to `campaigns`, so "regular is unaffected" stays small enough to prove. A missing/unreadable value can never read as drip |
+| `drip_campaign_configs` | PK(`campaign_id`) | 1:1 with a drip campaign. `interest_tag` (required), optional `partner_key_id`, hard `[start_at, end_at)`, `priority` (lower wins), demographic `filters` JSONB. **Three caps over three windows**: `campaign_cap` (lifetime journeys, live), `routing_daily_admission_cap` (per ET day, live), `daily_cap` (sends per ET day, **inert until P5**) |
+| `drip_journeys` | PK(`id`), UNIQUE(`lead_event_id`), **partial UNIQUE(`org_id`,`contact_id`) WHERE state IN ('routed','active')** | The partial unique makes "one campaign per contact" a **database invariant**, not a property of the routing code — the worker treats `23505` as "lost the race, skip". `campaign_id` is **NULL only for `unroutable`** (0163). `reason` JSONB records why it won and what was skipped |
+| `org_settings.drip_enabled` / `drip_paused` | — | Posture and latch (G9), mirroring `sends_enabled`/`sends_paused`. **Posture also gates whether the drip branch is emitted into the in-use CTEs**, which is what keeps R14 identical-by-construction |
+
+> **⚠️ "In use" is now defined in one shared builder** ([lib/drip/in-use.ts](../lib/drip/in-use.ts)) used by BOTH `iu_set` (campaign flag) and `applyInUseExclusion` (segment flag). They were independent definitions that agreed only by coincidence.
+
 ## Triggers & DB-side logic (in migrations, not Drizzle)
 - **`handle_new_user()`** (`0001`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row.
 - **`current_org_id()`** (`0001`): SECURITY DEFINER, backs RLS policies.

@@ -89,6 +89,11 @@ const campaignCreateBaseSchema = z.object({
   audience_contact_group_ids: z
     .array(z.number().int().positive())
     .optional(),
+  // Campaign type (Drip Phase 4). Absent ⇒ the DB default 'regular'. Only
+  // settable at CREATE: changing an existing campaign's type would leave a
+  // drip campaign with regular semantics (or vice versa) mid-flight, and the
+  // config lives in a different table. Make a new campaign instead.
+  type: z.enum(["regular", "drip"]).optional(),
   audience_filters: audienceFiltersSchema.optional(),
   // Optional cap on the random-sampled audience. Null clears the cap.
   // Validated as positive; the DB has a matching CHECK.

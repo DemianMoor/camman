@@ -33,6 +33,13 @@ export interface HeartbeatExpectation {
 }
 
 export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
+  // The drip routing worker (Phase 4). Watched by /api/cron/drip-monitors,
+  // never by itself. Runs every minute; 1 hour is ~60 missed runs.
+  dripRouting: {
+    job_name: "drip-routing",
+    max_age_hours: 1,
+    label: "drip routing worker (1-min)",
+  },
   // The drip lead-enrichment sweeper (Phase 3). Watched by /api/cron/drip-monitors,
   // never by itself — a job that checks its own liveness is silent in exactly the
   // case that matters. Runs every minute, so 1 hour is ~60 missed runs: generous

@@ -106,6 +106,12 @@ export async function POST(
             // source still has it.
             human_id: null,
             name: newName,
+            // ⚠️ R25. This insert is an explicit field-by-field literal, so any
+            // column NOT named here silently takes its default. Without this
+            // line a duplicated DRIP campaign would come back as REGULAR — a
+            // 200, a success toast, and the wrong data. Asserted by
+            // scripts/test-campaign-duplicate-type.ts.
+            type: source.type,
             notes: source.notes,
             brand_id: source.brand_id,
             offer_id: source.offer_id,
@@ -141,6 +147,21 @@ export async function POST(
             .update(campaigns)
             .set({ tracking_id: parentTrackingId })
             .where(eq(campaigns.id, inserted.id));
+        }
+
+        // ⚠️ A drip campaign's settings live in a 1:1 side table, so copying the
+        // `type` alone would produce a drip campaign with NO config — which the
+        // routing worker skips with "no config row", i.e. a duplicate that
+        // silently never routes. Copy both or neither.
+        if (source.type === "drip") {
+          await tx.execute(drizzleSql`
+            INSERT INTO drip_campaign_configs
+              (campaign_id, org_id, interest_tag, partner_key_id, start_at, end_at,
+               daily_cap, campaign_cap, routing_daily_admission_cap, priority, filters)
+            SELECT ${inserted.id}, org_id, interest_tag, partner_key_id, start_at, end_at,
+                   daily_cap, campaign_cap, routing_daily_admission_cap, priority, filters
+            FROM drip_campaign_configs WHERE campaign_id = ${cid}
+          `);
         }
 
         if (sourceStages.length > 0) {

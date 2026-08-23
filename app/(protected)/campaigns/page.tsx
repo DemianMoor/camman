@@ -70,6 +70,9 @@ type Campaign = {
   slug: string;
   human_id: string | null;
   name: string;
+  // 'regular' | 'drip'. Defaults 'regular' server-side, so an older cached
+  // response without the field renders as a regular campaign rather than blank.
+  type?: string;
   notes: string | null;
   brand_id: number;
   offer_id: number;
@@ -448,6 +451,11 @@ export default function CampaignsPage() {
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <span className="truncate font-medium">{c.name}</span>
+                {c.type === "drip" ? (
+                  <Badge variant="secondary" className="text-[10px]">
+                    Drip
+                  </Badge>
+                ) : null}
                 {c.human_id ? (
                   <Badge variant="outline" className="font-mono text-[10px]">
                     {c.human_id}

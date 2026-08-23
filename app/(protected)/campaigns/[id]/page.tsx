@@ -30,6 +30,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
+import { DripConfigPanel } from "@/components/campaigns/drip-config-panel";
 import { CampaignSendMode } from "@/components/campaigns/campaign-send-mode";
 import { CampaignActivitySection } from "@/components/campaigns/campaign-activity-section";
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
@@ -160,6 +161,9 @@ type CampaignDetail = {
   slug: string;
   human_id: string | null;
   name: string;
+  // 'regular' | 'drip' (Drip Phase 4). Absent on an older cached response,
+  // which renders as regular — the same fail-toward-existing-behaviour default.
+  type?: string;
   notes: string | null;
   brand_id: number;
   offer_id: number;
@@ -1671,6 +1675,20 @@ export default function CampaignDetailPage() {
         campaign={campaign}
         memberLabel={memberLabel}
       />
+
+      {/* ============ Drip settings (drip campaigns only) ============ */}
+      {campaign.type === "drip" ? (
+        <section className="space-y-4">
+          <div>
+            <h2 className="text-lg font-medium">Drip settings</h2>
+            <p className="text-sm text-muted-foreground">
+              Which leads this campaign accepts, and what it has routed so far. Sending is not
+              wired yet — a routed lead is an assignment, not a message.
+            </p>
+          </div>
+          <DripConfigPanel campaignId={campaign.id} canEdit={can("campaigns.update")} />
+        </section>
+      ) : null}
 
       {/* ============ Stages section ============ */}
       <section className="space-y-4">

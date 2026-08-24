@@ -108,13 +108,20 @@ async function main() {
 
       // The healthy stage gets Keitaro visits; the gap stage gets a row with ZERO
       // visits (proving the monitor keys off the value, not off a missing row).
+      // The gap stage's redirect_clicks_raw is set to a DISTINCT non-zero value
+      // (19, vs clean's 7) so a raw+clean implementation would yield 26 instead
+      // of 7 — otherwise raw defaults to 0 and raw+clean is numerically
+      // indistinguishable from clean alone, and the redirects assertion below
+      // passes under either implementation. redirect_clicks_raw does not gate
+      // the breach (visits are the only gate — see trackingGapBreached), so
+      // raising it must not, and does not, change whether this stage breaches.
       await tx.execute(sql`
         INSERT INTO keitaro_stage_results
           (org_id, campaign_id, stage_id, stage_tracking_id, stat_date,
-           visit_clicks_raw, visit_clicks_clean, redirect_clicks_clean)
+           visit_clicks_raw, visit_clicks_clean, redirect_clicks_raw, redirect_clicks_clean)
         VALUES
-          (${org_id}::uuid, ${campaign_id}, ${gapStage},     'VERIFY_GAP_STAGE',     current_date, 0,  0, 7),
-          (${org_id}::uuid, ${campaign_id}, ${healthyStage}, 'VERIFY_HEALTHY_STAGE', current_date, 40, 30, 5)
+          (${org_id}::uuid, ${campaign_id}, ${gapStage},     'VERIFY_GAP_STAGE',     current_date, 0,  0, 19, 7),
+          (${org_id}::uuid, ${campaign_id}, ${healthyStage}, 'VERIFY_HEALTHY_STAGE', current_date, 40, 30, 0,  5)
       `);
 
       // Both stages get the SAME number of human clicks — so the only thing that
@@ -175,7 +182,8 @@ async function main() {
       );
       ok(
         gap?.redirects === 7,
-        `⭐ SQL path: reports redirect_clicks_CLEAN (${gap?.redirects} === 7), not raw+clean`,
+        `⭐ SQL path: reports redirect_clicks_CLEAN (${gap?.redirects} === 7, raw=19 clean=7); ` +
+          `a raw+clean implementation would yield 26 and fail here`,
       );
       ok(
         gap?.destination_url === "https://verify.example/lp",

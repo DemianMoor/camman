@@ -162,6 +162,25 @@ export async function closeCompletedJourneys(
             AND ch.archived_at IS NULL
             AND ch.drip_active IS TRUE
             AND ch.drip_followup_minutes IS NOT NULL
+            -- ⚠️ A LANE BELOW THE CONTACT'S CURRENT TIER IS UNREACHABLE FOR EVER.
+            -- campaignTierExpr is HIGH-WATER: a tier only ever rises, so a
+            -- contact that has clicked can never match the Ignored lane again.
+            -- Waiting on it would make completion unreachable for every contact
+            -- above the lowest active lane -- i.e. for anyone who ever engaged,
+            -- which is exactly the population whose journey should end cleanly.
+            AND ch.behavioral_tier >= COALESCE((
+              SELECT MAX(t.tier) FROM (
+                SELECT 1 AS tier FROM links l
+                  JOIN clicks ck ON ck.link_id = l.id
+                 WHERE l.campaign_id = j.campaign_id AND l.contact_id = j.contact_id
+                   AND l.org_id = j.org_id
+                   AND ck.classification NOT IN ('bot','prefetch','suspect')
+                UNION ALL
+                SELECT 2 FROM stage_sends ss3
+                 WHERE ss3.campaign_id = j.campaign_id AND ss3.contact_id = j.contact_id
+                   AND ss3.org_id = j.org_id AND ss3.offer_reached_at IS NOT NULL
+              ) t
+            ), 0)
             AND NOT EXISTS (
               SELECT 1 FROM stage_sends ss
               WHERE ss.stage_id = ch.id
@@ -205,6 +224,25 @@ export async function expireJourneysPastEndDate(
             AND ch.archived_at IS NULL
             AND ch.drip_active IS TRUE
             AND ch.drip_followup_minutes IS NOT NULL
+            -- ⚠️ A LANE BELOW THE CONTACT'S CURRENT TIER IS UNREACHABLE FOR EVER.
+            -- campaignTierExpr is HIGH-WATER: a tier only ever rises, so a
+            -- contact that has clicked can never match the Ignored lane again.
+            -- Waiting on it would make completion unreachable for every contact
+            -- above the lowest active lane -- i.e. for anyone who ever engaged,
+            -- which is exactly the population whose journey should end cleanly.
+            AND ch.behavioral_tier >= COALESCE((
+              SELECT MAX(t.tier) FROM (
+                SELECT 1 AS tier FROM links l
+                  JOIN clicks ck ON ck.link_id = l.id
+                 WHERE l.campaign_id = j.campaign_id AND l.contact_id = j.contact_id
+                   AND l.org_id = j.org_id
+                   AND ck.classification NOT IN ('bot','prefetch','suspect')
+                UNION ALL
+                SELECT 2 FROM stage_sends ss3
+                 WHERE ss3.campaign_id = j.campaign_id AND ss3.contact_id = j.contact_id
+                   AND ss3.org_id = j.org_id AND ss3.offer_reached_at IS NOT NULL
+              ) t
+            ), 0)
             AND NOT EXISTS (
               SELECT 1 FROM stage_sends ss
               WHERE ss.stage_id = ch.id

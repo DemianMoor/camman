@@ -19,6 +19,7 @@ import {
   type DeliveryCell,
 } from "@/lib/reporting/delivery";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
+import { hasNoKeitaroVisits } from "@/lib/reporting/tracking-gap";
 
 // Cross-campaign Keitaro reports (the /reports "Overview" tab): per-stage
 // Clickers → Offer Redirect → Sales funnel over a date range (ET). The per-stage
@@ -122,11 +123,12 @@ export async function GET(req: NextRequest) {
 
   // ── READ-TIME CLICKERS FALLBACK ──────────────────────────────────────────
   //
-  // When a landing page loses its Keitaro visit script, `visit_clicks_clean`
-  // reads 0 while CamMan keeps recording every tap — so the Clickers column
-  // reports "nobody clicked" for a stage that got thousands of taps. The
-  // /api/cron/tracking-monitors job alerts on it; this makes the number on
-  // screen honest in the meantime, and for every past period at once.
+  // When a landing page loses its Keitaro visit script, both visit columns
+  // read 0 (hasNoKeitaroVisits) while CamMan keeps recording every tap — so
+  // the Clickers column reports "nobody clicked" for a stage that got
+  // thousands of taps. The /api/cron/tracking-monitors job alerts on it; this
+  // makes the number on screen honest in the meantime, and for every past
+  // period at once.
   //
   // ⚠️ DISPLAY-TIME ONLY. Writing CamMan counts into keitaro_stage_results would
   // poison the sync source and the next poll would fight it. Nothing here
@@ -148,9 +150,19 @@ export async function GET(req: NextRequest) {
   const clickersFallbackStageIds = new Set<number>();
   for (const s of stages) {
     if (s.link_mode !== "tracked") continue;
-    if (s.tally.visit_clicks_clean !== 0) continue;
+    // hasNoKeitaroVisits — BOTH columns, not clean alone. raw > 0 means
+    // Keitaro's visit script fired even though none of the visits were
+    // "clean"; that is not a tracking blackout, so it must not fall back.
+    // Same predicate the alert (lib/reporting/tracking-gap.ts) tests, so the
+    // two can't disagree about what "no Keitaro visits" means.
+    if (!hasNoKeitaroVisits(s.tally.visit_clicks_raw, s.tally.visit_clicks_clean)) continue;
     const cammanClickers = clickers.periodByStage.get(s.stage_id) ?? 0;
     if (cammanClickers <= 0) continue;
+    // No noise floor here, unlike the alert's TRACKING_GAP_MIN_HUMAN_CLICKS
+    // (≥25 human clicks, a threshold sized to avoid paging a human over a
+    // quiet stage). This is a display substitution, not a page — any real
+    // click count is enough to beat showing "0" for a stage that demonstrably
+    // got clicks.
     s.tally.visit_clicks_clean = cammanClickers;
     // `grand` was accumulated inside getStageMetricsInRange BEFORE this patch,
     // so it does not see the mutation above and must be topped up by hand.
@@ -174,8 +186,11 @@ export async function GET(req: NextRequest) {
     opt_out_rate: number;
     click_rate: number;
     // True when `clickers` is CamMan's counted-clicker count standing in for a
-    // missing Keitaro visit count. The UI marks the value and suppresses the
-    // rates that divide by it.
+    // missing Keitaro visit count. The UI marks the value and blanks
+    // redirect_rate and click_rate — not because both divide by the missing
+    // denominator (only redirect_rate does; click_rate's denominator is
+    // total_sent, and the substitute IS its numerator), but because both would
+    // mix a Keitaro basis with a CamMan one in the same rate.
     clickers_is_fallback: boolean;
     // Lifetime EPC ignores the date filter entirely and is the PRIMARY figure;
     // `epc` from withFunnelDerived is the period figure for the selected range.

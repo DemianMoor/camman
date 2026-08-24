@@ -35,7 +35,10 @@ type ReportRow = {
   clickers: number;
   click_rate: number;
   // True when `clickers` is CamMan's count standing in for a missing Keitaro
-  // visit count. Marks the value and blanks the rates that divide by it.
+  // visit count. Marks the value and blanks click_rate/redirect_rate — not
+  // because both divide by the missing denominator (only redirect_rate does;
+  // click_rate's denominator is total_sent and the substitute is its
+  // numerator), but because both would mix a Keitaro basis with a CamMan one.
   clickers_is_fallback: boolean;
   offer_redirect: number;
   redirect_rate: number;

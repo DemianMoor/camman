@@ -7,6 +7,7 @@
 //   - NOT firing when something is wrong (the tracking blackout we exist to catch)
 import {
   trackingGapBreached,
+  hasNoKeitaroVisits,
   TRACKING_GAP_MIN_HUMAN_CLICKS,
   TRACKING_GAP_MATURITY_HOURS,
   TRACKING_GAP_WINDOW_DAYS,
@@ -56,11 +57,23 @@ ok(
 
 // Visits are the ONLY Keitaro signal in the rule. Redirects are reported in the
 // alert but must never gate it — requiring redirects=0 too would skip 3 of the
-// 5 stages that qualify today, all of them the same defect.
+// 5 stages that qualify today, all of them the same defect. (The alert's own
+// zero-test is exercised above via trackingGapBreached; redirects aren't even
+// a parameter, so a redirect-gating regression can't be caught by calling it
+// again with the same arguments — see hasNoKeitaroVisits below instead.)
+
+// ── hasNoKeitaroVisits — the shared no-visits predicate (FIX 1) ────────────
+//
+// BOTH columns, always: raw is a superset of clean (no row in the table has
+// clean > raw), so "Keitaro saw visits, none of them unique" (raw > 0,
+// clean = 0) must NOT read as a tracking blackout. This is exactly the shape
+// that made the Overview mark 56 of 58 flagged stages wrong before the fix.
 ok(
-  trackingGapBreached(315, 0),
-  "⭐ breaches with visits=0 regardless of redirects (redirects are context, not a gate)",
+  !hasNoKeitaroVisits(1, 0),
+  "⭐ raw > 0, clean = 0 is NOT a no-visits state (the script fired; the visits just weren't unique)",
 );
+ok(hasNoKeitaroVisits(0, 0), "both columns zero -> no visits at all");
+ok(!hasNoKeitaroVisits(0, 5), "clean > 0 -> not a no-visits state either");
 
 // ── the thresholds themselves ───────────────────────────────────────────────
 eq(TRACKING_GAP_MIN_HUMAN_CLICKS, 25, "click floor is 25 HUMAN clicks");

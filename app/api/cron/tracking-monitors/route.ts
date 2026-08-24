@@ -21,9 +21,10 @@ import {
 // Breach-only, latched per stage: a periodic all-clear trains people to ignore
 // the channel, and an unlatched threshold check would page every hour for as
 // long as the condition held. Auth mirrors /api/cron/tells-monitors.
-// ⚠️ ONLY the exports Next.js allows in a route module. The alert key and the
-// message formatter live in lib/reporting/tracking-gap.ts — an extra export here
-// fails `next build`.
+// The alert key, message formatter, and the no-visits predicate live in
+// lib/reporting/tracking-gap.ts rather than here — they're shared with
+// app/api/keitaro/reports/route.ts and the verify scripts, so they belong in
+// lib/, not duplicated into this route module.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
@@ -61,8 +62,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
     // Re-arm stages that recovered, so a stage that regresses after a fix can
     // alert again. Without this the latch is a one-shot for the life of the row.
-    for (const stageId of report.clean_stage_ids) {
-      await clearAlert(db, { alertKey: trackingGapAlertKey(stageId) });
+    for (const { stage_id, org_id } of report.clean_stages) {
+      await clearAlert(db, { alertKey: trackingGapAlertKey(stage_id), orgId: org_id });
     }
     // Stamp AFTER the work, so a run that threw does not look healthy.
     await recordHeartbeat(db, HEARTBEAT_JOBS.trackingMonitors.job_name);

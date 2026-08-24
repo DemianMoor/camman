@@ -52,7 +52,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // Dead-man: this job watches the SWEEPER, never itself. The sweeper returns
   // the favour by watching this job (see lib/sends/tells-sweep.ts) — so if
   // either stops running, the other says so.
-  const heartbeats = await checkHeartbeats(db, [HEARTBEAT_JOBS.tellsSweep]);
+  //
+  // Also watches the Keitaro tracking-gap monitor (hourly, no other watcher —
+  // see HEARTBEAT_JOBS.trackingMonitors in lib/reporting/cron-heartbeat.ts).
+  // Piggybacking here rather than adding a new hourly route: this job already
+  // runs on that cadence.
+  const heartbeats = await checkHeartbeats(db, [
+    HEARTBEAT_JOBS.tellsSweep,
+    HEARTBEAT_JOBS.trackingMonitors,
+  ]);
   const allBreaches = [...report.breaches, ...heartbeatBreaches(heartbeats)];
 
   if (bearerMatches && allBreaches.length > 0) {

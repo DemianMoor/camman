@@ -17,7 +17,7 @@ async function main() {
 
   console.log(
     `evaluated ${report.stages_evaluated} stage(s) in ${ms}ms — ` +
-      `${report.breaches.length} breach(es), ${report.clean_stage_ids.length} clean`,
+      `${report.breaches.length} breach(es), ${report.clean_stages.length} clean`,
   );
   console.log(
     `thresholds: >=${report.min_human_clicks} human clicks, ` +

@@ -49,6 +49,26 @@ export const TRACKING_GAP_MATURITY_HOURS = 6;
 // Bounds the scan and stops long-dead stages re-alerting forever.
 export const TRACKING_GAP_WINDOW_DAYS = 7;
 
+/**
+ * Whether Keitaro recorded NO landing-page visits at all for a stage.
+ *
+ * ⚠️ BOTH COLUMNS, ALWAYS. `visit_clicks_raw` is a superset of
+ * `visit_clicks_clean` (no row in the table has clean > raw), so testing clean
+ * alone treats "Keitaro saw visits, none of them unique" as a tracking
+ * blackout. Measured 2026-08-24 over the Overview's default 7-day range: of 58
+ * stages that a clean-only test would flag, 56 had raw > 0 — the marker would
+ * have been wrong 96.6% of the time.
+ *
+ * This is the SHARED definition. The alert (runTrackingGapMonitor — via the
+ * SQL CASE in the query below, kept as SQL rather than calling out to this
+ * function because it runs inside a single statement, not JS; the two must be
+ * edited together) and the display fallback (app/api/keitaro/reports) both key
+ * off it, so they cannot disagree about what "no Keitaro visits" means.
+ */
+export function hasNoKeitaroVisits(visitClicksRaw: number, visitClicksClean: number): boolean {
+  return visitClicksRaw === 0 && visitClicksClean === 0;
+}
+
 // The rule, extracted so it is testable without a database.
 //
 // ⚠️ VISITS ARE THE ONLY KEITARO SIGNAL. Redirects are reported in the alert for
@@ -57,6 +77,11 @@ export const TRACKING_GAP_WINDOW_DAYS = 7;
 // visits, 51 redirects) and both stages of campaign 926 — all of which are the
 // same defect. A redirect is fired downstream of the LP and can land even when
 // the visit script never runs.
+//
+// `visits` here is `visits_raw + visits_clean` (see the query below). Summing
+// is safe ONLY as a zero-test — neither column is ever negative, so
+// `visits === 0` is exactly `hasNoKeitaroVisits(raw, clean)`. Both functions
+// express the same "no Keitaro visits" rule; keep them in sync.
 export function trackingGapBreached(humanClicks: number, visits: number): boolean {
   return visits === 0 && humanClicks >= TRACKING_GAP_MIN_HUMAN_CLICKS;
 }
@@ -81,8 +106,13 @@ export interface TrackingGapReport {
   min_human_clicks: number;
   stages_evaluated: number;
   breaches: TrackingGapBreach[];
-  /** Evaluated and NOT breaching — the caller clears these stages' latches. */
-  clean_stage_ids: number[];
+  /**
+   * Evaluated and NOT breaching — the caller clears these stages' latches.
+   * Carries org_id alongside stage_id because clearAlert() must scope the
+   * clear to the stage's own org (see notifyOnTransition's orgId above, which
+   * every breach already carries).
+   */
+  clean_stages: { stage_id: number; org_id: string }[];
 }
 
 interface GapRow {
@@ -111,7 +141,10 @@ interface GapRow {
 // from `redirect_clicks_clean` ALONE. raw ⊇ clean — they overlap — so summing
 // them for the reported figure double-counts (152 instead of the correct 51 on
 // stage 3029). The sum is only safe as a zero-test, and even there the explicit
-// form says what it means.
+// form says what it means. The CASE's both-zero test below IS
+// hasNoKeitaroVisits(k.visits_raw, k.visits_clean) — written out in SQL because
+// it runs inside this query, not JS. If that function's rule ever changes, this
+// CASE must change with it, and vice versa.
 // `opts.orgId` scopes the query to a single org. The cron path (bearer auth)
 // deliberately omits it — it must watch every org. The human session path
 // must pass its own org: without this, a signed-in `viewer` in any org (the
@@ -161,6 +194,7 @@ export async function runTrackingGapMonitor(
            (coalesce(k.visits_raw, 0) + coalesce(k.visits_clean, 0)) AS visits,
            coalesce(k.redirects, 0) AS redirects,
            coalesce(cm.human_clicks, 0) AS human_clicks,
+           -- both-zero test = hasNoKeitaroVisits(); see the comment above this query.
            CASE WHEN coalesce(k.visits_raw, 0) = 0
                  AND coalesce(k.visits_clean, 0) = 0
                  AND coalesce(cm.human_clicks, 0) >= ${TRACKING_GAP_MIN_HUMAN_CLICKS}
@@ -179,7 +213,7 @@ export async function runTrackingGapMonitor(
   `)) as unknown as GapRow[];
 
   const breaches: TrackingGapBreach[] = [];
-  const clean_stage_ids: number[] = [];
+  const clean_stages: { stage_id: number; org_id: string }[] = [];
 
   for (const r of rows) {
     const humanClicks = Number(r.human_clicks ?? 0);
@@ -196,7 +230,7 @@ export async function runTrackingGapMonitor(
         destination_url: r.destination_url,
       });
     } else {
-      clean_stage_ids.push(Number(r.stage_id));
+      clean_stages.push({ stage_id: Number(r.stage_id), org_id: r.org_id });
     }
   }
 
@@ -206,7 +240,7 @@ export async function runTrackingGapMonitor(
     min_human_clicks: TRACKING_GAP_MIN_HUMAN_CLICKS,
     stages_evaluated: rows.length,
     breaches,
-    clean_stage_ids,
+    clean_stages,
   };
 }
 

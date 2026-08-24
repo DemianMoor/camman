@@ -36,7 +36,7 @@ async function main() {
   const live = await runTrackingGapMonitor(db);
   console.log(
     `  evaluated ${live.stages_evaluated} stage(s): ` +
-      `${live.breaches.length} breaching, ${live.clean_stage_ids.length} clean`,
+      `${live.breaches.length} breaching, ${live.clean_stages.length} clean`,
   );
   for (const b of live.breaches) {
     console.log(
@@ -189,9 +189,16 @@ async function main() {
         gap?.destination_url === "https://verify.example/lp",
         "SQL path: resolves the landing-page URL for a breaching stage",
       );
+      const healthyClean = after.clean_stages.find((c) => c.stage_id === healthyStage);
       ok(
-        after.clean_stage_ids.includes(healthyStage),
+        healthyClean !== undefined,
         "SQL path: the healthy stage is returned as clean, so its latch gets re-armed",
+      );
+      ok(
+        healthyClean?.org_id === org_id,
+        "⭐ SQL path: the clean-stage record carries the stage's own org_id " +
+          "(clearAlert must scope the clear to it, or the alert_state row's " +
+          "org_id gets stamped NULL on every clear)",
       );
       ok(
         before.stages_evaluated + 2 === after.stages_evaluated,

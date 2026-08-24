@@ -128,18 +128,36 @@ sends succeed, DLRs arrive, and redirects may keep landing.
 
 **Detection.** `/api/cron/tracking-monitors` (hourly) reports any tracked stage
 sent 6h–7d ago with zero Keitaro visits and ≥25 CamMan human clicks. Latched per
-stage through `alert_state`, so it alerts once per stage and re-arms if the stage
-recovers. Rule and thresholds: [lib/reporting/tracking-gap.ts](../../lib/reporting/tracking-gap.ts).
+stage through `alert_state` (org-scoped — `clearAlert` passes the stage's own
+`org_id`, so the latch row's org never goes stale-NULL), so it alerts once per
+stage and re-arms if the stage recovers. Watched by `/api/cron/tells-monitors`
+(also hourly; see `HEARTBEAT_JOBS.trackingMonitors`) — a dead-man check for the
+monitor job itself. Rule and thresholds: [lib/reporting/tracking-gap.ts](../../lib/reporting/tracking-gap.ts).
 
 Visits gate the alert; redirects are reported for context but never gate it — a
 redirect fires downstream of the landing page and can land even when the visit
 script never runs.
 
+**"Zero Keitaro visits" means BOTH columns.** `hasNoKeitaroVisits(visitClicksRaw,
+visitClicksClean)` in [lib/reporting/tracking-gap.ts](../../lib/reporting/tracking-gap.ts)
+is the one shared definition — `visit_clicks_raw` is a superset of
+`visit_clicks_clean` (no row in the table has clean > raw), so testing clean
+alone treats "Keitaro saw visits, none of them unique" as a blackout. Both the
+alert above and the display fallback below call it (the alert via an equivalent
+SQL `CASE`, kept as SQL for its own query), so they cannot disagree about what
+"no visits" means. Measured 2026-08-24: a clean-only test would have marked 58
+Overview stages over the default 7-day range; 56 of those had `raw > 0` — the
+script had fired, just with no unique visits.
+
 **Display fallback.** The Overview tab substitutes CamMan's `counted_clickers`
-for a tracked stage whose `visit_clicks_clean` is 0, marks it with `*`, and
-renders `—` for the rates that divide by the missing denominator. Read-time only
-— nothing is written to `keitaro_stage_results`, so the next Keitaro poll cannot
-fight it and the substitution self-retires when visits resume. Applied in
+for a tracked stage with no Keitaro visits (`hasNoKeitaroVisits`, above) and
+`counted_clickers > 0`, marks it with `*`, and renders `—` for `click_rate` and
+`redirect_rate` — not because both divide by the missing denominator (only
+`redirect_rate` does; `click_rate`'s denominator is `total_sent` and the
+substitute is its numerator), but because both would mix a Keitaro basis with a
+CamMan one in the same rate. Read-time only — nothing is written to
+`keitaro_stage_results`, so the next Keitaro poll cannot fight it and the
+substitution self-retires when visits resume. Applied in
 [app/api/keitaro/reports/route.ts](../../app/api/keitaro/reports/route.ts) at
 stage grain, before the campaign rollup.
 

@@ -159,7 +159,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       const stages = (await db.execute(sql`
         SELECT s.id AS stage_id, s.window_start_min, s.window_end_min,
                s.creative_id, s.stop_text, s.short_url, s.landing_page_id,
-               s.tracking_id AS stage_tracking_id,
+               s.tracking_id AS stage_tracking_id, s.full_url,
                cr.text AS creative_text,
                lp.kind AS lp_kind, lp.slug AS lp_slug,
                lp.external_url AS lp_external_url, lp.status AS lp_status
@@ -174,6 +174,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       `)) as unknown as (StageWindow & {
         stage_id: number; creative_id: number | null; stop_text: string | null;
         short_url: string | null; landing_page_id: number | null; creative_text: string | null;
+        full_url: string | null;
         stage_tracking_id: string | null;
         lp_kind: string | null; lp_slug: string | null;
         lp_external_url: string | null; lp_status: string | null;
@@ -285,6 +286,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
               campaignTrackingId: head.campaign_tracking_id,
               stageTrackingId: stage.stage_tracking_id,
               brandLandingHost: head.brand_landing_host,
+              handEditedUrl: stage.full_url,
               landingPage: {
                 id: stage.landing_page_id,
                 kind: stage.lp_kind,

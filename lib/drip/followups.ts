@@ -60,6 +60,7 @@ interface CandidateRow {
   child_creative_id: number | null;
   child_stop_text: string | null;
   child_tracking_id: string | null;
+  child_full_url: string | null;
   lp_id: number | null;
   lp_kind: string | null;
   lp_slug: string | null;
@@ -114,6 +115,7 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
                ch.drip_followup_minutes AS child_minutes,
                cr.text AS child_creative_text, ch.creative_id AS child_creative_id,
                ch.stop_text AS child_stop_text, ch.tracking_id AS child_tracking_id,
+               ch.full_url AS child_full_url,
                lp.id AS lp_id, lp.kind AS lp_kind, lp.slug AS lp_slug,
                lp.external_url AS lp_external_url, lp.status AS lp_status,
                COALESCE(bt.tier, 0) AS tier,
@@ -231,6 +233,7 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
             brandName: r.brand_name ?? "",
             brandId: r.brand_id,
             brandLandingHost: r.brand_landing_host,
+            handEditedUrl: r.child_full_url,
             campaignTrackingId: r.campaign_tracking_id,
             stageTrackingId: r.child_tracking_id,
             providerPhoneId: number.provider_phone_id,

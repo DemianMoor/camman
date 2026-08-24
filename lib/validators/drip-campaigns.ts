@@ -2,6 +2,9 @@ import { z } from "zod";
 
 import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { DEMOGRAPHIC_FILTERS } from "@/lib/drip/routing-eval";
+// Shared with the campaign editor so the dropdown can never offer a value the
+// validator rejects (or omit one it accepts).
+import { AGE_BANDS, GENDERS, INCOME_BANDS } from "@/lib/drip/demographics";
 
 // Drip campaign config validators (Drip Phase 4).
 //
@@ -11,9 +14,7 @@ import { DEMOGRAPHIC_FILTERS } from "@/lib/drip/routing-eval";
 // the campaign would look narrower than it is. One list, both sides, the same
 // discipline segment rule types use.
 
-const INCOME_BANDS = ["lt_25k", "25k_50k", "50k_75k", "75k_100k", "100k_150k", "gte_150k"] as const;
-const AGE_BANDS = ["18_24", "25_34", "35_44", "45_54", "55_64", "65_plus"] as const;
-const GENDERS = ["male", "female", "other"] as const;
+
 
 // Each filter is a LIST of accepted values (or a boolean for the yes/no ones).
 // A list rather than a scalar because "TX or FL" is the common case and encoding

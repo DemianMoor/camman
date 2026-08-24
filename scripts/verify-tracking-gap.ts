@@ -24,6 +24,8 @@ import {
   TRACKING_GAP_MIN_HUMAN_CLICKS,
 } from "@/lib/reporting/tracking-gap";
 
+const ROLLBACK = Symbol("rollback");
+
 let fail = 0;
 function ok(cond: boolean, label: string) {
   console.log(`  ${cond ? "✓" : "✗"} ${label}`);
@@ -223,10 +225,10 @@ async function main() {
       }
 
       // Nothing above is meant to persist.
-      throw new Error("__ROLLBACK__");
+      throw ROLLBACK;
     });
   } catch (err) {
-    if (!(err instanceof Error) || err.message !== "__ROLLBACK__") throw err;
+    if (err !== ROLLBACK) throw err;
     console.log("\n  (transaction rolled back — nothing written)");
   }
 

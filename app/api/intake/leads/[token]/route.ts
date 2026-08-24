@@ -78,8 +78,48 @@ export async function POST(
     // State-transition gated: fires once when the condition starts, then stays
     // silent while it persists. Threshold, not first failure — a single typo
     // during partner onboarding is not worth a page.
-    if (failures >= 5) {
-      void notifyOnTransition(db, {
+    //
+    // ⚠️ ATTEMPTS ARE DECOUPLED FROM REQUEST RATE, DELIBERATELY.
+    //
+    // The latch is now claimed on DELIVERY, so a PENDING alert re-claims on
+    // every call until a send succeeds. That is the right retry for the seven
+    // cron callers. This one is per-request and pre-rate-limit (consume() runs
+    // ~90 lines below), and recordAuthFailure is uncapped — so `failures >= 5`
+    // would call notifyOnTransition on EVERY bad-secret request for the rest of
+    // the day. While pending, every one of those sends.
+    //
+    // Worst shape is a feedback loop: a burst produces Telegram 429s, 429 is
+    // not-delivered, nothing stamps, the row stays pending, the next wave all
+    // claims again — drowning the channel every other monitor shares. And the
+    // trigger condition (a leaked or rotated secret being hammered) is exactly
+    // when that burst happens.
+    //
+    // Firing on the threshold and then every hundredth failure keeps the retry
+    // (the next hundredth re-claims a pending row) while making attempts a
+    // function of failure COUNT, not request RATE.
+    if (failures === 5 || failures % 100 === 0) {
+      // Awaited: the latch is now claimed on DELIVERY (see alert-state.ts), so
+      // suppression depends on a second statement that runs AFTER the network
+      // call to Telegram. Fire-and-forget on a serverless invocation that may
+      // freeze after the response would leave the row pending and let the next
+      // failed request re-send. This path already awaits recordAuthFailure
+      // above, so this is consistent.
+      //
+      // ⚠️ COST, STATED IN MESSAGES, NOT ONLY MILLISECONDS. Once the alert is
+      // DELIVERED the claim is refused in one statement with no network call,
+      // so the latency is nil and nothing sends. But while it is PENDING — a
+      // prior send failed, or Telegram is unreachable — EVERY call that reaches
+      // this branch re-claims and SENDS, paying the full 4s AbortSignal.timeout
+      // before returning its 401. Latency-wise that only affects requests
+      // already being rejected; message-wise it is not free — an attacker (or
+      // a partner hammering a rotated secret) controls how many of those
+      // deliveries happen, at up to one Telegram message per qualifying
+      // request, into a channel every other monitor also posts to. The gate
+      // above (`failures === 5 || failures % 100 === 0`) is what bounds that:
+      // attempts scale with failure COUNT, not with request RATE, so the
+      // per-request amplification this comment used to wave away cannot
+      // happen.
+      await notifyOnTransition(db, {
         alertKey: `intake:auth_fail:${key.id}`,
         orgId: key.org_id,
         text:

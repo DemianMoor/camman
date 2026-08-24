@@ -130,7 +130,11 @@ sends succeed, DLRs arrive, and redirects may keep landing.
 sent 6h–7d ago with zero Keitaro visits and ≥25 CamMan human clicks. Latched per
 stage through `alert_state` (org-scoped — `clearAlert` passes the stage's own
 `org_id`, so the latch row's org never goes stale-NULL), so it alerts once per
-stage and re-arms if the stage recovers. Watched by `/api/cron/tells-monitors`
+DELIVERED breach per stage and re-arms if the stage recovers. The latch is
+claimed on confirmed delivery, not on detection — if a send fails, the row
+stays pending and the next hourly tick re-claims and re-sends, so more than one
+message for the same breach is possible ([lib/alerts/alert-state.ts](../../lib/alerts/alert-state.ts)).
+Watched by `/api/cron/tells-monitors`
 (also hourly; see `HEARTBEAT_JOBS.trackingMonitors`) — a dead-man check for the
 monitor job itself. Rule and thresholds: [lib/reporting/tracking-gap.ts](../../lib/reporting/tracking-gap.ts).
 

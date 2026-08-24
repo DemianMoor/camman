@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-08-22_
+_Last updated: 2026-08-24_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -361,6 +361,13 @@ Raw capture for partner-submitted leads. **Nothing consumes these tables yet** �
 | `lead_inbox` | PK(`id`), partial UNIQUE(`partner_key_id`,`dedup_key`) `WHERE dedup_key IS NOT NULL` | The raw payload in `raw` JSONB, plus addressing columns (`phone_e164`, `interest_tag`, `sandbox`). `normalized` stays NULL until Phase 3. `status` ∈ `received`/`processed`/`rejected`/`landline`/`duplicate`; index `(status, received_at)` is the worker's queue scan. `partner_slug` is denormalized and the FK is **ON DELETE RESTRICT** so provenance survives a rename and a key with leads cannot be deleted. RLS + SELECT-only org policy |
 | `partner_key_usage` | PK(`partner_key_id`,`window_kind`,`window_start`) | Rate-limit counters. **Units differ by `window_kind`**: `sec` counts REQUESTS, `day` counts LEADS, `auth_fail` counts failed secret checks on a resolved token. `day`/`auth_fail` windows start at the **ET** calendar day. RLS + SELECT-only org policy |
 | `alert_state` | PK(`alert_key`) | Generic state-transition gate for alerts (`ok`/`firing`). **Infra table: RLS on, NO policies**, same posture as `cron_locks`/`geoip_cache` |
+
+> **⚠️ `alert_state.last_notified_at` is the DELIVERY marker, not a detection timestamp.**
+> `state='firing' AND last_notified_at IS NULL` means *breach recorded, notification not yet
+> delivered* — the next tick retries the send. It is stamped only after Telegram confirms
+> receipt. No schema change was needed to introduce this: the column already existed, nothing
+> reads it, and the previous code always stamped it on transition, so no historical row can sit
+> in the pending state and be misread. See [lib/alerts/alert-state.ts](../lib/alerts/alert-state.ts).
 
 > **⚠️ `dedup_key` is nullable by design.** The key is `(partner_key_id, phone, received_minute)` and phone is exactly what a malformed payload lacks; `NOT NULL` would make such a lead impossible to insert, rejecting the leads most worth capturing. Phone-less leads are stored with `status='rejected'` and a populated `error`.
 

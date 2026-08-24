@@ -245,21 +245,32 @@ async function main() {
         VALUES (${orgId}, ${k.id}, 'fortnight', now(), 1)`, "23514");
 
       // ── alert_state ─────────────────────────────────────────────────────
+      // Mirrors the real claim in lib/alerts/alert-state.ts's transitionAlert,
+      // not a simplified stand-in: `last_notified_at` is never set by this
+      // probe (it stays NULL, the same as a send that hasn't yet been
+      // confirmed delivered), so the second disjunct below matches every time
+      // and the row is pending, not latched — a bad-secret probe never stamps
+      // delivery, only a real send does.
       console.log("\nalert_state transition gating:");
       const trans = (await tx.execute(sql`
         INSERT INTO alert_state (alert_key, org_id, state)
         VALUES ('probe:auth_fail', ${orgId}, 'firing')
         ON CONFLICT (alert_key) DO UPDATE SET state = 'firing'
-          WHERE alert_state.state <> 'firing'
+          WHERE alert_state.state <> 'firing' OR alert_state.last_notified_at IS NULL
         RETURNING alert_key`)) as unknown as { alert_key: string }[];
       check("first transition into firing ⇒ notifies (row returned)", trans.length, 1);
       const again = (await tx.execute(sql`
         INSERT INTO alert_state (alert_key, org_id, state)
         VALUES ('probe:auth_fail', ${orgId}, 'firing')
         ON CONFLICT (alert_key) DO UPDATE SET state = 'firing'
-          WHERE alert_state.state <> 'firing'
+          WHERE alert_state.state <> 'firing' OR alert_state.last_notified_at IS NULL
         RETURNING alert_key`)) as unknown as { alert_key: string }[];
-      check("⭐ still firing ⇒ SILENT (no row) — this is the gating", again.length, 0);
+      check(
+        "⭐ still firing but PENDING (never stamped delivered) ⇒ RE-CLAIMS (row returned) " +
+          "— this is the real gating; see lib/alerts/alert-state.ts",
+        again.length,
+        1,
+      );
 
       await expectReject(tx, "unknown alert state ⇒ rejected", sql`
         INSERT INTO alert_state (alert_key, state) VALUES ('probe:x','melting')`, "23514");

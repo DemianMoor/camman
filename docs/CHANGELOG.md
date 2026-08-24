@@ -1526,4 +1526,26 @@ Follow-ups go through the SAME send path as first-sends via a new shared
 `drain.ts` remains unmodified.
   - docs updated: docs/07-conventions.md, docs/04-features/drip-campaigns-routing.md
 
+## 2026-08-24 - Migration 0170: extra params allowed after sub_id3 on /lp/ URLs
+
+`link_destinations_landing_url_shape` (0094, widened in 0111) was anchored so a
+brand /lp/ destination could carry EXACTLY ONE parameter. That made an
+operator-added UTM impossible: the stage saved happily and every lead was then
+skipped at mint with `invalid_destination`, hours later.
+
+The constraint now requires the FIRST parameter to be `sub_id3=<[A-Za-z0-9_]+>`
+and permits further `&key=value` pairs after it. Nothing else was relaxed - the
+slug class still has no underscore and the value class still has no `%`, so every
+defect 0094 exists for is still caught: the id concatenated into the path, an
+empty sub_id3, the `subid3=sub_id3` placeholder, a missing sub_id3, and
+percent-encoded artifacts. It additionally requires sub_id3 to come FIRST.
+
+Stays `NOT VALID`, exactly as before.
+
+`validateBrandLpShape` AND `GUIDEKN_DEST_RE` were widened in step - leaving the
+guidekn regex anchored would have meant the same feature behaved differently per
+brand. The test now mirrors the DB cases one for one, so changing either side
+without the other goes red.
+  - docs updated: docs/07-conventions.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

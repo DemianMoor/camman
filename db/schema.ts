@@ -4047,6 +4047,16 @@ export const partner_keys = pgTable(
     created_by: uuid("created_by"),
     rotated_at: timestamp("rotated_at", { withTimezone: true }),
     last_seen_at: timestamp("last_seen_at", { withTimezone: true }),
+    // Drip P7 — the partner's signed report link. Opaque token, HASHED at rest
+    // exactly like secret_hash: the plaintext is shown once and is
+    // unrecoverable, so a database read cannot yield a working report link.
+    // NULL = no link issued (the safe default).
+    report_token_hash: text("report_token_hash"),
+    report_token_issued_at: timestamp("report_token_issued_at", { withTimezone: true }),
+    /** NULL = no expiry. Checked on every request, so shortening it is immediate. */
+    report_token_expires_at: timestamp("report_token_expires_at", { withTimezone: true }),
+    /** Revenue is our margin, not the partner's number — opt-in per key (R2). */
+    report_show_revenue: boolean("report_show_revenue").notNull().default(false),
   },
   (table) => [
     uniqueIndex("partner_keys_token_uniq").on(table.token),
@@ -4275,13 +4285,24 @@ export const lead_intake_daily = pgTable(
     duplicate: integer("duplicate").notNull().default(0),
     sandbox: integer("sandbox").notNull().default(0),
     lookups_spent: integer("lookups_spent").notNull().default(0),
+    // Drip P7. The RESOLVED interest tag -- what routing will actually match on,
+    // not what the payload supplied. A report keyed on the supplied tag would
+    // not explain where the leads went.
+    //
+    // '' NOT NULL for "no tag resolved": NULL never equals NULL in a unique
+    // index, so a nullable PK column would let duplicate untagged rows pile up
+    // silently and every count would read low.
+    interest_tag: text("interest_tag").notNull().default(""),
   },
   (table) => [
     primaryKey({
       name: "lead_intake_daily_pk",
-      columns: [table.partner_key_id, table.day_et],
+      columns: [table.org_id, table.partner_key_id, table.day_et, table.interest_tag],
     }),
     index("lead_intake_daily_org_day_idx").on(table.org_id, table.day_et.desc()),
+    index("lead_intake_daily_org_partner_tag_day_idx").on(
+      table.org_id, table.partner_key_id, table.interest_tag, table.day_et.desc(),
+    ),
     check(
       "lead_intake_daily_nonneg_check",
       sql`${table.received} >= 0 AND ${table.mobile} >= 0 AND ${table.voip} >= 0

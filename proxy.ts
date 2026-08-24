@@ -71,6 +71,21 @@ export const config = {
     // refresh. Excluding them drops a redundant getUser() round-trip per API
     // call. The middleware's redirect logic only targets page prefixes
     // (PROTECTED_PREFIXES / AUTH_PAGE_PREFIXES), none of which live under /api.
-    "/((?!_next/static|_next/image|_next/data|favicon.ico|r/|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|woff|woff2|ttf)$).*)",
+    // `partner-report/` is excluded so the PUBLIC signed-link report (Drip P7,
+    // app/partner-report/[token]) renders without a session. Without it the
+    // middleware 307s that page to /login before it ever routes.
+    //
+    // ⚠️ EXACT PATH SEGMENT, deliberately: the TRAILING SLASH is load-bearing.
+    // Without it, a bare `partner` also excludes `/partners`, `/partner-keys`
+    // and `/partner-reports` from the middleware entirely — no session refresh,
+    // no redirect — silently and with nothing failing.
+    //
+    // ⚠️ This lookahead is ANCHORED AT THE PATH ROOT, so an exclusion can only
+    // ever affect TOP-LEVEL paths; `/settings/partners` is unreachable from
+    // here either way. Don't reason about it by eye —
+    // scripts/test-public-route-scope.ts diffs this matcher against the one on
+    // origin/main across every real page route and asserts that `partner-report/`
+    // is the ONLY path that changed behaviour.
+    "/((?!_next/static|_next/image|_next/data|favicon.ico|r/|partner-report/|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|woff|woff2|ttf)$).*)",
   ],
 };

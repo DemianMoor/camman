@@ -9,7 +9,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { JourneyFunnel } from "@/components/drip/journey-funnel";
 import { toastApiError } from "@/lib/api/toast-error";
+import type { DripFunnel } from "@/lib/drip/funnel";
 import { formatCampaignDateTime, utcToCampaignLocalInput, campaignLocalInputToUtcIso }
   from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
@@ -74,12 +76,13 @@ type Journey = {
 export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; canEdit: boolean }) {
   const cfgApi = useApiCall<Config>();
   const saveApi = useApiCall<unknown>();
-  const journeysApi = useApiCall<{ data: Journey[] }>();
+  const journeysApi = useApiCall<{ data: Journey[]; funnel: DripFunnel }>();
   const numbersApi = useApiCall<{ selected: DripNumber[]; available: DripNumber[] }>();
   const saveNumbersApi = useApiCall<unknown>();
 
   const [cfg, setCfg] = useState<Config | null>(null);
   const [journeys, setJourneys] = useState<Journey[]>([]);
+  const [funnel, setFunnel] = useState<DripFunnel | null>(null);
   const [behavioralOn, setBehavioralOn] = useState(false);
   const [followupParents, setFollowupParents] = useState<FollowupParent[]>([]);
   const [selectedNumbers, setSelectedNumbers] = useState<DripNumber[]>([]);
@@ -118,7 +121,10 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
   useEffect(() => {
     (async () => {
       const r = await loadJ(`/api/campaigns/${campaignId}/drip-journeys`);
-      if (r.ok) setJourneys(r.data.data);
+      if (r.ok) {
+        setJourneys(r.data.data);
+        setFunnel(r.data.funnel);
+      }
     })();
   }, [loadJ, campaignId, tick]);
 
@@ -474,6 +480,13 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
           )}
         </CardContent>
       </Card>
+
+      {funnel && (
+        <div>
+          <h3 className="mb-3 text-sm font-medium">Journey funnel</h3>
+          <JourneyFunnel funnel={funnel} />
+        </div>
+      )}
 
       <div>
         <div className="mb-2 flex items-center gap-2">

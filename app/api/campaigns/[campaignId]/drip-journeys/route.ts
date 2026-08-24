@@ -4,9 +4,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { getDripFunnel } from "@/lib/drip/funnel";
 import { can } from "@/lib/permissions";
 
-// Recent journeys for one drip campaign (Drip Phase 4).
+// Recent journeys for one drip campaign (Drip Phase 4), plus the journey funnel
+// (Drip Phase 7). One round trip for the panel rather than two.
 export const dynamic = "force-dynamic";
 
 export async function GET(
@@ -33,5 +35,6 @@ export async function GET(
     ORDER BY j.routed_at DESC
     LIMIT 50
   `);
-  return NextResponse.json({ data });
+  const funnel = await getDripFunnel(orgId, cid);
+  return NextResponse.json({ data, funnel });
 }

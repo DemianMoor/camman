@@ -120,7 +120,13 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
   // ⚠️ Kept PER PARTNER KEY, not as one flat list. lead_intake_daily's key is
   // (partner_key_id, day_et), so attributing spend by org would either update
   // the wrong partner's row or none at all when a batch spans two partners.
-  const toEnqueue = { orgId: "", byKey: new Map<number, string[]>() };
+  // ⚠️ KEYED BY PARTNER **AND TAG** (Drip P7). The report is per partner x tag,
+  // so bucketing by partner alone would put every lookup under "(untagged)" and
+  // show zero lookup cost against the tagged rows an invoice is built from.
+  const toEnqueue = {
+    orgId: "",
+    byKey: new Map<string, { partnerKeyId: number; tag: string; phones: string[] }>(),
+  };
 
   await db.transaction(async (tx) => {
     // Claim: 'received' (pass 1) and 'awaiting_lookup' whose result has landed
@@ -174,6 +180,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
           WHERE id = ${row.id}`);
         await bumpIntakeCounters(tx, {
           orgId, partnerKeyId: row.partner_key_id, day,
+          interestTag: row.interest_tag,
           deltas: row.sandbox ? { sandbox: 1 } : { received: 1, rejected: 1 },
         });
         res.rejected++;
@@ -202,9 +209,12 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
           continue;
         }
         allowance--;
-        const bucket = toEnqueue.byKey.get(row.partner_key_id) ?? [];
-        bucket.push(row.phone_e164);
-        toEnqueue.byKey.set(row.partner_key_id, bucket);
+        const bkey = `${row.partner_key_id} ${(row.interest_tag ?? "").trim()}`;
+        const bucket =
+          toEnqueue.byKey.get(bkey) ??
+          { partnerKeyId: row.partner_key_id, tag: (row.interest_tag ?? "").trim(), phones: [] };
+        bucket.phones.push(row.phone_e164);
+        toEnqueue.byKey.set(bkey, bucket);
         await tx.execute(sql`
           UPDATE lead_inbox SET status='awaiting_lookup',
                  normalized=${JSON.stringify(normalized)}::jsonb
@@ -225,6 +235,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
       if (lineType === "landline") {
         await bumpIntakeCounters(tx, {
           orgId, partnerKeyId: row.partner_key_id, day,
+          interestTag: row.interest_tag,
           deltas: { received: 1, landline: 1 },
         });
         // Counted, THEN removed — same transaction, so there is no window in
@@ -296,6 +307,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
 
       await bumpIntakeCounters(tx, {
         orgId, partnerKeyId: row.partner_key_id, day,
+        interestTag: row.interest_tag,
         deltas: row.sandbox
           ? { sandbox: 1 }
           : { received: 1, [counterForLineType(lineType)]: 1 },
@@ -308,7 +320,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
   // ahead of bulk uploads in the account-global queue (migration 0158); every
   // existing caller stays at the default 0, so their relative order is
   // unchanged.
-  const allPhones = [...toEnqueue.byKey.values()].flat();
+  const allPhones = [...toEnqueue.byKey.values()].flatMap((b) => b.phones);
   if (allPhones.length > 0) {
     await enqueueNormalized(toEnqueue.orgId, allPhones, "drip_intake");
 
@@ -322,12 +334,13 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
     // Telnyx calls actually made, attributed to the partner that caused them.
     // Cache hits never reach here, which is why this counts calls and not leads.
     const day = etDay(now);
-    for (const [partnerKeyId, phones] of toEnqueue.byKey) {
+    for (const b of toEnqueue.byKey.values()) {
       await bumpIntakeCounters(db, {
         orgId: toEnqueue.orgId,
-        partnerKeyId,
+        partnerKeyId: b.partnerKeyId,
         day,
-        deltas: { lookups_spent: phones.length },
+        interestTag: b.tag,
+        deltas: { lookups_spent: b.phones.length },
       });
     }
   }

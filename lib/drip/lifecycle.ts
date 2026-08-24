@@ -192,6 +192,38 @@ export async function closeCompletedJourneys(
 }
 
 /**
+ * The Ignored lane fired ⇒ the journey ends, unengaged (Drip P7, ruling R4).
+ *
+ * ⚠️ CALLED IN THE SAME TRANSACTION AS THE LANE SEND, deliberately. The Ignored
+ * lane is the last thing this contact will ever be sent: they did not click, did
+ * not reach the offer, did not buy, and the tier is high-water so they can never
+ * drop into a lower lane. Closing in a separate pass would leave a window where
+ * the journey is live with nothing owed — and would hold the contact's
+ * one-live-journey slot against a campaign that has nothing left to say to them.
+ *
+ * ⚠️ `unengaged` IS A DISTINCT REASON, not a flavour of `all_stages_sent`. Both
+ * land in `completed`, but they answer different questions: all_stages_sent
+ * means the sequence ran to the end for someone who engaged, unengaged means it
+ * ended because nobody was listening. The funnel groups on
+ * (state, close_reason) precisely so those two do not merge into one bar.
+ *
+ * ⚠️ DOES NOT CANCEL PENDING SENDS, unlike closeJourneyOnOptOut — the send that
+ * triggered this close is itself pending dispatch. Cancelling here would cancel
+ * the very message whose firing is the reason we are closing.
+ */
+export async function closeJourneyUnengaged(
+  tx: DripTx,
+  { orgId, journeyId }: { orgId: string; journeyId: string },
+): Promise<CloseResult> {
+  return close(
+    tx,
+    "completed",
+    "unengaged",
+    sql`j.org_id = ${orgId}::uuid AND j.id = ${journeyId}::uuid`,
+  );
+}
+
+/**
  * Past the campaign's end_at ⇒ expire, but only once follow-ups have finished.
  *
  * ⚠️ END_AT ALREADY STOPS FIRST-SENDS — routing-eval refuses a lead whose

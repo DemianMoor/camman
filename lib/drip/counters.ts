@@ -47,11 +47,19 @@ export async function bumpIntakeCounters(
     orgId,
     partnerKeyId,
     day,
+    interestTag,
     deltas,
   }: {
     orgId: string;
     partnerKeyId: number;
     day: string;
+    /**
+     * The RESOLVED tag (Drip P7) — what routing will actually match on, not what
+     * the payload supplied. `null`/absent becomes '' ("untagged"), which is a
+     * real value that conflicts with itself: a NULL here would make every
+     * untagged row a fresh PK and silently under-count.
+     */
+    interestTag?: string | null;
     deltas: Partial<Record<CounterColumn, number>>;
   },
 ): Promise<void> {
@@ -72,9 +80,10 @@ export async function bumpIntakeCounters(
   );
 
   await dbc.execute(sql`
-    INSERT INTO lead_intake_daily (org_id, partner_key_id, day_et, ${sql.join(cols, sql`, `)})
-    VALUES (${orgId}::uuid, ${partnerKeyId}, ${day}::date, ${sql.join(vals, sql`, `)})
-    ON CONFLICT (partner_key_id, day_et)
+    INSERT INTO lead_intake_daily (org_id, partner_key_id, day_et, interest_tag, ${sql.join(cols, sql`, `)})
+    VALUES (${orgId}::uuid, ${partnerKeyId}, ${day}::date, ${(interestTag ?? "").trim()},
+            ${sql.join(vals, sql`, `)})
+    ON CONFLICT (org_id, partner_key_id, day_et, interest_tag)
     DO UPDATE SET ${sql.join(sets, sql`, `)}
   `);
 }

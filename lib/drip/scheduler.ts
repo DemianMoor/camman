@@ -8,6 +8,10 @@ import { getDescriptor } from "@/lib/sends/providers/registry";
 import { optOutGateSubject, resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import { isDripPostureOn } from "./in-use";
+
+/** Either the pooled client or an open transaction — the stamp needs the SAME
+ *  connection as the stage_sends insert, so callers pass their `tx`. */
+type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 import { numbersWithHeadroom, pickNumber, reportExhaustion } from "./numbers";
 import { etMinutesOfDay, pickStage, type StageWindow } from "./windows";
 
@@ -255,6 +259,11 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
               RETURNING id
             `)) as unknown as { id: string }[];
 
+            await stampDripStageDrainable(tx, {
+              stageId: stage.stage_id,
+              orgId,
+            });
+
             await tx.execute(sql`
               UPDATE drip_journeys
               SET state = 'active', first_send_at = now(),
@@ -298,4 +307,46 @@ async function notifyDailyCapNear(
       `⚠️ Drip campaign "${name ?? campaignId}" has used ${today}/${cap} of today's send cap ` +
       `(${Math.round((today / cap) * 100)}%). Leads beyond the cap wait for the next ET day.`,
   });
+}
+
+// ── stamp the stage drainable (Drip P5, ruling C) ───────────
+//
+// The drain requires send_approved = true AND materialized_at IS NOT
+// NULL AND (sent_at IS NOT NULL OR scheduled_at <= now()). Nothing
+// else in the drip path writes those, so without this the rows
+// inserted just above would sit 'pending' for ever.
+//
+// ⚠️ THIS IS WHERE DRIP'S HUMAN APPROVAL LIVES. For a regular stage
+// send_approved is a person pressing approve. A drip stage has no
+// such moment -- leads arrive unattended -- so the approval is the
+// three deliberate acts that had to happen before this line could
+// run: drip_active on the stage, posture on for the org, and the
+// campaign moved to active. `drip_active IS TRUE` in the WHERE is
+// what keeps that bargain: this statement can NEVER approve a
+// regular stage, whatever else goes wrong upstream.
+//
+// ⚠️ TWO-WRITER HAZARD ON sent_at. campaign_stages.sent_at is also
+// written by the "Mark as sent" status action, and the scheduled-send
+// path uses it as a fire-lock -- stamping it out from under that path
+// once silently cancelled a scheduled send. Hence COALESCE, never a
+// bare assignment: this only ever fills a NULL, so whichever writer
+// arrives first wins and neither can erase the other. The trailing
+// predicate makes the second pass a true no-op rather than a
+// same-value rewrite.
+export async function stampDripStageDrainable(
+  tx: DripTx,
+  { stageId, orgId }: { stageId: number; orgId: string },
+) {
+  await tx.execute(sql`
+    UPDATE campaign_stages
+    SET send_approved  = true,
+        materialized_at = COALESCE(materialized_at, now()),
+        sent_at         = COALESCE(sent_at, now())
+    WHERE id = ${stageId}
+      AND org_id = ${orgId}::uuid
+      AND drip_active IS TRUE
+      AND (send_approved IS NOT TRUE
+           OR materialized_at IS NULL
+           OR sent_at IS NULL)
+  `);
 }

@@ -1141,6 +1141,76 @@ Fix: re-declare the field on the update schema without the default (`.extend({ s
 
 Applied when `keitaro_stage_results.epc` was dropped (2026-08-11): the write was removed from [`lib/keitaro/poll.ts`](../lib/keitaro/poll.ts) and deployed first, a full poll cycle was confirmed, and only then was the column dropped. Snapshot the data first — a drop is unrecoverable and an export costs nothing (`docs/snapshots/`).
 
+## Verifying a surface means ROUND-TRIP, not render
+
+A UI or API change is verified when a value **posted through the real route comes
+back from a fresh read**. Neither of the two cheaper checks is evidence:
+
+- **That the component renders** proves the code is reachable. It says nothing
+  about whether the value it produces is stored. (The earlier trap — a control
+  put in dead render code — is the reachability half of the same lesson, and
+  passing it does not discharge this one.)
+- **The POST response body** is built from the same in-memory object the insert
+  was built from, so it happily echoes a field that was never written.
+
+This is not hypothetical. Drip stage windows shipped uncreatable: the validator
+accepted `window_start_min` / `window_end_min` / `drip_active`, the multi-row
+guard checked them, and the route answered **201** — while Drizzle's `.values()`
+literal, which writes exactly the keys it is handed, omitted all three. Postgres
+was never asked to store them and so had nothing to reject. The scheduler selects
+`WHERE drip_active IS TRUE`, so no stage created through the product was ever
+visible to it. A DB-level test would have passed against the broken route,
+because the database was never the broken part.
+
+**Consequences:**
+
+1. Any route that writes through an explicit column literal needs a test that
+   POSTs and then GETs. See
+   [scripts/test-stage-post-roundtrip.ts](../scripts/test-stage-post-roundtrip.ts).
+2. When adding a field, grep for every write literal in the route — the validator
+   and the guard are not the write. `PATCH` and `POST` are separate literals and
+   have already diverged once: PATCH persisted the windows while POST dropped
+   them, so the feature appeared to work for anyone who edited a stage twice.
+3. A guard whose input can never be populated is **vacuously green**. The window
+   overlap/touch check could not fire, because no sibling ever stored a window.
+
+## A campaign type that cannot satisfy the launch gate cannot launch
+
+`campaigns.type = 'drip'` is exempt from the contact-group requirement in **both**
+the create validator and the `draft → active` status route, and a drip activation
+skips `snapshotAudience` entirely (its frozen count is `0`, which is correct —
+the audience arrives later as leads, and `campaign_audience_pool` stays empty for
+that campaign forever).
+
+Without the exemption the type was uncreatable in its launched form and could
+never reach `active` — which routing, the scheduler **and** the drain all require.
+It was shipped and merged in that state because every test either synthesized
+rows directly or asserted that *regular* campaigns were unaffected. Nothing tried
+to drive the new type through the product.
+
+**The exemption is a positive read, never an inverse** (R13): only `type === 'drip'`
+skips. NULL, absent, or a future value keeps today's requirement, so a campaign
+this build cannot classify can never activate with no audience.
+
+## Drip's "human approved this send" is three deliberate acts, not a button
+
+A regular stage sends because a person pressed approve (`send_approved`). A drip
+stage has no such moment — leads arrive unattended — so the scheduler stamps
+`send_approved` / `materialized_at` / `sent_at` itself, in the same transaction
+as the first `stage_sends` insert. The approval it stands in for is the three
+things a human had to do first: set `drip_active` on the stage, turn on org
+posture, and move the campaign to `active`.
+
+`AND drip_active IS TRUE` in that statement's `WHERE` is what keeps the bargain —
+it can never approve a regular stage, whatever goes wrong upstream.
+
+⚠️ **`sent_at` is filled with `COALESCE`, never assigned.** That column has two
+other writers (the "Mark as sent" status action, and the scheduled-send path which
+uses it as a fire-lock — stamping it out from under that path once silently
+cancelled a scheduled send). Filling only a NULL means whichever writer arrives
+first wins and neither can erase the other. The statement also carries a trailing
+predicate so a second pass is a true no-op rather than a same-value rewrite.
+
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.
 - The live DB's `segment_rules` CHECK contents — discrepancy #2.

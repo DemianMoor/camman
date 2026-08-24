@@ -1389,4 +1389,101 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 - `daily_cap` relabelled from "not yet enforced" to live, now that the scheduler enforces it.
   — docs updated: docs/04-features/drip-campaigns-routing.md, docs/07-conventions.md
 
+## 2026-08-24 — Drip Phase 5: the three defects that made drip campaigns unrunnable
+
+Found while executing the production send proof. Each independently blocked the
+whole feature; all three were merged and deployed in the broken state.
+
+- **A — a drip campaign could not reach `status='active'`.** Both the create
+  validator and the `draft → active` route demanded ≥1 contact group, which the
+  type can never have, while routing, the scheduler and the drain all require
+  `active`. Now type-gated on a positive `'drip'` read (NULL/unknown keeps today's
+  behaviour), and a drip activation skips `snapshotAudience` — its frozen count
+  is `0` by design.
+- **B — `POST /api/campaigns/[id]/stages` silently dropped
+  `window_start_min` / `window_end_min` / `drip_active`.** Validator accepted them,
+  guard checked them, route answered 201, columns stored NULL: the Drizzle
+  `.values()` literal never listed them. The scheduler selects
+  `WHERE drip_active IS TRUE`, so no stage made through the product was visible to
+  it — and the overlap/touch guard was vacuously green, since no sibling ever
+  stored a window. PATCH had persisted them all along, so the bug hid from anyone
+  who edited a stage twice.
+- **C — nothing stamped a drip stage drainable.** `send_approved` /
+  `materialized_at` / `sent_at` appeared in `lib/drip/` only in two comments
+  describing the shape. The scheduler now stamps them idempotently in the same
+  transaction as the first `stage_sends` insert, guarded by `drip_active IS TRUE`
+  so it can never approve a regular stage, and filling `sent_at` with `COALESCE`
+  because that column has two other writers.
+
+Pinned by [scripts/test-drip-activation-and-stamp.ts](../scripts/test-drip-activation-and-stamp.ts)
+(launch-gate direction; stamp idempotence, regular-stage safety, `sent_at`
+preservation — in a rolled-back probe) and
+[scripts/test-stage-post-roundtrip.ts](../scripts/test-stage-post-roundtrip.ts)
+(POST → GET through the deployed route; verified RED against the unfixed
+production before the fix).
+  — docs updated: docs/07-conventions.md, docs/04-features/drip-campaigns-routing.md
+
+## 2026-08-24 — Drip Phase 5: per-lead link minting (defect D)
+
+Found by inspecting the first real drip message before it dispatched. The
+scheduler rendered with `linkUrl: stage.short_url` — a static column, NULL on
+every drip stage — so the SMS was brand + creative + footer with **no link**, and
+`stage_sends.link_id` was NULL: no `/r/`, no click, no Keitaro attribution, and
+copy that ends in a colon and stops. The P5 card specified "per-lead render **+
+mint**"; only the render half existed.
+
+- New [lib/drip/mint.ts](../lib/drip/mint.ts): resolves the destination from the
+  stage's landing page + the campaign brand's `landing_host` (via the shared
+  `buildLandingPageUrl`), picks the short domain via the shared
+  `resolveShortDomainForSend`, and mints one link per lead with `mintLink`.
+- **Fails closed per lead.** Any unresolvable component ⇒ the lead is skipped with
+  a logged reason and no send; its journey stays `routed` for the next tick.
+- Mint, render, opt-out gate, `stage_sends` insert, stage stamp and journey update
+  now share ONE transaction, so a refusal can leave neither an orphan link nor a
+  linkless message. The gate now judges the text that will actually ship.
+- New `mintRefused` counter on the scheduler result.
+- Documented that `link_destinations_landing_url_shape` hardcodes the three brand
+  landing hosts — a new brand host must be added to that CHECK.
+  — docs updated: docs/07-conventions.md, docs/04-features/drip-campaigns-routing.md
+
+## 2026-08-24 — Drip: STOP-keyword regex corrupted by a scripted patch (fix + class guard)
+
+A patch meant to write `/STOP/i` wrote two literal BACKSPACE bytes instead.
+`tsc` and lint were clean and the line looked right on every review surface, but
+the regex could never match, so the drip opt-out gate refused every txr lead —
+failing closed, so nothing wrong was sent and nothing at all was sent.
+
+- The predicate is now exported as `bodyCarriesStop` and tested on real bodies,
+  including that "stopped snacking" must NOT count as opt-out language.
+- [scripts/test-stop-keyword-guard.ts](../scripts/test-stop-keyword-guard.ts) also
+  scans all 968 source files for C0 control characters — the only check that can
+  see this class.
+  — docs updated: docs/07-conventions.md
+
+## 2026-08-24 — Drip UI defects from hands-on review (3 fixes + a dev-server blocker)
+
+- **Drip campaign form showed contact groups as required.** A drip campaign can
+  never have one, so Activate stayed disabled behind a hint naming a field the
+  type does not use. Selecting Drip now REMOVES segments, contact groups, the
+  audience cap, status filters, carrier filter and the audience-preview panel,
+  and renders the drip audience block instead (interest tag required, partner,
+  dates, three caps, priority, demographic filters). Regular is untouched.
+  The block is shared with the campaign page's drip panel — one definition.
+- **Dropdown text overlapped across campaign and stage screens.** Root cause was
+  `w-fit` on the shared `SelectTrigger`: the trigger grew to its content instead
+  of being bounded by its grid cell. Fixed in the primitive (`max-w-full`,
+  `min-w-0`, value clamps, items truncate) plus `min-w-0` on `FormItem`, so every
+  dropdown in the app is fixed rather than the reported ones only.
+- **The stage editor had TWO destination fields** — "Sales page" (legacy) and
+  "Landing page" (new) — with no stated rule for which won. Merged into one
+  **Destination** picker: landing pages (with the constructed `/lp/` URL preview),
+  external URLs, and legacy sales pages, grouped. One selection drives both stored
+  columns; a stage whose legacy label is no longer on the offer still renders as
+  its own option rather than showing an empty picker and clearing itself on save.
+- **`next dev` could not start at all** (pre-existing on main): `app/api/offers/[id]`
+  and `app/api/offers/[offerId]` are two slug names at one path. `next build`
+  tolerated it, so production was green while nobody could run the app locally.
+  Renamed to `[offerId]` per the parent/child convention — URLs unchanged.
+  — docs updated: docs/07-conventions.md, docs/screenshots/
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

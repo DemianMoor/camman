@@ -125,3 +125,20 @@ export function optOutGateSubject(opts: {
   if (!known) return { subject: "", verifiable: false };
   return { subject: known, verifiable: true };
 }
+
+/**
+ * Does this text carry a standalone STOP keyword?
+ *
+ * ⚠️ EXPORTED SO IT CAN BE TESTED. It was inline in the drip scheduler, where a
+ * patch silently replaced the two `\b` word boundaries with literal BACKSPACE
+ * characters (0x08). The line still compiled, still read correctly on screen and
+ * in a diff, and the regex could never match — so the gate refused every txr
+ * lead. It failed closed, so nothing wrong was sent; nothing at all was sent
+ * either, and the counters were the only visible symptom.
+ *
+ * ⚠️ THE WORD BOUNDARIES ARE LOAD-BEARING: "stopped snacking" is a real creative
+ * opening and must NOT count as opt-out language.
+ */
+export function bodyCarriesStop(subject: string): boolean {
+  return /\bSTOP\b/i.test(subject);
+}

@@ -11,7 +11,13 @@ import { OfferPicker } from "@/components/offers/offer-picker";
 import { SegmentPicker } from "@/components/segments/segment-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { campaignLocalInputToUtcIso } from "@/lib/campaign-timezone";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DripAudienceFields,
+  EMPTY_DRIP_AUDIENCE,
+  type DripAudienceValue,
+} from "./drip-audience-fields";
 import { CopyableId } from "@/components/ui/copyable-id";
 import {
   Form,
@@ -248,6 +254,7 @@ function Inner({
 
   const createApi = useApiCall<{ id: number; audience_snapshot_count: number }>();
   const activateApi = useApiCall<{ id: number; audience_snapshot_count: number }>();
+  const dripConfigApi = useApiCall<{ ok: boolean }>();
   const updateApi = useApiCall<{ id: number }>();
 
   // Campaign type, chosen at CREATE only (Drip Phase 4). Lives HERE, in the
@@ -260,6 +267,8 @@ function Inner({
   // separate table. Defaults 'regular', the same fail-toward-existing-behaviour
   // direction the column default takes.
   const [campaignType, setCampaignType] = useState<"regular" | "drip">("regular");
+  const [dripAudience, setDripAudience] =
+    useState<DripAudienceValue>(EMPTY_DRIP_AUDIENCE);
 
   function goBack() {
     if (isEdit && campaignId) {
@@ -269,7 +278,55 @@ function Inner({
     }
   }
 
+  // ⚠️ THE DRIP CONFIG IS A SECOND WRITE, AND IT MUST NOT BE SILENT.
+  // `POST /api/campaigns` does not accept drip settings — they live in their own
+  // 1:1 table behind PUT drip-config. If that second call fails, the campaign
+  // exists with NO interest tag and would route nothing, so the operator is told
+  // and sent to the campaign page to finish, rather than seeing a plain success
+  // toast for a campaign that cannot work.
+  async function persistDripConfig(campaignId: number): Promise<boolean> {
+    const num = (v: string) => {
+      const t = v.trim();
+      if (!t) return null;
+      const n = Number(t);
+      return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+    };
+    const r = await dripConfigApi.execute(`/api/campaigns/${campaignId}/drip-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        interest_tag: dripAudience.interest_tag.trim(),
+        partner_key_id: dripAudience.partner_key_id,
+        start_at: dripAudience.start_at
+          ? campaignLocalInputToUtcIso(dripAudience.start_at)
+          : null,
+        end_at: dripAudience.end_at ? campaignLocalInputToUtcIso(dripAudience.end_at) : null,
+        daily_cap: num(dripAudience.daily_cap),
+        campaign_cap: num(dripAudience.campaign_cap),
+        routing_daily_admission_cap: num(dripAudience.routing_daily_admission_cap),
+        priority: num(dripAudience.priority) ?? 100,
+        filters: dripAudience.filters,
+      }),
+    });
+    if (!r.ok) {
+      toastApiError(r, "Campaign saved, but its drip settings did not");
+      return false;
+    }
+    return true;
+  }
+
+  /** Interest tag is the one drip field routing cannot work without. */
+  function dripBlockedReason(): string | null {
+    if (campaignType !== "drip") return null;
+    return dripAudience.interest_tag.trim() ? null : "An interest tag is required.";
+  }
+
   async function handleCreateDraft(values: CampaignFormValues) {
+    const blocked = dripBlockedReason();
+    if (blocked) {
+      toast.error(blocked);
+      return;
+    }
     const result = await createApi.execute("/api/campaigns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -279,11 +336,17 @@ function Inner({
       toastApiError(result, "Couldn't save draft");
       return;
     }
+    if (campaignType === "drip") await persistDripConfig(result.data.id);
     toast.success("Draft saved");
     router.push(`/campaigns/${result.data.id}`);
   }
 
   async function handleCreateActivate(values: CampaignFormValues) {
+    const blocked = dripBlockedReason();
+    if (blocked) {
+      toast.error(blocked);
+      return;
+    }
     const result = await activateApi.execute("/api/campaigns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -293,8 +356,15 @@ function Inner({
       toastApiError(result, "Couldn't activate campaign");
       return;
     }
-    const count = result.data.audience_snapshot_count.toLocaleString();
-    toast.success(`Campaign activated — ${count} contacts in audience pool`);
+    if (campaignType === "drip") {
+      await persistDripConfig(result.data.id);
+      // A drip campaign freezes no pool, so quoting a contact count here would
+      // report 0 as though something went wrong.
+      toast.success("Drip campaign activated — leads will be routed as they arrive");
+    } else {
+      const count = result.data.audience_snapshot_count.toLocaleString();
+      toast.success(`Campaign activated — ${count} contacts in audience pool`);
+    }
     router.push(`/campaigns/${result.data.id}`);
   }
 
@@ -324,6 +394,7 @@ function Inner({
   }
 
   const state = useCampaignFormState({
+    campaignType,
     mode,
     initialValues,
     currentStatus,
@@ -478,10 +549,17 @@ function Inner({
               campaignType={campaignType}
               setCampaignType={setCampaignType}
             />
-            <AudienceCard state={state} />
+            <AudienceCard
+              state={state}
+              campaignType={campaignType}
+              dripAudience={dripAudience}
+              setDripAudience={setDripAudience}
+            />
           </div>
           <aside className="grid gap-3">
-            <AudienceCompositionPanel state={state} />
+            {campaignType === "regular" ? (
+              <AudienceCompositionPanel state={state} />
+            ) : null}
             <NotesCard state={state} />
             {!isEdit && activateBlockedReason ? (
               <p className="text-xs text-muted-foreground">
@@ -577,7 +655,7 @@ function SetupCard({
               </div>
               <p className="text-muted-foreground text-xs">
                 {campaignType === "drip"
-                  ? "Processes leads as they arrive from partners. Its drip settings are configured on the campaign page after saving. Cannot be changed later."
+                  ? "Processes leads as they arrive from partners. Set its routing below. Cannot be changed later."
                   : "Sends to a frozen audience snapshot. Cannot be changed later."}
               </p>
             </FormItem>
@@ -957,7 +1035,17 @@ function SetupCard({
 
 // =============== Audience card ===============
 
-function AudienceCard({ state }: { state: CampaignFormState }) {
+function AudienceCard({
+  state,
+  campaignType,
+  dripAudience,
+  setDripAudience,
+}: {
+  state: CampaignFormState;
+  campaignType: "regular" | "drip";
+  dripAudience: DripAudienceValue;
+  setDripAudience: (v: DripAudienceValue) => void;
+}) {
   const {
     form,
     segments,
@@ -988,6 +1076,28 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
         </CardTitle>
       </CardHeader>
       <CardContent className="grid gap-3 p-4">
+        {/* ⚠️ A DRIP CAMPAIGN'S AUDIENCE IS NOT A SET — it is leads arriving and
+            being routed. Segments, contact groups, the status filters and the
+            audience cap all describe a frozen snapshot this type never takes, so
+            they are REMOVED here, not disabled: a greyed-out "Contact groups"
+            marked required on a type that can never have one reads as a broken
+            form, which is exactly what the hands-on review reported. The regular
+            branch below is untouched. */}
+        {campaignType === "drip" ? (
+          <>
+            <p className="text-muted-foreground text-xs">
+              Leads arrive from partners and are routed to this campaign when
+              they match the tag and filters below. There is no contact list to
+              choose — the audience builds itself over time.
+            </p>
+            <DripAudienceFields
+              value={dripAudience}
+              onChange={setDripAudience}
+              disabled={anySubmitting}
+            />
+          </>
+        ) : (
+          <>
         {audienceLocked ? (
           <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs dark:border-amber-900 dark:bg-amber-950/40">
             <Lock
@@ -1205,6 +1315,8 @@ function AudienceCard({ state }: { state: CampaignFormState }) {
             audience is empty.
           </p>
         </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );

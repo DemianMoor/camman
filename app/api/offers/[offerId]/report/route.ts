@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ offerId: string }> },
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -22,7 +22,7 @@ export async function GET(
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
-  const { id } = await params;
+  const { offerId: id } = await params;
   const offerId = Number(id);
   if (!Number.isInteger(offerId) || offerId <= 0) {
     return apiError(400, "Invalid offer id", API_ERROR_CODES.VALIDATION, { field: "id" });

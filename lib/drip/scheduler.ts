@@ -1,13 +1,38 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
+
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { getDescriptor } from "@/lib/sends/providers/registry";
-import { optOutGateSubject, resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
+import {
+  bodyCarriesStop,
+  optOutGateSubject,
+  resolveOptOutFooter,
+} from "@/lib/sends/opt-out-footer";
 import { buildStageSms } from "@/lib/sends/stage-sms";
+import { mintDripLeadLink } from "./mint";
 import { isDripPostureOn } from "./in-use";
+
+/** Rolls back the mint transaction when a component cannot be resolved, so a
+ *  refusal skips ONE lead instead of aborting the batch. */
+/** Rolls back the send transaction when the opt-out footer cannot be verified. */
+class GateRefused extends Error {}
+
+class MintRefused extends Error {
+  constructor(
+    readonly reason: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Either the pooled client or an open transaction — the stamp needs the SAME
+ *  connection as the stage_sends insert, so callers pass their `tx`. */
+type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 import { numbersWithHeadroom, pickNumber, reportExhaustion } from "./numbers";
 import { etMinutesOfDay, pickStage, type StageWindow } from "./windows";
 
@@ -43,6 +68,8 @@ export interface SchedulerResult {
   inserted: number;
   waitingForWindow: number;
   gateRefused: number;
+  /** Leads skipped because their tracked link could not be minted (ruling D). */
+  mintRefused: number;
   capBlocked: number;
   numbersExhausted: number;
   pausedSkipped: number;
@@ -61,12 +88,15 @@ interface DueRow {
   campaign_paused: boolean;
   drip_paused: boolean;
   link_mode: string;
+  brand_id: number | null;
+  campaign_tracking_id: string | null;
+  brand_landing_host: string | null;
 }
 
 export async function runDripSchedulerBatch(now: Date = new Date()): Promise<SchedulerResult> {
   const res: SchedulerResult = {
     postureOn: false, considered: 0, inserted: 0, waitingForWindow: 0,
-    gateRefused: 0, capBlocked: 0, numbersExhausted: 0, pausedSkipped: 0,
+    gateRefused: 0, mintRefused: 0, capBlocked: 0, numbersExhausted: 0, pausedSkipped: 0,
   };
 
   const orgs = (await db.execute(sql`
@@ -88,6 +118,8 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
              false AS drip_paused,
              ct.phone_number AS phone,
              b.name AS brand_name,
+             c.brand_id, c.tracking_id AS campaign_tracking_id,
+             b.landing_host AS brand_landing_host,
              cfg.daily_cap, cfg.campaign_cap
       FROM drip_journeys j
       JOIN campaigns c  ON c.id = j.campaign_id
@@ -127,9 +159,14 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       const stages = (await db.execute(sql`
         SELECT s.id AS stage_id, s.window_start_min, s.window_end_min,
                s.creative_id, s.stop_text, s.short_url, s.landing_page_id,
-               cr.text AS creative_text
+               s.tracking_id AS stage_tracking_id,
+               cr.text AS creative_text,
+               lp.kind AS lp_kind, lp.slug AS lp_slug,
+               lp.external_url AS lp_external_url, lp.status AS lp_status
         FROM campaign_stages s
         LEFT JOIN creatives cr ON cr.id = s.creative_id
+        LEFT JOIN offer_landing_pages lp
+               ON lp.id = s.landing_page_id AND lp.org_id = s.org_id
         WHERE s.campaign_id = ${campaignId}
           AND s.drip_active IS TRUE
           AND s.archived_at IS NULL
@@ -137,6 +174,9 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       `)) as unknown as (StageWindow & {
         stage_id: number; creative_id: number | null; stop_text: string | null;
         short_url: string | null; landing_page_id: number | null; creative_text: string | null;
+        stage_tracking_id: string | null;
+        lp_kind: string | null; lp_slug: string | null;
+        lp_external_url: string | null; lp_status: string | null;
       })[];
       if (stages.length === 0) continue;
 
@@ -218,42 +258,77 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
           providerAppendsOwnOptOut: descriptor?.appendsOwnOptOut === true,
         });
 
-        const body = buildStageSms({
-          brandName: head.brand_name ?? "",
-          creativeText: stage.creative_text,
-          linkUrl: stage.short_url,
-          stopText: footer.text,
-        });
-
-        // ⭐ THE GATE, PER MESSAGE, FAILING CLOSED.
-        const gate = optOutGateSubject({
-          renderedBody: body,
-          resolved: footer,
-          providerKnownAppendedText: descriptor?.defaultOptOutFooter ?? null,
-        });
-        const hasStop = /\bSTOP\b/i.test(gate.subject);
-        if (!gate.verifiable || (!hasStop && pr?.adapter_code === "txr")) {
-          // Refuse THIS lead only. Its journey stays 'routed', so a fix to the
-          // creative or the footer is picked up on the next tick.
-          console.error(
-            `[drip-scheduler] opt-out gate REFUSED lead ${lead.journey_id} ` +
-              `(campaign ${campaignId}, stage ${stage.stage_id}, provider ${pr?.adapter_code ?? "?"}): ` +
-              `${!gate.verifiable ? "footer unverifiable" : "no STOP in rendered body"}`,
-          );
-          res.gateRefused++;
-          continue;
-        }
-
+        // ⭐ ONE LINK PER LEAD, MINTED BEFORE THE BODY EXISTS (ruling D).
+        // The rendered text cannot be built until the link code is known, and
+        // the link cannot be minted without the destination, so resolution and
+        // minting happen here rather than reading a static column. The mint
+        // shares its transaction with the stage_sends insert below, so a failure
+        // at any point leaves neither an orphan link nor a linkless message.
+        // ⭐ ONE TRANSACTION: MINT, RENDER, GATE, INSERT, STAMP, JOURNEY.
+        // The body cannot be built before the link code exists, and the gate
+        // must judge the text that will ACTUALLY be sent, so all of it lives
+        // inside one transaction. Any refusal rolls the whole thing back --
+        // no orphan link for a message that was never sent, and no message
+        // without its link.
+        const sendToken = randomUUID();
         try {
           await db.transaction(async (tx) => {
+            const r = await mintDripLeadLink(tx, {
+              orgId,
+              campaignId,
+              stageId: stage.stage_id,
+              contactId: lead.contact_id,
+              creativeId: stage.creative_id,
+              brandId: head.brand_id,
+              providerPhoneId: number.provider_phone_id,
+              sendToken,
+              campaignTrackingId: head.campaign_tracking_id,
+              stageTrackingId: stage.stage_tracking_id,
+              brandLandingHost: head.brand_landing_host,
+              landingPage: {
+                id: stage.landing_page_id,
+                kind: stage.lp_kind,
+                slug: stage.lp_slug,
+                external_url: stage.lp_external_url,
+                status: stage.lp_status,
+              },
+            });
+            if (!r.ok) throw new MintRefused(r.reason, r.message);
+
+            const body = buildStageSms({
+              brandName: head.brand_name ?? "",
+              creativeText: stage.creative_text!,
+              linkUrl: r.linkUrl,
+              stopText: footer.text,
+            });
+
+            // ⭐ THE GATE, PER MESSAGE, ON THE FINAL TEXT.
+            const gate = optOutGateSubject({
+              renderedBody: body,
+              resolved: footer,
+              providerKnownAppendedText: descriptor?.defaultOptOutFooter ?? null,
+            });
+            const hasStop = bodyCarriesStop(gate.subject);
+            if (!gate.verifiable || (!hasStop && pr?.adapter_code === "txr")) {
+              throw new GateRefused(
+                !gate.verifiable ? "footer unverifiable" : "no STOP in rendered body",
+              );
+            }
+
+            // id = sendToken so the row and its link share one identity, the
+            // same pairing kickoff uses; link_id is what makes the /r/ click
+            // resolvable back to this exact message.
             const ins = (await tx.execute(sql`
               INSERT INTO stage_sends
-                (org_id, campaign_id, stage_id, contact_id, phone, provider_phone_id,
-                 rendered_text, status, created_at)
-              VALUES (${orgId}::uuid, ${campaignId}, ${stage.stage_id}, ${lead.contact_id}::uuid,
-                      ${lead.phone}, ${number.provider_phone_id}, ${body}, 'pending', now())
+                (id, org_id, campaign_id, stage_id, contact_id, phone, provider_phone_id,
+                 link_id, rendered_text, status, created_at)
+              VALUES (${sendToken}::uuid, ${orgId}::uuid, ${campaignId}, ${stage.stage_id},
+                      ${lead.contact_id}::uuid, ${lead.phone}, ${number.provider_phone_id},
+                      ${r.linkId}, ${body}, 'pending', now())
               RETURNING id
             `)) as unknown as { id: string }[];
+
+            await stampDripStageDrainable(tx, { stageId: stage.stage_id, orgId });
 
             await tx.execute(sql`
               UPDATE drip_journeys
@@ -265,6 +340,26 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
           res.inserted++;
           todayCount++;
         } catch (e) {
+          // ⚠️ FAIL CLOSED, ONE LEAD AT A TIME. Every refusal below leaves the
+          // journey 'routed', so fixing the configuration lets the next tick
+          // pick this lead up unchanged — nothing is lost, nothing half-sent.
+          if (e instanceof MintRefused) {
+            console.error(
+              `[drip-scheduler] MINT REFUSED lead ${lead.journey_id} ` +
+                `(campaign ${campaignId}, stage ${stage.stage_id}): ${e.reason} — ${e.message}`,
+            );
+            res.mintRefused++;
+            continue;
+          }
+          if (e instanceof GateRefused) {
+            console.error(
+              `[drip-scheduler] opt-out gate REFUSED lead ${lead.journey_id} ` +
+                `(campaign ${campaignId}, stage ${stage.stage_id}, ` +
+                `provider ${pr?.adapter_code ?? "?"}): ${e.message}`,
+            );
+            res.gateRefused++;
+            continue;
+          }
           const code = (e as { cause?: { code?: string } })?.cause?.code;
           // 23505 = the (stage, contact) dedup index. Another tick beat us.
           if (code !== "23505") throw e;
@@ -298,4 +393,46 @@ async function notifyDailyCapNear(
       `⚠️ Drip campaign "${name ?? campaignId}" has used ${today}/${cap} of today's send cap ` +
       `(${Math.round((today / cap) * 100)}%). Leads beyond the cap wait for the next ET day.`,
   });
+}
+
+// ── stamp the stage drainable (Drip P5, ruling C) ───────────
+//
+// The drain requires send_approved = true AND materialized_at IS NOT
+// NULL AND (sent_at IS NOT NULL OR scheduled_at <= now()). Nothing
+// else in the drip path writes those, so without this the rows
+// inserted just above would sit 'pending' for ever.
+//
+// ⚠️ THIS IS WHERE DRIP'S HUMAN APPROVAL LIVES. For a regular stage
+// send_approved is a person pressing approve. A drip stage has no
+// such moment -- leads arrive unattended -- so the approval is the
+// three deliberate acts that had to happen before this line could
+// run: drip_active on the stage, posture on for the org, and the
+// campaign moved to active. `drip_active IS TRUE` in the WHERE is
+// what keeps that bargain: this statement can NEVER approve a
+// regular stage, whatever else goes wrong upstream.
+//
+// ⚠️ TWO-WRITER HAZARD ON sent_at. campaign_stages.sent_at is also
+// written by the "Mark as sent" status action, and the scheduled-send
+// path uses it as a fire-lock -- stamping it out from under that path
+// once silently cancelled a scheduled send. Hence COALESCE, never a
+// bare assignment: this only ever fills a NULL, so whichever writer
+// arrives first wins and neither can erase the other. The trailing
+// predicate makes the second pass a true no-op rather than a
+// same-value rewrite.
+export async function stampDripStageDrainable(
+  tx: DripTx,
+  { stageId, orgId }: { stageId: number; orgId: string },
+) {
+  await tx.execute(sql`
+    UPDATE campaign_stages
+    SET send_approved  = true,
+        materialized_at = COALESCE(materialized_at, now()),
+        sent_at         = COALESCE(sent_at, now())
+    WHERE id = ${stageId}
+      AND org_id = ${orgId}::uuid
+      AND drip_active IS TRUE
+      AND (send_approved IS NOT TRUE
+           OR materialized_at IS NULL
+           OR sent_at IS NULL)
+  `);
 }

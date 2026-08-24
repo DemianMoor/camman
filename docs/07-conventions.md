@@ -1161,6 +1161,176 @@ Fix: re-declare the field on the update schema without the default (`.extend({ s
 
 Applied when `keitaro_stage_results.epc` was dropped (2026-08-11): the write was removed from [`lib/keitaro/poll.ts`](../lib/keitaro/poll.ts) and deployed first, a full poll cycle was confirmed, and only then was the column dropped. Snapshot the data first — a drop is unrecoverable and an export costs nothing (`docs/snapshots/`).
 
+## Verifying a surface means ROUND-TRIP, not render
+
+A UI or API change is verified when a value **posted through the real route comes
+back from a fresh read**. Neither of the two cheaper checks is evidence:
+
+- **That the component renders** proves the code is reachable. It says nothing
+  about whether the value it produces is stored. (The earlier trap — a control
+  put in dead render code — is the reachability half of the same lesson, and
+  passing it does not discharge this one.)
+- **The POST response body** is built from the same in-memory object the insert
+  was built from, so it happily echoes a field that was never written.
+
+This is not hypothetical. Drip stage windows shipped uncreatable: the validator
+accepted `window_start_min` / `window_end_min` / `drip_active`, the multi-row
+guard checked them, and the route answered **201** — while Drizzle's `.values()`
+literal, which writes exactly the keys it is handed, omitted all three. Postgres
+was never asked to store them and so had nothing to reject. The scheduler selects
+`WHERE drip_active IS TRUE`, so no stage created through the product was ever
+visible to it. A DB-level test would have passed against the broken route,
+because the database was never the broken part.
+
+**Consequences:**
+
+1. Any route that writes through an explicit column literal needs a test that
+   POSTs and then GETs. See
+   [scripts/test-stage-post-roundtrip.ts](../scripts/test-stage-post-roundtrip.ts).
+2. When adding a field, grep for every write literal in the route — the validator
+   and the guard are not the write. `PATCH` and `POST` are separate literals and
+   have already diverged once: PATCH persisted the windows while POST dropped
+   them, so the feature appeared to work for anyone who edited a stage twice.
+3. A guard whose input can never be populated is **vacuously green**. The window
+   overlap/touch check could not fire, because no sibling ever stored a window.
+
+## A campaign type that cannot satisfy the launch gate cannot launch
+
+`campaigns.type = 'drip'` is exempt from the contact-group requirement in **both**
+the create validator and the `draft → active` status route, and a drip activation
+skips `snapshotAudience` entirely (its frozen count is `0`, which is correct —
+the audience arrives later as leads, and `campaign_audience_pool` stays empty for
+that campaign forever).
+
+Without the exemption the type was uncreatable in its launched form and could
+never reach `active` — which routing, the scheduler **and** the drain all require.
+It was shipped and merged in that state because every test either synthesized
+rows directly or asserted that *regular* campaigns were unaffected. Nothing tried
+to drive the new type through the product.
+
+**The exemption is a positive read, never an inverse** (R13): only `type === 'drip'`
+skips. NULL, absent, or a future value keeps today's requirement, so a campaign
+this build cannot classify can never activate with no audience.
+
+## Drip's "human approved this send" is three deliberate acts, not a button
+
+A regular stage sends because a person pressed approve (`send_approved`). A drip
+stage has no such moment — leads arrive unattended — so the scheduler stamps
+`send_approved` / `materialized_at` / `sent_at` itself, in the same transaction
+as the first `stage_sends` insert. The approval it stands in for is the three
+things a human had to do first: set `drip_active` on the stage, turn on org
+posture, and move the campaign to `active`.
+
+`AND drip_active IS TRUE` in that statement's `WHERE` is what keeps the bargain —
+it can never approve a regular stage, whatever goes wrong upstream.
+
+⚠️ **`sent_at` is filled with `COALESCE`, never assigned.** That column has two
+other writers (the "Mark as sent" status action, and the scheduled-send path which
+uses it as a fire-lock — stamping it out from under that path once silently
+cancelled a scheduled send). Filling only a NULL means whichever writer arrives
+first wins and neither can erase the other. The statement also carries a trailing
+predicate so a second pass is a true no-op rather than a same-value rewrite.
+
+## A drip send mints its own link, per lead, and fails closed without one
+
+The drip scheduler mints one tracked link per lead inside the SAME transaction as
+the `stage_sends` insert, then renders the body around it. It cannot read a link
+off the stage: `campaign_stages.short_url` is a static column and is NULL on
+every drip stage, which is exactly how drip shipped sending copy that ends in a
+colon and then stops, with `link_id` NULL — no `/r/` redirect, no click, no
+Keitaro attribution, and an unattributable send that was still paid for.
+
+**If any component cannot be resolved — landing page, brand `landing_host`, short
+domain, either tracking ID — the lead is SKIPPED with a logged reason and no
+send.** Its journey stays `routed`, so fixing the configuration lets the next
+tick pick it up unchanged. This mirrors the opt-out gate: a message that cannot
+be built correctly is not a message to send approximately.
+
+Nothing in [lib/drip/mint.ts](../lib/drip/mint.ts) is a second copy of a rule —
+destination construction is `buildLandingPageUrl` (shared with the stage editor's
+preview) and short-domain precedence is `resolveShortDomainForSend` (shared with
+kickoff and the verifier). Two copies of a URL rule means drip and blast sending
+different links from the same configuration.
+
+⚠️ **A test that asserts "a link exists" tests almost nothing** — a link to the
+wrong destination passes it. Resolve the minted code through `link_destinations`
+and compare the URL.
+
+## ⚠️ `link_destinations_landing_url_shape` hardcodes the brand landing hosts
+
+The 0094 CHECK is:
+
+```
+url NOT LIKE '%/lp/%'
+  OR url ~ '^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)/lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$'
+```
+
+The host list is **literal**. A new brand with its own `landing_host` and a
+`kind='slug'` landing page will mint fine right up to the `link_destinations`
+insert and then fail on the constraint — for drip that surfaces as every lead
+being skipped with `invalid_destination`, for a blast as a failed
+materialization. Adding a brand landing host means editing this constraint in the
+same change. (It is `NOT VALID` by design — see the guidekn URL-shape note — so
+altering it does not force a full table scan.)
+
+## A scripted patch can write a control character that every review surface hides
+
+A patch that produced a regex meant to read `/STOP/i` instead wrote two
+literal **BACKSPACE** bytes (0x08) where the escapes belonged. The result:
+
+- `tsc` clean, ESLint clean.
+- The line renders correctly in an editor, in `sed`, in `grep`, and in the GitHub
+  diff — a terminal draws 0x08 as nothing at all.
+- The regex could never match, so the drip opt-out gate refused **every** txr
+  lead. It failed CLOSED, so nothing wrong was sent; nothing at all was sent
+  either, and the only symptom was a counter reading `gateRefused: 1`.
+
+It shipped, deployed, and was only caught because the send that should have
+followed never appeared.
+
+**Two guards, because either alone is weak:**
+
+1. **Behaviour.** Predicates like this belong in an exported function with a test
+   that runs them on real text, not inline in a worker where nothing can reach
+   them. `bodyCarriesStop` in [lib/sends/opt-out-footer.ts](../lib/sends/opt-out-footer.ts).
+2. **Bytes.** [scripts/test-stop-keyword-guard.ts](../scripts/test-stop-keyword-guard.ts)
+   scans every `.ts`/`.tsx` file for C0 control characters (tab/newline/CR
+   excepted). This is the only check that sees the class at all.
+
+**When scripting an edit that contains regex escapes, verify the result with
+`od -c` or `cat -v`, not by reading it back.** Reading it back is exactly the
+check this class defeats. Building the bytes explicitly (`chr(92) + "b"`) is
+safer than relying on nested escaping through a shell heredoc into a language
+literal.
+
+## `next build` passing does not mean `next dev` runs
+
+`app/api/offers/[id]` and `app/api/offers/[offerId]` coexisted on main: two
+different slug names for one dynamic path. **The production build tolerated it
+and deployed green, while `next dev` refused to boot with
+`You cannot use different slug names for the same dynamic path`.** So CI, the
+deploy and the live site were all healthy and the app simply could not be run
+locally — a failure that looks like "my machine is broken" rather than a repo
+defect, and that nothing in the pipeline reports.
+
+Per §8, API routes nesting children under a dynamic parent use
+`[parentEntityId]`. The dynamic segment's NAME is internal — `/api/offers/123/archive`
+is unchanged by the rename — so fixing this is a param-key edit, not an API change.
+
+**If the dev server will not start, check for sibling dynamic segments before
+assuming a local problem.**
+
+## The campaign editor's live component is `campaign-editor-page.tsx`
+
+`components/campaigns/campaign-form.tsx` and `campaign-form-fields.tsx` are DEAD
+render code: `/campaigns/new` and `/campaigns/[id]/edit` both render
+`CampaignEditorPage`, which imports only `CarrierRemovedLines` from the fields
+file and lays out its own `SetupCard` / `AudienceCard` / `AudienceCompositionPanel`.
+Editing the form-fields file changes nothing an operator can see.
+
+⚠️ This has now caught work twice. Trace page → component before editing, and
+confirm with a round-trip in the browser, not by finding a plausible-looking file.
+
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.
 - The live DB's `segment_rules` CHECK contents — discrepancy #2.

@@ -631,6 +631,17 @@ export async function POST(
     sms_provider_id: input.sms_provider_id ?? null,
     provider_phone_id: input.provider_phone_id ?? null,
     landing_page_id: input.landing_page_id ?? null,
+    // ⚠️ THESE THREE MUST BE LISTED HERE OR THEY ARE SILENTLY DISCARDED.
+    // Drizzle's .values() writes exactly the keys it is given; a field the
+    // validator accepts and the guard checks still vanishes if it is missing
+    // from this literal, and the route answers 201 as though it stored it.
+    // That is how drip stages shipped uncreatable: POST returned 201 with
+    // window_start_min NULL, and the scheduler selects WHERE drip_active IS
+    // TRUE, so no stage made through the product was ever visible to it.
+    // A round-trip test (POST then GET) pins this; a render check cannot.
+    window_start_min: input.window_start_min ?? null,
+    window_end_min: input.window_end_min ?? null,
+    drip_active: input.drip_active ?? null,
     sales_page_label: nullIfEmpty(input.sales_page_label),
     short_url: nullIfEmpty(input.short_url),
     // When full_url_auto, full_url is (re)built in the transaction below

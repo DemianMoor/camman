@@ -170,10 +170,22 @@ export const campaignCreateSchema = campaignCreateBaseSchema.superRefine(
         message: "offer_id is required when launching",
       });
     }
+    // ⚠️ A DRIP CAMPAIGN HAS NO CONTACT GROUP, BY CONSTRUCTION. Its audience is
+    // not a set chosen up front; it is leads arriving one at a time and being
+    // routed. Requiring a group here made the type uncreatable in its launched
+    // form -- POST returned "At least one contact group is required when
+    // launching" for the one campaign type that can never supply one.
+    //
+    // ⚠️ DIRECTION (R13): only a POSITIVE read of 'drip' takes the new path. A
+    // type that is NULL, absent, or some future value this build has never heard
+    // of keeps today's requirement. The inverse -- exempting anything not
+    // recognised as 'regular' -- would silently drop the audience check off real
+    // campaigns the day someone adds a third type.
+    const isDrip = data.type === "drip";
     const hasGroups =
       data.audience_contact_group_ids != null &&
       data.audience_contact_group_ids.length > 0;
-    if (!hasGroups) {
+    if (!hasGroups && !isDrip) {
       ctx.addIssue({
         path: ["audience_contact_group_ids"],
         code: z.ZodIssueCode.custom,

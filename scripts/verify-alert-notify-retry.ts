@@ -10,9 +10,15 @@
 // The sender is injected, so no case touches the network or the real Telegram
 // channel.
 //
-// The two load-bearing cases:
-//   CASE 2 — fails if the fix breaks today's latch (a message every tick).
-//   CASE 6 — fails if a retry duplicates (two messages for one breach).
+// The load-bearing cases:
+//   CASE 2  — fails if the fix breaks today's latch (a message every tick).
+//   CASE 6  — fails if a retry duplicates (two messages for one breach).
+//   CASE 11 — fails if the claim's FIRST disjunct (`state <> 'firing'`) is
+//             removed. No other case ever produces a row in state 'ok' with a
+//             non-NULL last_notified_at — the one state that discriminates the
+//             two disjuncts — so without CASE 11, deleting that disjunct is
+//             undetectable and a delivered breach that recurs stays silent
+//             forever.
 import "./_env-preload";
 
 import { sql } from "drizzle-orm";
@@ -66,6 +72,12 @@ async function readRow(tx: Parameters<Parameters<typeof db.transaction>[0]>[0], 
 async function main() {
   console.log("\nSynthesized cases (rolled back)\n");
 
+  // The residue check (CASE 10) must run even if something above throws a
+  // real (non-ROLLBACK) error — otherwise a broken case rethrows, main()
+  // rejects, and the run produces no proof of cleanliness even though the
+  // transaction itself still aborted (so nothing actually leaked). Captured
+  // here instead of rethrown, so CASE 10 always runs; reported after.
+  let caseError: unknown = null;
   try {
     await db.transaction(async (tx) => {
       // ── CASES 1-2: happy path is unchanged ─────────────────────────────
@@ -79,7 +91,7 @@ async function main() {
         ok(s.delivered === 1, "CASE 1: fresh transition sends exactly once");
         ok(afterFirst?.state === "firing", "CASE 1: row is firing");
         ok(
-          afterFirst?.last_notified_at !== null,
+          typeof afterFirst?.last_notified_at === "string",
           "CASE 1: last_notified_at stamped after a confirmed send",
         );
 
@@ -112,7 +124,7 @@ async function main() {
           "⭐⭐ CASE 4: the next tick RETRIES and delivers — this is the whole fix",
         );
         ok(
-          afterRetry?.last_notified_at !== null,
+          typeof afterRetry?.last_notified_at === "string",
           "CASE 4: last_notified_at stamped once the retry succeeded",
         );
         ok(
@@ -144,32 +156,106 @@ async function main() {
         ok(s.delivered === 1, "⭐ CASE 8: breaching again after a clear sends — not stuck");
       }
 
+      // ── CASE 11: pins the FIRST disjunct (`state <> 'firing'`) ─────────
+      // CASE 8's clear happens after a FAILED first send, so last_notified_at
+      // is still NULL when it reaches 'ok' — its re-fire matches EITHER
+      // disjunct and proves nothing about the first one on its own. This
+      // block clears after a SUCCESSFUL delivery instead, so the cleared row
+      // is 'ok' WITH a non-NULL last_notified_at — the state no other case in
+      // this file produces, and the only one where the second disjunct
+      // (`last_notified_at IS NULL`) is false. If `state <> 'firing'` were
+      // deleted from the claim's WHERE, the recurrence below could not claim
+      // and would silently never send again.
+      {
+        const key = "verify:alert_retry:redeliver";
+        const s = fakeSender(0); // first send succeeds
+        const send = s.send;
+
+        await notifyOnTransition(tx, { alertKey: key, text: "breach", send });
+        const afterFirst = await readRow(tx, key);
+        ok(s.delivered === 1, "CASE 11: fresh transition delivers");
+        ok(afterFirst?.state === "firing", "CASE 11: row is firing");
+        ok(
+          typeof afterFirst?.last_notified_at === "string",
+          "CASE 11: last_notified_at stamped after the confirmed send",
+        );
+
+        await clearAlert(tx, { alertKey: key });
+        const cleared = await readRow(tx, key);
+        ok(cleared?.state === "ok", "CASE 11: clearAlert moved it to ok");
+        ok(
+          typeof cleared?.last_notified_at === "string",
+          "⭐ CASE 11: last_notified_at is STILL stamped on the cleared row — the " +
+            "one state no other case creates, and the one that discriminates " +
+            "`state <> 'firing'` from `last_notified_at IS NULL`",
+        );
+
+        await notifyOnTransition(tx, { alertKey: key, text: "breach again", send });
+        const afterRecur = await readRow(tx, key);
+        ok(
+          s.delivered === 2,
+          "⭐⭐ CASE 11: breaching again after a DELIVERED clear sends again — " +
+            "this is exactly what removing `state <> 'firing'` from the claim breaks",
+        );
+        ok(afterRecur?.state === "firing", "CASE 11: row is firing again");
+        // transitionAlert nulls last_notified_at on any transition INTO firing
+        // (prior state 'ok' <> 'firing'), so a non-NULL value here can only
+        // have been written by THIS call's markAlertNotified — i.e. a fresh
+        // stamp from the second delivery, not a leftover from the first.
+        // (Postgres `now()` is fixed for the whole surrounding transaction, so
+        // comparing the two stamps for inequality would not be meaningful.)
+        ok(
+          typeof afterRecur?.last_notified_at === "string",
+          "CASE 11: last_notified_at re-stamped by the recurrence's own delivery",
+        );
+      }
+
       throw ROLLBACK;
     });
   } catch (e) {
-    if (e !== ROLLBACK) throw e;
-    console.log("\n  (transaction rolled back — nothing written)");
+    if (e === ROLLBACK) {
+      console.log("\n  (transaction rolled back — nothing written)");
+    } else {
+      caseError = e;
+    }
   }
 
   // ── CASE 9: the real sender treats unset config as not sent ───────────
-  {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chat = process.env.TELEGRAM_CHAT_ID;
-    delete process.env.TELEGRAM_BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    const delivered = await notifyTelegram("verify: must not send");
-    if (token === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
-    else process.env.TELEGRAM_BOT_TOKEN = token;
-    if (chat === undefined) delete process.env.TELEGRAM_CHAT_ID;
-    else process.env.TELEGRAM_CHAT_ID = chat;
-    ok(delivered === false, "⭐ CASE 9: unset TELEGRAM_* counts as NOT sent");
+  // Skipped if the transaction above threw a real error — nothing after it ran
+  // to leave state worth checking with a live network call, and CASE 10 below
+  // (which DOES still run) is what actually proves no residue was left.
+  if (!caseError) {
+    try {
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const chat = process.env.TELEGRAM_CHAT_ID;
+      delete process.env.TELEGRAM_BOT_TOKEN;
+      delete process.env.TELEGRAM_CHAT_ID;
+      const delivered = await notifyTelegram("verify: must not send");
+      if (token === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+      else process.env.TELEGRAM_BOT_TOKEN = token;
+      if (chat === undefined) delete process.env.TELEGRAM_CHAT_ID;
+      else process.env.TELEGRAM_CHAT_ID = chat;
+      ok(delivered === false, "⭐ CASE 9: unset TELEGRAM_* counts as NOT sent");
+    } catch (e) {
+      caseError = e;
+    }
   }
 
   // ── CASE 10: residue ──────────────────────────────────────────────────
+  // Runs unconditionally: neither block above rethrows on a real error
+  // anymore — each captures it into `caseError` instead — so a broken case
+  // earlier can never skip this check. The transaction is rolled back (or
+  // never committed) either way; this proves cleanliness rather than causing
+  // it.
   const residue = (await db.execute(sql`
     SELECT count(*)::int AS n FROM alert_state WHERE alert_key LIKE 'verify:alert_retry:%'
   `)) as unknown as { n: number }[];
   ok(Number(residue[0].n) === 0, "⭐ CASE 10: residue check — no synthesized rows survived");
+
+  if (caseError) {
+    console.error(caseError);
+    process.exit(1);
+  }
 
   console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${fail} failed check(s)\n`);
   process.exit(fail === 0 ? 0 : 1);

@@ -15,9 +15,13 @@ type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 // threshold every tick would page on every tick for as long as the condition
 // held.
 //
-// The gate is the `WHERE alert_state.state <> ...` on the DO UPDATE: the row is
-// only touched when the state actually CHANGES, so RETURNING yields a row on a
-// transition and nothing while the condition persists. Same construction as the
+// The gate is the `WHERE alert_state.state <> ... OR alert_state.last_notified_at
+// IS NULL` on the DO UPDATE. For `state: 'ok'` the row is only touched when the
+// state actually CHANGES, so RETURNING yields a row on a transition and nothing
+// while the condition persists. For `state: 'firing'` that is true UNLESS the
+// alert is PENDING (firing with no confirmed delivery yet) — then the row is
+// touched, and RETURNING yields a row, on every call until a send succeeds; see
+// the pending-state docblock on transitionAlert below. Same construction as the
 // rate limiter's guarded upsert, for the same reason — the decision belongs in
 // the statement, not in a read-then-write the next invocation can race.
 
@@ -104,14 +108,25 @@ export async function markAlertNotified(dbc: DbOrTx, alertKey: string): Promise<
  * Best-effort throughout: a failure to record state or to reach Telegram must
  * never propagate into the request that noticed the condition.
  *
- * ⚠️ A DUPLICATE IS POSSIBLE ON THE FAILURE PATH, deliberately. Two overlapping
- * ticks can both claim an undelivered retry before either stamps success. The
- * window exists only between claim and stamp and only for an alert whose first
- * send already failed; cron cadences are 15-60 minutes and mostly single-runner.
- * At-most-one duplicate is strictly better than the silent loss it replaces. Not
- * closed with a lease (a second time-based concept in this state machine) nor
- * with SELECT FOR UPDATE (a row lock held across a 4s network call on a pooled
- * connection).
+ * ⚠️ A DUPLICATE IS POSSIBLE, deliberately, and the window is open on EVERY
+ * claim — not only a post-failure retry. Two overlapping callers on a FRESH
+ * transition can both win: the first sets 'firing'/NULL and returns a row; the
+ * second blocks on the row lock, then re-reads 'firing' + NULL once the first
+ * commits, matches the second disjunct (`last_notified_at IS NULL`), and also
+ * returns a row — both send. Under the OLD statement (gated on state change
+ * alone) the guarded upsert was atomically exclusive: exactly one winner,
+ * always. That single-winner property is deliberately traded away here, for
+ * EVERY caller, not just ones recovering from a failed send.
+ *
+ * This is not a cron-only concern. app/api/intake/leads/[token]/route.ts calls
+ * this at PER-REQUEST cadence, on a 401 auth-failure path, once failures >= 5 —
+ * two concurrent requests crossing that threshold together is a real case, not
+ * a theoretical one.
+ *
+ * A duplicate delivery beats the silent loss it replaces — that tradeoff is the
+ * accepted call. Not closed with a lease (a second time-based concept in this
+ * state machine) nor with SELECT FOR UPDATE (a row lock held across a 4s network
+ * call on a pooled connection).
  *
  * `send` is injectable ONLY so the guard can force a failure without touching
  * the network. Production callers use the default.

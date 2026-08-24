@@ -79,7 +79,15 @@ export async function POST(
     // silent while it persists. Threshold, not first failure — a single typo
     // during partner onboarding is not worth a page.
     if (failures >= 5) {
-      void notifyOnTransition(db, {
+      // Awaited: the latch is now claimed on DELIVERY (see alert-state.ts), so
+      // suppression depends on a second statement that runs AFTER the network
+      // call to Telegram. Fire-and-forget on a serverless invocation that may
+      // freeze after the response would leave the row pending and let the next
+      // failed request re-send. This path already awaits recordAuthFailure
+      // above, so this is consistent; and once a claim is refused (already
+      // latched), it's one statement with no network call — the added latency
+      // lands only on ticks that genuinely send.
+      await notifyOnTransition(db, {
         alertKey: `intake:auth_fail:${key.id}`,
         orgId: key.org_id,
         text:

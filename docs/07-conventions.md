@@ -922,6 +922,29 @@ codebase suppressed repeat alerts — `notifyTelegram` is stateless and the brea
 as a side effect of latching. **Whatever resets the condition must also clear the alert**, or the
 next genuine incident is silent; partner-key rotation does this explicitly.
 
+**The latch is claimed on DELIVERY, not on detection.** `notifyTelegram` never throws and
+returns `false` on unset config, a non-2xx, a network error, or its timeout. If the latch
+flipped when the condition was *noticed*, a send that failed on that one tick would be lost
+forever — the next tick sees no transition and stays silent, and a condition that never
+resolves never re-arms. So `notifyOnTransition` claims a send when the alert is newly firing
+**or** firing-but-never-delivered, and writes `last_notified_at` only after the send is
+confirmed.
+
+**If you gate state on "we told someone", you MUST check `notifyTelegram`'s boolean.** About
+twenty call sites discard it and are right to — they are best-effort notifications with nothing
+riding on them. The rule is for new callers that latch, suppress, or otherwise make a decision
+based on delivery. Ignoring it there re-creates the bug above.
+
+**A duplicate is possible on any concurrent claim, not only a post-failure retry.** Two callers
+racing a fresh transition into firing can both win, the same way two overlapping retries can —
+the old state-only gate's atomic single-winner guarantee is deliberately traded away here, for
+every caller. Accepted: a duplicate beats a silent loss.
+
+**Not fully covered:** callers that are event-driven rather than periodic retry only when the
+event recurs. `app/api/intake/leads/[token]/route.ts` is the one such caller today — if no
+further auth failure arrives, its alert is still lost. A sweeper over
+`state='firing' AND last_notified_at IS NULL` would close that; it is not built.
+
 ## Hash vs encrypt a credential — ask whether you must REPLAY it
 
 `lib/crypto/secret-box.ts` (AES-256-GCM, `PROVIDER_CREDENTIALS_KEY`) exists because

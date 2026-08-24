@@ -127,9 +127,31 @@ async function main() {
           typeof afterRetry?.last_notified_at === "string",
           "CASE 4: last_notified_at stamped once the retry succeeded",
         );
+        // ⚠️ THIS ASSERTION IS DELIBERATELY WEAK, AND ITS LABEL SAYS SO.
+        //
+        // Postgres `now()` is transaction_timestamp(), frozen for the whole
+        // surrounding db.transaction that every case in this file runs inside.
+        // The claim's `since = CASE WHEN state <> 'firing' THEN now() ELSE
+        // alert_state.since END` picks between "now()" and "the existing
+        // since" — but both evaluate to the SAME frozen instant here, so a
+        // byte-identical value comes back whether the CASE preserved the old
+        // `since` or reset it. Deleting the CASE entirely and writing
+        // `since = now()` unconditionally would still make `afterRetry.since
+        // === sinceAfterFail` true, and this check would still print ✓.
+        //
+        // Same root cause as CASE 11's stamp assertion below, and not
+        // strengthened here for the same reason: proving PRESERVED-vs-RESET
+        // needs either `statement_timestamp()` in the production SQL (out of
+        // scope — this guard does not touch alert-state.ts) or running the
+        // retry in a second, separately committed transaction (which would
+        // give up this file's one-rolled-back-transaction durability
+        // guarantee, and the residue check with it, for a single case). The
+        // label states only what this checks — that `since` is still
+        // populated after the retry, not that it was preserved rather than
+        // reset.
         ok(
           afterRetry?.since === sinceAfterFail,
-          "⭐ CASE 7: `since` is PRESERVED across the retry (the breach began when it began)",
+          "CASE 7: `since` is still populated after the retry (cannot prove PRESERVED-vs-RESET — frozen tx now(), see comment)",
         );
 
         await notifyOnTransition(tx, { alertKey: key, text: "breach", send });

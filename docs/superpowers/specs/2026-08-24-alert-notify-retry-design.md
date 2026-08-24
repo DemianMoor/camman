@@ -163,33 +163,60 @@ production failure mode.
 
 ## 6. Accepted limitations
 
-**A duplicate is possible on the failure path.** Two overlapping ticks can both claim an
-undelivered retry before either stamps success, producing two messages. The window exists only
-between claim and stamp, and only for an alert whose first send already failed. Cron cadences
-are 15–60 minutes and mostly single-runner, so overlap is already unlikely. At-most-one
-duplicate is strictly better than today's silent loss.
+**A duplicate is possible on ANY concurrent claim, not only a post-failure retry.** [Corrected
+2026-08-24 — see `lib/alerts/alert-state.ts` and `docs/07-conventions.md`, which fixed exactly
+this paragraph without it being carried back here.] The claim's `WHERE` has two disjuncts
+(`state <> 'firing'` OR `last_notified_at IS NULL`), and the window is open on EVERY claim that
+matches either one — including a fresh `ok → firing` transition, not only an alert whose first
+send already failed. Two overlapping callers racing a fresh transition can both win: the first
+sets `firing`/`NULL` and returns a row; the second blocks on the row lock, then re-reads
+`firing` + `NULL` once the first commits, matches the second disjunct, and also returns a row —
+both send. Under the OLD statement (gated on state change alone) the guarded upsert was
+atomically exclusive: exactly one winner, always. **That single-winner property is deliberately
+traded away here, for every caller, not just ones recovering from a failed send.** This is not a
+cron-only concern: `app/api/intake/leads/[token]/route.ts` calls this at per-request cadence, on
+a 401 auth-failure path, and two concurrent requests crossing the alert threshold together is a
+real case there, not a theoretical one. No numeric bound is stated on how many duplicates this
+produces — it depends on how many callers race the same claim, which this design does not
+constrain.
 
 Not fixed with a claim lease (a second time-based concept in a state machine this change is
 meant to leave alone) nor with `SELECT FOR UPDATE` (which would hold a row lock across a 4s
-network call on a pooled transaction connection).
+network call on a pooled transaction connection). A duplicate delivery beats the silent loss it
+replaces — that tradeoff is the accepted call.
 
-**The intake webhook is NOT fully covered, and this section is the record of that.**
+**The intake route: what actually shipped.** [Corrected 2026-08-24 — the paragraph this replaces
+described a `void`-ed fire-and-forget; the shipped code `await`s and, after a follow-up fix, is
+also sparsely gated. Both facts change the limitation analysis below.]
 
-`app/api/intake/leads/[token]/route.ts` is a `void`-ed fire-and-forget on a webhook. Its only
-retry driver is the next failed auth request on the same partner key. So:
+`app/api/intake/leads/[token]/route.ts` `await`s `notifyOnTransition` on its 401 auth-failure
+path — it is not fire-and-forget, so a serverless freeze immediately after the response is not a
+loss vector the way a `void`-ed call would be. Its retry driver is still event-driven rather than
+periodic: the next qualifying bad-secret request on the same partner key, not a cron tick. Absent
+any further request, a pending row from this route stays pending — same shape as before, just not
+for the reason originally written here.
 
-- another auth failure arrives ⇒ the alert retries and delivers
-- no further failure arrives ⇒ **the alert is still lost**, exactly as today
+That event-driven retry, on its own, is also the amplification risk this design did not
+anticipate: `recordAuthFailure` is uncapped, so a naive `failures >= 5` gate would call
+`notifyOnTransition` on every bad-secret request for the rest of the day, and every one of those
+SENDS while the row is pending — worst case a burst of Telegram 429s (429 = not delivered =
+still pending = the next wave all reclaims) that drowns the shared channel, triggered by exactly
+the condition the alert exists to detect (a hammered leaked/rotated secret). A follow-up fix
+changed the gate from `failures >= 5` to `failures === 5 || failures % 100 === 0`, so attempts
+now scale with failure COUNT rather than request RATE. See
+[docs/04-features/partner-lead-intake.md](../../04-features/partner-lead-intake.md).
 
-This is strictly no-worse-than-today (previously it was *always* lost on a failed send; now it
-is lost only when the condition also stops recurring), but it is **not** the same guarantee the
-seven periodic callers get. Do not read this change as "alert loss is fixed everywhere" — it is
-fixed for every caller that re-evaluates on a schedule, and improved-but-not-fixed for this one.
+With that gate in place: another qualifying auth failure arrives ⇒ the alert retries and can
+deliver; no further qualifying failure arrives ⇒ the alert is still lost, same as the seven
+periodic callers are NOT subject to (they always get another tick). Do not read this change as
+"alert loss is fixed everywhere" — it is fixed for every caller that re-evaluates on a schedule,
+and improved-but-not-fully-fixed for this one event-driven caller.
 
 Building a dedicated retry driver for event-driven callers — a sweeper that finds
 `state='firing' AND last_notified_at IS NULL` rows and re-sends them, independent of whoever
 raised them — is the real fix, and is deliberately out of scope for this branch. If pending
-rows start accumulating in `alert_state`, that is the signal to build it.
+rows start accumulating in `alert_state`, that is the signal to build it. **See §10 for a trap
+in that sweeper's naive predicate.**
 
 A permanently-pending row is also invisible until someone queries `alert_state` directly; no
 surface reports it. Also a known blind spot, also not closed here.
@@ -279,3 +306,18 @@ overlaps.
 - No retry backoff or attempt counter — the caller's own cadence is the retry schedule.
 - No surfacing of stuck-pending rows (§6). Worth a follow-up if pending rows accumulate.
 - No change to `clearAlert`, to the state values, or to the CHECK constraint.
+
+**A trap for the proposed sweeper (§6).** The suggested predicate,
+`state='firing' AND last_notified_at IS NULL`, is not safe to page on as-is. Two alert families
+key their `alert_key` by ET day and are **never cleared**:
+`` `drip:optout:${level}:${campaign_id}:${day}` `` ([lib/drip/optout-monitor.ts](../../../lib/drip/optout-monitor.ts))
+and `` `drip:daily_cap_near:${campaignId}:${etDay()}` `` ([lib/drip/scheduler.ts](../../../lib/drip/scheduler.ts)).
+If either alert's first send fails and no further breach recurs before the day rolls over, the row
+is orphaned: the next day's breach mints a *different* key (new day segment), so nothing ever
+retries it, and nothing ever calls `clearAlert` on the old key either — it sits `firing` +
+`last_notified_at IS NULL` forever, permanently matching the sweeper's predicate. So "pending rows
+accumulating" is polluted by a benign, expected cause (yesterday's opt-out or cap-near breach that
+simply aged out), not only by a genuinely stuck alert. A naive sweeper built straight off the
+predicate above would re-page about a rate that is no longer even being evaluated. Whoever builds
+it needs a `since`-age cutoff (skip rows older than the caller's own re-evaluation window) and
+probably an exclusion for day-keyed alert families, not the bare predicate.

@@ -1,6 +1,6 @@
 # Partner lead intake (Drip Phase 2)
 
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 Real-time capture of partner-submitted leads. **Zero sends, zero processing.** The endpoint
 authenticates, rate-limits, validates shape, writes one row, and returns. Everything downstream —
@@ -122,11 +122,19 @@ drift (risk R19). Only `phone` is required; unknown fields are kept in `raw`, ne
 
 `alert_state` is the first state-transition gate in the codebase. `notifyTelegram` is stateless by
 contract and fires on every call; the existing circuit breakers avoid alert storms only as a *side
-effect of latching*. Only a transition **into** `firing` notifies
+effect of latching*. The latch is claimed on confirmed **delivery**, not on detection: a transition
+into `firing` notifies, and so does an already-`firing` row whose last send never delivered (`state
+= 'firing' AND last_notified_at IS NULL`, the pending state) — that row re-claims and re-sends on
+every subsequent call until a send succeeds
 ([lib/alerts/alert-state.ts](../../lib/alerts/alert-state.ts)).
 
 Shipped in Phase 2: **auth-failure spike** per key (≥5 failed secret checks in a day on a resolved
-token).
+token). Because this route calls the alert per-request rather than on a cron cadence, and
+`recordAuthFailure` is uncapped, the naive `failures >= 5` gate would call `notifyOnTransition` on
+every bad-secret request for the rest of the day — and each one sends while the row is pending. The
+route instead fires at the 5th failure and then only every hundredth
+([app/api/intake/leads/[token]/route.ts](../../app/api/intake/leads/[token]/route.ts)), so
+attempts scale with failure count, not request rate.
 
 **Deferred to Phase 3: the backlog alert.** In Phase 2 nothing consumes `lead_inbox` by design, so
 "backlog > X unprocessed for > 10 min" would fire on the first lead and stay firing forever. It

@@ -754,6 +754,41 @@ warning and the block **agree** (a warning that disagrees with what is enforced 
 warning), that a shared NULL-brand number and a stage with no number are both left alone, and that
 a stage on a landing page is not warned about because mint-time construction self-corrects it.
 
+## Two selectors already partition the world — use the seam, don't add a flag
+
+Adding drip stages to `campaign_stages` risked touching the live send path. It did not, because the
+two selectors are already mutually exclusive on one column:
+
+    Phase A (materialize)  materialized_at IS NULL      AND sent_at IS NULL
+    Phase B (drain)        materialized_at IS NOT NULL
+
+A drip stage created with BOTH stamped is invisible to the first and permanently drainable by the
+second. **No `type` filter was added to either file**, so neither can drift.
+
+**⚠️ The corollary: nothing in either file mentions drip, so nothing in either file would fail if
+that property broke.** A future edit to either predicate could silently double-materialize drip
+stages or strand them forever. `scripts/test-drip-sends-schema.ts` replays both real predicates
+against a synthesized drip stage, with controls proving an unstamped stage is the mirror image.
+
+## A compliance gate that runs once per batch must move inside the loop
+
+`kickoff.ts` checks opt-out language once per stage, which is right when every recipient gets the
+same body. Drip renders per lead, so the same check moved inside the loop — and **fails closed per
+row**: a refusal drops that lead and leaves its journey untouched for the next tick. Refusing the
+whole batch would let one bad render block 199 good leads.
+
+`optOutGateSubject` already took a rendered body; only its call site was stage-shaped.
+
+## When a fail-safe has a direction, test the direction, not the feature
+
+`checkOptOutRateBreaker` skips the latch for drip campaigns. It has four live callers, all opt-out
+ingesters. A test proving "drip skips" would pass on an implementation that skipped for
+**everything** — which would silently remove opt-out protection from real campaigns with nothing
+else noticing.
+
+So the guard asserts all three: a regular campaign still latches, an **unknown/unreadable** type
+still latches, and only a positive read of `'drip'` does not.
+
 ## Two definitions of the same thing will drift — give them one builder
 
 "Contacts in use" was defined independently in two places: `iu_set` in

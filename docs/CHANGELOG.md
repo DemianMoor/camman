@@ -1337,4 +1337,30 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   — docs updated: docs/03-data-model.md, docs/04-features/drip-campaigns-routing.md,
   docs/07-conventions.md
 
+## 2026-08-24 — Drip Phase 5 (part 1): stage windows, scheduler, type-aware breaker
+
+- Migrations **0164-0166**: drip stage daily windows on `campaign_stages` (all nullable),
+  `drip_campaign_numbers`, and journey first-send bookkeeping. Preview-first on camman-v2
+  (24-check write test), then production; integrity OK.
+- **G1 holds with kickoff.ts and drain.ts untouched.** Phase A selects
+  `materialized_at IS NULL AND sent_at IS NULL`; the drain selects `materialized_at IS NOT NULL`.
+  A drip stage created with BOTH stamped is invisible to one and permanently drainable by the
+  other. Pinned by a test, with controls.
+- **⚠️ R13: `checkOptOutRateBreaker` is now type-aware, failing toward EXISTING behaviour.**
+  Only a positive, successful read of `type='drip'` skips the stage-level latch; NULL, unknown or
+  unreadable ⇒ the breaker latches exactly as before. Proven in all three directions against real
+  rows — a regular campaign still trips, an unknown type still trips, a drip campaign is measured
+  but not latched.
+- Drip stage windows are minutes past ET midnight, half-open, and may not overlap **or touch** —
+  a multi-row rule, so it lives in `lib/drip/windows.ts`, not a CHECK.
+- Number rotation with per-number ET-daily headroom; **no overflow onto an unlisted number, ever**
+  — exhaustion waits for the next ET day behind a state-transition alert.
+- `/api/cron/drip-scheduler` (1-min, posture-gated, inert in production) renders and gates
+  **per message**, failing closed per row. It also closes the P3 gap: it watches `drip-monitors`,
+  which previously had no watcher.
+- Exit gate green: both live selectors return identical sets with and without drip columns. **The
+  test reports its own vacuity** when both sides are empty, so a wall of PASS lines cannot be
+  misread.
+  — docs updated: docs/04-features/drip-campaigns-routing.md, docs/07-conventions.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

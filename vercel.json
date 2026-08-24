@@ -91,6 +91,10 @@
     {
       "path": "/api/cron/drip-routing",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/drip-scheduler",
+      "schedule": "* * * * *"
     }
   ]
 }

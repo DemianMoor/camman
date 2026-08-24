@@ -28,7 +28,8 @@ export const STAGE_TRACKING_PARAM = "sub_id3";
 // The canonical guidekn destination is exactly:
 //   https://www.guidekn.com/lp/<slug>?sub_id3=<tracking_id>
 //   - <slug>: lowercase letters and digits (e.g. "orv", "gb1") — no underscore
-//   - exactly one query param, sub_id3, carrying the stage tracking id
+//   - sub_id3 FIRST, carrying the stage tracking id; extra params may
+//     follow it (migration 0170 widened the DB CHECK to match)
 //
 // A string-concatenation bug historically produced malformed destinations (the
 // tracking id glued into the path, an empty sub_id3, a `subid3=sub_id3`
@@ -49,7 +50,7 @@ const GUIDEKN_LP_RE = /guidekn\.com\/lp\//i;
 
 // The canonical, well-formed guidekn destination.
 export const GUIDEKN_DEST_RE =
-  /^https:\/\/www\.guidekn\.com\/lp\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$/;
+  /^https:\/\/www\.guidekn\.com\/lp\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+(&[A-Za-z0-9_.~-]+=[^&\s]*)*$/;
 
 // True when `url` is subject to the guidekn shape rule (a guidekn /lp/ URL).
 export function isGuideknLpUrl(url: string | null | undefined): boolean {
@@ -275,9 +276,9 @@ export function hasUrlParam(url: string, key: string): boolean {
     });
 }
 
-// ⚠️ MIRRORS THE DB CHECK `link_destinations_landing_url_shape` (migration 0094,
-// widened in 0111) EXACTLY. That constraint is anchored and permits precisely
-// ONE query parameter on a brand /lp/ destination:
+// ⚠️ MIRRORS THE DB CHECK `link_destinations_landing_url_shape` (0094, widened
+// for digit-bearing slugs in 0111 and for EXTRA PARAMS in 0170) EXACTLY. A brand
+// /lp/ destination must LEAD with sub_id3 and may carry further params after it:
 //
 //   ^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)
 //    /lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$
@@ -291,7 +292,7 @@ export function hasUrlParam(url: string, key: string): boolean {
 // as skipped leads rather than at Save. This closes that gap at the write
 // routes, using the same host list and the same shape as the constraint.
 const BRAND_LP_SHAPE_RE =
-  /^https:\/\/(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$/;
+  /^https:\/\/(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+(&[A-Za-z0-9_.~-]+=[^&\s]*)*$/;
 
 /** Is this a brand /lp/ destination at all (any host in the constraint list)? */
 export function isBrandLpUrl(url: string | null | undefined): boolean {
@@ -308,11 +309,18 @@ export function validateBrandLpShape(url: string | null | undefined): string | n
   const u = (url ?? "").trim();
   if (!u || !isBrandLpUrl(u)) return null;
   if (BRAND_LP_SHAPE_RE.test(u)) return null;
-  const extra = u.includes("&");
-  return extra
-    ? "A landing-page URL may carry only the sub_id3 parameter. Extra parameters " +
-      "(UTM and the like) are rejected by the database when the link is created, " +
-      "so the send would fail. Use an external-URL landing page if you need them."
-    : "This landing-page URL does not match the required shape " +
-      "(https://<brand host>/lp/<slug>?sub_id3=<tracking id>).";
+  // ⚠️ Extra params are ALLOWED since 0170; what is still mandatory is that
+  // sub_id3 comes FIRST and carries a well-formed id. Naming the specific defect
+  // matters -- "does not match the shape" sends an operator hunting through a
+  // URL that is probably almost right.
+  if (!/[?&]sub_id3=/.test(u)) {
+    return "A landing-page URL must carry sub_id3 - without it this stage is unattributable.";
+  }
+  if (!/\\?sub_id3=/.test(u)) {
+    return "sub_id3 must be the FIRST parameter on a landing-page URL.";
+  }
+  if (/\\?sub_id3=(&|$)/.test(u)) return "sub_id3 is present but empty.";
+  return "This landing-page URL does not match the required shape " +
+    "(https://<brand host>/lp/<slug>?sub_id3=<tracking id>&<extra params>). " +
+    "Check for encoded characters in the tracking ID.";
 }

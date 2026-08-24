@@ -1256,6 +1256,17 @@ different links from the same configuration.
 wrong destination passes it. Resolve the minted code through `link_destinations`
 and compare the URL.
 
+## ⚠️ A /lp/ URL must LEAD with sub_id3; extra params are allowed since 0170
+
+The CHECK requires the first parameter to be `sub_id3=<[A-Za-z0-9_]+>` and then
+permits `&key=value` pairs. `validateBrandLpShape` (app) mirrors it exactly, and
+`GUIDEKN_DEST_RE` was widened in step so the rule does not differ per brand.
+
+⚠️ **When one side changes, change both.** The app being LOOSER than the
+constraint is the dangerous direction and is what produced this work: a lumzen
+/lp/ URL with a UTM param passed every app check and was rejected by the database
+at MINT, surfacing hours later as skipped leads rather than at Save.
+
 ## ⚠️ `link_destinations_landing_url_shape` hardcodes the brand landing hosts
 
 The 0094 CHECK is:

@@ -1,6 +1,7 @@
 import "./_env-preload";
 
 import { buildLandingPageUrl } from "@/lib/landing-page-url";
+import { validateBrandLpShape, validateDestination } from "@/lib/stage-url";
 import { formatStageTrackingId } from "@/lib/tracking-id-format";
 import { STAGE_TRACKING_PARAM } from "@/lib/stage-url";
 
@@ -122,6 +123,41 @@ function main() {
     check("utm applied", eu.searchParams.get("utm_source"), "sms");
     check("no %3F artifact", ext.url.includes("%3F"), false);
   }
+
+  // ⭐ THESE CASES MIRROR THE DB CHECK ONE FOR ONE. The app guard and the
+  // constraint disagreeing is the defect that produced this work: a lumzen /lp/
+  // URL with a UTM param passed every app check and was rejected by the database
+  // at MINT, surfacing hours later as skipped leads. Change either side without
+  // the other and these go red.
+  console.log("\n⭐ widened shape (0170) — extra params allowed AFTER sub_id3:");
+  const ok = (u: string) => validateBrandLpShape(u) === null;
+  const T = "142_118_082426_1_s1_c599";
+  check("canonical single param", ok(`https://www.lumzen.co/lp/lhj?sub_id3=${T}`), true);
+  check("⭐ one extra param (the point of 0170)",
+        ok(`https://www.lumzen.co/lp/lhj?sub_id3=${T}&utm_source=x`), true);
+  check("several extra params",
+        ok(`https://www.guidekn.com/lp/orv?sub_id3=${T}&utm_source=sms&utm_medium=a-b.c`), true);
+  check("empty extra value", ok(`https://www.fitsyou.net/lp/llm?sub_id3=${T}&utm_source=`), true);
+
+  console.log("\n⭐ ...and everything 0094 exists for is STILL refused:");
+  check("A: tracking id concatenated into the path",
+        ok("https://www.guidekn.com/lp/knd8_62_070826_1?sub_id3=8_62_070826_1"), false);
+  check("B: empty sub_id3", ok("https://www.lumzen.co/lp/lhj?sub_id3="), false);
+  check("B2: empty sub_id3 then params", ok("https://www.lumzen.co/lp/lhj?sub_id3=&utm_source=x"), false);
+  check("C: unsubstituted placeholder", ok("https://www.lumzen.co/lp/lhj?subid3=sub_id3"), false);
+  check("D: no sub_id3 at all", ok("https://www.lumzen.co/lp/lhj?utm_source=x"), false);
+  check("⭐ E: the %3F preview bug",
+        ok("https://www.lumzen.co/lp/llx?sub_id3=8_58_082426_1_s3_c335%3F_c%3F"), false);
+  check("sub_id3 must be FIRST", ok(`https://www.lumzen.co/lp/lhj?utm_source=x&sub_id3=${T}`), false);
+  check("unknown host is out of scope (no shape rule)",
+        ok(`https://evil.example/lp/lhj?sub_id3=${T}`), true);
+  check("a non-/lp/ URL is unaffected", ok("https://partner.example/offer?a=1&b=2"), true);
+
+  console.log("\nvalidateDestination (guidekn) widened in step:");
+  check("guidekn + UTM now passes",
+        validateDestination(`https://www.guidekn.com/lp/orv?sub_id3=${T}&utm_source=x`, T), null);
+  check("...but a mismatched sub_id3 still fails",
+        validateDestination(`https://www.guidekn.com/lp/orv?sub_id3=WRONG&utm_source=x`, T) !== null, true);
 
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
   if (failures > 0) process.exitCode = 1;

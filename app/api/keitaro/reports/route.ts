@@ -120,6 +120,45 @@ export async function GET(req: NextRequest) {
   // link_mode per campaign, so manual-mode rows fall back to Keitaro visits.
   const linkModeByCampaign = new Map(stages.map((s) => [s.campaign_id, s.link_mode]));
 
+  // ── READ-TIME CLICKERS FALLBACK ──────────────────────────────────────────
+  //
+  // When a landing page loses its Keitaro visit script, `visit_clicks_clean`
+  // reads 0 while CamMan keeps recording every tap — so the Clickers column
+  // reports "nobody clicked" for a stage that got thousands of taps. The
+  // /api/cron/tracking-monitors job alerts on it; this makes the number on
+  // screen honest in the meantime, and for every past period at once.
+  //
+  // ⚠️ DISPLAY-TIME ONLY. Writing CamMan counts into keitaro_stage_results would
+  // poison the sync source and the next poll would fight it. Nothing here
+  // persists; the substitution self-retires the moment visits resume.
+  //
+  // ⚠️ THE SUBSTITUTE IS counted_clickers, NOT raw taps. Measured over the 284
+  // healthy guidekn stages: counted_clickers = 1.35x visit_clicks_clean, while
+  // distinct contacts across ALL clicks = 11.0x. Rendering the unfiltered figure
+  // would put an 11x-inflated number beside counted_clickers in the same row.
+  //
+  // ⚠️ STAGE GRAIN, DELIBERATELY. The Keitaro column is itself assembled by
+  // summing per-stage rows, so summing stage-grain counted_clickers matches how
+  // the number it replaces is built. periodByCampaign is deduplicated at
+  // campaign grain and would make a fallback row systematically smaller.
+  //
+  // Gated to link_mode 'tracked': manual campaigns mint no links, so they have
+  // no CamMan clicks, and denominatorFor() still reads the real Keitaro value
+  // for them. The gate makes that structural rather than coincidental.
+  const clickersFallbackStageIds = new Set<number>();
+  for (const s of stages) {
+    if (s.link_mode !== "tracked") continue;
+    if (s.tally.visit_clicks_clean !== 0) continue;
+    const cammanClickers = clickers.periodByStage.get(s.stage_id) ?? 0;
+    if (cammanClickers <= 0) continue;
+    s.tally.visit_clicks_clean = cammanClickers;
+    // `grand` was accumulated inside getStageMetricsInRange BEFORE this patch,
+    // so it does not see the mutation above and must be topped up by hand.
+    // Gap stages contributed 0 to the Keitaro side, so this cannot double-count.
+    grand.visit_clicks_clean += cammanClickers;
+    clickersFallbackStageIds.add(s.stage_id);
+  }
+
   const groupByCampaign = (sp.get("groupBy") ?? "stage") === "campaign";
 
   type OutRow = {
@@ -134,6 +173,10 @@ export async function GET(req: NextRequest) {
     total_sent: number;
     opt_out_rate: number;
     click_rate: number;
+    // True when `clickers` is CamMan's counted-clicker count standing in for a
+    // missing Keitaro visit count. The UI marks the value and suppresses the
+    // rates that divide by it.
+    clickers_is_fallback: boolean;
     // Lifetime EPC ignores the date filter entirely and is the PRIMARY figure;
     // `epc` from withFunnelDerived is the period figure for the selected range.
     // Each carries its own denominator: a $0.00 EPC is only interpretable when
@@ -183,6 +226,9 @@ export async function GET(req: NextRequest) {
       total_sent: c.total_sent,
       opt_out_rate: rateOfSent(c.opt_outs, c.total_sent),
       click_rate: rateOfSent(c.tally.visit_clicks_clean, c.total_sent),
+      clickers_is_fallback: stages.some(
+        (s) => s.campaign_id === c.campaign_id && clickersFallbackStageIds.has(s.stage_id),
+      ),
       ...withFunnelDerived(
         c.tally,
         denominatorFor(
@@ -222,6 +268,7 @@ export async function GET(req: NextRequest) {
         total_sent: acc.total_sent,
         opt_out_rate: rateOfSent(acc.opt_outs, acc.total_sent),
         click_rate: rateOfSent(acc.tally.visit_clicks_clean, acc.total_sent),
+        clickers_is_fallback: clickersFallbackStageIds.has(acc.stage_id),
         ...withFunnelDerived(
           acc.tally,
           denominatorFor(
@@ -332,6 +379,7 @@ export async function GET(req: NextRequest) {
       total_sent: grandTotalSent,
       opt_out_rate: rateOfSent(grandOptOuts, grandTotalSent),
       click_rate: rateOfSent(grand.visit_clicks_clean, grandTotalSent),
+      clickers_is_fallback: clickersFallbackStageIds.size > 0,
     },
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });

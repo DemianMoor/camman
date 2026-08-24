@@ -372,6 +372,42 @@ export async function kickoffStageSend(
     // full_url: if the operator chose a page and we cannot honour it, shipping
     // some other URL is worse than not sending.
     if (row.landing_page_id != null) {
+      // ⚠️ A HAND-EDITED URL WINS OVER MINT-TIME CONSTRUCTION, and that is the
+      // whole point of letting the field be edited. An operator who appends
+      // &utm_source=... needs those params to reach the recipient; rebuilding
+      // from the landing page would silently discard them and send a URL the
+      // operator never approved.
+      //
+      // The discriminator is storage, not a flag: full_url_auto is transient
+      // (NON_UPDATABLE), and on a landing-page stage the auto path stores NULL
+      // because there is no sales page to build a bare URL from. So a non-empty
+      // full_url here means somebody typed it.
+      //
+      // ⚠️ The trade-off is stated in the form's helper text: an edited URL is
+      // frozen, so a later re-brand does NOT follow it. That is the operator's
+      // choice to make, not ours to make silently.
+      const handEdited = (row.full_url ?? "").trim();
+      if (handEdited) {
+        // Same discipline as the legacy path: trust it only when it carries
+        // THIS stage's tracking id in a well-formed way, otherwise fall through
+        // to canonical construction rather than ship a broken destination.
+        const carries =
+          !!row.stage_tracking_id && handEdited.includes(row.stage_tracking_id);
+        const wellFormed =
+          !isGuideknLpUrl(handEdited) ||
+          validateDestination(handEdited, row.stage_tracking_id) === null;
+        if (carries && wellFormed) {
+          destinationUrl = handEdited;
+        } else {
+          console.error(
+            `[kickoff] stage ${stageId}: hand-edited full_url rejected ` +
+              `(carries_tracking=${carries} well_formed=${wellFormed}) — ` +
+              `rebuilding from the landing page`,
+          );
+        }
+      }
+    }
+    if (row.landing_page_id != null && !destinationUrl) {
       if (!row.landing_page_kind) return { ok: false, reason: "landing_page_missing" };
       const built = buildLandingPageUrl({
         page: {

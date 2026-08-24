@@ -28,7 +28,7 @@ import {
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
-import { buildStageFullUrl, validateDestination } from "@/lib/stage-url";
+import { buildStageFullUrl, validateBrandLpShape, validateDestination } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
   generateCampaignTrackingId,
@@ -612,6 +612,11 @@ export async function POST(
   // sub_id3 ever drifts from the stage's tracking_id. Auto mode stores the bare
   // sales-page URL and is exempt.
   if (!fullUrlAuto) {
+    // Same app/DB disagreement as the PATCH route -- see the note there.
+    const shapeErr = validateBrandLpShape(nullIfEmpty(input.full_url) ?? "");
+    if (shapeErr) {
+      return apiError(400, shapeErr, API_ERROR_CODES.VALIDATION, { field: "full_url" });
+    }
     const destErr = validateDestination(nullIfEmpty(input.full_url) ?? "", null);
     if (destErr) {
       return apiError(400, destErr, API_ERROR_CODES.VALIDATION, {

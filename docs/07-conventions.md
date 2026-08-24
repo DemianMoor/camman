@@ -1519,3 +1519,48 @@ Two properties that are easy to lose:
 - **Every failure mode returns null indistinguishably** — unknown, revoked,
   expired, archived — and the page renders one `notFound()`, so it cannot be used
   to probe which tokens ever existed.
+
+## ⚠️ Never retry a non-idempotent external POST on an UNKNOWN outcome
+
+A client-side timeout tells you the *client* stopped waiting. It says nothing
+about whether the server acted. Retrying on it turns one request into two, and
+if the endpoint is not idempotent the second one is a duplicate side effect.
+
+This shipped as a real incident on **2026-08-24, Warsaw 22:00**: the hourly
+Telegram report was wrapped in "2 attempts, 8 s each, retry on any error"
+([lib/alerts/telegram.ts](../lib/alerts/telegram.ts)). Telegram accepted and
+delivered both POSTs but answered slower than 8 s, so the chat got the report
+**twice** and the job then alerted `⚠️ … failed. The operation was aborted due
+to timeout` — the verbatim message of Node's `AbortSignal.timeout` reason. The
+job was succeeding with duplicates while reporting failure.
+
+**The rule: classify the error by whether a response came back, not by whether
+it looked transient.**
+
+| Evidence | Outcome | Retry? |
+|---|---|---|
+| HTTP response, status 429/5xx | proven **not** delivered | yes, bounded |
+| HTTP response, any other error status | permanent failure | no — fail loudly |
+| **No response** (`TimeoutError`, `AbortError`, undici's socket `TypeError`) | **UNKNOWN** | **no** |
+
+Three consequences worth stating separately, because each was got wrong:
+
+- **UNKNOWN is a third terminal state, not a failure.** Collapsing it into
+  "failed" produces alerts for work that actually completed, and operators stop
+  trusting the alert. Report it in its own words — say the outcome is unknown
+  and that you did not re-send — and return success, so a delivered report is
+  not counted as a failed run. Keep the loud failure path for proven failures.
+- **A tight timeout manufactures UNKNOWNs.** 8 s was below Telegram's real tail
+  latency. Size the budget from the dependency's slow case, make it configurable
+  (`TELEGRAM_SEND_TIMEOUT_MS`), and keep the worst case under the route's own
+  cap — not from what feels fast.
+- **Log every attempt with number, duration and outcome.** Vercel keeps no
+  runtime logs without a drain, so an unlogged retry loop is invisible: the only
+  evidence this bug existed was the *count of messages in the chat*.
+
+Where the endpoint genuinely must be retried, make it idempotent first — an
+idempotency key, or a persisted "sent for run X" marker written before the call.
+Telegram's Bot API offers neither, so the report does not retry.
+
+See [docs/04-features/crons.md](04-features/crons.md) § `/api/cron/telegram-report`
+and [scripts/test-telegram-send-policy.ts](../scripts/test-telegram-send-policy.ts).

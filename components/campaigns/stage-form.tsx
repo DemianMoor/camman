@@ -73,6 +73,7 @@ import {
   removeUrlParam,
   setUrlParam,
   STAGE_TRACKING_PARAM,
+  validateBrandLpShape,
   validateDestination,
 } from "@/lib/stage-url";
 import { formatStageTrackingId } from "@/lib/tracking-id-format";
@@ -548,15 +549,6 @@ export function StageForm({
   const selectedLandingPage = landingPages.find(
     (p) => String(p.id) === watchedLandingPageId,
   );
-  // Built with the SAME function the send path mints with, so the operator can
-  // never approve one URL and have the recipient receive another.
-  const landingPreview = selectedLandingPage
-    ? buildLandingPageUrl({
-        page: selectedLandingPage,
-        landingHost: campaign.brand?.landing_host ?? null,
-        trackingId: campaignTrackingId ? `${campaignTrackingId}_s?_c?` : null,
-      })
-    : null;
 
   // ── ONE destination, derived from the two stored fields ─────────────────
   // The picker is a view over `landing_page_id` + `sales_page_label`; neither
@@ -932,14 +924,41 @@ export function StageForm({
     stageNumber,
   ]);
 
+  // Built with the SAME function the send path mints with, so the operator can
+  // never approve one URL and have the recipient receive another.
+  //
+  // ⚠️ THE REAL TRACKING ID, NEVER A PLACEHOLDER. This used to pass
+  // `${campaignTrackingId}_s?_c?` — literal question marks standing in for the
+  // unknown stage and creative. buildLandingPageUrl percent-encodes the id, so
+  // those became %3F and the operator was shown (and could save) a destination
+  // whose sub_id3 did not match the stage's tracking id at all, silently killing
+  // attribution. effectiveTrackingId is the stored id in edit mode and the
+  // exact id the server will generate in create mode, so the preview is
+  // byte-identical to what mint produces. Null until a creative is chosen —
+  // showing a URL with no tracking id is better than one with a fake one.
+  const landingPreview = selectedLandingPage
+    ? buildLandingPageUrl({
+        page: selectedLandingPage,
+        landingHost: campaign.brand?.landing_host ?? null,
+        trackingId: effectiveTrackingId,
+      })
+    : null;
+
   const generatedFullUrl = useMemo(() => {
-    // Auto value is the BARE sales-page URL. The tracking ID and UTM params
-    // are attached manually via the chips below the field.
+    // ⚠️ A LANDING PAGE PRODUCES A COMPLETE URL, a sales page a bare one.
+    // They are not the same kind of value and the field must not pretend they
+    // are. For a landing page the whole destination is already known — host,
+    // /lp/<slug> and sub_id3 — so it is shown in full and stays editable, which
+    // is what lets an operator append &utm_source=... by hand. This branch was
+    // missing entirely, so choosing a landing page left the field EMPTY.
+    if (landingPreview?.ok) return landingPreview.url;
+    // Sales page: the BARE URL. Its tracking ID and UTM params are attached
+    // manually via the chips below the field.
     const sp = (campaign.offer?.sales_pages ?? []).find(
       (p) => p.label === watchedSalesPageLabel,
     );
     return (sp?.url ?? "").trim();
-  }, [campaign.offer?.sales_pages, watchedSalesPageLabel]);
+  }, [campaign.offer?.sales_pages, watchedSalesPageLabel, landingPreview]);
 
   // A UTM chip brings only the parameter NAME (the tag's Value Source) with a
   // trailing "=", e.g. clicking "subid5" appends "?sub_id5=". Toggling off
@@ -982,6 +1001,9 @@ export function StageForm({
   // (id in path, empty/placeholder/mismatched sub_id3). Auto mode stores the
   // bare sales-page URL and the send path attaches sub_id3 canonically, so it's
   // exempt. Non-guidekn / empty URLs pass (validateDestination returns null).
+  // Mirrors the DB constraint, so the operator is stopped at Save rather than
+  // discovering it as skipped leads at mint.
+  const lpShapeError = watchedFullUrlAuto ? null : validateBrandLpShape(watchedFullUrl);
   const destinationError = watchedFullUrlAuto
     ? null
     : validateDestination(watchedFullUrl, effectiveTrackingId);
@@ -1019,6 +1041,10 @@ export function StageForm({
 
   // Submit
   async function handleSave() {
+    if (lpShapeError) {
+      toast.error(lpShapeError);
+      return;
+    }
     if (destinationError) {
       toast.error(destinationError);
       return;
@@ -1610,10 +1636,21 @@ export function StageForm({
                       disabled={isSubmitting}
                     />
                   </div>
+                  {/* ⚠️ THE TWO STATES BEHAVE DIFFERENTLY AT MINT TIME, and the
+                      operator has to be told which one they are in. An UNEDITED
+                      landing-page stage stores only the page id and the URL is
+                      constructed when the link is minted — so re-branding the
+                      campaign self-corrects. The moment it is hand-edited it is
+                      stored and sent VERBATIM, which is what lets UTM params be
+                      added, and equally what makes a later rebrand NOT follow. */}
                   <FormDescription className="text-xs">
                     {watchedFullUrlAuto
-                      ? "Auto-built from the sales page + the offer's tracking param + tracking ID + the UTM tags below."
-                      : "Custom — edited by hand. Use “Reset to generated” to rebuild from the selections."}
+                      ? watchedLandingPageId
+                        ? "Auto-built from the landing page + this campaign's brand + tracking ID. Left unedited, it is rebuilt when the link is minted, so re-branding the campaign updates it automatically. Edit it to add UTM or extra parameters."
+                        : "Auto-built from the sales page + the offer's tracking param + tracking ID + the UTM tags below."
+                      : watchedLandingPageId
+                        ? "Custom — edited by hand, so it is sent exactly as written and a later re-brand will NOT update it. Use “Reset to generated” to go back to mint-time construction."
+                        : "Custom — edited by hand. Use “Reset to generated” to rebuild from the selections."}
                   </FormDescription>
                   {/* Param chips — click to build the URL. A UTM chip appends
                       its Value Source as a param name (e.g. "sub_id5="); the

@@ -9,6 +9,7 @@ import {
 import { latestSendForAttribution } from "@/lib/sends/poll-opt-outs";
 import { textrequestPhoneToE164 } from "@/lib/sends/providers/textrequest";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
+import { closeJourneyOnOptOut } from "@/lib/drip/lifecycle";
 
 // Text Request opt-out intake (Phase 4) — the single write path behind all six
 // capture channels. Deliberately a mirror of processAhoiInboundOptOut
@@ -254,6 +255,10 @@ export async function processTextrequestOptOut(
     WHERE org_id = ${o.orgId} AND contact_id = ${contactId}
       AND status = 'pending'
   `);
+  // Drip Phase 6: the journey closes in the SAME breath as the cascade.
+  // A lead suppressed but still 'active' would hold its one-live-per-contact
+  // slot for ever -- the exact state the Phase 5 proof caught.
+  await closeJourneyOnOptOut(dbc, { orgId: o.orgId, contactId });
 
   // Attribution: the shared cross-provider helper — one opt-out credits the
   // single most-recent matching send across all stages in the trailing window.

@@ -1170,6 +1170,34 @@
       "when": 1790726400000,
       "tag": "0166_drip_journeys_first_send",
       "breakpoints": true
+    },
+    {
+      "idx": 167,
+      "version": "7",
+      "when": 1790812800000,
+      "tag": "0167_drip_journey_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 168,
+      "version": "7",
+      "when": 1790899200000,
+      "tag": "0168_drip_behavioral_children",
+      "breakpoints": true
+    },
+    {
+      "idx": 169,
+      "version": "7",
+      "when": 1790985600000,
+      "tag": "0169_tier_detection_timestamps",
+      "breakpoints": true
+    },
+    {
+      "idx": 170,
+      "version": "7",
+      "when": 1791072000000,
+      "tag": "0170_widen_landing_url_shape",
+      "breakpoints": true
     }
   ]
 }

@@ -17,6 +17,7 @@ import {
 } from "@/lib/sends/texthub-inbox";
 import { validatePhone } from "@/lib/phone-validation";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
+import { closeJourneyOnOptOut } from "@/lib/drip/lifecycle";
 
 // Polls TextHub's inbox per credential and turns inbound STOP messages into
 // org-wide opt_outs. Idempotent: each TextHub message id is recorded once in
@@ -331,6 +332,10 @@ async function pollCredential(
           WHERE org_id = ${cred.org_id} AND contact_id = ${contactId}
             AND status = 'pending'
         `);
+          // Drip Phase 6: the journey closes in the SAME breath as the cascade.
+          // A lead suppressed but still 'active' would hold its one-live-per-contact
+          // slot for ever -- the exact state the Phase 5 proof caught.
+          await closeJourneyOnOptOut(tx, { orgId: cred.org_id, contactId });
 
           // Attribution: the SINGLE most-recent send to this number across all
           // stages in the trailing window (one STOP ⇒ one stage). null when no

@@ -56,6 +56,9 @@ export interface DripMintInput {
   campaignTrackingId: string | null;
   stageTrackingId: string | null;
   brandLandingHost: string | null;
+  /** The stage's stored full_url. Non-empty ⇒ hand-edited (the auto path stores
+   *  NULL on a landing-page stage), so it wins over mint-time construction. */
+  handEditedUrl?: string | null;
   landingPage: {
     id: number | null;
     kind: string | null;
@@ -76,6 +79,35 @@ export async function mintDripLeadLink(
   input: DripMintInput,
 ): Promise<DripMintResult> {
   const { landingPage: lp } = input;
+
+  // ── 0. a hand-edited URL wins ─────────────────────────────────────────────
+  // ⚠️ THE SAME RULE AS THE BLAST PATH (lib/sends/kickoff.ts). An operator who
+  // appended &utm_source=... needs those params to reach the recipient;
+  // reconstructing from the landing page would silently discard them and send a
+  // URL nobody approved. Drip having a different rule from blasts here would be
+  // indefensible -- it is the same field, edited on the same screen.
+  //
+  // Trusted only when it carries THIS stage's tracking id; otherwise fall
+  // through to canonical construction rather than ship a broken destination.
+  const handEdited = (input.handEditedUrl ?? "").trim();
+  const tidForCheck = (input.stageTrackingId ?? "").trim();
+  if (handEdited && tidForCheck && handEdited.includes(tidForCheck)) {
+    const sd0 = await resolveShortDomainForSend(tx, {
+      orgId: input.orgId, brandId: input.brandId, providerPhoneId: input.providerPhoneId,
+    });
+    if (!sd0) {
+      return { ok: false, reason: "no_short_domain",
+        message: "the campaign's brand has no active short domain for this number" };
+    }
+    const link0 = await mintLink(tx, {
+      orgId: input.orgId, campaignId: input.campaignId, stageId: input.stageId,
+      contactId: input.contactId, creativeId: input.creativeId, shortDomainId: sd0.id,
+      destinationUrl: handEdited, sendToken: input.sendToken,
+      campaignTrackingId: input.campaignTrackingId, stageTrackingId: input.stageTrackingId,
+    });
+    return { ok: true, linkId: link0.id,
+             linkUrl: buildTrackedLinkUrl(sd0.domain, link0.code), destinationUrl: handEdited };
+  }
 
   // ── 1. destination, built NOW from the campaign's CURRENT brand ───────────
   // Late construction is deliberate: a re-branded campaign self-corrects,

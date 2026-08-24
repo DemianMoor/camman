@@ -1279,6 +1279,17 @@ different links from the same configuration.
 wrong destination passes it. Resolve the minted code through `link_destinations`
 and compare the URL.
 
+## ⚠️ A /lp/ URL must LEAD with sub_id3; extra params are allowed since 0170
+
+The CHECK requires the first parameter to be `sub_id3=<[A-Za-z0-9_]+>` and then
+permits `&key=value` pairs. `validateBrandLpShape` (app) mirrors it exactly, and
+`GUIDEKN_DEST_RE` was widened in step so the rule does not differ per brand.
+
+⚠️ **When one side changes, change both.** The app being LOOSER than the
+constraint is the dangerous direction and is what produced this work: a lumzen
+/lp/ URL with a UTM param passed every app check and was rejected by the database
+at MINT, surfacing hours later as skipped leads rather than at Save.
+
 ## ⚠️ `link_destinations_landing_url_shape` hardcodes the brand landing hosts
 
 The 0094 CHECK is:
@@ -1353,6 +1364,49 @@ Editing the form-fields file changes nothing an operator can see.
 
 ⚠️ This has now caught work twice. Trace page → component before editing, and
 confirm with a round-trip in the browser, not by finding a plausible-looking file.
+
+## A drip journey has terminal states, and closing one frees a slot
+
+`drip_journeys.state` is `routed | active` (live) or `opted_out | converted |
+completed | expired | exited | unroutable` (terminal). A terminal row MUST carry
+`closed_at` and a live one must not - a CHECK enforces it, so "is this closed?"
+cannot become two facts that disagree.
+
+**Closing is not bookkeeping.** `drip_journeys_one_live_per_contact_uniq` keys on
+`state IN ('routed','active')`, so a live journey holds that contact's ONLY drip
+slot. Before Phase 6 nothing ever closed a journey, so every contact ever routed
+held its slot for ever and an opted-out lead kept it too. Any terminal value
+frees the slot by construction - which is why the vocabulary was widened rather
+than the index rewritten.
+
+Freeing the slot is **not** permission to re-route: the week rule, the
+same-offer-same-creative rule and the org-wide opt-out gate all still apply.
+
+`exited` is an **archive** trigger, never a delete one: `campaign_id` is
+`ON DELETE CASCADE`, so a hard delete removes the journey rather than leaving one
+to mark. That is accepted.
+
+## Keitaro's `offer_reached_at` / `converted_at` are EVENT time, not detection time
+
+Both pollers write `(v.dt || ' ' || CAMPAIGN_TIMEZONE)::timestamptz` - the
+network's own timestamp. Postback lag is measured in hours: offer reach p50 **146
+min**, conversion p50 **219 min** (30 days), plus up to 15 minutes of poll
+cadence.
+
+**So a "time since detection" timer cannot key off them.** At p50 a 60-minute
+Offer follow-up computed from `offer_reached_at` is already expired the moment we
+learn of it: the operator sets 60 minutes and the message fires instantly.
+`offer_reached_detected_at` / `converted_detected_at` (0169) record when WE
+learned, and are the only honest clock for such a timer.
+
+The conversions poller stamps its detection column with `COALESCE(existing,
+now())`, not a bare `now()` - unlike the offer-reach UPDATE it has no `IS NULL`
+guard and re-writes rows whose status changed, so a bare assignment would slide
+the detection time forward on every poll and keep a follow-up permanently in the
+future.
+
+Tier 1 needs no such column: `clicks.clicked_at` defaults to `now()` at the `/r/`
+request, so a click's detection **is** its event.
 
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.

@@ -7,6 +7,7 @@ import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { telnyxBalance } from "@/lib/telnyx/client";
 import { checkTelnyxBalance } from "./lookup-guard";
 import { runDripOptOutMonitor } from "./optout-monitor";
+import { sweepJourneyLifecycle } from "./lifecycle-sweep";
 
 // Drip monitors (Drip Phase 3). Runs as a SEPARATE cron from the sweeper it
 // watches — a job that checks its own liveness reports nothing when it is the
@@ -39,6 +40,8 @@ export interface DripMonitorResult {
   balanceUsd: number | null;
   balanceThreshold: number | null;
   balanceFiring: boolean;
+  /** Journey terminal transitions closed on this tick (Drip Phase 6). */
+  lifecycle: Awaited<ReturnType<typeof sweepJourneyLifecycle>>;
   alerts: string[];
 }
 
@@ -124,6 +127,12 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
   // Runs here rather than in the scheduler so it still evaluates when the
   // scheduler has nothing to do — a campaign that stopped sending an hour ago
   // can still cross a threshold as its STOPs arrive.
+  // Drip Phase 6. Sweeps the three transitions nothing can announce:
+  // converted (Keitaro's poller knows nothing of drip), completed (true when the
+  // last follow-up lands) and expired (true when a clock passes). Opt-out and
+  // archive close at their source instead.
+  const lifecycle = await sweepJourneyLifecycle();
+
   const optOut = await runDripOptOutMonitor();
   for (const v of optOut) {
     if (v.level !== "ok") alerts.push(`optout_${v.level}:${v.campaign_id}`);
@@ -138,6 +147,7 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
     balanceUsd,
     balanceThreshold,
     balanceFiring,
+    lifecycle,
     alerts,
   };
 }

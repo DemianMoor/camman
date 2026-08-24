@@ -1955,6 +1955,14 @@ export const campaign_stages = pgTable(
     window_start_min: smallint("window_start_min"),
     window_end_min: smallint("window_end_min"),
     drip_active: boolean("drip_active"),
+    // Drip Phase 6. Minutes after THIS CONTACT'S detection moment that a
+    // behavioural child fires.
+    //
+    // ⚠️ A DIFFERENT KIND OF SCHEDULE FROM scheduled_at. A regular lane child
+    // fires at one absolute time the operator picked; a drip child serves
+    // contacts whose clocks all started at different moments, so the schedule
+    // has to be relative and per-contact. That cannot live in scheduled_at.
+    drip_followup_minutes: smallint("drip_followup_minutes"),
     send_approved: boolean("send_approved").notNull().default(false),
     status_changed_at: timestamp("status_changed_at", { withTimezone: true })
       .notNull()
@@ -2790,6 +2798,21 @@ export const stage_sends = pgTable(
     // overlapping rolling poll windows. NULL for recipients who never reached the
     // offer page (and for manual-mode rows that mint no tracked link).
     offer_reached_at: timestamp("offer_reached_at", { withTimezone: true }),
+    // Drip Phase 6. When WE LEARNED of the reach/conversion, as distinct from
+    // when it happened.
+    //
+    // ⚠️ offer_reached_at and converted_at carry KEITARO'S EVENT TIME (the
+    // pollers write (v.dt || ' ' || CAMPAIGN_TIMEZONE)::timestamptz), and the
+    // network's lag is measured in hours -- offer reach p50 146 min, conversion
+    // p50 219 min. A follow-up timer defined as "time since detection" cannot
+    // key off them: at p50 a 60-minute Offer timer is ALREADY EXPIRED when
+    // detected, so the operator sets 60 minutes and gets an instant send.
+    // NULL = detected before Phase 6, or not yet detected; the timer treats
+    // NULL as not-yet-detected, which fails toward not sending.
+    offer_reached_detected_at: timestamp("offer_reached_detected_at", {
+      withTimezone: true,
+    }),
+    converted_detected_at: timestamp("converted_detected_at", { withTimezone: true }),
     offer_reach_event_id: text("offer_reach_event_id"),
     // Migration 0096: carrier bucket stamped at materialization/send time from the
     // contact's carrier_norm. Enables future per-carrier delivery/sales analytics;
@@ -4312,6 +4335,10 @@ export const drip_campaign_configs = pgTable(
     // per new filter. The CARRIER filter is NOT here — drip reuses
     // campaigns.audience_filters.carrier_filter.
     filters: jsonb("filters").notNull().default({}),
+    // Drip Phase 6. Campaign-level behavioural follow-ups on/off.
+    // DEFAULT FALSE: an existing drip campaign gains no children and no
+    // follow-ups until an operator opts in.
+    behavioral_enabled: boolean("behavioral_enabled").notNull().default(false),
     created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -4378,6 +4405,13 @@ export const drip_journeys = pgTable(
       .notNull()
       .references(() => lead_events.id, { onDelete: "cascade" }),
     state: text("state").notNull().default("routed"),
+    // Drip Phase 6. A terminal state MUST carry closed_at and a live one must
+    // not (CHECK, migration 0167) -- otherwise "is this journey closed?" becomes
+    // two facts that can disagree and every consumer picks a different one.
+    closed_at: timestamp("closed_at", { withTimezone: true }),
+    // Free text on purpose: the STATE is the machine-readable part, and a second
+    // constrained vocabulary would have to be widened in lockstep with the first.
+    close_reason: text("close_reason"),
     routed_at: timestamp("routed_at", { withTimezone: true }).notNull().defaultNow(),
     // Drip Phase 5. Which stage sent the first message, and when.
     //
@@ -4419,7 +4453,7 @@ export const drip_journeys = pgTable(
     ),
     check(
       "drip_journeys_state_check",
-      sql`${table.state} IN ('routed', 'active', 'completed', 'exited', 'unroutable')`,
+      sql`${table.state} IN ('routed', 'active', 'opted_out', 'converted', 'completed', 'expired', 'exited', 'unroutable')`,
     ),
     check(
       "drip_journeys_campaign_required_check",

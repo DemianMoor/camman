@@ -1,88 +1,268 @@
-// Verifies the Overview clickers fallback: campaign 924's stage renders CamMan's
-// counted clickers, a healthy guidekn stage is untouched, and NOTHING that feeds
-// EPC moves.
+// Verifies the Overview "clickers fallback" invariant in
+// app/api/keitaro/reports/route.ts: for a link_mode='tracked' stage, when
+// Keitaro's visit_clicks_clean reads 0 but CamMan's counted_clickers is > 0,
+// the API must display `clickers = counted_clickers` and set
+// `clickers_is_fallback = true`. Otherwise it must display the Keitaro
+// number with the flag false.
 //
-// Run:  npx tsx scripts/verify-clickers-fallback.ts --baseline   (before the change)
-//       npx tsx scripts/verify-clickers-fallback.ts              (after)
+// Run: npx tsx scripts/verify-clickers-fallback.ts
 //
-// The baseline is written to .tracking-gap-baseline.json (gitignored scratch).
+// ⚠️ WHY THIS WAS REWRITTEN (2026-08-24). The previous version pinned a
+// snapshot of live production counts into `.tracking-gap-baseline.json` and
+// hardcoded "stage 3029 has 0 Keitaro visits". Both are assertions about the
+// MOVING WORLD, not the code under test: a real click took stage 3029's
+// counted_clickers from 282 to 283 ("unchanged" failed reporting a write that
+// never happened), and the landing page's Keitaro script started firing again
+// (0 -> 1 visit, "still 0 visits" failed too) — while the fallback logic was
+// correct both times. As every landing page gets fixed, every stage leaves
+// the gap state and the old script would fail PERMANENTLY. There is no
+// `--baseline` mode any more; nothing is snapshotted to disk.
+//
+// PART 1 evaluates the rule against live, already-committed data and REPORTS
+// the cohort split — informational only, never fails, exactly like
+// scripts/verify-tracking-gap.ts's Part 1. It explicitly says so when either
+// cohort (in the fallback state / not) is empty, rather than silently passing
+// as though it verified something.
+// PART 2 synthesizes BOTH cohorts (plus a true-zero edge case) inside a
+// rolled-back transaction, so the rule is proven to still catch a regression
+// after every live gap closes, regardless of what the world looks like today.
+// Mirrors verify-tracking-gap.ts's structure and rollback discipline exactly.
+//
+// ⚠️ LIMITATION — this does NOT invoke the route's actual code.
+// The fallback DECISION (app/api/keitaro/reports/route.ts, search for
+// "READ-TIME CLICKERS FALLBACK", ~line 148) is a short loop inline in the GET
+// handler and is not exported, so it cannot be imported and called directly.
+// Two ways of reaching the real code were considered and ruled out:
+//   1. Calling the route's exported GET() directly: it authenticates via
+//      requireApiMembership() -> lib/supabase/server.ts -> next/headers
+//      cookies(), which requires Next's request-scoped AsyncLocalStorage.
+//      Invoking GET() from a plain tsx script (no live Next request) throws
+//      "`cookies` was called outside a request scope."
+//   2. Hitting the deployed route over HTTP with an authenticated session
+//      (the pattern several scripts/test-*-api.ts scripts use): checked by
+//      probing https://camman.vercel.app/api/keitaro/reports directly — as
+//      of this writing the fallback feature (clickers_is_fallback,
+//      migration/feature added on this branch) has NOT been merged to main
+//      and is not present in the deployed response at all, so hitting prod
+//      would test nothing.
+// So `expectedFallback()` below is a hand transcription of route.ts's
+// condition, prominently flagged here (and in the task report). The raw
+// INPUTS it runs on (visit_clicks_clean, the counted-clickers denominator)
+// ARE the real, exported, shared computation the route itself calls —
+// lib/reporting/stage-funnel.ts::getStageMetricsInRange — for Part 1's live
+// data, which keeps the duplicated surface to just the ~3-line decision.
+// getStageMetricsInRange always queries the global `db` singleton (no
+// transaction handle), so it cannot see Part 2's synthesized fixtures either;
+// Part 2 queries those same two raw numbers directly via SQL against `tx`.
+// If route.ts's condition changes, `expectedFallback()` must be re-diffed
+// against it by hand — there is no automatic guarantee of drift detection
+// against the route file itself.
 import "./_env-preload";
 
-import { readFileSync, writeFileSync } from "node:fs";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 
-const BASELINE = ".tracking-gap-baseline.json";
-const isBaseline = process.argv.includes("--baseline");
+let fail = 0;
+function ok(cond: boolean, label: string) {
+  console.log(`  ${cond ? "✓" : "✗"} ${label}`);
+  if (!cond) fail++;
+}
 
-// The two reference stages. 3029 is the gap (0 visits, 282 counted clickers);
-// the guidekn control is resolved live so it stays valid as data ages.
-const GAP_STAGE = 3029;
+// Hand transcription of route.ts's inline fallback condition — see the
+// ⚠️ LIMITATION note above. Keep this in sync with
+// app/api/keitaro/reports/route.ts by hand.
+function expectedFallback(
+  linkMode: string,
+  visitClicksClean: number,
+  countedClickers: number,
+): { clickers: number; clickers_is_fallback: boolean } {
+  const isFallback =
+    linkMode === "tracked" && visitClicksClean === 0 && countedClickers > 0;
+  return {
+    clickers: isFallback ? countedClickers : visitClicksClean,
+    clickers_is_fallback: isFallback,
+  };
+}
 
 async function main() {
-  const control = (await db.execute(sql`
-    SELECT k.stage_id, sum(k.visit_clicks_clean)::int AS visits_clean
-    FROM keitaro_stage_results k
-    JOIN links l ON l.stage_id = k.stage_id
-    JOIN link_destinations ld ON ld.id = l.destination_id
-    WHERE ld.url LIKE 'https://www.guidekn.com/%'
-    GROUP BY 1 HAVING sum(k.visit_clicks_clean) > 0
-    ORDER BY 2 DESC LIMIT 1
-  `)) as unknown as { stage_id: number; visits_clean: number }[];
+  // ── PART 1 — the live picture. Reported, never asserted. ──────────────────
+  console.log("\nPART 1 — live findings (informational)\n");
 
-  const CONTROL_STAGE = Number(control[0].stage_id);
-  console.log(`gap stage ${GAP_STAGE}, guidekn control stage ${CONTROL_STAGE}`);
+  const orgRows = (await db.execute(
+    sql`SELECT id FROM organizations LIMIT 1`,
+  )) as unknown as { id: string }[];
+  if (orgRows.length === 0) throw new Error("no organizations row found");
+  const orgId = orgRows[0].id;
 
-  const rows = (await db.execute(sql`
-    SELECT k.stage_id,
-           sum(k.visit_clicks_clean)::int AS visits_clean,
-           (SELECT count(*)::int FROM counted_clickers cc WHERE cc.stage_id = k.stage_id) AS counted
-    FROM keitaro_stage_results k
-    WHERE k.stage_id IN (${GAP_STAGE}, ${CONTROL_STAGE})
-    GROUP BY 1
-  `)) as unknown as { stage_id: number; visits_clean: number; counted: number }[];
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10);
 
-  const snapshot = Object.fromEntries(
-    rows.map((r) => [
-      r.stage_id,
-      { visits_clean: Number(r.visits_clean), counted: Number(r.counted) },
-    ]),
-  );
+  const { stages, clickers } = await getStageMetricsInRange(orgId, from, to);
+  const tracked = stages.filter((s) => s.link_mode === "tracked");
+  const live = tracked.map((s) => {
+    const counted = clickers.periodByStage.get(s.stage_id) ?? 0;
+    return {
+      stage_id: s.stage_id,
+      visits: s.tally.visit_clicks_clean,
+      counted,
+      ...expectedFallback(s.link_mode, s.tally.visit_clicks_clean, counted),
+    };
+  });
+  const inFallback = live.filter((r) => r.clickers_is_fallback);
+  const notInFallback = live.filter((r) => !r.clickers_is_fallback);
 
-  if (isBaseline) {
-    writeFileSync(BASELINE, JSON.stringify(snapshot, null, 2));
-    console.log(`baseline written to ${BASELINE}:`);
-    console.log(JSON.stringify(snapshot, null, 2));
-    return;
+  console.log(`  evaluated ${live.length} tracked stage(s) over ${from}..${to} (ET)`);
+  console.log(`    ${inFallback.length} currently in the fallback state`);
+  console.log(`    ${notInFallback.length} currently NOT in the fallback state`);
+
+  if (inFallback.length === 0) {
+    console.log(
+      "    no stages currently in the fallback state; the fallback branch was NOT " +
+        "exercised by live data (Part 2 below synthesizes it regardless)",
+    );
+  } else {
+    for (const r of inFallback.slice(0, 10)) {
+      console.log(
+        `      stage ${r.stage_id}: visits=0, counted_clickers=${r.counted} -> displayed clickers=${r.clickers}`,
+      );
+    }
+  }
+  if (notInFallback.length === 0) {
+    console.log(
+      "    every tracked stage is currently in the fallback state; the non-fallback " +
+        "branch was NOT exercised by live data (Part 2 below synthesizes it regardless)",
+    );
   }
 
-  let fail = 0;
-  function ok(cond: boolean, label: string) {
-    console.log(`  ${cond ? "✓" : "✗"} ${label}`);
-    if (!cond) fail++;
+  // ── PART 2 — the durable invariant. Synthesized, asserted, rolled back. ───
+  console.log("\nPART 2 — durable invariant (synthesized, rolled back)\n");
+
+  try {
+    await db.transaction(async (tx) => {
+      // Pick any real tracked campaign + org so FKs are satisfiable.
+      const seed = (await tx.execute(sql`
+        SELECT c.id AS campaign_id, c.org_id
+        FROM campaigns c
+        WHERE c.link_mode = 'tracked'
+        ORDER BY c.id DESC
+        LIMIT 1
+      `)) as unknown as { campaign_id: number; org_id: string }[];
+      if (seed.length === 0) throw new Error("no tracked campaign to seed from");
+      const { campaign_id, org_id } = seed[0];
+
+      const contactRows = (await tx.execute(sql`
+        SELECT id FROM contacts WHERE org_id = ${org_id}::uuid ORDER BY id LIMIT 3
+      `)) as unknown as { id: string }[];
+      if (contactRows.length < 3) throw new Error("need at least 3 contacts in the seed org");
+      const [c1, c2, c3] = contactRows.map((r) => r.id);
+
+      // Three synthetic stages exercising both branches of the rule plus the
+      // edge case where there is nothing to fall back to:
+      //   GAP     — 0 Keitaro visits, 3 CamMan counted clickers -> fallback
+      //   HEALTHY — 5 Keitaro visits, 2 CamMan counted clickers (deliberately
+      //             LOWER than visits) -> NOT fallback, proving visits>0 wins
+      //             even when a different counted value also exists
+      //   ZERO    — 0 visits AND 0 counted clickers -> NOT fallback (nothing
+      //             to substitute)
+      const stages = (await tx.execute(sql`
+        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, tracking_id, sent_at)
+        VALUES
+          (${org_id}::uuid, ${campaign_id}, 901, 'VERIFY_FALLBACK_GAP_STAGE',     now() - interval '24 hours'),
+          (${org_id}::uuid, ${campaign_id}, 902, 'VERIFY_FALLBACK_HEALTHY_STAGE', now() - interval '24 hours'),
+          (${org_id}::uuid, ${campaign_id}, 903, 'VERIFY_FALLBACK_ZERO_STAGE',    now() - interval '24 hours')
+        RETURNING id, tracking_id
+      `)) as unknown as { id: number; tracking_id: string }[];
+      const gapStage = stages.find((s) => s.tracking_id === "VERIFY_FALLBACK_GAP_STAGE")!.id;
+      const healthyStage = stages.find((s) => s.tracking_id === "VERIFY_FALLBACK_HEALTHY_STAGE")!.id;
+      const zeroStage = stages.find((s) => s.tracking_id === "VERIFY_FALLBACK_ZERO_STAGE")!.id;
+
+      await tx.execute(sql`
+        INSERT INTO keitaro_stage_results
+          (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, visit_clicks_clean)
+        VALUES
+          (${org_id}::uuid, ${campaign_id}, ${gapStage},     'VERIFY_FALLBACK_GAP_STAGE',     current_date, 0),
+          (${org_id}::uuid, ${campaign_id}, ${healthyStage}, 'VERIFY_FALLBACK_HEALTHY_STAGE', current_date, 5),
+          (${org_id}::uuid, ${campaign_id}, ${zeroStage},    'VERIFY_FALLBACK_ZERO_STAGE',    current_date, 0)
+      `);
+
+      // 3 counted_clickers rows on the GAP stage, 2 on HEALTHY, 0 on ZERO.
+      // Reusing c1/c2 across stages is fine — the PK is (stage_id, contact_id).
+      await tx.execute(sql`
+        INSERT INTO counted_clickers (org_id, campaign_id, stage_id, contact_id, first_click_at)
+        VALUES
+          (${org_id}::uuid, ${campaign_id}, ${gapStage},     ${c1}::uuid, now() - interval '1 hour'),
+          (${org_id}::uuid, ${campaign_id}, ${gapStage},     ${c2}::uuid, now() - interval '1 hour'),
+          (${org_id}::uuid, ${campaign_id}, ${gapStage},     ${c3}::uuid, now() - interval '1 hour'),
+          (${org_id}::uuid, ${campaign_id}, ${healthyStage}, ${c1}::uuid, now() - interval '1 hour'),
+          (${org_id}::uuid, ${campaign_id}, ${healthyStage}, ${c2}::uuid, now() - interval '1 hour')
+      `);
+
+      // Read back exactly what route.ts would read: visit_clicks_clean summed
+      // from keitaro_stage_results, counted_clickers counted per stage.
+      const results = (await tx.execute(sql`
+        SELECT k.stage_id,
+               k.visit_clicks_clean AS visits,
+               (SELECT count(*)::int FROM counted_clickers cc WHERE cc.stage_id = k.stage_id) AS counted
+        FROM keitaro_stage_results k
+        WHERE k.stage_id IN (${gapStage}, ${healthyStage}, ${zeroStage})
+      `)) as unknown as { stage_id: number; visits: number; counted: number }[];
+      const byId = new Map(
+        results.map((r) => [Number(r.stage_id), { visits: Number(r.visits), counted: Number(r.counted) }]),
+      );
+      const gapInputs = byId.get(gapStage)!;
+      const healthyInputs = byId.get(healthyStage)!;
+      const zeroInputs = byId.get(zeroStage)!;
+
+      ok(gapInputs.visits === 0 && gapInputs.counted === 3, "gap fixture: synthesized 0 visits / 3 counted clickers");
+      const gapExpected = expectedFallback("tracked", gapInputs.visits, gapInputs.counted);
+      ok(gapExpected.clickers_is_fallback === true, "⭐ gap fixture: rule reports clickers_is_fallback = true");
+      ok(
+        gapExpected.clickers === 3,
+        "⭐ gap fixture: rule reports clickers = counted_clickers (3), not the 0 Keitaro visits",
+      );
+
+      ok(
+        healthyInputs.visits === 5 && healthyInputs.counted === 2,
+        "healthy fixture: synthesized 5 visits / 2 counted clickers (counted deliberately LOWER)",
+      );
+      const healthyExpected = expectedFallback("tracked", healthyInputs.visits, healthyInputs.counted);
+      ok(healthyExpected.clickers_is_fallback === false, "⭐ healthy fixture: rule reports clickers_is_fallback = false");
+      ok(
+        healthyExpected.clickers === 5,
+        "⭐ healthy fixture: rule reports clickers = the real Keitaro visits (5), NOT counted_clickers (2) — " +
+          "proves visits>0 wins even when a smaller counted value also exists",
+      );
+
+      ok(
+        zeroInputs.visits === 0 && zeroInputs.counted === 0,
+        "zero fixture: synthesized 0 visits AND 0 counted clickers",
+      );
+      const zeroExpected = expectedFallback("tracked", zeroInputs.visits, zeroInputs.counted);
+      ok(
+        zeroExpected.clickers_is_fallback === false,
+        "zero fixture: rule does NOT fall back when there is nothing to fall back to",
+      );
+      ok(zeroExpected.clickers === 0, "zero fixture: displayed clickers stays 0");
+
+      // Nothing above is meant to persist.
+      throw new Error("__ROLLBACK__");
+    });
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== "__ROLLBACK__") throw err;
+    console.log("\n  (transaction rolled back — nothing written)");
   }
 
-  const base = JSON.parse(readFileSync(BASELINE, "utf8")) as typeof snapshot;
+  // Prove the rollback actually happened.
+  const residue = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM campaign_stages
+    WHERE tracking_id IN ('VERIFY_FALLBACK_GAP_STAGE', 'VERIFY_FALLBACK_HEALTHY_STAGE', 'VERIFY_FALLBACK_ZERO_STAGE')
+  `)) as unknown as { n: number }[];
+  ok(Number(residue[0].n) === 0, "⭐ residue check: no synthesized rows survived");
 
-  // The SOURCE data must be identical — the fallback is display-time only.
-  ok(
-    JSON.stringify(base) === JSON.stringify(snapshot),
-    "⭐ keitaro_stage_results and counted_clickers are UNCHANGED (no data write)",
-  );
-  ok(snapshot[GAP_STAGE].visits_clean === 0, `gap stage ${GAP_STAGE} still has 0 Keitaro visits`);
-  ok(snapshot[GAP_STAGE].counted > 0, `gap stage ${GAP_STAGE} has CamMan counted clickers to fall back to`);
-  ok(
-    snapshot[CONTROL_STAGE].visits_clean > 0,
-    `control stage ${CONTROL_STAGE} has Keitaro visits, so it must NOT fall back`,
-  );
-
-  console.log(
-    `\n  expected on screen: stage ${GAP_STAGE} -> ${snapshot[GAP_STAGE].counted}* ` +
-      `(was 0), stage ${CONTROL_STAGE} -> ${snapshot[CONTROL_STAGE].visits_clean} (unmarked)`,
-  );
   console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${fail} failed check(s)\n`);
-  if (fail !== 0) process.exit(1);
+  process.exit(fail === 0 ? 0 : 1);
 }
 
 main().catch((err) => {

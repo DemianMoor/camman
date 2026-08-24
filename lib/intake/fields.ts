@@ -46,9 +46,9 @@ export const LEAD_FIELDS: LeadFieldDef[] = [
     aliases: ["mobile", "mobile_number", "phone_number", "cell", "telephone", "msisdn"],
     example: "+12025550199",
     notes:
-      "The only required field. E.164 preferred; US national format is accepted " +
-      "and normalized. A lead whose number cannot be parsed is still STORED, " +
-      "with status 'rejected' — it is never silently discarded.",
+      "The only required field. E.164 is preferred; US national format is accepted " +
+      "and normalized. A number that cannot be parsed is stored with status " +
+      "'rejected' rather than discarded.",
   },
   {
     key: "interest_tag",
@@ -58,8 +58,8 @@ export const LEAD_FIELDS: LeadFieldDef[] = [
     aliases: ["tag", "interest", "vertical"],
     example: "ACA",
     notes:
-      "May be overridden or defaulted by your key's configuration. Deliberately " +
-      "not a fixed list — new tags are configuration, not a code change.",
+      "May be overridden or defaulted by key configuration. Not a fixed list; " +
+      "new tags are added as configuration.",
   },
   { key: "first_name", label: "First Name", type: "string", required: false,
     aliases: ["fname", "firstname", "given_name"], example: "Jane" },
@@ -67,7 +67,7 @@ export const LEAD_FIELDS: LeadFieldDef[] = [
     aliases: ["lname", "lastname", "surname", "family_name"], example: "Doe" },
   { key: "email", label: "Email", type: "email", required: false,
     aliases: ["email_address", "mail"], example: "jane@example.com",
-    notes: "Stored lowercased and trimmed. Not a unique key — the phone is the identity." },
+    notes: "Stored lowercased and trimmed. Not a unique key; the phone number is the identity." },
   { key: "address", label: "Address", type: "string", required: false,
     aliases: ["street", "address1", "address_line_1"], example: "123 Main St" },
   { key: "state", label: "State", type: "string", required: false,
@@ -80,9 +80,8 @@ export const LEAD_FIELDS: LeadFieldDef[] = [
     key: "dob", label: "Date of Birth", type: "date", required: false,
     aliases: ["date_of_birth", "birth_date", "birthday"], example: "1985-04-17",
     notes:
-      "ISO 8601 (YYYY-MM-DD). ⚠️ Send an EMPTY VALUE for unknown, never " +
-      "1970-01-01 — an epoch placeholder is treated as unknown and discarded, " +
-      "because storing it would manufacture a false age cohort.",
+      "ISO 8601 (YYYY-MM-DD). Omit or send an empty value when unknown. Epoch " +
+      "placeholders such as 1970-01-01 are treated as unknown and discarded.",
   },
   {
     key: "income_band", label: "Income", type: "enum", required: false,

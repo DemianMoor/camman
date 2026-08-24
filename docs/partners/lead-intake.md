@@ -46,16 +46,16 @@ kept**, not discarded, so nothing is lost if you send more than the list below.
 
 | Field | Meaning | Type | Required | Also accepted as | Example | Notes |
 |---|---|---|---|---|---|---|
-| `phone` | Mobile Number | phone | **yes** | `mobile`, `mobile_number`, `phone_number`, `cell`, `telephone`, `msisdn` | `+12025550199` | The only required field. E.164 preferred; US national format is accepted and normalized. A lead whose number cannot be parsed is still STORED, with status 'rejected' — it is never silently discarded. |
-| `interest_tag` | Interest Tag | string | no | `tag`, `interest`, `vertical` | `ACA` | May be overridden or defaulted by your key's configuration. Deliberately not a fixed list — new tags are configuration, not a code change. |
+| `phone` | Mobile Number | phone | **yes** | `mobile`, `mobile_number`, `phone_number`, `cell`, `telephone`, `msisdn` | `+12025550199` | The only required field. E.164 is preferred; US national format is accepted and normalized. A number that cannot be parsed is stored with status 'rejected' rather than discarded. |
+| `interest_tag` | Interest Tag | string | no | `tag`, `interest`, `vertical` | `ACA` | May be overridden or defaulted by key configuration. Not a fixed list; new tags are added as configuration. |
 | `first_name` | First Name | string | no | `fname`, `firstname`, `given_name` | `Jane` |  |
 | `last_name` | Last Name | string | no | `lname`, `lastname`, `surname`, `family_name` | `Doe` |  |
-| `email` | Email | email | no | `email_address`, `mail` | `jane@example.com` | Stored lowercased and trimmed. Not a unique key — the phone is the identity. |
+| `email` | Email | email | no | `email_address`, `mail` | `jane@example.com` | Stored lowercased and trimmed. Not a unique key; the phone number is the identity. |
 | `address` | Address | string | no | `street`, `address1`, `address_line_1` | `123 Main St` |  |
 | `state` | State | string | no | `st`, `region`, `province` | `TX` |  |
 | `country` | Country | string | no | `country_code` | `US` |  |
 | `gender` | Gender | enum | no | `sex` | `female` | Allowed: `male` · `female` · `other` |
-| `dob` | Date of Birth | date | no | `date_of_birth`, `birth_date`, `birthday` | `1985-04-17` | ISO 8601 (YYYY-MM-DD). ⚠️ Send an EMPTY VALUE for unknown, never 1970-01-01 — an epoch placeholder is treated as unknown and discarded, because storing it would manufacture a false age cohort. |
+| `dob` | Date of Birth | date | no | `date_of_birth`, `birth_date`, `birthday` | `1985-04-17` | ISO 8601 (YYYY-MM-DD). Omit or send an empty value when unknown. Epoch placeholders such as 1970-01-01 are treated as unknown and discarded. |
 | `income_band` | Income | enum | no | `income`, `household_income` | `50-75k` | Allowed: `<25k` · `25-50k` · `50-75k` · `75-100k` · `100-150k` · `150k+` |
 | `kids` | Has Children | boolean | no | `children`, `has_kids` | `true` |  |
 | `married` | Married | boolean | no | `is_married`, `marital_status` | `false` |  |

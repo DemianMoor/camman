@@ -765,12 +765,31 @@ try {
       RETURNING id
     `)) as unknown as { id: number }[];
 
+    // ⚠️ `links` has TEN NOT NULL columns with no default — verified against
+    // information_schema, not guessed: org_id, code, short_domain_id,
+    // destination_id, campaign_id, stage_id, contact_id, send_token,
+    // campaign_tracking_id, stage_tracking_id. Omitting any of them fails the
+    // insert. Seed the FK-bearing ones from real rows.
+    const seedRefs = (await tx.execute(sql`
+      SELECT (SELECT id FROM short_domains ORDER BY id LIMIT 1) AS short_domain_id,
+             (SELECT id FROM contacts ORDER BY id LIMIT 1) AS contact_id
+    `)) as unknown as { short_domain_id: number; contact_id: string }[];
+    const { short_domain_id, contact_id } = seedRefs[0];
+
+    // One contact, N distinct send_tokens. The unique index is
+    // (stage_id, contact_id, send_token), so varying the token is enough and
+    // avoids needing N distinct contacts. The monitor counts click ROWS, not
+    // distinct contacts, so this does not weaken the assertion.
     for (const stageId of [gapStage, healthyStage]) {
       await tx.execute(sql`
         WITH new_links AS (
-          INSERT INTO links (org_id, campaign_id, stage_id, destination_id, code, send_token)
+          INSERT INTO links (org_id, campaign_id, stage_id, destination_id,
+                             short_domain_id, contact_id, code, send_token,
+                             campaign_tracking_id, stage_tracking_id)
           SELECT ${org_id}::uuid, ${campaign_id}, ${stageId}, ${dest[0].id},
-                 'vfy' || ${stageId} || '_' || g, g
+                 ${short_domain_id}, ${contact_id}::uuid,
+                 'vfy' || ${stageId} || '_' || g, 'vfytok' || g,
+                 'VERIFY_CAMPAIGN_TRACKING', 'VERIFY_STAGE_TRACKING'
           FROM generate_series(1, ${n}) g
           RETURNING id
         )
@@ -888,15 +907,12 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Consumes: `getStageMetricsInRange` (existing), `ClickerDenominators.periodByStage` (existing).
 - Produces: a `clickers_is_fallback: boolean` field on every row of the `/api/keitaro/reports` response, plus `clickers_is_fallback` on the `totals` object.
 
-- [ ] **Step 1: Capture the pre-change baseline**
+> **Step order matters here.** The baseline must be captured from the database
+> *before* the route change, and the script that captures it must exist first.
+> So: write the script (Step 1), capture the baseline and confirm it sees
+> today's gap (Step 2), then implement (Step 3).
 
-```bash
-cd /c/AFF/camman/.claude/worktrees/tgap && npx tsx scripts/verify-clickers-fallback.ts --baseline
-```
-
-This fails — the script does not exist yet. Write it in Step 2 first, run the baseline, then implement.
-
-- [ ] **Step 2: Write the verification script**
+- [ ] **Step 1: Write the verification script**
 
 Create `scripts/verify-clickers-fallback.ts`:
 
@@ -987,7 +1003,7 @@ console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${fail} failed check(s)\n`);
 process.exit(fail === 0 ? 0 : 1);
 ```
 
-- [ ] **Step 3: Run the baseline, then verify it currently reports the gap**
+- [ ] **Step 2: Run the baseline, then verify it currently reports the gap**
 
 ```bash
 cd /c/AFF/camman/.claude/worktrees/tgap
@@ -998,7 +1014,7 @@ npx tsx scripts/verify-clickers-fallback.ts
 
 Expected: baseline written, then `PASS` — stage 3029 has `visits_clean: 0` and `counted: 282`.
 
-- [ ] **Step 4: Implement the fallback**
+- [ ] **Step 3: Implement the fallback**
 
 In `app/api/keitaro/reports/route.ts`, immediately after the `linkModeByCampaign` line (currently line 121), insert:
 
@@ -1073,7 +1089,7 @@ Finally, on the `totals` object (around line 328), add:
       clickers_is_fallback: clickersFallbackStageIds.size > 0,
 ```
 
-- [ ] **Step 5: Verify nothing that feeds EPC moved**
+- [ ] **Step 4: Verify nothing that feeds EPC moved**
 
 ```bash
 cd /c/AFF/camman/.claude/worktrees/tgap
@@ -1083,7 +1099,7 @@ npx tsx scripts/verify-clickers-fallback.ts
 
 Expected: `tsc` clean; `PASS` — the source tables are byte-identical to the baseline, proving the change wrote nothing.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 cd /c/AFF/camman/.claude/worktrees/tgap

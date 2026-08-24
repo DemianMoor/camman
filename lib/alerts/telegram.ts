@@ -11,10 +11,29 @@
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEOUT_MS = 4000;
 
-export async function notifyTelegram(text: string): Promise<void> {
+/**
+ * Best-effort Telegram alert. NEVER THROWS.
+ *
+ * @returns `true` only when Telegram accepted the message (HTTP 2xx).
+ *          `false` for unset config, a non-2xx response, a network error, or
+ *          the timeout.
+ *
+ * ⚠️ THE RETURN VALUE IS THE ONLY SIGNAL OF DELIVERY. Because this function
+ * swallows every failure, a caller that needs to know whether a human was
+ * actually told has nothing else to read — and silence here is
+ * indistinguishable between "sent" and "your token is wrong".
+ *
+ * MOST CALLERS ARE RIGHT TO IGNORE IT: a one-off best-effort notification with
+ * no state riding on it should stay fire-and-forget, and ~20 call sites do
+ * exactly that. But if you are about to LATCH, SUPPRESS, or otherwise gate
+ * state on "we told someone", you MUST check this boolean — see
+ * lib/alerts/alert-state.ts for the worked example. Ignoring it there is
+ * precisely the bug that made a failed send lose an alert permanently.
+ */
+export async function notifyTelegram(text: string): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return; // not configured — silent no-op
+  if (!token || !chatId) return false; // not configured — nobody was told
 
   try {
     const res = await fetch(`${TELEGRAM_API}/bot${token}/sendMessage`, {
@@ -29,10 +48,13 @@ export async function notifyTelegram(text: string): Promise<void> {
     });
     if (!res.ok) {
       console.error(`[telegram] alert POST failed: HTTP ${res.status}`);
+      return false;
     }
+    return true;
   } catch (err) {
     // Swallow EVERYTHING — never let an alert failure propagate.
     console.error("[telegram] alert error (swallowed):", err);
+    return false;
   }
 }
 

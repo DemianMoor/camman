@@ -5,7 +5,7 @@ import { requireApiMembership } from "@/lib/api/helpers";
 import { withCronLease } from "@/lib/cron/lease";
 import { runDripMonitors } from "@/lib/drip/monitors";
 import { can } from "@/lib/permissions";
-import { checkHeartbeats, HEARTBEAT_JOBS } from "@/lib/reporting/cron-heartbeat";
+import { checkHeartbeats, HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 
 // Drip monitors (Drip Phase 3).
 //
@@ -53,6 +53,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       skippedCount: leased.skippedCount,
     });
   }
+  // Stamped AFTER the work so a run that threw does not look healthy. Watched by
+  // /api/cron/drip-scheduler — this job used to have no watcher at all.
+  await recordHeartbeat(db, HEARTBEAT_JOBS.dripMonitors.job_name);
   return NextResponse.json(leased.result);
 }
 

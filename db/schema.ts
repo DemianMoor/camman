@@ -1947,6 +1947,14 @@ export const campaign_stages = pgTable(
     // Deliberate per-stage gate the real-send drain checks before sending.
     // Default false — a stage's materialized batch is never drained until
     // explicitly approved. One of three gates (also SEND_ENABLED + CRON_SECRET).
+    // ⚠️ Drip Phase 5. NULL on every regular stage. A drip stage is a DAILY
+    // ET WINDOW, stored as minutes past ET midnight — arithmetic on a local
+    // wall-clock with no date attached, so no UTC offset can creep in.
+    // Half-open [start, end): windows may not overlap OR TOUCH, which is a
+    // multi-row rule enforced in lib/drip/windows.ts, not by a CHECK.
+    window_start_min: smallint("window_start_min"),
+    window_end_min: smallint("window_end_min"),
+    drip_active: boolean("drip_active"),
     send_approved: boolean("send_approved").notNull().default(false),
     status_changed_at: timestamp("status_changed_at", { withTimezone: true })
       .notNull()
@@ -4371,6 +4379,18 @@ export const drip_journeys = pgTable(
       .references(() => lead_events.id, { onDelete: "cascade" }),
     state: text("state").notNull().default("routed"),
     routed_at: timestamp("routed_at", { withTimezone: true }).notNull().defaultNow(),
+    // Drip Phase 5. Which stage sent the first message, and when.
+    //
+    // ⚠️ Recorded on the JOURNEY rather than derived from stage_sends, for two
+    // reasons: stage_sends is what the September retention card starts deleting
+    // from, and Phase 6's behavioural follow-ups will put more rows there, so
+    // "has this lead had its first send?" cannot be a count over that table.
+    first_stage_id: integer("first_stage_id").references(() => campaign_stages.id, {
+      onDelete: "set null",
+    }),
+    first_send_at: timestamp("first_send_at", { withTimezone: true }),
+    // Correlation only — deliberately NOT an FK, so it survives retention.
+    first_send_id: uuid("first_send_id"),
     // Why this campaign won and what was skipped. Read by the "why not routed"
     // tool. Carries creative_check:"deferred_p5" in Phase 4 — the creative half
     // of the same-offer-same-creative rule has no operand until drip stages exist.
@@ -4405,8 +4425,68 @@ export const drip_journeys = pgTable(
       "drip_journeys_campaign_required_check",
       sql`${table.state} = 'unroutable' OR ${table.campaign_id} IS NOT NULL`,
     ),
+    // 'active' means the first send happened. A 'routed' journey carrying a
+    // first_send_at would let the due-scan hand the same lead a SECOND
+    // first-send, which is the one thing the spec forbids.
+    check(
+      "drip_journeys_first_send_state_check",
+      sql`(${table.state} = 'routed' AND ${table.first_send_at} IS NULL)
+          OR (${table.state} <> 'routed')`,
+    ),
+    index("drip_journeys_due_idx")
+      .on(table.org_id, table.campaign_id, table.routed_at)
+      .where(sql`state = 'routed' AND first_send_at IS NULL`),
   ],
 );
 
 export type DripCampaignConfig = typeof drip_campaign_configs.$inferSelect;
 export type DripJourney = typeof drip_journeys.$inferSelect;
+
+// Per-drip-campaign number selection with a per-number ET-daily limit.
+//
+// ⚠️ The BRAND constraint is not duplicated here — which numbers may be picked
+// is decided by the Phase 1 brand -> number guard. This table stores the CHOICE,
+// not a second copy of the rule; two copies of an authorization rule is exactly
+// how the two in-use definitions drifted apart before Phase 4 unified them.
+//
+// ⚠️ ON DELETE RESTRICT on the phone: removing a number a live drip campaign is
+// sending from must fail loudly, not strand the campaign with nowhere to send.
+export const drip_campaign_numbers = pgTable(
+  "drip_campaign_numbers",
+  {
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    provider_phone_id: integer("provider_phone_id")
+      .notNull()
+      .references(() => provider_phones.id, { onDelete: "restrict" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // Sends per ET day from THIS number for THIS campaign. NULL = drip imposes
+    // no limit (the provider's pacing and carrier caps still apply).
+    daily_limit: integer("daily_limit"),
+    // Rotation order. Lower first — the operator's ordering is the preference,
+    // so rotation is "first with headroom", not round-robin.
+    position: integer("position").notNull().default(0),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "drip_campaign_numbers_pk",
+      columns: [table.campaign_id, table.provider_phone_id],
+    }),
+    index("drip_campaign_numbers_campaign_position_idx").on(
+      table.campaign_id,
+      table.position,
+      table.provider_phone_id,
+    ),
+    index("drip_campaign_numbers_org_idx").on(table.org_id),
+    check(
+      "drip_campaign_numbers_daily_limit_check",
+      sql`${table.daily_limit} IS NULL OR ${table.daily_limit} > 0`,
+    ),
+  ],
+);
+
+export type DripCampaignNumber = typeof drip_campaign_numbers.$inferSelect;

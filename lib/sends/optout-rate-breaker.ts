@@ -1,3 +1,5 @@
+import { sql } from "drizzle-orm";
+
 import type { db } from "@/db/client";
 import {
   countAlignedOptOutsInWindowsForStage,
@@ -183,6 +185,44 @@ export async function checkOptOutRateBreaker(
   if (decision.tripped_by === null) {
     return { ...decision, stage_id: stageId, tripped: false };
   }
+
+  // ⚠️⚠️ R13 — TYPE AWARENESS, AND THE DIRECTION IS NORMATIVE.
+  //
+  // A DRIP campaign is governed by its own per-campaign, per-ET-day opt-out
+  // monitor (Phase 5), which owns the drip latch. This stage-level breaker
+  // therefore does not latch a drip campaign — its stage windows are daily
+  // recurring, so a stage-scoped rolling window means something different there.
+  //
+  // ONLY A POSITIVE, SUCCESSFUL READ OF type = 'drip' MAY SKIP THE LATCH.
+  // NULL, an unknown value, a missing row, or a query that throws ⇒ the campaign
+  // is treated as REGULAR and the breaker latches exactly as it does today.
+  // This function has four live callers, all opt-out ingesters, all
+  // compliance-critical: a mistake here silently removes opt-out protection from
+  // real campaigns. Fail toward the EXISTING behaviour, never toward the new one.
+  let isDrip = false;
+  try {
+    const typeRows = (await dbc.execute(sql`
+      SELECT type FROM campaigns WHERE id = ${campaignId} AND org_id = ${orgId} LIMIT 1
+    `)) as unknown as { type: string | null }[];
+    isDrip = typeRows[0]?.type === "drip";
+  } catch (err) {
+    // Unreadable ⇒ regular. Logged, never swallowed silently.
+    console.error(
+      `[optout-breaker] campaign type unreadable for ${campaignId}; treating as REGULAR ` +
+        `and latching as usual:`,
+      err,
+    );
+    isDrip = false;
+  }
+
+  if (isDrip) {
+    console.warn(
+      `[optout-breaker] campaign ${campaignId} is DRIP — stage-level latch skipped; ` +
+        `the drip opt-out monitor owns this campaign's latch.`,
+    );
+    return { ...decision, stage_id: stageId, tripped: false };
+  }
+
   const tripped = await latchCampaignPause(dbc, {
     campaignId,
     orgId,

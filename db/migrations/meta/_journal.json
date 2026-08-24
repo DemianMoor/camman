@@ -1149,6 +1149,27 @@
       "when": 1790467200000,
       "tag": "0163_drip_journeys_unroutable_campaign",
       "breakpoints": true
+    },
+    {
+      "idx": 164,
+      "version": "7",
+      "when": 1790553600000,
+      "tag": "0164_drip_stage_windows",
+      "breakpoints": true
+    },
+    {
+      "idx": 165,
+      "version": "7",
+      "when": 1790640000000,
+      "tag": "0165_drip_campaign_numbers",
+      "breakpoints": true
+    },
+    {
+      "idx": 166,
+      "version": "7",
+      "when": 1790726400000,
+      "tag": "0166_drip_journeys_first_send",
+      "breakpoints": true
     }
   ]
 }

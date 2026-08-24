@@ -33,6 +33,19 @@ export interface HeartbeatExpectation {
 }
 
 export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
+  // The drip scheduler (Phase 5). Watched by drip-monitors.
+  dripScheduler: {
+    job_name: "drip-scheduler",
+    max_age_hours: 1,
+    label: "drip scheduler (1-min)",
+  },
+  // The drip monitors job itself — watched BY the scheduler, closing the
+  // P3 gap where the watcher had no watcher.
+  dripMonitors: {
+    job_name: "drip-monitors",
+    max_age_hours: 2,
+    label: "drip monitors (15-min)",
+  },
   // The drip routing worker (Phase 4). Watched by /api/cron/drip-monitors,
   // never by itself. Runs every minute; 1 hour is ~60 missed runs.
   dripRouting: {

@@ -82,6 +82,7 @@ export async function POST(
   const current = await db
     .select({
       status: campaigns.status,
+      type: campaigns.type,
       name: campaigns.name,
       brand_id: campaigns.brand_id,
       offer_id: campaigns.offer_id,
@@ -132,7 +133,11 @@ export async function POST(
     const segmentIds = c.audience_segment_ids ?? [];
     const excludeSegmentIds = c.audience_exclude_segment_ids ?? [];
     const contactGroupIds = c.audience_contact_group_ids ?? [];
-    if (contactGroupIds.length === 0) {
+    // ⚠️ DIRECTION (R13): only a POSITIVE read of 'drip' skips the audience
+    // requirement. NULL / unknown / a future type keeps today's behaviour, so a
+    // campaign this build cannot classify can never activate with no audience.
+    const isDrip = c.type === "drip";
+    if (contactGroupIds.length === 0 && !isDrip) {
       missing.push("audience_contact_group_ids");
     }
     if (missing.length > 0) {
@@ -156,7 +161,20 @@ export async function POST(
           .limit(1);
 
         let count: number;
-        if (existing.length === 0) {
+        if (isDrip) {
+          // ⚠️ NO SNAPSHOT FOR A DRIP CAMPAIGN, AND THE ZERO IS NOT A FAILURE.
+          // snapshotAudience freezes the set of contacts a blast will send to.
+          // A drip campaign has no such set at activation: leads arrive after
+          // it, one at a time, and each is admitted by the routing worker. The
+          // EmptyAudienceError below exists to stop a blast launching to nobody
+          // -- applied here it would reject every drip campaign, which is
+          // precisely how activation was blocked.
+          //
+          // 0 is therefore the CORRECT frozen count, and campaign_audience_pool
+          // stays empty for this campaign forever. The drip in-use branch reads
+          // drip_journeys, not the pool, so nothing downstream expects rows here.
+          count = 0;
+        } else if (existing.length === 0) {
           const snap = await snapshotAudience(
             {
               campaignId,
@@ -203,8 +221,10 @@ export async function POST(
           campaignId,
           actorUserId: user.id,
           eventType: "campaign_status_changed",
-          summary: `Campaign activated (draft → active), audience frozen at ${count.toLocaleString()}`,
-          metadata: { from, to: "active", audience_count: count },
+          summary: isDrip
+            ? "Drip campaign activated (draft → active); audience arrives as leads, nothing frozen"
+            : `Campaign activated (draft → active), audience frozen at ${count.toLocaleString()}`,
+          metadata: { from, to: "active", audience_count: count, type: c.type ?? null },
         });
         return row;
       });

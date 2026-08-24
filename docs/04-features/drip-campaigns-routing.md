@@ -145,3 +145,27 @@ checks the route's source text as well as the behaviour.
 
 Number selection (P5), stages and the scheduler (P5), sends (P5), behavioural follow-ups (P6), the
 pause button's wiring (P5 — the list shows type only), and the creative half of the same-offer rule.
+
+## Activation and the drainable stamp
+
+A drip campaign is **exempt from the contact-group launch requirement** in both
+the create validator and the `draft → active` status route, and its activation
+skips `snapshotAudience`: the frozen `audience_snapshot_count` is `0` and
+`campaign_audience_pool` stays empty for that campaign forever. That is correct,
+not a degenerate case — the audience arrives afterwards, one lead at a time, and
+the drip in-use branch reads `drip_journeys`, never the pool. The exemption is a
+positive read of `type === 'drip'`; NULL or an unrecognised type keeps the
+requirement.
+
+Reaching `active` is not optional: routing
+([lib/drip/routing-eval.ts](../../lib/drip/routing-eval.ts)), the scheduler
+([lib/drip/scheduler.ts](../../lib/drip/scheduler.ts)) and the drain
+([lib/sends/scheduled.ts](../../lib/sends/scheduled.ts)) all filter on it.
+
+`stampDripStageDrainable` (exported from the scheduler) sets `send_approved`,
+`materialized_at` and `sent_at` on the drip stage in the **same transaction** as
+the first `stage_sends` insert, so the existing drain picks the rows up with no
+change to `drain.ts`. It is idempotent, refuses any stage whose `drip_active` is
+not `TRUE`, and fills `sent_at` only when NULL — see
+[docs/07-conventions.md](../07-conventions.md) for why that column cannot be
+assigned.

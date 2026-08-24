@@ -1388,4 +1388,38 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 - `daily_cap` relabelled from "not yet enforced" to live, now that the scheduler enforces it.
   — docs updated: docs/04-features/drip-campaigns-routing.md, docs/07-conventions.md
 
+## 2026-08-24 — Drip Phase 5: the three defects that made drip campaigns unrunnable
+
+Found while executing the production send proof. Each independently blocked the
+whole feature; all three were merged and deployed in the broken state.
+
+- **A — a drip campaign could not reach `status='active'`.** Both the create
+  validator and the `draft → active` route demanded ≥1 contact group, which the
+  type can never have, while routing, the scheduler and the drain all require
+  `active`. Now type-gated on a positive `'drip'` read (NULL/unknown keeps today's
+  behaviour), and a drip activation skips `snapshotAudience` — its frozen count
+  is `0` by design.
+- **B — `POST /api/campaigns/[id]/stages` silently dropped
+  `window_start_min` / `window_end_min` / `drip_active`.** Validator accepted them,
+  guard checked them, route answered 201, columns stored NULL: the Drizzle
+  `.values()` literal never listed them. The scheduler selects
+  `WHERE drip_active IS TRUE`, so no stage made through the product was visible to
+  it — and the overlap/touch guard was vacuously green, since no sibling ever
+  stored a window. PATCH had persisted them all along, so the bug hid from anyone
+  who edited a stage twice.
+- **C — nothing stamped a drip stage drainable.** `send_approved` /
+  `materialized_at` / `sent_at` appeared in `lib/drip/` only in two comments
+  describing the shape. The scheduler now stamps them idempotently in the same
+  transaction as the first `stage_sends` insert, guarded by `drip_active IS TRUE`
+  so it can never approve a regular stage, and filling `sent_at` with `COALESCE`
+  because that column has two other writers.
+
+Pinned by [scripts/test-drip-activation-and-stamp.ts](../scripts/test-drip-activation-and-stamp.ts)
+(launch-gate direction; stamp idempotence, regular-stage safety, `sent_at`
+preservation — in a rolled-back probe) and
+[scripts/test-stage-post-roundtrip.ts](../scripts/test-stage-post-roundtrip.ts)
+(POST → GET through the deployed route; verified RED against the unfixed
+production before the fix).
+  — docs updated: docs/07-conventions.md, docs/04-features/drip-campaigns-routing.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

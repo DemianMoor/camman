@@ -88,8 +88,9 @@ A stage breaches when **all** hold:
 
 The redirect count is **reported, not required**. The original brief required
 `redirects = 0` too; measured against prod that would skip campaign 924 (visits 0,
-redirects 101) and two `lumzen.co` stages — 4 of the 6 real gap stages — all of which are
-the same defect. Visits are the signal; redirects are context.
+redirects 101) and both `lumzen.co` stages of campaign 926 (redirects 4 and 11) — **3 of
+the 5** stages that qualify, all of them the same defect. Visits are the signal; redirects
+are context.
 
 ### 3.2 Thresholds and why
 

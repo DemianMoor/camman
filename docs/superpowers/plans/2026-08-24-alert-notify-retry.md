@@ -620,12 +620,54 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 3: Documentation
+### Task 3: Documentation, plus the rollback-sentinel cleanup
 
 **Files:**
 - Modify: `docs/03-data-model.md` (the `alert_state` row, around line 363)
 - Modify: `docs/07-conventions.md` (the state-transition-gated alerts paragraph, around lines 919-923)
 - Modify: `docs/CHANGELOG.md`
+- Modify: `scripts/verify-tracking-gap.ts:226,229`
+- Modify: `scripts/verify-clickers-fallback.ts:322,325`
+
+- [ ] **Step 0: Close the rollback-sentinel divergence**
+
+Two scripts on `main` use a string sentinel to roll back their transaction; 30 others use a
+`Symbol`. Both string ones arrived on the previous branch, so this is closing a divergence that
+branch introduced, not a general cleanup. A `Symbol` cannot collide with a genuine error
+message; a string can.
+
+In **each** of `scripts/verify-tracking-gap.ts` and `scripts/verify-clickers-fallback.ts`:
+
+1. Add near the top-level constants (after the imports):
+
+```ts
+const ROLLBACK = Symbol("rollback");
+```
+
+2. Replace the throw (line ~226 / ~322):
+
+```ts
+      throw ROLLBACK;
+```
+
+3. Replace the catch guard (line ~229 / ~325):
+
+```ts
+    if (err !== ROLLBACK) throw err;
+```
+
+Then run both scripts and confirm each still reaches its rollback path and passes:
+
+```bash
+cd /c/AFF/camman/.claude/worktrees/alertfix
+npx tsx scripts/verify-tracking-gap.ts 2>&1 | tail -3
+npx tsx scripts/verify-clickers-fallback.ts 2>&1 | tail -3
+```
+
+Expected: both print `PASS — 0 failed check(s)` and their residue checks still report nothing
+persisted. If either now throws instead of rolling back cleanly, the catch guard is wrong —
+the `Symbol` is thrown bare, not wrapped in an `Error`, so `err instanceof Error` must NOT
+appear in the new guard.
 
 - [ ] **Step 1: Record the pending state in the data model**
 
@@ -684,10 +726,16 @@ Set the `last updated` line to `2026-08-24` on `docs/03-data-model.md` and `docs
 
 ```bash
 cd /c/AFF/camman/.claude/worktrees/alertfix
-git diff --name-only | grep -v '^docs/' && echo "NON-DOC FILE TOUCHED — STOP" || echo "docs only (correct)"
+echo "changed files (expect docs/ plus the two verify scripts, nothing else):"
+git diff --name-only
 test -f lib/alerts/alert-state.ts && echo "referenced path exists"
-git add docs/
-git commit -m "docs: record the delivery-confirmed latch and the pending-retry state
+echo "string sentinels remaining (expect 0): $(grep -c __ROLLBACK__ scripts/*.ts | awk -F: '{t+=$2} END {print t+0}')"
+git add docs/ scripts/verify-tracking-gap.ts scripts/verify-clickers-fallback.ts
+git commit -m "docs: record the delivery-confirmed latch, and use the Symbol rollback idiom
+
+The two verify scripts from the tracking-gap branch used a string
+sentinel that a genuine error message could collide with; 30 other
+scripts use Symbol. Closes a divergence that branch introduced.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```

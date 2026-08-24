@@ -24,6 +24,11 @@ const stageBaseSchema = z.object({
   window_start_min: z.number().int().min(0).max(1439).nullable().optional(),
   window_end_min: z.number().int().min(1).max(1440).nullable().optional(),
   drip_active: z.boolean().nullable().optional(),
+  // Drip P6. Minutes after THIS CONTACT'S detection that a behavioural child
+  // fires. Range mirrors the DB CHECK; the option lists live in
+  // lib/drip/followup-timing.ts and are enforced by the UI, not here — the API
+  // accepts any legal minute so a future option list needs no validator change.
+  drip_followup_minutes: z.number().int().min(1).max(1440).nullable().optional(),
   label: z
     .union([z.string().trim().max(120), z.literal("")])
     .nullable()

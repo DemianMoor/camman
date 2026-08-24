@@ -13,6 +13,12 @@ import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime, utcToCampaignLocalInput, campaignLocalInputToUtcIso }
   from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import {
+  DripFollowupChildren,
+  type FollowupChild,
+} from "@/components/campaigns/drip-followup-children";
+import { minutesToLabel } from "@/lib/drip/windows";
+import { Switch } from "@/components/ui/switch";
 
 // Drip campaign config + routed journeys (Drip Phase 4).
 //
@@ -38,6 +44,14 @@ type Config = {
   routing_daily_admission_cap: number | null;
   priority: number | null;
   journeys_total: number;
+};
+
+type FollowupParent = {
+  parent_id: number;
+  window_start_min: number;
+  window_end_min: number;
+  parent_active: boolean | null;
+  children: FollowupChild[];
 };
 
 type DripNumber = {
@@ -66,6 +80,8 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
 
   const [cfg, setCfg] = useState<Config | null>(null);
   const [journeys, setJourneys] = useState<Journey[]>([]);
+  const [behavioralOn, setBehavioralOn] = useState(false);
+  const [followupParents, setFollowupParents] = useState<FollowupParent[]>([]);
   const [selectedNumbers, setSelectedNumbers] = useState<DripNumber[]>([]);
   const [availableNumbers, setAvailableNumbers] = useState<DripNumber[]>([]);
   const [tick, setTick] = useState(0);
@@ -117,7 +133,35 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
     })();
   }, [loadN, campaignId, tick]);
 
+  const followupsApi = useApiCall<{ behavioral_enabled: boolean; parents: FollowupParent[] }>();
+  const loadF = followupsApi.execute;
+  useEffect(() => {
+    (async () => {
+      const r = await loadF(`/api/campaigns/${campaignId}/drip-followups`);
+      if (r.ok) {
+        setBehavioralOn(r.data.behavioral_enabled);
+        setFollowupParents(r.data.parents);
+      }
+    })();
+  }, [loadF, campaignId, tick]);
+
   const reload = useCallback(() => setTick((n) => n + 1), []);
+
+  const toggleBehavioral = async (on: boolean) => {
+    const r = await followupsApi.execute(`/api/campaigns/${campaignId}/drip-followups`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ behavioral_enabled: on }),
+    });
+    if (!r.ok) {
+      toastApiError(r, "Couldn't change behavioural follow-ups");
+      return;
+    }
+    toast.success(
+      on ? "Behavioural follow-ups on — lanes created, each switched off" : "Behavioural follow-ups off",
+    );
+    reload();
+  };
 
   const saveNumbers = async (next: DripNumber[]) => {
     const r = await saveNumbersApi.execute(`/api/campaigns/${campaignId}/drip-numbers`, {
@@ -284,6 +328,59 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
               <Save className="mr-1 size-4" /> Save drip settings
             </Button>
           )}
+        </CardContent>
+      </Card>
+
+      {/* ── Behavioural follow-ups (Drip Phase 6) ─────────────────────────
+          Children are rendered UNDER their parent stage, because a child only
+          means anything relative to one: it fires off that parent's first-send,
+          to the contacts that parent messaged. */}
+      <Card>
+        <CardContent className="space-y-3 pt-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <Label>Behavioural follow-ups</Label>
+              <p className="text-muted-foreground mt-1 text-xs">
+                Adds an Ignored / Clicked / Offer lane to every first-send stage.
+                Turning this on creates the lanes <strong>switched off</strong> —
+                write the copy and enable each one deliberately.
+              </p>
+            </div>
+            <Switch
+              checked={behavioralOn}
+              disabled={!canEdit}
+              onCheckedChange={toggleBehavioral}
+              aria-label="Behavioural follow-ups"
+            />
+          </div>
+
+          {behavioralOn && followupParents.length === 0 && (
+            <p className="text-muted-foreground text-xs">
+              No first-send stage yet — add one and its lanes appear here.
+            </p>
+          )}
+
+          {behavioralOn &&
+            followupParents.map((p) => (
+              <div key={p.parent_id} className="grid gap-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <Badge variant="secondary" className="font-mono text-[10px]">
+                    {minutesToLabel(p.window_start_min)}–{minutesToLabel(p.window_end_min)}
+                  </Badge>
+                  <span className="text-muted-foreground">
+                    stage {p.parent_id}
+                    {p.parent_active ? "" : " (inactive)"}
+                  </span>
+                </div>
+                <DripFollowupChildren
+                  campaignId={campaignId}
+                  parentStageId={p.parent_id}
+                  items={p.children}
+                  canEdit={canEdit}
+                  onChanged={reload}
+                />
+              </div>
+            ))}
         </CardContent>
       </Card>
 

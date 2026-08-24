@@ -1211,6 +1211,48 @@ cancelled a scheduled send). Filling only a NULL means whichever writer arrives
 first wins and neither can erase the other. The statement also carries a trailing
 predicate so a second pass is a true no-op rather than a same-value rewrite.
 
+## A drip send mints its own link, per lead, and fails closed without one
+
+The drip scheduler mints one tracked link per lead inside the SAME transaction as
+the `stage_sends` insert, then renders the body around it. It cannot read a link
+off the stage: `campaign_stages.short_url` is a static column and is NULL on
+every drip stage, which is exactly how drip shipped sending copy that ends in a
+colon and then stops, with `link_id` NULL — no `/r/` redirect, no click, no
+Keitaro attribution, and an unattributable send that was still paid for.
+
+**If any component cannot be resolved — landing page, brand `landing_host`, short
+domain, either tracking ID — the lead is SKIPPED with a logged reason and no
+send.** Its journey stays `routed`, so fixing the configuration lets the next
+tick pick it up unchanged. This mirrors the opt-out gate: a message that cannot
+be built correctly is not a message to send approximately.
+
+Nothing in [lib/drip/mint.ts](../lib/drip/mint.ts) is a second copy of a rule —
+destination construction is `buildLandingPageUrl` (shared with the stage editor's
+preview) and short-domain precedence is `resolveShortDomainForSend` (shared with
+kickoff and the verifier). Two copies of a URL rule means drip and blast sending
+different links from the same configuration.
+
+⚠️ **A test that asserts "a link exists" tests almost nothing** — a link to the
+wrong destination passes it. Resolve the minted code through `link_destinations`
+and compare the URL.
+
+## ⚠️ `link_destinations_landing_url_shape` hardcodes the brand landing hosts
+
+The 0094 CHECK is:
+
+```
+url NOT LIKE '%/lp/%'
+  OR url ~ '^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)/lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$'
+```
+
+The host list is **literal**. A new brand with its own `landing_host` and a
+`kind='slug'` landing page will mint fine right up to the `link_destinations`
+insert and then fail on the constraint — for drip that surfaces as every lead
+being skipped with `invalid_destination`, for a blast as a failed
+materialization. Adding a brand landing host means editing this constraint in the
+same change. (It is `NOT VALID` by design — see the guidekn URL-shape note — so
+altering it does not force a full table scan.)
+
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.
 - The live DB's `segment_rules` CHECK contents — discrepancy #2.

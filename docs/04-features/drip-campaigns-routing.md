@@ -169,3 +169,17 @@ change to `drain.ts`. It is idempotent, refuses any stage whose `drip_active` is
 not `TRUE`, and fills `sent_at` only when NULL — see
 [docs/07-conventions.md](../07-conventions.md) for why that column cannot be
 assigned.
+
+## Per-lead link minting
+
+Drip is one lead at a time, so it mints one tracked link per lead rather than
+reusing a stage-wide URL. [lib/drip/mint.ts](../../lib/drip/mint.ts) resolves the
+destination from the stage's landing page and the campaign brand's
+`landing_host`, picks the short domain with the shared `resolveShortDomainForSend`,
+and calls `mintLink` — all inside the same transaction as the `stage_sends`
+insert.
+
+**No link, no send.** If the landing page, the brand host, the short domain or
+either tracking ID cannot be resolved, the lead is skipped, counted in
+`mintRefused`, and logged with the reason; the journey stays `routed` so the next
+tick retries after the configuration is fixed.

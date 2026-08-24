@@ -1219,17 +1219,33 @@ Directly after the closing `</div>` of the StatCard grid, add:
         ) : null}
 ```
 
-- [ ] **Step 5: Verify in the running app**
+- [ ] **Step 5: Verify statically here — the screen check moves to Task 8**
 
 ```bash
-cd /c/AFF/camman/.claude/worktrees/tgap && npx tsc --noEmit && npm run dev
+npx tsc --noEmit && npx eslint components/reports/keitaro-report.tsx
 ```
 
-Open `/reports`, set the range to cover 2026-08-22, group by stage, and search `8_115_082126_4_s1_c581`.
+⚠️ **The app cannot run locally, for a reason unrelated to this branch.**
+`app/api/offers/` contains sibling dynamic segments `[id]` and `[offerId]` (the
+latter added by the drip landing-pages PR #115) — exactly what CLAUDE.md §8
+exists to prevent. `next build` succeeds, but `next dev` AND `next start` throw
+`You cannot use different slug names for the same dynamic path ('id' !== 'offerId')`
+on every request: measured, `/signup` returns 500 under `next start`. Production
+is unaffected because Vercel's per-route adapter never assembles the single
+sorted route tree (verified live: prod `/signup` 200, `/reports` 307, bogus path
+404, API 401).
 
-Expected: Clickers shows `282*` with the tooltip on hover; `CR, %` and `Offer Redirect %` both show `—`; the legend line appears under the stat cards. Then search a `guidekn` stage and confirm its Clickers value carries **no** asterisk and its rates render normally.
+Fixing it means moving `landing-pages` under `[id]/`, which is the drip
+workstream's code — out of scope here, and this branch must not overwrite
+parallel work.
 
-**Open the page and look.** A source-level grep proves a file contains the markup, not that the screen renders it — this codebase has already shipped UI copy into a dead render path that a source guard passed.
+So the browser check moves to **Task 8 Step 3b**, against this branch's Vercel
+**preview deployment**. That runs the same adapter production runs, rather than
+a local server production never uses.
+
+Do NOT mark this task verified on a source grep alone — a grep proves a file
+contains the markup, not that the screen renders it, and this codebase has
+already shipped UI copy into a dead render path that a source guard passed.
 
 - [ ] **Step 6: Commit**
 
@@ -1399,6 +1415,20 @@ git diff --name-only origin/main...HEAD | grep -c "^db/migrations/"
 ```
 
 Expected: `0`. This change requires no schema work; a migration appearing here means something went wrong.
+
+- [ ] **Step 3b: Verify the screen on the preview deployment**
+
+Push the branch (Step 4) first, wait for Vercel's preview build to reach READY,
+then open the preview URL and check `/reports`: range covering 2026-08-22,
+group by stage, search `8_115_082126_4_s1_c581`.
+
+Expected: Clickers shows `282*`, tooltip `CamMan clicks — Keitaro visits
+unavailable` on hover; `CR, %` and `Offer Redirect %` both render `—`; the
+legend line appears under the stat cards. Then search a `guidekn` stage and
+confirm its Clickers carries **no** asterisk and its rates render normally.
+
+This replaces Task 6's local browser check — see Task 6 Step 5 for why it is
+impossible locally.
 
 - [ ] **Step 4: Open the PR**
 

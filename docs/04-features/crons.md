@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-08-21_
+_Last updated: 2026-08-24_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -24,6 +24,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 
 | `/api/cron/textrequest-poll` | `4,19,34,49 * * * *` | Text Request backstops in one tick: messages poll (delivery-status reconcile **+** inbound-STOP capture), contacts poll (`has_opted_out=true`), and account-webhook health (reactivate any hook TR disconnected after 10 consecutive non-2XX); `withCronLease` single-runner. Every step runs even if an earlier one errored — the opt-out paths are compliance-critical. The messages poll walks **inbound first, then outbound**, separately, newest-first (`sort=desc`), 1000 rows per page, 20 pages per direction per dashboard. Inbound-first is load-bearing: the page budget is per-direction but the 60s function budget is shared, and a 10K-message campaign takes several ticks to drain (each killed at 60s mid-walk), so outbound-first would starve STOP intake for the whole campaign. No-ops until a txr number has a `dashboard_id` + `credential_id` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, GET/POST) |
 | `/api/cron/ahoi-cdr-poll` | `13,28,43,58 * * * *` | poll the Ahoi CDR export for inbound (`direction=in`) rows → `ahoi_inbound_events` (source `cdr`) + opt-out processing; idempotent on `(provider_id, provider_uuid)`; `withCronLease` single-runner | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, GET/POST) |
+| `/api/cron/tracking-monitors` | `37 * * * *` | Keitaro tracking-gap monitor: alerts when a tracked stage sent 6h–7d ago has ≥25 CamMan human clicks but zero Keitaro landing-page visits; latched per stage via `alert_state`, re-arms on recovery. See [tracking-attribution.md §7c](tracking-attribution.md) | CRON_SECRET (all orgs) **or** session `campaigns.view` (own org, GET/POST) |
 
 > **Schedules are staggered on purpose.** Previously the four `*/15` jobs all fired at `:00/:15/:30/:45` alongside the two `*/5` jobs — up to **5–6 crons at once**, each cold-starting and each grabbing pooler connections (the pool caps at `max:5` per instance against Supavisor's ~15-client ceiling). The `*/15` jobs now sit at distinct off-5 minute offsets (`3/6/8/9/12`, plus `carrier-triage` at `17/47`), so they never coincide with the `*/5` jobs or each other — peak concurrency drops from ~6 to ~2. `propagate-clickers` at `8` runs alone at that minute. `send-scheduled` and `keitaro/poll` stay on `*/5` (both latency-sensitive; two concurrent is fine).
 >

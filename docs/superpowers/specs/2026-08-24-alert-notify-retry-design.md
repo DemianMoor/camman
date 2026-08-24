@@ -132,6 +132,26 @@ This is **additive**. All ~20 existing call sites ignore the return value; TypeS
 discarding a returned value, so none of them change. The swallow-never-throw contract is
 preserved — the function still never throws, it just now says whether it worked.
 
+### ⚠️ Ignoring the return must not become the convention
+
+Twenty call sites discarding a `boolean` is exactly how a meaningful return value decays into
+decoration: the next author copies a neighbouring line, ignores the result, and silently
+re-creates the fire-and-forget bug this change exists to remove.
+
+TypeScript has no `#[must_use]`, and no ESLint rule in this project's config flags an ignored
+non-`Promise` return, so this cannot be enforced mechanically without building machinery that
+would itself rot. It is handled by making the contract loud where an author will actually read
+it:
+
+1. `notifyTelegram`'s JSDoc states plainly that the boolean is the **only** signal of delivery,
+   that it never throws, and that a caller who needs to know whether a human was told **must**
+   check it — with a pointer to `notifyOnTransition` as the worked example.
+2. `docs/07-conventions.md` carries the same rule next to the transition-gate paragraph, so it
+   surfaces in a docs search rather than only at the call site.
+3. The existing ~20 callers are *correct* to ignore it — they are best-effort notifications
+   with no latch to protect. The rule is about **new** callers that gate state on delivery, and
+   both notes say so, so this does not read as twenty pre-existing violations.
+
 **Unset config counts as not sent**, deliberately. In preview and local environments alerts
 will stay `firing` + pending and re-attempt each tick. The retry is close to free (the
 function returns before any `fetch`), nothing was ever delivered so there is no duplicate
@@ -153,11 +173,26 @@ Not fixed with a claim lease (a second time-based concept in a state machine thi
 meant to leave alone) nor with `SELECT FOR UPDATE` (which would hold a row lock across a 4s
 network call on a pooled transaction connection).
 
-**The intake webhook retries only on the next failed auth request.** It is included on the
-same terms as everything else: if another auth failure arrives, the alert retries; if none
-does, nothing retries — but the condition has arguably stopped. Strictly better than today
-either way. A permanently-pending row is invisible until someone queries `alert_state`; that
-is a known blind spot, not closed here.
+**The intake webhook is NOT fully covered, and this section is the record of that.**
+
+`app/api/intake/leads/[token]/route.ts` is a `void`-ed fire-and-forget on a webhook. Its only
+retry driver is the next failed auth request on the same partner key. So:
+
+- another auth failure arrives ⇒ the alert retries and delivers
+- no further failure arrives ⇒ **the alert is still lost**, exactly as today
+
+This is strictly no-worse-than-today (previously it was *always* lost on a failed send; now it
+is lost only when the condition also stops recurring), but it is **not** the same guarantee the
+seven periodic callers get. Do not read this change as "alert loss is fixed everywhere" — it is
+fixed for every caller that re-evaluates on a schedule, and improved-but-not-fixed for this one.
+
+Building a dedicated retry driver for event-driven callers — a sweeper that finds
+`state='firing' AND last_notified_at IS NULL` rows and re-sends them, independent of whoever
+raised them — is the real fix, and is deliberately out of scope for this branch. If pending
+rows start accumulating in `alert_state`, that is the signal to build it.
+
+A permanently-pending row is also invisible until someone queries `alert_state` directly; no
+surface reports it. Also a known blind spot, also not closed here.
 
 ---
 

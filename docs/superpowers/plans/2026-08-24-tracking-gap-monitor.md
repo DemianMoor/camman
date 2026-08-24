@@ -587,7 +587,10 @@ export async function POST(req: NextRequest) {
 
 - [ ] **Step 3: Add the cron entry**
 
-In `vercel.json`, add to the `crons` array (minute 37 is unused by every existing entry):
+In `vercel.json`, add to the `crons` array. Minute 37 is not exclusive — four
+`* * * * *` jobs and `tells-sweep` already fire then, and with every-minute crons
+in the file no minute is free. It is fine anyway: this is a read-only ~1.6 s query
+once an hour, and Vercel does not serialize crons.
 
 ```json
     {
@@ -611,7 +614,7 @@ Expected: `tsc` clean; the grep prints `37 * * * * /api/cron/tracking-monitors`.
 ```bash
 cd /c/AFF/camman/.claude/worktrees/tgap
 npx eslint app/api/cron/tracking-monitors/route.ts lib/reporting/cron-heartbeat.ts
-git add app/api/cron/tracking-monitors/route.ts vercel.json lib/reporting/cron-heartbeat.ts
+git add app/api/cron/tracking-monitors/route.ts vercel.json lib/reporting/cron-heartbeat.ts lib/reporting/tracking-gap.ts
 git commit -m "feat(monitors): hourly tracking-gap cron with per-stage alert latch
 
 Latched per stage so a second bad landing page cannot hide behind the

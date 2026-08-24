@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-08-11_
+_Last updated: 2026-08-24_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -118,6 +118,52 @@ Rebuild is safe to run at any time (the `NOT EXISTS` guard makes every insert id
 **Backfill of 2026-08-11:** 3,022 rows inserted, `clickers` 56,056 → 59,078, probe 3,022 → 0. Gated on no campaign activating, materializing or firing (`was_clicker_at_snapshot` freezes at activation and cannot be corrected afterwards). Pre-write snapshot: `docs/snapshots/clickers_pre_backfill_2026-08-11.csv`.
 
 ⚠️ **This fixes future snapshots, the 9 active clicker segment rules, and exports. It does NOT recover the follow-up messages those contacts never received** — those sends already happened against frozen, incorrect pools, and re-snapshotting an activated campaign is not an option.
+
+## 7c. Keitaro tracking gap — detection and display fallback
+
+A landing page missing its Keitaro visit script records no visits while CamMan
+keeps recording every tap. `keitaro_stage_results.visit_clicks_raw/clean` read 0,
+the Overview tab renders "Clickers 0", and nothing else in the system notices —
+sends succeed, DLRs arrive, and redirects may keep landing.
+
+**Detection.** `/api/cron/tracking-monitors` (hourly) reports any tracked stage
+sent 6h–7d ago with zero Keitaro visits and ≥25 CamMan human clicks. Latched per
+stage through `alert_state` (org-scoped — `clearAlert` passes the stage's own
+`org_id`, so the latch row's org never goes stale-NULL), so it alerts once per
+stage and re-arms if the stage recovers. Watched by `/api/cron/tells-monitors`
+(also hourly; see `HEARTBEAT_JOBS.trackingMonitors`) — a dead-man check for the
+monitor job itself. Rule and thresholds: [lib/reporting/tracking-gap.ts](../../lib/reporting/tracking-gap.ts).
+
+Visits gate the alert; redirects are reported for context but never gate it — a
+redirect fires downstream of the landing page and can land even when the visit
+script never runs.
+
+**"Zero Keitaro visits" means BOTH columns.** `hasNoKeitaroVisits(visitClicksRaw,
+visitClicksClean)` in [lib/reporting/tracking-gap.ts](../../lib/reporting/tracking-gap.ts)
+is the one shared definition — `visit_clicks_raw` is a superset of
+`visit_clicks_clean` (no row in the table has clean > raw), so testing clean
+alone treats "Keitaro saw visits, none of them unique" as a blackout. Both the
+alert above and the display fallback below call it (the alert via an equivalent
+SQL `CASE`, kept as SQL for its own query), so they cannot disagree about what
+"no visits" means. Measured 2026-08-24: a clean-only test would have marked 58
+Overview stages over the default 7-day range; 56 of those had `raw > 0` — the
+script had fired, just with no unique visits.
+
+**Display fallback.** The Overview tab substitutes CamMan's `counted_clickers`
+for a tracked stage with no Keitaro visits (`hasNoKeitaroVisits`, above) and
+`counted_clickers > 0`, marks it with `*`, and renders `—` for `click_rate` and
+`redirect_rate` — not because both divide by the missing denominator (only
+`redirect_rate` does; `click_rate`'s denominator is `total_sent` and the
+substitute is its numerator), but because both would mix a Keitaro basis with a
+CamMan one in the same rate. Read-time only — nothing is written to
+`keitaro_stage_results`, so the next Keitaro poll cannot fight it and the
+substitution self-retires when visits resume. Applied in
+[app/api/keitaro/reports/route.ts](../../app/api/keitaro/reports/route.ts) at
+stage grain, before the campaign rollup.
+
+**Scope:** Overview only. The By Number / Offer / Sequence / Group tabs are
+excluded — their rows aggregate many stages, and `counted_clickers` is not
+additive across a dimension.
 
 ## 7. Extension points / limitations
 - Re-score pass (`mode=rescore`) lets you retune weights and re-grade history.

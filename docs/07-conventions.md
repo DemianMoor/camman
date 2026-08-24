@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 ## "Made a purchase" has exactly one definition (2026-08-19)
 
@@ -572,6 +572,26 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - **A false positive is worse than a miss.** A missed bot dilutes a metric; a false positive deletes a real customer from it, silently — it looks identical to successful filtering. When in doubt, don't classify as datacenter.
 - **Rescore backfill ran 2026-08-11** (4,382 rows: 4,312 `suspect→human`, 70 `bot→suspect`). Any Hourly-Clickers or By-Group comparison spanning that date is not like-for-like.
 - **~91% of all taps hinge on one signal** (datacenter ASN, weight 60 — almost entirely Google AS15169 SMS link scanners). If that signal shifts, every click metric on the platform moves at once with no other warning.
+
+## Keitaro visit columns and their CamMan equivalents (see [04-features/tracking-attribution.md §7c](04-features/tracking-attribution.md))
+
+Only `visit_clicks_clean` is ever rendered (as "Clickers"); `visit_clicks_raw` is
+read into the funnel tally but reaches no screen.
+
+When substituting a CamMan figure for a Keitaro visit count, scope it to
+**human-classified** clicks. Measured 2026-08-24 over 284 healthy `guidekn.com`
+stages:
+
+| Keitaro column | CamMan equivalent | ratio |
+|---|---|---|
+| `visit_clicks_raw` | human click rows | 1.23x |
+| `visit_clicks_clean` | `counted_clickers` | 1.35x |
+| `visit_clicks_clean` | distinct contacts, any classification | **11.0x — wrong** |
+
+The unfiltered distinct-contact count is ~11x the column it would replace,
+because ~92% of taps are SMS scanners that never execute the landing page's
+script. Using it would place an 11x-inflated number beside `counted_clickers` in
+the same row.
 
 ## EPC — one denominator (see [04-features/epc-denominator.md](04-features/epc-denominator.md))
 - **Every EPC divides by counted clickers.** A contact with ≥1 click scored `human`, OR a conversion (Rule F), deduplicated at the grain of the row displayed. There is no second denominator and no fallback: `withFunnelDerived` takes it as a REQUIRED parameter so the compiler, not a convention, prevents one reappearing.

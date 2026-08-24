@@ -68,6 +68,17 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 24 * 16, // weekly cadence, ~2 missed runs
     label: "EPC integrity monitors (weekly)",
   },
+  // The hourly Keitaro tracking-gap monitor. Watched by tells-monitors — see
+  // app/api/cron/tells-monitors/route.ts, which is also hourly and calls
+  // checkHeartbeats(db, [HEARTBEAT_JOBS.tellsSweep, HEARTBEAT_JOBS.trackingMonitors]).
+  // Not a mutual pair like the Tells watch below: nothing watches
+  // tells-monitors' own liveness back on this job's behalf, so this only
+  // closes the "tracking-monitors alone stops running" gap.
+  trackingMonitors: {
+    job_name: "tracking-monitors",
+    max_age_hours: 3, // hourly cadence, ~2 missed runs
+    label: "Keitaro tracking-gap monitor (hourly)",
+  },
   // The weekly clickers rebuild — the repair path for the watermark-stranding
   // failure. It gets the same heartbeat treatment as everything else: if it
   // stops running, that must surface rather than being read as healthy.

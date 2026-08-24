@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-08-21_
+_Last updated: 2026-08-24_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -23,7 +23,7 @@ External services CamMan talks to, their contracts, and every environment variab
 | **MaxMind GeoLite2** | app → download | click ASN/country enrichment | `MAXMIND_LICENSE_KEY` | downloads `.mmdb` at runtime |
 | **Telegram Bot API** | app → alerts + reports | circuit-breaker / poller alerts (best-effort) + hourly/daily performance report (`/api/cron/telegram-report`) | bot token + chat id | `sendMessage` — best-effort for alerts (`notifyTelegram`), `parse_mode:"HTML"` + error-propagating for the report (`sendTelegramHtml`) |
 | **Keitaro** (tracker) | app → tracker | 5-min results poll + 15-min conversions poll + 15-min offer-reach poll | `Api-Key` header | `POST {KEITARO_API_URL}/admin_api/v1/report/build` `{range,grouping,metrics}` → `{rows[]}`; `POST …/conversions/log` `{range,columns,filters}` → `{rows[]}` (per-recipient sales by `sub_id_1`); `POST …/clicks/log` `{range,columns,filters}` → `{rows[]}` (per-recipient offer-page clicks by `sub_id_1`); `GET …/campaigns` |
-| **Vercel Cron** | scheduler → app | the 19 cron endpoints | `Authorization: Bearer CRON_SECRET` | staggered `*/15`/`*/5` pollers (incl. `13,28,43,58` for `/api/cron/ahoi-cdr-poll` and `4,19,34,49` for `/api/cron/textrequest-poll`) + `0 * * * *` (hourly telegram-report) + `0 5,20 * * *` (offer-group-report refresh) + `*/2 * * * *` (Telnyx lookup-worker drain) |
+| **Vercel Cron** | scheduler → app | the 25 cron endpoints | `Authorization: Bearer CRON_SECRET` | staggered `*/15`/`*/5` pollers (incl. `13,28,43,58` for `/api/cron/ahoi-cdr-poll` and `4,19,34,49` for `/api/cron/textrequest-poll`) + `0 * * * *` (hourly telegram-report) + `0 5,20 * * *` (offer-group-report refresh) + `*/2 * * * *` (Telnyx lookup-worker drain) + `37 * * * *` (hourly Keitaro tracking-gap monitor, `/api/cron/tracking-monitors`) |
 
 > **Deploy region — ALL functions run in `fra1`, co-located with the DB (moved 2026-07-30).**
 >

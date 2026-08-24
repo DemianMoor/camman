@@ -24,44 +24,117 @@ type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type AlertState = "ok" | "firing";
 
 /**
- * Move an alert to `state`, returning true only if this call CHANGED it.
+ * Move an alert to `state`, returning true only when this call OWES A SEND.
  *
- * A true return is the caller's licence to notify; false means the condition
- * was already in that state and the human has already been told.
+ * For `state: "ok"` that means the state actually changed (unchanged behaviour).
+ *
+ * For `state: "firing"` it means EITHER a fresh transition into firing OR the
+ * alert is already firing and has never been delivered — see the pending state
+ * below. A true return is the caller's licence to notify.
+ *
+ * ⚠️ THE PENDING STATE: `state = 'firing' AND last_notified_at IS NULL` means
+ * "breach recorded, notification NOT yet delivered". It is what makes a failed
+ * send retry instead of vanishing. Before this, the latch flipped on DETECTION,
+ * so a send that failed on the transition tick was lost permanently — the next
+ * tick saw no transition and stayed silent, and a condition that never resolves
+ * never re-arms.
+ *
+ * No migration was needed: `last_notified_at` already existed, nothing reads it,
+ * and the old code always stamped it when transitioning to firing — so no
+ * pre-existing row can be firing-with-NULL and be misread as pending.
+ *
+ * `since` is PRESERVED on a retry. It records when the breach began, not when
+ * the latest delivery attempt ran.
  */
 export async function transitionAlert(
   dbc: DbOrTx,
   { alertKey, orgId, state }: { alertKey: string; orgId?: string | null; state: AlertState },
 ): Promise<boolean> {
+  if (state === "ok") {
+    const rows = (await dbc.execute(sql`
+      INSERT INTO alert_state (alert_key, org_id, state, since, last_notified_at)
+      VALUES (${alertKey}, ${orgId ?? null}, 'ok', now(), NULL)
+      ON CONFLICT (alert_key) DO UPDATE
+        SET state = 'ok',
+            since = now(),
+            org_id = COALESCE(EXCLUDED.org_id, alert_state.org_id)
+        WHERE alert_state.state <> 'ok'
+      RETURNING alert_key
+    `)) as unknown as { alert_key: string }[];
+    return rows.length > 0;
+  }
+
   const rows = (await dbc.execute(sql`
     INSERT INTO alert_state (alert_key, org_id, state, since, last_notified_at)
-    VALUES (${alertKey}, ${orgId ?? null}, ${state}, now(),
-            ${state === "firing" ? sql`now()` : sql`NULL`})
+    VALUES (${alertKey}, ${orgId ?? null}, 'firing', now(), NULL)
     ON CONFLICT (alert_key) DO UPDATE
-      SET state = ${state},
-          since = now(),
-          last_notified_at = CASE WHEN ${state} = 'firing' THEN now()
-                                  ELSE alert_state.last_notified_at END
-      WHERE alert_state.state <> ${state}
+      SET state = 'firing',
+          since = CASE WHEN alert_state.state <> 'firing' THEN now()
+                       ELSE alert_state.since END,
+          last_notified_at = CASE WHEN alert_state.state <> 'firing' THEN NULL
+                                  ELSE alert_state.last_notified_at END,
+          org_id = COALESCE(EXCLUDED.org_id, alert_state.org_id)
+      WHERE alert_state.state <> 'firing'
+         OR alert_state.last_notified_at IS NULL
     RETURNING alert_key
   `)) as unknown as { alert_key: string }[];
   return rows.length > 0;
 }
 
 /**
- * Notify Telegram only on a transition INTO firing.
+ * Stamp an alert as delivered. Called ONLY after a send is confirmed.
+ *
+ * The `state = 'firing'` guard matters: if the condition cleared between the
+ * send and this stamp, the row is now 'ok' and must not be recorded as
+ * delivered-while-firing. The `last_notified_at IS NULL` guard makes it
+ * idempotent.
+ */
+export async function markAlertNotified(dbc: DbOrTx, alertKey: string): Promise<void> {
+  await dbc.execute(sql`
+    UPDATE alert_state SET last_notified_at = now()
+    WHERE alert_key = ${alertKey}
+      AND state = 'firing'
+      AND last_notified_at IS NULL
+  `);
+}
+
+/**
+ * Notify on a transition into firing, and RETRY until the send is confirmed.
  *
  * Best-effort throughout: a failure to record state or to reach Telegram must
- * never propagate into the request that noticed the condition — the same
- * contract notifyTelegram already keeps.
+ * never propagate into the request that noticed the condition.
+ *
+ * ⚠️ A DUPLICATE IS POSSIBLE ON THE FAILURE PATH, deliberately. Two overlapping
+ * ticks can both claim an undelivered retry before either stamps success. The
+ * window exists only between claim and stamp and only for an alert whose first
+ * send already failed; cron cadences are 15-60 minutes and mostly single-runner.
+ * At-most-one duplicate is strictly better than the silent loss it replaces. Not
+ * closed with a lease (a second time-based concept in this state machine) nor
+ * with SELECT FOR UPDATE (a row lock held across a 4s network call on a pooled
+ * connection).
+ *
+ * `send` is injectable ONLY so the guard can force a failure without touching
+ * the network. Production callers use the default.
  */
 export async function notifyOnTransition(
   dbc: DbOrTx,
-  { alertKey, orgId, text }: { alertKey: string; orgId?: string | null; text: string },
+  {
+    alertKey,
+    orgId,
+    text,
+    send = notifyTelegram,
+  }: {
+    alertKey: string;
+    orgId?: string | null;
+    text: string;
+    send?: (text: string) => Promise<boolean>;
+  },
 ): Promise<void> {
   try {
-    const changed = await transitionAlert(dbc, { alertKey, orgId, state: "firing" });
-    if (changed) await notifyTelegram(text);
+    const owesSend = await transitionAlert(dbc, { alertKey, orgId, state: "firing" });
+    if (!owesSend) return;
+    const delivered = await send(text);
+    if (delivered) await markAlertNotified(dbc, alertKey);
   } catch (err) {
     console.error(`[alert-state] transition failed for ${alertKey} (swallowed):`, err);
   }

@@ -111,6 +111,10 @@ export async function GET(req: NextRequest) {
         human_id: campaigns.human_id,
         name: campaigns.name,
         type: campaigns.type,
+        // Drip P5: the SEND latch, which is a different thing from campaign
+        // STATUS. A drip campaign can be status='active' and still latched.
+        send_paused: campaigns.send_paused,
+        send_paused_reason: campaigns.send_paused_reason,
         notes: campaigns.notes,
         brand_id: campaigns.brand_id,
         offer_id: campaigns.offer_id,

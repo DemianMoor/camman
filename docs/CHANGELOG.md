@@ -1363,4 +1363,29 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
   misread.
   — docs updated: docs/04-features/drip-campaigns-routing.md, docs/07-conventions.md
 
+## 2026-08-24 — Drip Phase 5 (part 2): opt-out monitor, pause, stage editor, same-offer rule
+
+- **Drip opt-out monitor** (G7): per campaign, per **ET day**, over an ET-day-as-timestamptz
+  **range** (never a functional predicate on `sent_at` — R15). ≥7% warns, ≥10% sets the drip latch.
+  The rate is measured against the messages that produced the STOPs, so a blast on the same number
+  cannot be blamed on a drip campaign. A 50-send floor stops the first STOP of the day reading as
+  33% and latching a healthy campaign.
+- **"Accept risk and proceed" refuses to clear any other kind of latch.** `campaigns.send_paused`
+  is shared with the failure-spike and regular opt-out breakers; the override checks the reason
+  string and leaves a non-drip latch alone. The everyday resume likewise refuses to clear an
+  automatic pause.
+- **Pause button on the campaigns list**, worded apart from the status Pause: "Pause sending" stops
+  messages while leads keep accumulating; the status "Pause" stops the campaign.
+- **Drip stage editor**: daily ET window with overlap/**touch** validation and gap warnings, using
+  the SAME `validateWindowSet` the save endpoint calls — the operator cannot meet different wording
+  at save time. Multi-row rule enforced in `lib/api/drip-stage-window-guard.ts` on both create and
+  update; the single-row half stays a DB CHECK.
+- **Per-number daily limits UI**, offering only the campaign brand's numbers via the existing Phase 1
+  brand guard rather than a second copy of the rule.
+- **Same-offer-same-creative completed**; the `deferred_p5` marker is gone and the two tests that
+  asserted it were updated — a guard that goes red because the feature shipped is a guard that
+  expired.
+- `daily_cap` relabelled from "not yet enforced" to live, now that the scheduler enforces it.
+  — docs updated: docs/04-features/drip-campaigns-routing.md, docs/07-conventions.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

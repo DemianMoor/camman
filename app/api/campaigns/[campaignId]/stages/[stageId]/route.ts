@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
@@ -9,6 +9,7 @@ import {
   provider_phones,
   sms_providers,
 } from "@/db/schema";
+import { checkDripStageWindow } from "@/lib/api/drip-stage-window-guard";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
@@ -234,6 +235,40 @@ export async function PATCH(
     );
   }
   const input = parsed.data;
+
+  // ⚠️ Drip P5 multi-row window rule, same guard as create. excludeStageId is
+  // THIS stage — without it, every edit that leaves the window unchanged would
+  // report an overlap with the value already stored.
+  if (
+    input.window_start_min !== undefined ||
+    input.window_end_min !== undefined ||
+    input.drip_active !== undefined
+  ) {
+    const existing = (await db.execute(drizzleSql`
+      SELECT window_start_min, window_end_min, drip_active
+      FROM campaign_stages WHERE id = ${sid} AND org_id = ${orgId}::uuid LIMIT 1
+    `)) as unknown as {
+      window_start_min: number | null; window_end_min: number | null; drip_active: boolean | null;
+    }[];
+    const cur = existing[0];
+    // Merged view: a PATCH that only flips drip_active must be validated against
+    // the window already stored, not against undefined.
+    const windowRefusal = await checkDripStageWindow(db, {
+      orgId,
+      campaignId: cid,
+      excludeStageId: sid,
+      windowStartMin:
+        input.window_start_min !== undefined ? input.window_start_min : cur?.window_start_min,
+      windowEndMin:
+        input.window_end_min !== undefined ? input.window_end_min : cur?.window_end_min,
+      dripActive: input.drip_active !== undefined ? input.drip_active : cur?.drip_active,
+    });
+    if (windowRefusal) {
+      return apiError(400, windowRefusal.message, API_ERROR_CODES.VALIDATION, {
+        field: windowRefusal.field,
+      });
+    }
+  }
 
   // FK ownership checks for any of the optional refs being changed.
   if (input.creative_id != null) {

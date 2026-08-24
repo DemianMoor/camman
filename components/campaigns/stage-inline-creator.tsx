@@ -86,6 +86,11 @@ export interface EditableStage {
 }
 
 export interface StageInlineEditorProps {
+  // Drip P5. Forwarded to StageForm so the daily-window section renders. Without
+  // this thread the control compiles and never appears — the failure mode Phase 4
+  // hit with CampaignFormFields.
+  campaignType?: string;
+  siblingWindows?: { stage_id?: number; window_start_min: number; window_end_min: number }[];
   campaign: CampaignLite;
   campaignId: number;
   // The parent campaign's tracking_id (when brand+offer are set) and the
@@ -112,6 +117,8 @@ export interface StageInlineEditorProps {
 // =============== Component ===============
 
 export function StageInlineEditor({
+  campaignType,
+  siblingWindows,
   campaign,
   campaignId,
   campaignTrackingId,
@@ -291,6 +298,8 @@ export function StageInlineEditor({
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : (
           <StageForm
+            campaignType={campaignType}
+            siblingWindows={siblingWindows}
             key={isEdit ? `stage-${stage!.id}` : "stage-new"}
             mode={isEdit ? "edit" : "create"}
             campaignId={campaignId}

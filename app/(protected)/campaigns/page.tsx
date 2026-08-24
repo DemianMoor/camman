@@ -73,6 +73,11 @@ type Campaign = {
   // 'regular' | 'drip'. Defaults 'regular' server-side, so an older cached
   // response without the field renders as a regular campaign rather than blank.
   type?: string;
+  // ⚠️ The SEND latch, NOT the campaign status. A drip campaign can be
+  // status='active' with sending latched — conflating the two is exactly how an
+  // operator ends up unable to tell "I paused this" from "something paused it".
+  send_paused?: boolean;
+  send_paused_reason?: string | null;
   notes: string | null;
   brand_id: number;
   offer_id: number;
@@ -291,6 +296,10 @@ export default function CampaignsPage() {
   ]);
 
   // Dialog state
+  // Drip send-latch toggle. Separate from the status transitions because it is
+  // a different control over a different thing.
+  const [dripBusyId, setDripBusyId] = useState<number | null>(null);
+
   const [transitionTarget, setTransitionTarget] = useState<{
     campaign: Campaign;
     transition: CampaignTransition;
@@ -417,6 +426,29 @@ export default function CampaignsPage() {
     return m?.display_name ?? m?.email ?? "Member";
   }
 
+  async function toggleDripSending(c: Campaign) {
+    setDripBusyId(c.id);
+    try {
+      const res = await fetch(`/api/campaigns/${c.id}/drip-pause`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: c.send_paused ? "resume" : "pause" }),
+      });
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        // A refusal here is usually meaningful — a breaker trip cannot be
+        // cleared with the everyday button — so surface the server's wording
+        // rather than a generic failure.
+        toast.error(body.error ?? "Could not change sending state");
+        return;
+      }
+      toast.success(c.send_paused ? "Sending resumed" : "Sending paused — leads keep accumulating");
+      refetch();
+    } finally {
+      setDripBusyId(null);
+    }
+  }
+
   const columns = useMemo<ColumnDef<Campaign>[]>(
     () => [
       {
@@ -454,6 +486,15 @@ export default function CampaignsPage() {
                 {c.type === "drip" ? (
                   <Badge variant="secondary" className="text-[10px]">
                     Drip
+                  </Badge>
+                ) : null}
+                {c.send_paused ? (
+                  <Badge
+                    variant="destructive"
+                    className="text-[10px]"
+                    title={c.send_paused_reason ?? "Sending is paused"}
+                  >
+                    Sending paused
                   </Badge>
                 ) : null}
                 {c.human_id ? (
@@ -716,6 +757,30 @@ export default function CampaignsPage() {
                           {tr.icon} {tr.label}
                         </DropdownMenuItem>
                       ))}
+                    </>
+                  ) : null}
+                  {/* ⚠️ The drip SEND latch — deliberately worded apart from the
+                      status Pause above. "Pause sending" stops messages while
+                      leads keep arriving and accumulating; the status "Pause"
+                      stops the campaign itself. Labelling both "Pause" is how an
+                      operator ends up unsure which one they clicked. */}
+                  {c.type === "drip" && canUpdate ? (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onSelect={() => void toggleDripSending(c)}
+                        disabled={dripBusyId === c.id}
+                      >
+                        {c.send_paused ? (
+                          <>
+                            <Play className="size-4" aria-hidden /> Resume sending
+                          </>
+                        ) : (
+                          <>
+                            <Pause className="size-4" aria-hidden /> Pause sending
+                          </>
+                        )}
+                      </DropdownMenuItem>
                     </>
                   ) : null}
                   {showArchive || showRestore ? (

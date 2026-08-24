@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, Loader2, RotateCcw } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
+import { DripStageWindowFields } from "@/components/campaigns/drip-stage-window-fields";
 
 import {
   CreativePickerDialog,
@@ -79,6 +80,13 @@ import { cn } from "@/lib/utils";
 
 export interface StageFormValues {
   label: string;
+  // Drip P5. Minutes past ET midnight; null on a regular stage. The window is
+  // half-open [start, end) and windows may not overlap OR TOUCH — validated by
+  // the SAME function the server uses (lib/drip/windows.ts), so the operator
+  // cannot meet a different rule at save time.
+  window_start_min: number | null;
+  window_end_min: number | null;
+  drip_active: boolean;
   creative_id: number | null;
   sms_provider_id: number | null;
   provider_phone_id: number | null;
@@ -220,6 +228,12 @@ export interface StageFormActionContext {
 export interface StageFormProps {
   mode: "create" | "edit";
   campaignId: number;
+  // Drip P5. 'drip' reveals the daily-window section. Absent/'regular' renders
+  // exactly the form that shipped before — the regular path is untouched.
+  campaignType?: string;
+  // The OTHER active drip windows on this campaign, for overlap/touch/gap
+  // checks. Empty for a regular campaign.
+  siblingWindows?: { stage_id?: number; window_start_min: number; window_end_min: number }[];
   // Only set in edit mode; needed for the per-stage export URL.
   stageId?: number;
   // Edit-mode only: the existing stage's tracking_id (null when the
@@ -316,6 +330,14 @@ export function buildStageCreateBody(
 ): Record<string, unknown> {
   return {
     label: values.label.trim() ? values.label.trim() : undefined,
+    // Only sent when actually set, so a regular stage's payload is unchanged.
+    ...(values.window_start_min != null && values.window_end_min != null
+      ? {
+          window_start_min: values.window_start_min,
+          window_end_min: values.window_end_min,
+          drip_active: values.drip_active,
+        }
+      : {}),
     creative_id: values.creative_id,
     sms_provider_id: values.sms_provider_id,
     provider_phone_id: values.provider_phone_id,
@@ -338,6 +360,10 @@ export function buildStageCreateBody(
 
 const DEFAULT_VALUES: StageFormValues = {
   label: "",
+  // Null/false = a regular stage. A drip stage sets these explicitly.
+  window_start_min: null,
+  window_end_min: null,
+  drip_active: false,
   creative_id: null,
   sms_provider_id: null,
   provider_phone_id: null,
@@ -364,6 +390,8 @@ const DEFAULT_VALUES: StageFormValues = {
 export function StageForm({
   mode,
   campaignId,
+  campaignType,
+  siblingWindows,
   stageId,
   trackingId,
   campaignTrackingId,
@@ -1169,6 +1197,27 @@ export function StageForm({
                 height, so any leftover space is just trailing at the bottom of the
                 shorter column, not a void between fields. */}
             <div className="grid items-start gap-4 sm:grid-cols-2">
+              {/* Drip P5: the daily window. Rendered only for a drip campaign,
+                  so the regular stage form is byte-for-byte what it was. */}
+              {campaignType === "drip" ? (
+                <DripStageWindowFields
+                  startMin={form.watch("window_start_min")}
+                  endMin={form.watch("window_end_min")}
+                  active={form.watch("drip_active")}
+                  disabled={isSubmitting}
+                  siblings={(siblingWindows ?? []).map((w: { stage_id?: number; window_start_min: number; window_end_min: number }) => ({
+                    stage_id: w.stage_id,
+                    window_start_min: w.window_start_min,
+                    window_end_min: w.window_end_min,
+                  }))}
+                  onChange={(v) => {
+                    form.setValue("window_start_min", v.startMin, { shouldDirty: true });
+                    form.setValue("window_end_min", v.endMin, { shouldDirty: true });
+                    form.setValue("drip_active", v.active, { shouldDirty: true });
+                  }}
+                />
+              ) : null}
+
               {/* Label + Tracking ID, stacked in the left column */}
               <div className="space-y-3">
                 <FormField

@@ -6,6 +6,7 @@ import { db } from "@/db/client";
 import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { telnyxBalance } from "@/lib/telnyx/client";
 import { checkTelnyxBalance } from "./lookup-guard";
+import { runDripOptOutMonitor } from "./optout-monitor";
 
 // Drip monitors (Drip Phase 3). Runs as a SEPARATE cron from the sweeper it
 // watches — a job that checks its own liveness reports nothing when it is the
@@ -30,6 +31,7 @@ export const BACKLOG_ALERT_KEY = "drip:inbox_backlog";
 export const AWAITING_ALERT_KEY = "drip:awaiting_lookup_stalled";
 
 export interface DripMonitorResult {
+  optOut: Awaited<ReturnType<typeof runDripOptOutMonitor>>;
   backlogReceived: number;
   backlogAwaiting: number;
   oldestReceivedMinutes: number | null;
@@ -118,7 +120,17 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
     alerts.push("balance_unreadable");
   }
 
+  // ── per-campaign, per-ET-day opt-out monitor (G7) ──────────────────────
+  // Runs here rather than in the scheduler so it still evaluates when the
+  // scheduler has nothing to do — a campaign that stopped sending an hour ago
+  // can still cross a threshold as its STOPs arrive.
+  const optOut = await runDripOptOutMonitor();
+  for (const v of optOut) {
+    if (v.level !== "ok") alerts.push(`optout_${v.level}:${v.campaign_id}`);
+  }
+
   return {
+    optOut,
     backlogReceived,
     backlogAwaiting,
     oldestReceivedMinutes: oldestReceived,

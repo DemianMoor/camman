@@ -99,6 +99,8 @@ interface RawRow {
   journeys_total: number;
   journeys_today: number;
   had_offer_exposure: boolean;
+  active_creative_ids: (number | null)[] | null;
+  seen_creative_ids: (number | null)[] | null;
 }
 
 /** ET-day-aware age band, matching the 1c definition used by segment rules. */
@@ -171,7 +173,21 @@ export async function evaluateLeadRouting(
         AS journeys_today,
       EXISTS (SELECT 1 FROM offer_exposures oe
               WHERE oe.org_id = ${orgId}::uuid AND oe.contact_id = le.contact_id
-                AND c.offer_id IS NOT NULL AND oe.offer_id = c.offer_id) AS had_offer_exposure
+                AND c.offer_id IS NOT NULL AND oe.offer_id = c.offer_id) AS had_offer_exposure,
+      -- The creatives this campaign could currently send: ACTIVE first-send
+      -- stages only. A creative on a deactivated stage is not something the
+      -- lead would receive, so it must not count as "already covered".
+      (SELECT array_agg(DISTINCT s2.creative_id) FROM campaign_stages s2
+       WHERE s2.campaign_id = c.id AND s2.drip_active IS TRUE
+         AND s2.archived_at IS NULL AND s2.creative_id IS NOT NULL) AS active_creative_ids,
+      -- What this contact has already been sent, from ANY campaign on this offer.
+      (SELECT array_agg(DISTINCT s3.creative_id)
+       FROM stage_sends ss3
+       JOIN campaign_stages s3 ON s3.id = ss3.stage_id
+       JOIN campaigns c3 ON c3.id = ss3.campaign_id
+       WHERE ss3.org_id = ${orgId}::uuid AND ss3.contact_id = le.contact_id
+         AND ss3.status = 'sent' AND s3.creative_id IS NOT NULL
+         AND c.offer_id IS NOT NULL AND c3.offer_id = c.offer_id) AS seen_creative_ids
     FROM le
     LEFT JOIN contact_attributes ca2 ON ca2.contact_id = le.contact_id
     LEFT JOIN campaigns c
@@ -305,8 +321,31 @@ export async function evaluateLeadRouting(
     if (r.had_offer_exposure) {
       detail.same_offer = `contact already has an exposure to offer ${r.campaign_offer_id}`;
     }
-    rules.creative_check = "pass";
-    detail.creative_check = "deferred_p5";
+    // ⭐ THE CREATIVE HALF — completed in Phase 5, now that drip stages exist.
+    //
+    // The spec's rule: a lead already inside a journey that arrives again may be
+    // routed again ONLY if it would get a NEW creative or a DIFFERENT offer;
+    // same offer + same creative ⇒ skip. Phase 4 could not evaluate this because
+    // drip stages did not exist, so it recorded `deferred_p5` rather than
+    // silently passing — a rule that always passes looks implemented.
+    //
+    // "Would receive" is defined against the campaign's ACTIVE first-send
+    // creatives: those are the only messages this campaign can currently send.
+    // A creative on a deactivated stage is not something the lead would get.
+    if (r.had_offer_exposure && r.active_creative_ids && r.seen_creative_ids) {
+      const wouldSend = new Set(r.active_creative_ids.filter((x) => x != null));
+      const alreadySeen = new Set(r.seen_creative_ids.filter((x) => x != null));
+      const somethingNew = [...wouldSend].some((c) => !alreadySeen.has(c));
+      rules.creative_check = somethingNew ? "pass" : "blocked";
+      if (!somethingNew) {
+        detail.creative_check =
+          `contact already received every active creative of this campaign ` +
+          `(${[...wouldSend].join(", ") || "none"}) for offer ${r.campaign_offer_id}`;
+      }
+    } else {
+      // No prior exposure to this offer ⇒ nothing to be a repeat of.
+      rules.creative_check = "pass";
+    }
 
     // Caps.
     const capOk = r.cfg_campaign_cap == null || r.journeys_total < r.cfg_campaign_cap;

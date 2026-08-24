@@ -66,6 +66,21 @@ export interface PartnerReportResult {
 }
 
 /**
+ * Zero every revenue figure, for a partner whose key has revenue switched off.
+ *
+ * ⭐ THIS MUST RUN ON THE SERVER, BEFORE THE REPORT IS HANDED TO THE VIEW.
+ * `showRevenue: false` only stops the column being RENDERED — the value still
+ * travels in the RSC payload and is readable from view-source. That is not a
+ * theory: it was caught in the live production smoke check, with `revenue_usd`
+ * sitting in the HTML of a page whose key has revenue off. It read 0 at the
+ * time, so nothing leaked; the first drip conversion would have published our
+ * margin to the partner while the UI still looked correct.
+ */
+export function stripRevenueForPartner(r: PartnerReportResult): PartnerReportResult {
+  return { ...r, rows: r.rows.map((row) => ({ ...row, revenue_usd: 0 })) };
+}
+
+/**
  * @param from,to inclusive ET calendar days, `YYYY-MM-DD`.
  * @param partnerKeyId restrict to one partner (the signed-link view always does).
  */

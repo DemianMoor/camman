@@ -195,7 +195,7 @@ export function trackingGapBreached(humanClicks: number, visits: number): boolea
 cd /c/AFF/camman/.claude/worktrees/tgap && npx tsx scripts/test-tracking-gap.ts
 ```
 
-Expected: `PASS — 12 passed, 0 failed`
+Expected: `PASS — 10 passed, 0 failed`
 
 - [ ] **Step 5: Lint and commit**
 

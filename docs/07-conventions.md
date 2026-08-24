@@ -1283,6 +1283,34 @@ check this class defeats. Building the bytes explicitly (`chr(92) + "b"`) is
 safer than relying on nested escaping through a shell heredoc into a language
 literal.
 
+## `next build` passing does not mean `next dev` runs
+
+`app/api/offers/[id]` and `app/api/offers/[offerId]` coexisted on main: two
+different slug names for one dynamic path. **The production build tolerated it
+and deployed green, while `next dev` refused to boot with
+`You cannot use different slug names for the same dynamic path`.** So CI, the
+deploy and the live site were all healthy and the app simply could not be run
+locally — a failure that looks like "my machine is broken" rather than a repo
+defect, and that nothing in the pipeline reports.
+
+Per §8, API routes nesting children under a dynamic parent use
+`[parentEntityId]`. The dynamic segment's NAME is internal — `/api/offers/123/archive`
+is unchanged by the rename — so fixing this is a param-key edit, not an API change.
+
+**If the dev server will not start, check for sibling dynamic segments before
+assuming a local problem.**
+
+## The campaign editor's live component is `campaign-editor-page.tsx`
+
+`components/campaigns/campaign-form.tsx` and `campaign-form-fields.tsx` are DEAD
+render code: `/campaigns/new` and `/campaigns/[id]/edit` both render
+`CampaignEditorPage`, which imports only `CarrierRemovedLines` from the fields
+file and lays out its own `SetupCard` / `AudienceCard` / `AudienceCompositionPanel`.
+Editing the form-fields file changes nothing an operator can see.
+
+⚠️ This has now caught work twice. Trace page → component before editing, and
+confirm with a round-trip in the browser, not by finding a plausible-looking file.
+
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.
 - The live DB's `segment_rules` CHECK contents — discrepancy #2.

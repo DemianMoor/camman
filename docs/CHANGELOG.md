@@ -1459,4 +1459,30 @@ failing closed, so nothing wrong was sent and nothing at all was sent.
   see this class.
   — docs updated: docs/07-conventions.md
 
+## 2026-08-24 — Drip UI defects from hands-on review (3 fixes + a dev-server blocker)
+
+- **Drip campaign form showed contact groups as required.** A drip campaign can
+  never have one, so Activate stayed disabled behind a hint naming a field the
+  type does not use. Selecting Drip now REMOVES segments, contact groups, the
+  audience cap, status filters, carrier filter and the audience-preview panel,
+  and renders the drip audience block instead (interest tag required, partner,
+  dates, three caps, priority, demographic filters). Regular is untouched.
+  The block is shared with the campaign page's drip panel — one definition.
+- **Dropdown text overlapped across campaign and stage screens.** Root cause was
+  `w-fit` on the shared `SelectTrigger`: the trigger grew to its content instead
+  of being bounded by its grid cell. Fixed in the primitive (`max-w-full`,
+  `min-w-0`, value clamps, items truncate) plus `min-w-0` on `FormItem`, so every
+  dropdown in the app is fixed rather than the reported ones only.
+- **The stage editor had TWO destination fields** — "Sales page" (legacy) and
+  "Landing page" (new) — with no stated rule for which won. Merged into one
+  **Destination** picker: landing pages (with the constructed `/lp/` URL preview),
+  external URLs, and legacy sales pages, grouped. One selection drives both stored
+  columns; a stage whose legacy label is no longer on the offer still renders as
+  its own option rather than showing an empty picker and clearing itself on save.
+- **`next dev` could not start at all** (pre-existing on main): `app/api/offers/[id]`
+  and `app/api/offers/[offerId]` are two slug names at one path. `next build`
+  tolerated it, so production was green while nobody could run the app locally.
+  Renamed to `[offerId]` per the parent/child convention — URLs unchanged.
+  — docs updated: docs/07-conventions.md, docs/screenshots/
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

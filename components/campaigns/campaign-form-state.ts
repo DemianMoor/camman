@@ -96,6 +96,8 @@ export interface CampaignFormProps {
   onCancel: () => void;
   isSubmittingDraft: boolean;
   isSubmittingActivate: boolean;
+  /** Drip campaigns have no audience source; the activation gate must know. */
+  campaignType?: "regular" | "drip";
 }
 
 // =============== Constants ===============
@@ -123,6 +125,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     onCancel,
     isSubmittingDraft,
     isSubmittingActivate,
+    campaignType,
   } = props;
 
   const isEdit = mode === "edit";
@@ -502,16 +505,22 @@ export function useCampaignFormState(props: CampaignFormProps) {
   // present but a campaign can launch with just a contact-group pool.
   const draftReady = !dateError;
   const hasAudienceSource = watchedContactGroups.length > 0;
+  // ⚠️ A drip campaign has no audience source and never will — requiring one
+  // here left the Activate button permanently disabled with a hint naming a
+  // field the form no longer shows.
+  const isDrip = campaignType === "drip";
   const activateReady =
     !!watchedName.trim() &&
     watchedBrandId !== null &&
     watchedOfferId !== null &&
-    hasAudienceSource &&
+    (isDrip || hasAudienceSource) &&
     !dateError;
   const activateBlockedReason = dateError
     ? dateError
     : !activateReady
-      ? "Fill in name, brand, offer, and at least one contact group to activate."
+      ? isDrip
+        ? "Fill in name, brand and offer to activate."
+        : "Fill in name, brand, offer, and at least one contact group to activate."
       : null;
   const anySubmitting = isSubmittingDraft || isSubmittingActivate;
 

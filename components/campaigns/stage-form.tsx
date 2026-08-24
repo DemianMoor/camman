@@ -44,7 +44,9 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -555,6 +557,54 @@ export function StageForm({
         trackingId: campaignTrackingId ? `${campaignTrackingId}_s?_c?` : null,
       })
     : null;
+
+  // ── ONE destination, derived from the two stored fields ─────────────────
+  // The picker is a view over `landing_page_id` + `sales_page_label`; neither
+  // column changed, so an existing stage round-trips and the send path sees
+  // exactly what it saw before.
+  const activeLandingPages = useMemo(
+    () => landingPages.filter((p) => p.status === "active"),
+    [landingPages],
+  );
+  // ⚠️ A stored legacy label that the offer no longer lists is still offered,
+  // marked. Dropping it would render an empty picker for a stage that HAS a
+  // destination, and the next save would quietly clear it.
+  const salesPageOptions = useMemo(() => {
+    // Derived inside the memo: a `?? []` outside it is a fresh array each render
+    // and would defeat the memo entirely.
+    const offerSalesPages = campaign.offer?.sales_pages ?? [];
+    const opts = offerSalesPages.map((sp) => ({ label: sp.label, orphan: false }));
+    if (
+      watchedSalesPageLabel &&
+      !opts.some((o) => o.label === watchedSalesPageLabel)
+    ) {
+      opts.push({ label: watchedSalesPageLabel, orphan: true });
+    }
+    return opts;
+  }, [campaign.offer?.sales_pages, watchedSalesPageLabel]);
+
+  const destinationValue = watchedLandingPageId
+    ? `lp:${watchedLandingPageId}`
+    : watchedSalesPageLabel
+      ? `sp:${watchedSalesPageLabel}`
+      : NONE;
+
+  function onDestinationChange(v: string) {
+    // Exactly one of the two is ever set, so the picker can never leave the
+    // stage carrying a landing page AND a legacy label with no rule for which
+    // wins — the ambiguity the two-field version shipped with.
+    if (v.startsWith("lp:")) {
+      form.setValue("landing_page_id", v.slice(3), { shouldDirty: true });
+      form.setValue("sales_page_label", "", { shouldDirty: true });
+    } else if (v.startsWith("sp:")) {
+      form.setValue("landing_page_id", "", { shouldDirty: true });
+      form.setValue("sales_page_label", v.slice(3), { shouldDirty: true });
+    } else {
+      form.setValue("landing_page_id", "", { shouldDirty: true });
+      form.setValue("sales_page_label", "", { shouldDirty: true });
+    }
+  }
+
   const watchedFullUrl = form.watch("full_url");
   const watchedFullUrlAuto = form.watch("full_url_auto");
   const watchedScheduledAt = form.watch("scheduled_at");
@@ -1129,7 +1179,6 @@ export function StageForm({
     effectiveTrackingId,
   ]);
 
-  const offerSalesPages = campaign.offer?.sales_pages ?? [];
   const audienceEmpty =
     audiencePreview !== null && audiencePreview.count === 0;
 
@@ -1312,12 +1361,12 @@ export function StageForm({
               </div>
             </div>
 
-        {/* ============ Sales page & URLs ============ */}
+        {/* ============ Destination & URLs ============ */}
         <div className="grid gap-3 border-t pt-3">
           <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Sales page & URLs
+            Destination & URLs
           </span>
-          {/* Left column ([Creative | Sales page] then Short URL) and right
+          {/* Left column ([Creative | Destination] then Short URL) and right
               column (Stop text then Full URL) are two INDEPENDENT vertical stacks
               joined by one items-start 2-col split — neither column is height-
               coupled to the other, so a short field is never stretched to a tall
@@ -1379,91 +1428,74 @@ export function StageForm({
                 )}
               />
 
-                <FormField
-                  control={form.control}
-                  name="landing_page_id"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Landing page</FormLabel>
-                    <Select
-                      value={field.value === "" ? NONE : field.value}
-                      onValueChange={(v) => field.onChange(v === NONE ? "" : v)}
-                      disabled={isSubmitting || landingPages.length === 0}
-                    >
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue
-                            placeholder={
-                              landingPages.length === 0
-                                ? "No landing pages on this offer"
-                                : "Use the legacy URL below"
-                            }
-                          />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value={NONE}>None — use the URL below</SelectItem>
-                        {landingPages
-                          .filter((p) => p.status === "active")
-                          .map((p) => (
-                            <SelectItem key={p.id} value={String(p.id)}>
+                {/* ── ONE destination picker ────────────────────────────
+                    Was TWO fields ("Landing page" and "Sales page"), which put
+                    the same decision in two places and left the operator to work
+                    out which one won. The options are now merged and one
+                    selection drives both stored fields; nothing about the
+                    payload or the send path changed.
+
+                    ⚠️ BACKWARD COMPATIBLE BY CONSTRUCTION. A stage saved before
+                    landing pages existed carries only `sales_page_label`, and
+                    renders here as its own selected option — including when that
+                    label is no longer offered on the offer, which would
+                    otherwise silently show an empty picker and rewrite the
+                    stage's destination on the next save. The NULL
+                    landing_page_id path is untouched. */}
+                <FormItem className="min-w-0">
+                  <FormLabel>Destination</FormLabel>
+                  <Select
+                    value={destinationValue}
+                    onValueChange={onDestinationChange}
+                    disabled={isSubmitting}
+                  >
+                    <FormControl>
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="None — use the Full URL below" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value={NONE}>None — use the Full URL below</SelectItem>
+                      {activeLandingPages.length > 0 && (
+                        <SelectGroup>
+                          <SelectLabel>Landing pages</SelectLabel>
+                          {activeLandingPages.map((p) => (
+                            <SelectItem key={`lp-${p.id}`} value={`lp:${p.id}`}>
                               {p.title}
                               {p.kind === "slug" ? ` · /lp/${p.slug}` : " · external"}
                               {p.is_default ? " (default)" : ""}
                             </SelectItem>
                           ))}
-                      </SelectContent>
-                    </Select>
-                    {landingPreview && (
-                      <p className="text-muted-foreground mt-1 break-all font-mono text-xs">
-                        {landingPreview.ok ? (
-                          <>Sends to <span className="text-foreground">{landingPreview.url}</span> — built from this campaign&apos;s brand when the link is created, so re-branding updates it automatically.</>
-                        ) : (
-                          <span className="text-destructive">{landingPreview.message}</span>
-                        )}
-                      </p>
-                    )}
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                  name="sales_page_label"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Sales page {watchedLandingPageId ? "(unused — a landing page is selected)" : ""}</FormLabel>
-                    <Select
-                      value={field.value === "" ? NONE : field.value}
-                      onValueChange={(v) =>
-                        field.onChange(v === NONE ? "" : v)
-                      }
-                      disabled={isSubmitting || offerSalesPages.length === 0}
-                    >
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue
-                            placeholder={
-                              offerSalesPages.length === 0
-                                ? "No sales pages on this offer"
-                                : "Choose a sales page"
-                            }
-                          />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value={NONE}>None</SelectItem>
-                        {offerSalesPages.map((sp) => (
-                          <SelectItem key={sp.label} value={sp.label}>
-                            {sp.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+                        </SelectGroup>
+                      )}
+                      {salesPageOptions.length > 0 && (
+                        <SelectGroup>
+                          <SelectLabel>Sales pages (legacy)</SelectLabel>
+                          {salesPageOptions.map((sp) => (
+                            <SelectItem key={`sp-${sp.label}`} value={`sp:${sp.label}`}>
+                              {sp.label}
+                              {sp.orphan ? " · not on this offer" : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {landingPreview && (
+                    <p className="text-muted-foreground mt-1 break-all font-mono text-xs">
+                      {landingPreview.ok ? (
+                        <>Sends to <span className="text-foreground">{landingPreview.url}</span> — built from this campaign&apos;s brand when the link is created, so re-branding updates it automatically.</>
+                      ) : (
+                        <span className="text-destructive">{landingPreview.message}</span>
+                      )}
+                    </p>
+                  )}
+                  {destinationValue.startsWith("sp:") && (
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      Legacy sales page — the URL is built from the Full URL field below.
+                    </p>
+                  )}
+                </FormItem>
               </div>
               {/* Short URL — full-half width in the left column, directly under
                   the Creative / Sales-page row. */}

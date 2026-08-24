@@ -1198,6 +1198,20 @@
       "when": 1791072000000,
       "tag": "0170_widen_landing_url_shape",
       "breakpoints": true
+    },
+    {
+      "idx": 171,
+      "version": "7",
+      "when": 1791158400000,
+      "tag": "0171_intake_daily_tag_grain",
+      "breakpoints": true
+    },
+    {
+      "idx": 172,
+      "version": "7",
+      "when": 1791244800000,
+      "tag": "0172_partner_report_tokens",
+      "breakpoints": true
     }
   ]
 }

@@ -1,9 +1,16 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
+
+> **Later phases.** Journey lifecycle, behavioural lanes and the **journey
+> funnel** (routed → sent → clicked → offer → converted, plus outcomes grouped on
+> `(state, close_reason)`) are Phase 6/7 — see
+> [drip-partner-reporting.md](drip-partner-reporting.md). Note in particular that
+> the **Ignored lane is terminal**: it closes its journey `completed`/`unengaged`
+> in the same transaction as the lane send.
 
 Card `869endku0` · migrations **0159–0163** · recon:
 [2026-08-23-drip-phase-4-routing-recon.md](../superpowers/specs/2026-08-23-drip-phase-4-routing-recon.md)

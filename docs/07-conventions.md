@@ -1386,6 +1386,40 @@ same-offer-same-creative rule and the org-wide opt-out gate all still apply.
 `ON DELETE CASCADE`, so a hard delete removes the journey rather than leaving one
 to mark. That is accepted.
 
+### `close_reason` carries the meaning, not `state` — and `completed` has two
+
+`close_reason` is free text (no CHECK), so a new reason needs no migration.
+Two reasons share the `completed` state and are **materially different**:
+
+| state / reason | meaning |
+|---|---|
+| `completed` / `all_stages_sent` | the sequence ran out for someone who engaged |
+| `completed` / `unengaged` | the Ignored lane fired and nobody was listening |
+
+Anything grouping journeys — the funnel, any future report — groups on
+**`(state, close_reason)`**, never on `state` alone. Collapsing these two throws
+away the one number that says whether a campaign is talking to anyone.
+
+### The Ignored lane closes its journey in the SAME transaction as its send
+
+`closeJourneyUnengaged` is called from `lib/drip/followups.ts` inside the lane's
+own transaction — both, or neither. A tier-0 contact did not click, did not reach
+the offer and did not buy, and the tier is **high-water**, so they can never drop
+into a lower lane: that send is the last thing the journey will ever do.
+
+Closing in a later sweep would leave a window where the journey is live with
+nothing owed, holding the contact's one drip slot against a campaign with nothing
+left to say to them.
+
+⚠️ It does **not** cancel pending sends (unlike `closeJourneyOnOptOut`) — the send
+that triggered the close is itself pending dispatch. Cancelling would cancel the
+very message whose firing is the reason for closing.
+
+⚠️ Like every close it is guarded by `state IN ('routed','active')`, so a journey
+that already reached a terminal state is never relabelled. If STOP lands in the
+same minute, the row stays `opted_out` / `stop_received` — the compliance record
+wins.
+
 ## Keitaro's `offer_reached_at` / `converted_at` are EVENT time, not detection time
 
 Both pollers write `(v.dt || ' ' || CAMPAIGN_TIMEZONE)::timestamptz` - the
@@ -1414,3 +1448,74 @@ request, so a click's detection **is** its event.
 - Per-route `runtime` / `dynamic` exports for cron + redirect handlers (Node runtime / force-dynamic expected).
 - How `campaign_stages.status` / `sent_at` are reconciled after a TextHub drain (kickoff/drain operate only on `stage_sends`).
 - Whether any protected page is reachable without a server-side membership check — discrepancy #5.
+
+## A middleware exclusion is an EXACT path segment, and the trailing slash is load-bearing
+
+`proxy.ts`'s matcher excludes public paths with a negative lookahead. Every entry
+ends in `/` — `r/`, `partner-report/`, `api/` — because without it the entry is a
+**prefix**: a bare `partner` also drops `/partners`, `/partner-keys` and
+`/partner-reports` out of the middleware entirely. No session refresh, no
+redirect, nothing failing, nothing logged.
+
+⚠️ The lookahead is **anchored at the path root**, so an exclusion can only ever
+affect TOP-LEVEL paths. `/settings/partners` is unreachable from here no matter
+how wide the entry gets. Do not reason about this by eye — the first draft of the
+guard for this asserted the opposite and was wrong.
+
+**Assert it as a differential, not as a list of guesses.**
+`scripts/test-public-route-scope.ts` reads the matcher from `proxy.ts` AND from
+`git show origin/main:proxy.ts`, runs both across every real page route in the
+repo (discovered from the filesystem, so routes added later are covered) plus an
+adversarial prefix family, and asserts that the paths whose behaviour CHANGED are
+exactly the intended ones. Enumerating "routes I think should still be gated"
+only tests the author's imagination.
+
+It then builds the widened variant and asserts the diff catches it. A guard that
+has never gone red proves nothing.
+
+## Never bill from a per-transaction cost delta
+
+`lookup_batches.balance_before_usd - balance_after_usd` looks like the cost of
+that batch. It is not, and the failure is silent:
+
+- **Small batches read as free.** 4 of 15 production batches have delta `0.0000`,
+  and they are exactly the small (1–2 lookup) `drip_intake` ones. Billing from it
+  invoices those partners **$0.00**.
+- **Concurrent batches share a snapshot.** Overlapping batches record the same
+  `balance_before`, so each claims the whole window's movement or none of it.
+
+Implied per-batch rates span 0×–3.9× the flat rate. In **aggregate** the ledger is
+sound, so the pattern is: **the ledger sets the RATE over a trailing window; a
+per-actor counter does the ATTRIBUTION.** See
+[drip-partner-reporting.md](04-features/drip-partner-reporting.md) §3.
+
+Related: `lookup_batches.actual_cost_usd` equals `est_cost_usd` in 15/15 rows. It
+is an estimate wearing the word "actual". Nothing reads it.
+
+A derived rate must **fail toward the standard rate, never toward zero** — a zero
+rate invoices everyone nothing, which is the exact failure being avoided.
+
+## A report joining two sources keys off their UNION, not one coalesced onto the other
+
+Building rows from source A and `COALESCE`ing B's key onto it silently drops
+every `(key, dimension)` pair that exists only in B. This is not hypothetical: the
+partner report showed `sent: 0` against real sends, because the pre-0171 counter
+row sits under `interest_tag = ''` while its sends carry `medicare`.
+
+Emit a `keys` CTE that `UNION`s the key set of every source, then `LEFT JOIN` each
+source onto it.
+
+## A signed link that must be revocable is a DB-resolved opaque token, not an HMAC
+
+Revocation is the requirement that decides the design. A signed/HMAC/JWT token
+cannot be revoked without a denylist — i.e. without the very database lookup that
+signing was meant to avoid. So: 24 random bytes, SHA-256 at rest, plaintext
+returned **once**, revoked with one `UPDATE`.
+
+Two properties that are easy to lose:
+
+- **Scope comes from the resolved row, never the URL.** The route accepts no
+  entity id, so there is no parameter to tamper with.
+- **Every failure mode returns null indistinguishably** — unknown, revoked,
+  expired, archived — and the page renders one `notFound()`, so it cannot be used
+  to probe which tokens ever existed.

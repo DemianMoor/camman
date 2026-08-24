@@ -7,6 +7,7 @@ import { campaignTierExpr } from "@/lib/campaign-tier";
 import { resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
 import { followupDueAt, type FollowupTier } from "./followup-timing";
 import { isDripPostureOn } from "./in-use";
+import { closeJourneyUnengaged } from "./lifecycle";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
 import { dispatchDripSend, GateRefused, MintRefused } from "./send-one";
 
@@ -37,6 +38,8 @@ export interface FollowupResult {
   pausedSkipped: number;
   gateRefused: number;
   mintRefused: number;
+  /** Journeys closed completed/unengaged because the Ignored lane fired (R4). */
+  closedUnengaged: number;
 }
 
 interface CandidateRow {
@@ -77,7 +80,7 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
   const res: FollowupResult = {
     postureOn: false, considered: 0, inserted: 0, notDue: 0, noDetection: 0,
     tierMismatch: 0, alreadySent: 0, capBlocked: 0, numbersExhausted: 0,
-    pausedSkipped: 0, gateRefused: 0, mintRefused: 0,
+    pausedSkipped: 0, gateRefused: 0, mintRefused: 0, closedUnengaged: 0,
   };
 
   const orgs = (await db.execute(sql`
@@ -244,6 +247,19 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
               external_url: r.lp_external_url, status: r.lp_status,
             },
           });
+
+          // ⭐ THE IGNORED LANE IS TERMINAL (ruling R4). Tier 0 means no click,
+          // no offer reach, no purchase — and the tier is high-water, so this
+          // contact can never fall into a lower lane. The send above is the last
+          // thing this journey will ever do, so it closes here, in the SAME
+          // transaction: both, or neither.
+          if (r.child_tier === 0) {
+            const closed = await closeJourneyUnengaged(tx, {
+              orgId,
+              journeyId: r.journey_id,
+            });
+            if (closed.closed > 0) res.closedUnengaged++;
+          }
         });
         res.inserted++;
       } catch (e) {

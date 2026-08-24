@@ -118,6 +118,32 @@ accepts, what a key's `field_mapping` may target, and what the partner document 
 [scripts/generate-partner-docs.ts](../../scripts/generate-partner-docs.ts); `--check` fails if they
 drift (risk R19). Only `phone` is required; unknown fields are kept in `raw`, never discarded.
 
+### The public docs page — `/docs/partner-api`
+
+[app/docs/partner-api/page.tsx](../../app/docs/partner-api/page.tsx) is the
+**partner-facing** rendering of the same contract, public and session-free.
+It renders from `lib/intake/fields.ts` plus
+[lib/intake/api-contract.ts](../../lib/intake/api-contract.ts) (response codes,
+sandbox steps, changelog) — nothing on it is hand-copied, and the example
+payloads are **derived from each field's own `example`**, so a new field appears
+in the sample request as well as in the table.
+
+⚠️ **Any PR changing fields, validation or limits must add an `API_CHANGELOG`
+entry in the same PR** and regenerate the markdown — see
+[07-conventions.md](../07-conventions.md).
+
+Three guards run in `npm run check:docs`, which `vercel-build` calls before
+`next build` (this repo has no GitHub Actions, so the Vercel build is the gate):
+the markdown `--check`, [test-partner-docs-drift.ts](../../scripts/test-partner-docs-drift.ts)
+(renders the page and parses its output; also probes `canonicalFieldKey()` and
+greps for internal names), and
+[test-public-route-scope.ts](../../scripts/test-public-route-scope.ts).
+
+⚠️ **Page-vs-endpoint alone cannot catch a REMOVED field** — the page renders
+from `LEAD_FIELDS` and the accepted list *is* `LEAD_FIELDS`, so both sides move
+together (measured: deleting `state` left the whole suite green). The committed
+markdown is the independent anchor that makes a removal show up.
+
 ## Alerts
 
 `alert_state` is the first state-transition gate in the codebase. `notifyTelegram` is stateless by

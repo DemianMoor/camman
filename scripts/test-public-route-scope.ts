@@ -88,6 +88,10 @@ function isIntentionallyPublic(p: string): boolean {
     p === "/favicon.ico" ||
     p.startsWith("/r/") ||               // public short-link redirect
     p.startsWith("/partner-report/") ||  // public signed report (Drip P7)
+    // ⚠️ EXACT path, not a prefix — this one is a leaf page, so
+    // `/docs/partner-api-internal` must stay gated. See proxy.ts.
+    p === "/docs/partner-api" ||         // public partner API docs
+    p === "/docs/partner-api/" ||
     p.startsWith("/api/") ||             // every route self-authenticates
     /\.(svg|png|jpg|jpeg|gif|webp|ico|css|js|woff|woff2|ttf)$/.test(p)
   );
@@ -108,16 +112,26 @@ function main() {
     "/partners", "/partner", "/partner-keys", "/partner-keys/15",
     "/partner-reports", "/partner-report", "/partnerreport",
     "/settings/partners", "/settings/partner-keys",
+    // the docs/partner-api family — a bare prefix would swallow these
+    "/docs", "/docs/partner-api", "/docs/partner-api/", "/docs/partner-api-internal",
+    "/docs/partner-apix", "/docs/internal", "/docs/partner-api/extra",
     "/api/campaigns/list", "/_next/static/x.js", "/favicon.ico", "/r/x",
-  ];
+  ].filter((p, i, a) => a.indexOf(p) === i); // a real page route may also be in the adversarial list
 
-  // ── 1. the public page must bypass the middleware ────────────────────────
-  console.log("⭐ the signed-link report must BYPASS the middleware (no session):");
+  // ── 1. the public pages must bypass the middleware ───────────────────────
+  console.log("⭐ the PUBLIC pages must bypass the middleware (no session):");
   check("/partner-report/<token>", runsNow("/partner-report/abc123"), false);
   check("/partner-report/<base64url token>", runsNow("/partner-report/a_b-cD9"), false);
+  check("/docs/partner-api", runsNow("/docs/partner-api"), false);
+  check("/docs/partner-api/ (trailing slash)", runsNow("/docs/partner-api/"), false);
   check("(control) the existing public short link still bypasses", runsNow("/r/AbCdEfG"), false);
-  check("⭐ /partner-report with NO token segment is still gated",
-        runsNow("/partner-report"), true);
+
+  console.log("\n⭐ ...and the near-misses around them stay GATED:");
+  check("⭐ /partner-report with NO token segment", runsNow("/partner-report"), true);
+  check("⭐ /docs (the parent) is NOT public", runsNow("/docs"), true);
+  check("⭐ /docs/partner-api-internal is NOT public", runsNow("/docs/partner-api-internal"), true);
+  check("⭐ /docs/partner-api/extra (a child) is NOT public",
+        runsNow("/docs/partner-api/extra"), true);
 
   // ── 2. the invariant, over every path ────────────────────────────────────
   console.log(`\n⭐ the invariant over ${corpus.length} paths (${realPageRoutes().length} real page routes):`);
@@ -156,11 +170,13 @@ function main() {
   // that cannot fail is decoration. Build the exact mistake this exists to
   // catch — the trailing slash dropped, leaving a bare `partner` — and confirm
   // the invariant check rejects it.
-  const widened = matcherFor(nowPattern.replace("partner-report/", "partner"));
+  const widened = matcherFor(
+    nowPattern.replace("partner-report/", "partner").replace("docs/partner-api/?$", "docs"),
+  );
   const widenedLost = corpus.filter(
     (p) => !widened.test(p) && !isIntentionallyPublic(p),
   );
-  check("⭐ a widened `partner` matcher IS caught (this test can go red)",
+  check("⭐ widened `partner` + `docs` entries ARE caught (this test can go red)",
         widenedLost.length > 0, true);
   console.log(`        it would silently un-gate: ${widenedLost.join(", ") || "(nothing)"}`);
 

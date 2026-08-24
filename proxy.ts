@@ -86,6 +86,17 @@ export const config = {
     // scripts/test-public-route-scope.ts diffs this matcher against the one on
     // origin/main across every real page route and asserts that `partner-report/`
     // is the ONLY path that changed behaviour.
-    "/((?!_next/static|_next/image|_next/data|favicon.ico|r/|partner-report/|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|woff|woff2|ttf)$).*)",
+    // `docs/partner-api` is excluded so the PUBLIC partner API documentation
+    // renders without a session — a partner reads it before they have anything
+    // to log into.
+    //
+    // ⚠️ ANCHORED WITH `$`, NOT a trailing slash, because this one is a LEAF
+    // route. `partner-report/` needs the slash because its real paths are
+    // `/partner-report/<token>`; this page IS `/docs/partner-api`, so a trailing
+    // slash would exclude only non-existent children and leave the page itself
+    // gated. A bare `docs/partner-api` would be the opposite mistake — a prefix
+    // that also swallows `/docs/partner-api-internal`. `/?$` matches this exact
+    // path (with or without a trailing slash) and nothing else.
+    "/((?!_next/static|_next/image|_next/data|favicon.ico|r/|partner-report/|docs/partner-api/?$|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|woff|woff2|ttf)$).*)",
   ],
 };

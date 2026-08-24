@@ -18,7 +18,7 @@ import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
-import { buildStageFullUrl, validateDestination } from "@/lib/stage-url";
+import { buildStageFullUrl, validateBrandLpShape, validateDestination } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import { deleteStage } from "@/lib/stages/delete-stage";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
@@ -512,6 +512,15 @@ export async function PATCH(
   // tracking_id and rebuilds if it drifts. Skipped in auto mode (bare URL) and
   // when the payload doesn't touch full_url.
   if (!fullUrlAuto && typeof updates.full_url === "string") {
+    // ⚠️ The DB CHECK link_destinations_landing_url_shape covers ALL THREE brand
+    // hosts, but isGuideknLpUrl (below) matches only guidekn -- so a lumzen or
+    // fitsyou /lp/ URL with an extra param passes every app check and is then
+    // rejected by the database at MINT, surfacing as skipped leads hours later.
+    // Refuse it here, where the operator is.
+    const shapeErr = validateBrandLpShape(updates.full_url);
+    if (shapeErr) {
+      return apiError(400, shapeErr, API_ERROR_CODES.VALIDATION, { field: "full_url" });
+    }
     const destErr = validateDestination(updates.full_url, null);
     if (destErr) {
       return apiError(400, destErr, API_ERROR_CODES.VALIDATION, {

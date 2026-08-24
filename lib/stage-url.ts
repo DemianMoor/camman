@@ -274,3 +274,45 @@ export function hasUrlParam(url: string, key: string): boolean {
       return decoded === key;
     });
 }
+
+// ⚠️ MIRRORS THE DB CHECK `link_destinations_landing_url_shape` (migration 0094,
+// widened in 0111) EXACTLY. That constraint is anchored and permits precisely
+// ONE query parameter on a brand /lp/ destination:
+//
+//   ^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)
+//    /lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$
+//
+// It exists because malformed tracking URLs silently killed attribution.
+//
+// ⚠️ WHY A SECOND FUNCTION RATHER THAN EXTENDING validateDestination:
+// isGuideknLpUrl matches ONLY guidekn, so a lumzen or fitsyou /lp/ URL passes
+// every app-level check today and is then REJECTED by the database at mint —
+// the app and the constraint disagree, and the operator finds out hours later
+// as skipped leads rather than at Save. This closes that gap at the write
+// routes, using the same host list and the same shape as the constraint.
+const BRAND_LP_SHAPE_RE =
+  /^https:\/\/(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$/;
+
+/** Is this a brand /lp/ destination at all (any host in the constraint list)? */
+export function isBrandLpUrl(url: string | null | undefined): boolean {
+  const u = (url ?? "").trim();
+  return /^https:\/\/(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp\//.test(u);
+}
+
+/**
+ * Returns a human-readable error when a brand /lp/ URL would be refused by the
+ * database, or null when it is acceptable. Non-/lp/ URLs are out of scope and
+ * always pass — a network or partner URL has no shape rule.
+ */
+export function validateBrandLpShape(url: string | null | undefined): string | null {
+  const u = (url ?? "").trim();
+  if (!u || !isBrandLpUrl(u)) return null;
+  if (BRAND_LP_SHAPE_RE.test(u)) return null;
+  const extra = u.includes("&");
+  return extra
+    ? "A landing-page URL may carry only the sub_id3 parameter. Extra parameters " +
+      "(UTM and the like) are rejected by the database when the link is created, " +
+      "so the send would fail. Use an external-URL landing page if you need them."
+    : "This landing-page URL does not match the required shape " +
+      "(https://<brand host>/lp/<slug>?sub_id3=<tracking id>).";
+}

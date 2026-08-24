@@ -198,6 +198,10 @@ type CampaignDetail = {
 };
 
 type Stage = {
+  // Drip P5 window fields. Absent on a regular stage.
+  window_start_min?: number | null;
+  window_end_min?: number | null;
+  drip_active?: boolean | null;
   id: number;
   campaign_id: number;
   stage_number: number;
@@ -1991,6 +1995,20 @@ export default function CampaignDetailPage() {
           <StageInlineEditor
             campaign={campaign}
             campaignId={campaignId}
+            campaignType={campaign.type}
+            siblingWindows={stages
+              .filter(
+                (s) =>
+                  s.drip_active === true &&
+                  s.window_start_min != null &&
+                  s.window_end_min != null &&
+                  s.id !== editingStage?.id,
+              )
+              .map((s) => ({
+                stage_id: s.id,
+                window_start_min: s.window_start_min as number,
+                window_end_min: s.window_end_min as number,
+              }))}
             campaignTrackingId={campaign.tracking_id}
             nextStageNumber={
               stages.reduce((m, s) => Math.max(m, s.stage_number), 0) + 1

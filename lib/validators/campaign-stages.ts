@@ -16,6 +16,14 @@ export const STAGE_STATUSES = [
 // (key sent with explicit null), matching campaigns.ts. Forms typically
 // JSON.stringify null fields rather than omitting them.
 const stageBaseSchema = z.object({
+  // Drip P5. Minutes past ET midnight, half-open [start, end). The single-row
+  // bounds are also a DB CHECK; the multi-row rule (windows may not overlap OR
+  // TOUCH) cannot be a CHECK and is enforced in the route via
+  // validateWindowSet — the SAME function the editor calls, so the operator
+  // never meets a different rule at save time.
+  window_start_min: z.number().int().min(0).max(1439).nullable().optional(),
+  window_end_min: z.number().int().min(1).max(1440).nullable().optional(),
+  drip_active: z.boolean().nullable().optional(),
   label: z
     .union([z.string().trim().max(120), z.literal("")])
     .nullable()

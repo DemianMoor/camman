@@ -85,7 +85,8 @@ export async function runDripRoutingBatch(now: Date = new Date()): Promise<Routi
           skipped: verdict.candidates
             .filter((c) => c.campaign_id !== verdict.winner!.campaign_id)
             .map((c) => ({ campaign_id: c.campaign_id, eligible: c.eligible, detail: c.detail })),
-          creative_check: "deferred_p5",
+          // The creative half of the same-offer rule is enforced from Phase 5
+          // onward; the marker it used to carry is gone.
           evaluated_at: now.toISOString(),
         };
         try {

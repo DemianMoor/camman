@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
+import { checkDripStageWindow } from "@/lib/api/drip-stage-window-guard";
 import {
   brands,
   campaign_stages,
@@ -54,6 +55,12 @@ function parseId(idParam: string) {
 
 const SORT_COLUMNS = {
   stage_number: campaign_stages.stage_number,
+  // Drip P5: the daily window. NULL on a regular stage, so nothing changes for
+  // the existing screens — but the stage editor needs the SIBLING windows to
+  // validate overlap/touch, and without these it would silently see none.
+  window_start_min: campaign_stages.window_start_min,
+  window_end_min: campaign_stages.window_end_min,
+  drip_active: campaign_stages.drip_active,
   created_at: campaign_stages.created_at,
   status: campaign_stages.status,
 } as const;
@@ -156,6 +163,9 @@ export async function GET(
       org_id: campaign_stages.org_id,
       campaign_id: campaign_stages.campaign_id,
       stage_number: campaign_stages.stage_number,
+      window_start_min: campaign_stages.window_start_min,
+      window_end_min: campaign_stages.window_end_min,
+      drip_active: campaign_stages.drip_active,
       label: campaign_stages.label,
       creative_id: campaign_stages.creative_id,
       sms_provider_id: campaign_stages.sms_provider_id,
@@ -459,6 +469,23 @@ export async function POST(
     );
   }
   const input = parsed.data;
+
+  // ⚠️ Drip P5: the multi-row window rule. The DB CHECK covers the single-row
+  // half (end after start, inside the day); "may not overlap OR TOUCH" spans
+  // rows and can only be enforced here. Same function the editor calls, so the
+  // wording an operator sees does not change between the warning and the save.
+  const windowRefusal = await checkDripStageWindow(db, {
+    orgId,
+    campaignId: cid,
+    windowStartMin: input.window_start_min,
+    windowEndMin: input.window_end_min,
+    dripActive: input.drip_active,
+  });
+  if (windowRefusal) {
+    return apiError(400, windowRefusal.message, API_ERROR_CODES.VALIDATION, {
+      field: windowRefusal.field,
+    });
+  }
 
   // A new stage can't be scheduled in the past (would immediately miss its
   // window). Server-side source of truth; the form mirrors this client-side.

@@ -21,9 +21,10 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 // another will chase the wrong control:
 //   Campaign cap   — LIFETIME journeys, enforced now at routing
 //   Routing/day    — journeys admitted per ET day, enforced now at routing
-//   Daily send cap — SENDS per ET day, NOT enforced yet (Phase 5)
-// The UI says which are live and which is not, because a cap that silently does
-// nothing is worse than no cap: it looks like protection.
+//   Daily send cap — SENDS per ET day, enforced at send time (Phase 5)
+// All three are live as of Phase 5. They remain labelled apart because they are
+// different windows over different things, and an operator who reads one as
+// another will chase the wrong control.
 
 type Config = {
   campaign_id: number;
@@ -39,6 +40,14 @@ type Config = {
   journeys_total: number;
 };
 
+type DripNumber = {
+  provider_phone_id: number;
+  phone_number: string;
+  provider: string | null;
+  daily_limit: number | null;
+  position?: number;
+};
+
 type Journey = {
   id: string;
   state: string;
@@ -52,9 +61,13 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
   const cfgApi = useApiCall<Config>();
   const saveApi = useApiCall<unknown>();
   const journeysApi = useApiCall<{ data: Journey[] }>();
+  const numbersApi = useApiCall<{ selected: DripNumber[]; available: DripNumber[] }>();
+  const saveNumbersApi = useApiCall<unknown>();
 
   const [cfg, setCfg] = useState<Config | null>(null);
   const [journeys, setJourneys] = useState<Journey[]>([]);
+  const [selectedNumbers, setSelectedNumbers] = useState<DripNumber[]>([]);
+  const [availableNumbers, setAvailableNumbers] = useState<DripNumber[]>([]);
   const [tick, setTick] = useState(0);
 
   const [tag, setTag] = useState("");
@@ -93,7 +106,34 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
     })();
   }, [loadJ, campaignId, tick]);
 
+  const loadN = numbersApi.execute;
+  useEffect(() => {
+    (async () => {
+      const r = await loadN(`/api/campaigns/${campaignId}/drip-numbers`);
+      if (r.ok) {
+        setSelectedNumbers(r.data.selected);
+        setAvailableNumbers(r.data.available);
+      }
+    })();
+  }, [loadN, campaignId, tick]);
+
   const reload = useCallback(() => setTick((n) => n + 1), []);
+
+  const saveNumbers = async (next: DripNumber[]) => {
+    const r = await saveNumbersApi.execute(`/api/campaigns/${campaignId}/drip-numbers`, {
+      method: "PUT",
+      body: JSON.stringify({
+        numbers: next.map((n, i) => ({
+          provider_phone_id: n.provider_phone_id,
+          daily_limit: n.daily_limit,
+          position: i,
+        })),
+      }),
+    });
+    if (!r.ok) return toastApiError(r);
+    toast.success("Sending numbers saved");
+    reload();
+  };
 
   const num = (v: string) => (v.trim() === "" ? null : Number(v));
 
@@ -218,7 +258,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
               </div>
               <div>
                 <Label htmlFor="cap-daily" className="text-xs">
-                  Daily send cap <Badge variant="outline">not yet enforced</Badge>
+                  Daily send cap <Badge variant="secondary">live</Badge>
                 </Label>
                 <Input
                   id="cap-daily"
@@ -227,10 +267,8 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
                   placeholder="unlimited"
                   disabled={!canEdit}
                 />
-                {/* ⚠️ Saying this plainly matters: a cap that silently does
-                    nothing looks like protection. */}
                 <p className="text-muted-foreground mt-1 text-xs">
-                  Saved, but sends do not exist yet — enforced in the next phase.
+                  Sends per ET day. Warns at 90%; leads beyond it wait for tomorrow.
                 </p>
               </div>
             </div>
@@ -245,6 +283,97 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
             >
               <Save className="mr-1 size-4" /> Save drip settings
             </Button>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="space-y-3 pt-4">
+          <div>
+            <Label>Sending numbers</Label>
+            {/* ⚠️ Only the campaign brand's numbers are offered — the same
+                Phase 1 brand rule the stage save enforces, not a second copy.
+                Rotation is "first with headroom", so the order here is the
+                preference. When every number is used up the leads WAIT for the
+                next ET day; nothing overflows onto an unlisted number. */}
+            <p className="text-muted-foreground text-xs">
+              Only this brand&apos;s numbers can be used. Rotation takes the first with headroom
+              left today; when all are used up, leads wait for the next ET day.
+            </p>
+          </div>
+
+          {selectedNumbers.length === 0 ? (
+            <p className="text-muted-foreground text-sm">
+              No numbers selected — this campaign cannot send.
+            </p>
+          ) : (
+            <ul className="divide-y rounded-md border">
+              {selectedNumbers.map((n, i) => (
+                <li key={n.provider_phone_id} className="flex items-center gap-2 px-3 py-2">
+                  <span className="font-mono text-sm">{n.phone_number}</span>
+                  <Badge variant="outline" className="text-[10px]">{n.provider ?? "?"}</Badge>
+                  <div className="ml-auto flex items-center gap-2">
+                    <Label htmlFor={`lim-${n.provider_phone_id}`} className="text-xs">
+                      Daily limit
+                    </Label>
+                    <Input
+                      id={`lim-${n.provider_phone_id}`}
+                      className="w-24"
+                      defaultValue={n.daily_limit == null ? "" : String(n.daily_limit)}
+                      placeholder="none"
+                      disabled={!canEdit}
+                      onBlur={(e) => {
+                        const v = e.target.value.trim();
+                        const next = [...selectedNumbers];
+                        next[i] = { ...n, daily_limit: v === "" ? null : Number(v) };
+                        setSelectedNumbers(next);
+                        void saveNumbers(next);
+                      }}
+                    />
+                    {canEdit && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          const next = selectedNumbers.filter(
+                            (x) => x.provider_phone_id !== n.provider_phone_id,
+                          );
+                          setSelectedNumbers(next);
+                          void saveNumbers(next);
+                        }}
+                      >
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {canEdit && availableNumbers.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {availableNumbers
+                .filter(
+                  (a) => !selectedNumbers.some((s2) => s2.provider_phone_id === a.provider_phone_id),
+                )
+                .map((a) => (
+                  <Button
+                    key={a.provider_phone_id}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const next = [...selectedNumbers, { ...a, daily_limit: null }];
+                      setSelectedNumbers(next);
+                      void saveNumbers(next);
+                    }}
+                  >
+                    + {a.phone_number}
+                  </Button>
+                ))}
+            </div>
           )}
         </CardContent>
       </Card>

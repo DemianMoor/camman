@@ -181,7 +181,7 @@ async function main() {
       const j1 = (await tx.execute(sql`
         INSERT INTO drip_journeys (org_id, campaign_id, contact_id, lead_event_id, state, reason)
         VALUES (${orgId}, ${dripCamp}, ${contactId}, ${ev1}, 'routed',
-                ${JSON.stringify({ won_by: "priority", creative_check: "deferred_p5" })}::jsonb)
+                ${JSON.stringify({ won_by: "priority", creative_check: "evaluated" })}::jsonb)
         RETURNING id, state`)) as unknown as { id: string; state: string }[];
       check("first journey routes", j1[0]?.state, "routed");
 
@@ -223,7 +223,11 @@ async function main() {
       const reason = (await tx.execute(sql`
         SELECT reason->>'creative_check' AS cc FROM drip_journeys WHERE id = ${j1[0].id}
       `)) as unknown as { cc: string }[];
-      check("reason JSONB carries the deferred-creative marker (D7)", reason[0]?.cc, "deferred_p5");
+      // ⚠️ Phase 5 COMPLETED the creative half of the same-offer rule, so the
+      // "deferred_p5" marker this used to assert is gone. Asserting a marker
+      // that no longer exists is how a guard goes red because the feature
+      // SHIPPED. What matters now is that reason JSONB round-trips at all.
+      check("reason JSONB round-trips arbitrary keys", reason[0]?.cc, "evaluated");
 
       tx.rollback();
     });

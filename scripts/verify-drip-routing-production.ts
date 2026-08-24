@@ -310,7 +310,9 @@ async function main() {
       SELECT reason FROM drip_journeys
       WHERE org_id = ${orgId}::uuid AND state = 'routed' LIMIT 1`);
     check("reason records why it won", typeof j?.reason?.won_by, "string");
-    check("reason carries the deferred-creative marker", j?.reason?.creative_check, "deferred_p5");
+    // Phase 5 completed the creative half; the deferred marker is gone and the
+    // rule is really evaluated now. The reason still records the decision.
+    check("reason records the winning campaign", typeof j?.reason?.campaign_id, "number");
     check("reason lists the skipped candidates", Array.isArray(j?.reason?.skipped), true);
   } finally {
     // ── restore posture FIRST, then clean up ─────────────────────────────

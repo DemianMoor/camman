@@ -1445,4 +1445,18 @@ mint**"; only the render half existed.
   landing hosts — a new brand host must be added to that CHECK.
   — docs updated: docs/07-conventions.md, docs/04-features/drip-campaigns-routing.md
 
+## 2026-08-24 — Drip: STOP-keyword regex corrupted by a scripted patch (fix + class guard)
+
+A patch meant to write `/STOP/i` wrote two literal BACKSPACE bytes instead.
+`tsc` and lint were clean and the line looked right on every review surface, but
+the regex could never match, so the drip opt-out gate refused every txr lead —
+failing closed, so nothing wrong was sent and nothing at all was sent.
+
+- The predicate is now exported as `bodyCarriesStop` and tested on real bodies,
+  including that "stopped snacking" must NOT count as opt-out language.
+- [scripts/test-stop-keyword-guard.ts](../scripts/test-stop-keyword-guard.ts) also
+  scans all 968 source files for C0 control characters — the only check that can
+  see this class.
+  — docs updated: docs/07-conventions.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

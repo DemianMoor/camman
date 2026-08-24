@@ -1253,6 +1253,36 @@ materialization. Adding a brand landing host means editing this constraint in th
 same change. (It is `NOT VALID` by design — see the guidekn URL-shape note — so
 altering it does not force a full table scan.)
 
+## A scripted patch can write a control character that every review surface hides
+
+A patch that produced a regex meant to read `/STOP/i` instead wrote two
+literal **BACKSPACE** bytes (0x08) where the escapes belonged. The result:
+
+- `tsc` clean, ESLint clean.
+- The line renders correctly in an editor, in `sed`, in `grep`, and in the GitHub
+  diff — a terminal draws 0x08 as nothing at all.
+- The regex could never match, so the drip opt-out gate refused **every** txr
+  lead. It failed CLOSED, so nothing wrong was sent; nothing at all was sent
+  either, and the only symptom was a counter reading `gateRefused: 1`.
+
+It shipped, deployed, and was only caught because the send that should have
+followed never appeared.
+
+**Two guards, because either alone is weak:**
+
+1. **Behaviour.** Predicates like this belong in an exported function with a test
+   that runs them on real text, not inline in a worker where nothing can reach
+   them. `bodyCarriesStop` in [lib/sends/opt-out-footer.ts](../lib/sends/opt-out-footer.ts).
+2. **Bytes.** [scripts/test-stop-keyword-guard.ts](../scripts/test-stop-keyword-guard.ts)
+   scans every `.ts`/`.tsx` file for C0 control characters (tab/newline/CR
+   excepted). This is the only check that sees the class at all.
+
+**When scripting an edit that contains regex escapes, verify the result with
+`od -c` or `cat -v`, not by reading it back.** Reading it back is exactly the
+check this class defeats. Building the bytes explicitly (`chr(92) + "b"`) is
+safer than relying on nested escaping through a shell heredoc into a language
+literal.
+
 ## Open `[VERIFY]` items (could not confirm from source in this pass)
 - Exact production `DATABASE_URL` pooler port (6543 expected) — discrepancy #3.
 - The live DB's `segment_rules` CHECK contents — discrepancy #2.

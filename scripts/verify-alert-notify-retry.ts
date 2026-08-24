@@ -198,15 +198,24 @@ async function main() {
             "this is exactly what removing `state <> 'firing'` from the claim breaks",
         );
         ok(afterRecur?.state === "firing", "CASE 11: row is firing again");
-        // transitionAlert nulls last_notified_at on any transition INTO firing
-        // (prior state 'ok' <> 'firing'), so a non-NULL value here can only
-        // have been written by THIS call's markAlertNotified — i.e. a fresh
-        // stamp from the second delivery, not a leftover from the first.
-        // (Postgres `now()` is fixed for the whole surrounding transaction, so
-        // comparing the two stamps for inequality would not be meaningful.)
+        // ⚠️ THIS ASSERTION IS DELIBERATELY WEAK, AND ITS LABEL SAYS SO.
+        //
+        // It cannot distinguish a fresh stamp from the first delivery's
+        // leftover. Under the exact mutation CASE 11 exists to catch (the
+        // `state <> 'firing'` disjunct removed), the claim is refused, the row
+        // stays 'ok', markAlertNotified never runs — and the first delivery's
+        // stamp is still sitting there, so this check prints ✓ while nothing
+        // was re-stamped. It is the two assertions above that catch that.
+        //
+        // It cannot be strengthened here: Postgres `now()` is transaction
+        // timestamp, frozen for the whole surrounding transaction, so the two
+        // stamps are byte-identical and comparing them for inequality proves
+        // nothing. Rather than leave a ✓ next to a label claiming more than it
+        // checks, the label states exactly what it verifies — that the column
+        // is populated at all.
         ok(
           typeof afterRecur?.last_notified_at === "string",
-          "CASE 11: last_notified_at re-stamped by the recurrence's own delivery",
+          "CASE 11: last_notified_at is populated (cannot prove it is FRESH — see comment)",
         );
       }
 

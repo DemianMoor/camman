@@ -84,9 +84,16 @@ export async function POST(
       // call to Telegram. Fire-and-forget on a serverless invocation that may
       // freeze after the response would leave the row pending and let the next
       // failed request re-send. This path already awaits recordAuthFailure
-      // above, so this is consistent; and once a claim is refused (already
-      // latched), it's one statement with no network call — the added latency
-      // lands only on ticks that genuinely send.
+      // above, so this is consistent.
+      //
+      // ⚠️ COST, STATED HONESTLY: once the alert is DELIVERED the claim is
+      // refused in one statement with no network call, so the latency is nil.
+      // But while it is PENDING — a prior send failed, or Telegram is
+      // unreachable — EVERY subsequent bad-secret request re-claims and pays
+      // the full 4s AbortSignal.timeout before returning its 401, at request
+      // cadence, for as long as delivery keeps failing. That is the accepted
+      // price of not losing the alert; it is bounded by the timeout, and it
+      // only affects requests that are already being rejected.
       await notifyOnTransition(db, {
         alertKey: `intake:auth_fail:${key.id}`,
         orgId: key.org_id,

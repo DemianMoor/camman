@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
 import { PartnerReportView } from "@/components/reports/partner-report-view";
-import { getPartnerReport } from "@/lib/reporting/partner-report";
+import { getPartnerReport, stripRevenueForPartner } from "@/lib/reporting/partner-report";
 import { resolveReportToken } from "@/lib/reporting/partner-report-token";
 
 // PUBLIC partner report (Drip Phase 7) — no login, no session.
@@ -68,12 +68,16 @@ export default async function PartnerReportPage({
     resolved.partnerKeyId,
   );
 
+  // ⭐ Stripped on the SERVER, not hidden by the component — see
+  // stripRevenueForPartner. Hiding a column client-side still ships the value.
+  const safe = resolved.showRevenue ? report : stripRevenueForPartner(report);
+
   return (
     <PartnerReportView
       token={token}
       partnerName={resolved.partnerName}
       showRevenue={resolved.showRevenue}
-      report={report}
+      report={safe}
     />
   );
 }

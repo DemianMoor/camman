@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
 import { getDripFunnel } from "@/lib/drip/funnel";
 import { getCalibratedLookupRate, describeRate } from "@/lib/reporting/lookup-rate";
-import { getPartnerReport } from "@/lib/reporting/partner-report";
+import { getPartnerReport, stripRevenueForPartner } from "@/lib/reporting/partner-report";
 import {
   issueReportToken, resolveReportToken, revokeReportToken,
 } from "@/lib/reporting/partner-report-token";
@@ -182,6 +182,26 @@ async function main() {
         [...new Set(scoped.rows.map((r) => r.partner_key_id))], [keyId]);
   check("⭐ and it is a strict subset of the internal report",
         scoped.rows.length <= report.rows.length, true);
+
+  // ⭐ REVENUE MUST BE STRIPPED SERVER-SIDE, NOT HIDDEN BY THE COMPONENT.
+  // `showRevenue: false` only stops the column RENDERING; the value still
+  // travels in the RSC payload and is readable from view-source. Found in the
+  // live production smoke check. It read 0 at the time, so nothing leaked — the
+  // first drip conversion would have published our margin to the partner with
+  // the UI still looking correct. Asserted against a SYNTHETIC NON-ZERO row,
+  // because today's real revenue is 0 and would pass either way.
+  const synthetic = {
+    ...scoped,
+    rows: scoped.rows.map((r) => ({ ...r, revenue_usd: 1234.56 })),
+  };
+  check("⭐ the fixture really is non-zero (so this assertion can fail)",
+        synthetic.rows.every((r) => r.revenue_usd === 1234.56) && synthetic.rows.length > 0, true);
+  check("⭐ stripRevenueForPartner zeroes EVERY row",
+        stripRevenueForPartner(synthetic).rows.map((r) => r.revenue_usd),
+        synthetic.rows.map(() => 0));
+  check("⭐ and it leaves the partner's own numbers untouched",
+        stripRevenueForPartner(synthetic).rows.map((r) => [r.sent, r.clicks, r.opt_outs]),
+        synthetic.rows.map((r) => [r.sent, r.clicks, r.opt_outs]));
 
   check("a garbage token resolves to null", await resolveReportToken("not-a-real-token"), null);
   check("an empty token resolves to null", await resolveReportToken(""), null);

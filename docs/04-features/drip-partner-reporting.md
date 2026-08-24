@@ -271,3 +271,23 @@ Migration **0172** — `partner_keys`:
 - partial unique index on `report_token_hash WHERE NOT NULL`
 
 Both ship **inert**: 0 links issued, revenue off on every key.
+
+---
+
+## 9. ⚠️ Revenue is stripped on the SERVER, not hidden by the component
+
+`stripRevenueForPartner()` runs in `app/partner-report/[token]/page.tsx` before
+the report reaches the view.
+
+`showRevenue: false` only stops the column being **rendered**. The value still
+travels in the RSC payload and is readable from view-source. This was found in
+the **live production smoke check** — `revenue_usd` was sitting in the HTML of a
+page whose key has revenue switched off. It read `0` at the time, so nothing
+leaked; the first drip conversion would have published our margin to the partner
+with the UI still looking correct.
+
+The regression assertion in `scripts/drip-p7-proof.ts` runs against a **synthetic
+non-zero** row, because today's real revenue is `0` and would pass either way.
+
+**General rule:** for a public surface, "don't show it" is a rendering decision
+and "don't send it" is a security one. Only the second is a control.

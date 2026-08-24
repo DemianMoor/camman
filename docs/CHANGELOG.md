@@ -1422,4 +1422,27 @@ preservation — in a rolled-back probe) and
 production before the fix).
   — docs updated: docs/07-conventions.md, docs/04-features/drip-campaigns-routing.md
 
+## 2026-08-24 — Drip Phase 5: per-lead link minting (defect D)
+
+Found by inspecting the first real drip message before it dispatched. The
+scheduler rendered with `linkUrl: stage.short_url` — a static column, NULL on
+every drip stage — so the SMS was brand + creative + footer with **no link**, and
+`stage_sends.link_id` was NULL: no `/r/`, no click, no Keitaro attribution, and
+copy that ends in a colon and stops. The P5 card specified "per-lead render **+
+mint**"; only the render half existed.
+
+- New [lib/drip/mint.ts](../lib/drip/mint.ts): resolves the destination from the
+  stage's landing page + the campaign brand's `landing_host` (via the shared
+  `buildLandingPageUrl`), picks the short domain via the shared
+  `resolveShortDomainForSend`, and mints one link per lead with `mintLink`.
+- **Fails closed per lead.** Any unresolvable component ⇒ the lead is skipped with
+  a logged reason and no send; its journey stays `routed` for the next tick.
+- Mint, render, opt-out gate, `stage_sends` insert, stage stamp and journey update
+  now share ONE transaction, so a refusal can leave neither an orphan link nor a
+  linkless message. The gate now judges the text that will actually ship.
+- New `mintRefused` counter on the scheduler result.
+- Documented that `link_destinations_landing_url_shape` hardcodes the three brand
+  landing hosts — a new brand host must be added to that CHECK.
+  — docs updated: docs/07-conventions.md, docs/04-features/drip-campaigns-routing.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

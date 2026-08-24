@@ -34,6 +34,9 @@ type ReportRow = {
   opt_out_rate: number;
   clickers: number;
   click_rate: number;
+  // True when `clickers` is CamMan's count standing in for a missing Keitaro
+  // visit count. Marks the value and blanks the rates that divide by it.
+  clickers_is_fallback: boolean;
   offer_redirect: number;
   redirect_rate: number;
   sales: number;
@@ -370,7 +373,19 @@ export function KeitaroReport() {
         header: "Clickers",
         enableSorting: true,
         cell: ({ row }) => (
-          <span className="tabular-nums">{fmtInt(row.original.clickers)}</span>
+          <span
+            className="tabular-nums"
+            title={
+              row.original.clickers_is_fallback
+                ? "CamMan clicks — Keitaro visits unavailable"
+                : undefined
+            }
+          >
+            {fmtInt(row.original.clickers)}
+            {row.original.clickers_is_fallback ? (
+              <sup className="text-muted-foreground">*</sup>
+            ) : null}
+          </span>
         ),
       },
       {
@@ -379,7 +394,7 @@ export function KeitaroReport() {
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">
-            {fmtPct(row.original.click_rate)}
+            {row.original.clickers_is_fallback ? "—" : fmtPct(row.original.click_rate)}
           </span>
         ),
       },
@@ -399,7 +414,7 @@ export function KeitaroReport() {
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">
-            {fmtPct(row.original.redirect_rate)}
+            {row.original.clickers_is_fallback ? "—" : fmtPct(row.original.redirect_rate)}
           </span>
         ),
       },
@@ -591,18 +606,29 @@ export function KeitaroReport() {
       </div>
 
       {totals ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
-          <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
-          <StatCard
-            label="Offer Redirect"
-            value={fmtInt(totals.offer_redirect)}
-          />
-          <StatCard label="Sales" value={fmtInt(totals.sales)} />
-          <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
-          <StatCard label="Cost" value={fmtUsd(totals.cost)} />
-          <StatCard label="Profit" value={fmtUsd(totals.profit)} />
-          <StatCard label="Avg Opt-out" value={fmtPct(totals.opt_out_rate)} />
-        </div>
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
+            <StatCard
+              label="Clickers"
+              value={`${fmtInt(totals.clickers)}${totals.clickers_is_fallback ? "*" : ""}`}
+            />
+            <StatCard
+              label="Offer Redirect"
+              value={fmtInt(totals.offer_redirect)}
+            />
+            <StatCard label="Sales" value={fmtInt(totals.sales)} />
+            <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
+            <StatCard label="Cost" value={fmtUsd(totals.cost)} />
+            <StatCard label="Profit" value={fmtUsd(totals.profit)} />
+            <StatCard label="Avg Opt-out" value={fmtPct(totals.opt_out_rate)} />
+          </div>
+          {totals.clickers_is_fallback ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              * CamMan clicks — Keitaro visits unavailable for this period. Rates that
+              divide by Keitaro visits show —.
+            </p>
+          ) : null}
+        </>
       ) : null}
 
       {fetchError ? (

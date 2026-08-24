@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 
+import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import type { db } from "@/db/client";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -197,4 +198,25 @@ export async function runTrackingGapMonitor(dbc: DbOrTx): Promise<TrackingGapRep
     breaches,
     clean_stage_ids,
   };
+}
+
+// One latch per stage. Keyed by stage, not by campaign or host, deliberately:
+// a second bad landing page must not hide behind the first one's latch.
+export function trackingGapAlertKey(stageId: number): string {
+  return `tracking_gap:stage:${stageId}`;
+}
+
+// ⚠️ PLAIN TEXT. notifyTelegram() sends without parse_mode, so HTML tags would
+// render literally in the channel. Do not add markup here.
+export function formatTrackingGapAlert(b: TrackingGapBreach): string {
+  return [
+    "⚠️ Keitaro tracking gap",
+    `Stage ${b.tracking_id ?? b.stage_id} — ${b.campaign_name}`,
+    `CamMan recorded ${b.human_clicks.toLocaleString()} clicks, but Keitaro shows ` +
+      `0 visits and ${b.redirects.toLocaleString()} redirects since send ` +
+      `(${formatCampaignDateTime(b.sent_at)}).`,
+    `LP: ${b.destination_url ?? "(no destination recorded)"}`,
+    "Likely cause: LP is missing the Keitaro visit script, or the LP is dead/404. " +
+      "Open the LP and check both.",
+  ].join("\n");
 }

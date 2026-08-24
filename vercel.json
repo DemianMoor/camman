@@ -95,6 +95,10 @@
     {
       "path": "/api/cron/drip-scheduler",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/tracking-monitors",
+      "schedule": "37 * * * *"
     }
   ]
 }

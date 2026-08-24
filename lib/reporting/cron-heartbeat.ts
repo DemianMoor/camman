@@ -68,6 +68,14 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 24 * 16, // weekly cadence, ~2 missed runs
     label: "EPC integrity monitors (weekly)",
   },
+  // The hourly Keitaro tracking-gap monitor. Watched by nobody yet — it is the
+  // newest job and there is no natural partner on an hourly cadence. Recording
+  // its heartbeat now means a future watcher needs no change here.
+  trackingMonitors: {
+    job_name: "tracking-monitors",
+    max_age_hours: 3, // hourly cadence, ~2 missed runs
+    label: "Keitaro tracking-gap monitor (hourly)",
+  },
   // The weekly clickers rebuild — the repair path for the watermark-stranding
   // failure. It gets the same heartbeat treatment as everything else: if it
   // stops running, that must surface rather than being read as healthy.

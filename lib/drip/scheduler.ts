@@ -7,7 +7,11 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { getDescriptor } from "@/lib/sends/providers/registry";
-import { optOutGateSubject, resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
+import {
+  bodyCarriesStop,
+  optOutGateSubject,
+  resolveOptOutFooter,
+} from "@/lib/sends/opt-out-footer";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import { mintDripLeadLink } from "./mint";
 import { isDripPostureOn } from "./in-use";
@@ -304,7 +308,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
               resolved: footer,
               providerKnownAppendedText: descriptor?.defaultOptOutFooter ?? null,
             });
-            const hasStop = /STOP/i.test(gate.subject);
+            const hasStop = bodyCarriesStop(gate.subject);
             if (!gate.verifiable || (!hasStop && pr?.adapter_code === "txr")) {
               throw new GateRefused(
                 !gate.verifiable ? "footer unverifiable" : "no STOP in rendered body",

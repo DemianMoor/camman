@@ -29,7 +29,7 @@ export const ALT_SECRET_HEADER = "X-Partner-Secret";
 export interface ResponseCode {
   status: number;
   meaning: string;
-  /** What the PARTNER should do. The whole point of the table. */
+  /** Resolution — what the partner does about it. The point of the table. */
   action: string;
   /** Whether retrying the identical request can succeed. */
   retry: "yes" | "no" | "after-delay";
@@ -45,53 +45,49 @@ export interface ResponseCode {
 export const RESPONSE_CODES: ResponseCode[] = [
   {
     status: 202,
-    meaning: "Accepted and stored. The response body reports what happened to each lead.",
-    action: "Nothing. Reconcile by index against the `leads` array if you track ids.",
+    meaning: "Request accepted. The body reports per-lead outcomes.",
+    action: "None. Reconcile against the `leads` array by index.",
     retry: "no",
   },
   {
     status: 400,
-    meaning: "The body was not valid JSON, or contained no leads.",
-    action: "Fix the request. Do not retry it unchanged — it will fail identically.",
+    meaning: "The body is not valid JSON, or contains no leads.",
+    action: "Correct the request before resending.",
     retry: "no",
   },
   {
     status: 401,
-    meaning: "The token or the secret is wrong.",
+    meaning: "The token or secret is invalid.",
     action:
-      "Check both credentials. Repeated failures on a valid token are alerted to us, " +
-      "so contact us rather than retrying in a loop.",
+      "Verify both credentials. Repeated failures on a valid token are alerted internally.",
     retry: "no",
   },
   {
     status: 403,
-    meaning: "The key is recognised but has been disabled.",
-    action: "Contact us. Retrying will not re-enable it.",
+    meaning: "The key is recognised but disabled.",
+    action: "Contact your account manager.",
     retry: "no",
   },
   {
     status: 413,
     meaning:
-      "The payload was too large, the batch held too many leads, or the batch " +
-      "was larger than the whole daily allowance. The applicable limit is named in the response body.",
-    action:
-      "Split into smaller batches and resend. Nothing was stored, so no lead is lost.",
+      "The payload exceeds the size limit, the batch exceeds the per-call lead limit, " +
+      "or the batch exceeds the daily allowance. The applicable limit is named in the body.",
+    action: "Split into smaller batches and resend. No leads were stored.",
     retry: "yes",
   },
   {
     status: 429,
-    meaning: "A rate limit was hit. Nothing at all was stored.",
+    meaning: "A rate limit was exceeded. No leads were stored.",
     action:
-      "Wait for the number of seconds in the `Retry-After` header, then resend the WHOLE batch. " +
-      "A 429 does not consume any allowance, so being throttled never reduces what you can send later.",
+      "Wait the interval given in `Retry-After`, then resend the full batch. " +
+      "Allowance is not consumed.",
     retry: "after-delay",
   },
   {
     status: 500,
-    meaning: "We failed to store the leads.",
-    action:
-      "Retry. Duplicate protection makes a repeat safe, and we would rather receive a lead " +
-      "twice than lose it.",
+    meaning: "The request could not be stored.",
+    action: "Resend. Duplicate detection is idempotent, so retries are safe.",
     retry: "yes",
   },
 ];
@@ -141,32 +137,32 @@ export interface SandboxStep {
 
 export const SANDBOX_STEPS: SandboxStep[] = [
   {
-    title: "We send you a token and a secret",
+    title: "Receive credentials",
     detail:
-      "Both are secret. The token goes in the URL, the secret in the header. " +
-      "The secret is shown once — if it is lost we issue a new one.",
+      "The token is used in the URL, the secret in the header. The secret is " +
+      "displayed once and cannot be recovered.",
   },
   {
-    title: "Post one lead",
-    detail: 'You should get a 202 with "sandbox": true in the body.',
+    title: "Submit a single lead",
+    detail: 'The endpoint returns 202 with "sandbox": true.',
   },
   {
-    title: "Post the same lead again",
+    title: "Submit the same lead again",
     detail:
-      'You should get "duplicate": true and the SAME id back. This is how you prove ' +
-      "your retries are safe.",
+      'The response returns "duplicate": true and the original lead id, confirming ' +
+      "idempotent retries.",
   },
   {
-    title: "Post a lead with no phone number",
+    title: "Submit a lead without a phone number",
     detail:
-      'You should get "status": "rejected" with an error explaining why. The lead is ' +
-      "still stored so we can both see exactly what arrived.",
+      'The response returns "status": "rejected" with an error. The lead is stored ' +
+      "for inspection.",
   },
   {
-    title: "Tell us, and we switch the key live",
+    title: "Request activation",
     detail:
-      "Nothing about your request changes — same URL, same credentials, same payload. " +
-      'Only the "sandbox" flag in the response flips to false.',
+      'The key is switched live. URL, credentials and payload are unchanged; the ' +
+      '"sandbox" flag becomes false.',
   },
 ];
 
@@ -188,28 +184,23 @@ export const API_CHANGELOG: ChangelogEntry[] = [
   {
     date: "2026-08-24",
     changes: [
-      "Published this page. No change to the API itself — the endpoint, fields and " +
-        "limits are exactly as they have been since the integration opened.",
+      "Published this reference. No change to the endpoint, fields or limits.",
     ],
   },
   {
     date: "2026-08-22",
     changes: [
-      "Added the demographic fields: date of birth, gender, income band, marital status " +
-        "and children. All optional; sending them is not required and omitting them " +
-        "changes nothing.",
-      "Date of birth must be sent EMPTY when unknown. An epoch placeholder such as " +
-        "1970-01-01 is treated as unknown and discarded rather than stored.",
+      "Added demographic fields (dob, gender, income_band, married, kids). All optional.",
+      "dob: epoch placeholders such as 1970-01-01 are treated as unknown and discarded.",
     ],
   },
   {
     date: "2026-08-21",
     changes: [
       `Batches of up to ${MAX_LEADS_PER_CALL} leads per call.`,
-      "Leads that fail validation are stored and reported back with an error, rather " +
-        "than being silently dropped.",
-      "Duplicate protection: the same number sent twice in the same minute returns the " +
-        "same lead id with \"duplicate\": true, so retries cannot create a second lead.",
+      "Leads failing validation are stored and returned with an error rather than dropped.",
+      'Duplicate detection: a number resubmitted within the same minute returns the ' +
+        'original lead id with "duplicate": true.',
     ],
   },
 ];

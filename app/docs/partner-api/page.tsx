@@ -35,10 +35,10 @@ import { LEAD_FIELDS, MAX_LEADS_PER_CALL } from "@/lib/intake/fields";
 export const dynamic = "force-static";
 
 export const metadata: Metadata = {
-  title: "Partner API — sending leads",
+  title: "Lead Intake API",
   description:
-    "How to send leads to us: authentication, request shape, fields, response codes, " +
-    "batching, rate limits and sandbox testing.",
+    "Reference for the lead intake endpoint: authentication, request format, fields, " +
+    "response codes, batching, rate limits and sandbox testing.",
 };
 
 const BASE = "https://<your-camman-host>";
@@ -90,19 +90,20 @@ export default function PartnerApiDocsPage() {
   ].join("\n");
 
   const toc = [
-    ["auth", "Authentication"], ["endpoint", "Endpoint"], ["request", "Example request"],
-    ["curl", "Copy-paste curl"], ["fields", "Fields"], ["responses", "Response codes"],
+    ["auth", "Authentication"], ["endpoint", "Endpoint"], ["request", "Request format"],
+    ["curl", "Quick start"], ["fields", "Fields"], ["responses", "Response codes"],
     ["batching", "Batching"], ["limits", "Rate limits"], ["sandbox", "Sandbox"],
-    ["changelog", "Changelog"],
+    ["changelog", "Changelog"], ["support", "Support"],
   ] as const;
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-10">
       <header className="mb-8">
-        <h1 className="text-2xl font-semibold">Partner API — sending leads</h1>
+        <h1 className="text-2xl font-semibold">Lead Intake API</h1>
         <p className="text-muted-foreground mt-2 text-sm leading-relaxed">
-          You post leads to a URL we give you. We store them and reply immediately;
-          nothing else happens during the call, so it is fast and safe to retry.
+          Leads are submitted via HTTP POST to a partner-specific endpoint. Requests are
+          stored and acknowledged synchronously; no downstream processing occurs during
+          the call.
         </p>
         <nav className="mt-5 flex flex-wrap gap-x-4 gap-y-1 text-sm">
           {toc.map(([id, label]) => (
@@ -116,7 +117,7 @@ export default function PartnerApiDocsPage() {
       <div className="space-y-8">
         <Section id="auth" title="Authentication">
           <p className="text-sm leading-relaxed">
-            You receive <strong>two</strong> values from us. Both are secret.
+            Each partner is issued two credentials.
           </p>
           <div className="my-4 overflow-x-auto rounded-md border">
             <table className="w-full text-sm">
@@ -131,7 +132,7 @@ export default function PartnerApiDocsPage() {
                 <tr className="border-t">
                   <td className="p-2 font-medium">Token</td>
                   <td className="p-2">In the URL path</td>
-                  <td className="p-2">Identifies you. Not a password on its own.</td>
+                  <td className="p-2">Identifies the partner. Not sufficient on its own.</td>
                 </tr>
                 <tr className="border-t">
                   <td className="p-2 font-medium">Secret</td>
@@ -139,7 +140,7 @@ export default function PartnerApiDocsPage() {
                     In the <Code>Authorization</Code> header
                   </td>
                   <td className="p-2">
-                    Proves it is you. Shown once — if it is lost we issue a new one.
+                    Authenticates the request. Displayed once; a lost secret is reissued.
                   </td>
                 </tr>
               </tbody>
@@ -147,16 +148,16 @@ export default function PartnerApiDocsPage() {
           </div>
           <Block>{`Authorization: Bearer <YOUR_SECRET>`}</Block>
           <p className="text-sm leading-relaxed">
-            <Code>{`${ALT_SECRET_HEADER}: <YOUR_SECRET>`}</Code> works instead, if that is
-            easier for your HTTP client.
+            <Code>{`${ALT_SECRET_HEADER}: <YOUR_SECRET>`}</Code> is accepted as an
+            alternative.
           </p>
           {/* Not a style preference — the body is stored as received, so a secret
               placed there would be persisted. Keeping it in a header makes it
               structurally absent rather than something we have to redact. */}
           <p className="mt-3 rounded-md border-l-2 border-amber-500 bg-amber-500/5 p-3 text-sm leading-relaxed">
-            <strong>Never put the secret in the JSON body.</strong> We do not read it there,
-            and the body is stored as received — so a secret sent in the body would be
-            persisted rather than ignored.
+            <strong>Warning:</strong> the secret must not be placed in the request body. The
+            body is stored as received, so a secret sent there is persisted rather than
+            ignored.
           </p>
         </Section>
 
@@ -166,45 +167,48 @@ Content-Type: application/json
 Authorization: Bearer <YOUR_SECRET>`}</Block>
           <p className="text-sm leading-relaxed">
             Replace <Code>{`<YOUR_TOKEN>`}</Code> and <Code>{`<YOUR_SECRET>`}</Code> with the
-            values we send you. We will also confirm the exact host — it does not change
-            once you are set up.
+            issued credentials. The host is confirmed at onboarding and remains fixed.
           </p>
         </Section>
 
-        <Section id="request" title="Example request">
+        <Section id="request" title="Request format">
           <p className="text-sm leading-relaxed">
-            The body is either a single lead object or an array of them. Only{" "}
+            The body is a single lead object or an array of lead objects. Only{" "}
             {LEAD_FIELDS.filter((f) => f.required).map((f) => (
               <Code key={f.key}>{f.key}</Code>
             ))}{" "}
-            is required — send whatever else you have.
+            is required; all other fields are optional.
           </p>
           <Block label="Minimal — one lead">{j(minimalLead())}</Block>
-          <Block label="Full — one lead, every field we recognise">{j(exampleLead())}</Block>
-          <Block label={`Batch — up to ${MAX_LEADS_PER_CALL} leads per call`}>
+          <Block label="Complete — all recognised fields">{j(exampleLead())}</Block>
+          <Block label={`Batch — up to ${MAX_LEADS_PER_CALL} leads per request`}>
             {j(exampleBatch())}
           </Block>
           <p className="text-sm leading-relaxed">
-            Rows in a batch do not have to look alike — send whichever fields you hold for
-            each lead. <strong>Unknown fields are kept, not discarded</strong>, so nothing is
-            lost if you send more than the list below.
+            Objects within a batch need not share the same fields. Unrecognised fields are
+            retained rather than discarded.
           </p>
         </Section>
 
-        <Section id="curl" title="Copy-paste curl">
-          <Block>{curl}</Block>
+        <Section id="curl" title="Quick start">
           <p className="text-sm leading-relaxed">
-            Run this against your sandbox key first — see <a href="#sandbox" className="underline">Sandbox</a>.
-            A successful call returns <Code>202</Code>:
+            A minimal request against a sandbox key. See{" "}
+            <a href="#sandbox" className="underline">Sandbox</a> for the full verification
+            sequence.
           </p>
+          <Block>{curl}</Block>
+          <p className="text-sm leading-relaxed">A successful request returns <Code>202</Code>:</p>
           <Block label="202 response">{j(EXAMPLE_202_RESPONSE)}</Block>
           <p className="text-sm leading-relaxed">
-            <Code>leads</Code> comes back in the same order you sent them, so you can
-            reconcile by index.
+            The <Code>leads</Code> array preserves request order, allowing reconciliation by
+            index.
           </p>
         </Section>
 
         <Section id="fields" title="Fields">
+          <p className="mb-3 text-sm leading-relaxed">
+            Recognised fields, their formats and whether they are required.
+          </p>
           <div className="overflow-x-auto rounded-md border">
             <table className="w-full text-sm">
               <thead className="bg-muted/50 text-xs">
@@ -243,10 +247,9 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
             </table>
           </div>
 
-          <h3 className="mt-6 mb-2 text-sm font-semibold">Alternative names we accept</h3>
+          <h3 className="mt-6 mb-2 text-sm font-semibold">Field aliases</h3>
           <p className="text-sm leading-relaxed">
-            If your payload already uses one of these names, it works as-is — no mapping
-            needed.
+            The following names are accepted as equivalents and require no configuration.
           </p>
           <div className="my-3 overflow-x-auto rounded-md border">
             <table className="w-full text-sm">
@@ -263,13 +266,13 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
             </table>
           </div>
           <p className="text-sm leading-relaxed">
-            If your names differ from all of these, tell us and we map them on our side —
-            you do not need to change your payload.
+            Payloads using other field names can be mapped server-side on request; see{" "}
+            <a href="#support" className="underline">Support</a>.
           </p>
 
           {LEAD_FIELDS.filter((f) => f.notes).length > 0 && (
             <>
-              <h3 className="mt-6 mb-2 text-sm font-semibold">Notes on specific fields</h3>
+              <h3 className="mt-6 mb-2 text-sm font-semibold">Field details</h3>
               <dl className="space-y-3 text-sm leading-relaxed">
                 {LEAD_FIELDS.filter((f) => f.notes).map((f) => (
                   <div key={f.key}>
@@ -283,13 +286,16 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
         </Section>
 
         <Section id="responses" title="Response codes">
+          <p className="mb-3 text-sm leading-relaxed">
+            Every status the endpoint returns, with the corresponding resolution.
+          </p>
           <div className="overflow-x-auto rounded-md border">
             <table className="w-full text-sm">
               <thead className="bg-muted/50 text-xs">
                 <tr>
                   <th className="p-2 text-left">Status</th>
                   <th className="p-2 text-left">Meaning</th>
-                  <th className="p-2 text-left">What you should do</th>
+                  <th className="p-2 text-left">Resolution</th>
                   <th className="p-2 text-left">Retry?</th>
                 </tr>
               </thead>
@@ -308,94 +314,88 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
             </table>
           </div>
 
-          <h3 className="mt-6 mb-2 text-sm font-semibold">Duplicates are safe</h3>
+          <h3 className="mt-6 mb-2 text-sm font-semibold">Idempotency</h3>
           <p className="text-sm leading-relaxed">
-            The same phone number sent twice within the same minute resolves to the{" "}
-            <strong>same stored lead</strong>, and you get its id back with{" "}
-            <Code>&quot;duplicate&quot;: true</Code>. Retrying after a timeout therefore
-            cannot create a second lead — retry freely.
+            A phone number resubmitted within the same minute resolves to the existing lead
+            and returns its id with <Code>&quot;duplicate&quot;: true</Code>. Retries after a
+            timeout cannot create a second lead.
           </p>
 
-          <h3 className="mt-6 mb-2 text-sm font-semibold">Rejected leads are still stored</h3>
+          <h3 className="mt-6 mb-2 text-sm font-semibold">Rejected leads</h3>
           <p className="text-sm leading-relaxed">
-            A lead with a missing or unparseable phone number comes back as{" "}
+            A lead with a missing or unparseable phone number returns{" "}
             <Code>&quot;status&quot;: &quot;rejected&quot;</Code> with an{" "}
-            <Code>error</Code>. We keep it rather than dropping it, so we can show you
-            exactly what arrived when an integration misbehaves. It is not processed
-            further. A <Code>202</Code> containing rejected leads is still a{" "}
-            <Code>202</Code> — check the per-lead <Code>status</Code>, not only the HTTP
-            code.
+            <Code>error</Code>. Rejected leads are stored for inspection but not processed
+            further.
+          </p>
+          <p className="mt-3 rounded-md border-l-2 border-amber-500 bg-amber-500/5 p-3 text-sm leading-relaxed">
+            <strong>Note:</strong> a response containing rejected leads is still a{" "}
+            <Code>202</Code>. Check the per-lead <Code>status</Code> field, not the HTTP
+            status alone.
           </p>
         </Section>
 
         <Section id="batching" title="Batching">
           <p className="text-sm leading-relaxed">
-            Send a single object, or an array of up to{" "}
-            <strong>{MAX_LEADS_PER_CALL}</strong> leads in one call.
+            A request carries a single lead object or an array of up to{" "}
+            {MAX_LEADS_PER_CALL} leads.
           </p>
           <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-relaxed">
             <li>
-              A batch is <strong>all or nothing</strong>. If it is refused — too large, or
-              over a limit — nothing from it is stored, so you can resend the whole batch
-              without working out which leads landed.
+              Batches are accepted or refused in full. A refused batch stores nothing and
+              can be resent unchanged.
             </li>
             <li>
-              Individual leads inside an accepted batch can still come back{" "}
-              <Code>rejected</Code> (for example, an unparseable phone). That does not
-              affect the others.
+              Individual leads within an accepted batch may still be{" "}
+              <Code>rejected</Code>. Other leads in the batch are unaffected.
             </li>
             <li>
-              There is also a maximum request size in bytes. It is generous for
-              {" "}{MAX_LEADS_PER_CALL} normal leads; we tell you your exact figure when we
-              issue your key, and a <Code>413</Code> names the limit it hit.
+              A maximum request size in bytes also applies. The per-key value is issued
+              with the credentials; a <Code>413</Code> names the limit exceeded.
             </li>
           </ul>
         </Section>
 
         <Section id="limits" title="Rate limits">
           <p className="text-sm leading-relaxed">
-            Two separate limits, counting different things:
+            Two independent limits apply, counting different units.
           </p>
           <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-relaxed">
             <li>
-              <strong>Per second</strong> — counts <strong>requests</strong>. A batch of{" "}
-              {MAX_LEADS_PER_CALL} is one request.
+              Per second — counts requests. A batch of {MAX_LEADS_PER_CALL} leads is one
+              request.
             </li>
             <li>
-              <strong>Per day</strong> — counts <strong>leads</strong>. A batch of{" "}
-              {MAX_LEADS_PER_CALL} costs {MAX_LEADS_PER_CALL}. The day resets at midnight
-              US Eastern.
+              Per day — counts leads. A batch of {MAX_LEADS_PER_CALL} leads consumes{" "}
+              {MAX_LEADS_PER_CALL}. The daily window resets at midnight US Eastern.
             </li>
           </ul>
           {/* Per-key numbers are deliberately absent: they differ per partner, and
               printing one partner's figures on a shared public page would be both
               wrong for every other reader and a disclosure. */}
           <p className="mt-3 text-sm leading-relaxed">
-            <strong>Your specific numbers are given to you directly</strong> when we issue
-            your key — they are not published here, because they differ per partner.
+            Limits are set per partner and issued with the credentials. They are not
+            published here.
           </p>
           <p className="mt-3 text-sm leading-relaxed">
-            When you exceed a limit you get <Code>429</Code> with a{" "}
-            <Code>Retry-After</Code> header giving the number of seconds to wait. Honour it
-            rather than retrying immediately.
+            Exceeding a limit returns <Code>429</Code> with a <Code>Retry-After</Code> header
+            giving the wait in seconds.
           </p>
           <Block>{`HTTP/1.1 429 Too Many Requests
 Retry-After: 37
 
 { "error": "Rate limit exceeded", "window": "second" }`}</Block>
           <p className="text-sm leading-relaxed">
-            A <Code>429</Code> stores nothing and <strong>does not consume any allowance</strong>,
-            so being throttled never reduces what you can send later that day. Resend the
-            whole batch after waiting.
+            A <Code>429</Code> stores nothing and does not consume allowance. Resend the full
+            batch after the specified interval.
           </p>
         </Section>
 
         <Section id="sandbox" title="Sandbox">
           <p className="text-sm leading-relaxed">
-            Every new key starts in <strong>sandbox</strong>. Sandbox leads are stored and
-            clearly flagged, but are never messaged and are excluded from reporting. You can
-            prove your integration end to end — real ids, real duplicate detection, real
-            validation errors — with no possibility of a message going out.
+            New keys are issued in sandbox mode. Sandbox leads are stored and flagged, are
+            never messaged, and are excluded from reporting. Lead ids, duplicate detection
+            and validation behave identically to a live key.
           </p>
           <ol className="mt-4 space-y-3 text-sm leading-relaxed">
             {SANDBOX_STEPS.map((s, i) => (
@@ -414,7 +414,7 @@ Retry-After: 37
 
         <Section id="changelog" title="Changelog">
           <p className="text-muted-foreground text-sm leading-relaxed">
-            Changes to what this endpoint accepts. Newest first.
+            Changes to the endpoint contract, most recent first.
           </p>
           <div className="mt-4 space-y-5">
             {API_CHANGELOG.map((e) => (
@@ -429,12 +429,14 @@ Retry-After: 37
             ))}
           </div>
         </Section>
-      </div>
 
-      <footer className="text-muted-foreground mt-10 border-t pt-6 text-xs leading-relaxed">
-        Questions, a field we do not list, or different names in your payload — talk to us
-        and we will map it on our side.
-      </footer>
+        <Section id="support" title="Support">
+          <p className="text-sm leading-relaxed">
+            For field mapping requests or integration questions, contact your account
+            manager.
+          </p>
+        </Section>
+      </div>
     </main>
   );
 }

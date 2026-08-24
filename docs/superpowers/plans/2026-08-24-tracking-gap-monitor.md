@@ -755,10 +755,10 @@ try {
     await tx.execute(sql`
       INSERT INTO keitaro_stage_results
         (org_id, campaign_id, stage_id, stage_tracking_id, stat_date,
-         visit_clicks_raw, visit_clicks_clean, redirect_clicks_clean)
+         visit_clicks_raw, visit_clicks_clean, redirect_clicks_raw, redirect_clicks_clean)
       VALUES
-        (${org_id}::uuid, ${campaign_id}, ${gapStage},     'VERIFY_GAP_STAGE',     current_date, 0,  0, 7),
-        (${org_id}::uuid, ${campaign_id}, ${healthyStage}, 'VERIFY_HEALTHY_STAGE', current_date, 40, 30, 5)
+        (${org_id}::uuid, ${campaign_id}, ${gapStage},     'VERIFY_GAP_STAGE',     current_date, 0,  0, 19, 7),
+        (${org_id}::uuid, ${campaign_id}, ${healthyStage}, 'VERIFY_HEALTHY_STAGE', current_date, 40, 30, 11, 5)
     `);
 
     // Both stages get the SAME number of human clicks — so the only thing that
@@ -819,7 +819,7 @@ try {
     );
     ok(
       gap?.redirects === 7,
-      `⭐ SQL path: reports redirect_clicks_CLEAN (${gap?.redirects} === 7), not raw+clean`,
+      `⭐ SQL path: reports redirect_clicks_CLEAN (${gap?.redirects} === 7). raw is 19, so a raw+clean implementation would yield 26 and fail here`,
     );
     ok(
       gap?.destination_url === "https://verify.example/lp",

@@ -181,6 +181,58 @@ async function main() {
             (await closeCompletedJourneys(tx, { orgId, campaignId: campId })).closed, 1);
       check("state", (await state(d.jid)).state, "completed");
 
+      // ⭐ THE UNREACHABLE-LANE CASE. Tier is HIGH-WATER, so a contact that
+      // clicked can never match the Ignored lane again. If completion waited on
+      // that lane it would be unreachable for everyone who ever engaged --
+      // exactly the population whose journey should end cleanly. Caught on live
+      // data: the sweeper reported completed:0 for a clicker who was finished.
+      const g = await newJourney("+19986" + sfx);
+      const lowLane = (
+        (await tx.execute(sql`
+          INSERT INTO campaign_stages (org_id, campaign_id, parent_stage_id, behavioral_tier,
+                                       drip_followup_minutes, drip_active, stage_number)
+          VALUES (${orgId}, ${campId}, ${parentId}, 0, 1440, true, 97)
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      const highLane = (
+        (await tx.execute(sql`
+          INSERT INTO campaign_stages (org_id, campaign_id, parent_stage_id, behavioral_tier,
+                                       drip_followup_minutes, drip_active, stage_number)
+          VALUES (${orgId}, ${campId}, ${parentId}, 1, 60, true, 96)
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      // make this contact tier 1 (a clean click), and send it ONLY the tier-1 lane
+      const lnk = (
+        (await tx.execute(sql`
+          INSERT INTO link_destinations (org_id, url, url_hash)
+          VALUES (${orgId}, ${"https://x.example/" + sfx}, ${"h" + sfx})
+          ON CONFLICT DO NOTHING RETURNING id`)) as unknown as { id: number }[]
+      )[0];
+      const sd = (
+        (await tx.execute(sql`SELECT id FROM short_domains LIMIT 1`)) as unknown as { id: number }[]
+      )[0].id;
+      const linkId = (
+        (await tx.execute(sql`
+          INSERT INTO links (org_id, code, short_domain_id, destination_id, campaign_id,
+                             stage_id, contact_id, send_token,
+                             campaign_tracking_id, stage_tracking_id)
+          VALUES (${orgId}, ${"c" + sfx.slice(-6)}, ${sd}, ${lnk.id}, ${campId},
+                  ${parentId}, ${g.cid}, ${"tok" + sfx}, 'x', 'y')
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      await tx.execute(sql`
+        INSERT INTO clicks (org_id, link_id, classification) VALUES (${orgId}, ${linkId}, 'human')`);
+      await tx.execute(sql`
+        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                 rendered_text, status, created_at)
+        VALUES (${orgId}, ${campId}, ${highLane}, ${g.cid}, ${"+19986" + sfx},
+                'probe', 'sent', now())`);
+      check("⭐ a clicker completes even though the Ignored lane never sent to it",
+            (await closeCompletedJourneys(tx, { orgId, campaignId: campId })).closed >= 1, true);
+      check("...its state is completed", (await state(g.jid)).state, "completed");
+      void lowLane;
+
+
       // ── 4. archive ⇒ exited ───────────────────────────────────────────────
       console.log("\n4. campaign archived ⇒ exited:");
       const e = await newJourney("+19984" + sfx);

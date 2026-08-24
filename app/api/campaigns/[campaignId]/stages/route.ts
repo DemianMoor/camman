@@ -210,6 +210,10 @@ export async function GET(
       split_total: campaign_stages.split_total,
       behavioral_tier: campaign_stages.behavioral_tier,
       parent_stage_id: campaign_stages.parent_stage_id,
+      // Drip P6. Without this the editor cannot show a child's timer, and the
+      // same class of bug as the P5 windows would surface: a field that saves
+      // but has nothing to render it.
+      drip_followup_minutes: campaign_stages.drip_followup_minutes,
       archived_at: campaign_stages.archived_at,
       created_at: campaign_stages.created_at,
       creative: {

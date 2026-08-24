@@ -233,6 +233,12 @@ export async function pollKeitaroConversions(
         SET sale_status = v.status,
             sale_revenue = v.revenue,
             converted_at = (v.converted_at || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz,
+            -- Drip Phase 6: detection time (see poll-offer-reaches). COALESCE
+            -- rather than a bare now(): unlike the offer-reach UPDATE this one
+            -- has NO "is null" guard -- it re-writes a row whose status changed
+            -- -- so a bare assignment would slide the detection time forward on
+            -- every re-poll and keep a follow-up permanently in the future.
+            converted_detected_at = COALESCE(s.converted_detected_at, now()),
             keitaro_conversion_id = v.event_id
         FROM (VALUES ${sql.join(chunk, sql`, `)})
           AS v(id, status, revenue, converted_at, event_id)

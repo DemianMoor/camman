@@ -7,6 +7,7 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
+import { closeJourneysOnArchive } from "@/lib/drip/lifecycle";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -52,6 +53,11 @@ export async function POST(
     .returning();
 
   if (updated[0]) {
+    // Drip Phase 6 (ruling D3): archive is the 'exited' trigger. A hard DELETE
+    // cascades drip_journeys away (ON DELETE CASCADE, migration 0161), so there
+    // is no row left to mark -- archive is the only path that can produce it.
+    // No-op for a regular campaign, which has no journeys.
+    await closeJourneysOnArchive(db, { orgId, campaignId });
     await logCampaignEvent(db, {
       orgId,
       campaignId,

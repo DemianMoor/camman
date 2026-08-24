@@ -9,6 +9,7 @@ import {
 import { latestSendForAttribution } from "@/lib/sends/poll-opt-outs";
 import { tellsPhoneToE164 } from "@/lib/sends/providers/tells";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
+import { closeJourneyOnOptOut } from "@/lib/drip/lifecycle";
 
 // Tells opt-out intake (Phase 3) — the ONLY automated STOP path for this
 // provider. Deliberately a mirror of processTextrequestOptOut
@@ -207,6 +208,10 @@ export async function processTellsOptOut(
     WHERE org_id = ${o.orgId} AND contact_id = ${contactId}
       AND status = 'pending'
   `);
+  // Drip Phase 6: the journey closes in the SAME breath as the cascade.
+  // A lead suppressed but still 'active' would hold its one-live-per-contact
+  // slot for ever -- the exact state the Phase 5 proof caught.
+  await closeJourneyOnOptOut(dbc, { orgId: o.orgId, contactId });
 
   // Attribution: the shared cross-provider helper — one opt-out credits the
   // single most-recent matching send across all stages in the trailing window.

@@ -186,6 +186,14 @@ export async function pollKeitaroOfferReaches(
       await database.execute(sql`
         UPDATE stage_sends AS s
         SET offer_reached_at = (v.dt || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz,
+            -- Drip Phase 6: when WE LEARNED, as distinct from when it happened.
+            -- offer_reached_at above is Keitaro's EVENT time and lags by hours
+            -- (p50 146 min), so a follow-up timer measured from it is already
+            -- expired on arrival. now() here is the only honest clock for a
+            -- "time since detection" timer. Guarded by the same
+            -- offer_reached_at IS NULL predicate, so it is stamped exactly once
+            -- and a re-poll never moves it.
+            offer_reached_detected_at = now(),
             offer_reach_event_id = v.event_id
         FROM (VALUES ${sql.join(chunk, sql`, `)}) AS v(id, dt, event_id)
         WHERE s.id = v.id AND s.offer_reached_at IS NULL

@@ -9,6 +9,7 @@ import {
 } from "@/lib/sends/optout-rate-breaker";
 import { latestSendForAttribution } from "@/lib/sends/poll-opt-outs";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
+import { closeJourneyOnOptOut } from "@/lib/drip/lifecycle";
 
 // CARRY 1: a single physical STOP is captured independently by the inbound
 // webhook (real-time) and the CDR poll (*/15, up to ~15min later) — two
@@ -248,6 +249,10 @@ export async function processAhoiInboundOptOut(
     WHERE org_id = ${o.orgId} AND contact_id = ${contactId}
       AND status = 'pending'
   `);
+  // Drip Phase 6: the journey closes in the SAME breath as the cascade.
+  // A lead suppressed but still 'active' would hold its one-live-per-contact
+  // slot for ever -- the exact state the Phase 5 proof caught.
+  await closeJourneyOnOptOut(dbc, { orgId: o.orgId, contactId });
 
   // Attribution: the SAME cross-provider helper TextHub's poller uses — one
   // STOP credits the single most-recent matching send across ALL stages

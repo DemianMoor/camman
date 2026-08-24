@@ -1487,4 +1487,43 @@ failing closed, so nothing wrong was sent and nothing at all was sent.
   Renamed to `[offerId]` per the parent/child convention — URLs unchanged.
   — docs updated: docs/07-conventions.md, docs/screenshots/
 
+## 2026-08-24 - Drip Phase 6: journey lifecycle + behavioural follow-ups
+
+Migrations 0167-0169, applied preview-first then production; integrity clean and
+the send-path query plans measured IDENTICAL before and after the 3.47M-row
+`stage_sends` ALTER.
+
+**Journey lifecycle - the check Phase 5 failed.** Nothing in the codebase ever
+closed a journey; `completed` and `exited` existed only in a CHECK. All five
+terminal transitions now exist (`opted_out`, `converted`, `completed`, `expired`,
+`exited`) - three of which had to be ADDED to the vocabulary. Opt-out and archive
+close at their source, in the same transaction as the cause; converted, completed
+and expired are swept, since nothing can announce them. Closing frees the
+one-live-per-contact slot, which is the point: until now every contact ever
+routed held it for ever.
+
+**Behavioural children reuse the existing lane model.** `parent_stage_id` +
+`behavioral_tier` already carry 536 live lane children, and Ignored/Clicked/Offer
+ARE tiers 0/1/2 - no new table, no new linkage. The only genuinely new column is
+`drip_followup_minutes`, because a drip child's schedule is relative to each
+contact's own detection moment rather than one absolute `scheduled_at`.
+
+**Timers run from DETECTION, not the event.** `offer_reached_at` /
+`converted_at` carry Keitaro's event time and the network lags by hours (reach
+p50 146 min). A 60-minute Offer timer measured from the event is already expired
+when detected - the operator sets 60 minutes and gets an instant send. Both
+pollers now stamp `*_detected_at`, and the conversions poller uses COALESCE
+because its UPDATE has no `IS NULL` guard and a bare assignment would slide the
+detection time forward on every re-poll.
+
+**The Ignored floor** (ruling D4): the timer cannot elapse until one full
+15-minute offer-reach poll cycle has passed after the first send, because a
+signal we have not polled for is indistinguishable from absence. Delay-only - it
+can never cause a send, and never shortens a longer choice.
+
+Follow-ups go through the SAME send path as first-sends via a new shared
+`dispatchDripSend`, so the opt-out gate has exactly one implementation and
+`drain.ts` remains unmodified.
+  - docs updated: docs/07-conventions.md, docs/04-features/drip-campaigns-routing.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

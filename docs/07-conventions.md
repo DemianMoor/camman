@@ -1564,3 +1564,56 @@ Telegram's Bot API offers neither, so the report does not retry.
 
 See [docs/04-features/crons.md](04-features/crons.md) § `/api/cron/telegram-report`
 and [scripts/test-telegram-send-policy.ts](../scripts/test-telegram-send-policy.ts).
+## ⭐ A PR that changes intake fields, validation or limits MUST add a docs changelog entry
+
+Partners integrate against the public page at `/docs/partner-api`. A silent
+change to what we accept surfaces on their side as "our leads started failing",
+days later, with nothing to point at.
+
+**In the same PR** that touches any of:
+
+- `LEAD_FIELDS` in [lib/intake/fields.ts](../lib/intake/fields.ts) — a field
+  added, removed, renamed, or its required-ness / allowed values changed
+- an alias in that same map
+- `MAX_LEADS_PER_CALL`, the payload cap, or the rate-limit semantics
+- any status code the intake route can return, or what it means
+
+…add a dated entry to `API_CHANGELOG` in
+[lib/intake/api-contract.ts](../lib/intake/api-contract.ts), **and** regenerate
+the partner markdown (`npx tsx scripts/generate-partner-docs.ts`).
+
+Write the entry for the partner, not for us: what they must change, by when, and
+what happens if they do nothing. "Added `income_band`" is useless; "added
+`income_band` — optional, omitting it changes nothing" is what they need.
+
+### The docs cannot silently drift, by construction
+
+Three guards run in `npm run check:docs`, which `vercel-build` calls **before**
+`next build` — so a failure blocks the deploy and shows red on the PR. (This repo
+has no GitHub Actions; the Vercel build is the only pre-merge gate.)
+
+| guard | catches |
+|---|---|
+| `generate-partner-docs.ts --check` | the shared definition changed without regenerating the committed markdown |
+| `test-partner-docs-drift.ts` | the rendered page disagreeing with what the endpoint accepts, or with the committed markdown |
+| `test-public-route-scope.ts` | the public route exclusions widening beyond what is intended |
+
+⚠️ **The page-vs-endpoint comparison alone cannot catch a REMOVED field**, and it
+is worth understanding why before trusting it. The page renders from
+`LEAD_FIELDS` and the "accepted" list *is* `LEAD_FIELDS`, so deleting a field
+moves both sides together and the check stays green — measured, by deleting
+`state` and watching the whole suite pass. The committed markdown is the fixed
+point that makes a removal visible: the page and the doc disagree until someone
+regenerates, which puts the removal in the PR diff where a reviewer sees it.
+
+**A comparison between two things derived from the same source proves nothing.
+One side must be independently anchored.**
+
+### Nothing internal goes on that page
+
+It is public. No table or column names, no infrastructure or provider names, no
+org data, no per-partner values, no secrets — placeholders only. Per-key numbers
+(rate limits, payload caps) are described in words and given to each partner
+directly; printing one partner's figures on a shared page is wrong for every
+other reader and a disclosure besides. `test-partner-docs-drift.ts` greps the
+rendered markup for a banned list and for credential-shaped strings.

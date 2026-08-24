@@ -5,12 +5,13 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "vercel-build": "if [ \"$VERCEL_ENV\" = \"preview\" ] && [ \"$RUN_PREVIEW_MIGRATIONS\" = \"1\" ]; then npm run db:migrate; fi && next build",
+    "vercel-build": "npm run check:docs && if [ \"$VERCEL_ENV\" = \"preview\" ] && [ \"$RUN_PREVIEW_MIGRATIONS\" = \"1\" ]; then npm run db:migrate; fi && next build",
     "start": "next start",
     "lint": "eslint",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "check:docs": "tsx scripts/generate-partner-docs.ts --check && tsx scripts/test-partner-docs-drift.ts && tsx scripts/test-public-route-scope.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

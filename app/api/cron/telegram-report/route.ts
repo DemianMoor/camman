@@ -4,7 +4,11 @@ import { formatInTimeZone } from "date-fns-tz";
 
 import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
-import { notifyTelegram, sendTelegramHtml } from "@/lib/alerts/telegram";
+import {
+  notifyTelegram,
+  sendTelegramReport,
+  type TelegramReportOutcome,
+} from "@/lib/alerts/telegram";
 import { carrierTriageSummary } from "@/lib/carrier/queue-stats";
 import { findStalledStages, formatStallAlert } from "@/lib/sends/stall-detector";
 import {
@@ -84,38 +88,25 @@ async function buildHourly(now: Date): Promise<string> {
   return hourlyMessage(dayLabel(today), m, yesterdaySpend);
 }
 
-// ── resilient send ──────────────────────────────────────────────────────────
-// The report fires once per hour with no natural recovery until the next tick,
-// so a single transient Telegram/network blip silently drops an hour's report
-// (the failure mode we saw: two consecutive top-of-hour ticks lost, then
-// recovered). Retry once with a generous timeout — well within maxDuration=60 —
-// before giving up. 8s > the 4s best-effort default because losing a whole hour
-// is worse than a slightly longer invocation.
-const SEND_TIMEOUT_MS = 8000;
-const SEND_ATTEMPTS = 2;
-const RETRY_BACKOFF_MS = 1000;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// ── resilient send ───────────────────────────────────────────────────────────────────────────
+// Retry policy + per-attempt logging live in sendTelegramReport
+// (lib/alerts/telegram.ts). It retries ONLY when Telegram answered and proved
+// non-delivery; a send whose outcome is unknown (timeout, socket error) is left
+// alone rather than re-POSTed, because sendMessage is not idempotent.
 
-async function sendHtmlWithRetry(message: string): Promise<void> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt++) {
-    try {
-      await sendTelegramHtml(message, SEND_TIMEOUT_MS);
-      return;
-    } catch (err) {
-      lastErr = err;
-      if (attempt < SEND_ATTEMPTS) await sleep(RETRY_BACKOFF_MS);
-    }
-  }
-  throw lastErr;
-}
-
-// Overall cap on build + send. Must fire BELOW Vercel's maxDuration=60 kill —
+// Cap on the metrics BUILD only. Must fire BELOW Vercel's maxDuration=60 kill —
 // a maxDuration kill produces no alert and no report (the exact silent failure
 // we hit). Capping here turns a hung metrics build (cold-start pooler stall)
-// into a caught error that alerts. 50s leaves ~10s of headroom for the alert
-// fetch afterward.
-const OVERALL_TIMEOUT_MS = 50000;
+// into a caught error that alerts, and a hang that never reached the send is a
+// proven "no report", so alerting is correct.
+//
+// It deliberately does NOT wrap the send. A guard firing while the POST is in
+// flight would report a failure for a message Telegram may already have
+// delivered — the same false alarm the send policy exists to prevent. The send
+// governs its own budget (sendTelegramReport: hard per-attempt abort + capped
+// total), so the two guards never overlap. Worst case 30s build + 25s send + 4s
+// alert = 59s, inside maxDuration.
+const BUILD_TIMEOUT_MS = 30000;
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -213,20 +204,20 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Build AND send inside ONE try/catch under an overall timeout. The build used
-  // to run outside the catch, so a slow/hung metrics build produced no alert and
-  // no report — the function just ran into Vercel's maxDuration kill with zero
-  // signal (this is what dropped the hourly report while daily kept working).
+  // Build AND send share ONE try/catch: each throws only on a PROVEN failure, so
+  // both deserve the same loud alert. The build used to run outside the catch,
+  // so a slow/hung metrics build produced no alert and no report — the function
+  // just ran into Vercel's maxDuration kill with zero signal (this is what
+  // dropped the hourly report while daily kept working). The timeout, though,
+  // wraps the build ALONE — see BUILD_TIMEOUT_MS.
+  let outcome: TelegramReportOutcome;
   try {
-    await withTimeout(
-      (async () => {
-        const message =
-          format === "daily" ? await buildDaily(now) : await buildHourly(now);
-        await sendHtmlWithRetry(message);
-      })(),
-      OVERALL_TIMEOUT_MS,
-      `${format} report`,
+    const message = await withTimeout(
+      format === "daily" ? buildDaily(now) : buildHourly(now),
+      BUILD_TIMEOUT_MS,
+      `${format} report build`,
     );
+    outcome = await sendTelegramReport(message);
   } catch (err) {
     const detail = err instanceof Error ? err.message : "report failed";
     console.error("[telegram-report] failed:", err);
@@ -240,7 +231,29 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: detail }, { status: 500 });
   }
 
-  return NextResponse.json({ sent: true, format, test });
+  // Telegram never answered. It very likely DID deliver (that is the common
+  // shape of a slow response), so this is not a failure and must not read like
+  // one — an hour where the report actually arrived used to be alerted as
+  // "failed" because the retry loop timed out twice. Say plainly that the
+  // outcome is unknown and that we did not re-send, and return 200 so the
+  // scheduler doesn't count a delivered report as a failed run.
+  if (outcome.status === "unknown") {
+    console.warn(
+      `[telegram-report] ${format} send outcome unknown after ${outcome.ms}ms:`,
+      outcome.detail,
+    );
+    await notifyTelegram(
+      `ℹ️ CamMan ${format} report (Warsaw ${warsawHour}:00): Telegram did not respond within ${outcome.ms}ms, so delivery is UNKNOWN — the report above may already have arrived. Not re-sent (a retry would post it twice). ${outcome.detail}`,
+    );
+    return NextResponse.json({
+      sent: "unknown",
+      format,
+      test,
+      detail: outcome.detail,
+    });
+  }
+
+  return NextResponse.json({ sent: true, format, test, attempts: outcome.attempts });
 }
 
 export async function GET(req: NextRequest) {

@@ -122,6 +122,7 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 | `SEND_ENABLED` | server | deploy-level **backstop** for the send **drain**; must be exactly `"true"` to send. Left permanently on in Vercel — the day-to-day on/off is the DB flag `org_settings.sends_enabled` (Settings → Sending). The drain requires BOTH. Re-checked between batches mid-drain |
 | `TELEGRAM_BOT_TOKEN` | server | Telegram bot token — best-effort alerts (unset ⇒ silent no-op) **and** the performance report (unset ⇒ report returns 500 when a send is due) |
 | `TELEGRAM_CHAT_ID` | server | numeric chat/group id for alerts + the performance report |
+| `TELEGRAM_SEND_TIMEOUT_MS` | server | optional per-attempt timeout (ms) for the performance report's send; default **20000**. A tight budget aborts a `sendMessage` Telegram may already have delivered — and that POST is not idempotent (see [crons.md](04-features/crons.md)) |
 | `KEITARO_API_URL` | server | Keitaro admin/API host (default `https://admin.gdkn.org`). Never a brand tracking domain |
 | `KEITARO_API_KEY` | server | Keitaro Admin API key (`Api-Key` header). Unset ⇒ poll returns `degraded:true` and writes nothing. **Rotate** the key shared in plaintext during setup |
 | `TELNYX_API_KEY` | server | Telnyx API v2 key (`Authorization: Bearer`). Unset ⇒ the lookup worker no-ops (queue rows stay pending). Account needs "Permitted NPAC User" for full LRN/portability data |

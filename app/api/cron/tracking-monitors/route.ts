@@ -31,15 +31,21 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;
   const bearerMatches = !!secret && req.headers.get("authorization") === `Bearer ${secret}`;
 
+  // Org scope for the human path only. The bearer/cron path stays cross-org
+  // (undefined orgId) — it must watch every org. A signed-in session only
+  // ever gets its own org's breach rows.
+  let orgId: string | undefined;
+
   if (!bearerMatches) {
     const auth = await requireApiMembership();
     if ("error" in auth) return auth.error;
     if (!can(auth.role, "campaigns.view")) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
+    orgId = auth.orgId;
   }
 
-  const report = await runTrackingGapMonitor(db);
+  const report = await runTrackingGapMonitor(db, { orgId });
 
   // Only the scheduler notifies. A human hitting this route gets the findings in
   // the response body without spraying the channel.

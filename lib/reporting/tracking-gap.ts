@@ -112,7 +112,16 @@ interface GapRow {
 // them for the reported figure double-counts (152 instead of the correct 51 on
 // stage 3029). The sum is only safe as a zero-test, and even there the explicit
 // form says what it means.
-export async function runTrackingGapMonitor(dbc: DbOrTx): Promise<TrackingGapReport> {
+// `opts.orgId` scopes the query to a single org. The cron path (bearer auth)
+// deliberately omits it — it must watch every org. The human session path
+// must pass its own org: without this, a signed-in `viewer` in any org (the
+// route only requires `campaigns.view`) would see breach rows, campaign
+// names, and landing-page URLs for every other org too. See CLAUDE.md §3.
+export async function runTrackingGapMonitor(
+  dbc: DbOrTx,
+  opts: { orgId?: string } = {},
+): Promise<TrackingGapReport> {
+  const orgFilter = opts.orgId ? sql`AND cs.org_id = ${opts.orgId}::uuid` : sql``;
   const rows = (await dbc.execute(sql`
     WITH candidates AS (
       SELECT cs.id AS stage_id, cs.org_id, cs.tracking_id, cs.sent_at,
@@ -124,6 +133,7 @@ export async function runTrackingGapMonitor(dbc: DbOrTx): Promise<TrackingGapRep
         AND cs.sent_at >= now() - make_interval(days  => ${TRACKING_GAP_WINDOW_DAYS})
         AND cs.archived_at IS NULL
         AND c.link_mode = 'tracked'
+        ${orgFilter}
     ),
     keitaro AS (
       SELECT k.stage_id,

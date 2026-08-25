@@ -41,6 +41,10 @@ export type NavItem = {
 export type NavGroup = {
   label: string | null;
   items: NavItem[];
+  // Collapsible groups render their label as a toggle button and start
+  // collapsed (the group holding the current route auto-expands). Groups with
+  // `collapsible: false` — and the unlabelled top group — are always open.
+  collapsible?: boolean;
 };
 
 // `disabled` for entity items is derived from lib/feature-flags.ts. Flipping a
@@ -51,10 +55,16 @@ export const navGroups: NavGroup[] = [
     label: null,
     items: [
       { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+      // Deliberate duplicate of the Reports > Overview row. The Reports group
+      // is collapsible, so this pins the most-visited report to the top of the
+      // sidebar. Both rows highlight on /reports — that is intended.
+      { label: "Overview", href: "/reports", icon: BarChart3, exact: true },
     ],
   },
   {
     label: "Campaigns",
+    // Always expanded — the primary workflow, never hidden behind a toggle.
+    collapsible: false,
     items: [
       {
         label: "Campaigns",

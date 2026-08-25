@@ -494,7 +494,7 @@ How a segment sets its title depends on what the page is:
 - **Client page** (`"use client"`) → metadata **cannot** be exported from a client module. Add a sibling `layout.tsx` in that segment that exports `metadata` and returns `children` unchanged. **Do not convert a client page to a server component just to give it a title.** 29 of the 36 pages use this pattern; copy any of them (e.g. [app/(protected)/brands/layout.tsx](<../app/(protected)/brands/layout.tsx>)).
 - **Dynamic segment** → `generateMetadata({ params })`, and `params` is a **Promise** (Next 15+) — `await` it. [reports/[dimension]](<../app/(protected)/reports/[dimension]/page.tsx>) needs no I/O at all — it reads the pure constant `DIMENSION_TAB_LABEL`.
 
-Titles track the sidebar labels in [components/protected/nav-config.ts](../components/protected/nav-config.ts) and each page's `<h1>`, so the tab matches what's on screen. `app/page.tsx` sets no title — it always `redirect()`s and never paints.
+Titles track the sidebar labels in [components/protected/nav-config.ts](../components/protected/nav-config.ts) and each page's `<h1>`, so the tab matches what's on screen. `app/page.tsx` sets no title — it always `redirect()`s and never paints. One label is intentionally not unique: **Overview** appears twice in the nav (a shortcut in the top group + the row inside the collapsible Reports group), both pointing at `/reports` — see [04-features/ui-system.md](04-features/ui-system.md#sidebar-groups-collapsible).
 
 #### Entity detail pages show the record's name
 

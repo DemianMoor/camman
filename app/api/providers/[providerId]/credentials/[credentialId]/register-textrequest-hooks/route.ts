@@ -7,6 +7,7 @@ import { db } from "@/db/client";
 import { provider_credentials, provider_phones, sms_providers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { appOrigin } from "@/lib/app-origin";
 import { can } from "@/lib/permissions";
 import { resolveCredentialKeyById } from "@/lib/sends/provider-credential";
 import {
@@ -40,21 +41,15 @@ function parseId(idParam: string) {
   return n;
 }
 
-// Prefer the ACTUAL request host — the admin clicking this is by definition on
-// the correct reachable origin, which makes registration immune to a mistyped
-// NEXT_PUBLIC_SITE_URL. Register from the stable production domain, never a
-// preview deployment URL, or the hooks will point at a URL that disappears.
-function resolveOrigin(req: NextRequest): string | null {
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
-  if (host) {
-    const proto = req.headers.get("x-forwarded-proto") ?? "https";
-    return `${proto}://${host}`;
-  }
-  let env = (process.env.NEXT_PUBLIC_SITE_URL ?? "").trim();
-  if (!env) return null;
-  if (!/^https?:\/\//i.test(env)) env = `https://${env}`;
-  return env.replace(/\/+$/, "");
-}
+// The hook origin comes from NEXT_PUBLIC_SITE_URL and NOTHING ELSE.
+//
+// ⚠️ This deliberately does NOT read the request host. It used to prefer it, on
+// the reasoning that an admin clicking Register is on a reachable origin — but
+// the URL registered here is persisted by the PROVIDER and long outlives the
+// request. Registering from a preview deployment pinned inbound delivery to a
+// URL that later disappears, and now that CamMan answers on a partner-facing
+// hostname too, it would silently move inbound traffic off the primary host.
+// Both failures are invisible until messages stop arriving. Fail loudly instead.
 
 export async function POST(
   req: NextRequest,
@@ -110,11 +105,11 @@ export async function POST(
     return apiError(404, "Credential not found", API_ERROR_CODES.NOT_FOUND, { entity: "provider_credential" });
   }
 
-  const origin = resolveOrigin(req);
+  const origin = appOrigin();
   if (!origin) {
     return apiError(
       500,
-      "Server misconfiguration: could not resolve the app origin (no request host and NEXT_PUBLIC_SITE_URL is unset)",
+      "Server misconfiguration: NEXT_PUBLIC_SITE_URL is not set, so the inbound hook URL cannot be built. Set it to the primary production origin and redeploy — registration will not fall back to the request host.",
       API_ERROR_CODES.VALIDATION,
     );
   }

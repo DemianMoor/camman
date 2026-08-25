@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-25_
 
 ## "Made a purchase" has exactly one definition (2026-08-19)
 
@@ -99,6 +99,52 @@ Neither was noticed because `scripts/verify-brand-domains.ts`, the guard that co
 - **Every mutation is keyed on the domain row's id.** Activate / deactivate / set-default / delete all take an id. **There must never be a brand-wide DELETE again** — `scripts/verify-brand-domains.ts` asserts at *source* level, repo-wide, that no `DELETE FROM short_domains` whose predicate mentions `brand_id` exists anywhere, plus a self-test proving that scanner can actually see a violation. (The probe string is assembled from parts, because written as one literal it made the guard file its own offender — a scanner right about the bytes and wrong about the meaning.)
 - **Deactivating clears `is_default`,** and set-default refuses a non-active row. A pending domain as brand default would mean activation silently redirects the whole brand's minting; activate and choose are two deliberate acts.
 - **Delete keeps the minted-links guard**, now scoped to the single row: a domain with minted links can only be deactivated, never removed, or its links are orphaned.
+
+## An app hostname must NEVER be registered as an active short domain
+
+[`app/page.tsx`](../app/page.tsx) treats the bare root `/` as a short-link
+surface: if the request `Host` is not the app host (`NEXT_PUBLIC_SITE_URL`), it
+looks the hostname up in `short_domains` and, on an **active** row whose brand
+has a `website`, **redirects to that brand's external website**. Only the exact
+path `/` is affected — `/r/[code]` and every other route are untouched — and a
+miss falls through to `/dashboard`.
+
+**⚠️ Never add `exuma.io`, `camman.exuma.io`, or any other hostname the app is
+served on as an active short domain.** CamMan now answers on a partner-facing
+hostname as well as the primary one, and only the primary one matches
+`appHostname()`. Registering a serving hostname as an active short domain would
+send every operator who opens that host's root to a brand's marketing site
+instead of the app — with no error anywhere, because that is the feature working
+as designed. Verified 2026-08-25: zero `short_domains` rows match `exuma` or
+`camman`, so the fall-through is what runs today. **That is a fact about current
+data, not a property of the code** — it stops being true the moment someone adds
+such a row.
+
+Short domains are for brand link hostnames only. See also the origin split in
+[06-integrations.md](06-integrations.md#multiple-production-hostnames-primary--partner-facing).
+
+## Outbound URLs come from env, never from the request Host
+
+Every URL CamMan hands to someone else resolves through
+[`lib/app-origin.ts`](../lib/app-origin.ts) — `appOrigin()` for the **primary**
+host (auth emails, alert deep-links, provider webhook/callback registration) and
+`partnerOrigin()` / `partnerBase()` for the **partner-facing** host (lead intake
+endpoint, `/docs/partner-api`). Neither reads the request.
+
+**Why this is a rule and not a preference:** the two registration routes
+(`register-callback`, `register-textrequest-hooks`) used to prefer the request
+host, on the reasonable-sounding logic that an admin clicking Register is on a
+reachable origin. But the provider **persists** that URL, so it outlives the
+request — registering from a preview deployment pinned STOP delivery to a URL
+that later 404s, and with a second serving hostname it would quietly move opt-out
+traffic off the primary name. The same applied to the partner intake URL copied
+out of Settings. **Nothing errors in either case**; the URL looks fine and fails
+weeks later, which is exactly why it needs a guard rather than care.
+
+`appOrigin()` takes no arguments, so no request can reach it, and an unset
+`NEXT_PUBLIC_SITE_URL` makes registration **fail loudly** rather than fall back.
+`scripts/test-partner-host.ts` (in `npm run check:docs`) asserts the resolution
+behavior and that neither route contains a host read, with a can-go-red control.
 
 ## The tracked link is built ONCE — the host is inside the counted body (B2)
 

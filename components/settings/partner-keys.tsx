@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
+import { partnerBase } from "@/lib/app-origin";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
@@ -150,8 +151,13 @@ export function PartnerKeys() {
     setShownToken({ id: row.id, token: r.data.token });
   };
 
+  // The URL an operator copies and hands to a partner. It must be the
+  // PARTNER-FACING hostname regardless of which hostname the operator is
+  // browsing — copying this box from a preview deployment used to hand out a
+  // URL that later 404s. Falls back to the current origin only on a
+  // single-hostname deployment where NEXT_PUBLIC_PARTNER_HOST is unset.
   const endpointUrl = (token: string) =>
-    `${typeof window === "undefined" ? "" : window.location.origin}/api/intake/leads/${token}`;
+    `${partnerBase(typeof window === "undefined" ? "" : window.location.origin)}/api/intake/leads/${token}`;
 
   return (
     <div className="space-y-4">

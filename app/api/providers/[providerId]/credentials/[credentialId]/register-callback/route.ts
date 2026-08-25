@@ -7,6 +7,7 @@ import { db } from "@/db/client";
 import { provider_credentials } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { appOrigin } from "@/lib/app-origin";
 import { can } from "@/lib/permissions";
 import { loadCredentialContext } from "@/lib/providers/credential-context";
 import { resolveCredentialKeyById } from "@/lib/sends/provider-credential";
@@ -19,27 +20,15 @@ function parseId(idParam: string) {
   return n;
 }
 
-// Resolve the app's public origin for building the callback URL. Prefer the
-// ACTUAL request host (the admin is, by definition, on the correct reachable
-// production origin when they click Register) — this makes the callback immune
-// to a mistyped NEXT_PUBLIC_SITE_URL (wrong host or missing scheme). Falls back
-// to NEXT_PUBLIC_SITE_URL (normalizing a missing scheme) only if the request
-// carries no host header (e.g. some test runners). Returns a scheme+host base
-// with no trailing slash, or null if nothing usable is available.
+// The callback origin comes from NEXT_PUBLIC_SITE_URL and NOTHING ELSE.
 //
-// NOTE: register from the stable production domain, not an ephemeral preview
-// deployment URL, or the callback will point at a URL that later disappears.
-function resolveOrigin(req: NextRequest): string | null {
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
-  if (host) {
-    const proto = req.headers.get("x-forwarded-proto") ?? "https";
-    return `${proto}://${host}`;
-  }
-  let env = (process.env.NEXT_PUBLIC_SITE_URL ?? "").trim();
-  if (!env) return null;
-  if (!/^https?:\/\//i.test(env)) env = `https://${env}`;
-  return env.replace(/\/+$/, "");
-}
+// ⚠️ This deliberately does NOT read the request host. It used to prefer it, on
+// the reasoning that an admin clicking Register is on a reachable origin — but
+// the URL registered here is persisted by the PROVIDER and long outlives the
+// request. Registering from a preview deployment pinned STOP delivery to a URL
+// that later disappears, and now that CamMan answers on a partner-facing
+// hostname too, it would silently move opt-out traffic off the primary host.
+// Both failures are invisible until STOPs stop arriving. Fail loudly instead.
 
 // POST — register this credential's inbound opt-out (STOP) callback with
 // TextHub. Admin+ (provider_credentials.manage) — resolves and transmits the
@@ -84,11 +73,11 @@ export async function POST(
     );
   }
 
-  const origin = resolveOrigin(req);
+  const origin = appOrigin();
   if (!origin) {
     return apiError(
       500,
-      "Server misconfiguration: could not resolve the app origin (no request host and NEXT_PUBLIC_SITE_URL is unset)",
+      "Server misconfiguration: NEXT_PUBLIC_SITE_URL is not set, so the opt-out callback URL cannot be built. Set it to the primary production origin and redeploy — registration will not fall back to the request host.",
       API_ERROR_CODES.VALIDATION,
     );
   }

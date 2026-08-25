@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 
+import { partnerOrigin } from "@/lib/app-origin";
 import {
   ALT_SECRET_HEADER,
   API_CHANGELOG,
@@ -41,7 +42,12 @@ export const metadata: Metadata = {
     "response codes, batching, rate limits and sandbox testing.",
 };
 
-const BASE = "https://<your-camman-host>";
+// The partner-facing origin when one is configured, else a literal placeholder.
+// Never the request host — this page is force-static, and a partner reading it
+// on one hostname must still be told the hostname their credentials are issued
+// against. Build-time value: NEXT_PUBLIC_* is inlined, so changing the env var
+// requires a redeploy.
+const BASE = partnerOrigin() ?? "https://<your-camman-host>";
 
 function Code({ children }: { children: React.ReactNode }) {
   return (

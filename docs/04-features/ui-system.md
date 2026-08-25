@@ -1,6 +1,6 @@
 # Feature — UI System
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-25_
 
 ## 1. Purpose
 A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shadcn/ui. Reusable wrappers enforce the project's interaction conventions (dialog dismissal, required-field markers, file uploads, multi-select) so individual screens stay thin.
@@ -21,8 +21,17 @@ A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shad
 | `FileDropZone` | `components/file-drop-zone.tsx` | click + drag-drop file input (CSV imports). The only file-picker shape — extend it, don't roll a new `<input type=file>` |
 | `FormDialog` | `components/ui/form-dialog.tsx` | dialog that **blocks** backdrop-click + Escape dismissal (protects in-progress form data); X / Cancel still close |
 | `CopyableId` | `components/ui/copyable-id.tsx` | read-only input + copy button + toast for system-generated ids (tracking IDs) |
-| Sidebar + nav | `components/protected/sidebar*.tsx`, `nav-config.ts` | grouped nav; items disabled via `isEntityAvailable()` |
+| Sidebar + nav | `components/protected/sidebar*.tsx`, `nav-config.ts` | grouped nav, **collapsible groups** (see below); items disabled via `isEntityAvailable()` |
 | `SpamCheckStrip` | `components/spam/spam-check-strip.tsx` | inline spam-score button under creative textareas |
+
+### Sidebar groups (collapsible)
+The nav is a list of `NavGroup`s in [components/protected/nav-config.ts](../../components/protected/nav-config.ts); [components/protected/sidebar-nav.tsx](../../components/protected/sidebar-nav.tsx) renders them. The same component serves desktop and the mobile `<Sheet>` drawer — `app/(protected)/layout.tsx` mounts `<Sidebar>` twice.
+
+- A group with a `label` renders its label as a **toggle button** (chevron rotates 90° when open) and **starts collapsed**. The unlabelled top group (Dashboard, Overview) and any group with `collapsible: false` are always open and render a static label.
+- **Campaigns is `collapsible: false`** — the primary workflow, never hidden behind a toggle.
+- Open/closed state persists per browser in `localStorage` under `sidebar:groups` via `usePersistedFilters` (`lib/hooks/use-persisted-filters.ts`), shape `Record<groupLabel, boolean>`. An unknown or newly-added group falls back to the collapsed default, so adding a group never resurrects stale storage.
+- The group containing the current route auto-expands. This fires **only when `pathname` changes** (guarded by a ref) — running it every render would immediately reopen a group the user just collapsed, making the active group's toggle look dead. Consequence: the user *can* collapse the group they're currently in, and it reopens on the next navigation into it.
+- Reports > Overview is **deliberately duplicated** as a row in the top group, pinning the most-visited report above the collapsible blocks. Both rows use `exact: true` and both highlight on `/reports`; neither highlights on `/reports/<dimension>`.
 
 ### Dialog dismissal rules
 | Wrapper | Backdrop / Escape | Use for |

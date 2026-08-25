@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-25_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -111,7 +111,8 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | public | anon key (browser-safe) |
 | `SUPABASE_SERVICE_ROLE_KEY` | **server** | bypasses RLS; used by `lib/supabase/admin.ts`. Never expose to browser |
 | `DATABASE_URL` | server | Postgres connection (Supabase pooler, `?prepare=false`). URL-encode special chars in the password (`#`/`&`) or rotate to alphanumerics — `#` silently truncates the string |
-| `NEXT_PUBLIC_SITE_URL` | public | app origin; auth callback base + absolute links. Must match the deployed origin in prod |
+| `NEXT_PUBLIC_SITE_URL` | public | **primary** app origin; auth callback base, internal alert deep-links, and every provider webhook/callback URL we register. Must match the deployed origin in prod |
+| `NEXT_PUBLIC_PARTNER_HOST` | public | **optional** partner-facing origin. Only affects URLs handed to a partner: the lead intake endpoint in Settings → Partner intake keys, and `/docs/partner-api`. Unset ⇒ those fall back to the operator's current browser origin (single-hostname behavior). Never used for auth, alerts, or webhooks. Inlined at **build time** — changing it requires a redeploy |
 | `SPAM_PROVIDER` | server | which spam provider (`classifier` is the only option) |
 | `CLASSIFIER_URL` | server | Cloud Run URL of the classifier service |
 | `CLASSIFIER_API_KEY` | server | `X-API-Key` for the classifier |
@@ -149,3 +150,35 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 
 ## Supabase Auth URL configuration (prod)
 Authentication → URL Configuration must include the production origin under Site URL and Redirect URLs (`/auth/callback`, `/auth/complete`, `/auth/reset-password`), keeping localhost entries for dev (CLAUDE.md §14).
+
+## Multiple production hostnames (primary + partner-facing)
+
+The app can answer on more than one hostname off the same deployment. The split
+is deliberate and one-directional:
+
+| | Hostname | Carries |
+|---|---|---|
+| **Primary** | `NEXT_PUBLIC_SITE_URL` | auth emails (verification, password reset), internal Telegram alert deep-links, every provider webhook/callback URL we register, the TextRequest callback base |
+| **Partner-facing** | `NEXT_PUBLIC_PARTNER_HOST` | the lead intake endpoint copied from Settings → Partner intake keys, and the public `/docs/partner-api` page |
+
+**All machine traffic stays on the primary host.** Adding a second hostname does
+not move it, and nothing derives an outbound URL from the request `Host` header —
+see [`lib/app-origin.ts`](../lib/app-origin.ts), which is the only place either
+origin is resolved. `scripts/test-partner-host.ts` (wired into `npm run check:docs`)
+asserts that property and that the registration routes contain no host read.
+
+Adding a hostname is otherwise a pure infrastructure change — the app has no
+Host allow-list, no CORS layer, and no origin/CSRF check (`proxy.ts` is
+path-based only, and its redirects clone the request URL, so they follow
+whichever hostname served them). Auth cookies set no `domain`, so a session on
+one hostname does not carry to the other; users sign in per hostname, which is
+expected.
+
+Two consequences worth knowing before adding a name:
+- `NEXT_PUBLIC_*` is inlined at **build time**. Setting `NEXT_PUBLIC_PARTNER_HOST`
+  in Vercel has no effect until the next deploy; until then the intake URL falls
+  back to the operator's current origin.
+- A new hostname does **not** need to be added to Supabase Auth → URL
+  Configuration, because auth email links are pinned to the primary host by
+  design. Only add it there if you deliberately want signup/reset to complete on
+  the second hostname.

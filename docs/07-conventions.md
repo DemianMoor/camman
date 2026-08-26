@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-25_
+_Last updated: 2026-08-26_
 
 ## "Made a purchase" has exactly one definition (2026-08-19)
 
@@ -1049,6 +1049,29 @@ row looks right — re-verify the surrounding invariants too (here: the count of
 number, that no row was left with a phone but a NULL provider, and that the pending send-row
 counts were untouched), because the failure you caused is rarely the only thing your request
 touched.
+
+## Never interpolate a JS array into a Drizzle `sql` template
+
+Drizzle's `sql` tagged template FLATTENS an array into positional parameters. It does not bind it as one array-typed parameter.
+
+```ts
+// BROKEN — sends 8 params for 3 placeholders
+await db.execute(sql`
+  INSERT INTO notification_settings (org_id, active_weekdays, hourly_window_to)
+  VALUES (${orgId}, ${[1, 2, 3, 4, 5, 6]}, ${1})
+`);
+// Postgres: 42804 — column is of type smallint[] but expression is of type integer
+```
+
+The array column receives whichever scalar happens to land in its slot, and every parameter after it is shifted. Use the query builder, which knows the column is an array:
+
+```ts
+await db.insert(notification_settings).values({ org_id: orgId, active_weekdays: [1, 2, 3, 4, 5, 6] });
+```
+
+**`tsc`, `eslint` and `next build` are all green while this bug is live** — the value is a `number[]` and the column is declared `.array()`, so nothing static disagrees. It only appears when the statement executes, which is why any write path touching an array column needs a test that actually runs it. This is the same shape as the older `ANY(${jsArray})` trap (`ERR_INVALID_ARG_TYPE` from postgres-js, 2026-08-19) — same cause, different symptom.
+
+Found 2026-08-26 on `PUT /api/settings/notifications` (migration 0173), before it shipped. `scripts/test-notification-settings-persistence.ts` is the guard: it calls the real exported `saveNotificationSettings()` inside a transaction that always rolls back, rather than re-typing the query into the test.
 
 ## Working copy — do multi-step work in a throwaway worktree, never in `C:/AFF/camman` directly
 

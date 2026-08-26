@@ -19,7 +19,15 @@ import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import { cn } from "@/lib/utils";
-import type { CreativeSequencePlacement } from "@/lib/validators/creatives";
+import type {
+  CreativeFunnelStage,
+  CreativeQuality,
+  CreativeSequencePlacement,
+} from "@/lib/validators/creatives";
+import {
+  FUNNEL_STAGE_VALUES,
+  QUALITY_VALUES,
+} from "@/lib/validators/creatives";
 
 // What the picker needs from a creative. Superset of the stage form's own
 // Creative type so the chosen one can be merged straight back into its state.
@@ -28,6 +36,8 @@ export type PickerCreative = {
   slug: string;
   text: string;
   status: string;
+  quality: CreativeQuality;
+  funnel_stage: CreativeFunnelStage;
   sequence_placement: CreativeSequencePlacement;
   spam_score: number | null;
   spam_verdict: "spam" | "not_spam" | null;
@@ -73,6 +83,31 @@ const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   any: "Any",
   unknown: "Unknown",
 };
+
+const QUALITY_LABEL: Record<CreativeQuality, string> = {
+  high: "High",
+  average: "Average",
+  poor: "Poor",
+  unknown: "Unknown",
+};
+
+const FUNNEL_STAGE_LABEL: Record<CreativeFunnelStage, string> = {
+  start: "Start",
+  clicked: "Clicked",
+  checkout: "Checkout",
+  ignored: "Ignored",
+  unknown: "Unknown",
+};
+
+const QUALITY_FILTER_OPTIONS = QUALITY_VALUES.map((v) => ({
+  id: v,
+  label: QUALITY_LABEL[v],
+}));
+
+const FUNNEL_STAGE_FILTER_OPTIONS = FUNNEL_STAGE_VALUES.map((v) => ({
+  id: v,
+  label: FUNNEL_STAGE_LABEL[v],
+}));
 
 function SpamDot({
   score,
@@ -156,6 +191,8 @@ export function CreativePickerDialog({
 
   const [search, setSearch] = useState("");
   const [sequences, setSequences] = useState<CreativeSequencePlacement[]>([]);
+  const [qualities, setQualities] = useState<CreativeQuality[]>([]);
+  const [funnelStages, setFunnelStages] = useState<CreativeFunnelStage[]>([]);
   const [offers, setOffers] = useState<OfferOption[]>([]);
   // Extra offers (beyond the campaign's) the operator checked to widen the list.
   const [extraOfferIds, setExtraOfferIds] = useState<number[]>([]);
@@ -219,12 +256,17 @@ export function CreativePickerDialog({
     };
   }, [creativesApi.execute, offerIds, includeAllOffers]);
 
-  // Client-side search (text/slug) + sequence filter over the fetched set. The
-  // server already ranked by EPC desc; filtering preserves that order.
+  // Client-side search (text/slug) + sequence/quality/funnel filter over the
+  // fetched set. The server already ranked by EPC desc; filtering preserves
+  // that order.
   const visibleCreatives = useMemo(() => {
     const q = search.trim().toLowerCase();
     return creatives.filter((c) => {
       if (sequences.length > 0 && !sequences.includes(c.sequence_placement))
+        return false;
+      if (qualities.length > 0 && !qualities.includes(c.quality))
+        return false;
+      if (funnelStages.length > 0 && !funnelStages.includes(c.funnel_stage))
         return false;
       if (q) {
         const hay = `${c.text} ${c.slug}`.toLowerCase();
@@ -232,7 +274,7 @@ export function CreativePickerDialog({
       }
       return true;
     });
-  }, [creatives, search, sequences]);
+  }, [creatives, search, sequences, qualities, funnelStages]);
 
   const activeCreative = useMemo(
     () => creatives.find((c) => c.id === activeId) ?? null,
@@ -411,6 +453,36 @@ export function CreativePickerDialog({
                 placeholder="Any sequence position"
                 selectedLabel={(n) => `${n} position${n === 1 ? "" : "s"}`}
                 searchPlaceholder="Filter positions…"
+              />
+            </div>
+
+            <div>
+              <div className="mb-1.5 text-xs font-medium text-muted-foreground">
+                Quality
+              </div>
+              <MultiSelectPicker
+                options={QUALITY_FILTER_OPTIONS}
+                value={qualities}
+                onChange={(next) => setQualities(next as CreativeQuality[])}
+                placeholder="Any quality"
+                selectedLabel={(n) => `${n} quality level${n === 1 ? "" : "s"}`}
+                searchPlaceholder="Filter quality…"
+              />
+            </div>
+
+            <div>
+              <div className="mb-1.5 text-xs font-medium text-muted-foreground">
+                Funnel Stage
+              </div>
+              <MultiSelectPicker
+                options={FUNNEL_STAGE_FILTER_OPTIONS}
+                value={funnelStages}
+                onChange={(next) =>
+                  setFunnelStages(next as CreativeFunnelStage[])
+                }
+                placeholder="Any funnel stage"
+                selectedLabel={(n) => `${n} stage${n === 1 ? "" : "s"}`}
+                searchPlaceholder="Filter funnel stage…"
               />
             </div>
           </div>

@@ -3099,6 +3099,35 @@ export const org_setting_events = pgTable(
 export type OrgSettingEvent = typeof org_setting_events.$inferSelect;
 export type NewOrgSettingEvent = typeof org_setting_events.$inferInsert;
 
+// Per-org Telegram notification settings (migration 0173). Loaded by the
+// telegram-report cron on every tick; absent row → cron uses hard-coded
+// defaults. Times are Europe/Warsaw. active_weekdays stores ISO weekday
+// numbers (1=Mon … 7=Sun) and gates the HOURLY window only — the daily
+// summary is never weekday-gated.
+//
+// The defaults below mirror the DDL and reproduce the pre-0173 hard-coded
+// schedule exactly: window 16:00–01:59 (to=1 makes it wrap midnight) on
+// Mon–Sat. They are not free to "tidy" — see migration 0173's header.
+export const notification_settings = pgTable("notification_settings", {
+  org_id: uuid("org_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  daily_report_enabled: boolean("daily_report_enabled").notNull().default(true),
+  hourly_report_enabled: boolean("hourly_report_enabled").notNull().default(true),
+  stall_alert_enabled: boolean("stall_alert_enabled").notNull().default(true),
+  unjoinable_alert_enabled: boolean("unjoinable_alert_enabled").notNull().default(true),
+  daily_report_hour: smallint("daily_report_hour").notNull().default(10),
+  hourly_window_from: smallint("hourly_window_from").notNull().default(16),
+  hourly_window_to: smallint("hourly_window_to").notNull().default(1),
+  hourly_interval_hours: smallint("hourly_interval_hours").notNull().default(1),
+  active_weekdays: smallint("active_weekdays").array().notNull().default([1, 2, 3, 4, 5, 6]),
+  created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type NotificationSettings = typeof notification_settings.$inferSelect;
+export type NewNotificationSettings = typeof notification_settings.$inferInsert;
+
 // Append-only campaign activity log (migration 0060). One row per meaningful
 // action on a campaign or its stages — lifecycle (status changes), authoring
 // (stage create), and the send pipeline (approve / kickoff / drain) plus result

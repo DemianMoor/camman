@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  Bell,
   CalendarClock,
   CheckCheck,
   FolderTree,
@@ -232,6 +233,11 @@ export const navGroups: NavGroup[] = [
         label: "Why Not Routed",
         href: "/drip/why-not-routed",
         icon: Search,
+      },
+      {
+        label: "Notifications",
+        href: "/settings/notifications",
+        icon: Bell,
       },
       {
         label: "User Management",

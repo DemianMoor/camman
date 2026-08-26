@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-26_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -16,7 +16,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 | `/api/keitaro/poll` | `*/5 * * * *` | pull Keitaro clicks/conversions → `keitaro_stage_results` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/keitaro/poll-conversions` | `9,24,39,54 * * * *` | per-recipient SALE attribution → `stage_sends.sale_status` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
 | `/api/keitaro/poll-offer-reaches` | `12,27,42,57 * * * *` | per-recipient OFFER-PAGE REACH (Level 2) → `stage_sends.offer_reached_at` | CRON_SECRET (all orgs) **or** session `result_imports.create` (operator+, POST/GET) |
-| `/api/cron/telegram-report` | `0 * * * *` | send the daily/hourly performance report to Telegram (decides internally per Warsaw time) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
+| `/api/cron/telegram-report` | `0 * * * *` | send the daily/hourly performance report to Telegram (decides internally per Warsaw time); schedule driven by `notification_settings` (migration 0173), configurable at `/settings/notifications`; the shipped defaults reproduce the previously hard-coded schedule (daily 10:00 every day; hourly 16:00–01:59 owned by Mon–Sat) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 | `/api/cron/refresh-offer-group-report` | `0 5,20 * * *` | rebuild the offer group report matviews (`offer_group_report_mv`, `offer_report_org_summary_mv`) | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |
 | `/api/cron/lookup-worker` | `*/2 * * * *` | drain the Telnyx number-lookup queue (`lib/telnyx/worker.ts`); single-runner lease | CRON_SECRET only (503 if unset, 401 otherwise) |
 | `/api/cron/carrier-triage` | `17,47 * * * *` | drain `carrier_classify_queue` — batch unresolved carrier strings to `claude-haiku-4-5`, write confident buckets to `carrier_mappings` (`lib/carrier/ai-triage.ts`); `withCronLease` single-runner; per-run API-call cap | CRON_SECRET only (Bearer **or** `x-cron-secret`); 401 otherwise |

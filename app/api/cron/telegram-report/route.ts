@@ -25,7 +25,10 @@ import {
   dailyMessage,
   decideFormat,
   hourlyMessage,
+  DEFAULT_NOTIFICATION_SETTINGS,
+  type NotifSettings,
 } from "@/lib/reporting/telegram-report-format";
+import { sql } from "drizzle-orm";
 
 // Scheduled Telegram performance report. ONE external trigger fires this every
 // hour on the hour (UTC); the handler decides internally what to do based on the
@@ -33,6 +36,9 @@ import {
 // DST weeks, so every wall-clock decision goes through Intl-backed
 // formatInTimeZone (date-fns-tz), never offset arithmetic.
 //
+// Schedule is controlled by notification_settings (migration 0173). The
+// defaults reproduce the schedule that used to be hard-coded here, so this
+// list is both "what the defaults do" and "what this cron did before 0173":
 //   • Warsaw hour == 10            → daily report for the PREVIOUS ET day (final).
 //   • Warsaw hour 16..23, !Sunday  → hourly update (today-so-far, ET).
 //   • Warsaw hour 0..1,  !Monday   → hourly update (belongs to the previous
@@ -46,6 +52,39 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const WARSAW = "Europe/Warsaw";
+
+// ── settings loader ─────────────────────────────────────────────────────────
+// Best-effort: a DB error or missing row just falls back to defaults. The cron
+// is single-org in practice; LIMIT 1 picks up the only org's settings.
+async function loadNotifSettings(): Promise<NotifSettings> {
+  try {
+    const rows = (await db.execute(sql`
+      SELECT
+        daily_report_enabled, hourly_report_enabled,
+        stall_alert_enabled, unjoinable_alert_enabled,
+        daily_report_hour, hourly_window_from, hourly_window_to,
+        hourly_interval_hours, active_weekdays
+      FROM notification_settings
+      LIMIT 1
+    `)) as unknown as Partial<NotifSettings>[];
+    const r = rows[0];
+    if (!r) return DEFAULT_NOTIFICATION_SETTINGS;
+    return {
+      daily_report_enabled: r.daily_report_enabled ?? DEFAULT_NOTIFICATION_SETTINGS.daily_report_enabled,
+      hourly_report_enabled: r.hourly_report_enabled ?? DEFAULT_NOTIFICATION_SETTINGS.hourly_report_enabled,
+      stall_alert_enabled: r.stall_alert_enabled ?? DEFAULT_NOTIFICATION_SETTINGS.stall_alert_enabled,
+      unjoinable_alert_enabled: r.unjoinable_alert_enabled ?? DEFAULT_NOTIFICATION_SETTINGS.unjoinable_alert_enabled,
+      daily_report_hour: r.daily_report_hour ?? DEFAULT_NOTIFICATION_SETTINGS.daily_report_hour,
+      hourly_window_from: r.hourly_window_from ?? DEFAULT_NOTIFICATION_SETTINGS.hourly_window_from,
+      hourly_window_to: r.hourly_window_to ?? DEFAULT_NOTIFICATION_SETTINGS.hourly_window_to,
+      hourly_interval_hours: r.hourly_interval_hours ?? DEFAULT_NOTIFICATION_SETTINGS.hourly_interval_hours,
+      active_weekdays: r.active_weekdays ?? DEFAULT_NOTIFICATION_SETTINGS.active_weekdays,
+    };
+  } catch (err) {
+    console.error("[telegram-report] failed to load notification settings, using defaults:", err);
+    return DEFAULT_NOTIFICATION_SETTINGS;
+  }
+}
 
 // ── ET day bounds ───────────────────────────────────────────────────────────
 function etDays(now: Date) {
@@ -125,8 +164,9 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 const STALL_THRESHOLD_MINUTES = 30;
 
 // Best-effort backlog-stall check. Never throws (own try/catch) so it can't break
-// the report. No-ops when global sending is off.
-async function checkStalledQueue(now: Date): Promise<void> {
+// the report. No-ops when global sending is off or the type is disabled.
+async function checkStalledQueue(now: Date, enabled: boolean): Promise<void> {
+  if (!enabled) return;
   if (process.env.SEND_ENABLED !== "true") return;
   try {
     const stalled = await findStalledStages(db, {
@@ -149,7 +189,8 @@ const UNJOINABLE_WINDOW_HOURS = 24;
 // whose stage_send_id is NULL can't be aligned to a send and are dropped from
 // the rate, so a rising share silently blinds the breaker. Never throws (own
 // try/catch) so it can't break the report. One cheap aggregate per hour.
-async function checkUnjoinableAttributions(): Promise<void> {
+async function checkUnjoinableAttributions(enabled: boolean): Promise<void> {
+  if (!enabled) return;
   try {
     const stats = await findUnjoinableOptOutAttributions(db, {
       windowHours: UNJOINABLE_WINDOW_HOURS,
@@ -176,17 +217,19 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const warsawIsoDow = Number(formatInTimeZone(now, WARSAW, "i")); // 1=Mon..7=Sun
   const test = req.nextUrl.searchParams.get("test") === "1";
 
+  // Load notification preferences (best-effort; falls back to defaults).
+  const notifSettings = await loadNotifSettings();
+
   // Phase 3 — backlog-stall safety net. Runs EVERY hourly tick (independent of the
   // report window below), so a queue that silently stops draining is caught within
   // ~an hour regardless of the specific cause. Best-effort: never break the report.
-  // Skipped when global sending is off (env SEND_ENABLED) — then nothing is
-  // expected to drain and every due stage would look "stalled".
-  await checkStalledQueue(now);
+  // Skipped when global sending is off (env SEND_ENABLED) or type is disabled.
+  await checkStalledQueue(now, notifSettings.stall_alert_enabled);
   // Same cadence, same best-effort contract: watch the opt-out-rate breaker's
   // numerator for attributions it can no longer align to a send.
-  await checkUnjoinableAttributions();
+  await checkUnjoinableAttributions(notifSettings.unjoinable_alert_enabled);
 
-  const format = decideFormat(warsawHour, warsawIsoDow, test);
+  const format = decideFormat(warsawHour, warsawIsoDow, test, notifSettings);
 
   if (!format) {
     return NextResponse.json({ skipped: true, warsawHour, warsawIsoDow });

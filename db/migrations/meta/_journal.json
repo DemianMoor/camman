@@ -1212,6 +1212,13 @@
       "when": 1791244800000,
       "tag": "0172_partner_report_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 173,
+      "version": "7",
+      "when": 1791331200000,
+      "tag": "0173_notification_settings",
+      "breakpoints": true
     }
   ]
 }

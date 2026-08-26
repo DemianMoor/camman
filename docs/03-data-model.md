@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-26_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -185,6 +185,7 @@ erDiagram
 | `invites` | `org_id`, `email`, `role`, `token` UNIQUE, `expires_at`, `accepted_at` | pending member invitations |
 | `org_settings` | `org_id` PK, `sends_enabled` (default false), `sends_enabled_updated_by/_at`, `sends_paused` (default false), `sends_paused_at/_by` | per-org singleton; DB master switch for live SMS sending (migration 0063). `sends_paused` (migration 0080) is the dedicated **emergency hard-stop** flipped one-click from the Today's sends screen — independent of `sends_enabled`, halts the drain mid-run. Distinct from the `SEND_ENABLED` env backstop |
 | `org_setting_events` | `org_id`, `setting_key`, `old_value`, `new_value`, `actor_user_id` | append-only audit of settings flips (migration 0063) |
+| `notification_settings` | `org_id` PK, 4 type toggles (`daily_report_enabled`, `hourly_report_enabled`, `stall_alert_enabled`, `unjoinable_alert_enabled`), `daily_report_hour` (Warsaw, 0–23, default 10), `hourly_window_from`/`to` (Warsaw, **default 16/1 — the window wraps midnight**), `hourly_interval_hours` (1/2/3, default 1), `active_weekdays` smallint[] (ISO 1=Mon…7=Sun, **default 1–6; Sunday out**, and it gates the hourly window only — the daily summary is never weekday-gated) | per-org singleton (migration 0173); loaded by the Telegram-report cron every tick. Missing row → cron falls back to hard-coded defaults in `lib/reporting/telegram-report-format.ts`, which are a transcription of the pre-0173 hard-coded schedule, so the table ships inert. A midnight-spanning window belongs to the day it STARTED on (`hourlyOwningDow`), which is what reproduces the old "no Sunday evening, no Monday 00:00–01:59" pair from one weekday set. API: `GET/PUT /api/settings/notifications` (manager+) |
 
 ### Registry
 | Table | Key columns | Notes |

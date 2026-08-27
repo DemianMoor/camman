@@ -35,6 +35,10 @@ export interface StageMetrics {
   stage_number: number | null;
   stage_label: string | null;
   stage_tracking_id: string;
+  // Send time, carried so the Overview's clickers fallback can require a stage
+  // to be MATURE before reading zero Keitaro visits as a tracking gap
+  // (lib/reporting/tracking-gap.ts). Null for a stage with no send stamp.
+  sent_at: Date | null;
   // Grouping keys for the performance reports.
   provider_phone_id: number | null;
   offer_id: number | null;
@@ -138,6 +142,7 @@ export async function getStageMetricsInRange(
         stage_number: r.stage_number,
         stage_label: r.stage_label,
         stage_tracking_id: r.stage_tracking_id,
+        sent_at: r.stage_sent_at ?? null,
         provider_phone_id: r.provider_phone_id ?? null,
         offer_id: r.offer_id ?? null,
         brand_id: r.brand_id ?? null,
@@ -196,6 +201,7 @@ export async function getStageMetricsInRange(
       stage_number: r.stage_number,
       stage_label: r.stage_label,
       stage_tracking_id: r.stage_tracking_id ?? "",
+      sent_at: r.stage_sent_at ?? null,
       provider_phone_id: r.provider_phone_id ?? null,
       offer_id: r.offer_id ?? null,
       brand_id: r.brand_id ?? null,

@@ -11,6 +11,7 @@ import {
   getCountedClickers,
   getTotalCountedClickers,
   getRuleFRescueCount,
+  HUMAN_CLICK,
 } from "@/lib/reporting/counted-clickers";
 
 // Rebuilds the counted-clicker cache and asserts it reproduces the denominators
@@ -57,11 +58,18 @@ async function main() {
   // check anyway — it proves the cache agrees with the definition, not with a
   // number someone wrote down once. A small tolerance absorbs clicks that land
   // between the rebuild and this query.
+  //
+  // ⚠️ The predicate comes from HUMAN_CLICK, not a hand-copy. This query used to
+  // inline `ck.classification = 'human'`, so the moment that definition gained
+  // its `scored_at IS NOT NULL` clause the "independent cross-check" started
+  // failing with a 4,597-row gap that was the FIX working, not a defect. What
+  // stays independent is the QUERY — a different shape, a different
+  // aggregation, no cache involved; what must not diverge is the definition.
   const direct = (await d.execute(sql`
     WITH counted AS (
       SELECT l.campaign_id, l.stage_id, l.contact_id
       FROM clicks ck JOIN links l ON l.id = ck.link_id
-      WHERE ck.classification = 'human'
+      WHERE ${HUMAN_CLICK}
       GROUP BY 1, 2, 3
       UNION
       SELECT ss.campaign_id, ss.stage_id, ss.contact_id

@@ -1,6 +1,6 @@
 # Feature — EPC denominator (counted clickers)
 
-_Last updated: 2026-08-11_
+_Last updated: 2026-08-27_
 
 ## 1. Purpose
 
@@ -12,10 +12,20 @@ Before 2026-08-11 the same campaign read differently depending on which page you
 
 A **counted clicker** is a contact who, within the grain being displayed, has:
 
-- at least one click with `classification = 'human'`, **OR**
+- at least one **scored** click with `classification = 'human'`, **OR**
 - a conversion (**Rule F**)
 
 deduplicated at the grain of the row displayed.
+
+> **`scored_at IS NOT NULL` is part of the predicate, not a tidiness filter.**
+> `clicks.classification` carries a *first-pass* verdict written inline by the
+> redirect from the user-agent and headers alone; the scoring job overwrites it
+> with the real verdict once the MaxMind ASN lookup has run. The first pass has
+> no ASN, so an ordinary-looking UA arriving from a datacenter is provisionally
+> `human` and is demoted to `suspect` minutes-to-hours later.
+> [propagate-clickers.ts](../../lib/links/propagate-clickers.ts) has always
+> required both columns; the counted-clicker cache did not until 2026-08-27.
+> See §10.
 
 Full precedence table — the definition, kept even where branches are currently unreachable:
 
@@ -23,13 +33,14 @@ Full precedence table — the definition, kept even where branches are currently
 |---|---|---|---|
 | Scored `bot` / `prefetch` / `suspect` | either | No | CamMan scoring is authoritative |
 | Scored `human` | either | Yes | Confirmed human |
+| `human`, **not yet scored** | either | No | First-pass guess, not a verdict |
 | `unknown` (never scored) | Yes | Yes | Keitaro filtering vouches |
 | `unknown` (never scored) | No | No | Nothing vouches |
 | No CamMan row at all | Yes | Yes | CamMan missed it, or manual-mode |
 
 Rows 3 and 4 are **unreachable today** — `clicks.classification` has had zero `unknown` rows across all history. Row 5 fires only for manual-mode campaigns.
 
-**The consumer-relay carve-out is NOT applied at this layer.** It lives in the scorer ([datacenter-asns.ts](../../lib/links/datacenter-asns.ts)), so by the time a click reaches the denominator the rule has collapsed to `classification = 'human'`. That is the point of one definition of "human" in the codebase — do not re-implement the ASN logic in reporting.
+**The consumer-relay carve-out is NOT applied at this layer.** It lives in the scorer ([datacenter-asns.ts](../../lib/links/datacenter-asns.ts)), so by the time a click reaches the denominator the rule has collapsed to a scored `classification = 'human'`. That is the point of one definition of "human" in the codebase — do not re-implement the ASN logic in reporting.
 
 ### Manual-mode campaigns
 
@@ -204,3 +215,19 @@ A NULL watermark counts as stale: never-run and stopped-running need the same at
 | [`verify-epc-monitors.ts`](../../scripts/verify-epc-monitors.ts) | every threshold fires on synthetic series; heartbeats detect never-run |
 
 ⚠️ Run these on a pool with **more than one connection**. `getExcludedClickerConversion` holds a transaction; concurrent monitors on a `max:1` pool deadlock behind it.
+
+## 10. The unscored-click inflation (fixed 2026-08-27)
+
+`HUMAN_CLICK` in [counted-clickers.ts](../../lib/reporting/counted-clickers.ts) tested `classification = 'human'` alone. Because the incremental refresh is `INSERT … ON CONFLICT DO NOTHING`, a provisional verdict it ingested could only be withdrawn by the **once-a-day full rebuild** — so the denominator inflated through every morning and snapped back overnight.
+
+Measured on prod 2026-08-27 at 10:20 ET, with 4,045 of the day's 9,965 clicks still unscored:
+
+| Stage | counted clickers | contacts actually classified human |
+|---|---|---|
+| 3309 | 620 | 28 |
+| 3319 | 523 | 164 |
+| 3298 | 41 | 13 |
+
+**The correction is confined to the current day.** Across all history, every `classification = 'human' AND scored_at IS NULL` click was clicked today — prior days are fully scored — so adding the clause removed 5,223 stage-grain rows (106,263 → 101,040) and changed **no historical figure**. What it removes is the intraday spike.
+
+`HUMAN_CLICK` is now **exported**, because [verify-counted-clickers.ts](../../scripts/verify-counted-clickers.ts)'s "independent recomputation" had inlined its own copy of the predicate — so it agreed with the cache only for as long as nobody edited the definition. The query stays independent; the definition does not.

@@ -19,7 +19,10 @@ import {
   type DeliveryCell,
 } from "@/lib/reporting/delivery";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
-import { hasNoKeitaroVisits } from "@/lib/reporting/tracking-gap";
+import {
+  shouldSubstituteClickers,
+  substitutionDominates,
+} from "@/lib/reporting/tracking-gap";
 
 // Cross-campaign Keitaro reports (the /reports "Overview" tab): per-stage
 // Clickers → Offer Redirect → Sales funnel over a date range (ET). The per-stage
@@ -147,28 +150,38 @@ export async function GET(req: NextRequest) {
   // Gated to link_mode 'tracked': manual campaigns mint no links, so they have
   // no CamMan clicks, and denominatorFor() still reads the real Keitaro value
   // for them. The gate makes that structural rather than coincidental.
-  const clickersFallbackStageIds = new Set<number>();
+  // How much of each stage's rendered Clickers figure is a CamMan substitute.
+  // A Map, not the old Set: a grouped row needs the AMOUNT substituted to judge
+  // whether the substitute dominates it (substitutionDominates), and `some()`
+  // over a Set is exactly what marked whole campaigns for one small stage.
+  const substitutedByStage = new Map<number, number>();
+  let substitutedTotal = 0;
+  const now = new Date();
   for (const s of stages) {
-    if (s.link_mode !== "tracked") continue;
-    // hasNoKeitaroVisits — BOTH columns, not clean alone. raw > 0 means
-    // Keitaro's visit script fired even though none of the visits were
-    // "clean"; that is not a tracking blackout, so it must not fall back.
-    // Same predicate the alert (lib/reporting/tracking-gap.ts) tests, so the
-    // two can't disagree about what "no Keitaro visits" means.
-    if (!hasNoKeitaroVisits(s.tally.visit_clicks_raw, s.tally.visit_clicks_clean)) continue;
     const cammanClickers = clickers.periodByStage.get(s.stage_id) ?? 0;
-    if (cammanClickers <= 0) continue;
-    // No noise floor here, unlike the alert's TRACKING_GAP_MIN_HUMAN_CLICKS
-    // (≥25 human clicks, a threshold sized to avoid paging a human over a
-    // quiet stage). This is a display substitution, not a page — any real
-    // click count is enough to beat showing "0" for a stage that demonstrably
-    // got clicks.
+    // The WHOLE rule lives in lib/reporting/tracking-gap.ts — link_mode,
+    // both visit columns, a non-zero CamMan count, and the maturity gate. It is
+    // shared with scripts/verify-clickers-fallback.ts so the guard cannot
+    // transcribe a stale copy of it.
+    if (
+      !shouldSubstituteClickers({
+        linkMode: s.link_mode,
+        visitClicksRaw: s.tally.visit_clicks_raw,
+        visitClicksClean: s.tally.visit_clicks_clean,
+        countedClickers: cammanClickers,
+        stageSentAt: s.sent_at,
+        now,
+      })
+    ) {
+      continue;
+    }
     s.tally.visit_clicks_clean = cammanClickers;
     // `grand` was accumulated inside getStageMetricsInRange BEFORE this patch,
     // so it does not see the mutation above and must be topped up by hand.
     // Gap stages contributed 0 to the Keitaro side, so this cannot double-count.
     grand.visit_clicks_clean += cammanClickers;
-    clickersFallbackStageIds.add(s.stage_id);
+    substitutedByStage.set(s.stage_id, cammanClickers);
+    substitutedTotal += cammanClickers;
   }
 
   const groupByCampaign = (sp.get("groupBy") ?? "stage") === "campaign";
@@ -241,8 +254,15 @@ export async function GET(req: NextRequest) {
       total_sent: c.total_sent,
       opt_out_rate: rateOfSent(c.opt_outs, c.total_sent),
       click_rate: rateOfSent(c.tally.visit_clicks_clean, c.total_sent),
-      clickers_is_fallback: stages.some(
-        (s) => s.campaign_id === c.campaign_id && clickersFallbackStageIds.has(s.stage_id),
+      clickers_is_fallback: substitutionDominates(
+        stages.reduce(
+          (n, s) =>
+            s.campaign_id === c.campaign_id
+              ? n + (substitutedByStage.get(s.stage_id) ?? 0)
+              : n,
+          0,
+        ),
+        c.tally.visit_clicks_clean,
       ),
       ...withFunnelDerived(
         c.tally,
@@ -283,7 +303,13 @@ export async function GET(req: NextRequest) {
         total_sent: acc.total_sent,
         opt_out_rate: rateOfSent(acc.opt_outs, acc.total_sent),
         click_rate: rateOfSent(acc.tally.visit_clicks_clean, acc.total_sent),
-        clickers_is_fallback: clickersFallbackStageIds.has(acc.stage_id),
+        // Same rule as the campaign row. A substituted stage has
+        // substituted === total, so this is identical to the old
+        // `has(stage_id)` test — stated once so the two grains cannot drift.
+        clickers_is_fallback: substitutionDominates(
+          substitutedByStage.get(acc.stage_id) ?? 0,
+          acc.tally.visit_clicks_clean,
+        ),
         ...withFunnelDerived(
           acc.tally,
           denominatorFor(
@@ -394,7 +420,10 @@ export async function GET(req: NextRequest) {
       total_sent: grandTotalSent,
       opt_out_rate: rateOfSent(grandOptOuts, grandTotalSent),
       click_rate: rateOfSent(grand.visit_clicks_clean, grandTotalSent),
-      clickers_is_fallback: clickersFallbackStageIds.size > 0,
+      clickers_is_fallback: substitutionDominates(
+        substitutedTotal,
+        grand.visit_clicks_clean,
+      ),
     },
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });

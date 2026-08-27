@@ -45,13 +45,15 @@
 //      migration/feature added on this branch) has NOT been merged to main
 //      and is not present in the deployed response at all, so hitting prod
 //      would test nothing.
-// So `expectedFallback()` below now composes the SHARED, exported no-visits
-// predicate — hasNoKeitaroVisits(), imported from lib/reporting/tracking-gap.ts,
-// the same function app/api/keitaro/reports/route.ts and the alert both call —
-// with the two conditions that remain inline in route.ts and unexported
-// (link_mode === 'tracked', counted_clickers > 0). Only those two are still a
-// by-hand mirror; the no-visits test itself can no longer drift between this
-// script and the route, because both call the same function. The raw INPUTS
+// So `expectedFallback()` below DELEGATES to the shared, exported rule —
+// shouldSubstituteClickers() in lib/reporting/tracking-gap.ts, the whole rule in
+// one function, which app/api/keitaro/reports/route.ts calls too. Nothing is
+// transcribed here any more: previously the link_mode and counted>0 clauses were
+// mirrored by hand, and a by-hand mirror is exactly what let the display half
+// ship WITHOUT the maturity gate the alert half has had all along (2026-08-27 —
+// six campaigns marked "Keitaro visits unavailable" 30–90 minutes after send,
+// five of which had Keitaro visits). Delete any clause from that function and
+// the Part 2 fixtures below go red. The raw INPUTS
 // it runs on (visit_clicks_raw/clean, the counted-clickers denominator) ARE
 // the real, exported, shared computation the route itself calls —
 // lib/reporting/stage-funnel.ts::getStageMetricsInRange — for Part 1's live
@@ -65,7 +67,11 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
-import { hasNoKeitaroVisits } from "@/lib/reporting/tracking-gap";
+import {
+  shouldSubstituteClickers,
+  substitutionDominates,
+  TRACKING_GAP_MATURITY_HOURS,
+} from "@/lib/reporting/tracking-gap";
 
 const ROLLBACK = Symbol("rollback");
 
@@ -75,21 +81,34 @@ function ok(cond: boolean, label: string) {
   if (!cond) fail++;
 }
 
-// Composes the shared hasNoKeitaroVisits() predicate with the two conditions
-// that remain inline in route.ts — see the note above.
+// ⚠️ DELEGATES — it does not restate the rule. This helper used to TRANSCRIBE
+// the conditions route.ts kept inline, which is not a shared definition at all:
+// a transcription stays green while the thing it claims to check moves. The
+// whole rule now lives in shouldSubstituteClickers() and BOTH callers import it.
+// Deleting a clause from that function must turn assertions here red.
 function expectedFallback(
   linkMode: string,
   visitClicksRaw: number,
   visitClicksClean: number,
   countedClickers: number,
+  stageSentAt: Date | string | null,
+  now: Date,
 ): { clickers: number; clickers_is_fallback: boolean } {
-  const isFallback =
-    linkMode === "tracked" &&
-    hasNoKeitaroVisits(visitClicksRaw, visitClicksClean) &&
-    countedClickers > 0;
+  const isFallback = shouldSubstituteClickers({
+    linkMode,
+    visitClicksRaw,
+    visitClicksClean,
+    countedClickers,
+    stageSentAt,
+    now,
+  });
+  const clickers = isFallback ? countedClickers : visitClicksClean;
   return {
-    clickers: isFallback ? countedClickers : visitClicksClean,
-    clickers_is_fallback: isFallback,
+    clickers,
+    // The rendered flag is the grouped-row rule, not the raw boolean. At stage
+    // grain substituted === total, so it agrees with `isFallback` — asserting
+    // through the real function keeps that equivalence honest.
+    clickers_is_fallback: substitutionDominates(isFallback ? countedClickers : 0, clickers),
   };
 }
 
@@ -106,6 +125,7 @@ async function main() {
   const to = new Date().toISOString().slice(0, 10);
   const from = new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10);
 
+  const now = new Date();
   const { stages, clickers } = await getStageMetricsInRange(orgId, from, to);
   const tracked = stages.filter((s) => s.link_mode === "tracked");
   const live = tracked.map((s) => {
@@ -114,12 +134,16 @@ async function main() {
     const visitsClean = s.tally.visit_clicks_clean;
     return {
       stage_id: s.stage_id,
+      campaign_id: s.campaign_id,
+      sent_at: s.sent_at,
       visits_raw: visitsRaw,
       visits_clean: visitsClean,
       counted,
       // The pre-FIX-1 rule (clean-only), for the before/after comparison below.
       would_mark_before: visitsClean === 0 && counted > 0,
-      ...expectedFallback(s.link_mode, visitsRaw, visitsClean, counted),
+      // The pre-maturity-gate rule, for the second comparison below.
+      would_mark_before_maturity: visitsRaw === 0 && visitsClean === 0 && counted > 0,
+      ...expectedFallback(s.link_mode, visitsRaw, visitsClean, counted, s.sent_at, now),
     };
   });
   const inFallback = live.filter((r) => r.clickers_is_fallback);
@@ -128,6 +152,7 @@ async function main() {
   // Of the stages the old rule would have marked, how many actually had
   // Keitaro traffic (raw > 0) — i.e. were marked WRONGLY.
   const wronglyMarkedBefore = wouldMarkBefore.filter((r) => r.visits_raw > 0);
+  const wouldMarkBeforeMaturity = live.filter((r) => r.would_mark_before_maturity);
 
   console.log(`  evaluated ${live.length} tracked stage(s) over ${from}..${to} (ET)`);
   console.log(`    ${inFallback.length} currently in the fallback state`);
@@ -136,7 +161,40 @@ async function main() {
     `\n  FIX 1 before/after — stages the Overview would mark with '*':\n` +
       `    before (clean-only test):        ${wouldMarkBefore.length}\n` +
       `      of which had raw > 0 (wrong):  ${wronglyMarkedBefore.length}\n` +
-      `    after (hasNoKeitaroVisits):       ${inFallback.length}`,
+      `    after (hasNoKeitaroVisits):       ${wouldMarkBeforeMaturity.length}`,
+  );
+
+  const immature = live.filter(
+    (r) => r.would_mark_before_maturity && !r.clickers_is_fallback,
+  );
+  console.log(
+    `\n  MATURITY GATE before/after — same stages, now requiring the stage to be\n` +
+      `  at least ${TRACKING_GAP_MATURITY_HOURS}h past its send before zero visits counts as a gap:\n` +
+      `    before (no maturity gate):       ${wouldMarkBeforeMaturity.length}\n` +
+      `      dropped as too young:          ${immature.length}\n` +
+      `    after (with maturity gate):      ${inFallback.length}`,
+  );
+
+  // Campaign grain — the `some()` → majority change. A campaign is "rescued"
+  // when at least one of its stages substitutes but the substitute is NOT the
+  // majority of that campaign's clicker figure: under `some()` the whole row was
+  // marked and lost CR% + Redirect% regardless of how small the substitute was.
+  const byCampaign = new Map<number, { substituted: number; total: number }>();
+  for (const r of live) {
+    const c = byCampaign.get(r.campaign_id) ?? { substituted: 0, total: 0 };
+    c.substituted += r.clickers_is_fallback ? r.counted : 0;
+    c.total += r.clickers;
+    byCampaign.set(r.campaign_id, c);
+  }
+  const campSomeMarked = [...byCampaign.values()].filter((c) => c.substituted > 0);
+  const campNowMarked = [...byCampaign.values()].filter((c) =>
+    substitutionDominates(c.substituted, c.total),
+  );
+  console.log(
+    `\n  CAMPAIGN GRAIN before/after — campaign rows carrying '*' (and losing\n` +
+      `  CR% + Redirect%) over the same window:\n` +
+      `    before (stages.some(...)):       ${campSomeMarked.length}\n` +
+      `    after (substitutionDominates):   ${campNowMarked.length}`,
   );
 
   if (inFallback.length === 0) {
@@ -191,6 +249,12 @@ async function main() {
       //              even when a different counted value also exists
       //   ZERO     — 0 visits AND 0 counted clickers -> NOT fallback (nothing
       //              to substitute)
+      //   FRESH    — 0 visits, 3 counted clickers, but sent only 30 MINUTES
+      //              ago -> NOT fallback. Zero visits that soon after a send is
+      //              latency, not a gap: the measured Keitaro visit rate is
+      //              1–5% of recipients, so a small stage legitimately sits at
+      //              zero all day. Delete the maturity clause from
+      //              shouldSubstituteClickers() and this fixture goes red.
       //   RAW_ONLY — raw > 0, clean = 0, 3 CamMan counted clickers -> NOT
       //              fallback. This is the exact shape FIX 1 corrected:
       //              Keitaro's script fired (raw > 0), the visits just
@@ -204,13 +268,15 @@ async function main() {
           (${org_id}::uuid, ${campaign_id}, 901, 'VERIFY_FALLBACK_GAP_STAGE',      now() - interval '24 hours'),
           (${org_id}::uuid, ${campaign_id}, 902, 'VERIFY_FALLBACK_HEALTHY_STAGE',  now() - interval '24 hours'),
           (${org_id}::uuid, ${campaign_id}, 903, 'VERIFY_FALLBACK_ZERO_STAGE',     now() - interval '24 hours'),
-          (${org_id}::uuid, ${campaign_id}, 904, 'VERIFY_FALLBACK_RAWONLY_STAGE',  now() - interval '24 hours')
+          (${org_id}::uuid, ${campaign_id}, 904, 'VERIFY_FALLBACK_RAWONLY_STAGE',  now() - interval '24 hours'),
+          (${org_id}::uuid, ${campaign_id}, 905, 'VERIFY_FALLBACK_FRESH_STAGE',    now() - interval '30 minutes')
         RETURNING id, tracking_id
       `)) as unknown as { id: number; tracking_id: string }[];
       const gapStage = stages.find((s) => s.tracking_id === "VERIFY_FALLBACK_GAP_STAGE")!.id;
       const healthyStage = stages.find((s) => s.tracking_id === "VERIFY_FALLBACK_HEALTHY_STAGE")!.id;
       const zeroStage = stages.find((s) => s.tracking_id === "VERIFY_FALLBACK_ZERO_STAGE")!.id;
       const rawOnlyStage = stages.find((s) => s.tracking_id === "VERIFY_FALLBACK_RAWONLY_STAGE")!.id;
+      const freshStage = stages.find((s) => s.tracking_id === "VERIFY_FALLBACK_FRESH_STAGE")!.id;
 
       await tx.execute(sql`
         INSERT INTO keitaro_stage_results
@@ -219,7 +285,8 @@ async function main() {
           (${org_id}::uuid, ${campaign_id}, ${gapStage},     'VERIFY_FALLBACK_GAP_STAGE',     current_date, 0, 0),
           (${org_id}::uuid, ${campaign_id}, ${healthyStage}, 'VERIFY_FALLBACK_HEALTHY_STAGE', current_date, 5, 5),
           (${org_id}::uuid, ${campaign_id}, ${zeroStage},    'VERIFY_FALLBACK_ZERO_STAGE',    current_date, 0, 0),
-          (${org_id}::uuid, ${campaign_id}, ${rawOnlyStage}, 'VERIFY_FALLBACK_RAWONLY_STAGE', current_date, 6, 0)
+          (${org_id}::uuid, ${campaign_id}, ${rawOnlyStage}, 'VERIFY_FALLBACK_RAWONLY_STAGE', current_date, 6, 0),
+          (${org_id}::uuid, ${campaign_id}, ${freshStage},   'VERIFY_FALLBACK_FRESH_STAGE',   current_date, 0, 0)
       `);
 
       // 3 counted_clickers rows on GAP, 2 on HEALTHY, 0 on ZERO, 3 on RAW_ONLY.
@@ -234,7 +301,10 @@ async function main() {
           (${org_id}::uuid, ${campaign_id}, ${healthyStage}, ${c2}::uuid, now() - interval '1 hour'),
           (${org_id}::uuid, ${campaign_id}, ${rawOnlyStage}, ${c1}::uuid, now() - interval '1 hour'),
           (${org_id}::uuid, ${campaign_id}, ${rawOnlyStage}, ${c2}::uuid, now() - interval '1 hour'),
-          (${org_id}::uuid, ${campaign_id}, ${rawOnlyStage}, ${c3}::uuid, now() - interval '1 hour')
+          (${org_id}::uuid, ${campaign_id}, ${rawOnlyStage}, ${c3}::uuid, now() - interval '1 hour'),
+          (${org_id}::uuid, ${campaign_id}, ${freshStage},   ${c1}::uuid, now() - interval '20 minutes'),
+          (${org_id}::uuid, ${campaign_id}, ${freshStage},   ${c2}::uuid, now() - interval '20 minutes'),
+          (${org_id}::uuid, ${campaign_id}, ${freshStage},   ${c3}::uuid, now() - interval '20 minutes')
       `);
 
       // Read back exactly what route.ts would read: visit_clicks_raw/clean
@@ -243,26 +313,50 @@ async function main() {
         SELECT k.stage_id,
                k.visit_clicks_raw AS visits_raw,
                k.visit_clicks_clean AS visits_clean,
+               cs.sent_at::text AS sent_at,
                (SELECT count(*)::int FROM counted_clickers cc WHERE cc.stage_id = k.stage_id) AS counted
         FROM keitaro_stage_results k
-        WHERE k.stage_id IN (${gapStage}, ${healthyStage}, ${zeroStage}, ${rawOnlyStage})
-      `)) as unknown as { stage_id: number; visits_raw: number; visits_clean: number; counted: number }[];
+        JOIN campaign_stages cs ON cs.id = k.stage_id
+        WHERE k.stage_id IN (${gapStage}, ${healthyStage}, ${zeroStage}, ${rawOnlyStage}, ${freshStage})
+      `)) as unknown as {
+        stage_id: number;
+        visits_raw: number;
+        visits_clean: number;
+        sent_at: string;
+        counted: number;
+      }[];
       const byId = new Map(
         results.map((r) => [
           Number(r.stage_id),
-          { visitsRaw: Number(r.visits_raw), visitsClean: Number(r.visits_clean), counted: Number(r.counted) },
+          {
+            visitsRaw: Number(r.visits_raw),
+            visitsClean: Number(r.visits_clean),
+            counted: Number(r.counted),
+            sentAt: r.sent_at,
+          },
         ]),
       );
       const gapInputs = byId.get(gapStage)!;
       const healthyInputs = byId.get(healthyStage)!;
       const zeroInputs = byId.get(zeroStage)!;
       const rawOnlyInputs = byId.get(rawOnlyStage)!;
+      const freshInputs = byId.get(freshStage)!;
+      // now() is read ONCE here, not per assertion: the fixtures are stamped
+      // relative to the database clock and this is the clock the rule is given.
+      const evalNow = new Date();
 
       ok(
         gapInputs.visitsRaw === 0 && gapInputs.visitsClean === 0 && gapInputs.counted === 3,
         "gap fixture: synthesized 0 raw / 0 clean visits, 3 counted clickers",
       );
-      const gapExpected = expectedFallback("tracked", gapInputs.visitsRaw, gapInputs.visitsClean, gapInputs.counted);
+      const gapExpected = expectedFallback(
+        "tracked",
+        gapInputs.visitsRaw,
+        gapInputs.visitsClean,
+        gapInputs.counted,
+        gapInputs.sentAt,
+        evalNow,
+      );
       ok(gapExpected.clickers_is_fallback === true, "⭐ gap fixture: rule reports clickers_is_fallback = true");
       ok(
         gapExpected.clickers === 3,
@@ -278,6 +372,8 @@ async function main() {
         healthyInputs.visitsRaw,
         healthyInputs.visitsClean,
         healthyInputs.counted,
+        healthyInputs.sentAt,
+        evalNow,
       );
       ok(healthyExpected.clickers_is_fallback === false, "⭐ healthy fixture: rule reports clickers_is_fallback = false");
       ok(
@@ -290,7 +386,14 @@ async function main() {
         zeroInputs.visitsRaw === 0 && zeroInputs.visitsClean === 0 && zeroInputs.counted === 0,
         "zero fixture: synthesized 0 visits AND 0 counted clickers",
       );
-      const zeroExpected = expectedFallback("tracked", zeroInputs.visitsRaw, zeroInputs.visitsClean, zeroInputs.counted);
+      const zeroExpected = expectedFallback(
+        "tracked",
+        zeroInputs.visitsRaw,
+        zeroInputs.visitsClean,
+        zeroInputs.counted,
+        zeroInputs.sentAt,
+        evalNow,
+      );
       ok(
         zeroExpected.clickers_is_fallback === false,
         "zero fixture: rule does NOT fall back when there is nothing to fall back to",
@@ -307,6 +410,8 @@ async function main() {
         rawOnlyInputs.visitsRaw,
         rawOnlyInputs.visitsClean,
         rawOnlyInputs.counted,
+        rawOnlyInputs.sentAt,
+        evalNow,
       );
       ok(
         rawOnlyExpected.clickers_is_fallback === false,
@@ -318,6 +423,74 @@ async function main() {
       ok(
         rawOnlyExpected.clickers === 0,
         "raw-only fixture: displayed clickers stays the real (0) Keitaro clean count, not counted_clickers",
+      );
+
+      // ── the MATURITY-GATE regression case ─────────────────────────────────
+      // Identical inputs to the GAP fixture — 0 raw, 0 clean, 3 counted
+      // clickers. The ONLY difference is sent_at. If this fixture and the GAP
+      // fixture ever agree, the maturity clause is gone.
+      ok(
+        freshInputs.visitsRaw === 0 &&
+          freshInputs.visitsClean === 0 &&
+          freshInputs.counted === 3,
+        "fresh fixture: synthesized 0 raw / 0 clean visits, 3 counted clickers — " +
+          "byte-identical to the gap fixture except sent_at",
+      );
+      const freshExpected = expectedFallback(
+        "tracked",
+        freshInputs.visitsRaw,
+        freshInputs.visitsClean,
+        freshInputs.counted,
+        freshInputs.sentAt,
+        evalNow,
+      );
+      ok(
+        freshExpected.clickers_is_fallback === false,
+        `⭐⭐ fresh fixture: stage sent 30 min ago (< ${TRACKING_GAP_MATURITY_HOURS}h) reports ` +
+          "clickers_is_fallback = FALSE — zero Keitaro visits that soon after a send is " +
+          "ingestion latency, not a dead landing page. Measured visit rate is 1–5% of " +
+          "recipients, so a small stage sits at zero for hours legitimately. Drop the " +
+          "maturity clause from shouldSubstituteClickers() and this goes true, matching " +
+          "the gap fixture above — which is the bug it exists to catch",
+      );
+      ok(
+        freshExpected.clickers === 0,
+        "fresh fixture: displayed clickers stays the honest Keitaro 0, not the 3 CamMan taps",
+      );
+      ok(
+        gapExpected.clickers_is_fallback !== freshExpected.clickers_is_fallback,
+        "⭐ gap vs fresh: same visit/clicker inputs, OPPOSITE verdicts — sent_at is the " +
+          "only variable, so the maturity gate is demonstrably load-bearing",
+      );
+
+      // ── the CAMPAIGN-GRAIN regression case ────────────────────────────────
+      // substitutionDominates() replaced `stages.some(...)`. These are pure
+      // arithmetic, no fixtures needed — but they belong here, next to the rule
+      // they guard, not in a separate file that nobody runs.
+      ok(
+        substitutionDominates(3, 20) === false,
+        "⭐⭐ campaign grain: a 3-of-20 substitute does NOT mark the row — under " +
+          "`stages.some(...)` one small resend marked a whole campaign and blanked its " +
+          "CR% and Redirect% while its Keitaro visits sat right there (2026-08-27: five " +
+          "campaigns with 6–15 clean visits lost both rate columns this way)",
+      );
+      ok(
+        substitutionDominates(30, 33) === true,
+        "campaign grain: a 30-of-33 substitute DOES mark the row — past the majority " +
+          "the number has stopped being a Keitaro reading",
+      );
+      ok(
+        substitutionDominates(10, 20) === false,
+        "campaign grain: exactly half is not a majority — the boundary is strict",
+      );
+      ok(
+        substitutionDominates(0, 5) === false,
+        "campaign grain: nothing substituted never marks the row",
+      );
+      ok(
+        substitutionDominates(3, 3) === true,
+        "⭐ stage grain is unchanged: a substituted stage has substituted === total, " +
+          "so the same function still returns true there",
       );
 
       // Nothing above is meant to persist.

@@ -751,28 +751,77 @@ async function main() {
         if (!name.startsWith(ORG_MARKER)) {
           throw new Error(`Refusing teardown: org ${orgId} name "${name}" is not the test marker.`);
         }
-        await db.execute(sql`DELETE FROM clicks WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM links WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM campaigns WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM link_destinations WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM short_domains WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM creatives WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM opt_outs WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM contacts WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM brands WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
+        // ── The teardown MUST raise statement_timeout ───────────────────────
+        // Deleting a contact cascades into 14 tables, and five of them have NO
+        // leading index on contact_id — creative_exposures (3.4M),
+        // stage_sends (3.79M), offer_exposures (1.44M), counted_clickers,
+        // drip_journeys. So ONE `DELETE FROM contacts` seq-scans ~8.6M rows and
+        // takes ~150s against production. Under the default statement_timeout it
+        // is CANCELLED, the teardown aborts part-way, and the run leaves test
+        // contacts in the live database — which is exactly what happened on the
+        // first prod run of this script (2026-08-27).
+        //
+        // All contacts go in ONE statement on purpose: the cost is those
+        // per-statement seq scans, so deleting 8 contacts one at a time would pay
+        // it eight times.
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL statement_timeout = '300s'`);
+          await tx.execute(sql`DELETE FROM clicks WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM links WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM campaigns WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM link_destinations WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM short_domains WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM creatives WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM opt_outs WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM contacts WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM brands WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
+        });
         console.log("  cleanup complete");
       }
     } finally {
+      // ── Two DIFFERENT safety questions, asked separately ─────────────────
+      //
+      // (i) "Did I leave anything behind?" — asked PER-ORG, not by global count.
+      //     Global counts give false positives against a live production
+      //     database: real clicks and contacts arrive during the ~2 min run, so
+      //     a raw before/after comparison reports DRIFT for traffic that has
+      //     nothing to do with this script (observed on the first prod run: +4
+      //     clicks that were genuine redirects). Only a per-org check is precise.
+      //
+      // (ii) "Did I delete somebody else's data?" — this is the dangerous one,
+      //     and it IS a global check. A DECREASE in any counted table means the
+      //     teardown reached outside its own org. Increases are ignored (that is
+      //     live traffic); decreases fail loudly.
+      if (orgId) {
+        const leftovers = (await db.execute(sql`
+          SELECT
+            (SELECT count(*)::int FROM organizations WHERE id = ${orgId}::uuid) AS orgs,
+            (SELECT count(*)::int FROM contacts WHERE org_id = ${orgId}::uuid) AS contacts,
+            (SELECT count(*)::int FROM brands WHERE org_id = ${orgId}::uuid) AS brands,
+            (SELECT count(*)::int FROM campaigns WHERE org_id = ${orgId}::uuid) AS campaigns,
+            (SELECT count(*)::int FROM clicks WHERE org_id = ${orgId}::uuid) AS clicks,
+            (SELECT count(*)::int FROM links WHERE org_id = ${orgId}::uuid) AS links,
+            (SELECT count(*)::int FROM campaign_stage_split_groups WHERE org_id = ${orgId}::uuid) AS groups
+        `)) as unknown as Record<string, number>[];
+        const total = Object.values(leftovers[0] ?? {}).reduce((n, v) => n + Number(v), 0);
+        check(
+          "ZERO rows left behind for the test org",
+          total === 0,
+          JSON.stringify(leftovers[0]),
+        );
+      }
       const after = await tableCounts();
-      let drift = false;
+      let shrank = false;
       for (const t of COUNTED_TABLES) {
-        if (before[t] !== after[t]) {
-          drift = true;
-          console.log(`  \x1b[31mDRIFT\x1b[0m ${t}: before=${before[t]} after=${after[t]}`);
+        if (after[t] < before[t]) {
+          shrank = true;
+          console.log(
+            `  \x1b[31mSHRANK\x1b[0m ${t}: before=${before[t]} after=${after[t]} — the teardown reached OUTSIDE its org`,
+          );
         }
       }
-      check("real-data table counts unchanged after teardown", !drift);
+      check("no counted table SHRANK (teardown stayed inside the test org)", !shrank);
       if (fatal) console.error("\nFATAL ERROR:\n", fatal);
       console.log(`\n${passed} passed, ${failed} failed, ${skipped} skipped`);
       await pgConn.end({ timeout: 5 });

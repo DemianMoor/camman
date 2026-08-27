@@ -24,11 +24,69 @@ export interface StalledStage {
   materialized_at: string | null;
 }
 
-interface StallRow extends StalledStage {
+interface StallRow extends Omit<StalledStage, "pending" | "last_sent"> {
   send_window_weekday_start: number | null;
   send_window_weekday_end: number | null;
   send_window_weekend_start: number | null;
   send_window_weekend_end: number | null;
+}
+
+export interface StageSendStats {
+  pending: number;
+  last_sent: string | null;
+}
+
+/**
+ * Per-stage `pending` count and latest `sent_at`, for a SMALL list of stage ids.
+ *
+ * ⭐ THIS MUST STAY A GROUPED AGGREGATE OVER `stage_id = ANY(...)`, NOT A
+ * CORRELATED SCALAR SUBQUERY IN THE CANDIDATE QUERY. That is not a style
+ * preference — it is the fix for a full-day production outage (2026-08-27).
+ *
+ * `(SELECT max(ss.sent_at) FROM stage_sends ss WHERE ss.stage_id = s.id)` looks
+ * harmless, but Postgres rewrites a bare `max()` into "walk an index on sent_at
+ * backwards and stop at the first match". The only index leading with sent_at is
+ * `stage_sends_sent_at_contact_idx`, so `stage_id` becomes a FILTER rather than
+ * an index condition — and for a stage that has NEVER SENT there is no first
+ * match, so it scans the entire index and returns nothing. Measured on prod with
+ * 3.86M rows: 48s PER CANDIDATE ROW (1,846,869 rows removed by filter, 3.15M
+ * buffers). Two never-sent candidates = 96s, which blew through the caller's
+ * 60s maxDuration and silently killed every hourly Telegram report for a day.
+ *
+ * With `GROUP BY stage_id` the min/max index rewrite does not apply, so the
+ * planner uses `stage_sends_stage_id_idx` as an Index Cond and touches only that
+ * stage's rows: 3.7ms for the same two stages. The pathological plan is not
+ * merely unlikely here, it is unreachable.
+ *
+ * Guarded by scripts/test-stall-detector-perf.ts.
+ */
+export async function stageSendStats(
+  dbc: typeof db,
+  stageIds: number[],
+): Promise<Map<number, StageSendStats>> {
+  const out = new Map<number, StageSendStats>();
+  if (stageIds.length === 0) return out;
+  // sql.join, NOT `${stageIds}` — Drizzle flattens a JS array in a sql template
+  // into positional params and Postgres rejects it (42809/42804).
+  const idList = sql.join(
+    stageIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  const rows = (await dbc.execute(sql`
+    SELECT ss.stage_id                                          AS stage_id,
+           count(*) FILTER (WHERE ss.status = 'pending')::int   AS pending,
+           max(ss.sent_at)                                      AS last_sent
+    FROM stage_sends ss
+    WHERE ss.stage_id IN (${idList})
+    GROUP BY ss.stage_id
+  `)) as unknown as { stage_id: number; pending: number; last_sent: string | null }[];
+  for (const r of rows) {
+    out.set(Number(r.stage_id), {
+      pending: Number(r.pending ?? 0),
+      last_sent: r.last_sent,
+    });
+  }
+  return out;
 }
 
 // A stage is a stall CANDIDATE (per SQL) when it should be actively draining but
@@ -58,11 +116,7 @@ export async function findStalledStages(
            p.send_window_weekday_start AS send_window_weekday_start,
            p.send_window_weekday_end   AS send_window_weekday_end,
            p.send_window_weekend_start AS send_window_weekend_start,
-           p.send_window_weekend_end   AS send_window_weekend_end,
-           (SELECT count(*)::int FROM stage_sends ss
-              WHERE ss.stage_id = s.id AND ss.status = 'pending') AS pending,
-           (SELECT max(ss.sent_at) FROM stage_sends ss
-              WHERE ss.stage_id = s.id) AS last_sent
+           p.send_window_weekend_end   AS send_window_weekend_end
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     JOIN org_settings os ON os.org_id = c.org_id
@@ -102,28 +156,34 @@ export async function findStalledStages(
   `)) as unknown as StallRow[];
 
   // Quiet-hours guard: a stage whose provider window is currently CLOSED is
-  // legitimately holding, not stalled — drop it.
-  return rows
-    .filter((r) => {
-      const cfg: ProviderSendWindow = {
-        send_window_weekday_start: r.send_window_weekday_start,
-        send_window_weekday_end: r.send_window_weekday_end,
-        send_window_weekend_start: r.send_window_weekend_start,
-        send_window_weekend_end: r.send_window_weekend_end,
-      };
-      return !isOutsideSendWindow(cfg, now);
-    })
-    .map((r) => ({
-      stage_id: r.stage_id,
-      campaign: r.campaign,
-      stage_number: r.stage_number,
-      label: r.label,
-      tracking_id: r.tracking_id,
-      provider_name: r.provider_name,
-      pending: Number(r.pending ?? 0),
-      last_sent: r.last_sent,
-      materialized_at: r.materialized_at,
-    }));
+  // legitimately holding, not stalled — drop it. Filter FIRST, then fetch
+  // pending/last_sent for the survivors only (see stageSendStats).
+  const inWindow = rows.filter((r) => {
+    const cfg: ProviderSendWindow = {
+      send_window_weekday_start: r.send_window_weekday_start,
+      send_window_weekday_end: r.send_window_weekday_end,
+      send_window_weekend_start: r.send_window_weekend_start,
+      send_window_weekend_end: r.send_window_weekend_end,
+    };
+    return !isOutsideSendWindow(cfg, now);
+  });
+
+  const stats = await stageSendStats(
+    dbc,
+    inWindow.map((r) => r.stage_id),
+  );
+
+  return inWindow.map((r) => ({
+    stage_id: r.stage_id,
+    campaign: r.campaign,
+    stage_number: r.stage_number,
+    label: r.label,
+    tracking_id: r.tracking_id,
+    provider_name: r.provider_name,
+    pending: stats.get(r.stage_id)?.pending ?? 0,
+    last_sent: stats.get(r.stage_id)?.last_sent ?? null,
+    materialized_at: r.materialized_at,
+  }));
 }
 
 // Human-readable Telegram alert body for a non-empty stall list. Caller decides

@@ -203,6 +203,36 @@ async function checkUnjoinableAttributions(enabled: boolean): Promise<void> {
   }
 }
 
+// Cap on EACH best-effort watch (below). They are diagnostics, not the job, so
+// they get a small slice and are abandoned if they exceed it.
+//
+// ⭐ THESE RUN AFTER THE REPORT IS SENT, AND THEY ARE BOUNDED. Both halves of
+// that sentence are load-bearing, and both were bought with a full-day outage
+// on 2026-08-27: the stall check degenerated to a 96s query (see
+// lib/sends/stall-detector.ts), it ran BEFORE the report with no time bound, and
+// the function hit Vercel's 60s maxDuration kill every hour — no report, and no
+// failure alert either, because the alert path was downstream of the hang.
+// A diagnostic must never be able to starve the thing it is diagnosing.
+const CHECK_TIMEOUT_MS = 10000;
+
+// Best-effort watches. Never throw; each is individually time-boxed so one slow
+// query cannot consume the invocation. Runs on EVERY hourly tick, including
+// ticks where no report is due — the stall net is deliberately independent of
+// the report window.
+async function runWatches(now: Date, s: NotifSettings): Promise<void> {
+  const watches: [string, Promise<void>][] = [
+    ["stall", checkStalledQueue(now, s.stall_alert_enabled)],
+    ["unjoinable", checkUnjoinableAttributions(s.unjoinable_alert_enabled)],
+  ];
+  for (const [label, p] of watches) {
+    try {
+      await withTimeout(p, CHECK_TIMEOUT_MS, `${label} watch`);
+    } catch (err) {
+      console.error(`[telegram-report] ${label} watch abandoned:`, err);
+    }
+  }
+}
+
 // ── handler ─────────────────────────────────────────────────────────────────
 async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;
@@ -220,15 +250,20 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // Load notification preferences (best-effort; falls back to defaults).
   const notifSettings = await loadNotifSettings();
 
-  // Phase 3 — backlog-stall safety net. Runs EVERY hourly tick (independent of the
-  // report window below), so a queue that silently stops draining is caught within
-  // ~an hour regardless of the specific cause. Best-effort: never break the report.
-  // Skipped when global sending is off (env SEND_ENABLED) or type is disabled.
-  await checkStalledQueue(now, notifSettings.stall_alert_enabled);
-  // Same cadence, same best-effort contract: watch the opt-out-rate breaker's
-  // numerator for attributions it can no longer align to a send.
-  await checkUnjoinableAttributions(notifSettings.unjoinable_alert_enabled);
+  // The report is the JOB. It goes first and gets the whole budget; the watches
+  // run afterwards on whatever is left (see runWatches).
+  const response = await runReport(now, warsawHour, warsawIsoDow, test, notifSettings);
+  await runWatches(now, notifSettings);
+  return response;
+}
 
+async function runReport(
+  now: Date,
+  warsawHour: number,
+  warsawIsoDow: number,
+  test: boolean,
+  notifSettings: NotifSettings,
+): Promise<NextResponse> {
   const format = decideFormat(warsawHour, warsawIsoDow, test, notifSettings);
 
   if (!format) {

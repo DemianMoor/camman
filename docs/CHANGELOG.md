@@ -1564,4 +1564,24 @@ brand. The test now mirrors the DB cases one for one, so changing either side
 without the other goes red.
   - docs updated: docs/07-conventions.md
 
+2026-08-27 — Behavioural split becomes CAMPAIGN-level (migration 0174): a lane's
+audience is now everyone who received ANY COMPLETED stage of the campaign, not
+just one chosen predecessor. The tier was already campaign-wide; only the
+aliveness anchor was per-stage. New `campaign_stage_split_groups` table owns each
+split's three lanes with a `pending -> materializing -> materialized | failed`
+state machine; `source_stage_ids` is resolved LATE (T-15min on the send-preflight
+cron, or lazily at Phase A) so a stage finishing in between is included.
+All-or-nothing is enforced at the RELEASE boundary — Phase B holds a grouped lane
+until the whole group is materialized — not by one long transaction. A
+zero-recipient lane is now `skipped_empty_at` (terminal, benign, satisfies its
+group) instead of being burned as `schedule_missed_at`. One shared
+"completed stage" predicate (`lib/sends/stage-complete.ts`) now backs both the
+source set and the P4 parent-complete gate; it is deliberately NOT
+`campaign_stages.status`. Entry point moved from the stage editor to campaign
+level beside "Add stage", with a preview modal showing source scope + provisional
+lane counts; the per-stage endpoint was removed. ~569 pre-0174 lanes keep legacy
+single-parent semantics and were NOT backfilled.
+  - docs updated: docs/03-data-model.md (+ ERD), docs/04-features/behavioral-lanes.md,
+    docs/05-flows.md (new flow D2), docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

@@ -17,7 +17,6 @@ import {
   Pencil,
   PenLine,
   Play,
-  Plus,
   Send,
   Split,
   Trash2,
@@ -98,7 +97,6 @@ import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
-import { formatStageTrackingId } from "@/lib/tracking-id-format";
 import { cn } from "@/lib/utils";
 
 // These heavy dialog/panel bodies are each mounted only when their `{state ?
@@ -2227,6 +2225,19 @@ export default function CampaignDetailPage() {
                       </div>
                     </div>
 
+                    {splitPreview.source_contacts === 0 ? (
+                      <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                        <span className="font-medium">
+                          These completed stages reached nobody.
+                        </span>{" "}
+                        Every lane would be empty right now. This usually means the
+                        stage that actually sent still has messages in flight, so it
+                        doesn&apos;t count as completed yet. You can still create the
+                        split — the source scope is re-resolved shortly before the
+                        lanes send — but nothing will go out unless more stages
+                        finish first.
+                      </div>
+                    ) : null}
                     <p className="text-xs text-muted-foreground">
                       These numbers are a live preview and will change until the
                       lanes are prepared. The source scope is re-resolved shortly

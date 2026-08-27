@@ -102,6 +102,13 @@ async function main() {
       RETURNING id
     `)) as unknown as { id: number }[];
     const sourceId = srcRows[0].id;
+    // 0174: the split is campaign-level and gated on >=1 COMPLETED stage, so the
+    // source must satisfy the shared predicate in lib/sends/stage-complete.ts —
+    // sent_at set AND no pending/sending rows. It then becomes the anchor the
+    // three lanes are cloned from, which is exactly the copy path this asserts.
+    await db.execute(sql`
+      UPDATE campaign_stages SET sent_at = now() WHERE id = ${sourceId}::int
+    `);
 
     // ── CASE 1: behavioral split (copy path) ────────────────────────────────
     console.log("\nCase 1 — lane split blanks date + rewrites sub_id3:");
@@ -117,6 +124,11 @@ async function main() {
       id: number; scheduled_at: string | null; full_url: string | null; tracking_id: string | null;
     }[];
 
+    // Guard the guards: every per-lane assertion below is an `.every()`, which is
+    // vacuously TRUE over an empty array — so a failed split would render as a
+    // wall of green. Assert the scope first.
+    check("3 lanes materialized to assert against (non-empty scope)",
+      lanes.length === 3, `got ${lanes.length}`);
     check("every lane has scheduled_at = NULL", lanes.every((l) => l.scheduled_at === null),
       lanes.map((l) => l.scheduled_at).join(","));
     check(

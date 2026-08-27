@@ -126,6 +126,47 @@ pending --recompute--> materializing --all lanes done--> materialized
   anchor only. Widening the parent-complete gate to wait on ALL source stages
   would let one stalled stage hold the whole group for 24h and then HOLD it.
 
+### Overlapping ticks, and the per-group timeout
+
+The `send-scheduled` cron takes no group-level lease (a tick that overruns its
+300s `maxDuration` overlaps the next), so two ticks CAN reach the same group.
+Three independent guards hold, each exercised by firing the real function
+concurrently in `scripts/verify-campaign-level-split.ts`:
+
+| Race | Guard |
+|------|-------|
+| two recomputes of one group | `ensureGroupSourceResolved`'s `UPDATE ... WHERE state = 'pending'` — one wins, the loser re-reads the winner's row, so only ONE source set is ever written |
+| two materializations of one lane | the pre-existing `stage_sends_active_contact_uniq` partial unique index + `ON CONFLICT DO NOTHING` — 3 concurrent inserts produce exactly 1 row |
+| two settles of one group | `UPDATE ... WHERE state = 'materializing' ... RETURNING` — exactly one returns true, so counters can't double |
+
+**Per-group timeout.** A group that never leaves `materializing` holds its
+siblings' already-written rows unreleased forever, and nothing else would say so
+— silent non-delivery, the worst failure this design can have.
+`sweepStuckSplitGroups()` runs on the same `send-preflight` cron and raises a
+**Tier-1** alert when a group has an outstanding lane more than
+`SPLIT_GROUP_STUCK_MS` (60 min) past its **last lane's due time**.
+
+It is **alert-only** — auto-failing would discard real work and could itself
+cause the non-delivery it is meant to catch, so a human decides. `last_error`
+doubles as the post-once marker (no re-alert every 5 minutes) and
+`settleSplitGroup` clears it.
+
+> **Measuring from the LAST lane's due time is load-bearing.** Lanes are created
+> with `scheduled_at = null` and the operator sets each one's time SEPARATELY, so
+> a group legitimately sits in `materializing` from the first lane's slot until
+> the last one's. Anchoring the clock on `recomputed_at` would fire on every
+> normal staggered split. A lane whose time was never set contributes no due time,
+> so the clock runs from the last lane that has one — which is exactly the "you
+> never scheduled lane 3" case worth flagging.
+
+> ⚠️ **Consequence of the all-or-nothing release gate: staggered lanes all wait
+> for the last one.** If lane 1 is scheduled 10:00 and lane 3 at 14:00, lane 1
+> materializes at 10:00 but does NOT send until the group settles at 14:00,
+> because Phase B gates on group state. This is the design working as specified
+> (nothing goes out until everything is ready), not a bug — but schedule the three
+> lanes together unless you specifically want them to fire as one batch at the
+> latest time.
+
 ### An empty lane is skipped, not burned
 
 `no_recipients` is a PERMANENT kickoff refusal, so before 0174 a zero-recipient

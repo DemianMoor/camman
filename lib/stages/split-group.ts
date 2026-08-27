@@ -161,7 +161,9 @@ export async function settleSplitGroup(
 ): Promise<boolean> {
   const rows = (await dbc.execute(sql`
     UPDATE campaign_stage_split_groups g
-    SET state = 'materialized'
+    -- Clearing last_error matters: it is the stuck-sweep's post-once marker, so a
+    -- group that was flagged stuck and then finished must not stay flagged.
+    SET state = 'materialized', last_error = NULL
     WHERE g.id = ${groupId}::uuid
       AND g.state = 'materializing'
       AND NOT EXISTS (
@@ -174,6 +176,80 @@ export async function settleSplitGroup(
     RETURNING g.id
   `)) as unknown as { id: string }[];
   return rows.length > 0;
+}
+
+// ── Per-group stuck detector ────────────────────────────────────────────────
+//
+// A group that never leaves 'materializing' holds its siblings' already-written
+// rows UNRELEASED forever, and nothing else would ever say so. That is the worst
+// failure mode this design can have — silent non-delivery — so it gets its own
+// alarm. Trips when ALL of:
+//
+//   * state = 'materializing'
+//   * at least one non-archived lane is still outstanding (neither materialized
+//     nor skipped-empty)
+//   * now is more than SPLIT_GROUP_STUCK_MS past the LAST lane's due time
+//
+// MEASURED FROM THE LAST LANE'S DUE TIME, not from recomputed_at — and that is
+// load-bearing. Lanes are created with `scheduled_at = null` and the operator
+// sets each one's time SEPARATELY, so a group legitimately sits in
+// 'materializing' from the first lane's slot until the last one's. Anchoring on
+// recomputed_at would fire on every normal staggered split. A lane whose
+// scheduled_at was never set contributes no due time, so the clock runs from the
+// last lane that DOES have one — which is exactly the "you never scheduled lane
+// 3" case we want flagged.
+//
+// It ALERTS, it does not auto-fail. Failing the group would discard real work and
+// could itself cause the non-delivery it is meant to catch; a human decides.
+// `last_error` doubles as the post-once marker so the sweep can't re-alert every
+// 5 minutes; settleSplitGroup clears it.
+export const SPLIT_GROUP_STUCK_MS = 60 * 60 * 1000;
+const STUCK_MARKER = "stuck_materializing";
+
+export async function sweepStuckSplitGroups(
+  dbc: DbOrTx,
+  opts: { now: Date; stuckMs?: number; orgId?: string; maxGroups?: number },
+): Promise<{ stuck: number }> {
+  const stuckMs = opts.stuckMs ?? SPLIT_GROUP_STUCK_MS;
+  const cutoffSeconds = Math.floor(stuckMs / 1000);
+  const nowIso = opts.now.toISOString();
+
+  const rows = (await dbc.execute(sql`
+    UPDATE campaign_stage_split_groups g
+    SET last_error = ${STUCK_MARKER}
+    WHERE g.id IN (
+      SELECT g2.id
+      FROM campaign_stage_split_groups g2
+      JOIN campaigns c ON c.id = g2.campaign_id
+      WHERE g2.state = 'materializing'
+        AND g2.last_error IS DISTINCT FROM ${STUCK_MARKER}
+        AND EXISTS (
+          SELECT 1 FROM campaign_stages s
+          WHERE s.split_group_id = g2.id
+            AND s.archived_at IS NULL
+            AND s.materialized_at IS NULL
+            AND s.skipped_empty_at IS NULL
+        )
+        AND ${nowIso}::timestamptz > (
+          GREATEST(
+            g2.recomputed_at,
+            COALESCE(
+              (SELECT max(s.scheduled_at) FROM campaign_stages s
+               WHERE s.split_group_id = g2.id AND s.archived_at IS NULL),
+              g2.recomputed_at
+            )
+          ) + make_interval(secs => ${cutoffSeconds})
+        )
+        ${opts.orgId ? sql`AND c.org_id = ${opts.orgId}::uuid` : sql``}
+      LIMIT ${opts.maxGroups ?? 25}
+    )
+    RETURNING g.id::text AS id
+  `)) as unknown as { id: string }[];
+
+  for (const r of rows) {
+    void notifyGroupStuck(dbc, r.id).catch(() => {});
+  }
+  return { stuck: rows.length };
 }
 
 // ── Provisional preview (the confirm modal) ─────────────────────────────────
@@ -411,6 +487,42 @@ export async function notifyGroupFailed(
       `Reason: ${reason}\n` +
       `All lanes are held unreleased. Rows already materialized are kept — cancel the ` +
       `stages to clear them. Action needed: resolve the cause, then re-prepare.`,
+  );
+}
+
+// Tier 1 — the group has been stuck mid-materialization long past its last lane's
+// slot. Its siblings' rows are written but held, so this is silent non-delivery
+// until a human acts.
+export async function notifyGroupStuck(
+  dbc: DbOrTx,
+  groupId: string,
+): Promise<void> {
+  const ctx = await groupAlertContext(dbc, groupId);
+  const outstanding = (await dbc.execute(sql`
+    SELECT s.stage_number, s.label, s.scheduled_at
+    FROM campaign_stages s
+    WHERE s.split_group_id = ${groupId}::uuid
+      AND s.archived_at IS NULL
+      AND s.materialized_at IS NULL
+      AND s.skipped_empty_at IS NULL
+    ORDER BY s.stage_number
+  `)) as unknown as {
+    stage_number: number | null; label: string | null; scheduled_at: string | null;
+  }[];
+  const list = outstanding
+    .map(
+      (s) =>
+        `  · stage ${s.stage_number ?? "?"}${s.label ? ` "${s.label}"` : ""} — ` +
+        (s.scheduled_at ? `due ${s.scheduled_at}` : "NO SEND TIME SET"),
+    )
+    .join("\n");
+  await notifyTelegram(
+    `🛑 Behavioural split STUCK — lanes materialized but NOT sending.\n` +
+      `Campaign "${ctx.campaign}" (id ${ctx.campaignId})\n` +
+      `The group has been mid-materialization well past its last lane's slot, so ` +
+      `every lane is held unreleased. Outstanding:\n${list || "  (none listed)"}\n` +
+      `Action needed: set a send time on any lane missing one, or cancel the split. ` +
+      `Nothing is auto-failed — the messages already prepared are intact.`,
   );
 }
 

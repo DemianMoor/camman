@@ -437,6 +437,8 @@ A teardown that stops at its first failure leaks silently, because the crash sur
 - **Split-group atomicity is at the RELEASE boundary, not the insert boundary (migration 0174).** Lanes materialize independently — windowed, per-window commit, resumable, exactly as before — and **Phase B refuses to drain a grouped lane until its whole group is `materialized`**. One transaction for the trio was measured at ~30–65s for the largest real trio (18,755 combined rows at ~500–900 rows/s): it would pin one transaction-pooler connection that long, breach the 300s route ceiling at ~3× today's size, and throw away the resumability that exists because a 60s timeout used to roll back ~17K recipients. On failure the group goes `failed`, NO lane releases, a Tier-1 Telegram alert fires, and **rows already written stay in place unreleased** — rolling them back is a second failure mode with nothing to gain; `.../send/abort` is how an operator clears them.
 - **A zero-recipient behavioural lane is SKIPPED, not burned (migration 0174).** `no_recipients` is a PERMANENT kickoff refusal, so a zero-recipient stage used to be stamped `schedule_missed_at` and render Red "needs attention". Under campaign-level classification an empty tier is ROUTINE — tier 2 measures just 28–323 contacts on the widest production campaigns — so a grouped lane that resolves to zero gets `campaign_stages.skipped_empty_at` instead, reads as the Grey `skipped_empty` operational status, SATISFIES its group so the siblings still release, and posts an informational (Tier-3) note. **`skipped_empty_at` is a PIPELINE marker, not a `status` value** — it joins `schedule_missed_at`/`slip_hold_at`/`preflight_aborted_at`, all nullable timestamps, because `status` is a different axis (see the completed-stage rule above). An ORDINARY stage with no recipients keeps the louder behaviour.
 - **The widened source set is a superset EXCEPT when the completed stages reached nobody.** `sent(parent) ⊆ sent(all completed stages)` holds because materialization only draws from `campaign_audience_pool` — verified on 203 real lane parents, `old EXCEPT new = 0` every time. The exception (3 of 206 on production: campaigns 119, 120, 478) is a campaign whose *sending* stage still carries stranded `pending` rows, so it is excluded as incomplete and the new source set is EMPTY — a new lane there would be smaller, not larger. The protection is the confirm modal, which reports `0 contacts reached` behind an amber warning before the operator commits. Do NOT "fix" this by relaxing the completeness predicate to bare `sent_at IS NOT NULL`: that would let a stage still actively sending into the classification universe and would diverge from the P4 gate.
+- **A behavioural split group is protected against overlapping cron ticks by three independent guards, and has a per-group timeout (migration 0174).** The `send-scheduled` cron takes no group-level lease, so two ticks CAN reach one group. (1) `ensureGroupSourceResolved` writes under `WHERE state = 'pending'` — one wins, the loser re-reads the winner's row, so only ONE source set is ever written. (2) Two materializations of one lane collide on the pre-existing `stage_sends_active_contact_uniq` partial unique index + `ON CONFLICT DO NOTHING`. (3) `settleSplitGroup` flips under `WHERE state = 'materializing' … RETURNING`, so exactly one caller flips it and counters can't double. All three are asserted by firing the real functions CONCURRENTLY in [scripts/verify-campaign-level-split.ts](../scripts/verify-campaign-level-split.ts), not by reading the SQL. **The timeout** (`sweepStuckSplitGroups`, on the same `send-preflight` cron, `SPLIT_GROUP_STUCK_MS = 60 min`) exists because a group stuck in `materializing` holds its siblings' written rows unreleased forever with nothing else to say so — silent non-delivery. It is **alert-only** (auto-failing would discard work and could cause the very non-delivery it catches), post-once via `last_error`, cleared by `settleSplitGroup`, and **measured from the LAST lane's due time** — anchoring on `recomputed_at` would fire on every legitimately staggered split.
+- **Staggered lane schedules all send at the LAST lane's time (migration 0174).** Phase B gates on GROUP state, so a lane scheduled 10:00 materializes at 10:00 but does not release until its 14:00 sibling settles the group. That is the all-or-nothing release gate working as designed — nothing goes out until everything is ready — but it means the three lanes should normally be scheduled together unless firing as one batch at the latest time is what you want.
 - **Lane children never fire before their parent completes (migration 0117, P4).** A behavioral lane child (`parent_stage_id` set) is gated in the scheduler ([`lib/sends/child-slip.ts`](../lib/sends/child-slip.ts) `decideChildSlip`): it only materializes once the parent is COMPLETE (`sent_at` set AND no `pending`/`sending` rows — `failed`/`skipped_*` are terminal and don't block; the lane aliveness filter already drops a `failed` contact). If the parent overruns, the child is **slipped** to `parent_complete + original_offset` (quiet-hours-aware, rolling to the next ET day via `nextWindowOpenAtOrAfter`), capped at **24h** past the original — beyond which it is **HELD** (`slip_hold_at`, parked for a human), never fired or burned as `schedule_missed_at`. A provider paused mid-drain freezes its stage's `pending` rows → parent never completes → dependent child holds at 24h with a Telegram alert: the intended fail-safe (a direct consequence of the latching per-provider pause — the P8 blast-radius policy call). Slip alerts carry the new fire time; hold alerts are self-sufficient (campaign, stage, original time, reason, action).
 - **Preflight before materialize + Autopilot week view (migration 0118, P5/P6).** A `*/5` cron ([`lib/sends/send-preflight.ts`](../lib/sends/send-preflight.ts)) computes each scheduled stage's resolved-audience breakdown ~15 min before it materializes and posts a Telegram digest + red alerts (post-once via `preflight_notified_at`); the breakdown ([`preflight-breakdown.ts`](../lib/sends/preflight-breakdown.ts)) predicts the **1-hour phone dedup** (`dedup_1h_predicted`) so a stage that will be ~100% `skipped_duplicate` is visible BEFORE it fires. `/sends/autopilot` renders the week with slip state + parent-gate + preflight, a new **`held`** operational status for slip-held children, and **release-hold** / **preflight-abort** actions. `preflight_aborted_at` holds a stage out of Phase A (mirrors `slip_hold_at`). Release-hold preserves `slip_original_scheduled_at` for audit unless the operator supplies an explicit new time.
 - **Send-time opt-out invariant is a HARD gate (migration 0116).** Opt-outs are filtered into the frozen `stage_sends` set only at materialization, so a pre-built/scheduled stage could otherwise text someone who STOPped between build and dispatch. Before sending each claimed batch the drain re-checks `opt_outs` (right before the 1-hour dedup gate) and marks opted-out rows **`skipped_opted_out`** (`last_error='opt_out_cancel'`, terminal, never sent); the opt-out ingesters ([`poll-opt-outs.ts`](../lib/sends/poll-opt-outs.ts), [`ahoi-optout.ts`](../lib/sends/ahoi-optout.ts)) also cascade-cancel still-`pending` rows for the contact on intake. A **distinct** bucket from `filtered`/`failed`/`rejected` so STOP-cancels stay separately countable. Applies identically to scheduled and manual sends (shared `runStageDrain`).
@@ -1077,6 +1079,46 @@ await db.insert(notification_settings).values({ org_id: orgId, active_weekdays: 
 **`tsc`, `eslint` and `next build` are all green while this bug is live** — the value is a `number[]` and the column is declared `.array()`, so nothing static disagrees. It only appears when the statement executes, which is why any write path touching an array column needs a test that actually runs it. This is the same shape as the older `ANY(${jsArray})` trap (`ERR_INVALID_ARG_TYPE` from postgres-js, 2026-08-19) — same cause, different symptom.
 
 Found 2026-08-26 on `PUT /api/settings/notifications` (migration 0173), before it shipped. `scripts/test-notification-settings-persistence.ts` is the guard: it calls the real exported `saveNotificationSettings()` inside a transaction that always rolls back, rather than re-typing the query into the test.
+
+## Recon reads `origin/main`, never whatever branch happens to be checked out
+
+**A recon, audit, or "where does X live" investigation must be done against
+`origin/main` (or the branch the work will actually be based on) — not against
+the shared checkout's current `HEAD`.** `C:/AFF/camman` sits on whatever branch
+another session last used, and that branch can be arbitrarily stale.
+
+Established 2026-08-27 on the campaign-level behavioural split. The Phase 0 recon
+was read off a feature branch **105 commits behind `origin/main`**. Its
+conclusions about structure and cost held up, but two specifics were already
+wrong by the time they were written:
+
+- `campaignTierExpr`'s tier 3 had moved from `sale_status = 'sale'` to
+  `purchasedClause()` (`sale_status IN ('lead','sale')`) — the recon documented
+  the dead definition.
+- `stageRecipientsSql` had gained a `carrierPolicy` parameter that **every
+  send-path caller must pass**, or the audience shown stops matching the audience
+  that materializes. New call sites written from the stale reading would have
+  silently omitted it.
+
+Neither would have been caught by `tsc` (one is a SQL-level semantic, the other an
+optional parameter). Both were found only by diffing the files the recon named
+between the read branch and `origin/main`.
+
+**The recipe, before trusting any recon finding:**
+
+```sh
+git fetch origin
+git rev-list --count HEAD..origin/main          # how stale is what I read?
+git diff --numstat <read-ref> origin/main -- <the files the recon named>
+```
+
+If the count is non-zero, re-read the changed files on `origin/main` before
+building on the recon — and say plainly in the write-up which ref it was read at.
+A recon is a claim about the code; like any claim it decays, and the decay is
+invisible until something built on it is already wrong.
+
+Related: the base-commit rule below, and "a passing check is not evidence until
+you know what it ran against".
 
 ## Working copy — do multi-step work in a throwaway worktree, never in `C:/AFF/camman` directly
 

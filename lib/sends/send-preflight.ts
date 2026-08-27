@@ -8,7 +8,10 @@ import {
   computePreflightBreakdown,
   type PreflightBreakdown,
 } from "@/lib/sends/preflight-breakdown";
-import { recomputeDueSplitGroups } from "@/lib/stages/split-group";
+import {
+  recomputeDueSplitGroups,
+  sweepStuckSplitGroups,
+} from "@/lib/stages/split-group";
 
 export type DbOrTx = typeof db;
 
@@ -29,6 +32,9 @@ export interface PreflightRunResult {
   split_groups_considered: number;
   split_groups_resolved: number;
   split_groups_failed: number;
+  // Groups held mid-materialization long past their last lane's slot. Alert-only
+  // (never auto-failed) -- see sweepStuckSplitGroups.
+  split_groups_stuck: number;
 }
 
 interface DueRow {
@@ -116,6 +122,18 @@ export async function runSendPreflight(
     // swallow — Phase A's lazy resolve is the backstop
   }
 
+  // Per-group timeout. A group that never leaves 'materializing' holds its
+  // siblings' already-written rows unreleased forever, and nothing else would
+  // ever say so — this is the only alarm for that silent non-delivery. It is
+  // ALERT-ONLY and post-once, and it measures from the LAST lane's due time so a
+  // legitimately staggered split (lanes scheduled hours apart) never trips it.
+  let stuckSweep = { stuck: 0 };
+  try {
+    stuckSweep = await sweepStuckSplitGroups(dbc, { now, orgId });
+  } catch {
+    // best-effort, like every other arm of this cron
+  }
+
   const due = (await dbc.execute(sql`
     SELECT s.id AS stage_id, s.campaign_id AS campaign_id, c.org_id AS org_id,
            s.stage_number AS stage_number, s.label AS label, c.name AS campaign_name,
@@ -182,5 +200,6 @@ export async function runSendPreflight(
     split_groups_considered: groupSweep.considered,
     split_groups_resolved: groupSweep.resolved,
     split_groups_failed: groupSweep.failed,
+    split_groups_stuck: stuckSweep.stuck,
   };
 }

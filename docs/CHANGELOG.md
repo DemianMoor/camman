@@ -1581,6 +1581,12 @@ source set and the P4 parent-complete gate; it is deliberately NOT
 level beside "Add stage", with a preview modal showing source scope + provisional
 lane counts; the per-stage endpoint was removed. ~569 pre-0174 lanes keep legacy
 single-parent semantics and were NOT backfilled.
+  Also adds the per-group timeout (`sweepStuckSplitGroups`, 60 min past the LAST
+  lane's due time, alert-only + post-once) — a group stuck in `materializing`
+  holds its siblings' rows unreleased forever and nothing else would say so. And
+  a new process convention: recon reads `origin/main`, never the shared
+  checkout's current HEAD (the Phase 0 recon here was read 105 commits stale and
+  recorded two already-dead specifics).
   - docs updated: docs/03-data-model.md (+ ERD), docs/04-features/behavioral-lanes.md,
     docs/05-flows.md (new flow D2), docs/07-conventions.md, docs/CHANGELOG.md
 

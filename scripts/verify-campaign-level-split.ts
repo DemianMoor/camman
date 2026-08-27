@@ -1,6 +1,6 @@
 // Campaign-level behavioural split — enforcement proof (migration 0174).
 //
-// Ten bars. Every synthetic bar seeds under a DEDICATED throwaway organization
+// Twelve bars. Every synthetic bar seeds under a DEDICATED throwaway organization
 // carrying the marker below; teardown is scoped to that org_id ONLY (asserted to
 // match the marker first), and real-data table counts are captured before seeding
 // and re-checked after teardown.
@@ -24,6 +24,12 @@
 //       a recompute that fails before any lane materialized leaves zero rows.
 //  (10) A lane that resolves to ZERO recipients is skipped_empty (terminal,
 //       benign), still SATISFIES its group, and is not re-selected by Phase A.
+//  (11) OVERLAPPING TICKS on one group: concurrent recomputes agree on one source
+//       set, concurrent materializations of a lane write ONE row, concurrent
+//       settles flip once. Fired concurrently, not reasoned about.
+//  (12) PER-GROUP TIMEOUT: a group stuck in 'materializing' past its LAST lane's
+//       slot is detected, alert-only (never auto-failed), post-once, and does NOT
+//       trip while a legitimately staggered lane is still in the future.
 //
 // Run: npx tsx --conditions=react-server scripts/verify-campaign-level-split.ts
 // (the react-server condition is required: this pulls in lib/sends/scheduled.ts,
@@ -45,9 +51,11 @@ import {
 import {
   ensureGroupSourceResolved,
   failSplitGroup,
+  getSplitGroup,
   markLaneSkippedEmpty,
   previewSplitLanes,
   settleSplitGroup,
+  sweepStuckSplitGroups,
 } from "@/lib/stages/split-group";
 import { performBehavioralSplit } from "@/lib/stages/behavioral-split";
 
@@ -491,6 +499,145 @@ async function main() {
     `);
     const settled = await settleSplitGroup(db, groupId);
     check("a skipped-empty lane SATISFIES its group (it can still settle)", settled);
+
+    // ── (11) OVERLAPPING TICKS ON THE SAME GROUP ─────────────────────────────
+    // The send-scheduled cron takes no group-level lease, so two ticks CAN reach
+    // the same group (a tick that overruns its 300s maxDuration overlaps the
+    // next). Three independent guards must hold. Each is exercised by firing the
+    // real function CONCURRENTLY, not by reading the SQL.
+    console.log("\n(11) Overlapping ticks on the same group");
+    const camp3 = (
+      (await db.execute(sql`
+        INSERT INTO campaigns (org_id, slug, name, brand_id, link_mode, status, tracking_id)
+        VALUES (${orgId}::uuid, ${`sg3-${unique}`}, ${"SplitGroup Camp 3"},
+                ${brandId}::int, ${"tracked"}, ${"active"}, ${`sg3${unique}`})
+        RETURNING id
+      `)) as unknown as { id: number }[]
+    )[0].id;
+    const c3s1 = (
+      (await db.execute(sql`
+        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, sent_at)
+        VALUES (${orgId}::uuid, ${camp3}::int, 1, ${creativeId}::int, now())
+        RETURNING id
+      `)) as unknown as { id: number }[]
+    )[0].id;
+    await db.execute(sql`
+      INSERT INTO stage_sends
+        (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
+      VALUES (${orgId}::uuid, ${camp3}::int, ${c3s1}::int, ${cid["ign"]}::uuid,
+              ${"x"}, ${"body"}, ${"sent"})
+    `);
+    const split3 = await performBehavioralSplit({ orgId, campaignId: camp3 }, db);
+    if (!split3.ok) throw new Error("camp3 split failed: " + JSON.stringify(split3));
+    const g3 = split3.split_group_id;
+
+    // (a) Two concurrent recomputes => exactly ONE transition, one source set.
+    const both = await Promise.all([
+      ensureGroupSourceResolved(db, g3),
+      ensureGroupSourceResolved(db, g3),
+    ]);
+    check(
+      "concurrent recomputes both return 'materializing' (loser reads the winner's row)",
+      both.every((g) => g?.state === "materializing"),
+      both.map((g) => g?.state).join(","),
+    );
+    check(
+      "concurrent recomputes agree on ONE source set",
+      JSON.stringify(both[0]?.source_stage_ids) === JSON.stringify(both[1]?.source_stage_ids),
+      both.map((g) => JSON.stringify(g?.source_stage_ids)).join(" vs "),
+    );
+
+    // (b) Two concurrent materializations of the SAME lane cannot double-write.
+    // This is the `stage_sends_active_contact_uniq` partial unique index +
+    // ON CONFLICT DO NOTHING that the scheduler already relies on; assert it
+    // still holds for a grouped lane.
+    const g3lane = split3.lane_stage_ids[0];
+    const dupInsert = () =>
+      db.execute(sql`
+        INSERT INTO stage_sends
+          (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
+        VALUES (${orgId}::uuid, ${camp3}::int, ${g3lane}::int, ${cid["ign"]}::uuid,
+                ${"x"}, ${"body"}, ${"pending"})
+        ON CONFLICT (stage_id, contact_id) WHERE status IN ('pending','sending')
+        DO NOTHING
+      `);
+    await Promise.all([dupInsert(), dupInsert(), dupInsert()]);
+    const dupRows = (
+      (await db.execute(sql`
+        SELECT count(*)::int AS n FROM stage_sends
+        WHERE stage_id = ${g3lane}::int AND contact_id = ${cid["ign"]}::uuid
+      `)) as unknown as { n: number }[]
+    )[0].n;
+    check("3 concurrent materializations of one lane => exactly ONE row",
+      Number(dupRows) === 1, `got ${dupRows}`);
+
+    // (c) Two concurrent settles => exactly ONE flips (so counters can't double).
+    await db.execute(sql`
+      UPDATE campaign_stages SET materialized_at = now()
+      WHERE split_group_id = ${g3}::uuid
+    `);
+    const settles = await Promise.all([
+      settleSplitGroup(db, g3),
+      settleSplitGroup(db, g3),
+    ]);
+    check("concurrent settles => exactly ONE returns true",
+      settles.filter(Boolean).length === 1, settles.join(","));
+
+    // ── (12) PER-GROUP TIMEOUT ───────────────────────────────────────────────
+    console.log("\n(12) Per-group timeout (stuck in 'materializing')");
+    // Put the group back to materializing with one lane outstanding, and date it
+    // so it is well past the cutoff.
+    await db.execute(sql`
+      UPDATE campaign_stages SET materialized_at = NULL
+      WHERE id = ${split3.lane_stage_ids[1]}::int
+    `);
+    await db.execute(sql`
+      UPDATE campaign_stages
+      SET scheduled_at = now() - interval '3 hours', send_approved = true
+      WHERE split_group_id = ${g3}::uuid
+    `);
+    await db.execute(sql`
+      UPDATE campaign_stage_split_groups
+      SET state = 'materializing', last_error = NULL, recomputed_at = now() - interval '3 hours'
+      WHERE id = ${g3}::uuid
+    `);
+    const sweep1 = await sweepStuckSplitGroups(db, { now: new Date(), orgId });
+    check("a group stuck past the cutoff is DETECTED", sweep1.stuck === 1, `stuck=${sweep1.stuck}`);
+    const afterSweep = await getSplitGroup(db, g3);
+    check("stuck group is ALERT-ONLY — state stays 'materializing', not auto-failed",
+      afterSweep?.state === "materializing", afterSweep?.state);
+    check("stuck marker recorded", afterSweep?.last_error === "stuck_materializing",
+      String(afterSweep?.last_error));
+    const sweep2 = await sweepStuckSplitGroups(db, { now: new Date(), orgId });
+    check("the sweep is POST-ONCE (no re-alert every 5 min)", sweep2.stuck === 0,
+      `second sweep stuck=${sweep2.stuck}`);
+
+    // FAULT INJECTION: a group still INSIDE its window must NOT trip. This is the
+    // staggered-lane case — lanes are created with scheduled_at NULL and the
+    // operator sets each separately, so a group legitimately sits in
+    // 'materializing' between the first lane's slot and the last one's.
+    await db.execute(sql`
+      UPDATE campaign_stage_split_groups SET last_error = NULL WHERE id = ${g3}::uuid
+    `);
+    await db.execute(sql`
+      UPDATE campaign_stages SET scheduled_at = now() + interval '4 hours'
+      WHERE id = ${split3.lane_stage_ids[1]}::int
+    `);
+    const sweep3 = await sweepStuckSplitGroups(db, { now: new Date(), orgId });
+    check("a staggered group whose LAST lane is still in the future does NOT trip",
+      sweep3.stuck === 0, `stuck=${sweep3.stuck}`);
+    // And settling clears the marker so a recovered group is not left flagged.
+    await db.execute(sql`
+      UPDATE campaign_stages SET materialized_at = now() WHERE split_group_id = ${g3}::uuid
+    `);
+    await db.execute(sql`
+      UPDATE campaign_stage_split_groups SET last_error = 'stuck_materializing'
+      WHERE id = ${g3}::uuid
+    `);
+    await settleSplitGroup(db, g3);
+    const settledGroup = await getSplitGroup(db, g3);
+    check("settling CLEARS the stuck marker", settledGroup?.last_error == null,
+      String(settledGroup?.last_error));
 
     // ── (5b) REAL DATA: old lanes are a subset of the widened source set ─────
     console.log("\n(5b) REAL DATA — legacy single-parent lanes vs the widened set");

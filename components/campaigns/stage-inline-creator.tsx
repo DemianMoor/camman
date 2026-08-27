@@ -109,9 +109,6 @@ export interface StageInlineEditorProps {
   onImportResults?: () => void;
   onManualResults?: () => void;
   onViewImportHistory?: () => void;
-  // Edit-only: trigger a behavioral split from the editor. The parent runs the
-  // confirm + POST (shared with the stages-row action).
-  onBehavioralSplit?: () => void;
 }
 
 // =============== Component ===============
@@ -130,7 +127,6 @@ export function StageInlineEditor({
   onImportResults,
   onManualResults,
   onViewImportHistory,
-  onBehavioralSplit,
 }: StageInlineEditorProps) {
   const createApi = useApiCall<{ id: number; stage_number: number }>();
   const updateApi = useApiCall<{ id: number }>();
@@ -323,7 +319,6 @@ export function StageInlineEditor({
               onOpenChange(false);
               onSaved();
             }}
-            onBehavioralSplit={isEdit ? onBehavioralSplit : undefined}
             campaign={campaign}
             resultsCounters={
               isEdit

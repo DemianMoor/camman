@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-27_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -99,6 +99,49 @@ sequenceDiagram
 > The redirect appends `&sub_id1=<send_token>` (= `stage_sends.id`) to the shared destination so a later Keitaro sale attributes back to this recipient (flow H). The operator's stage Full URL is never touched.
 
 > **Key resolution is number → account → key (migration 0110).** A stage with no `provider_phone_id` falls back to the legacy `(provider, brand)`/default lookup, but only while the provider has exactly ONE credential — once a provider has ≥2 accounts a numberless stage refuses (`no_credentials`) rather than guessing. The key is decrypted at this point only (AES-256-GCM `api_key_encrypted`, dual-read against legacy plaintext `api_key`) — never earlier, never returned by any list/GET response. See [07-conventions.md](07-conventions.md).
+
+## D2. Behavioural split group — recompute, materialize, release (0174)
+
+```mermaid
+sequenceDiagram
+  participant Op as Operator
+  participant API as POST /campaigns/[id]/behavioral-split
+  participant Pre as send-preflight cron (*/5, T-15min)
+  participant PhA as send-scheduled Phase A
+  participant PhB as send-scheduled Phase B
+  participant TG as Telegram
+  Op->>API: split (gated on >=1 COMPLETED stage)
+  API->>API: INSERT split group (state=pending, source_stage_ids EMPTY)
+  API->>API: INSERT 3 lanes (tier 0/1/2, parent=anchor, split_group_id)
+  Note over API: the source set is NOT frozen here -- a stage finishing<br/>before the recompute must still be included
+  Pre->>Pre: ensureGroupSourceResolved (guarded on state='pending')
+  Pre->>Pre: resolve COMPLETED stages -> source_stage_ids, recomputed_at
+  Pre->>Pre: state pending -> materializing
+  alt no completed source stages
+    Pre->>TG: Tier-1 "split FAILED" ; state -> failed
+  end
+  loop each lane, independently (windowed + resumable)
+    PhA->>PhA: ensureGroupSourceResolved (lazy backstop)
+    PhA->>PhA: kickoffStageSend with sourceStageIds
+    alt 0 recipients
+      PhA->>PhA: skipped_empty_at (terminal, benign) ; SATISFIES the group
+      PhA->>TG: Tier-3 informational note
+    else permanent refusal
+      PhA->>PhA: schedule_missed_at ; group -> failed
+      PhA->>TG: Tier-1 "no lane will send"
+    end
+    PhA->>PhA: settleSplitGroup (flips when NO lane is outstanding)
+  end
+  PhB->>PhB: drain ONLY if the whole group is 'materialized'
+```
+> **All-or-nothing at the RELEASE boundary, not the insert boundary.** Lanes
+> materialize independently and resumably; Phase B is what refuses to let any lane
+> send until every sibling is done. A one-transaction trio was measured at ~30-65s
+> for the largest real trio and would have discarded resumability.
+
+> **A failed group keeps its already-materialized rows, unreleased.** Rolling them
+> back would be a second failure mode with nothing to gain — the abort route
+> (`.../send/abort`) is how an operator clears them.
 
 ## E. Opt-out (STOP) intake
 

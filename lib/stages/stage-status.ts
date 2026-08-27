@@ -24,7 +24,11 @@ export type StageOperationalStatus =
   | "materializing"
   | "prepared"
   | "sending_sent"
-  | "missed_failed";
+  | "missed_failed"
+  // 0174 — a behavioural lane that resolved to ZERO recipients. TERMINAL and
+  // BENIGN: distinct from missed_failed on purpose, because under campaign-level
+  // classification an empty tier is a routine outcome, not something to fix.
+  | "skipped_empty";
 
 // "Will it send?" summarized for copy/sorting. `attention` and `unprepared`
 // are the two that must read loud — they mean "this will NOT send as-is".
@@ -137,6 +141,19 @@ export const STAGE_STATUS_META: Record<StageOperationalStatus, StageStatusMeta> 
     rowClass: "border-l-rose-500 bg-rose-50/50 dark:bg-rose-950/25",
     swatchClass: "bg-rose-500",
   },
+  skipped_empty: {
+    key: "skipped_empty",
+    label: "No recipients",
+    meaning:
+      "This behavioural lane had nobody in its tier, so nothing was sent. Normal for a small audience — its sibling lanes are unaffected.",
+    willSend: "sent",
+    sortWeight: 90,
+    badgeClass:
+      "border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400",
+    dotClass: "bg-slate-300",
+    rowClass: "border-l-slate-200 dark:border-l-slate-800",
+    swatchClass: "bg-slate-300",
+  },
   missed_failed: {
     key: "missed_failed",
     label: "Missed / Failed",
@@ -161,6 +178,7 @@ export const STAGE_STATUS_ORDER: StageOperationalStatus[] = [
   "materializing",
   "prepared",
   "sending_sent",
+  "skipped_empty",
   "missed_failed",
 ];
 
@@ -192,6 +210,9 @@ export interface DeriveStageStatusInput {
   /** campaign_stages.materialized_at — set only when EVERY recipient row exists.
    *  NULL while windowed materialization is in progress (some rows may exist). */
   materializedAt: string | Date | null;
+  /** campaign_stages.skipped_empty_at (migration 0174) — a behavioural lane whose
+   *  audience resolved to zero. Terminal; reads Grey "no recipients", never Red. */
+  skippedEmptyAt?: string | Date | null;
   /** stage_sends counts by status. Null/absent ⇒ nothing materialized. */
   counts: StageSendCounts | null | undefined;
 }
@@ -242,6 +263,14 @@ export function deriveStageOperationalStatus(
   // 1. A missed scheduled window is always "needs attention" — must never read
   //    Green/Sent (Bug 1 makes schedule_missed_at trustworthy).
   if (input.scheduleMissedAt != null) return "missed_failed";
+
+  // 1a′. 0174: an empty lane is terminal and benign. ABOVE the campaign-pause and
+  //      slip-hold states because it is a settled FACT about this stage — there
+  //      is no outstanding work for a pause or a hold to be blocking. BELOW a
+  //      genuinely missed window, which is the louder and less recoverable fact
+  //      (and the two are mutually exclusive in practice: the empty-lane skip
+  //      replaces the schedule_missed_at stamp, it never accompanies it).
+  if (input.skippedEmptyAt != null) return "skipped_empty";
 
   // 1a. The CAMPAIGN's send circuit is latched (campaigns.send_paused — the P7
   //     opt-out-rate breaker or a manual pause). Both scheduler phases filter on

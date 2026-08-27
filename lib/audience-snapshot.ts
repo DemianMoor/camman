@@ -923,6 +923,13 @@ export interface LaneCountBatchItem {
   stageId: number;
   behavioralTier: number;
   parentStageId: number | null;
+  // 0174 campaign-level split. When the lane's group has a resolved source set,
+  // aliveness is "received ANY of these" instead of "received parentStageId".
+  // NULL/empty ⇒ the parentStageId path, byte-identical to pre-0174 — which is
+  // what every legacy lane (~569 in production, none backfilled) keeps using.
+  // MUST mirror stageRecipientsSql's overlay or the count shown on the stages
+  // list stops predicting what materializes.
+  sourceStageIds?: number[] | null;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -932,12 +939,29 @@ export interface LaneCountBatchItem {
 
 // One row per lane as a typed UNION ALL of SELECTs (mirrors buildStagesCte):
 // stage_id + tier + parent + the three filter booleans + the split bounds.
+// A lane's ALIVENESS KEY: the set of stages whose recipients it may draw from.
+// Lanes that share a key share one `alive` branch, so a 3-lane group costs one
+// scan, not three. Legacy lanes key on their single parent; 0174 lanes key on
+// their (already-resolved) source set.
+function alivenessKey(l: LaneCountBatchItem): string | null {
+  const src = l.sourceStageIds ?? null;
+  if (src !== null && src.length > 0) return `g:${[...src].sort((a, b) => a - b).join(",")}`;
+  if (l.parentStageId != null) return `p:${l.parentStageId}`;
+  return null; // aliveness off
+}
+
+function alivenessStageIds(l: LaneCountBatchItem): number[] {
+  const src = l.sourceStageIds ?? null;
+  if (src !== null && src.length > 0) return src;
+  return l.parentStageId != null ? [l.parentStageId] : [];
+}
+
 function buildLanesCte(lanes: LaneCountBatchItem[]): SQL {
   const rows = lanes.map(
     (l) => drizzleSql`select
       ${l.stageId}::int as stage_id,
       ${l.behavioralTier}::int as tier,
-      ${l.parentStageId}::int as parent_stage_id,
+      ${alivenessKey(l)}::text as alive_key,
       ${l.include_no_status}::boolean as inc_ns,
       ${l.include_clickers}::boolean as inc_cl,
       ${l.exclude_clickers}::boolean as exc_cl,
@@ -956,32 +980,46 @@ export async function computeLaneAudienceCountsBatch(
 ): Promise<Map<number, number>> {
   if (lanes.length === 0) return new Map();
   const lanesCte = buildLanesCte(lanes);
-  // Distinct non-null parent stage ids → the aliveness universe. Empty array is
-  // valid: null-parent lanes (aliveness off) don't need it.
-  const parentIds = [
-    ...new Set(
-      lanes
-        .map((l) => l.parentStageId)
-        .filter((p): p is number => p != null),
-    ),
-  ];
-  const parentArray = drizzleSql.raw(
-    "ARRAY[" + parentIds.join(",") + "]::int[]",
+
+  // The aliveness universe, one branch per DISTINCT key (see alivenessKey). A
+  // 3-lane group shares one branch. Lanes with aliveness off contribute nothing.
+  const byKey = new Map<string, number[]>();
+  for (const l of lanes) {
+    const key = alivenessKey(l);
+    if (key === null) continue;
+    if (!byKey.has(key)) byKey.set(key, alivenessStageIds(l));
+  }
+  const aliveBranches = [...byKey.entries()].map(
+    ([key, ids]) => drizzleSql`
+      select distinct ${key}::text as alive_key, contact_id
+      from stage_sends
+      where campaign_id = ${campaignId}::int
+        and org_id = ${orgId}::uuid
+        and status = 'sent'
+        and stage_id = any (array[${drizzleSql.join(
+          ids.map((i) => drizzleSql`${i}::int`),
+          drizzleSql`, `,
+        )}]::int[])`,
   );
+  // No lane has aliveness on: emit a shape-compatible empty relation so the
+  // LEFT JOIN below still type-checks (every such lane escapes via the
+  // `alive_key is null` branch anyway).
+  const aliveCte =
+    aliveBranches.length > 0
+      ? aliveBranches.reduce((acc, b, i) =>
+          i === 0 ? b : drizzleSql`${acc} union all ${b}`,
+        )
+      : drizzleSql`select null::text as alive_key, null::uuid as contact_id where false`;
 
   const rows = (await db.execute(drizzleSql`
     with tier_map as materialized (
       ${campaignTierExpr(campaignId, orgId)}
     ),
-    -- Contacts who received (status='sent') each distinct parent stage. Built
-    -- once; the per-lane join below reproduces the aliveness EXISTS check.
+    -- Contacts who received (status='sent') any stage in each distinct ALIVENESS
+    -- KEY. Built once per key — a 0174 group's three lanes share one branch; the
+    -- per-lane join below reproduces stageRecipientsSql's aliveness EXISTS check.
     alive as (
-      select distinct stage_id as parent_stage_id, contact_id
-      from stage_sends
-      where campaign_id = ${campaignId}::int
-        and org_id = ${orgId}::uuid
-        and status = 'sent'
-        and stage_id = any(${parentArray})
+      ${aliveCte}
     ),
     ln as (${lanesCte}),
     qualified as (
@@ -993,17 +1031,17 @@ export async function computeLaneAudienceCountsBatch(
       from ln
       join campaign_audience_pool p
         on p.campaign_id = ${campaignId}::int and p.org_id = ${orgId}::uuid
-      -- Aliveness: LEFT JOIN so a lane with a NULL parent (aliveness off) keeps
-      -- every contact via the parent_stage_id-is-null escape; a lane WITH a
-      -- parent keeps only rows that matched (a.contact_id is not null).
+      -- Aliveness: LEFT JOIN so a lane with aliveness off (alive_key null) keeps
+      -- every contact via the null escape; a lane WITH a key keeps only rows that
+      -- matched (a.contact_id is not null).
       left join alive a
-        on a.parent_stage_id = ln.parent_stage_id and a.contact_id = p.contact_id
+        on a.alive_key = ln.alive_key and a.contact_id = p.contact_id
       left join tier_map t on t.contact_id = p.contact_id
       where not exists (
           select 1 from opt_outs oo
           where oo.contact_id = p.contact_id and oo.org_id = ${orgId}::uuid
         )
-        and (ln.parent_stage_id is null or a.contact_id is not null)
+        and (ln.alive_key is null or a.contact_id is not null)
         and (
           (ln.inc_ns and p.was_no_status_at_snapshot)
           or (ln.inc_cl and p.was_clicker_at_snapshot)

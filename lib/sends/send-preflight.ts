@@ -8,6 +8,10 @@ import {
   computePreflightBreakdown,
   type PreflightBreakdown,
 } from "@/lib/sends/preflight-breakdown";
+import {
+  recomputeDueSplitGroups,
+  sweepStuckSplitGroups,
+} from "@/lib/stages/split-group";
 
 export type DbOrTx = typeof db;
 
@@ -24,6 +28,13 @@ export interface PreflightRunResult {
   preflighted: number; // breakdowns computed + persisted this tick
   red: number; // of those, how many hit a red condition
   digest_sent: boolean;
+  // 0174 — behavioural split groups resolved at T-minus-PREFLIGHT_LEAD_MS.
+  split_groups_considered: number;
+  split_groups_resolved: number;
+  split_groups_failed: number;
+  // Groups held mid-materialization long past their last lane's slot. Alert-only
+  // (never auto-failed) -- see sweepStuckSplitGroups.
+  split_groups_stuck: number;
 }
 
 interface DueRow {
@@ -95,6 +106,34 @@ export async function runSendPreflight(
   const nowIso = now.toISOString();
   const leadIso = new Date(now.getTime() + PREFLIGHT_LEAD_MS).toISOString();
 
+  // ─── 0174: resolve behavioural split groups entering the window ───────────
+  // Runs FIRST so the breakdown computed below already reflects the widened
+  // (campaign-level) source set rather than the single-parent fallback. Wrapped
+  // because this cron must stay best-effort: a split-group failure must never
+  // stop the preflight digest for every other stage in the tick.
+  let groupSweep = { considered: 0, resolved: 0, failed: 0 };
+  try {
+    groupSweep = await recomputeDueSplitGroups(dbc, {
+      now,
+      leadMs: PREFLIGHT_LEAD_MS,
+      orgId,
+    });
+  } catch {
+    // swallow — Phase A's lazy resolve is the backstop
+  }
+
+  // Per-group timeout. A group that never leaves 'materializing' holds its
+  // siblings' already-written rows unreleased forever, and nothing else would
+  // ever say so — this is the only alarm for that silent non-delivery. It is
+  // ALERT-ONLY and post-once, and it measures from the LAST lane's due time so a
+  // legitimately staggered split (lanes scheduled hours apart) never trips it.
+  let stuckSweep = { stuck: 0 };
+  try {
+    stuckSweep = await sweepStuckSplitGroups(dbc, { now, orgId });
+  } catch {
+    // best-effort, like every other arm of this cron
+  }
+
   const due = (await dbc.execute(sql`
     SELECT s.id AS stage_id, s.campaign_id AS campaign_id, c.org_id AS org_id,
            s.stage_number AS stage_number, s.label AS label, c.name AS campaign_name,
@@ -153,5 +192,14 @@ export async function runSendPreflight(
     digestSent = true;
   }
 
-  return { considered: due.length, preflighted: items.length, red: redCount, digest_sent: digestSent };
+  return {
+    considered: due.length,
+    preflighted: items.length,
+    red: redCount,
+    digest_sent: digestSent,
+    split_groups_considered: groupSweep.considered,
+    split_groups_resolved: groupSweep.resolved,
+    split_groups_failed: groupSweep.failed,
+    split_groups_stuck: stuckSweep.stuck,
+  };
 }

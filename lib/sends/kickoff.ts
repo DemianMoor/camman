@@ -60,6 +60,13 @@ export type KickoffRefusal =
   | "no_creative"
   | "no_schedule"
   | "no_recipients"
+  // 0174. The stage is a lane of a behavioural split GROUP whose source set has
+  // not been resolved yet (state='pending'), or whose group already FAILED.
+  // TRANSIENT by design — it must NOT be in PERMANENT_REFUSALS: the T−15
+  // preflight cron (or the next Phase A tick) resolves the group and the lane
+  // then materializes normally. Burning it as schedule_missed_at would strand a
+  // perfectly healthy lane because a cron ran a minute late.
+  | "split_group_not_ready"
   // tracked-only:
   | "stage_not_ready"
   | "no_provider"
@@ -157,6 +164,11 @@ interface MainRow {
   split_total: number | null;
   behavioral_tier: number | null;
   parent_stage_id: number | null;
+  split_group_id: string | null;
+  // The group's resolved source set (0174). NULL for a legacy lane / ordinary
+  // stage; empty array while the group is still 'pending'.
+  source_stage_ids: number[] | null;
+  split_group_state: string | null;
   creative_text: string | null;
   creative_allow_multi_segment: boolean;
   exclude_prior_offer_contacts: boolean;
@@ -212,6 +224,9 @@ export async function kickoffStageSend(
       s.split_total              AS split_total,
       s.behavioral_tier          AS behavioral_tier,
       s.parent_stage_id          AS parent_stage_id,
+      s.split_group_id           AS split_group_id,
+      sg.source_stage_ids        AS source_stage_ids,
+      sg.state                   AS split_group_state,
       cr.text                    AS creative_text,
       cr.allow_multi_segment     AS creative_allow_multi_segment,
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
@@ -225,6 +240,7 @@ export async function kickoffStageSend(
     LEFT JOIN creatives cr ON cr.id = s.creative_id
     LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
     LEFT JOIN sms_providers prov ON prov.id = s.sms_provider_id AND prov.org_id = c.org_id
+    LEFT JOIN campaign_stage_split_groups sg ON sg.id = s.split_group_id
     WHERE c.id = ${campaignId} AND c.org_id = ${orgId}
     LIMIT 1
   `)) as unknown as MainRow[];
@@ -560,6 +576,21 @@ export async function kickoffStageSend(
     ).catch(() => {});
   }
 
+  // ---- 0174: a grouped lane may only materialize once its GROUP has resolved
+  // its source set. Defensive: Phase A calls ensureGroupSourceResolved() before
+  // kickoff, so this normally never fires — but a manual Prepare on a lane whose
+  // group is still 'pending' would otherwise resolve against an EMPTY source set
+  // and silently fall back to the single-parent aliveness, materializing the
+  // wrong (narrower) audience. Refusing is the only safe answer, and the refusal
+  // is TRANSIENT so the next tick fixes it.
+  if (row.split_group_id != null) {
+    const groupState = row.split_group_state;
+    const sources = row.source_stage_ids ?? [];
+    if (groupState === "failed" || groupState === "pending" || sources.length === 0) {
+      return { ok: false, reason: "split_group_not_ready" };
+    }
+  }
+
   // ---- Enumerate the recipients NOT YET materialized (resumable). Behavioral-
   // lane fields flow into the SAME stageRecipientsSql the preview count uses, so
   // the people SENT are byte-identical to the people PREVIEWED. Opt-out + converted
@@ -575,6 +606,9 @@ export async function kickoffStageSend(
       splitTotal: row.split_total ?? null,
       behavioralTier: row.behavioral_tier ?? null,
       parentStageId: row.parent_stage_id ?? null,
+      // 0174: widens aliveness to the group's completed source stages. NULL /
+      // empty ⇒ the parentStageId path, byte-identical to pre-0174.
+      sourceStageIds: row.source_stage_ids ?? null,
     },
     eligibility: {
       creativeId: row.creative_id ?? null,

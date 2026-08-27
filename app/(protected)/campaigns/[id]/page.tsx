@@ -17,7 +17,6 @@ import {
   Pencil,
   PenLine,
   Play,
-  Plus,
   Send,
   Split,
   Trash2,
@@ -44,6 +43,7 @@ import {
   deriveStageOperationalStatus,
   STAGE_STATUS_META,
 } from "@/lib/stages/stage-status";
+import type { SplitLanePreview } from "@/lib/stages/split-group";
 import { PhoneUploadForm } from "@/components/phone-upload-form";
 import {
   combineSales,
@@ -97,7 +97,6 @@ import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
-import { formatStageTrackingId } from "@/lib/tracking-id-format";
 import { cn } from "@/lib/utils";
 
 // These heavy dialog/panel bodies are each mounted only when their `{state ?
@@ -403,10 +402,13 @@ export default function CampaignDetailPage() {
   const stageCancelApi = useApiCall<{ ok: boolean; discarded: number }>();
   const stageDuplicateApi = useApiCall<Stage>();
   const behavioralSplitApi = useApiCall<{
-    parent_stage_id: number;
+    split_group_id: string;
+    anchor_stage_id: number;
+    source_stage_ids_preview: number[];
     lane_stage_ids: number[];
     tiers: (number | null)[];
   }>();
+  const splitPreviewApi = useApiCall<SplitLanePreview>();
 
   const [campaign, setCampaign] = useState<CampaignDetail | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
@@ -591,8 +593,10 @@ export default function CampaignDetailPage() {
   } | null>(null);
   const [stageDeleteConfirm, setStageDeleteConfirm] = useState<Stage | null>(null);
   const [stageCancelConfirm, setStageCancelConfirm] = useState<Stage | null>(null);
-  const [behavioralSplitStage, setBehavioralSplitStage] =
-    useState<Stage | null>(null);
+  // 0174: the split is CAMPAIGN-level now, so there is no target stage — just
+  // "is the confirm modal open" plus the provisional preview it renders.
+  const [behavioralSplitOpen, setBehavioralSplitOpen] = useState(false);
+  const [splitPreview, setSplitPreview] = useState<SplitLanePreview | null>(null);
   const [importStage, setImportStage] = useState<Stage | null>(null);
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
@@ -747,18 +751,33 @@ export default function CampaignDetailPage() {
     refetchCampaign();
   }
 
+  // 0174: open the confirm modal and fetch the PROVISIONAL preview (source scope
+  // + live per-tier counts). The preview is a seconds-long live tier scan, so it
+  // is fetched on open — never inline in the stages list.
+  async function openBehavioralSplit() {
+    setSplitPreview(null);
+    setBehavioralSplitOpen(true);
+    const result = await splitPreviewApi.execute(
+      `/api/campaigns/${campaignId}/behavioral-split/preview`,
+    );
+    if (result.ok) setSplitPreview(result.data);
+    else toastApiError(result, "Couldn't compute the split preview");
+  }
+
   async function handleBehavioralSplit() {
-    if (!behavioralSplitStage) return;
     const result = await behavioralSplitApi.execute(
-      `/api/campaigns/${campaignId}/stages/${behavioralSplitStage.id}/behavioral-split`,
+      `/api/campaigns/${campaignId}/behavioral-split`,
       { method: "POST" },
     );
     if (!result.ok) {
       toastApiError(result, "Couldn't create behavioral lanes");
       return;
     }
-    toast.success("Behavioral split — 3 lanes created (Ignored / Clicked / Reached offer)");
-    setBehavioralSplitStage(null);
+    toast.success(
+      "Behavioral split — 3 lanes created (Ignored / Clicked / Reached offer). Set a send time on each lane.",
+    );
+    setBehavioralSplitOpen(false);
+    setSplitPreview(null);
     refetchStages();
     refetchCampaign();
   }
@@ -788,6 +807,26 @@ export default function CampaignDetailPage() {
     return m;
   }, [stages]);
   const hasBehavioralLanes = lanesByParent.size > 0;
+
+  // 0174: gate for the campaign-level "Behavioral split…" button. MIRRORS the
+  // server predicate in lib/sends/stage-complete.ts — sent_at set AND no
+  // pending/sending rows left — deliberately NOT `status`, which is the
+  // operator's manual record and disagrees with the pipeline on real stages.
+  // Lanes are excluded here for the same reason the server excludes them.
+  // This only decides whether the button is ENABLED; the endpoint re-checks and
+  // returns `no_completed_stages` on its own.
+  const hasCompletedStage = useMemo(
+    () =>
+      stages.some(
+        (s) =>
+          s.behavioral_tier == null &&
+          s.status !== "archived" &&
+          s.sent_at != null &&
+          s.send_counts.pending === 0 &&
+          s.send_counts.sending === 0,
+      ),
+    [stages],
+  );
 
   // ============ Stage columns ============
 
@@ -1992,6 +2031,7 @@ export default function CampaignDetailPage() {
         )}
 
         {canCreateStage && campaign.status !== "archived" ? (
+          <div className="flex flex-wrap items-center gap-2">
           <StageInlineEditor
             campaign={campaign}
             campaignId={campaignId}
@@ -2050,22 +2090,30 @@ export default function CampaignDetailPage() {
                   }
                 : undefined
             }
-            onBehavioralSplit={
-              canCreateStage &&
-              editingStage &&
-              editingStage.behavioral_tier == null &&
-              (lanesByParent.get(editingStage.id)?.length ?? 0) === 0
-                ? () => {
-                    // Close the editor, then open the shared confirm dialog with
-                    // this stage — same flow as the stages-row action.
-                    const s = editingStage;
-                    setAddStageOpen(false);
-                    setEditingStage(null);
-                    setBehavioralSplitStage(s);
-                  }
-                : undefined
-            }
           />
+          {/* 0174: the behavioural split lives HERE, at campaign level, beside
+              "Add stage" — it is taken against the campaign's completed stages,
+              not against one chosen predecessor, so a per-stage entry point would
+              misrepresent what it does. The A/B split stays inside the stage
+              editor because it genuinely IS per-stage. Two entry points for two
+              different actions; deliberately not two for the same one.
+              Hidden while the editor is open so the row stays a single action. */}
+          {!addStageOpen && campaign.link_mode === "tracked" ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void openBehavioralSplit()}
+              disabled={!hasCompletedStage}
+              title={
+                hasCompletedStage
+                  ? "Split this campaign into Ignored / Clicked / Reached offer lanes"
+                  : "Needs at least one stage that has finished sending"
+              }
+            >
+              <Split className="size-4" aria-hidden /> Behavioral split…
+            </Button>
+          ) : null}
+          </div>
         ) : null}
       </section>
 
@@ -2093,68 +2141,112 @@ export default function CampaignDetailPage() {
       </section>
 
       {/* ============ Dialogs ============ */}
-      {/* Behavioral split confirm — mirrors the A/B split confirm flow. No
-          input: it always stamps the three tier lanes off the chosen stage. */}
+      {/* Behavioral split confirm (0174) — CAMPAIGN-level. Shows the SOURCE
+          SCOPE (which completed stages feed the classification) and a live
+          per-tier count before anything is created. Both are PROVISIONAL: the
+          tier is read live and the source set is re-resolved ~15 min before the
+          lanes materialize, so a stage that completes in between widens it. */}
       <AlertDialog
-        open={behavioralSplitStage !== null}
+        open={behavioralSplitOpen}
         onOpenChange={(open) => {
-          if (!open) setBehavioralSplitStage(null);
+          if (!open) {
+            setBehavioralSplitOpen(false);
+            setSplitPreview(null);
+          }
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className="max-w-lg">
           <AlertDialogHeader>
-            <AlertDialogTitle>
-              Behavioral split — Stage {behavioralSplitStage?.stage_number}
-            </AlertDialogTitle>
+            <AlertDialogTitle>Behavioral split</AlertDialogTitle>
             <AlertDialogDescription asChild>
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <p>
                   This stamps out <span className="font-medium">three</span> lane
-                  stages off this position — one each for{" "}
+                  stages for this campaign — one each for{" "}
                   <span className="font-medium">Ignored</span>,{" "}
                   <span className="font-medium">Clicked</span>, and{" "}
                   <span className="font-medium">Reached offer</span>. Each lane
-                  starts as a copy of this stage; edit its message afterward.
+                  starts as a copy of the most recently completed stage; edit its
+                  message and set its send time afterward.
                 </p>
-                <p>
-                  At send time each recipient who received this position falls
-                  into exactly one lane by their current tier. Converted contacts
-                  exit; opted-out are suppressed. This stage stays as the parent
-                  position. Nothing is sent now.
-                </p>
-                {(() => {
-                  const campaignTrackingId = campaign.tracking_id;
-                  const creativeId = behavioralSplitStage?.creative_id;
-                  if (!campaignTrackingId || creativeId == null) return null;
-                  const nextNo =
-                    stages.reduce((m, s) => Math.max(m, s.stage_number), 0) + 1;
-                  return (
-                    <div className="grid gap-1 rounded-md border border-dashed p-2">
+
+                {splitPreviewApi.isLoading || splitPreview === null ? (
+                  <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                    Computing lane counts…
+                  </div>
+                ) : !splitPreview.can_split ? (
+                  <div className="rounded-md border border-dashed p-3 text-xs">
+                    This campaign has no completed stages yet. A behavioral split
+                    classifies contacts by how they behaved in stages that have
+                    already sent, so at least one must finish first.
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid gap-1.5 rounded-md border border-dashed p-3">
                       <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                        Lane tracking IDs (preview — finalized on save)
+                        Source scope — {splitPreview.source_stages.length} completed
+                        stage{splitPreview.source_stages.length === 1 ? "" : "s"}
                       </span>
-                      {["Ignored", "Clicked", "Reached offer"].map(
-                        (laneLabel, i) => (
-                          <div
-                            key={laneLabel}
-                            className="flex items-center gap-2 text-xs"
-                          >
-                            <span className="w-24 shrink-0 text-muted-foreground">
-                              {laneLabel}
-                            </span>
-                            <span className="truncate font-mono text-foreground">
-                              {formatStageTrackingId({
-                                campaignTrackingId,
-                                stageNumber: nextNo + i,
-                                creativeId,
-                              })}
-                            </span>
-                          </div>
-                        ),
-                      )}
+                      <p className="text-xs text-muted-foreground">
+                        {splitPreview.source_stages
+                          .map((st) => `#${st.stage_number}`)
+                          .join(", ")}{" "}
+                        · {splitPreview.source_contacts.toLocaleString()} contacts
+                        reached
+                      </p>
                     </div>
-                  );
-                })()}
+
+                    <div className="grid gap-1 rounded-md border border-dashed p-3">
+                      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                        Lane counts (provisional)
+                      </span>
+                      {splitPreview.lanes.map((ln) => (
+                        <div
+                          key={ln.tier}
+                          className="flex items-center justify-between gap-2 text-xs"
+                        >
+                          <span className="text-muted-foreground">{ln.label}</span>
+                          <span className="font-medium tabular-nums text-foreground">
+                            {ln.count.toLocaleString()}
+                          </span>
+                        </div>
+                      ))}
+                      <div className="mt-1 flex items-center justify-between gap-2 border-t pt-1 text-xs text-muted-foreground">
+                        <span>Converted (exits — no lane)</span>
+                        <span className="tabular-nums">
+                          {splitPreview.converted_excluded.toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                        <span>Opted out (suppressed)</span>
+                        <span className="tabular-nums">
+                          {splitPreview.opted_out_excluded.toLocaleString()}
+                        </span>
+                      </div>
+                    </div>
+
+                    {splitPreview.source_contacts === 0 ? (
+                      <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                        <span className="font-medium">
+                          These completed stages reached nobody.
+                        </span>{" "}
+                        Every lane would be empty right now. This usually means the
+                        stage that actually sent still has messages in flight, so it
+                        doesn&apos;t count as completed yet. You can still create the
+                        split — the source scope is re-resolved shortly before the
+                        lanes send — but nothing will go out unless more stages
+                        finish first.
+                      </div>
+                    ) : null}
+                    <p className="text-xs text-muted-foreground">
+                      These numbers are a live preview and will change until the
+                      lanes are prepared. The source scope is re-resolved shortly
+                      before they send, so a stage that finishes in the meantime is
+                      included. A lane that ends up with nobody is skipped, not
+                      failed — its siblings still send.
+                    </p>
+                  </>
+                )}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -2167,7 +2259,11 @@ export default function CampaignDetailPage() {
                 e.preventDefault();
                 void handleBehavioralSplit();
               }}
-              disabled={behavioralSplitApi.isLoading}
+              disabled={
+                behavioralSplitApi.isLoading ||
+                splitPreviewApi.isLoading ||
+                splitPreview?.can_split !== true
+              }
             >
               Create 3 lanes
             </AlertDialogAction>

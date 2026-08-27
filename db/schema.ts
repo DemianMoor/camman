@@ -2043,6 +2043,26 @@ export const campaign_stages = pgTable(
       (): AnyPgColumn => campaign_stages.id,
       { onDelete: "cascade" },
     ),
+    // ─── Campaign-level behavioural split (migration 0174) ──────────────────
+    // NULL ⇒ legacy single-parent semantics: the lane's aliveness universe is
+    // "received parent_stage_id". Set ⇒ the aliveness universe is the group's
+    // `source_stage_ids` (every COMPLETED stage of the campaign, resolved at
+    // recompute time). ~569 pre-0174 lanes keep NULL and are NOT backfilled —
+    // rewriting them would rewrite what they actually targeted.
+    // parent_stage_id STAYS populated on a grouped lane: it is the P4 slip
+    // anchor, so the parent-complete gate / lane counts / preflight are unchanged.
+    split_group_id: uuid("split_group_id").references(
+      (): AnyPgColumn => campaign_stage_split_groups.id,
+      { onDelete: "set null" },
+    ),
+    // Terminal marker for a lane that resolved to ZERO recipients. A PIPELINE
+    // marker, not a `status` value — `status` is the operator's manual record
+    // (see lib/stages/stage-status.ts); the pipeline's own terminal markers are
+    // all nullable timestamps and this joins schedule_missed_at / slip_hold_at /
+    // preflight_aborted_at. Under campaign-level classification an empty lane is
+    // ROUTINE, so it must read as a benign skip rather than a Red "missed" — and
+    // it still satisfies its group so the other two lanes can release.
+    skipped_empty_at: timestamp("skipped_empty_at", { withTimezone: true }),
     // ─── Parent-complete gate + bounded slip (migration 0117, P4) ───────────
     // Lane children (parent_stage_id set) must not fire until the parent stage
     // has FULLY sent (sent_at set AND no pending/sending rows). While the parent
@@ -2109,9 +2129,13 @@ export const campaign_stages = pgTable(
     // (scheduled_at <= now AND sent_at IS NULL AND schedule_missed_at IS NULL,
     // ORDER BY scheduled_at). Partial index on exactly that predicate. See
     // lib/sends/scheduled.ts.
+    // Migration 0174 widened the predicate with `skipped_empty_at IS NULL` so a
+    // lane already skipped as empty is not re-considered every tick.
     index("campaign_stages_scheduled_due_idx")
       .on(table.scheduled_at)
-      .where(sql`sent_at IS NULL AND schedule_missed_at IS NULL`),
+      .where(
+        sql`sent_at IS NULL AND schedule_missed_at IS NULL AND skipped_empty_at IS NULL`,
+      ),
     check(
       "campaign_stages_status_check",
       sql`${table.status} IN ('draft', 'pending', 'sent', 'success', 'cancelled', 'failed', 'archived')`,
@@ -2138,11 +2162,80 @@ export const campaign_stages = pgTable(
     index("campaign_stages_parent_stage_id_idx")
       .on(table.parent_stage_id)
       .where(sql`parent_stage_id IS NOT NULL`),
+    // Sparse — only grouped lanes carry it. Backs "all lanes of this group".
+    index("campaign_stages_split_group_id_idx")
+      .on(table.split_group_id)
+      .where(sql`split_group_id IS NOT NULL`),
   ],
 );
 
 export type CampaignStage = typeof campaign_stages.$inferSelect;
 export type NewCampaignStage = typeof campaign_stages.$inferInsert;
+
+// A behavioural split GROUP: the unit that owns the three tier lanes stamped by
+// one campaign-level split (migration 0174).
+//
+// The group exists because the three lanes share ONE source scope and ONE
+// release decision. Storing `source_stage_ids` on each lane would store it three
+// times and let the copies drift; and Phase B needs a single place to ask "may
+// this trio release yet?" — see `state` below.
+//
+// `source_stage_ids` is written at RECOMPUTE time (T−15min via the send-preflight
+// cron, or lazily at Phase A), NOT at split creation: a stage that completes
+// between the split being created and the recompute must be in the source set.
+// The stored array is therefore the record of what that materialization used,
+// and `recomputed_at` is what the UI renders as "resolved at HH:MM".
+export const campaign_stage_split_groups = pgTable(
+  "campaign_stage_split_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    // The P4 slip anchor: the LATEST completed stage (by sent_at) at split
+    // creation. Deliberately ONE stage even though the audience source is a set
+    // — widening the parent-complete gate to "wait on ALL source stages" would
+    // let a single stalled stage hold the whole group for 24h and then HOLD it.
+    // Each lane's parent_stage_id points here too, so P4 / lane counts /
+    // preflight need no change.
+    anchor_stage_id: integer("anchor_stage_id").references(
+      (): AnyPgColumn => campaign_stages.id,
+      { onDelete: "cascade" },
+    ),
+    // Completed stages whose recipients form the classification universe.
+    // Empty until the recompute runs.
+    source_stage_ids: integer("source_stage_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    // pending → materializing → materialized | failed. Phase B releases a lane
+    // only when its group is 'materialized' (all-or-nothing at the RELEASE
+    // boundary, not the insert boundary — materialization stays windowed and
+    // resumable per lane).
+    state: text("state").notNull().default("pending"),
+    recomputed_at: timestamp("recomputed_at", { withTimezone: true }),
+    last_error: text("last_error"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("campaign_stage_split_groups_campaign_idx").on(table.campaign_id),
+    index("campaign_stage_split_groups_org_idx").on(table.org_id),
+    check(
+      "campaign_stage_split_groups_state_check",
+      sql`${table.state} IN ('pending', 'materializing', 'materialized', 'failed')`,
+    ),
+  ],
+);
+
+export type CampaignStageSplitGroup =
+  typeof campaign_stage_split_groups.$inferSelect;
+export type NewCampaignStageSplitGroup =
+  typeof campaign_stage_split_groups.$inferInsert;
 
 // Per-(org, brand, offer, date) counter table backing the campaign
 // tracking_id sequence. Rows are inserted on demand via an atomic

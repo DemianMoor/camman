@@ -41,6 +41,13 @@ export interface StageRecipientFilters {
   // position") check. Either absent/null ⇒ that overlay is off.
   behavioralTier?: number | null;
   parentStageId?: number | null;
+  // Campaign-level behavioural split (migration 0174). When present and non-empty,
+  // the aliveness universe widens from "received parentStageId" to "received ANY
+  // of these COMPLETED stages" — the group's resolved `source_stage_ids`.
+  // ABSENT or EMPTY ⇒ the parentStageId path is used unchanged, so every legacy
+  // lane (~569 in production, none backfilled) and every existing caller emits
+  // byte-identical SQL.
+  sourceStageIds?: number[] | null;
 }
 
 export interface StageRecipientRow {
@@ -113,12 +120,31 @@ export function stageRecipientsSql(opts: {
   //   union all select 1 from stage_result_rows srr
   //     where srr.stage_id = <parent> and srr.contact_id = p.contact_id
   //       and srr.outcome = 'delivered'
+  //
+  // CAMPAIGN-LEVEL (0174): when the lane's group has a resolved source set, the
+  // single `stage_id = <parent>` equality becomes `stage_id = ANY(<sources>)` —
+  // "received ANY completed stage of this campaign". Nothing else changes: the
+  // frozen pool is still the universe and the tier is still read campaign-wide
+  // (it always was — campaignTierExpr never looked at ancestry).
+  //
+  // The widened set is a strict SUPERSET of the single-parent set, because
+  // materialization only ever draws from campaign_audience_pool, so
+  // sent(parent) ⊆ sent(all completed stages). Verified on real production data
+  // (campaigns 118 and 889: `old EXCEPT new = 0` for all four lane parents).
+  const sourceIds = f.sourceStageIds ?? null;
+  const hasSourceSet = sourceIds !== null && sourceIds.length > 0;
+  const alivenessStageMatch = hasSourceSet
+    ? sql`ss.stage_id = any (array[${sql.join(
+        sourceIds.map((id) => sql`${id}::int`),
+        sql`, `,
+      )}]::int[])`
+    : sql`ss.stage_id = ${f.parentStageId!}::int`;
   const aliveness =
-    isLane && hasParent
+    isLane && (hasParent || hasSourceSet)
       ? sql`
         and exists (
           select 1 from stage_sends ss
-          where ss.stage_id = ${f.parentStageId!}::int
+          where ${alivenessStageMatch}
             and ss.contact_id = p.contact_id
             and ss.org_id = ${orgId}::uuid
             and ss.status = 'sent'

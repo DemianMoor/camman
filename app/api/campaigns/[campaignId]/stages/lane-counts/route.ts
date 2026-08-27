@@ -99,6 +99,13 @@ export async function GET(
       exclude_clickers: campaign_stages.exclude_clickers,
       split_index: campaign_stages.split_index,
       split_total: campaign_stages.split_total,
+      // 0174: the lane's group source set, so the displayed count uses the SAME
+      // aliveness universe the send will. NULL for legacy lanes; empty while the
+      // group is still 'pending' (both fall back to parent_stage_id).
+      source_stage_ids: drizzleSql<number[] | null>`(
+        SELECT g.source_stage_ids FROM campaign_stage_split_groups g
+        WHERE g.id = ${campaign_stages.split_group_id}
+      )`,
     })
     .from(campaign_stages)
     .where(and(...conditions))
@@ -114,6 +121,7 @@ export async function GET(
     exclude_clickers: r.exclude_clickers,
     split_index: r.split_index,
     split_total: r.split_total,
+    sourceStageIds: r.source_stage_ids ?? null,
   }));
 
   const counts = await computeLaneAudienceCountsBatch(cid, orgId, items);

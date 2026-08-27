@@ -67,6 +67,8 @@ interface CfgRow {
   split_total: number | null;
   behavioral_tier: number | null;
   parent_stage_id: number | null;
+  // 0174: split-group source set. NULL for legacy lanes / ordinary stages.
+  source_stage_ids: number[] | null;
   creative_id: number | null;
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
@@ -86,6 +88,8 @@ export async function computePreflightBreakdown(
   const cfgRows = (await dbc.execute(sql`
     SELECT s.include_no_status, s.include_clickers, s.exclude_clickers,
            s.split_index, s.split_total, s.behavioral_tier, s.parent_stage_id,
+           (SELECT g.source_stage_ids FROM campaign_stage_split_groups g
+             WHERE g.id = s.split_group_id) AS source_stage_ids,
            s.creative_id, c.offer_id, c.exclude_prior_offer_contacts,
            s.provider_phone_id, pp.allow_unknown_carrier
     FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
@@ -152,6 +156,7 @@ export async function computePreflightBreakdown(
           ...filters,
           behavioralTier: cfg.behavioral_tier ?? null,
           parentStageId: cfg.parent_stage_id ?? null,
+          sourceStageIds: cfg.source_stage_ids ?? null,
         },
         eligibility,
         carrierPolicy,
@@ -188,6 +193,7 @@ export async function computePreflightBreakdown(
             ...filters,
             behavioralTier: cfg.behavioral_tier ?? null,
             parentStageId: cfg.parent_stage_id ?? null,
+            sourceStageIds: cfg.source_stage_ids ?? null,
           },
           eligibility,
         })}
@@ -201,6 +207,7 @@ export async function computePreflightBreakdown(
               ...filters,
               behavioralTier: cfg.behavioral_tier ?? null,
               parentStageId: cfg.parent_stage_id ?? null,
+              sourceStageIds: cfg.source_stage_ids ?? null,
             },
             eligibility,
             carrierPolicy,

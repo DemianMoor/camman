@@ -14,6 +14,15 @@ import { decideChildSlip } from "@/lib/sends/child-slip";
 import { isProviderPaused, resolvePacingCap } from "@/lib/sends/circuit-breakers";
 import { runStageDrain, type DrainResult, type Sender } from "@/lib/sends/drain";
 import { kickoffStageSend, type KickoffRefusal } from "@/lib/sends/kickoff";
+import { stageCompleteExpr } from "@/lib/sends/stage-complete";
+import {
+  ensureGroupSourceResolved,
+  failSplitGroup,
+  markLaneSkippedEmpty,
+  notifyGroupFailed,
+  notifyLaneSkippedEmpty,
+  settleSplitGroup,
+} from "@/lib/stages/split-group";
 
 // The send-scheduled cron. Two phases per tick, both bounded by the SAME
 // per-provider per-tick send budget:
@@ -45,6 +54,8 @@ export interface DueRow {
   scheduled_at: string;
   // P4 lane-child gate: parent + slip state (NULL/0 for non-lane stages).
   parent_stage_id: number | null;
+  // 0174 behavioural split group. NULL for ordinary stages and legacy lanes.
+  split_group_id: string | null;
   slip_original_scheduled_at: string | null;
   slip_count: number;
   send_window_weekday_start: number | null;
@@ -76,6 +87,7 @@ export async function selectDueScheduledStages(
            s.sms_provider_id AS provider_id,
            s.scheduled_at    AS scheduled_at,
            s.parent_stage_id AS parent_stage_id,
+           s.split_group_id  AS split_group_id,
            s.slip_original_scheduled_at AS slip_original_scheduled_at,
            s.slip_count      AS slip_count,
            p.send_window_weekday_start AS send_window_weekday_start,
@@ -96,6 +108,8 @@ export async function selectDueScheduledStages(
       AND s.scheduled_at <= ${nowIso}
       AND s.sent_at IS NULL
       AND s.schedule_missed_at IS NULL
+      -- 0174: a lane already skipped as EMPTY is terminal — never reconsider it.
+      AND s.skipped_empty_at IS NULL
       -- P4: a lane child parked at the 24h slip cap must not be reselected.
       AND s.slip_hold_at IS NULL
       -- P5: an operator abort during the preflight window holds the stage.
@@ -123,6 +137,7 @@ export async function selectDueScheduledStages(
 export interface DrainableRow {
   stage_id: number;
   org_id: string;
+  split_group_id: string | null;
   provider_id: number | null;
   // The send-from phone. Phase B partitions the drain by this so stages on
   // different numbers drain CONCURRENTLY (a slow phone never blocks a fast one).
@@ -155,6 +170,7 @@ export async function selectDrainableStages(
   return (await dbc.execute(sql`
     SELECT s.id              AS stage_id,
            c.org_id          AS org_id,
+           s.split_group_id  AS split_group_id,
            s.sms_provider_id AS provider_id,
            s.provider_phone_id AS provider_phone_id,
            p.max_sends_per_run AS max_sends_per_run,
@@ -183,6 +199,16 @@ export async function selectDrainableStages(
       -- materialization is COMPLETE (materialized_at set) are drainable. Phase A
       -- finishes any in-progress materialization first.
       AND s.materialized_at IS NOT NULL
+      -- 0174: ALL-OR-NOTHING AT THE RELEASE BOUNDARY. A lane belonging to a
+      -- behavioural split group releases ONLY once the WHOLE group is
+      -- 'materialized' — so a group whose recompute failed, or one lane of which
+      -- is still materializing, never lets its siblings send a partial split.
+      -- Ordinary stages and legacy (pre-0174, split_group_id NULL) lanes are
+      -- unaffected: the NOT EXISTS is vacuously true for them.
+      AND NOT EXISTS (
+        SELECT 1 FROM campaign_stage_split_groups g
+        WHERE g.id = s.split_group_id AND g.state <> 'materialized'
+      )
       -- Released already, OR due for first release. Future-armed stages
       -- (sent_at NULL and scheduled_at in the future) are held until due.
       AND (s.sent_at IS NOT NULL OR (s.scheduled_at IS NOT NULL AND s.scheduled_at <= ${nowIso}))
@@ -216,6 +242,10 @@ export interface ScheduledRunResult {
   skipped_opted_out: number; // recipients suppressed at dispatch (STOP after materialization)
   paused_now: number; // stages whose drain latched a circuit-breaker pause
   phone_lease_skipped: number; // phone groups skipped — another invocation is draining that number
+  // ─── 0174 behavioural split groups ────────────────────────────────────────
+  skipped_empty: number; // lanes that resolved to 0 recipients (terminal, benign)
+  split_groups_ready: number; // groups that flipped materializing -> materialized
+  split_groups_failed: number; // groups killed by a lane's permanent refusal
 }
 
 const BASE: ScheduledRunResult = {
@@ -238,6 +268,9 @@ const BASE: ScheduledRunResult = {
   skipped_opted_out: 0,
   paused_now: 0,
   phone_lease_skipped: 0,
+  skipped_empty: 0,
+  split_groups_ready: 0,
+  split_groups_failed: 0,
 };
 
 // Per-stage materialization budget for a cron tick. Windowed materialization
@@ -397,21 +430,20 @@ export async function getParentState(
   dbc: typeof db,
   parentStageId: number,
 ): Promise<{ scheduledAt: Date | null; complete: boolean }> {
+  // `complete` comes from the SHARED definition in lib/sends/stage-complete.ts —
+  // the same fragment the campaign-level split's source set uses, so the P4 gate
+  // and "which stages count as sources" can never drift apart.
   const rows = (await dbc.execute(sql`
-    SELECT s.scheduled_at AS scheduled_at,
-           s.sent_at      AS sent_at,
-           NOT EXISTS (
-             SELECT 1 FROM stage_sends ss
-             WHERE ss.stage_id = s.id AND ss.status IN ('pending', 'sending')
-           ) AS no_open
+    SELECT s.scheduled_at        AS scheduled_at,
+           ${stageCompleteExpr("s")} AS complete
     FROM campaign_stages s
     WHERE s.id = ${parentStageId}
     LIMIT 1
-  `)) as unknown as { scheduled_at: string | null; sent_at: string | null; no_open: boolean }[];
+  `)) as unknown as { scheduled_at: string | null; complete: boolean }[];
   const r = rows[0];
   return {
     scheduledAt: r?.scheduled_at ? new Date(r.scheduled_at) : null,
-    complete: !!r && r.sent_at != null && r.no_open === true,
+    complete: !!r && r.complete === true,
   };
 }
 
@@ -621,6 +653,35 @@ export async function runScheduledSends(
       continue;
     }
 
+    // ─── 0174: resolve the behavioural split group's source set ────────────
+    // Normally the T−15 send-preflight cron already did this, so this is the
+    // lazy fallback for a lane that never passed through a preflight window (a
+    // stage approved less than 15 min before its slot, or a preflight tick that
+    // errored). ensureGroupSourceResolved is idempotent and guarded on
+    // state='pending', so the two callers can race harmlessly.
+    //
+    // The set is derived HERE, live, rather than frozen when the split was
+    // created — a stage that finished sending between the split's creation and
+    // now MUST be in the source set.
+    if (row.split_group_id != null) {
+      let group: Awaited<ReturnType<typeof ensureGroupSourceResolved>> = null;
+      try {
+        group = await ensureGroupSourceResolved(dbc, row.split_group_id);
+      } catch {
+        // Transient (a DB blip). Leave the group 'pending' and retry next tick —
+        // NOT a failure, and nothing has been materialized, so nothing leaks.
+        result.refused++;
+        continue;
+      }
+      if (!group || group.state === "failed" || group.state === "pending") {
+        // 'failed' ⇒ the group is dead and no lane may fire (the Tier-1 alert was
+        // raised when it failed). 'pending' ⇒ the resolve lost its guard race and
+        // will be re-read next tick. Either way: do not materialize.
+        result.refused++;
+        continue;
+      }
+    }
+
     // Materialize (windowed + resumable — kickoff manages its own per-window
     // transactions, so it is NOT wrapped in one here). A thrown error is caught
     // per-stage so one stage can't fail the whole run; committed windows persist
@@ -645,6 +706,29 @@ export async function runScheduledSends(
       // B stamps it. Phase B only drains once materialized_at is set (complete), so
       // a partially-materialized stage is never sent early.
       result.materialized++;
+      // 0174: this lane may have been the last one outstanding in its group. The
+      // settle is guarded on "no sibling still un-materialized", so calling it on
+      // a PARTIAL materialization is safe — it simply won't flip.
+      if (row.split_group_id != null && kickoff.complete) {
+        if (await settleSplitGroup(dbc, row.split_group_id)) result.split_groups_ready++;
+      }
+    } else if (
+      // ─── 0174: a lane that resolves to ZERO recipients is SKIPPED, not burned ──
+      // `no_recipients` is a permanent refusal, so before 0174 an empty lane was
+      // stamped schedule_missed_at and rendered Red "needs attention". Under
+      // campaign-level classification an empty tier is ROUTINE (tier 2 measures
+      // 28–323 contacts on the widest production campaigns), so a false Red every
+      // time a small campaign splits is not acceptable. The lane goes terminal via
+      // skipped_empty_at, which SATISFIES its group so the siblings still release.
+      // Scoped to GROUPED lanes only — an ordinary stage with no recipients keeps
+      // today's louder behaviour, because for a plain stage that IS a surprise.
+      row.split_group_id != null &&
+      kickoff.reason === "no_recipients"
+    ) {
+      await markLaneSkippedEmpty(dbc, row.stage_id);
+      result.skipped_empty++;
+      void notifyLaneSkippedEmpty(dbc, row.stage_id).catch(() => {});
+      if (await settleSplitGroup(dbc, row.split_group_id)) result.split_groups_ready++;
     } else if (PERMANENT_REFUSALS.has(kickoff.reason)) {
       await dbc.execute(sql`
         UPDATE campaign_stages SET schedule_missed_at = ${nowIso}
@@ -653,6 +737,14 @@ export async function runScheduledSends(
           AND schedule_missed_at IS NULL
       `);
       result.missed++;
+      // 0174: a permanent refusal on ONE lane kills the WHOLE group — no sibling
+      // may release a partial split. Rows already written by lanes that succeeded
+      // stay in place, unreleased; the abort route is how an operator clears them.
+      if (row.split_group_id != null) {
+        await failSplitGroup(dbc, row.split_group_id, kickoff.reason);
+        result.split_groups_failed++;
+        void notifyGroupFailed(dbc, row.split_group_id, kickoff.reason).catch(() => {});
+      }
     } else {
       result.refused++;
     }

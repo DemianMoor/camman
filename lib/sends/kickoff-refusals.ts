@@ -11,6 +11,11 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     message: "Set a send date/time before sending (a copied stage starts with no date)",
   },
   no_recipients: { status: 400, message: "No recipients qualify for this stage" },
+  split_group_not_ready: {
+    status: 409,
+    message:
+      "This behavioural lane's split group isn't ready yet — its source stages are still being resolved. It will prepare itself on the next scheduler tick.",
+  },
   stage_not_ready: {
     status: 400,
     message: "Stage isn't ready to send — it's missing its tracking ID",

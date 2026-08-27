@@ -263,8 +263,8 @@ export interface StageFormProps {
   splitIndex?: number | null;
   splitTotal?: number | null;
   // Edit-mode only: this stage's behavioral_tier (NULL ⇒ ordinary stage). When
-  // set, the stage is itself a behavioral lane and CANNOT be behaviorally split
-  // again, so the "Behavioral split" action is hidden.
+  // set, the stage is itself a behavioural lane — the editor shows a read-only
+  // note instead of the A/B split action, and tier/parent are not editable.
   behavioralTier?: number | null;
   // Edit-mode only: the stage's sent_at. When set on a tracked (API) campaign,
   // the send has fired and the Scheduled field locks (see CLAUDE.md §10g / the
@@ -284,11 +284,6 @@ export interface StageFormProps {
     new_stage_ids: number[];
     split_total: number;
   }) => void;
-  // Edit-mode only: invoked when the operator triggers a behavioral split from
-  // the editor. The parent closes the editor and runs its own confirm + POST
-  // (the same flow as the stages-row "Behavioral split…" action), so the two
-  // entry points share one implementation.
-  onBehavioralSplit?: () => void;
   campaign: {
     id: number;
     name: string;
@@ -406,7 +401,6 @@ export function StageForm({
   sentAt,
   armed,
   onSplit,
-  onBehavioralSplit,
   campaign,
   resultsCounters,
   onImportResults,
@@ -2073,29 +2067,15 @@ export function StageForm({
                         re-split, delete the sibling splits first.
                       </p>
                     ) : null}
-                    {/* Behavioral split — companion to the A/B split above. Only
-                        on a saved ORDINARY stage (a lane can't be split again).
-                        Hands off to the parent, which runs the same confirm +
-                        POST as the stages-row "Behavioral split…" action. */}
-                    {isEdit && onBehavioralSplit && behavioralTier == null ? (
-                      <div className="border-t pt-2">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => onBehavioralSplit()}
-                          disabled={isSubmitting}
-                          className="w-full"
-                        >
-                          Behavioral split…
-                        </Button>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          Branch this position into 3 tier lanes — Ignored /
-                          Clicked / Reached offer. Each recipient is routed by
-                          their current behavior at send time.
-                        </p>
-                      </div>
-                    ) : null}
+                    {/* NOTE: the behavioural split used to live here, beside the
+                        A/B split. It moved to CAMPAIGN level (next to "Add stage"
+                        on the campaign page) in migration 0174, and the
+                        separation is intentional — not an oversight to undo.
+                        The A/B split genuinely IS per-stage: it partitions one
+                        stage's own audience. The behavioural split is not: its
+                        lanes classify everyone who received ANY completed stage
+                        of the campaign, so hanging it off one chosen stage
+                        misrepresented its scope. */}
                     {isEdit && behavioralTier != null ? (
                       <p className="border-t pt-2 text-[11px] text-muted-foreground">
                         This stage is a behavioral lane and can&apos;t be split

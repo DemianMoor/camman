@@ -1,7 +1,8 @@
 import { and, eq, ne, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { campaign_stages, campaigns } from "@/db/schema";
+import { campaign_stages, campaign_stage_split_groups, campaigns } from "@/db/schema";
+import { resolveCompletedStages } from "@/lib/sends/stage-complete";
 import {
   generateCampaignTrackingId,
   generateStageTrackingId,
@@ -14,17 +15,34 @@ import {
 } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 
-// Core of the behavioral-split endpoint, factored out of the route so it can be
+// Core of the behavioural-split endpoint, factored out of the route so it can be
 // tested directly against a throwaway org (the route resolves org from the auth
 // session, which a test harness can't pin). The route is a thin auth + error-map
-// wrapper around this. Structure mirrors the A/B split route's transaction/clone.
+// wrapper around this.
 //
-// The chosen stage becomes the PARENT position and stays an ORDINARY stage; we
-// stamp three lane-stages under it, one per behavioral tier (0 ignored / 1
-// clicked / 2 reached offer). Tier 3 (converted) gets no lane — those contacts
-// exit. Each lane clones the parent's config, sets behavioral_tier +
-// parent_stage_id, regenerates its own stage tracking_id, and leaves
-// split_index/split_total NULL (lanes partition by tier, not the A/B partition).
+// ── CAMPAIGN-LEVEL (migration 0174) ──────────────────────────────────────────
+// The split is now taken against the CAMPAIGN, not against one chosen stage. It
+// stamps three lane-stages, one per behavioural tier (0 ignored / 1 clicked /
+// 2 reached offer), plus a `campaign_stage_split_groups` row that owns them.
+//
+// Tier 3 (converted) gets no lane — those contacts exit the sequence.
+//
+// TWO THINGS ARE DELIBERATELY *NOT* DECIDED HERE:
+//
+//   1. The SOURCE SET. `source_stage_ids` stays empty and the group starts
+//      'pending'; the set is resolved at RECOMPUTE time (T−15min via the
+//      send-preflight cron, or lazily at Phase A). A stage that finishes sending
+//      between this split being created and the recompute MUST be in the source
+//      set, so freezing it now would be wrong.
+//
+//   2. The AUDIENCE. As before, a lane's recipients are resolved live at
+//      materialization, not here.
+//
+// The ANCHOR is decided here, though: the latest completed stage by `sent_at`.
+// It is the P4 slip anchor (the lanes wait for it to finish before firing) and
+// it is the config template the three lanes are cloned from. Each lane's
+// `parent_stage_id` points at it too, so the existing P4 / lane-count /
+// preflight code paths keep working unchanged.
 
 // tier → human label for the lane's starting label. Tier 3 deliberately absent.
 export const LANE_TIERS = [
@@ -36,7 +54,9 @@ export const LANE_TIERS = [
 export type BehavioralSplitResult =
   | {
       ok: true;
-      parent_stage_id: number;
+      split_group_id: string;
+      anchor_stage_id: number;
+      source_stage_ids_preview: number[];
       lane_stage_ids: number[];
       tiers: (number | null)[];
     }
@@ -49,10 +69,10 @@ export type BehavioralSplitResult =
     };
 
 export async function performBehavioralSplit(
-  opts: { orgId: string; campaignId: number; stageId: number },
+  opts: { orgId: string; campaignId: number },
   database: typeof db = db,
 ): Promise<BehavioralSplitResult> {
-  const { orgId, campaignId, stageId } = opts;
+  const { orgId, campaignId } = opts;
 
   const campaignRow = await database
     .select({
@@ -75,71 +95,75 @@ export async function performBehavioralSplit(
     };
   }
 
-  const sourceRow = await database
+  // Gate: the split classifies contacts by how they behaved in stages that have
+  // ALREADY SENT, so at least one completed stage is required. Uses the shared
+  // pipeline definition (sent_at + no open rows) — NOT `status`, which is the
+  // operator's manual record and disagrees with reality on 227 production stages.
+  const completed = await resolveCompletedStages(database, campaignId, orgId);
+  if (completed.length === 0) {
+    return {
+      ok: false,
+      status: 409,
+      code: "conflict",
+      message:
+        "This campaign has no completed stages yet — a behavioural split needs at least one stage that has finished sending.",
+      details: { reason: "no_completed_stages" },
+    };
+  }
+  // Latest completed by sent_at (resolveCompletedStages orders ascending).
+  const anchor = completed[completed.length - 1];
+
+  // Guard: refuse a second LIVE split while one is still un-fired. Once a group
+  // reaches 'materialized' (its lanes have gone out) or 'failed', a fresh split is
+  // allowed — that is the campaign-level analogue of the old "delete the lanes to
+  // re-split" rule, and it lets an operator split again after more stages complete.
+  const liveGroup = await database
+    .select({ id: campaign_stage_split_groups.id, state: campaign_stage_split_groups.state })
+    .from(campaign_stage_split_groups)
+    .where(
+      and(
+        eq(campaign_stage_split_groups.campaign_id, campaignId),
+        eq(campaign_stage_split_groups.org_id, orgId),
+        sql`${campaign_stage_split_groups.state} IN ('pending', 'materializing')`,
+        sql`EXISTS (
+          SELECT 1 FROM campaign_stages s
+          WHERE s.split_group_id = ${campaign_stage_split_groups.id}
+            AND s.status <> 'archived'
+        )`,
+      ),
+    )
+    .limit(1);
+  if (liveGroup[0]) {
+    return {
+      ok: false,
+      status: 409,
+      code: "conflict",
+      message:
+        "This campaign already has a behavioural split waiting to send. Let it fire, or archive its lanes, before creating another.",
+      details: { reason: "split_already_pending", split_group_id: liveGroup[0].id },
+    };
+  }
+
+  const source = await database
     .select()
     .from(campaign_stages)
     .where(
       and(
-        eq(campaign_stages.id, stageId),
+        eq(campaign_stages.id, anchor.id),
         eq(campaign_stages.campaign_id, campaignId),
-        eq(campaign_stages.org_id, orgId),
-      ),
-    )
-    .limit(1);
-  if (!sourceRow[0]) {
-    return {
-      ok: false,
-      status: 404,
-      code: "not_found",
-      message: "Stage not found",
-      details: { entity: "stage" },
-    };
-  }
-  const source = sourceRow[0];
-
-  // Guard: can't behaviorally split a stage that is itself a lane (no chaining).
-  if (source.behavioral_tier !== null) {
-    return {
-      ok: false,
-      status: 409,
-      code: "conflict",
-      message: "This stage is itself a behavioral lane and can't be split again.",
-      details: { reason: "already_lane", behavioral_tier: source.behavioral_tier },
-    };
-  }
-
-  // Guard: archived stages can't be split (mirrors the A/B split route).
-  if (source.status === "archived") {
-    return {
-      ok: false,
-      status: 409,
-      code: "conflict",
-      message: "Archived stages can't be split. Restore the stage first.",
-      details: { reason: "archived" },
-    };
-  }
-
-  // Guard (behavioral analog of A/B's "already split"): refuse if this stage
-  // still has LIVE (non-archived) behavioral lanes, so we never stack a second
-  // trio. Archived lanes are excluded — archiving the accidental lanes frees the
-  // parent to be re-split (matches the A/B re-split rule).
-  const existingLanes = await database
-    .select({ n: sql<number>`count(*)::int` })
-    .from(campaign_stages)
-    .where(
-      and(
-        eq(campaign_stages.parent_stage_id, stageId),
         eq(campaign_stages.org_id, orgId),
         ne(campaign_stages.status, "archived"),
       ),
-    );
-  if (Number(existingLanes[0]?.n ?? 0) > 0) {
+    )
+    .limit(1)
+    .then((r) => r[0]);
+  if (!source) {
     return {
       ok: false,
       status: 409,
       code: "conflict",
-      message: "This stage already has behavioral lanes. Delete them before re-splitting.",
-      details: { reason: "already_behaviorally_split" },
+      message: "The anchor stage could not be loaded — it may have been archived mid-request.",
+      details: { reason: "anchor_unavailable", anchor_stage_id: anchor.id },
     };
   }
 
@@ -166,6 +190,19 @@ export async function performBehavioralSplit(
         .where(eq(campaigns.id, campaignId));
     }
 
+    // The group. state='pending' + empty source_stage_ids: the recompute owns
+    // both (see the header note).
+    const groupRows = await tx
+      .insert(campaign_stage_split_groups)
+      .values({
+        org_id: orgId,
+        campaign_id: campaignId,
+        anchor_stage_id: anchor.id,
+        state: "pending",
+      })
+      .returning({ id: campaign_stage_split_groups.id });
+    const groupId = groupRows[0].id;
+
     // One lane per tier. stage_number is auto-assigned by the BEFORE INSERT
     // trigger; send-state counters reset; split_index/split_total left NULL.
     type StageInsertable = Omit<
@@ -187,7 +224,7 @@ export async function performBehavioralSplit(
       include_clickers: source.include_clickers,
       exclude_clickers: source.exclude_clickers,
       include_no_status: source.include_no_status,
-      // A lane NEVER inherits the parent's send date — a stale (past) date would
+      // A lane NEVER inherits the anchor's send date — a stale (past) date would
       // auto-fire on approval. Operator sets a fresh date per lane; the send
       // pipeline refuses a null-scheduled stage (no_schedule).
       scheduled_at: null,
@@ -198,9 +235,10 @@ export async function performBehavioralSplit(
       delivered_count: 0,
       opt_out_count: 0,
       click_count: 0,
-      // The behavioral identity — set together, coherent with the CHECK.
+      // The behavioural identity — set together, coherent with the CHECK.
       behavioral_tier: tier,
-      parent_stage_id: source.id,
+      parent_stage_id: anchor.id,
+      split_group_id: groupId,
     }));
 
     const insertedStages = await tx
@@ -261,7 +299,12 @@ export async function performBehavioralSplit(
 
     return {
       ok: true as const,
-      parent_stage_id: source.id,
+      split_group_id: groupId,
+      anchor_stage_id: anchor.id,
+      // What the source set WOULD be if resolved right now. Shown in the confirm
+      // dialog so the operator sees the scope; the authoritative set is written
+      // by the recompute and may legitimately be larger by then.
+      source_stage_ids_preview: completed.map((s) => s.id),
       lane_stage_ids: insertedStages.map((s) => s.id),
       tiers: insertedStages.map((s) => s.behavioral_tier),
     };

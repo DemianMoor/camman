@@ -105,7 +105,7 @@ async function main() {
 
     // ── CASE 1: behavioral split (copy path) ────────────────────────────────
     console.log("\nCase 1 — lane split blanks date + rewrites sub_id3:");
-    const r1 = await performBehavioralSplit({ orgId, campaignId, stageId: sourceId });
+    const r1 = await performBehavioralSplit({ orgId, campaignId });
     check("split returned ok with 3 lanes", r1.ok && r1.lane_stage_ids.length === 3, JSON.stringify(r1));
 
     const lanes = (await db.execute(sql`

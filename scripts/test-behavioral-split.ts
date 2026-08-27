@@ -1,6 +1,9 @@
-// Behavioral-split endpoint logic test (build step 4). Exercises
-// performBehavioralSplit() — the factored-out core the thin route calls — so the
-// auth session isn't needed and everything stays under a dedicated throwaway org.
+// Behavioral-split endpoint logic test. Exercises performBehavioralSplit() — the
+// factored-out core the thin route calls — so the auth session isn't needed and
+// everything stays under a dedicated throwaway org.
+//
+// CAMPAIGN-LEVEL since migration 0174: the split is taken against the campaign,
+// gated on >=1 COMPLETED stage, and creates a campaign_stage_split_groups row.
 //
 // TEST-DATA SAFETY: every row is seeded under a throwaway organization carrying
 // the marker below. Teardown is scoped to that org_id ONLY (asserted to match
@@ -64,6 +67,27 @@ async function main() {
     `)) as unknown as { id: number; stage_number: number }[];
     return r[0];
   }
+  // Make a stage satisfy the SHARED completeness predicate
+  // (lib/sends/stage-complete.ts): sent_at set AND no pending/sending rows.
+  // Deliberately does NOT touch `status` — the whole point of that predicate is
+  // that `status` is the operator's manual record and does not decide this.
+  async function markComplete(stageId: number) {
+    await db.execute(sql`
+      UPDATE campaign_stages SET sent_at = now() WHERE id = ${stageId}::int
+    `);
+  }
+  async function groupOf(campaignId: number) {
+    const r = (await db.execute(sql`
+      SELECT id::text AS id, state, anchor_stage_id, source_stage_ids, recomputed_at
+      FROM campaign_stage_split_groups
+      WHERE campaign_id = ${campaignId}::int AND org_id = ${orgId}::uuid
+      ORDER BY created_at DESC LIMIT 1
+    `)) as unknown as {
+      id: string; state: string; anchor_stage_id: number | null;
+      source_stage_ids: number[]; recomputed_at: string | null;
+    }[];
+    return r[0] ?? null;
+  }
   async function lanesOf(parentId: number) {
     return (await db.execute(sql`
       SELECT id, behavioral_tier, parent_stage_id, split_index, split_total, tracking_id
@@ -106,8 +130,20 @@ async function main() {
     const campaignId = campRows[0].id;
     const parent = await newStage(campaignId, creativeId);
 
-    console.log("\nCase 1 — split an ordinary stage:");
-    const r1 = await performBehavioralSplit({ orgId, campaignId, stageId: parent.id });
+    console.log("\nCase 1a - split with NO completed stages (must be rejected):");
+    const r1a = await performBehavioralSplit({ orgId, campaignId });
+    check(
+      "rejected with conflict / reason=no_completed_stages",
+      !r1a.ok && r1a.status === 409 &&
+        (r1a.details as { reason?: string })?.reason === "no_completed_stages",
+      JSON.stringify(r1a),
+    );
+    check("no group row created by the refusal", (await groupOf(campaignId)) === null);
+    check("no lanes created by the refusal", (await lanesOf(parent.id)).length === 0);
+
+    console.log("\nCase 1b - split a campaign with one completed stage:");
+    await markComplete(parent.id);
+    const r1 = await performBehavioralSplit({ orgId, campaignId });
     check("returns ok with 3 lane ids", r1.ok && r1.lane_stage_ids.length === 3, JSON.stringify(r1));
     const lanes = await lanesOf(parent.id);
     check("exactly 3 lanes persisted", lanes.length === 3, `got ${lanes.length}`);
@@ -116,7 +152,7 @@ async function main() {
       JSON.stringify(lanes.map((l) => l.behavioral_tier)) === JSON.stringify([0, 1, 2]),
       lanes.map((l) => l.behavioral_tier).join(","),
     );
-    check("all lanes parent_stage_id = the chosen stage", lanes.every((l) => l.parent_stage_id === parent.id));
+    check("all lanes anchor on the completed stage", lanes.every((l) => l.parent_stage_id === parent.id));
     check("split_index/split_total NULL on every lane", lanes.every((l) => l.split_index === null && l.split_total === null));
     const tids = lanes.map((l) => l.tracking_id);
     check(
@@ -125,31 +161,42 @@ async function main() {
       tids.join(" | "),
     );
 
-    // ====================================================================
-    // CASE 2 — splitting a stage that is ITSELF a lane is REJECTED.
-    // ====================================================================
-    console.log("\nCase 2 — split a lane (should be rejected):");
-    const aLaneId = lanes[0].id;
-    const r2 = await performBehavioralSplit({ orgId, campaignId, stageId: aLaneId });
+    // The GROUP. source_stage_ids is deliberately EMPTY at creation: it is
+    // resolved at RECOMPUTE time (T-minus-15 / Phase A), never frozen here, so a
+    // stage that completes in between is still included. Asserting empty is
+    // asserting that contract, not asserting today's inertness.
+    const g1 = await groupOf(campaignId);
+    check("a split group row was created", g1 !== null);
+    check("group starts state='pending'", g1?.state === "pending", g1?.state);
     check(
-      "rejected with conflict / reason=already_lane",
+      "group source_stage_ids is EMPTY at creation (resolved later)",
+      Array.isArray(g1?.source_stage_ids) && g1.source_stage_ids.length === 0,
+      JSON.stringify(g1?.source_stage_ids),
+    );
+    check("group recomputed_at is NULL at creation", g1?.recomputed_at == null);
+    check("group anchor = the latest completed stage", Number(g1?.anchor_stage_id) === parent.id);
+    const lanesLinked = (await db.execute(sql`
+      SELECT count(*)::int AS n FROM campaign_stages
+      WHERE split_group_id = ${g1.id}::uuid
+    `)) as unknown as { n: number }[];
+    check("all 3 lanes carry split_group_id", Number(lanesLinked[0].n) === 3, `got ${lanesLinked[0].n}`);
+
+    console.log("\nCase 2 - re-split while one is still pending (must be rejected):");
+    const r2 = await performBehavioralSplit({ orgId, campaignId });
+    check(
+      "rejected with conflict / reason=split_already_pending",
       !r2.ok && r2.status === 409 &&
-        (r2.details as { reason?: string })?.reason === "already_lane",
+        (r2.details as { reason?: string })?.reason === "split_already_pending",
       JSON.stringify(r2),
     );
-    check("no lanes created under the rejected lane", (await lanesOf(aLaneId)).length === 0);
+    check("still exactly 3 lanes (nothing stacked)", (await lanesOf(parent.id)).length === 3);
 
-    // ====================================================================
-    // CASE 2b — ARCHIVED lanes no longer block a re-split of their parent.
-    // (The 8_62_070126_1 "Day 4" bug: archived lanes kept the parent stuck.)
-    // ====================================================================
-    console.log("\nCase 2b — re-split after archiving lanes:");
-    // Archive the 3 lanes created in Case 1.
+    console.log("\nCase 2b - re-split after archiving the lanes:");
     await db.execute(sql`
       UPDATE campaign_stages SET status = 'archived'
-      WHERE parent_stage_id = ${parent.id}::int AND org_id = ${orgId}::uuid
+      WHERE split_group_id = ${g1.id}::uuid
     `);
-    const r2b = await performBehavioralSplit({ orgId, campaignId, stageId: parent.id });
+    const r2b = await performBehavioralSplit({ orgId, campaignId });
     check("re-split ALLOWED once lanes are archived", r2b.ok, JSON.stringify(r2b));
     const liveLanes = (await db.execute(sql`
       SELECT count(*)::int AS n FROM campaign_stages
@@ -157,15 +204,10 @@ async function main() {
         AND status <> 'archived'
     `)) as unknown as { n: number }[];
     check("exactly 3 LIVE lanes after re-split", Number(liveLanes[0].n) === 3, `got ${liveLanes[0].n}`);
-
-    // And with LIVE lanes present, a further re-split is still rejected.
-    const r2bBlocked = await performBehavioralSplit({ orgId, campaignId, stageId: parent.id });
-    check(
-      "re-split still BLOCKED while live lanes exist",
-      !r2bBlocked.ok && r2bBlocked.status === 409 &&
-        (r2bBlocked.details as { reason?: string })?.reason === "already_behaviorally_split",
-      JSON.stringify(r2bBlocked),
-    );
+    await db.execute(sql`
+      UPDATE campaign_stages SET status = 'archived'
+      WHERE campaign_id = ${campaignId}::int AND behavioral_tier IS NOT NULL
+    `);
 
     // ====================================================================
     // CASE 3 — the CHECK constraint from step 1 is active (lanes are coherent,
@@ -203,6 +245,11 @@ async function main() {
     const ct2 = camp2Rows[0].tracking_id;
     const source2 = await newStage(campaign2Id, creativeId); // stage_number 1
     const decoy = await newStage(campaign2Id, creativeId); // stage_number 2
+    // The split now needs a COMPLETED stage. Complete BOTH so the anchor is the
+    // decoy (stage_number 2) -- lanes then take stage_numbers 3,4,5 exactly as
+    // this case's colliding-tracking-id setup assumes.
+    await markComplete(source2.id);
+    await markComplete(decoy.id);
     // Lanes will be stage_numbers 3,4,5 → the tier-0 lane (first new) is sn 3.
     const collidingTid = generateStageTrackingId({
       campaignTrackingId: ct2,
@@ -216,12 +263,16 @@ async function main() {
 
     let threw = false;
     try {
-      await performBehavioralSplit({ orgId, campaignId: campaign2Id, stageId: source2.id });
+      await performBehavioralSplit({ orgId, campaignId: campaign2Id });
     } catch {
       threw = true;
     }
     check("the split threw on the tracking_id collision", threw);
-    check("rolled back: ZERO lanes under source2 (no orphans)", (await lanesOf(source2.id)).length === 0);
+    check("rolled back: ZERO lanes under the anchor (no orphans)", (await lanesOf(decoy.id)).length === 0);
+    // The GROUP row is inserted in the SAME transaction as the lanes, so a
+    // rollback must leave no orphan group either -- otherwise the campaign would
+    // be permanently blocked by its own split_already_pending guard.
+    check("rolled back: ZERO group rows (no orphan group)", (await groupOf(campaign2Id)) === null);
     check("the decoy stage still exists (only the split tx rolled back)", (
       (await db.execute(sql`SELECT count(*)::int AS n FROM campaign_stages WHERE id = ${decoy.id}::int`)) as unknown as { n: number }[]
     )[0].n === 1);

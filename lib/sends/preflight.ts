@@ -89,6 +89,10 @@ interface MainRow {
   split_total: number | null;
   behavioral_tier: number | null;
   parent_stage_id: number | null;
+  // 0174: the lane's split-group source set (NULL for legacy lanes / ordinary
+  // stages). Must flow into stageRecipientsSql or preflight's recipient_count
+  // stops matching what kickoff materializes.
+  source_stage_ids: number[] | null;
   sender_max_sends_per_second: number | null;
   allow_unknown_carrier: boolean | null;
 }
@@ -118,6 +122,7 @@ export async function preflightStageSend(
       s.split_total       AS split_total,
       s.behavioral_tier   AS behavioral_tier,
       s.parent_stage_id   AS parent_stage_id,
+      sg.source_stage_ids AS source_stage_ids,
       pp.max_sends_per_second AS sender_max_sends_per_second,
       pp.allow_unknown_carrier AS allow_unknown_carrier
     FROM campaigns c
@@ -125,6 +130,7 @@ export async function preflightStageSend(
     LEFT JOIN creatives cr ON cr.id = s.creative_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id AND p.org_id = ${orgId}
     LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id AND pp.org_id = ${orgId}
+    LEFT JOIN campaign_stage_split_groups sg ON sg.id = s.split_group_id
     WHERE c.id = ${campaignId} AND c.org_id = ${orgId}
     LIMIT 1
   `)) as unknown as MainRow[];
@@ -163,6 +169,7 @@ export async function preflightStageSend(
           // kickoff will materialize (and the stages-list live preview).
           behavioralTier: row.behavioral_tier ?? null,
           parentStageId: row.parent_stage_id ?? null,
+          sourceStageIds: row.source_stage_ids ?? null,
         },
         // Match the kickoff's content-dedup so the previewed recipient count
         // equals what will actually materialize.

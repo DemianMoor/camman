@@ -49,6 +49,7 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 - Post-cleanup state verified: fixture families all 0; real data intact (811,921 contacts, 7 providers, 3 brands, 26 offers, 259 campaigns, 3,281,300 stage_sends, 141,273 opt_outs).
 
 2026-08-18 - W2 rollup layer: contact_org_stats (migration 0145), segment audience single-eval — docs/04-features/w2-rollup-layer.md added
+2026-08-18 - Carrier breakdown per group added to Lookup Stats Panel — docs/04-features/phone-lookup-carrier.md
 2026-08-18 - Minted-link count restored on /settings/short-domains (migration 0144) + stale-guard sweep - docs/03-data-model.md, docs/07-conventions.md
 - Migration 0144 adds links.short_domain_id (non-partial btree). #88 removed the per-domain minted-link count because links (3.28M rows) had nothing covering that column, making each count a parallel seq scan of the whole table.
 - MEASURED, in-database, same query and same brand: BEFORE 12,574 ms (Seq Scan on links, 3.28M rows, once per domain); AFTER 623 ms warm (Index Only Scan using links_short_domain_id_idx). Through the real listBrandShortDomains(), slowest brand 731 ms local wall-clock - which includes ~400 ms of round-trip latency to eu-central-1, visible as brands with ZERO links costing about as much as brands with thousands. The deployed app runs in fra1, next to the database.

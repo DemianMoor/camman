@@ -1,6 +1,6 @@
 # Phone Lookup & Carrier Enrichment (Telnyx)
 
-_Last updated: 2026-07-14_
+_Last updated: 2026-08-18_
 
 > **Status: in build** (`feat/telnyx-number-lookup`). Phase 1 (schema) is authored; the worker, upload flows, segment/campaign wiring, and admin UI land in later phases. This doc is updated as each phase ships.
 
@@ -156,6 +156,7 @@ A read-only reporting section at the top of `/settings/lookup` (`LookupStatsSect
 
 - **Definitions** ([lib/telnyx/lookup-stats.ts](../../lib/telnyx/lookup-stats.ts)): **Total** = contacts carrying the group (via `contact_contact_groups`; a multi-group contact counts per group). **Looked up** = a `phone_lookups` row exists, split by `source` (`telnyx` = API, `csv_import` = manual). **Landlines suppressed** = `line_type='landline'` (retained, `messaging_status='not_applicable'`). **Sendable** = `messaging_status='eligible'` AND NOT in the org's `opt_outs` set — **reuses the send-audience definition verbatim** ([lib/audience-snapshot.ts](../../lib/audience-snapshot.ts) / [lib/segment-rules-eval.ts](../../lib/segment-rules-eval.ts)). **Remaining un-looked-up** = Total − Looked up (the "run a lookup here" flag; rows >50% un-looked-up are highlighted).
 - **Disjoint reconciliation (permanent invariant):** columns partition the population so `total = sendable + landlines + opt_outs(non-landline)` and `telnyx + manual = looked_up`. `computeLookupGroupStats` **asserts this on every compute** (throws on drift), not just in tests — because `messaging_status='eligible' ⇔ line_type<>'landline'`, a future non-landline `not_applicable` reason would fail the assertion loudly rather than silently mis-count. The **summary strip** counts distinct contacts across active groups (multi-group deduped); per-group rows count per group.
+- **Carrier breakdown per group:** each `GroupStat` now carries `by_carrier?: Record<string, number>` — a map of `carrier_norm` → contact count for contacts in that group. Computed in a second query (separate from the main aggregate to keep the FILTER columns clean) and stored in the same JSONB blob. Exposed in the UI as an expandable sub-row (chevron toggle) beneath each group row, showing carrier name + count pills. Old cache entries that pre-date this field render the toggle only after the next refresh. No migration needed — the cache is schema-less JSONB.
 - **Perf / caching:** the aggregate is a ~2s full-population scan (750K+ contacts, opt-outs pre-hashed to a set like the audience builder), too heavy per page view. Cached per-org in `lookup_group_stats_cache` (migration 0106); the panel reads it in ~46ms with a prominent "as of ET" label + "may be stale" badge past the 15-min TTL, and a manager-only "Refresh now". **Fail-safe:** `refreshLookupGroupStats` computes FIRST, then does one atomic upsert of the whole blob — a failed recompute (query error or broken invariant) leaves the prior cache intact and returns 500, so the panel degrades to older data, never blank. `GET /api/telnyx/lookup/group-stats` (read/first-compute) + `POST …/refresh` (force), both manager+. Verified: `scripts/test-lookup-stats.ts`.
 
 ## Integration facts

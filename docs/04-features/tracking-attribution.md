@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-27_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -154,16 +154,54 @@ Overview stages over the default 7-day range; 56 of those had `raw > 0` — the
 script had fired, just with no unique visits.
 
 **Display fallback.** The Overview tab substitutes CamMan's `counted_clickers`
-for a tracked stage with no Keitaro visits (`hasNoKeitaroVisits`, above) and
-`counted_clickers > 0`, marks it with `*`, and renders `—` for `click_rate` and
-`redirect_rate` — not because both divide by the missing denominator (only
-`redirect_rate` does; `click_rate`'s denominator is `total_sent` and the
-substitute is its numerator), but because both would mix a Keitaro basis with a
-CamMan one in the same rate. Read-time only — nothing is written to
-`keitaro_stage_results`, so the next Keitaro poll cannot fight it and the
-substitution self-retires when visits resume. Applied in
+for a tracked stage that satisfies `shouldSubstituteClickers()` — the whole rule,
+exported from [lib/reporting/tracking-gap.ts](../../lib/reporting/tracking-gap.ts):
+`link_mode = 'tracked'`, `hasNoKeitaroVisits` (above), `counted_clickers > 0`,
+**and the stage at least `TRACKING_GAP_MATURITY_HOURS` past its send**. It marks
+the value with `*` and renders `—` for `click_rate` and `redirect_rate` — not
+because both divide by the missing denominator (only `redirect_rate` does;
+`click_rate`'s denominator is `total_sent` and the substitute is its numerator),
+but because both would mix a Keitaro basis with a CamMan one in the same rate.
+Read-time only — nothing is written to `keitaro_stage_results`, so the next
+Keitaro poll cannot fight it and the substitution self-retires when visits
+resume. Applied in
 [app/api/keitaro/reports/route.ts](../../app/api/keitaro/reports/route.ts) at
 stage grain, before the campaign rollup.
+
+### ⚠️ The maturity gate (added 2026-08-27) — zero visits at 40 minutes is latency
+
+The display half originally had **no maturity gate and no noise floor**, on the
+reasoning that "any real click count beats showing 0". That reasoning holds only
+once Keitaro has had a chance to record anything. The alert half has always had
+`TRACKING_GAP_MATURITY_HOURS = 6`; the display half now shares it.
+
+Measured 2026-08-27 against the previous day's mature sends, the Keitaro
+clean-visit rate is **1–5% of recipients**, while CamMan books a tap within
+seconds of the send. A late-sequence resend of 9–200 contacts is therefore
+*expected* to sit at zero Keitaro visits for hours — or all day. That morning six
+campaigns carried "Keitaro visits unavailable" 30–90 minutes after send; **five
+of them had Keitaro visits at campaign level** (6–15 clean). The marker was
+reporting send latency as a dead landing page.
+
+A null `sent_at` fails **closed** (no substitution): maturity is unprovable, and
+the honest Keitaro zero beats an unverifiable substitute.
+
+### ⚠️ Grouped rows: majority, not `some()`
+
+A campaign row (and the totals card) aggregates many stages, so its clicker
+figure can be part real Keitaro visits and part CamMan substitute. The flag was
+`stages.some(...)`: **one** substituted stage marked the whole row and blanked
+both rate columns, however small that stage was. On 2026-08-27 five campaigns
+whose Keitaro visits were 6–15 clean lost CR% and Redirect% because a single
+9-to-180-recipient resend contributed a substitute.
+
+`substitutionDominates(substituted, totalClickers)` now decides it: the row is
+marked when the substitute is the **majority** of the figure — the point at which
+the number stops being a Keitaro reading with a patch on it and becomes a CamMan
+reading. Majority is a principled boundary, not a tuned threshold, and at **stage
+grain `substituted === total`**, so stage rows behave exactly as before. Over the
+trailing 30 days the change takes marked campaign rows from **11 to 4**; over the
+2026-08-27 range specifically, from **2 to 0**.
 
 **Scope:** Overview only. The By Number / Offer / Sequence / Group tabs are
 excluded — their rows aggregate many stages, and `counted_clickers` is not

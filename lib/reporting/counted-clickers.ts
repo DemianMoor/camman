@@ -8,9 +8,12 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 // THE COUNTED-CLICKER DEFINITION — the single denominator behind every EPC.
 //
 // A counted clicker is a contact who, within the grain being displayed, has:
-//     at least one click with classification = 'human'
+//     at least one SCORED click with classification = 'human'
 //  OR a conversion                                            (Rule F)
 // deduplicated at the grain of the row displayed.
+//
+// SCORED is load-bearing — see the HUMAN_CLICK predicate below. An unscored row
+// carries the redirect's provisional UA-only guess, not a verdict.
 //
 // Full precedence table (docs/04-features/tracking-attribution.md). Rows 3 and 4
 // are currently unreachable — clicks.classification has had zero 'unknown' rows
@@ -20,7 +23,8 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 //
 //   | CamMan state              | In Keitaro? | Counted | Why                        |
 //   | bot / prefetch / suspect  | either      | No      | CamMan scoring is final    |
-//   | human                     | either      | Yes     | Confirmed human            |
+//   | human, scored             | either      | Yes     | Confirmed human            |
+//   | human, NOT yet scored     | either      | No      | First-pass guess, not a verdict |
 //   | unknown (never scored)    | Yes         | Yes     | Keitaro filtering vouches  |
 //   | unknown (never scored)    | No          | No      | Nothing vouches            |
 //   | no CamMan row at all      | Yes         | Yes     | Missed, or manual-mode     |
@@ -28,7 +32,7 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 // The consumer-relay carve-out (Apple iCloud Private Relay egress on Fastly /
 // Cloudflare / Akamai, plus Google Fiber) is NOT applied here. It lives in the
 // scorer (lib/links/datacenter-asns.ts), so by the time a click reaches this
-// module the rule has collapsed to `classification = 'human'`. That is the point
+// module the rule has collapsed to a scored `classification = 'human'`. That is the point
 // of having one definition of "human" in the codebase — do not re-implement the
 // ASN logic at this layer.
 //
@@ -54,7 +58,34 @@ const GRAIN_COLUMN: Record<ClickGrain, string> = {
 
 // The rebuild's source-of-truth predicate, kept in one place so the cache and
 // any ad-hoc verification can never drift.
-const HUMAN_CLICK = sql`ck.classification = 'human'`;
+//
+// ⚠️ `scored_at IS NOT NULL` IS PART OF THE PREDICATE, NOT A TIDINESS FILTER.
+// `clicks.classification` carries a FIRST-PASS verdict written inline by the
+// redirect from the user-agent and headers alone; the scoring job overwrites it
+// with the real verdict once the MaxMind ASN lookup has run (db/schema.ts, the
+// `clicks` comment). The first pass has no ASN, so an ordinary-looking UA coming
+// out of a datacenter is provisionally 'human' and is only demoted to 'suspect'
+// minutes-to-hours later.
+//
+// Without this clause the cache ingests those provisional verdicts, and it can
+// never take them back on its own: the incremental pass is INSERT … ON CONFLICT
+// DO NOTHING, so a row is only removed by the once-a-day full rebuild. Measured
+// on prod 2026-08-27 at 10:20 ET, with 4,045 of the day's 9,965 clicks still
+// unscored: stage 3309 held 620 counted clickers against 28 contacts whose
+// clicks were actually classified human — a 22x intraday inflation of an EPC
+// denominator. Every screen divides by this number.
+//
+// lib/links/propagate-clickers.ts has always required BOTH columns ("a CLEAN
+// click: classification = 'human' AND scored_at IS NOT NULL"). This aligns the
+// two definitions of "human" that the codebase is supposed to have only one of.
+//
+// EXPORTED so scripts/verify-counted-clickers.ts's independent recomputation
+// cannot transcribe a stale copy: it used to inline
+// `ck.classification = 'human'` in its own SQL, which meant the "independent
+// cross-check" agreed with the cache only for as long as nobody edited this
+// line. The recomputation stays independent — different query, different
+// aggregation — while the DEFINITION stays single.
+export const HUMAN_CLICK = sql`ck.classification = 'human' AND ck.scored_at IS NOT NULL`;
 
 export interface RebuildResult {
   rows: number;

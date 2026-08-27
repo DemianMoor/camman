@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-26_
+_Last updated: 2026-08-27_
 
 ## "Made a purchase" has exactly one definition (2026-08-19)
 
@@ -1686,3 +1686,64 @@ org data, no per-partner values, no secrets — placeholders only. Per-key numbe
 directly; printing one partner's figures on a shared page is wrong for every
 other reader and a disclosure besides. `test-partner-docs-drift.ts` greps the
 rendered markup for a banned list and for credential-shaped strings.
+
+## A first-pass verdict is not a verdict — join on `scored_at`, not just `classification`
+
+`clicks.classification` is written **twice**. The redirect writes an inline
+first-pass guess from the user-agent and headers alone; the scoring job
+overwrites it with the real verdict once the MaxMind ASN lookup has run. The
+first pass has no ASN, so an ordinary-looking UA arriving from a datacenter is
+provisionally `human` and is demoted to `suspect` minutes-to-hours later.
+
+**Any query that means "a human clicked" must test `classification = 'human'
+AND scored_at IS NOT NULL`.** `scored_at IS NULL` is the authoritative
+unscored flag; the classification column alone cannot tell you whether you are
+reading a verdict or a guess.
+
+This bit the EPC denominator (2026-08-27). `HUMAN_CLICK` in
+[lib/reporting/counted-clickers.ts](../lib/reporting/counted-clickers.ts) tested
+the classification alone while
+[lib/links/propagate-clickers.ts](../lib/links/propagate-clickers.ts) had always
+tested both — two definitions of "human" in a codebase whose stated goal is one.
+It stayed invisible because of **how the cache refreshes**: the incremental pass
+is `INSERT … ON CONFLICT DO NOTHING`, so a provisional row it ingests can only be
+withdrawn by the once-a-day full rebuild. The denominator therefore inflated
+through every morning and snapped back overnight — stage 3309 held 620 counted
+clickers against 28 contacts actually classified human — and every daily
+comparison looked fine, because both sides were read after the nightly repair.
+
+**An additive cache cannot correct itself. Whatever it ingests, it keeps until
+the next full rebuild — so the predicate it ingests on has to be right at insert
+time, not eventually.**
+
+## A monitor's display half needs the same gates as its alert half
+
+The Keitaro tracking-gap feature ships as two halves off one predicate: an alert
+that pages, and a marker that renders. The alert had a maturity gate
+(`TRACKING_GAP_MATURITY_HOURS = 6`) and a noise floor
+(`TRACKING_GAP_MIN_HUMAN_CLICKS = 25`). The display half deliberately had
+neither, reasoned as "a display substitution pages nobody, so any real click
+count beats showing 0".
+
+The noise floor genuinely is about paging. **The maturity gate is not** — it is
+about whether the observation is meaningful yet, and that question is identical
+on both sides. Without it the marker read send latency as a dead landing page:
+the measured Keitaro visit rate is 1–5% of recipients, so a small resend sits at
+zero for hours legitimately, while CamMan books a tap within seconds.
+
+Before deciding a gate is "only for the alerting path", ask which of the two
+things it does: *is this observation actionable?* (alerting) or *is this
+observation established yet?* (both).
+
+## A flag on a grouped row must be proportionate to what it describes
+
+`clickers_is_fallback` on a campaign row was `stages.some(...)`: one substituted
+stage marked the whole campaign and blanked its CR% and Redirect%, however small
+that stage was. Five campaigns whose Keitaro visits were plainly present lost
+both rate columns over a single 9-recipient resend.
+
+A row that aggregates N things needs a rule about **how much** of it the flag
+describes, not whether any of it does. Prefer a structural boundary — majority —
+over a tuned threshold, and check that the rule degenerates correctly at the
+finest grain: at stage grain `substituted === total`, so the same function
+returns the old answer and only grouped rows change.

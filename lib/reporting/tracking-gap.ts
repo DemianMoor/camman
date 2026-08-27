@@ -69,6 +69,96 @@ export function hasNoKeitaroVisits(visitClicksRaw: number, visitClicksClean: num
   return visitClicksRaw === 0 && visitClicksClean === 0;
 }
 
+// ── THE DISPLAY SUBSTITUTION RULE ────────────────────────────────────────────
+//
+// Shared by app/api/keitaro/reports (the Overview tab) and
+// scripts/verify-clickers-fallback.ts. The guard used to TRANSCRIBE the two
+// conditions route.ts kept inline; a transcribed rule is not a shared rule, and
+// the two halves of this feature have already drifted once (PR #129, the
+// raw-vs-clean seam). Both call the function below now.
+
+/**
+ * Whether enough time has passed since a stage's send for zero Keitaro visits
+ * to be EVIDENCE of a tracking gap rather than ordinary latency.
+ *
+ * ⚠️ THE DISPLAY HALF SHIPPED WITHOUT THIS GATE AND IT WAS THE DEFECT.
+ * The alert half has always had TRACKING_GAP_MATURITY_HOURS; the display half
+ * deliberately had neither a maturity gate nor a noise floor, on the reasoning
+ * that "any real click count is enough to beat showing 0". That reasoning holds
+ * only once Keitaro has had a chance to record anything at all.
+ *
+ * Measured 2026-08-27 against the previous day's mature sends, the Keitaro
+ * clean-visit rate is 1–5% of recipients. A late-sequence resend of 9–200
+ * contacts is therefore EXPECTED to sit at zero visits for the whole day, while
+ * CamMan books a tap within seconds of the send. That morning six campaigns
+ * carried the "Keitaro visits unavailable" marker 30–90 minutes after send;
+ * FIVE of them had Keitaro visits at campaign level (6–15 clean). The marker
+ * was reporting send latency as a broken landing page.
+ *
+ * A null `sentAt` fails CLOSED (no substitution): maturity is unprovable, and
+ * the honest Keitaro zero beats an unverifiable substitute.
+ */
+export function stageIsMatureForGap(
+  sentAt: Date | string | null,
+  now: Date,
+): boolean {
+  if (sentAt == null) return false;
+  const t = sentAt instanceof Date ? sentAt.getTime() : Date.parse(sentAt);
+  if (!Number.isFinite(t)) return false;
+  return now.getTime() - t >= TRACKING_GAP_MATURITY_HOURS * 3_600_000;
+}
+
+export interface ClickerSubstitutionInput {
+  /** campaigns.link_mode — manual campaigns mint no links, so they have no CamMan clicks. */
+  linkMode: string;
+  visitClicksRaw: number;
+  visitClicksClean: number;
+  /** CamMan counted clickers for the stage over the SAME range. */
+  countedClickers: number;
+  /** campaign_stages.sent_at. Null ⇒ not substituted (see stageIsMatureForGap). */
+  stageSentAt: Date | string | null;
+  now: Date;
+}
+
+/**
+ * Whether one STAGE's Keitaro visit count should be replaced on screen by
+ * CamMan's counted clickers. The whole rule, in one place.
+ *
+ * Still no noise floor, unlike the alert's TRACKING_GAP_MIN_HUMAN_CLICKS — that
+ * threshold exists to avoid paging a human, and a display substitution pages
+ * nobody. The maturity gate is what this needed, not a click count.
+ */
+export function shouldSubstituteClickers(i: ClickerSubstitutionInput): boolean {
+  return (
+    i.linkMode === "tracked" &&
+    hasNoKeitaroVisits(i.visitClicksRaw, i.visitClicksClean) &&
+    i.countedClickers > 0 &&
+    stageIsMatureForGap(i.stageSentAt, i.now)
+  );
+}
+
+/**
+ * Whether a GROUPED row (a campaign row, or the totals card) should carry the
+ * "*" marker and blank the two rates that mix bases.
+ *
+ * ⚠️ WAS `stages.some(...)` — ONE substituted stage marked the whole row.
+ * A campaign with four healthy stages plus one 9-recipient resend lost both
+ * CR% and Redirect% while its Keitaro visits were sitting right there in the
+ * panel. That is the complaint this rule exists to answer: the marker has to be
+ * proportionate to how much of the number is actually a substitute.
+ *
+ * Majority, not a tuned threshold: below it the row is a Keitaro reading with a
+ * patch on it, above it the row is a CamMan reading. At STAGE grain a
+ * substituted stage has substituted === total, so this is exactly the previous
+ * behaviour there — the change is confined to grouped rows.
+ */
+export function substitutionDominates(
+  substituted: number,
+  totalClickers: number,
+): boolean {
+  return substituted > 0 && substituted * 2 > totalClickers;
+}
+
 // The rule, extracted so it is testable without a database.
 //
 // ⚠️ VISITS ARE THE ONLY KEITARO SIGNAL. Redirects are reported in the alert for

@@ -1,6 +1,6 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-08-27_
+_Last updated: 2026-08-28_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
@@ -107,10 +107,31 @@ pending --recompute--> materializing --all lanes done--> materialized
 - **The recompute runs on the `send-preflight` cron** (`*/5`,
   `PREFLIGHT_LEAD_MS = 15 min`) -- it already leads each `send-scheduled` tick by
   exactly one lead time, is read-mostly, is per-stage best-effort, and carries the
-  operator abort. Phase A calls the same idempotent
-  `ensureGroupSourceResolved()` as a lazy backstop; both are guarded on
-  `state = 'pending'` so they race harmlessly. It deliberately does **not** ride on
-  `preflight_notified_at`, which is a post-once marker.
+  operator abort. It deliberately does **not** ride on `preflight_notified_at`,
+  which is a post-once marker.
+- **But the cron is not the only way in: `kickoffStageSend` resolves the group
+  itself.** That covers EVERY path that can materialize — the manual Prepare
+  button, approve-send, and Phase A — so "the source set is resolved before any
+  row is written" holds in one place instead of three, and it is what makes the
+  Prepare button work at all. `ensureGroupSourceResolved()` is idempotent and
+  guarded on `state = 'pending'`, so all callers race harmlessly. The cron sweep
+  is an OPTIMISATION (resolve early, so the T−15 digest reports the real
+  audience), not the mechanism.
+
+  > This shipped broken and was fixed 2026-08-28. Kickoff originally only
+  > *checked* the group state and refused a `pending` one. A group leaves
+  > `pending` only when the sweep or Phase A resolves it, and both require the lane
+  > to be approved AND due (or inside the lead window) — neither of which an
+  > operator clicking Prepare right after creating a split satisfies. So Prepare
+  > was a dead end, and its error copy ("it will prepare itself on the next
+  > scheduler tick") was wrong too: with no date set, no tick would ever pick it
+  > up. Regression test:
+  > [scripts/test-split-manual-prepare.ts](../../scripts/test-split-manual-prepare.ts).
+  >
+  > The subtle half: after resolving, kickoff must take `source_stage_ids` from the
+  > RESOLVE, not from the row it read beforehand — that row still carries the empty
+  > array the group was created with, and using it would silently fall through to
+  > the single-parent aliveness and materialize the narrower audience.
 - **Atomicity is at the RELEASE boundary, not the insert boundary.** Lanes
   materialize independently (windowed, per-window commit, resumable -- unchanged);
   **Phase B refuses to release a grouped lane until the whole group is

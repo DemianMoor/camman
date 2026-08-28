@@ -21,6 +21,11 @@ export interface SearchableSelectOption {
   value: string;
   label: string;
   color?: string | null;
+  /** Extra text matched by the search box in addition to `label`, never
+   *  rendered. Lets a caller make an option findable by a form the label does
+   *  not literally contain — e.g. a phone number displayed as "+1 844 621 0404"
+   *  stays searchable by the bare digits "8446210404". */
+  searchText?: string;
 }
 
 export interface SearchableSelectProps {
@@ -63,7 +68,11 @@ export function SearchableSelect({
   const filtered = React.useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return options;
-    return options.filter((o) => o.label.toLowerCase().includes(q));
+    return options.filter(
+      (o) =>
+        o.label.toLowerCase().includes(q) ||
+        (o.searchText != null && o.searchText.toLowerCase().includes(q)),
+    );
   }, [search, options]);
 
   const selected = React.useMemo(

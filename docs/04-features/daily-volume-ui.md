@@ -96,12 +96,28 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
   status-derived server-side, Orange/Red sorted to the top, links into each
   campaign. Hosts the meter, window indicator, and stuck callout.
   - **Grouped by sending number (2026-08-28).** The stage list is grouped by the
-    number that sends each stage, as tabs: `All` (default) then one tab per
-    number, labelled `<number> (<provider>) <stage count>` plus a dot when that
-    number holds a stage needing action. The `All` tab stacks every number as a
-    labelled section; a number tab shows that one section. Both render the same
-    [PhoneStageGroup](../../components/sends/phone-stage-group.tsx), so the two
-    views cannot drift.
+    number that sends each stage. A `<SearchableSelect>` "Number" filter picks
+    between `All numbers` (default) and one entry per number, labelled
+    `<number> (<provider>) - <stage count>`. Unfiltered, every number renders as
+    a labelled section stacked down the page; pick a number and only that
+    section renders. Both paths render the same
+    [PhoneStageGroup](../../components/sends/phone-stage-group.tsx), so they
+    cannot drift.
+    - **A dropdown rather than a tab strip** so the control stays one line as the
+      day's number count grows, and so a number can be found by typing. It is
+      below the ">10 options" bar in the picker convention (a day runs 3-7
+      numbers) — an explicit product call, not the default reading of the rule.
+    - The needs-action signal survives the move in two places: the option's
+      (and selected trigger's) dot, via `SearchableSelect`'s existing `color`
+      field, and a **`needs action` badge on each group header** — the header
+      badge is what makes an unhappy number scannable down the unfiltered list,
+      since a dropdown's dots are only visible while it is open. A
+      "N numbers need action" summary sits beside the trigger.
+    - **`SearchableSelect` gained an optional `searchText`** (extended, not
+      forked — per the "don't add a fourth popover-search component" rule). It is
+      matched alongside `label` and never rendered, so a number displayed as
+      `+1 844 621 0404` is still found by typing the bare digits `8446210404`.
+      Providers are searchable through the label.
     - Grouping key is `campaign_stages.provider_phone_id` — one number per stage,
       set on the stage itself, so it is known BEFORE materialization and an
       unprepared stage still lands in its number's group.
@@ -119,9 +135,10 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
       list, volume meter, stuck callout) is unchanged and stays org-wide.
     - The per-row provider chip was dropped — the group header owns
       number/provider identity, so repeating it per row was noise.
-    - Tab selection is deliberately NOT persisted: a number in play today may not
-      be tomorrow, and restoring a stale tab onto an empty day is worse than
-      defaulting to `All`.
+    - The selection is deliberately NOT persisted: a number in play today may not
+      be tomorrow, and restoring a stale one onto an empty day is worse than
+      defaulting to `All numbers`. It also falls back to `All numbers` if the
+      selected number leaves the list on refresh.
   - **`skipped_empty` / `held` are now derivable here.** The candidate query
     previously omitted `skipped_empty_at` and `slip_hold_at`, so
     `deriveStageOperationalStatus` received `undefined` for both and could never

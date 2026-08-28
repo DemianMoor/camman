@@ -21,9 +21,12 @@ import {
   type FleetStage,
 } from "@/components/sends/phone-stage-group";
 import { VolumeCapsMeter } from "@/components/sends/volume-caps-meter";
+import {
+  SearchableSelect,
+  type SearchableSelectOption,
+} from "@/components/searchable-select";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
@@ -153,12 +156,46 @@ export default function FleetTodayPage() {
     [fleet],
   );
 
-  // A number in play today may not be in play tomorrow, so the selected tab is
+  // A number in play today may not be in play tomorrow, so the selection is
   // deliberately NOT persisted — restoring a stale number onto an empty day is
-  // worse than defaulting to All. Reset if the selected number leaves the list.
-  const [tab, setTab] = useState("all");
-  const activeTab =
-    tab === "all" || phoneGroups.some((g) => g.key === tab) ? tab : "all";
+  // worse than defaulting to All. Falls back to All if the selected number
+  // leaves the list (e.g. after a refresh).
+  const [selectedKey, setSelectedKey] = useState("all");
+  const activeKey =
+    selectedKey === "all" || phoneGroups.some((g) => g.key === selectedKey)
+      ? selectedKey
+      : "all";
+  const visibleGroups =
+    activeKey === "all"
+      ? phoneGroups
+      : phoneGroups.filter((g) => g.key === activeKey);
+
+  // Options for the number filter. `color` paints the dot the component already
+  // renders on both the trigger and the row, so the "this number needs action"
+  // signal survives the move from tabs to a dropdown. `searchText` carries the
+  // bare digits so typing "8446210404" finds a number displayed as
+  // "+1 844 621 0404".
+  const numberOptions: SearchableSelectOption[] = useMemo(() => {
+    const all: SearchableSelectOption = {
+      value: "all",
+      label: `All numbers — ${fleet?.data.length ?? 0} stage${
+        (fleet?.data.length ?? 0) === 1 ? "" : "s"
+      }`,
+    };
+    return [
+      all,
+      ...phoneGroups.map((g) => ({
+        value: g.key,
+        label: `${formatSendingNumber(g.phone_number)}${
+          g.provider_name ? ` (${g.provider_name})` : ""
+        } — ${g.stages.length} stage${g.stages.length === 1 ? "" : "s"}`,
+        color: g.needsAction ? "#F97316" : null,
+        searchText: [g.phone_number ?? "", g.provider_name ?? ""].join(" "),
+      })),
+    ];
+  }, [phoneGroups, fleet]);
+
+  const numbersNeedingAction = phoneGroups.filter((g) => g.needsAction).length;
 
   return (
     <div className="space-y-6">
@@ -389,45 +426,50 @@ export default function FleetTodayPage() {
           No tracked stages scheduled, sent, or missed today.
         </div>
       ) : (
-        <Tabs value={activeTab} onValueChange={setTab} className="gap-5">
-          {/* Wraps to several rows once a day runs many numbers, so it carries
-              its own bottom rule to stay visually separate from the first
-              group header underneath it. */}
-          <TabsList
-            variant="line"
-            className="h-auto w-full flex-wrap justify-start gap-x-1 gap-y-0.5 border-b pb-2 group-data-horizontal/tabs:h-auto"
-          >
-            <TabsTrigger value="all" className="flex-none">
-              All
-              <span className="ml-1.5 tabular-nums opacity-60">
-                {fleet.data.length}
+        <div className="space-y-4">
+          {/* Number filter. A dropdown rather than a row of tabs so the bar
+              stays one line as the day's number count grows, and so a number
+              can be found by typing its digits. The orange dot on an option
+              (and on the trigger once picked) marks a number holding a stage
+              that needs action. */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b pb-3">
+            <label
+              className="text-sm font-medium text-muted-foreground"
+              htmlFor="today-number-filter"
+            >
+              Number
+            </label>
+            <SearchableSelect
+              options={numberOptions}
+              value={activeKey}
+              onChange={setSelectedKey}
+              className="min-w-[26rem]"
+              searchPlaceholder="Search by number or provider…"
+              emptyMessage="No number matches"
+              aria-label="Filter today's stages by sending number"
+            />
+            {activeKey === "all" && numbersNeedingAction > 0 ? (
+              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="size-1.5 rounded-full bg-orange-500" aria-hidden />
+                {numbersNeedingAction} number
+                {numbersNeedingAction === 1 ? "" : "s"} need
+                {numbersNeedingAction === 1 ? "s" : ""} action
               </span>
-            </TabsTrigger>
-            {phoneGroups.map((g) => (
-              <TabsTrigger key={g.key} value={g.key} className="flex-none">
-                {/* Dot = this number holds a stage needing action, so a problem
-                    announces itself from the bar without clicking in. */}
-                {g.needsAction ? (
-                  <span
-                    className="mr-1.5 size-1.5 rounded-full bg-orange-500"
-                    aria-label="needs action"
-                  />
-                ) : null}
-                <span className="font-mono">
-                  {formatSendingNumber(g.phone_number)}
-                </span>
-                {g.provider_name ? (
-                  <span className="ml-1 opacity-70">({g.provider_name})</span>
-                ) : null}
-                <span className="ml-1.5 tabular-nums opacity-60">
-                  {g.stages.length}
-                </span>
-              </TabsTrigger>
-            ))}
-          </TabsList>
+            ) : null}
+            {activeKey !== "all" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7"
+                onClick={() => setSelectedKey("all")}
+              >
+                Show all numbers
+              </Button>
+            ) : null}
+          </div>
 
-          <TabsContent value="all" className="space-y-6">
-            {phoneGroups.map((g) => (
+          <div className="space-y-6">
+            {visibleGroups.map((g) => (
               <PhoneStageGroup
                 key={g.key}
                 group={g}
@@ -435,18 +477,8 @@ export default function FleetTodayPage() {
                 onPrepare={onPrepare}
               />
             ))}
-          </TabsContent>
-
-          {phoneGroups.map((g) => (
-            <TabsContent key={g.key} value={g.key}>
-              <PhoneStageGroup
-                group={g}
-                canActivate={canActivate}
-                onPrepare={onPrepare}
-              />
-            </TabsContent>
-          ))}
-        </Tabs>
+          </div>
+        </div>
       )}
 
       <StagePrepareDialog

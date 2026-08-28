@@ -1,7 +1,7 @@
 # Today's Sends — group stages by sending number
 
 **Date:** 2026-08-28
-**Status:** Approved (design), pending implementation
+**Status:** Implemented; UI control revised to a searchable dropdown after review
 **Surfaces:** `app/(protected)/sends/today/page.tsx`, `app/api/sends/today/route.ts`
 
 ## Problem
@@ -15,8 +15,8 @@ message count in the "Prepared for today" card.
 
 ## Goal
 
-Group the stage list by the number that sends it, exposed as tabs, without
-regressing the triage properties of the existing screen.
+Group the stage list by the number that sends it, selectable from a searchable
+number filter, without regressing the triage properties of the existing screen.
 
 ## Data model facts this rests on
 
@@ -57,27 +57,44 @@ A pure function, no React, so the ordering rules are testable in isolation.
   everything else. Ascending `scheduled_at` WITHIN each band; stages with no
   schedule sort last.
 - **Group order:** groups holding a needs-action stage first, then by that
-  group's earliest `scheduled_at`. The number that needs attention is leftmost
-  in the tab bar and topmost on the All tab.
+  group's earliest `scheduled_at`. The number that needs attention is first in
+  the filter list and topmost in the unfiltered list.
 
 Deriving the band from `sortWeight === 0` rather than listing statuses means a
 future attention state joins the band automatically. Notably `skipped_empty`
 (`sortWeight: 90`, benign) and `draft` (40) correctly stay out of it.
 
-### 3. UI — tabs
+### 3. UI — number filter
+
+**Revised 2026-08-28 (post-review): a searchable dropdown, not a tab strip.**
+The first build used tabs; on review the control was changed to a
+`<SearchableSelect>` so it stays one line as the day's number count grows and so
+a number can be found by typing rather than scanned. The grouping, ordering and
+data layer are unchanged — only the control and what compensates for it.
+
+Consequences of the swap, each addressed:
+
+- A dropdown's per-option dot is only visible while it is open, so the
+  "which number is unhappy" signal moved to a **`needs action` badge on each
+  group header**, plus a "N numbers need action" summary beside the trigger.
+  The option/trigger dot is kept via `SearchableSelect`'s existing `color`.
+- Search matches `label` only, and the label renders `+1 844 621 0404`, so
+  typing `8446210404` matched nothing. `SearchableSelectOption` gained an
+  optional **`searchText`** — matched alongside `label`, never rendered — set to
+  the raw E.164 digits. The component was extended rather than forked, per the
+  "don't add a fourth popover-search component" convention.
+- This sits below the ">10 options" bar in that convention (3–7 numbers a day).
+  Deliberate product call, recorded in docs/07-conventions.md.
 
 The top block is UNCHANGED and stays global: hard-stop banner, paused-campaign
 banner, status tiles, "Prepared for today" + its "By number" list, volume
 meter, stuck callout. Only the stage list below it changes.
 
-Tab bar: `All (n)` first and default, then one tab per number, ordered as above.
+Filter options: `All numbers - n stages` first and default, then one per number
+ordered as above, labeled `<number> (<provider>) - <n> stages`.
 
-Each number tab's label is the formatted number, the provider in parentheses,
-the stage count, and a small colored dot when that number holds a needs-action
-stage — so a problem announces itself from the bar without clicking in.
-
-- **All tab** — every group stacked as labeled sections.
-- **Number tab** — that one section.
+- **All numbers** — every group stacked as labeled sections.
+- **A number** — that one section, plus a "Show all numbers" reset.
 
 Both render the same `PhoneStageGroup` component, so the two views cannot drift.
 
@@ -89,9 +106,10 @@ number" card) · stage count · aggregate `sent / prepared` for the group, plus
 The per-row provider chip is dropped — the header now owns number/provider
 identity, and repeating it on every row is noise.
 
-Tab selection is NOT persisted to localStorage. A number in play today may not
-be in play tomorrow; restoring a stale tab onto an empty day is worse than
-defaulting to All.
+The selection is NOT persisted to localStorage. A number in play today may not
+be in play tomorrow; restoring a stale one onto an empty day is worse than
+defaulting to All numbers. It also falls back to All numbers if the selected
+number leaves the list on refresh.
 
 ### 4. Correctness fix pulled in by this work
 
@@ -112,9 +130,11 @@ Selecting both columns and passing them through is the fix.
 ## Verification criteria
 
 1. Group stage counts sum to the flat total; no stage duplicated or dropped.
-2. A number tab's rows are identical to that number's section on the All tab.
-3. Every tab holding an orange/red/rose/amber stage shows its dot; clean tabs
-   do not.
+2. A filtered number's rows are identical to that number's section in the
+   unfiltered list.
+3. Every number holding an orange/red/rose/amber stage shows its dot in the
+   dropdown and a `needs action` badge on its group header; clean ones do not.
+   Typing a number's bare digits finds it; typing a provider name finds it.
 4. Within a block: needs-action band on top, ascending time inside each band.
 5. `skipped_empty` stays OUT of the needs-action band and sorts by time
    with the rest of the block. It is benign and terminal, but the brief was
@@ -127,5 +147,5 @@ Selecting both columns and passing them through is the fix.
 ## Out of scope
 
 - Any change to the top block's content or behavior.
-- Persisting tab selection.
+- Persisting the number selection.
 - Per-number filtering on any other screen.

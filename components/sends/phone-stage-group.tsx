@@ -58,8 +58,8 @@ export function formatSendingNumber(phone: string | null): string {
  * One sending number's section: a header identifying the number, then its
  * stages in band order.
  *
- * The SAME component renders a section on the "All" tab and the body of a
- * single-number tab, so the two views cannot drift apart.
+ * The SAME component renders a section in the un-filtered list and the body of
+ * a single-number view, so the two cannot drift apart.
  */
 export function PhoneStageGroup({
   group,
@@ -93,6 +93,15 @@ export function PhoneStageGroup({
         {typeBadge ? (
           <span className="rounded border px-1 py-0.5 text-[10px] font-medium text-muted-foreground">
             {typeBadge}
+          </span>
+        ) : null}
+        {/* The number filter is a dropdown now, so its per-option dot is only
+            visible while the menu is open. This badge is what makes an unhappy
+            number scannable down the un-filtered list. */}
+        {group.needsAction ? (
+          <span className="inline-flex items-center gap-1 rounded border border-orange-300 bg-orange-100 px-1.5 py-0.5 text-[10px] font-medium text-orange-800 dark:border-orange-900 dark:bg-orange-950 dark:text-orange-200">
+            <span className="size-1.5 rounded-full bg-orange-500" aria-hidden />
+            needs action
           </span>
         ) : null}
         {group.provider_paused ? (

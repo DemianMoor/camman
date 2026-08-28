@@ -216,6 +216,13 @@ export async function performBehavioralSplit(
       creative_id: source.creative_id,
       sms_provider_id: source.sms_provider_id,
       provider_phone_id: source.provider_phone_id,
+      // 1b (0150): a copy carries the landing PAGE, not a frozen URL, so the
+      // destination is rebuilt at mint time from ITS campaign's brand. Omitted
+      // here until 2026-08-28, which left every lane of a behavioural split with NO
+      // destination -- kickoff refused them with `no_destination` and the
+      // operator had to re-pick the landing page by hand on each one. Only the
+      // stage-duplicate path had it; the other three copy paths did not.
+      landing_page_id: source.landing_page_id,
       sales_page_label: source.sales_page_label,
       short_url: source.short_url,
       full_url: source.full_url,

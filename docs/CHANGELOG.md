@@ -1602,6 +1602,10 @@ from the resolve rather than from the pre-resolve row (which still held the empt
 array and would have silently materialized the narrower single-parent audience).
 Refusal copy corrected — it now names the real cause (no completed stages to classify
 from) instead of promising a scheduler tick that would never come.
+  Also fixes a SECOND, pre-existing bug found while verifying the first: of the four
+  stage-copy paths only stage-duplicate carried landing_page_id (added in 0150), so
+  behavioural-split lanes, A/B-split siblings and duplicated-campaign stages all had
+  NO destination and were refused at Prepare with no_destination. All three now copy it.
   - docs updated: docs/04-features/behavioral-lanes.md, docs/07-conventions.md, docs/CHANGELOG.md
 
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

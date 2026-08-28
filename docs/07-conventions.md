@@ -2,6 +2,14 @@
 
 _Last updated: 2026-08-28_
 
+## A phone number in a dense table shows its last 4 — a short code shows all of it (2026-08-28)
+
+`formatPhoneLast4(phone_number, number_type)` ([lib/phone-validation.ts](../../lib/phone-validation.ts)) is the shared form for a number that has to sit inside a column of numbers: `+18449903688` → `…3688`.
+
+**`number_type === 'short_code'` is exempt and renders whole.** A short code is 5–6 digits and is chosen/remembered as a unit — `…1637` names nothing an operator can act on, while `621637` is the number they know. The same exemption already exists in [`<ProviderPhoneCell>`](../../components/provider-phone-cell.tsx); any new phone rendering should keep it rather than mask uniformly.
+
+Where a truncated value is the only thing on screen, the untruncated value belongs on `title` (hover) — that is how the /reports Overview cell surfaces both the full number and a campaign name past its 50-character cap. Applies to the name too: set `title` **only when the value was actually cut**, so a short name doesn't grow a redundant tooltip.
+
 ## "Made a purchase" has exactly one definition (2026-08-19)
 
 `stage_sends.sale_status` stores the affiliate network's **raw Keitaro postback status**, verbatim. This account's network fires `lead` for PAID conversions and effectively never sends `sale`. Therefore:

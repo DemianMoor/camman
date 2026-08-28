@@ -7,6 +7,7 @@ import {
   campaigns,
   keitaro_stage_results,
   opt_out_attributions,
+  provider_phones,
   stage_sends,
 } from "@/db/schema";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
@@ -41,6 +42,9 @@ export interface StageMetrics {
   sent_at: Date | null;
   // Grouping keys for the performance reports.
   provider_phone_id: number | null;
+  // The stage's send number, resolved for display (Overview campaign cell).
+  phone_number: string | null;
+  phone_number_type: string | null;
   offer_id: number | null;
   brand_id: number | null;
   // Computed metrics (identical to Overview).
@@ -103,6 +107,8 @@ export async function getStageMetricsInRange(
       stage_number: campaign_stages.stage_number,
       stage_label: campaign_stages.label,
       provider_phone_id: campaign_stages.provider_phone_id,
+      phone_number: provider_phones.phone_number,
+      phone_number_type: provider_phones.number_type,
       stage_sent_at: campaign_stages.sent_at,
       stage_sms_count: campaign_stages.sms_count,
       stage_total_cost: campaign_stages.total_cost,
@@ -119,6 +125,7 @@ export async function getStageMetricsInRange(
     .from(keitaro_stage_results)
     .innerJoin(campaigns, eq(campaigns.id, keitaro_stage_results.campaign_id))
     .leftJoin(campaign_stages, eq(campaign_stages.id, keitaro_stage_results.stage_id))
+    .leftJoin(provider_phones, eq(provider_phones.id, campaign_stages.provider_phone_id))
     .where(
       and(
         eq(keitaro_stage_results.org_id, orgId),
@@ -144,6 +151,8 @@ export async function getStageMetricsInRange(
         stage_tracking_id: r.stage_tracking_id,
         sent_at: r.stage_sent_at ?? null,
         provider_phone_id: r.provider_phone_id ?? null,
+        phone_number: r.phone_number ?? null,
+        phone_number_type: r.phone_number_type ?? null,
         offer_id: r.offer_id ?? null,
         brand_id: r.brand_id ?? null,
         opt_outs: 0,
@@ -176,6 +185,8 @@ export async function getStageMetricsInRange(
       stage_number: campaign_stages.stage_number,
       stage_label: campaign_stages.label,
       provider_phone_id: campaign_stages.provider_phone_id,
+      phone_number: provider_phones.phone_number,
+      phone_number_type: provider_phones.number_type,
       stage_tracking_id: campaign_stages.tracking_id,
       stage_sent_at: campaign_stages.sent_at,
       stage_sms_count: campaign_stages.sms_count,
@@ -183,6 +194,7 @@ export async function getStageMetricsInRange(
     })
     .from(campaign_stages)
     .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
+    .leftJoin(provider_phones, eq(provider_phones.id, campaign_stages.provider_phone_id))
     .where(
       and(
         eq(campaign_stages.org_id, orgId),
@@ -203,6 +215,8 @@ export async function getStageMetricsInRange(
       stage_tracking_id: r.stage_tracking_id ?? "",
       sent_at: r.stage_sent_at ?? null,
       provider_phone_id: r.provider_phone_id ?? null,
+      phone_number: r.phone_number ?? null,
+      phone_number_type: r.phone_number_type ?? null,
       offer_id: r.offer_id ?? null,
       brand_id: r.brand_id ?? null,
       opt_outs: 0,

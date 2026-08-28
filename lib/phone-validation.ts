@@ -99,3 +99,18 @@ export function validatePhonesBatch(
   }
   return { valid, invalid };
 }
+
+// Compact display form for tables where a full number would eat the column —
+// currently the /reports Overview campaign cell. Short codes are already 5–6
+// digits and are only recognisable in full, so they render raw; every other
+// number type collapses to its last four digits behind an ellipsis ("…0199").
+// Un-parseable or too-short input falls back to the raw string rather than
+// rendering a misleading fragment.
+export function formatPhoneLast4(
+  phoneNumber: string,
+  numberType?: string | null,
+): string {
+  if (numberType === "short_code") return phoneNumber;
+  const digits = phoneNumber.replace(/\D/g, "");
+  return digits.length >= 4 ? `…${digits.slice(-4)}` : phoneNumber;
+}

@@ -186,6 +186,11 @@ export async function GET(req: NextRequest) {
 
   const groupByCampaign = (sp.get("groupBy") ?? "stage") === "campaign";
 
+  // The send number(s) behind the row: one for a stage row, the distinct set
+  // across the campaign's stages for a campaign row. Rendered as a second line
+  // under the campaign name (long numbers collapse to their last 4 digits).
+  type PhoneRef = { phone_number: string; number_type: string | null };
+
   type OutRow = {
     stage_id: number | null;
     campaign_id: number;
@@ -194,6 +199,7 @@ export async function GET(req: NextRequest) {
     stage_name: string | null;
     stage_tracking_id: string | null;
     stage_count: number | null;
+    phones: PhoneRef[];
     opt_outs: number;
     total_sent: number;
     opt_out_rate: number;
@@ -219,6 +225,7 @@ export async function GET(req: NextRequest) {
       campaign_id: number;
       campaign_name: string;
       stage_count: number;
+      phones: Map<string, PhoneRef>;
       opt_outs: number;
       total_sent: number;
       tally: FunnelTally;
@@ -231,6 +238,7 @@ export async function GET(req: NextRequest) {
           campaign_id: acc.campaign_id,
           campaign_name: acc.campaign_name,
           stage_count: 0,
+          phones: new Map(),
           opt_outs: 0,
           total_sent: 0,
           tally: emptyFunnel(),
@@ -238,6 +246,12 @@ export async function GET(req: NextRequest) {
         byCampaign.set(acc.campaign_id, c);
       }
       c.stage_count += 1;
+      if (acc.phone_number && !c.phones.has(acc.phone_number)) {
+        c.phones.set(acc.phone_number, {
+          phone_number: acc.phone_number,
+          number_type: acc.phone_number_type,
+        });
+      }
       c.opt_outs += acc.opt_outs;
       c.total_sent += acc.total_sent;
       mergeFunnel(c.tally, acc.tally);
@@ -250,6 +264,7 @@ export async function GET(req: NextRequest) {
       stage_name: null,
       stage_tracking_id: null,
       stage_count: c.stage_count,
+      phones: [...c.phones.values()],
       opt_outs: c.opt_outs,
       total_sent: c.total_sent,
       opt_out_rate: rateOfSent(c.opt_outs, c.total_sent),
@@ -299,6 +314,14 @@ export async function GET(req: NextRequest) {
         stage_name,
         stage_tracking_id: acc.stage_tracking_id,
         stage_count: null,
+        phones: acc.phone_number
+          ? [
+              {
+                phone_number: acc.phone_number,
+                number_type: acc.phone_number_type,
+              },
+            ]
+          : [],
         opt_outs: acc.opt_outs,
         total_sent: acc.total_sent,
         opt_out_rate: rateOfSent(acc.opt_outs, acc.total_sent),

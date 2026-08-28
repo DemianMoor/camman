@@ -12,6 +12,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
+import {
+  formatPhoneInternational,
+  formatPhoneLast4,
+} from "@/lib/phone-validation";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
@@ -29,6 +33,10 @@ type ReportRow = {
   stage_name: string | null;
   stage_tracking_id: string | null;
   stage_count: number | null;
+  // Send number(s) behind the row — one for a stage row, the distinct set
+  // across the campaign's stages for a campaign row. Empty when the stage has
+  // no provider phone assigned.
+  phones: { phone_number: string; number_type: string | null }[];
   opt_outs: number;
   total_sent: number;
   opt_out_rate: number;
@@ -186,6 +194,43 @@ function fmtPct(n: number): string {
   return `${(n * 100).toFixed(1)}%`;
 }
 
+// The Campaign cell carries two lines (name + send number), so an unbounded
+// name would push the metric columns off screen. Anything past 50 characters
+// is cut here and the full name is reachable by hovering the link.
+const MAX_CAMPAIGN_NAME_CHARS = 50;
+function truncateCampaignName(name: string): string {
+  return name.length > MAX_CAMPAIGN_NAME_CHARS
+    ? name.slice(0, MAX_CAMPAIGN_NAME_CHARS - 1).trimEnd() + "…"
+    : name;
+}
+
+// The number(s) a row was sent from, under the campaign name. Short codes are
+// only recognisable in full; every other type collapses to its last 4 digits.
+// A campaign row can span stages on different numbers — the first few are
+// listed and the rest counted, with all of them in full on hover.
+const MAX_PHONES_SHOWN = 3;
+function fullPhoneLabel(p: ReportRow["phones"][number]): string {
+  return p.number_type === "short_code"
+    ? p.phone_number
+    : formatPhoneInternational(p.phone_number);
+}
+function SendNumbers({ phones }: { phones: ReportRow["phones"] }) {
+  if (phones.length === 0) return null;
+  const shown = phones.slice(0, MAX_PHONES_SHOWN);
+  const hidden = phones.length - shown.length;
+  return (
+    <span
+      className="font-mono text-[11px] text-muted-foreground"
+      title={phones.map(fullPhoneLabel).join(", ")}
+    >
+      {shown
+        .map((p) => formatPhoneLast4(p.phone_number, p.number_type))
+        .join(", ")}
+      {hidden > 0 ? ` +${hidden}` : ""}
+    </span>
+  );
+}
+
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border bg-background px-3 py-2">
@@ -299,14 +344,22 @@ export function KeitaroReport() {
       id: "campaign_name",
       header: "Campaign",
       enableSorting: true,
-      cell: ({ row }) => (
-        <Link
-          href={`/campaigns/${row.original.campaign_id}`}
-          className="font-medium text-primary hover:underline"
-        >
-          {row.original.campaign_name}
-        </Link>
-      ),
+      cell: ({ row }) => {
+        const name = row.original.campaign_name;
+        const shortName = truncateCampaignName(name);
+        return (
+          <div className="flex max-w-[22rem] flex-col gap-0.5">
+            <Link
+              href={`/campaigns/${row.original.campaign_id}`}
+              className="font-medium text-primary hover:underline"
+              title={shortName === name ? undefined : name}
+            >
+              {shortName}
+            </Link>
+            <SendNumbers phones={row.original.phones} />
+          </div>
+        );
+      },
     };
     const stageCol: ColumnDef<ReportRow> =
       filters.groupBy === "campaign"

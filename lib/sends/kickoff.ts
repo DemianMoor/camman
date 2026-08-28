@@ -12,7 +12,10 @@ import {
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { resolveShortDomainForSend } from "@/lib/sends/resolve-short-domain";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
-import { ensureGroupSourceResolved } from "@/lib/stages/split-group";
+import {
+  ensureGroupSourceResolved,
+  settleSplitGroup,
+} from "@/lib/stages/split-group";
 import { getDescriptor } from "@/lib/sends/providers/registry";
 import {
   optOutGateSubject,
@@ -746,6 +749,22 @@ export async function kickoffStageSend(
   // next invocation resumes.
   if (complete) {
     await markMaterialized(dbc, stageId);
+    // SETTLE THE GROUP HERE for the same reason the resolve lives here: every
+    // caller that can finish a lane must be able to finish its GROUP. Phase A
+    // settles too, but Phase A only ever sees lanes with `materialized_at IS
+    // NULL` — so a lane materialized by the manual Prepare button (or
+    // approve-send) was never followed by a settle from anywhere, and its group
+    // sat in 'materializing' forever. Phase B gates on `state='materialized'`,
+    // so those lanes would NEVER release: a silent non-send of already-prepared
+    // messages, which is the worst outcome this design can produce.
+    //
+    // Observed live 2026-08-28 on campaigns 1032 and 1033 — both groups fully
+    // materialized, both stuck, both scheduled to fire the same afternoon.
+    // Idempotent and guarded on `state='materializing'`, so it no-ops unless this
+    // lane was genuinely the last one outstanding.
+    if (row.split_group_id != null) {
+      await settleSplitGroup(dbc, row.split_group_id);
+    }
   }
 
   return {

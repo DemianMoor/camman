@@ -104,9 +104,20 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
     [PhoneStageGroup](../../components/sends/phone-stage-group.tsx), so they
     cannot drift.
     - **A dropdown rather than a tab strip** so the control stays one line as the
-      day's number count grows, and so a number can be found by typing. It is
-      below the ">10 options" bar in the picker convention (a day runs 3-7
-      numbers) — an explicit product call, not the default reading of the rule.
+      day's number count grows, and so a number can be found by typing. This is
+      the ordinary reading of the ">10 options" picker convention: 3-7 numbers
+      appeared on any of the 21 days sampled, but the operating range exceeds 10
+      (confirmed 2026-08-28), and a tab strip wraps to several rows well before
+      that.
+    - **Verified at scale**, not assumed: driven in-browser with a synthesized
+      22-number payload — 22 sections render, the option list scrolls at ~9 rows
+      of 23, the popover stays inside the viewport, and search still narrows by
+      bare digits and by provider. The ordering half is pinned by
+      [scripts/test-today-grouping.ts](../../scripts/test-today-grouping.ts) at
+      25 numbers, including the case where the LAST-indexed number needs action —
+      because groups needing action sort first, they stay reachable WITHOUT
+      scrolling at any count, and that is the only thing making the list usable
+      once it exceeds the visible rows.
     - The needs-action signal survives the move in two places: the option's
       (and selected trigger's) dot, via `SearchableSelect`'s existing `color`
       field, and a **`needs action` badge on each group header** — the header

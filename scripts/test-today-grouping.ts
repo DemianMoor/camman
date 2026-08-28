@@ -79,5 +79,39 @@ const total = gs.reduce((n, g) => n + g.stages.length, 0);
 ok(`group counts sum to input length (${total} === ${multi.length})`, total === multi.length);
 ok("aggregates summed", g1.totalPrepared === 60 && g1.totalSent === 18);
 
+// --- many numbers (the operating range is open-ended) --------------------
+// Verified in-browser at 22 numbers on 2026-08-28. This pins the ordering half
+// so a refactor can't quietly bury the numbers needing attention behind a
+// scroll: the dropdown list scrolls at ~9 rows, so "needs-action groups sort
+// first" is the ONLY thing keeping them reachable without scrolling at any count.
+const MANY = 25;
+const manyStages = Array.from({ length: MANY }, (_, k) =>
+  // Attention on three widely-separated numbers, deliberately including the LAST
+  // one: if group ordering ever degraded to input order, n=24 would sink to the
+  // bottom of a 25-long list and this check catches it.
+  mk(
+    k,
+    k === 24 || k === 11 || k === 3 ? "missed_failed" : "prepared",
+    t(6 + (k % 12)),
+    "n" + k,
+  ),
+);
+const manyGroups = groupStagesByPhone(manyStages);
+ok(MANY + " numbers produce " + MANY + " groups", manyGroups.length === MANY);
+const flagged = manyGroups.filter((g) => g.needsAction);
+ok(
+  "all 3 needs-action groups sort into the first 3 slots (got: " +
+    manyGroups.slice(0, 3).map((g) => g.key).join(",") + ")",
+  flagged.length === 3 && manyGroups.slice(0, 3).every((g) => g.needsAction),
+);
+ok(
+  "the LAST-indexed number still reaches the top when it needs action",
+  manyGroups.slice(0, 3).some((g) => g.provider_phone_id === 24),
+);
+ok(
+  "no stage lost across many groups",
+  manyGroups.reduce((n, g) => n + g.stages.length, 0) === MANY,
+);
+
 console.log(fails === 0 ? "\nALL CHECKS PASSED" : `\n${fails} CHECK(S) FAILED`);
 process.exit(fails === 0 ? 0 : 1);

@@ -8,10 +8,11 @@
 
 Today's Sends is one flat cross-campaign list of every tracked stage in play
 today (ET). It answers "what needs action?" but not "which sending number is
-doing the work, and which one is unhappy?". Operators run 3–7 numbers across
-2–5 providers on a given day (measured over the last 21 ET days; 18–42 stages
-per day), and per-number posture is currently invisible except as an aggregate
-message count in the "Prepared for today" card.
+doing the work, and which one is unhappy?". Operators ran 3–7 numbers across
+2–5 providers on each of the last 21 ET days (18–42 stages per day), and the
+real range is open-ended above that — more than 10 numbers is expected
+(confirmed 2026-08-28). Per-number posture is currently invisible except as an
+aggregate message count in the "Prepared for today" card.
 
 ## Goal
 
@@ -83,8 +84,11 @@ Consequences of the swap, each addressed:
   optional **`searchText`** — matched alongside `label`, never rendered — set to
   the raw E.164 digits. The component was extended rather than forked, per the
   "don't add a fourth popover-search component" convention.
-- This sits below the ">10 options" bar in that convention (3–7 numbers a day).
-  Deliberate product call, recorded in docs/07-conventions.md.
+- This is the ordinary reading of the ">10 options" bar in that convention. The
+  21-day sample showed 3–7 numbers a day, but the operator confirmed the real
+  range exceeds 10 (2026-08-28) — **a measured range is not an operating
+  range**. Verified in-browser at 22 numbers; ordering pinned at 25 by
+  `scripts/test-today-grouping.ts`.
 
 The top block is UNCHANGED and stays global: hard-stop banner, paused-campaign
 banner, status tiles, "Prepared for today" + its "By number" list, volume

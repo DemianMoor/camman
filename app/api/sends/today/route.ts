@@ -41,6 +41,21 @@ export async function GET() {
       s.sent_at         AS sent_at,
       s.materialized_at AS materialized_at,
       s.schedule_missed_at AS schedule_missed_at,
+      -- 0117 slip-hold and 0174 empty-lane markers. Both were previously absent
+      -- here, so deriveStageOperationalStatus got undefined and could never
+      -- return "held" / "skipped_empty" on this screen. An empty behavioural
+      -- lane then fell through to scheduled_unprepared and rendered ORANGE with
+      -- a Prepare button -- a false alarm that the per-number grouping below
+      -- pins to the TOP of its block. Selecting them is what makes the
+      -- needs-action band trustworthy.
+      s.slip_hold_at    AS slip_hold_at,
+      s.skipped_empty_at AS skipped_empty_at,
+      -- The sending number. One per stage, stamped onto every stage_sends row at
+      -- materialization (0112), so it is known BEFORE a stage is prepared -- the
+      -- grouping does not depend on materialization having run.
+      s.provider_phone_id AS provider_phone_id,
+      pp.phone_number   AS phone_number,
+      pp.number_type    AS number_type,
       s.send_approved   AS send_approved,
       s.status          AS status,
       s.tracking_id     AS tracking_id,
@@ -63,6 +78,7 @@ export async function GET() {
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id AND c.org_id = ${orgId}
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id AND p.org_id = ${orgId}
+    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id AND pp.org_id = ${orgId}
     WHERE s.org_id = ${orgId}
       AND s.status <> 'archived'
       AND c.link_mode = 'tracked'
@@ -79,6 +95,11 @@ export async function GET() {
     sent_at: string | null;
     materialized_at: string | null;
     schedule_missed_at: string | null;
+    slip_hold_at: string | null;
+    skipped_empty_at: string | null;
+    provider_phone_id: number | null;
+    phone_number: string | null;
+    number_type: string | null;
     send_approved: boolean;
     status: string;
     tracking_id: string | null;
@@ -194,6 +215,8 @@ export async function GET() {
         scheduledAt: r.scheduled_at,
         sentAt: r.sent_at,
         scheduleMissedAt: r.schedule_missed_at,
+        slipHoldAt: r.slip_hold_at,
+        skippedEmptyAt: r.skipped_empty_at,
         campaignSendPaused: r.campaign_paused === true,
         materializedAt: r.materialized_at,
         counts,
@@ -227,6 +250,10 @@ export async function GET() {
       scheduled_at: r.scheduled_at,
       sent_at: r.sent_at,
       schedule_missed_at: r.schedule_missed_at,
+      provider_phone_id:
+        r.provider_phone_id == null ? null : Number(r.provider_phone_id),
+      phone_number: r.phone_number,
+      number_type: r.number_type,
       provider_name: r.provider_name,
       provider_color: r.provider_color,
       provider_paused: r.provider_paused === true,

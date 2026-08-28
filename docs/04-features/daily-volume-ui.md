@@ -1,6 +1,6 @@
 # Daily-Volume UI (WS4)
 
-_Last updated: 2026-07-26_
+_Last updated: 2026-08-28_
 
 The operating layer that makes running many tracked SMS campaigns a day fast and
 legible. Purely additive UI + read endpoints over the existing send pipeline
@@ -95,6 +95,68 @@ color. The model applies only to `link_mode = 'tracked'` campaigns.
   `GET /api/sends/today`. Every tracked stage scheduled/sent/missed today (ET),
   status-derived server-side, Orange/Red sorted to the top, links into each
   campaign. Hosts the meter, window indicator, and stuck callout.
+  - **Grouped by sending number (2026-08-28).** The stage list is grouped by the
+    number that sends each stage. A `<SearchableSelect>` "Number" filter picks
+    between `All numbers` (default) and one entry per number, labelled
+    `<number> (<provider>) - <stage count>`. Unfiltered, every number renders as
+    a labelled section stacked down the page; pick a number and only that
+    section renders. Both paths render the same
+    [PhoneStageGroup](../../components/sends/phone-stage-group.tsx), so they
+    cannot drift.
+    - **A dropdown rather than a tab strip** so the control stays one line as the
+      day's number count grows, and so a number can be found by typing. This is
+      the ordinary reading of the ">10 options" picker convention: 3-7 numbers
+      appeared on any of the 21 days sampled, but the operating range exceeds 10
+      (confirmed 2026-08-28), and a tab strip wraps to several rows well before
+      that.
+    - **Verified at scale**, not assumed: driven in-browser with a synthesized
+      22-number payload — 22 sections render, the option list scrolls at ~9 rows
+      of 23, the popover stays inside the viewport, and search still narrows by
+      bare digits and by provider. The ordering half is pinned by
+      [scripts/test-today-grouping.ts](../../scripts/test-today-grouping.ts) at
+      25 numbers, including the case where the LAST-indexed number needs action —
+      because groups needing action sort first, they stay reachable WITHOUT
+      scrolling at any count, and that is the only thing making the list usable
+      once it exceeds the visible rows.
+    - The needs-action signal survives the move in two places: the option's
+      (and selected trigger's) dot, via `SearchableSelect`'s existing `color`
+      field, and a **`needs action` badge on each group header** — the header
+      badge is what makes an unhappy number scannable down the unfiltered list,
+      since a dropdown's dots are only visible while it is open. A
+      "N numbers need action" summary sits beside the trigger.
+    - **`SearchableSelect` gained an optional `searchText`** (extended, not
+      forked — per the "don't add a fourth popover-search component" rule). It is
+      matched alongside `label` and never rendered, so a number displayed as
+      `+1 844 621 0404` is still found by typing the bare digits `8446210404`.
+      Providers are searchable through the label.
+    - Grouping key is `campaign_stages.provider_phone_id` — one number per stage,
+      set on the stage itself, so it is known BEFORE materialization and an
+      unprepared stage still lands in its number's group.
+    - Ordering lives in
+      [lib/sends/group-stages-by-phone.ts](../../lib/sends/group-stages-by-phone.ts)
+      (pure, no React, covered by
+      [scripts/test-today-grouping.ts](../../scripts/test-today-grouping.ts)).
+      Within a block the whole **needs-action band** comes first — derived as
+      `STAGE_STATUS_META[...].sortWeight === 0`, NOT a hardcoded list, so a
+      future attention state joins it automatically — then everything else, with
+      ascending `scheduled_at` inside each band. Groups holding a needs-action
+      stage sort first; the null-number bucket ("No number assigned", rendered
+      only when non-empty) is pinned last.
+    - The top block (banners, status tiles, "Prepared for today" + its per-number
+      list, volume meter, stuck callout) is unchanged and stays org-wide.
+    - The per-row provider chip was dropped — the group header owns
+      number/provider identity, so repeating it per row was noise.
+    - The selection is deliberately NOT persisted: a number in play today may not
+      be tomorrow, and restoring a stale one onto an empty day is worse than
+      defaulting to `All numbers`. It also falls back to `All numbers` if the
+      selected number leaves the list on refresh.
+  - **`skipped_empty` / `held` are now derivable here.** The candidate query
+    previously omitted `skipped_empty_at` and `slip_hold_at`, so
+    `deriveStageOperationalStatus` received `undefined` for both and could never
+    return those states on this screen. An empty behavioural lane (0174) then
+    fell through to `scheduled_unprepared` and rendered ORANGE with a Prepare
+    button — a false alarm that per-number grouping would pin to the top of its
+    block. Both columns are now selected and passed through.
   - **Emergency hard-stop.** A "Hard stop" button (manager+, `campaigns.drain`)
     flips `org_settings.sends_paused` via `POST /api/sends/pause`. While engaged,
     a red banner with a "Proceed (resume sending)" button replaces it. The pause

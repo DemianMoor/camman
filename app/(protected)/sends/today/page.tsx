@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Ban, Play, RefreshCw, Send } from "lucide-react";
+import { AlertTriangle, Ban, Play, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -15,50 +15,26 @@ import {
   CampaignResumeDialog,
   type ResumeTarget,
 } from "@/components/sends/campaign-resume-dialog";
-import { SendWindowIndicator } from "@/components/sends/send-window-indicator";
+import {
+  PhoneStageGroup,
+  formatSendingNumber,
+  type FleetStage,
+} from "@/components/sends/phone-stage-group";
 import { VolumeCapsMeter } from "@/components/sends/volume-caps-meter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
+import { groupStagesByPhone } from "@/lib/sends/group-stages-by-phone";
 import {
   STAGE_STATUS_META,
   STAGE_STATUS_ORDER,
   type StageOperationalStatus,
 } from "@/lib/stages/stage-status";
 import { cn } from "@/lib/utils";
-
-type FleetStage = {
-  stage_id: number;
-  stage_number: number;
-  label: string | null;
-  campaign_id: number;
-  campaign_name: string;
-  tracking_id: string | null;
-  scheduled_at: string | null;
-  sent_at: string | null;
-  schedule_missed_at: string | null;
-  provider_name: string | null;
-  provider_color: string | null;
-  provider_paused: boolean;
-  campaign_paused: boolean;
-  campaign_paused_reason: string | null;
-  campaign_paused_at: string | null;
-  operational_status: StageOperationalStatus;
-  counts: {
-    total: number;
-    pending: number;
-    sending: number;
-    sent: number;
-    failed: number;
-    skippedDuplicate: number;
-    skippedOptedOut: number;
-  };
-  window_opens_at: string | null;
-  window_closes_at: string | null;
-};
 
 type PausedCampaign = {
   campaign_id: number;
@@ -143,6 +119,17 @@ export default function FleetTodayPage() {
   }, [fleetExec, stateExec, tick]);
 
   const canActivate = can("campaigns.activate");
+  const onPrepare = useCallback(
+    (s: FleetStage) =>
+      setPrepareTarget({
+        campaignId: s.campaign_id,
+        stageId: s.stage_id,
+        stageLabel: s.label,
+        scheduledAt: s.scheduled_at,
+        scheduleMissedAt: s.schedule_missed_at,
+      }),
+    [],
+  );
   const canPause = can("campaigns.pause");
   const loading = fleet === null;
 
@@ -157,6 +144,21 @@ export default function FleetTodayPage() {
   // the "Sent today" meter below it.
   const preparedToday =
     fleet?.data.reduce((sum, s) => sum + s.counts.total, 0) ?? 0;
+
+  // Stages grouped by the number that sends them. The tab bar and the "All"
+  // tab both render from this one list, so a number tab and its section on All
+  // are the same rows in the same order by construction.
+  const phoneGroups = useMemo(
+    () => groupStagesByPhone(fleet?.data ?? []),
+    [fleet],
+  );
+
+  // A number in play today may not be in play tomorrow, so the selected tab is
+  // deliberately NOT persisted — restoring a stale number onto an empty day is
+  // worse than defaulting to All. Reset if the selected number leaves the list.
+  const [tab, setTab] = useState("all");
+  const activeTab =
+    tab === "all" || phoneGroups.some((g) => g.key === tab) ? tab : "all";
 
   return (
     <div className="space-y-6">
@@ -379,7 +381,7 @@ export default function FleetTodayPage() {
         </div>
       ) : null}
 
-      {/* Stage list */}
+      {/* Stage list — grouped by the number that sends each stage. */}
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : fleet.data.length === 0 ? (
@@ -387,134 +389,64 @@ export default function FleetTodayPage() {
           No tracked stages scheduled, sent, or missed today.
         </div>
       ) : (
-        <div className="space-y-2">
-          {fleet.data.map((s) => {
-            const meta = STAGE_STATUS_META[s.operational_status];
-            return (
-              <div
-                key={s.stage_id}
-                className={cn(
-                  "flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-l-4 bg-background p-3",
-                  meta.rowClass,
-                )}
-              >
-                <span
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium",
-                    meta.badgeClass,
-                  )}
-                  title={meta.meaning}
-                >
-                  <span className={cn("size-1.5 rounded-full", meta.dotClass)} />
-                  {meta.label}
-                </span>
-
-                <div className="min-w-0 flex-1">
-                  <Link
-                    href={`/campaigns/${s.campaign_id}`}
-                    className="text-sm font-medium hover:underline"
-                  >
-                    {s.campaign_name}
-                  </Link>
-                  <span className="text-muted-foreground">
-                    {" "}
-                    · Stage {s.stage_number}
-                    {s.label ? ` — ${s.label}` : ""}
-                  </span>
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-                    {s.provider_name ? (
-                      <span className="inline-flex items-center gap-1">
-                        <span
-                          className="size-1.5 rounded-full"
-                          style={{
-                            backgroundColor: s.provider_color ?? "#64748B",
-                          }}
-                        />
-                        {s.provider_name}
-                        {s.provider_paused ? (
-                          <span className="text-destructive"> (paused)</span>
-                        ) : null}
-                      </span>
-                    ) : null}
-                    {s.campaign_paused ? (
-                      <span
-                        className="inline-flex items-center gap-1 rounded border border-rose-300 bg-rose-100 px-1.5 py-0.5 text-[11px] font-medium text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200"
-                        title={s.campaign_paused_reason ?? "Campaign send paused"}
-                      >
-                        <Ban className="size-3" aria-hidden /> campaign paused
-                      </span>
-                    ) : null}
-                    {s.scheduled_at ? (
-                      <span>{formatCampaignDateTime(s.scheduled_at)}</span>
-                    ) : null}
-                    <SendWindowIndicator
-                      opensAt={s.window_opens_at}
-                      closesAt={s.window_closes_at}
-                    />
-                  </div>
-                </div>
-
-                <div className="text-right text-xs tabular-nums text-muted-foreground">
-                  {s.counts.total > 0 ? (
-                    <span>
-                      {s.counts.sent}/{s.counts.total} sent
-                      {s.counts.failed > 0 ? (
-                        <span className="text-red-600">
-                          {" "}
-                          · {s.counts.failed} failed
-                        </span>
-                      ) : null}
-                      {s.counts.pending > 0 ? (
-                        <span>
-                          {" "}
-                          · {s.counts.pending.toLocaleString()} pending
-                          {s.campaign_paused ? (
-                            <span className="text-rose-600">
-                              {" "}
-                              · held by campaign pause
-                            </span>
-                          ) : null}
-                        </span>
-                      ) : null}
-                      {s.counts.skippedOptedOut > 0 ? (
-                        <span className="text-amber-600">
-                          {" "}
-                          · {s.counts.skippedOptedOut} STOP-cancel
-                        </span>
-                      ) : null}
-                      {s.counts.skippedDuplicate > 0 ? (
-                        <span> · {s.counts.skippedDuplicate} skipped (1h)</span>
-                      ) : null}
-                    </span>
-                  ) : (
-                    <span>not prepared</span>
-                  )}
-                </div>
-
-                {/* One-click Prepare on Orange rows (same shared popup). */}
-                {s.operational_status === "scheduled_unprepared" &&
-                canActivate ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7"
-                    onClick={() =>
-                      setPrepareTarget({
-                        campaignId: s.campaign_id,
-                        stageId: s.stage_id,
-                        stageLabel: s.label,
-                        scheduledAt: s.scheduled_at,
-                        scheduleMissedAt: s.schedule_missed_at,
-                      })
-                    }
-                  >
-                    <Send className="size-3" aria-hidden /> Prepare
-                  </Button>
+        <Tabs value={activeTab} onValueChange={setTab} className="gap-5">
+          {/* Wraps to several rows once a day runs many numbers, so it carries
+              its own bottom rule to stay visually separate from the first
+              group header underneath it. */}
+          <TabsList
+            variant="line"
+            className="h-auto w-full flex-wrap justify-start gap-x-1 gap-y-0.5 border-b pb-2 group-data-horizontal/tabs:h-auto"
+          >
+            <TabsTrigger value="all" className="flex-none">
+              All
+              <span className="ml-1.5 tabular-nums opacity-60">
+                {fleet.data.length}
+              </span>
+            </TabsTrigger>
+            {phoneGroups.map((g) => (
+              <TabsTrigger key={g.key} value={g.key} className="flex-none">
+                {/* Dot = this number holds a stage needing action, so a problem
+                    announces itself from the bar without clicking in. */}
+                {g.needsAction ? (
+                  <span
+                    className="mr-1.5 size-1.5 rounded-full bg-orange-500"
+                    aria-label="needs action"
+                  />
                 ) : null}
-              </div>
-            );
-          })}
-        </div>
+                <span className="font-mono">
+                  {formatSendingNumber(g.phone_number)}
+                </span>
+                {g.provider_name ? (
+                  <span className="ml-1 opacity-70">({g.provider_name})</span>
+                ) : null}
+                <span className="ml-1.5 tabular-nums opacity-60">
+                  {g.stages.length}
+                </span>
+              </TabsTrigger>
+            ))}
+          </TabsList>
+
+          <TabsContent value="all" className="space-y-6">
+            {phoneGroups.map((g) => (
+              <PhoneStageGroup
+                key={g.key}
+                group={g}
+                canActivate={canActivate}
+                onPrepare={onPrepare}
+              />
+            ))}
+          </TabsContent>
+
+          {phoneGroups.map((g) => (
+            <TabsContent key={g.key} value={g.key}>
+              <PhoneStageGroup
+                group={g}
+                canActivate={canActivate}
+                onPrepare={onPrepare}
+              />
+            </TabsContent>
+          ))}
+        </Tabs>
       )}
 
       <StagePrepareDialog

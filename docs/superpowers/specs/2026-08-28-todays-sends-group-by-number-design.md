@@ -116,7 +116,11 @@ Selecting both columns and passing them through is the fix.
 3. Every tab holding an orange/red/rose/amber stage shows its dot; clean tabs
    do not.
 4. Within a block: needs-action band on top, ascending time inside each band.
-5. `skipped_empty` sorts to the BOTTOM of its block, not into the band.
+5. `skipped_empty` stays OUT of the needs-action band and sorts by time
+   with the rest of the block. It is benign and terminal, but the brief was
+   "sort by time" with exactly one exception (the band) -- sinking finished
+   states would be a second, unrequested exception. Noted as an open
+   question rather than decided unilaterally.
 6. `npx tsc --noEmit` clean; `npx eslint` on changed files adds no new problems.
 7. Renders on localhost against real data.
 

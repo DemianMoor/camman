@@ -1623,4 +1623,14 @@ from) instead of promising a scheduler tick that would never come.
   NO destination and were refused at Prepare with no_destination. All three now copy it.
   - docs updated: docs/04-features/behavioral-lanes.md, docs/07-conventions.md, docs/CHANGELOG.md
 
+2026-08-28 — feat: the /reports Overview campaign cell now carries a second line with
+the send number(s) behind the row — the stage's number when grouped by stage, the
+distinct set across the campaign's in-range stages when grouped by campaign (first 3
+listed, rest counted, all of them in full on hover). Long numbers collapse to their
+last 4 digits (formatPhoneLast4); short codes stay whole because a fragment of one is
+unrecognisable. Campaign names now cap at 50 characters with the full name on hover, so
+the two-line cell doesn't push the metric columns off screen. getStageMetricsInRange
+left-joins provider_phones for the number (PK join, no fan-out); no schema change.
+  - docs updated: docs/04-features/reports-rollup.md, docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

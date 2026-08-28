@@ -1,6 +1,6 @@
 # Reports Rollup
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-28_
 
 > **⚠️ SOURCE CHANGE (2026-07-20) — read this first.** The five `/reports` tabs
 > were re-sourced to **match the Overview (Keitaro) tab exactly**. On first live
@@ -161,8 +161,20 @@ Shared shell (title + tab bar) in [app/(protected)/reports/layout.tsx](../../app
 - Provider/number filter scopes every tab (stage-level, via `campaign_stages.provider_phone_id`). By-Number rows use the shared [`<ProviderPhoneCell>`](../../components/provider-phone-cell.tsx).
 - Totals reconcile to Overview on every tab; group rows sum back to the totals (fractional split, no double-count). Hourly = activity-time engagement (no sent/cost/rates columns).
 
+### Overview campaign cell — send number + capped title (2026-08-28)
+
+The Overview tab's **Campaign** column renders two lines ([components/reports/keitaro-report.tsx](../../components/reports/keitaro-report.tsx)):
+
+- **Line 1 — the campaign name, capped at 50 characters.** Longer names are cut with an ellipsis and the full name moves to the link's `title` (hover). A name at or under the cap gets no tooltip. The cap exists so the now two-line cell doesn't push the metric columns off screen.
+- **Line 2 — the send number(s) behind the row**, from `campaign_stages.provider_phone_id`. Long numbers collapse to their last four digits (`…3688`) via `formatPhoneLast4()` ([lib/phone-validation.ts](../../lib/phone-validation.ts)); **short codes render whole** (`621637`) — four digits of a six-digit code identify nothing. Hover shows every number in full, internationally formatted.
+
+Grouped by **stage** the line is that stage's number (absent when the stage has no provider phone). Grouped by **campaign** it is the **distinct** set across that campaign's stages **within the selected range** — the first 3 listed, the rest as `+N` (e.g. `63109, …3688`). The set is assembled in [app/api/keitaro/reports/route.ts](../../app/api/keitaro/reports/route.ts) and travels as `phones: { phone_number, number_type }[]` on every row; the numbers themselves come from a `provider_phones` LEFT JOIN added to `getStageMetricsInRange()` — a join on the PK, so no row fan-out and the funnel math is untouched.
+
+Guard: [scripts/verify-overview-phone-line.ts](../../scripts/verify-overview-phone-line.ts) signs in, calls the real endpoint in **both** groupings, and compares the numbers it returns against `provider_phones` read straight from the DB. It fails loudly if every row comes back with an empty array — all-empty satisfies "has a phones field" and would otherwise pass vacuously.
+
 ## Verification
 
 - **Overview parity:** [`scripts/test-stage-funnel.ts`](../../scripts/test-stage-funnel.ts) — the extracted helper reproduces Overview to the cent (Jul 18–19: Clickers 2,144, Redirect 257, Sales 32, Revenue $2,040, Cost $747.53, Profit $1,292.47, Sent 72,408) and `sum(stages) == grand`.
 - **Reports:** [`scripts/test-performance-report.ts`](../../scripts/test-performance-report.ts) — number/offer/sequence totals **equal** Overview and rows reconcile exactly; group rows reconcile to the totals; hourly buckets by activity time. Plus `tsc` + `next build` (routes compile, client/server boundary clean).
+- **Overview campaign cell:** [`scripts/verify-overview-phone-line.ts`](../../scripts/verify-overview-phone-line.ts) — `formatPhoneLast4` unit checks + the live endpoint's `phones` field vs `provider_phones` in the DB (both groupings).
 - **Legacy rollup:** [`scripts/test-report-rollup.ts`](../../scripts/test-report-rollup.ts) still validates the (now-unused) Phase-1 rollup aggregates.

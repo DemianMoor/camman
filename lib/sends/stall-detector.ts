@@ -1,6 +1,12 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import {
+  ceilingBreached,
+  countSentSince,
+  resolve24hCap,
+  resolveMinuteCap,
+} from "@/lib/sends/circuit-breakers";
 import { isOutsideSendWindow, type ProviderSendWindow } from "@/lib/quiet-hours";
 
 // Phase 3 — backlog-stall detector. A catch-all safety net for ANY reason the
@@ -12,6 +18,18 @@ import { isOutsideSendWindow, type ProviderSendWindow } from "@/lib/quiet-hours"
 // Read-only. Meant to run on a slow cadence (the hourly Telegram cron) so a
 // persistent stall nags ~hourly without spamming every 5-minute drain tick.
 
+/**
+ * Why a stage with undrained rows is sitting still.
+ *
+ * `stalled` is the alarm: nothing explains it, so something is wrong.
+ * `rate_24h` / `rate_minute` are NOT alarms — the drain is refusing to claim
+ * another batch because the provider is at a ceiling the operator configured
+ * (`sms_providers.max_sends_per_24h` / `max_sends_per_minute`). That is a hold
+ * ON PURPOSE, exactly like a paused provider or closed quiet hours, and the
+ * whole point of this detector is to not cry wolf about those.
+ */
+export type StallHold = "stalled" | "rate_24h" | "rate_minute";
+
 export interface StalledStage {
   stage_id: number;
   campaign: string;
@@ -22,9 +40,16 @@ export interface StalledStage {
   pending: number;
   last_sent: string | null; // ISO, or null if nothing ever sent
   materialized_at: string | null;
+  hold: StallHold;
+  /** Human detail for a ceiling hold, e.g. "30,038/30,000 in 24h". Null when stalled. */
+  hold_detail: string | null;
 }
 
-interface StallRow extends Omit<StalledStage, "pending" | "last_sent"> {
+interface StallRow extends Omit<StalledStage, "pending" | "last_sent" | "hold" | "hold_detail"> {
+  org_id: string;
+  provider_id: number | null;
+  max_sends_per_24h: number | null;
+  max_sends_per_minute: number | null;
   send_window_weekday_start: number | null;
   send_window_weekday_end: number | null;
   send_window_weekend_start: number | null;
@@ -107,11 +132,15 @@ export async function findStalledStages(
   const nowIso = now.toISOString();
   const rows = (await dbc.execute(sql`
     SELECT s.id                AS stage_id,
+           c.org_id            AS org_id,
            c.name              AS campaign,
            s.stage_number      AS stage_number,
            s.label             AS label,
            s.tracking_id       AS tracking_id,
+           p.id                AS provider_id,
            p.name              AS provider_name,
+           p.max_sends_per_24h    AS max_sends_per_24h,
+           p.max_sends_per_minute AS max_sends_per_minute,
            s.materialized_at   AS materialized_at,
            p.send_window_weekday_start AS send_window_weekday_start,
            p.send_window_weekday_end   AS send_window_weekday_end,
@@ -172,39 +201,139 @@ export async function findStalledStages(
     dbc,
     inWindow.map((r) => r.stage_id),
   );
+  const holds = await pacingHolds(dbc, inWindow);
 
-  return inWindow.map((r) => ({
-    stage_id: r.stage_id,
-    campaign: r.campaign,
-    stage_number: r.stage_number,
-    label: r.label,
-    tracking_id: r.tracking_id,
-    provider_name: r.provider_name,
-    pending: stats.get(r.stage_id)?.pending ?? 0,
-    last_sent: stats.get(r.stage_id)?.last_sent ?? null,
-    materialized_at: r.materialized_at,
-  }));
+  return inWindow.map((r) => {
+    const hold = holds.get(r.stage_id);
+    return {
+      stage_id: r.stage_id,
+      campaign: r.campaign,
+      stage_number: r.stage_number,
+      label: r.label,
+      tracking_id: r.tracking_id,
+      provider_name: r.provider_name,
+      pending: stats.get(r.stage_id)?.pending ?? 0,
+      last_sent: stats.get(r.stage_id)?.last_sent ?? null,
+      materialized_at: r.materialized_at,
+      hold: hold?.hold ?? "stalled",
+      hold_detail: hold?.detail ?? null,
+    };
+  });
+}
+
+/**
+ * Classify each candidate by whether its provider is currently AT a pacing
+ * ceiling, using the drain's own predicate.
+ *
+ * ⭐ THIS MIRRORS lib/sends/drain.ts — `countSentSince(org, provider, window) >=
+ * resolve*Cap(...)` is literally the condition that makes the drain break with
+ * `stopReason = "rate_24h"` / `"rate_minute"`. Reproducing the drain's own test
+ * is the point: the detector must agree with the thing it is describing, or it
+ * reports "STALLED — check provider health" about a queue that is behaving
+ * exactly as configured. That happened on 2026-08-27: Text Request sat at
+ * 30,038 against a 30,000/24h ceiling, which read as 3,976 stalled messages.
+ *
+ * Counted per (org, provider) — the same grain the drain counts on — and once
+ * per distinct pair, not per stage, so a provider owning ten stalled stages
+ * costs one query. Providers with no ceiling configured resolve to the module
+ * defaults, exactly as the drain resolves them.
+ */
+async function pacingHolds(
+  dbc: typeof db,
+  rows: StallRow[],
+): Promise<Map<number, { hold: StallHold; detail: string }>> {
+  const out = new Map<number, { hold: StallHold; detail: string }>();
+  const pairs = new Map<string, StallRow>();
+  for (const r of rows) {
+    if (r.provider_id == null) continue;
+    pairs.set(`${r.org_id}:${r.provider_id}`, r);
+  }
+
+  const verdicts = new Map<string, { hold: StallHold; detail: string }>();
+  for (const [key, r] of pairs) {
+    const providerId = r.provider_id as number;
+    const cap24h = resolve24hCap(r.max_sends_per_24h);
+    const sent24h = await countSentSince(dbc, r.org_id, providerId, 86_400);
+    if (ceilingBreached(sent24h, cap24h)) {
+      verdicts.set(key, {
+        hold: "rate_24h",
+        detail: `${sent24h.toLocaleString("en-US")}/${cap24h.toLocaleString("en-US")} in the last 24h`,
+      });
+      continue;
+    }
+    const minuteCap = resolveMinuteCap(r.max_sends_per_minute);
+    const sent60 = await countSentSince(dbc, r.org_id, providerId, 60);
+    if (ceilingBreached(sent60, minuteCap)) {
+      verdicts.set(key, {
+        hold: "rate_minute",
+        detail: `${sent60.toLocaleString("en-US")}/${minuteCap.toLocaleString("en-US")} in the last minute`,
+      });
+    }
+  }
+
+  for (const r of rows) {
+    if (r.provider_id == null) continue;
+    const v = verdicts.get(`${r.org_id}:${r.provider_id}`);
+    if (v) out.set(r.stage_id, v);
+  }
+  return out;
 }
 
 // Human-readable Telegram alert body for a non-empty stall list. Caller decides
 // whether to send (only when the list is non-empty).
+function stageLine(s: StalledStage, now: Date): string {
+  const stageBit = s.stage_number != null ? `stage ${s.stage_number}` : `stage id ${s.stage_id}`;
+  const labelBit = s.label ? ` "${s.label}"` : "";
+  const trackBit = s.tracking_id ? ` [${s.tracking_id}]` : "";
+  const lastBit = s.last_sent
+    ? `last send ${Math.round((now.getTime() - new Date(s.last_sent).getTime()) / 60000)}m ago`
+    : "never sent";
+  return `• "${s.campaign}" · ${stageBit}${labelBit}${trackBit} — ${s.pending} pending, ${lastBit} (${s.provider_name ?? "?"})`;
+}
+
+/** Stages whose non-drain is unexplained — the only ones worth an alarm. */
+export function trulyStalled(stages: StalledStage[]): StalledStage[] {
+  return stages.filter((s) => s.hold === "stalled");
+}
+
+/**
+ * Alert body. Caller sends only when `trulyStalled()` is non-empty.
+ *
+ * Stages held at a provider's pacing ceiling are NEVER the reason an alert
+ * fires — they are working as configured — but when an alert does fire they are
+ * listed underneath, named, so the operator sees the whole queue rather than a
+ * partial picture that invites the wrong diagnosis.
+ */
 export function formatStallAlert(stages: StalledStage[], now: Date, thresholdMinutes: number): string {
-  const totalPending = stages.reduce((n, s) => n + s.pending, 0);
-  const lines = stages.slice(0, 15).map((s) => {
-    const stageBit = s.stage_number != null ? `stage ${s.stage_number}` : `stage id ${s.stage_id}`;
-    const labelBit = s.label ? ` "${s.label}"` : "";
-    const trackBit = s.tracking_id ? ` [${s.tracking_id}]` : "";
-    const lastBit = s.last_sent
-      ? `last send ${Math.round((now.getTime() - new Date(s.last_sent).getTime()) / 60000)}m ago`
-      : "never sent";
-    return `• "${s.campaign}" · ${stageBit}${labelBit}${trackBit} — ${s.pending} pending, ${lastBit} (${s.provider_name ?? "?"})`;
-  });
-  const more = stages.length > 15 ? `\n…and ${stages.length - 15} more.` : "";
-  return (
-    `⚠️ Send queue STALLED — ${stages.length} stage(s), ${totalPending} message(s) not draining ` +
+  const stalled = trulyStalled(stages);
+  const capped = stages.filter((s) => s.hold !== "stalled");
+  const totalPending = stalled.reduce((n, s) => n + s.pending, 0);
+  const lines = stalled.slice(0, 15).map((s) => stageLine(s, now));
+  const more = stalled.length > 15 ? `\n…and ${stalled.length - 15} more.` : "";
+
+  let msg =
+    `⚠️ Send queue STALLED — ${stalled.length} stage(s), ${totalPending} message(s) not draining ` +
     `(no send in ${thresholdMinutes}m, in-window, provider not paused).\n` +
     lines.join("\n") +
     more +
-    `\nCheck the send-scheduled cron / provider health. This is the backlog-stall safety net.`
-  );
+    `\nCheck the send-scheduled cron / provider health. This is the backlog-stall safety net.`;
+
+  if (capped.length > 0) {
+    const cappedPending = capped.reduce((n, s) => n + s.pending, 0);
+    // One line per provider — the ceiling is a provider fact, not a stage fact,
+    // so N stages behind one exhausted provider must not read as N problems.
+    const byProvider = new Map<string, { stages: number; pending: number; detail: string }>();
+    for (const s of capped) {
+      const k = `${s.provider_name ?? "?"} (${s.hold === "rate_24h" ? "24h cap" : "per-minute cap"})`;
+      const prev = byProvider.get(k) ?? { stages: 0, pending: 0, detail: s.hold_detail ?? "" };
+      byProvider.set(k, { stages: prev.stages + 1, pending: prev.pending + s.pending, detail: prev.detail });
+    }
+    msg +=
+      `\n\nNot stalled — held at a pacing ceiling (${capped.length} stage(s), ` +
+      `${cappedPending} message(s) waiting, will resume on their own):\n` +
+      [...byProvider.entries()]
+        .map(([k, v]) => `• ${k} — ${v.stages} stage(s), ${v.pending} pending · ${v.detail}`)
+        .join("\n");
+  }
+  return msg;
 }

@@ -10,7 +10,8 @@ import {
   type TelegramReportOutcome,
 } from "@/lib/alerts/telegram";
 import { carrierTriageSummary } from "@/lib/carrier/queue-stats";
-import { findStalledStages, formatStallAlert } from "@/lib/sends/stall-detector";
+import { findStalledStages, formatStallAlert, trulyStalled } from "@/lib/sends/stall-detector";
+import { reportMissedStages } from "@/lib/sends/missed-stages";
 import {
   findUnjoinableOptOutAttributions,
   formatUnjoinableAlert,
@@ -173,11 +174,32 @@ async function checkStalledQueue(now: Date, enabled: boolean): Promise<void> {
       now,
       thresholdMinutes: STALL_THRESHOLD_MINUTES,
     });
-    if (stalled.length > 0) {
+    // Only an UNEXPLAINED non-drain raises the alarm. Stages held at a
+    // provider's configured pacing ceiling are working as intended and never
+    // trigger a send on their own — they are named inside the message when it
+    // fires for other reasons. Alerting on them made the detector cry "check
+    // provider health" about a queue obeying its own 24h cap (2026-08-27).
+    if (trulyStalled(stalled).length > 0) {
       await notifyTelegram(formatStallAlert(stalled, now, STALL_THRESHOLD_MINUTES));
     }
   } catch (err) {
     console.error("[telegram-report] stall check failed:", err);
+  }
+}
+
+// Best-effort watch for stages the scheduler stood down while their messages
+// were still queued — the case findStalledStages excludes by construction (it
+// requires schedule_missed_at IS NULL). Latched per stage inside
+// reportMissedStages, so a permanently-missed stage is announced once, not
+// hourly. Shares the stall_alert_enabled switch: same family (send-queue
+// health), and a new column would mean a migration for one boolean.
+async function checkMissedStages(now: Date, enabled: boolean): Promise<void> {
+  if (!enabled) return;
+  if (process.env.SEND_ENABLED !== "true") return;
+  try {
+    await reportMissedStages(db, { now });
+  } catch (err) {
+    console.error("[telegram-report] missed-stage check failed:", err);
   }
 }
 
@@ -223,6 +245,7 @@ async function runWatches(now: Date, s: NotifSettings): Promise<void> {
   const watches: [string, Promise<void>][] = [
     ["stall", checkStalledQueue(now, s.stall_alert_enabled)],
     ["unjoinable", checkUnjoinableAttributions(s.unjoinable_alert_enabled)],
+    ["missed-stage", checkMissedStages(now, s.stall_alert_enabled)],
   ];
   for (const [label, p] of watches) {
     try {

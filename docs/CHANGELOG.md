@@ -1592,4 +1592,16 @@ single-parent semantics and were NOT backfilled.
   - docs updated: docs/03-data-model.md (+ ERD), docs/04-features/behavioral-lanes.md,
     docs/05-flows.md (new flow D2), docs/07-conventions.md, docs/CHANGELOG.md
 
+2026-08-28 — fix: the behavioural-split Prepare button was dead-ended. kickoffStageSend
+only CHECKED the split group's state and refused a 'pending' one, but a group leaves
+'pending' only when the T−15 preflight sweep or Phase A resolves it, and both require
+the lane to be approved AND due — which clicking Prepare right after creating a split
+satisfies neither of. Kickoff now RESOLVES the group itself, covering every path that
+can materialize (manual Prepare, approve-send, Phase A), and takes source_stage_ids
+from the resolve rather than from the pre-resolve row (which still held the empty
+array and would have silently materialized the narrower single-parent audience).
+Refusal copy corrected — it now names the real cause (no completed stages to classify
+from) instead of promising a scheduler tick that would never come.
+  - docs updated: docs/04-features/behavioral-lanes.md, docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

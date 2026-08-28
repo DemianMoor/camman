@@ -12,6 +12,7 @@ import {
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { resolveShortDomainForSend } from "@/lib/sends/resolve-short-domain";
 import { enumerateStageRecipients } from "@/lib/sends/recipients";
+import { ensureGroupSourceResolved } from "@/lib/stages/split-group";
 import { getDescriptor } from "@/lib/sends/providers/registry";
 import {
   optOutGateSubject,
@@ -577,18 +578,39 @@ export async function kickoffStageSend(
   }
 
   // ---- 0174: a grouped lane may only materialize once its GROUP has resolved
-  // its source set. Defensive: Phase A calls ensureGroupSourceResolved() before
-  // kickoff, so this normally never fires — but a manual Prepare on a lane whose
-  // group is still 'pending' would otherwise resolve against an EMPTY source set
-  // and silently fall back to the single-parent aliveness, materializing the
-  // wrong (narrower) audience. Refusing is the only safe answer, and the refusal
-  // is TRANSIENT so the next tick fixes it.
+  // its source set.
+  let resolvedSourceStageIds: number[] | null = row.source_stage_ids ?? null;
   if (row.split_group_id != null) {
-    const groupState = row.split_group_state;
-    const sources = row.source_stage_ids ?? [];
-    if (groupState === "failed" || groupState === "pending" || sources.length === 0) {
+    // RESOLVE THE GROUP HERE, not just in the cron paths.
+    //
+    // Originally this only *checked* the state and refused when it was still
+    // 'pending' — which broke the manual Prepare button outright. A group leaves
+    // 'pending' when the T−15 preflight sweep or Phase A resolves it, and BOTH
+    // require the lane to be approved AND due (or inside the lead window). An
+    // operator who creates a split and immediately clicks Prepare satisfies
+    // neither, so Prepare was a dead end, and the refusal copy ("it will prepare
+    // itself on the next scheduler tick") was wrong too: with no date set, no
+    // tick would ever pick it up.
+    //
+    // Doing it here rather than in the route covers EVERY caller that can
+    // materialize — manual Prepare, approve-send, and Phase A — so "the source
+    // set is resolved before any row is written" holds in one place instead of
+    // three. Idempotent and guarded on `state = 'pending'`, so it races
+    // harmlessly with the cron paths that also call it.
+    const group = await ensureGroupSourceResolved(dbc, row.split_group_id);
+    // Still not ready ⇒ the resolve genuinely failed (no completed source
+    // stages), or the group is gone. Refusing is correct: materializing now
+    // would fall back to the single-parent aliveness and send the WRONG,
+    // narrower audience.
+    if (!group || group.state === "failed" || group.source_stage_ids.length === 0) {
       return { ok: false, reason: "split_group_not_ready" };
     }
+    // Take the source set from the RESOLVE, not from `row` — `row` was read
+    // before the resolve ran, so on the manual path its source_stage_ids is
+    // still the empty array the group was created with. Using it would silently
+    // fall through to the parentStageId path and materialize the narrower
+    // single-parent audience.
+    resolvedSourceStageIds = group.source_stage_ids;
   }
 
   // ---- Enumerate the recipients NOT YET materialized (resumable). Behavioral-
@@ -608,7 +630,7 @@ export async function kickoffStageSend(
       parentStageId: row.parent_stage_id ?? null,
       // 0174: widens aliveness to the group's completed source stages. NULL /
       // empty ⇒ the parentStageId path, byte-identical to pre-0174.
-      sourceStageIds: row.source_stage_ids ?? null,
+      sourceStageIds: resolvedSourceStageIds,
     },
     eligibility: {
       creativeId: row.creative_id ?? null,

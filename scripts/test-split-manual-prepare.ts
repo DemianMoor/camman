@@ -72,10 +72,41 @@ async function main() {
       INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
       VALUES (${orgId}::uuid, ${campaignId}::int, ${s1}::int, ${contactId}::uuid, ${"x"}, ${"body"}, ${"sent"})`);
 
+    // A landing page on the source, so we can assert the lane inherits it.
+    const networkId = (await one<{ id: number }>(sql`
+      INSERT INTO affiliate_networks (org_id, network_id, name)
+      VALUES (${orgId}::uuid, ${`SPN-${unique}`}, ${`SplitPrep Net ${unique}`})
+      RETURNING id`)).id;
+    const offerId = (await one<{ id: number }>(sql`
+      INSERT INTO offers (org_id, network_id, offer_id, name)
+      VALUES (${orgId}::uuid, ${networkId}::int, ${`SPO-${unique}`}, ${`SplitPrep Offer ${unique}`})
+      RETURNING id`)).id;
+    const lpId = (await one<{ id: number }>(sql`
+      INSERT INTO offer_landing_pages (org_id, offer_id, title, kind, slug, status)
+      VALUES (${orgId}::uuid, ${offerId}::int, ${`SplitPrep LP ${unique}`},
+              ${"slug"}, ${`sp${unique}`}, ${"active"})
+      RETURNING id`)).id;
+    await db.execute(sql`
+      UPDATE campaign_stages SET landing_page_id = ${lpId}::int WHERE id = ${s1}::int`);
+
     console.log("\nOperator flow: create the split, then click Prepare on a lane");
     const split = await performBehavioralSplit({ orgId, campaignId }, db);
     check("split created", split.ok, JSON.stringify(split));
     if (!split.ok) throw new Error("split failed");
+
+    // Pre-existing bug from migration 0150, fixed alongside this one: of the four
+    // copy paths only stage-duplicate carried landing_page_id, so a fresh lane had
+    // NO destination and kickoff refused it with `no_destination`. Observed live on
+    // campaign 1062.
+    const laneLps = (await db.execute(sql`
+      SELECT id, landing_page_id FROM campaign_stages
+      WHERE split_group_id = ${split.split_group_id}::uuid ORDER BY stage_number
+    `)) as unknown as { id: number; landing_page_id: number | null }[];
+    check(
+      "every lane INHERITS the source's landing_page_id (else it has no destination)",
+      laneLps.length === 3 && laneLps.every((l) => Number(l.landing_page_id) === lpId),
+      laneLps.map((l) => `${l.id}:${l.landing_page_id}`).join(" "),
+    );
 
     const before = await getSplitGroup(db, split.split_group_id);
     check("group starts 'pending' with an empty source set (as designed)",
@@ -137,6 +168,9 @@ async function main() {
           await tx.execute(sql`SET LOCAL statement_timeout = '300s'`);
           await tx.execute(sql`DELETE FROM links WHERE org_id = ${orgId}::uuid`);
           await tx.execute(sql`DELETE FROM campaigns WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM offer_landing_pages WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM offers WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM affiliate_networks WHERE org_id = ${orgId}::uuid`);
           await tx.execute(sql`DELETE FROM creatives WHERE org_id = ${orgId}::uuid`);
           await tx.execute(sql`DELETE FROM contacts WHERE org_id = ${orgId}::uuid`);
           await tx.execute(sql`DELETE FROM brands WHERE org_id = ${orgId}::uuid`);

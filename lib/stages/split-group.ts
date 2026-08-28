@@ -178,6 +178,54 @@ export async function settleSplitGroup(
   return rows.length > 0;
 }
 
+// ── Self-healing settle sweep ───────────────────────────────────────────────
+//
+// Flips ANY group whose lanes are all finished but whose state never caught up.
+// `settleSplitGroup` is called at the end of every materialization now, so this
+// should find nothing — but "should find nothing" is exactly the claim a sweep
+// exists to keep honest, and the failure it heals is silent non-delivery.
+//
+// It exists because that guarantee did NOT hold at first: settle was only called
+// from Phase A, which selects on `materialized_at IS NULL`, so a lane finished by
+// the manual Prepare button was never followed by a settle from anywhere. Phase B
+// gates on `state='materialized'`, so those already-prepared messages would never
+// release. Two live groups were found in exactly that state on 2026-08-28, both
+// scheduled to fire that afternoon.
+//
+// Runs on the send-preflight cron BEFORE sweepStuckSplitGroups, so a group that
+// is merely un-settled is healed rather than alerted on.
+export async function settleCompletedSplitGroups(
+  dbc: DbOrTx,
+  opts?: { orgId?: string; maxGroups?: number },
+): Promise<{ settled: number }> {
+  const rows = (await dbc.execute(sql`
+    UPDATE campaign_stage_split_groups g
+    SET state = 'materialized', last_error = NULL
+    WHERE g.id IN (
+      SELECT g2.id
+      FROM campaign_stage_split_groups g2
+      JOIN campaigns c ON c.id = g2.campaign_id
+      WHERE g2.state = 'materializing'
+        -- At least one live lane, so an empty/archived group is never "settled".
+        AND EXISTS (
+          SELECT 1 FROM campaign_stages s
+          WHERE s.split_group_id = g2.id AND s.archived_at IS NULL
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_stages s
+          WHERE s.split_group_id = g2.id
+            AND s.archived_at IS NULL
+            AND s.materialized_at IS NULL
+            AND s.skipped_empty_at IS NULL
+        )
+        ${opts?.orgId ? sql`AND c.org_id = ${opts.orgId}::uuid` : sql``}
+      LIMIT ${opts?.maxGroups ?? 50}
+    )
+    RETURNING g.id::text AS id
+  `)) as unknown as { id: string }[];
+  return { settled: rows.length };
+}
+
 // ── Per-group stuck detector ────────────────────────────────────────────────
 //
 // A group that never leaves 'materializing' holds its siblings' already-written

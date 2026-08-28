@@ -10,6 +10,7 @@ import {
 } from "@/lib/sends/preflight-breakdown";
 import {
   recomputeDueSplitGroups,
+  settleCompletedSplitGroups,
   sweepStuckSplitGroups,
 } from "@/lib/stages/split-group";
 
@@ -35,6 +36,9 @@ export interface PreflightRunResult {
   // Groups held mid-materialization long past their last lane's slot. Alert-only
   // (never auto-failed) -- see sweepStuckSplitGroups.
   split_groups_stuck: number;
+  // Groups whose lanes were all finished but whose state never caught up. Should
+  // stay 0 now that kickoff settles; a non-zero value means something skipped that.
+  split_groups_settled: number;
 }
 
 interface DueRow {
@@ -127,6 +131,15 @@ export async function runSendPreflight(
   // ever say so — this is the only alarm for that silent non-delivery. It is
   // ALERT-ONLY and post-once, and it measures from the LAST lane's due time so a
   // legitimately staggered split (lanes scheduled hours apart) never trips it.
+  // Heal before alerting: a group that is merely un-settled must not be reported
+  // as stuck. Runs BEFORE sweepStuckSplitGroups for exactly that reason.
+  let settleSweep = { settled: 0 };
+  try {
+    settleSweep = await settleCompletedSplitGroups(dbc, { orgId });
+  } catch {
+    // best-effort, like every other arm of this cron
+  }
+
   let stuckSweep = { stuck: 0 };
   try {
     stuckSweep = await sweepStuckSplitGroups(dbc, { now, orgId });
@@ -201,5 +214,6 @@ export async function runSendPreflight(
     split_groups_resolved: groupSweep.resolved,
     split_groups_failed: groupSweep.failed,
     split_groups_stuck: stuckSweep.stuck,
+    split_groups_settled: settleSweep.settled,
   };
 }

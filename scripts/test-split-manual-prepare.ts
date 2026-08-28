@@ -17,7 +17,10 @@ import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
 import { performBehavioralSplit } from "@/lib/stages/behavioral-split";
-import { getSplitGroup } from "@/lib/stages/split-group";
+import {
+  getSplitGroup,
+  markLaneSkippedEmpty,
+} from "@/lib/stages/split-group";
 
 const ORG_MARKER = "__SPLIT_PREPARE_TEST__";
 
@@ -71,6 +74,25 @@ async function main() {
     await db.execute(sql`
       INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
       VALUES (${orgId}::uuid, ${campaignId}::int, ${s1}::int, ${contactId}::uuid, ${"x"}, ${"body"}, ${"sent"})`);
+
+    // A SECOND contact at tier 2 (reached the offer), so the tier-0 and tier-2
+    // lanes both have a recipient. Needed to exercise the settle: a lane with no
+    // recipients refuses `no_recipients` on the manual path and never gets far
+    // enough to finish its group.
+    const contact2 = (await one<{ id: string }>(sql`
+      INSERT INTO contacts (org_id, phone_number, created_at, updated_at)
+      VALUES (${orgId}::uuid, ${`+1998${String(unique).slice(-7)}`}, now(), now())
+      RETURNING id::text AS id`)).id;
+    await db.execute(sql`
+      INSERT INTO campaign_audience_pool
+        (campaign_id, contact_id, org_id, was_clicker_at_snapshot, was_opt_in_at_snapshot, was_no_status_at_snapshot)
+      VALUES (${campaignId}::int, ${contact2}::uuid, ${orgId}::uuid, false, false, true)`);
+    await db.execute(sql`
+      INSERT INTO stage_sends
+        (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status,
+         offer_reached_at, offer_reach_event_id)
+      VALUES (${orgId}::uuid, ${campaignId}::int, ${s1}::int, ${contact2}::uuid,
+              ${"y"}, ${"body"}, ${"sent"}, now(), ${`evt-${unique}`})`);
 
     // A landing page on the source, so we can assert the lane inherits it.
     const networkId = (await one<{ id: number }>(sql`
@@ -142,17 +164,57 @@ async function main() {
       SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${laneId}::int`)).n;
     check("the lane has materialized rows", Number(rows) > 0, `got ${rows}`);
 
-    // FAULT INJECTION: a campaign with NO completed stage must still refuse —
-    // the fix must not turn the guard into a rubber stamp.
-    await db.execute(sql`UPDATE campaign_stages SET sent_at = NULL WHERE id = ${s1}::int`);
+    // A lane finished by the MANUAL path must also finish its GROUP. Phase A
+    // settles, but Phase A only ever selects lanes with `materialized_at IS NULL`,
+    // so a hand-prepared lane was never followed by a settle from anywhere and its
+    // group sat in 'materializing' forever. Phase B gates on 'materialized', so
+    // those already-prepared messages would NEVER release — a silent non-send.
+    // Found live on campaigns 1032/1033 (2026-08-28), both fully prepared, both
+    // stuck, both scheduled to fire that afternoon.
+    // The tier-1 lane has nobody — mark it skipped the way Phase A would, so the
+    // tier-2 lane below is genuinely the LAST outstanding one.
+    await markLaneSkippedEmpty(db, split.lane_stage_ids[1]);
+    const midway = await getSplitGroup(db, split.split_group_id);
+    check("group is still 'materializing' while a lane is outstanding",
+      midway?.state === "materializing", midway?.state);
+
+    const lastLane = split.lane_stage_ids[2];
     await db.execute(sql`
-      UPDATE campaign_stage_split_groups
-      SET state = 'pending', source_stage_ids = '{}', recomputed_at = NULL
-      WHERE id = ${split.split_group_id}::uuid`);
-    const lane2 = split.lane_stage_ids[1];
+      UPDATE campaign_stages SET scheduled_at = now() + interval '3 days'
+      WHERE id = ${lastLane}::int
+    `);
+    const kLast = await kickoffStageSend(db, { orgId, campaignId, stageId: lastLane });
+    check("the last lane prepares by hand", kLast.ok === true, JSON.stringify(kLast));
+    const settled = await getSplitGroup(db, split.split_group_id);
+    check(
+      "the MANUAL path SETTLES the group (materializing -> materialized)",
+      settled?.state === "materialized",
+      settled?.state,
+    );
+
+    // FAULT INJECTION on a SEPARATE campaign — the fix must not turn the guard
+    // into a rubber stamp. Its own campaign so the settle work above cannot
+    // contaminate it (an earlier version reused this one and the assertion
+    // silently passed for the wrong reason).
+    const camp2 = (await one<{ id: number }>(sql`
+      INSERT INTO campaigns (org_id, slug, name, brand_id, link_mode, status, tracking_id)
+      VALUES (${orgId}::uuid, ${`sp2-${unique}`}, ${"SplitPrep Camp 2"}, ${brandId}::int,
+              ${"manual"}, ${"active"}, ${`sp2${unique}`}) RETURNING id`)).id;
+    const c2s1 = (await one<{ id: number }>(sql`
+      INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, sent_at)
+      VALUES (${orgId}::uuid, ${camp2}::int, 1, ${creativeId}::int, now())
+      RETURNING id`)).id;
+    await db.execute(sql`
+      INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
+      VALUES (${orgId}::uuid, ${camp2}::int, ${c2s1}::int, ${contactId}::uuid, ${"z"}, ${"body"}, ${"sent"})`);
+    const split2 = await performBehavioralSplit({ orgId, campaignId: camp2 }, db);
+    if (!split2.ok) throw new Error("second split failed: " + JSON.stringify(split2));
+    // Now REMOVE the completed stage, so the group can no longer resolve.
+    await db.execute(sql`UPDATE campaign_stages SET sent_at = NULL WHERE id = ${c2s1}::int`);
+    const lane2 = split2.lane_stage_ids[0];
     await db.execute(sql`
       UPDATE campaign_stages SET scheduled_at = now() + interval '3 days' WHERE id = ${lane2}::int`);
-    const k2 = await kickoffStageSend(db, { orgId, campaignId, stageId: lane2 });
+    const k2 = await kickoffStageSend(db, { orgId, campaignId: camp2, stageId: lane2 });
     check("with NO completed source stage, Prepare still REFUSES",
       k2.ok === false && k2.reason === "split_group_not_ready", JSON.stringify(k2));
   } catch (e) {

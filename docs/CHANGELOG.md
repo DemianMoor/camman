@@ -1592,6 +1592,15 @@ single-parent semantics and were NOT backfilled.
   - docs updated: docs/03-data-model.md (+ ERD), docs/04-features/behavioral-lanes.md,
     docs/05-flows.md (new flow D2), docs/07-conventions.md, docs/CHANGELOG.md
 
+2026-08-28 — fix: a hand-prepared behavioural lane never settled its split group,
+so Phase B (which gates on state='materialized') would never release it — silent
+non-delivery of already-prepared messages. settleSplitGroup now runs at the end of
+every materialization inside kickoffStageSend, covering manual Prepare, approve-send
+and Phase A alike; settleCompletedSplitGroups() on the send-preflight cron is the
+self-healing backstop for groups already stuck. Found live on campaigns 1032/1033 —
+both fully materialized, both stuck, both scheduled to fire the same afternoon.
+  - docs updated: docs/04-features/behavioral-lanes.md, docs/07-conventions.md, docs/CHANGELOG.md
+
 2026-08-28 — fix: the behavioural-split Prepare button was dead-ended. kickoffStageSend
 only CHECKED the split group's state and refused a 'pending' one, but a group leaves
 'pending' only when the T−15 preflight sweep or Phase A resolves it, and both require

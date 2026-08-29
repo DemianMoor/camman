@@ -120,7 +120,8 @@ export async function stageSendStats(
 //   • not missed, not lane-held (slip_hold), provider not paused,
 //   • org sending on (sends_enabled) and not emergency-paused,
 //   • released (sent_at set) OR due for first release (scheduled_at <= now),
-//   • materialized > threshold ago (give a fresh stage time to get going),
+//   • ELIGIBLE — materialized AND due AND released — more than the threshold
+//     ago (the grace that lets a stage just coming due get going),
 //   • has `pending` rows, and NO `sent` row in the trailing threshold window.
 // The final in-window check (per-provider ET window) is applied in JS so a stage
 // legitimately paused for quiet hours is NOT reported as stalled.
@@ -157,7 +158,32 @@ export async function findStalledStages(
       AND s.send_approved = true
       AND s.archived_at IS NULL
       AND s.materialized_at IS NOT NULL
-      AND s.materialized_at < ${nowIso}::timestamptz - make_interval(mins => ${thresholdMinutes})
+      -- ⭐ The grace runs from when the stage became ELIGIBLE TO DRAIN, not from
+      -- when it was materialized. Materialization is a PRE-pass that now runs
+      -- hours ahead of the send (150 min ahead for the stage that produced the
+      -- false alarm on 2026-08-29; 205 of the 207 stages materialized in the
+      -- prior 7 days led their scheduled_at by more than 30 min), so anchoring
+      -- the grace on materialized_at alone spends all of it before the stage is
+      -- even allowed to send. The instant scheduled_at passed, the stage was
+      -- alarm-eligible, and the only thing still suppressing the alarm was "has
+      -- a sent row in the trailing window" — which a stage that has NEVER sent
+      -- cannot have until the drain physically reaches it. Four stages came due
+      -- together at 14:00:00; the drain works due stages round-robin and the
+      -- fourth got its first row out at 14:01:08, while this hourly cron
+      -- (0 * * * *) ran in the 29-second gap after the third stage's first send.
+      -- A fully healthy queue was reported as "2934 pending, never sent".
+      --
+      -- Same lesson as pacingHolds() below: a watchdog must reproduce the
+      -- predicate of the thing it watches — here the drain's START condition, not
+      -- only its stop conditions. sent_at (the fire-lock stamp) is in the
+      -- GREATEST too, so a stage released with no scheduled_at gets the same
+      -- grace from its release. materialized_at is NOT NULL above, so the
+      -- COALESCEs make the expression total.
+      AND GREATEST(
+            s.materialized_at,
+            COALESCE(s.scheduled_at, s.materialized_at),
+            COALESCE(s.sent_at, s.materialized_at)
+          ) < ${nowIso}::timestamptz - make_interval(mins => ${thresholdMinutes})
       AND s.schedule_missed_at IS NULL
       AND s.slip_hold_at IS NULL
       AND (p.send_paused IS NOT TRUE)

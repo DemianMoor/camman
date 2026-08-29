@@ -1,4 +1,4 @@
-// Guards for the two 2026-08-28 changes to send-queue watching:
+// Guards for three changes to send-queue watching (2026-08-28, 2026-08-29):
 //
 //   A. A stage held at a provider's PACING CEILING is classified `rate_24h`, not
 //      `stalled`, and never raises the alarm on its own. Text Request sat at
@@ -8,6 +8,13 @@
 //   B. A stage the scheduler STOOD DOWN with messages still queued is reported —
 //      the case findStalledStages excludes by construction — and is reported
 //      ONCE, then re-armed when it recovers.
+//   C. The stall grace runs from when a stage became ELIGIBLE TO DRAIN, not
+//      from when it was materialized. Materialization is a pre-pass that runs
+//      hours ahead of the send, so a stage that has only just come due had
+//      already spent its whole grace and was alarm-eligible the instant it was
+//      allowed to send. On 2026-08-29 the hourly cron landed in the 29-second
+//      gap before the fourth of four co-due stages got its first row out, and a
+//      healthy queue was reported as 2934 pending, never sent.
 //
 // Rolled-back tx, throwaway org, injected clock, injected notifier (no Telegram,
 // no sends). Every assertion is paired with a control that proves it can fail:
@@ -78,13 +85,20 @@ async function main() {
         providerId: number; phoneId: number; campaignId?: number;
         materializedMinsAgo?: number | null; releasedMinsAgo?: number | null;
         pending?: number; sentAtMinsAgo?: number | null; missed?: boolean;
+        // Defaults to 120 min ago (long due). null = never scheduled, released by hand.
+        scheduledMinsAgo?: number | null;
       }) => {
         const cid = o.campaignId ?? campId;
         const st = (await one<{ id: number }>(sql`
           INSERT INTO campaign_stages
             (org_id, campaign_id, stage_number, sms_provider_id, provider_phone_id,
              send_approved, scheduled_at, materialized_at, sent_at, schedule_missed_at)
-          VALUES (${orgId}, ${cid}, ${stageSeq++}, ${o.providerId}, ${o.phoneId}, true, ${iso(120)},
+          VALUES (${orgId}, ${cid}, ${stageSeq++}, ${o.providerId}, ${o.phoneId}, true,
+                  ${o.scheduledMinsAgo === undefined
+                      ? iso(120)
+                      : o.scheduledMinsAgo === null
+                        ? null
+                        : iso(o.scheduledMinsAgo)},
                   ${o.materializedMinsAgo == null ? null : iso(o.materializedMinsAgo)},
                   ${o.releasedMinsAgo == null ? null : iso(o.releasedMinsAgo)},
                   ${o.missed ? iso(60) : null})
@@ -195,6 +209,61 @@ async function main() {
       await tx.execute(sql`UPDATE stage_sends SET status = 'pending' WHERE stage_id = ${missedWithRows}`);
       await tick();
       check("CONTROL: recurrence is audible again", sentTexts.length === 2, `${sentTexts.length}`);
+
+      // ── C. grace runs from eligibility, not materialization ─────────────────
+      const gProv = await mkProvider(1000000);
+      const gPh = await mkPhone(gProv);
+
+      // Production shape: materialized 150 min early by the pre-pass, due 1 min
+      // ago, claimed by the drain 1 min ago, not one row out yet.
+      const justDue = await mkStage({
+        providerId: gProv, phoneId: gPh,
+        materializedMinsAgo: 150, scheduledMinsAgo: 1, releasedMinsAgo: 1, pending: 5,
+      });
+
+      // RED PROOF, anchored to a hand-written literal that does NOT move when
+      // stall-detector.ts is edited: the OLD predicate (grace measured from
+      // materialized_at) admits this fixture. Without it the pass below could be
+      // vacuous — a fixture excluded for some unrelated reason looks identical.
+      const underOldAnchor = (await tx.execute(sql`
+        SELECT s.id FROM campaign_stages s
+        WHERE s.id = ${justDue}
+          AND s.materialized_at < ${NOW.toISOString()}::timestamptz - make_interval(mins => 30)
+      `)) as unknown as { id: number }[];
+      check("fixture WOULD have fired under the old materialized_at grace",
+        underOldAnchor.length === 1, JSON.stringify(underOldAnchor));
+
+      const graceRes = await findStalledStages(dbc, { now: NOW, thresholdMinutes: 30, orgId });
+      check("stage that only just came due is NOT stalled",
+        !graceRes.some((r) => r.stage_id === justDue),
+        JSON.stringify(graceRes.filter((r) => r.stage_id === justDue)));
+
+      // CONTROL: same rows, same materialization — only the due/release instant
+      // moves past the threshold. A stage genuinely wedged since it came due must
+      // still alarm, or this fix would have blinded the detector instead.
+      await tx.execute(sql`
+        UPDATE campaign_stages SET scheduled_at = ${iso(45)}, sent_at = ${iso(45)}
+        WHERE id = ${justDue}`);
+      const graceCtl = await findStalledStages(dbc, { now: NOW, thresholdMinutes: 30, orgId });
+      check("CONTROL: due 45m ago with nothing sent ⇒ stalled",
+        graceCtl.some((r) => r.stage_id === justDue && r.hold === "stalled"),
+        JSON.stringify(graceCtl.map((r) => ({ id: r.stage_id, hold: r.hold }))));
+
+      // A stage released by hand (no scheduled_at at all) takes its grace from
+      // the release stamp, the same way.
+      const justReleased = await mkStage({
+        providerId: gProv, phoneId: gPh,
+        materializedMinsAgo: 150, scheduledMinsAgo: null, releasedMinsAgo: 2, pending: 5,
+      });
+      const relRes = await findStalledStages(dbc, { now: NOW, thresholdMinutes: 30, orgId });
+      check("stage released 2m ago (no scheduled_at) is NOT stalled",
+        !relRes.some((r) => r.stage_id === justReleased));
+
+      await tx.execute(sql`UPDATE campaign_stages SET sent_at = ${iso(45)} WHERE id = ${justReleased}`);
+      const relCtl = await findStalledStages(dbc, { now: NOW, thresholdMinutes: 30, orgId });
+      check("CONTROL: released 45m ago with nothing sent ⇒ stalled",
+        relCtl.some((r) => r.stage_id === justReleased && r.hold === "stalled"),
+        JSON.stringify(relCtl.map((r) => ({ id: r.stage_id, hold: r.hold }))));
 
       console.log("\nAll cases done. Rolling back.");
       throw ROLLBACK;

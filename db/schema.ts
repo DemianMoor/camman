@@ -53,6 +53,22 @@ export const org_members = pgTable(
     invited_by: uuid("invited_by").references(() => authUsers.id, {
       onDelete: "set null",
     }),
+    // Migration 0175. Deactivation switch, checked on EVERY request in the
+    // same SELECT that already resolves org_id + role (getApiMembershipRow /
+    // getOrgMembership), so a suspension cuts access at the next request
+    // rather than at token expiry. Defaults true: applying the migration
+    // changes nothing for existing members.
+    is_active: boolean("is_active").notNull().default(true),
+    last_login_at: timestamp("last_login_at", { withTimezone: true }),
+    // text, not inet — x-forwarded-for is a comma-separated LIST behind more
+    // than one proxy, which inet rejects. Same choice as clicks.ip.
+    last_login_ip: text("last_login_ip"),
+    // The address the invite was sent to, recorded at acceptance. This is an
+    // audit field, NOT the invite mechanism: user_id is NOT NULL with an FK to
+    // auth.users, so an org_members row cannot exist before the user does.
+    // Pending invites live in `invites`.
+    invited_email: text("invited_email"),
+    invited_at: timestamp("invited_at", { withTimezone: true }),
     joined_at: timestamp("joined_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1855,6 +1871,14 @@ export const campaigns = pgTable(
   (table) => [
     unique("campaigns_org_id_slug_unique").on(table.org_id, table.slug),
     index("campaigns_org_id_idx").on(table.org_id),
+    // Migration 0175. campaigns.created_by_user_id already EXISTED and is
+    // already written by the create + duplicate routes (394/397 rows
+    // populated); only the index is new. It supports the deactivation kill
+    // switch's "what did this user create" filter. Partial because the ~3
+    // pre-existing NULLs will never be queried.
+    index("campaigns_created_by_idx")
+      .on(table.created_by_user_id)
+      .where(sql`created_by_user_id IS NOT NULL`),
     index("campaigns_brand_id_idx").on(table.brand_id),
     index("campaigns_offer_id_idx").on(table.offer_id),
     index("campaigns_assigned_to_user_id_idx").on(table.assigned_to_user_id),
@@ -2111,6 +2135,12 @@ export const campaign_stages = pgTable(
     // is changed later. See lib/tracking-id.ts.
     tracking_id: text("tracking_id"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
+    // Migration 0175. Authorship for the deactivation kill switch — see the
+    // matching column on `campaigns`. NULL on every pre-0175 row.
+    created_by_user_id: uuid("created_by_user_id").references(
+      () => authUsers.id,
+      { onDelete: "set null" },
+    ),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -2121,6 +2151,9 @@ export const campaign_stages = pgTable(
       table.stage_number,
     ),
     index("campaign_stages_org_id_idx").on(table.org_id),
+    index("campaign_stages_created_by_idx")
+      .on(table.created_by_user_id)
+      .where(sql`created_by_user_id IS NOT NULL`),
     index("campaign_stages_campaign_id_idx").on(table.campaign_id),
     index("campaign_stages_creative_id_idx").on(table.creative_id),
     index("campaign_stages_sms_provider_id_idx").on(table.sms_provider_id),
@@ -4667,3 +4700,169 @@ export const drip_campaign_numbers = pgTable(
 );
 
 export type DripCampaignNumber = typeof drip_campaign_numbers.$inferSelect;
+
+// ============ Multi-user / Operator foundation (migration 0175) ============
+// ClickUp 869et3vm1. All three tables ship EMPTY and have no reader until the
+// phase that needs them lands. Their RLS policies are ORG-scoped only, not
+// role-aware — role-aware RLS is deferred to its own card, and in any case the
+// app's own connection runs as `postgres` with rolbypassrls = true, so these
+// policies only defend against a leaked anon key. The real control is can().
+
+// Phase 2. Stable "Route A / B / C…" label per provider ACCOUNT, so an
+// Operator can talk about routing without learning which SSP is behind it.
+// Owner sees provider name + alias; Operator sees the alias only.
+export const provider_route_aliases = pgTable(
+  "provider_route_aliases",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    sms_provider_id: integer("sms_provider_id")
+      .notNull()
+      .references(() => sms_providers.id, { onDelete: "cascade" }),
+    // NULL = the provider has one account and is aliased at the provider
+    // level. Set = this alias names one credential of a multi-account provider.
+    credential_id: integer("credential_id").references(
+      () => provider_credentials.id,
+      { onDelete: "cascade" },
+    ),
+    alias: text("alias").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // The alias must be unique per org or it stops being an identifier.
+    uniqueIndex("provider_route_aliases_org_alias_uniq").on(
+      table.org_id,
+      table.alias,
+    ),
+    // TWO partial uniques, not one composite. A plain
+    // UNIQUE (org_id, sms_provider_id, credential_id) lets UNLIMITED rows
+    // through when credential_id IS NULL, because NULL never equals NULL in a
+    // unique index. Splitting on null-ness is the only form that constrains
+    // both shapes.
+    uniqueIndex("provider_route_aliases_provider_cred_uniq")
+      .on(table.org_id, table.sms_provider_id, table.credential_id)
+      .where(sql`credential_id IS NOT NULL`),
+    uniqueIndex("provider_route_aliases_provider_only_uniq")
+      .on(table.org_id, table.sms_provider_id)
+      .where(sql`credential_id IS NULL`),
+    check(
+      "provider_route_aliases_alias_not_blank",
+      sql`length(btrim(${table.alias})) > 0`,
+    ),
+  ],
+);
+
+export type ProviderRouteAlias = typeof provider_route_aliases.$inferSelect;
+export type NewProviderRouteAlias = typeof provider_route_aliases.$inferInsert;
+
+// Phase 4 (written from Phase 1 onward for auth events). Mirrors the existing
+// campaign_events precedent minus the campaign FKs, plus request context.
+// campaign_events keeps owning campaign-scoped history; this owns account,
+// authz and compliance events that have no campaign to hang off.
+export const audit_log = pgTable(
+  "audit_log",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // NULLABLE + ON DELETE SET NULL on purpose: an audit row must survive the
+    // deletion of the user it describes, and some rows have no human actor at
+    // all (a cron-driven kill switch, a system deactivation).
+    actor_user_id: uuid("actor_user_id").references(() => authUsers.id, {
+      onDelete: "set null",
+    }),
+    // Dotted machine verb: 'auth.login', 'user.deactivated',
+    // 'stage.auto_paused'. Never render raw — `summary` is the human line.
+    action: text("action").notNull(),
+    entity_type: text("entity_type"),
+    // text, not a typed id: this table spans entities whose PKs are variously
+    // serial, uuid and text. Storing the printed form keeps it to one column.
+    entity_id: text("entity_id"),
+    summary: text("summary").notNull(),
+    metadata: jsonb("metadata"),
+    ip: text("ip"),
+    user_agent: text("user_agent"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("audit_log_org_created_idx").on(table.org_id, table.created_at),
+    index("audit_log_org_actor_created_idx").on(
+      table.org_id,
+      table.actor_user_id,
+      table.created_at,
+    ),
+    // Supports "has this actor logged in from this IP before?" — without it
+    // that check degrades to scanning the actor's whole history per login.
+    index("audit_log_org_action_created_idx").on(
+      table.org_id,
+      table.action,
+      table.created_at,
+    ),
+    check("audit_log_action_not_blank", sql`length(btrim(${table.action})) > 0`),
+  ],
+);
+
+export type AuditLogEntry = typeof audit_log.$inferSelect;
+export type NewAuditLogEntry = typeof audit_log.$inferInsert;
+
+// Phase 3. Operator asks, Owner decides. Everything except campaigns and
+// stages routes through here rather than deleting directly.
+export const deletion_requests = pgTable(
+  "deletion_requests",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    entity_type: text("entity_type").notNull(),
+    entity_id: text("entity_id").notNull(),
+    // Denormalized so the queue can still name what it points at after the
+    // entity is archived or renamed.
+    entity_label: text("entity_label"),
+    reason: text("reason"),
+    requested_by: uuid("requested_by").references(() => authUsers.id, {
+      onDelete: "set null",
+    }),
+    status: text("status").notNull().default("pending"),
+    decided_by: uuid("decided_by").references(() => authUsers.id, {
+      onDelete: "set null",
+    }),
+    decided_at: timestamp("decided_at", { withTimezone: true }),
+    decision_note: text("decision_note"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("deletion_requests_org_pending_idx")
+      .on(table.org_id, table.created_at)
+      .where(sql`status = 'pending'`),
+    index("deletion_requests_org_created_idx").on(
+      table.org_id,
+      table.created_at,
+    ),
+    // One OPEN request per entity. Decided rows are unconstrained, so the same
+    // entity can be requested again after a rejection.
+    uniqueIndex("deletion_requests_open_entity_uniq")
+      .on(table.org_id, table.entity_type, table.entity_id)
+      .where(sql`status = 'pending'`),
+    check(
+      "deletion_requests_status_check",
+      sql`${table.status} IN ('pending', 'approved', 'rejected', 'cancelled')`,
+    ),
+    check(
+      "deletion_requests_entity_type_not_blank",
+      sql`length(btrim(${table.entity_type})) > 0`,
+    ),
+  ],
+);
+
+export type DeletionRequest = typeof deletion_requests.$inferSelect;
+export type NewDeletionRequest = typeof deletion_requests.$inferInsert;

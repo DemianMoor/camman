@@ -142,6 +142,10 @@ export async function POST(
     scheduled_at: null,
     notes: source.notes,
     status: "draft",
+    // The DUPLICATOR owns the copy, not whoever created the original: the
+    // person who pressed Duplicate is the one whose deactivation should disarm
+    // it (migration 0175).
+    created_by_user_id: user.id,
     sms_count: 0,
     total_cost: "0",
     delivered_count: 0,

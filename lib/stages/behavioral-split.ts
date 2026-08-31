@@ -69,7 +69,12 @@ export type BehavioralSplitResult =
     };
 
 export async function performBehavioralSplit(
-  opts: { orgId: string; campaignId: number },
+  // `actorUserId` stamps created_by_user_id on the lane children (migration
+  // 0175). OPTIONAL because the test harnesses call this without a user, but a
+  // lane created through the API must carry one: the deactivation kill switch
+  // finds approved-but-unsent stages by author, and an unstamped lane child
+  // would survive its creator's deactivation still armed to send.
+  opts: { orgId: string; campaignId: number; actorUserId?: string | null },
   database: typeof db = db,
 ): Promise<BehavioralSplitResult> {
   const { orgId, campaignId } = opts;
@@ -246,6 +251,7 @@ export async function performBehavioralSplit(
       behavioral_tier: tier,
       parent_stage_id: anchor.id,
       split_group_id: groupId,
+      created_by_user_id: opts.actorUserId ?? null,
     }));
 
     const insertedStages = await tx

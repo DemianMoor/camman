@@ -59,10 +59,26 @@ const getApiUser = cache(async (): Promise<User | null> => {
   return user;
 });
 
+// `is_active` is selected in the SAME query that already resolves org_id and
+// role, so the per-request deactivation check costs ZERO extra round-trips.
+// This is the load-bearing half of the kill switch: revoking refresh tokens
+// only stops NEW sessions, while an already-issued access token stays valid
+// until it expires. Re-reading is_active here is what makes a deactivation
+// take effect on the very next request instead of at token expiry.
+//
+// It cannot live in proxy.ts alone: ALL of api/ is excluded from the
+// middleware matcher (see proxy.ts config), so the middleware never runs for
+// any of these routes.
 const getApiMembershipRow = cache(
-  async (userId: string): Promise<{ org_id: string; role: string } | null> => {
+  async (
+    userId: string,
+  ): Promise<{ org_id: string; role: string; is_active: boolean } | null> => {
     const rows = await db
-      .select({ org_id: org_members.org_id, role: org_members.role })
+      .select({
+        org_id: org_members.org_id,
+        role: org_members.role,
+        is_active: org_members.is_active,
+      })
       .from(org_members)
       .where(eq(org_members.user_id, userId))
       .limit(1);
@@ -94,6 +110,19 @@ export async function requireApiMembership(): Promise<
         "No organization membership",
         API_ERROR_CODES.FORBIDDEN,
         { reason: "no_org_membership" },
+      ),
+    };
+  }
+  // Ordered BEFORE the role check on purpose: a deactivated account gets the
+  // same answer whatever its role is, including a role this build no longer
+  // recognises.
+  if (!row.is_active) {
+    return {
+      error: apiError(
+        403,
+        "Your access has been deactivated",
+        API_ERROR_CODES.FORBIDDEN,
+        { reason: "membership_inactive" },
       ),
     };
   }

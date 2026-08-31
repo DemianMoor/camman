@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-08-25_
+_Last updated: 2026-08-31_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -182,3 +182,38 @@ Two consequences worth knowing before adding a name:
   Configuration, because auth email links are pinned to the primary host by
   design. Only add it there if you deliberately want signup/reset to complete on
   the second hostname.
+
+## Google Workspace (Supabase Auth provider) — migration 0175
+
+Sign-in provider for everyone except the Owner break-glass path.
+
+**Configured in the Supabase dashboard, not in this repo:**
+- Authentication → Providers → **Google**: enable, and set the OAuth client id +
+  secret from Google Cloud Console.
+- Google Cloud Console → OAuth consent screen (Internal) and an OAuth **Web
+  application** client whose *Authorized redirect URI* is the Supabase callback
+  (`https://<project>.supabase.co/auth/v1/callback`), **not** our
+  `/auth/callback` — the app route is where Supabase sends the user afterwards.
+- Authentication → URL Configuration must already list our origins under Site
+  URL and Redirect URLs (`/auth/callback`, `/auth/complete`,
+  `/auth/reset-password`).
+- Authentication → Sessions → **JWT expiry / refresh-token rotation.** ClickUp
+  869et3vm1 asks for a session TTL ≤ 12 h. **There is no code path for this** —
+  it is a dashboard setting and an ops step.
+
+**Env vars read by the app** (names only — never values):
+
+| Var | Purpose |
+|---|---|
+| `GOOGLE_ALLOWED_HD` | Workspace domain the gate accepts. **Optional — defaults to `exuma.io`.** Read by `lib/auth/workspace-gate.ts`; also feeds the invite validator, so changing it changes which addresses can be invited. |
+| `NEXT_PUBLIC_SITE_URL` | Already required. The OAuth `redirectTo` is built from it, so a wrong value sends users to another origin after Google. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Already required. Now additionally used for `auth.admin.signOut` (session revocation) and `auth.admin.listUsers` (resolving member emails for the Users screen). |
+
+⚠️ **Supabase does not enforce the `hd` claim.** Enabling the provider accepts
+any Google account; the domain restriction is entirely ours. See
+`lib/auth/workspace-gate.ts` and docs/04-features/multi-tenancy-auth.md.
+
+⚠️ **Session revocation and the Users roster degrade rather than fail** when the
+service-role key is missing or Supabase Admin is unreachable: deactivation still
+cuts access (the `is_active` flag is checked per request) and reports
+`sessions_revoked: false`, and the roster falls back to `invited_email`.

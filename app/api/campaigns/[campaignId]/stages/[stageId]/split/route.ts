@@ -61,7 +61,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "stages.create")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -280,6 +280,8 @@ export async function POST(
         scheduled_at: null,
         notes: source.notes,
         status: "draft",
+        // Migration 0175: the person who pressed Split authors the siblings.
+        created_by_user_id: user.id,
         sms_count: 0,
         total_cost: "0",
         delivered_count: 0,

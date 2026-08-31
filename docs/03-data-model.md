@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-08-27_
+_Last updated: 2026-08-31_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -52,6 +52,14 @@ erDiagram
   organizations ||--o{ org_members : has
   organizations ||--o{ invites : has
   auth_users ||--o{ org_members : "is member"
+  organizations ||--o{ audit_log : "account/authz events (0175)"
+  organizations ||--o{ deletion_requests : "approval queue (0175)"
+  organizations ||--o{ provider_route_aliases : "Route A/B/C (0175)"
+  auth_users ||--o{ audit_log : "actor_user_id (set null)"
+  auth_users ||--o{ deletion_requests : "requested_by / decided_by (set null)"
+  auth_users ||--o{ campaign_stages : "created_by_user_id (set null, 0175)"
+  sms_providers ||--o{ provider_route_aliases : "aliased as"
+  provider_credentials ||--o{ provider_route_aliases : "per-account alias"
   organizations ||--o{ brands : owns
   organizations ||--o{ affiliate_networks : owns
   organizations ||--o{ offers : owns
@@ -184,11 +192,14 @@ erDiagram
 | Table | Key columns | Notes |
 |-------|------------|-------|
 | `organizations` | `id uuid` | the tenant root |
-| `org_members` | `user_id→auth.users`, `org_id`, `role` | UNIQUE(user_id, org_id); role CHECK in {owner,admin,manager,operator,viewer} |
-| `invites` | `org_id`, `email`, `role`, `token` UNIQUE, `expires_at`, `accepted_at` | pending member invitations |
+| `org_members` | `user_id→auth.users`, `org_id`, `role`, `is_active`, `last_login_at`, `last_login_ip`, `invited_email`, `invited_at` | UNIQUE(user_id, org_id); role CHECK in {owner,admin,manager,operator,viewer}. **`is_active` (migration 0175, default true)** is the deactivation switch, re-read on EVERY request inside the query that already resolves org_id + role, so it costs no extra round-trip and cuts access at the next request instead of at token expiry. `last_login_ip` is `text`, not `inet`: `x-forwarded-for` is a comma-separated list behind more than one proxy, which `inet` rejects. `invited_email`/`invited_at` are an audit record written at acceptance — they are NOT the invite mechanism, because `user_id` is NOT NULL with an FK to `auth.users`, so an `org_members` row cannot exist before the user does. Pending invites live in `invites` |
+| `invites` | `org_id`, `email`, `role`, `token` UNIQUE, `expires_at`, `accepted_at` | pending member invitations. Dormant until 0175 — the table shipped in `0001` but no application code read or wrote it. Under Google sign-in **the row IS the authorization**: there is no password to set and no token for the invitee to carry, so `resolveAllowlist` simply looks for an open row matching the verified address. `token` is still populated (NOT NULL UNIQUE) so an emailed-link flow stays possible without a migration. `invites_role_check` excludes `owner`, so an invite can never mint one |
 | `org_settings` | `org_id` PK, `sends_enabled` (default false), `sends_enabled_updated_by/_at`, `sends_paused` (default false), `sends_paused_at/_by` | per-org singleton; DB master switch for live SMS sending (migration 0063). `sends_paused` (migration 0080) is the dedicated **emergency hard-stop** flipped one-click from the Today's sends screen — independent of `sends_enabled`, halts the drain mid-run. Distinct from the `SEND_ENABLED` env backstop |
 | `org_setting_events` | `org_id`, `setting_key`, `old_value`, `new_value`, `actor_user_id` | append-only audit of settings flips (migration 0063) |
 | `notification_settings` | `org_id` PK, 4 type toggles (`daily_report_enabled`, `hourly_report_enabled`, `stall_alert_enabled`, `unjoinable_alert_enabled`), `daily_report_hour` (Warsaw, 0–23, default 10), `hourly_window_from`/`to` (Warsaw, **default 16/1 — the window wraps midnight**), `hourly_interval_hours` (1/2/3, default 1), `active_weekdays` smallint[] (ISO 1=Mon…7=Sun, **default 1–6; Sunday out**, and it gates the hourly window only — the daily summary is never weekday-gated) | per-org singleton (migration 0173); loaded by the Telegram-report cron every tick. Missing row → cron falls back to hard-coded defaults in `lib/reporting/telegram-report-format.ts`, which are a transcription of the pre-0173 hard-coded schedule, so the table ships inert. A midnight-spanning window belongs to the day it STARTED on (`hourlyOwningDow`), which is what reproduces the old "no Sunday evening, no Monday 00:00–01:59" pair from one weekday set. API: `GET/PUT /api/settings/notifications` (manager+) |
+| `audit_log` | `org_id`, `actor_user_id` (set null), `action`, `entity_type`, `entity_id` text, `summary`, `metadata` jsonb, `ip`, `user_agent`, `created_at` | account / authz / compliance events (migration 0175). **Not a second `campaign_events`** — that one keeps owning campaign-scoped history and is written by 19 routes; this owns events with no campaign to hang off (logins, activation, role changes, cap hits, deletion requests). `actor_user_id` is nullable + ON DELETE SET NULL so a row survives the deletion of the user it describes, and because some rows have no human actor. `entity_id` is `text` because the table spans entities whose PKs are variously serial, uuid and text. Writes are **best-effort and never throw** (`lib/audit.ts`) — an audit failure must not break the action being audited. Indexes: `(org_id, created_at)`, `(org_id, actor_user_id, created_at)`, `(org_id, action, created_at)` — the last supports the "login from a new IP" lookup |
+| `deletion_requests` | `org_id`, `entity_type`, `entity_id` text, `entity_label`, `reason`, `requested_by`, `status`, `decided_by`, `decided_at`, `decision_note` | Owner approval queue (migration 0175, **Phase 3** — ships empty with no reader). `status` CHECK in {pending, approved, rejected, cancelled}. A partial UNIQUE on `(org_id, entity_type, entity_id) WHERE status='pending'` allows exactly one OPEN request per entity while leaving decided rows unconstrained, so an entity can be re-requested after a rejection. `entity_label` is denormalized so the queue can still name what it points at after the entity is archived or renamed |
+| `provider_route_aliases` | `org_id`, `sms_provider_id`, `credential_id` (nullable), `alias`, `created_at` | stable "Route A / B / C…" label per provider account (migration 0175, **Phase 2** — ships empty). Owner sees provider name + alias; Operator sees the alias only. **Two partial uniques, not one composite**: a plain `UNIQUE (org_id, sms_provider_id, credential_id)` would let unlimited rows through when `credential_id IS NULL`, because NULL never equals NULL in a unique index — so uniqueness is split on the null-ness. `UNIQUE (org_id, alias)` keeps the alias an identifier |
 
 ### Registry
 | Table | Key columns | Notes |

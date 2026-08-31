@@ -199,6 +199,9 @@ export async function POST(
             scheduled_at: null,
             notes: s.notes,
             status: "draft" as const,
+            // Migration 0175: the duplicator authors the copies, matching how
+            // the campaign row itself is stamped a few lines above.
+            created_by_user_id: user.id,
             sms_count: 0,
             total_cost: "0",
             delivered_count: 0,

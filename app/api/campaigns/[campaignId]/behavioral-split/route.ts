@@ -36,7 +36,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "stages.create")) {
     return apiError(403, "Forbidden");
@@ -48,7 +48,11 @@ export async function POST(
     return apiError(400, "Invalid id", "validation");
   }
 
-  const result = await performBehavioralSplit({ orgId, campaignId: cid });
+  const result = await performBehavioralSplit({
+    orgId,
+    campaignId: cid,
+    actorUserId: user.id,
+  });
   if (!result.ok) {
     return apiError(result.status, result.message, result.code, result.details);
   }

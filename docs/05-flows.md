@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-08-27_
+_Last updated: 2026-08-31_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -431,3 +431,84 @@ sequenceDiagram
 ```
 
 > Runs just after the opt-out / conversions / offer-reach pollers each quarter-hour so it folds in freshly-attributed engagement. All bucketing is by the SEND hour in ET; sales/revenue use the per-recipient `stage_sends` attribution (not the Keitaro daily aggregate) so they're hour- and group-splittable. Grand totals come from `report_stage_hour`; `report_group_hour` fans out over contact groups and is non-additive. See [04-features/reports-rollup.md](04-features/reports-rollup.md).
+
+## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)
+
+The gate is in the callback, not in Supabase. Supabase will mint a session for
+any Google account once the provider is on; everything that makes it *our*
+session happens after `exchangeCodeForSession`.
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant App as Next.js
+  participant G as Google
+  participant SB as Supabase Auth
+  participant DB as Postgres
+
+  U->>App: "Sign in with Google"
+  App->>SB: signInWithOAuth(google, hd=exuma.io)
+  Note over App,G: hd is a CONVENIENCE hint for the account<br/>chooser — a URL param, never a control
+  SB-->>U: redirect to Google
+  U->>G: choose account
+  G-->>App: /auth/callback?code=...
+  App->>SB: exchangeCodeForSession(code)
+  App->>SB: getUser()  (server-verified)
+
+  App->>App: verifyWorkspaceIdentity(user)
+  Note over App: provider=google AND email verified<br/>AND domain = exuma.io AND (hd absent OR hd matches)
+  alt identity fails
+    App->>SB: signOut()
+    App-->>U: /login?error=not_authorized
+  end
+
+  App->>DB: resolveAllowlist(userId, email)
+  alt no membership and no open invite
+    App->>SB: signOut()
+    App-->>U: /login?error=not_authorized
+  else member but is_active = false
+    App->>DB: audit_log auth.login_denied
+    App->>SB: signOut()
+    App-->>U: /login?error=deactivated
+  else open invite
+    App->>DB: BEGIN — INSERT org_members + burn invite — COMMIT
+    App->>DB: audit_log user.joined
+  end
+
+  App->>DB: recordLogin — stamp last_login_at/ip, audit auth.login
+  App-->>U: redirect /dashboard
+```
+
+**Why the sign-out on every refusal:** a session left alive would let the user
+simply navigate to `/dashboard`, where no later request re-runs this gate.
+
+**Why the invite redemption is one transaction:** a failure between the two
+writes would otherwise leave a consumed invite with no membership (the user can
+never get in and the Owner sees the invite as accepted), or a membership with a
+live invite still open.
+
+## Deactivation kill switch
+
+```mermaid
+sequenceDiagram
+  participant O as Owner
+  participant App as Next.js
+  participant DB as Postgres
+  participant SB as Supabase Admin
+
+  O->>App: PATCH /api/users/:memberId {is_active:false}
+  Note over App: refuses self-modification and<br/>the last active owner
+  App->>DB: 1. UPDATE org_members SET is_active = false
+  Note over App,DB: FIRST, so there is no instant where the<br/>account is un-revoked AND active
+  App->>SB: 2. auth.admin.signOut(userId, "global")
+  Note over App,SB: best-effort — a failure must not abort,<br/>step 1 already cut access and step 3 must run
+  App->>DB: 3. UPDATE campaign_stages SET send_approved = false<br/>WHERE created_by_user_id = :user<br/>AND send_approved AND sent_at IS NULL
+  Note over App,DB: clears an EXISTING drain gate — no new<br/>send-path logic, and sent_at is NEVER written<br/>(it is the scheduler's atomic fire-lock)
+  App->>DB: campaign_events stage_auto_paused (per stage)
+  App->>DB: audit_log user.deactivated
+  App-->>O: {stages_paused, sessions_revoked}
+```
+
+Reactivation deliberately does **not** re-approve those stages: un-pausing a
+send is a per-stage decision an Owner makes with the campaign in front of them,
+not a side effect of restoring an account.

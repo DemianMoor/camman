@@ -1,12 +1,13 @@
 # Feature — Multi-tenancy, Auth & Permissions
 
-_Last updated: 2026-06-19_
+_Last updated: 2026-08-31_
 
 ## 1. Purpose
 Isolate every org's data behind an `org_id`, authenticate users via Supabase Auth, and enforce a five-role permission model on both server and client. A missing `org_id` filter is a data-leak bug — this is the most safety-critical convention in the codebase.
 
 ## 2. Key concepts / entities
-- `organizations` (tenant root), `org_members` (user↔org + role), `invites`.
+- `organizations` (tenant root), `org_members` (user↔org + role + **`is_active`**), `invites`.
+- `audit_log` — account/authz/compliance events (migration 0175). Distinct from `campaign_events`, which owns campaign-scoped history.
 - External `auth.users` (Supabase-managed).
 - Roles: `viewer < operator < manager < admin < owner` (ascending, inherited).
 - `Permission` union + `can()` helper in [`lib/permissions.ts`](../../lib/permissions.ts).
@@ -60,12 +61,119 @@ sequenceDiagram
   App-->>U: redirect /dashboard
   Note over App: layout.tsx requireOrgMembership();<br/>if missing → /auth/complete
 ```
-- Email + password (NOT magic link); **email verification required** before login.
+- Owner break-glass is email + password (NOT magic link); **email verification required**. Everyone else signs in with Google (below).
 - Org auto-creation is a **DB trigger** (`handle_new_user()` in `0001`), not app code: new org named `"<name>'s Organization"`, user inserted as `owner`.
 - `/auth/complete` is the fallback if membership is somehow missing post-verification; it rechecks and forwards to `/dashboard`.
 
+### Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)
+
+**Supabase does not enforce `hd`.** Enabling the Google provider accepts *any*
+Google account, personal gmail.com included. The hosted-domain restriction is
+ours, and it lives in [`lib/auth/workspace-gate.ts`](../../lib/auth/workspace-gate.ts),
+enforced in [`app/auth/callback/route.ts`](../../app/auth/callback/route.ts).
+
+Three independent checks, all required — "domain alone is not enough":
+
+1. **Verified Google identity in our domain.** The address domain is the
+   load-bearing test: a consumer Google account cannot hold an `@exuma.io`
+   address, because only the Workspace issues those. The `hd` claim is checked
+   as a *confirmation* and **only when present** — Google omits it in some
+   flows, and treating absence as failure would lock out legitimate users over
+   a claim we do not control. Present-and-wrong fails closed.
+2. **Allow-listed.** An existing `org_members` row, or an open `invites` row
+   (unexpired, unaccepted) that an Owner created.
+3. **`is_active`** — re-checked on *every* request, not just at sign-in.
+
+A session that fails the gate is **signed out inside the callback**, before the
+redirect. Leaving it alive would let the user navigate straight to `/dashboard`
+and be admitted by a later request that never re-runs the gate.
+
+`?hd=` is also passed to Google's authorize URL, but that is a **convenience
+only** — it pre-filters the account chooser. It is a URL parameter, so it is
+not a control.
+
+**Password sign-in is owner-only.** `signInAction` resolves the role after
+authenticating and signs a non-owner back out. Operator accounts have no
+password path at all.
+
+**Self-signup is closed.** `signUpAction` refuses without calling
+`supabase.auth.signUp`. The enforcement is in the **server action**, not the
+page: a Server Action is an RPC endpoint with a stable id and stays callable
+with no UI pointing at it, so deleting the page would have closed nothing.
+
+### The `is_active` per-request gate
+
+`is_active` rides along in the query that **already** resolves `org_id` + role
+(`getApiMembershipRow` in `lib/api/helpers.ts`, `getOrgMembership` in
+`lib/auth/helpers.ts`), so the check costs **zero extra round-trips**.
+
+It must be in **both** helpers. It cannot live in `proxy.ts` alone: all of
+`api/` is excluded from the middleware matcher, and `PROTECTED_PREFIXES` covers
+only three page prefixes.
+
+Why it matters: revoking refresh tokens does **not** invalidate an
+already-issued access token — Supabase JWTs stay valid until they expire. Only
+re-reading `is_active` makes a deactivation take effect on the next request
+rather than at token expiry.
+
+⚠️ A deactivated member is redirected to **`/auth/deactivated`, never
+`/login`**. Their session is still valid at that point, and `proxy.ts` bounces
+authenticated requests for `/login` back to `/dashboard` — which redirects here
+again. Sending them to `/login` is an infinite loop, not a login page.
+
+### The deactivation kill switch
+
+[`lib/auth/deactivate.ts`](../../lib/auth/deactivate.ts). Three steps, and the
+**order is the point**:
+
+1. `is_active = false` — takes effect on the next request.
+2. Revoke refresh tokens (Supabase Admin `signOut(userId, "global")`).
+   **Best-effort**: if it fails the switch continues, because step 1 has already
+   cut access and step 3 still must run. The UI reports a revocation failure
+   explicitly.
+3. Auto-pause every stage the user created that is `send_approved = true AND
+   sent_at IS NULL` — the "time bomb" defence against sends scheduled before
+   departure.
+
+Step 1 is first so there is no instant at which the account is un-revoked *and*
+active.
+
+⚠️ **Step 3 does not touch the send path.** It clears the **existing**
+`send_approved` gate the drain already reads — no new condition in materialize
+or fire. And it **never writes `sent_at`**: that is the scheduler's atomic
+fire-lock, and a second writer stamping it silently cancels a scheduled send (a
+real past incident). Un-approving is reversible; re-approval is a deliberate
+per-stage act by an Owner, which is why reactivation deliberately does **not**
+re-approve them.
+
+Authorship comes from `created_by_user_id`. `campaigns` already had it (394 of
+397 rows populated); `campaign_stages` gained it in 0175, and **all five
+stage-insert sites** stamp it (create, stage duplicate, split, campaign
+duplicate, behavioural split).
+
 ### User management
-- `app/api/members/` — invite/remove/role-assign, gated by `users.manage` (admin+). Invites use `invites.token` + `expires_at`.
+- **`/settings/users`** ([page](../../app/(protected)/settings/users/page.tsx) +
+  [`components/settings/users-panel.tsx`](../../components/settings/users-panel.tsx)) —
+  member roster, roles, last login + IP, pending invites, activate/deactivate.
+  Gated on `users.manage`; the page re-checks server-side and `notFound()`s.
+- `app/api/users/*` — `list`, `invite`, `[memberId]` (PATCH role **or**
+  `is_active`, never both), `invites/[inviteId]` (DELETE = revoke).
+- `app/api/members/` is a **different, lower-privilege endpoint** — the campaign
+  assignee picker, readable with `campaigns.view`. It was deliberately not
+  extended, because the roster exposes email, last login and IP.
+- **An invite is an allow-list entry, not an emailed link.** Under Google
+  sign-in there is no password to set and no token for the invitee to carry:
+  the row itself is the authorization. `invites.token` is still populated
+  (NOT NULL UNIQUE) so an emailed-link flow stays possible without a migration.
+- Re-inviting **replaces** the open invite rather than stacking a second one, so
+  `resolveAllowlist` can never find two rows to choose between.
+- **Lockout guards:** the last active owner cannot be demoted or deactivated,
+  and nobody can change their own role or access.
+- ⚠️ **`operator` is refused by the invite route in Phase 1**
+  (`OPERATOR_LOCKED_UNTIL_PHASE_2`). The role name already exists and currently
+  grants the whole audience block — the inverse of the Operator access matrix.
+  Phase 2 redefines `operatorPerms`; **removing that lock is an explicit Phase 2
+  step.**
 
 ## 4. Data it reads/writes
 - Reads/writes `org_members`, `invites`, `organizations`.
@@ -86,4 +194,12 @@ sequenceDiagram
 ## 7. Extension points / limitations
 - Adding a permission: extend the `Permission` union + add to the relevant role Set (higher roles inherit via spread). Adding a role: extend the union, add a Set, **and** update the `org_members_role_check` CHECK constraint via migration.
 - No per-resource ACLs — permissions are role-global within an org.
-- No SSO / OAuth providers (email+password only).
+- Google Workspace SSO is live (Phase 1). No other OAuth providers.
+- **Session TTL is a Supabase dashboard setting, not code.** There is nowhere in
+  this repo to set it; ClickUp 869et3vm1 asks for ≤ 12 h and that is an ops
+  change, not a code change.
+- **RLS still enforces nothing against the app itself** — `DATABASE_URL`
+  connects as `postgres` with `rolbypassrls = true` and tenant tables do not use
+  `FORCE ROW LEVEL SECURITY`, so every policy here defends only against a leaked
+  anon key. `can()` in application code is the real control. Role-aware RLS is
+  deferred to its own card.

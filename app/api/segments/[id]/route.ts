@@ -9,6 +9,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { interceptDeletion } from "@/lib/guardrails/deletion-requests";
 import { can } from "@/lib/permissions";
 import {
   nullIfEmpty,
@@ -193,7 +194,7 @@ export async function DELETE(
     method: "DELETE",
   });
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "segments.delete")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -206,6 +207,23 @@ export async function DELETE(
       field: "id",
     });
   }
+
+
+  // ── Deletion approval queue (869et3vm1 Phase 3) ─────────────────────────
+  //
+  // For an operator this becomes a REQUEST, not a deletion. 202 rather than
+  // 403: they MAY do this, it just needs an owner's decision first.
+  {
+    const diverted = await interceptDeletion({
+      orgId,
+      role,
+      actorUserId: user.id,
+      entityType: "segment",
+      entityId: segmentId,
+    });
+    if (diverted.intercepted) return diverted.response;
+  }
+
 
   const deleted = await db.transaction(async (tx) => {
     return await tx

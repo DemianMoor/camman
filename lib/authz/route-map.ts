@@ -42,6 +42,12 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "brands/[id]/short-domains/[domainId]": null, // settings / provider registry -- Owner only
   "brands/list": { methods: ["GET"] },
 
+  // ── deletion-requests ─────────────────────────────────────────────────
+  // The OWNER approval queue. Denied to the operator: they create requests as a
+  // side effect of trying to delete, and must never see or decide the queue.
+  "deletion-requests": null, // owner-only approval queue
+  "deletion-requests/[requestId]": null, // owner-only approval queue
+
   // ── campaigns ─────────────────────────────────────────────────────────────
   // Campaigns & stages: the operator runs these end-to-end. Aggregate
   // counts only -- every contact-level sibling is denied below.
@@ -156,7 +162,10 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // delete here, and the matrix says no delete.
   "creatives": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/[id]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "creatives/[id]/archive": null, // archive IS delete here -- goes through the deletion queue in Phase 3
+  // 869et3vm1 Phase 3: reachable so the DELETION QUEUE can intercept it. The
+  // handler diverts an operator into a deletion_requests row and returns 202 —
+  // nothing is archived without an owner decision.
+  "creatives/[id]/archive": { methods: ["POST"] },
   "creatives/[id]/duplicate": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/[id]/rescore": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/[id]/restore": null, // archive IS delete here -- goes through the deletion queue in Phase 3
@@ -328,7 +337,10 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // audience/contacts/export siblings are denied below.
   "segments": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "segments/[id]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "segments/[id]/archive": null, // archive IS delete here -- goes through the deletion queue in Phase 3
+  // 869et3vm1 Phase 3: reachable so the DELETION QUEUE can intercept it. The
+  // handler diverts an operator into a deletion_requests row and returns 202 —
+  // nothing is archived without an owner decision.
+  "segments/[id]/archive": { methods: ["POST"] },
   "segments/[id]/audience": null, // contact rows / CSV of contacts
   "segments/[id]/contacts": null, // contact rows / CSV of contacts
   "segments/[id]/contacts/export": null, // contact rows / CSV of contacts

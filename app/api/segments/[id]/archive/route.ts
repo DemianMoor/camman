@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import { segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { interceptDeletion } from "@/lib/guardrails/deletion-requests";
 import { can } from "@/lib/permissions";
 
 function parseId(idParam: string) {
@@ -17,9 +18,12 @@ export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "segments/[id]/archive",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "segments.archive")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -31,6 +35,22 @@ export async function POST(
     return apiError(400, "Invalid segment id", API_ERROR_CODES.VALIDATION, {
       field: "id",
     });
+  }
+
+
+  // ── Deletion approval queue (869et3vm1 Phase 3) ─────────────────────────
+  //
+  // For an operator this becomes a REQUEST, not a deletion. 202 rather than
+  // 403: they MAY do this, it just needs an owner's decision first.
+  {
+    const diverted = await interceptDeletion({
+      orgId,
+      role,
+      actorUserId: user.id,
+      entityType: "segment",
+      entityId: segmentId,
+    });
+    if (diverted.intercepted) return diverted.response;
   }
 
   const updated = await db

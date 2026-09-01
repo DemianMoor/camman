@@ -1661,4 +1661,11 @@ domain gate now reads the Google identity's email so linking works; Owner-only s
 carries `provider_route_aliases`.
   - docs updated: docs/04-features/multi-tenancy-auth.md, docs/07-conventions.md, docs/CHANGELOG.md
 
+- 2026-09-01 — "Link Google account" button on /settings/users (ClickUp 869et3vm1): the Phase 2
+server action `linkGoogleIdentityAction` shipped with no caller; this adds the Owner-only,
+self-only button on the Owner's own row, `has_google` on the users list so it hides once linked,
+and an `auth.google_linked` audit row written by the callback (distinguished from an ordinary
+sign-in by a `linked=google` marker on the redirect URL). No migration.
+  - docs updated: docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

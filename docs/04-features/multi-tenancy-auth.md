@@ -306,6 +306,17 @@ exact scenario linking exists to enable. Covered by
 is Owner-only and **self-only** — `linkIdentity()` acts on whoever is signed in,
 so nobody can link an identity onto someone else's account.
 
+**Where the button lives:** `/settings/users`, on the signed-in Owner's own row
+("Link Google account"). It is hidden once `has_google` is true, and the row
+shows a "Google linked" badge instead.
+
+A link and an ordinary sign-in are indistinguishable at the callback — same code
+exchange, same user, same Google identity by then — so the action puts
+`?linked=google` on its `redirectTo` and the callback writes an
+**`auth.google_linked`** audit row when it sees it. The link runs through the
+SAME workspace gate as a login, so linking a personal Google account is refused
+for exactly the reason signing in with one is.
+
 ⚠️ **Requires a Supabase dashboard toggle:** Authentication → Sign In / Providers
 → **"Allow manual linking"**, which is OFF by default. Automatic linking does not
 cover this case — it only fires when the identities share an email address.

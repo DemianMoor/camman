@@ -72,11 +72,18 @@ export async function GET() {
   // still renders with the address we recorded at invite time, because a
   // screen that fails entirely is worse than one missing a column.
   const emailById = new Map<string, string>();
+  // Whether the account can already sign in with Google. Drives the "Link
+  // Google account" button, which must not offer to link something that is
+  // already linked.
+  const hasGoogle = new Set<string>();
   try {
     const admin = createAdminClient();
     const { data } = await admin.auth.admin.listUsers({ perPage: 200 });
     for (const u of data?.users ?? []) {
       if (u.email) emailById.set(u.id, u.email);
+      if ((u.identities ?? []).some((i) => i.provider === "google")) {
+        hasGoogle.add(u.id);
+      }
     }
   } catch (err) {
     console.error("[users/list] could not resolve emails from Supabase Admin", {
@@ -108,6 +115,7 @@ export async function GET() {
       last_login_at: m.last_login_at,
       last_login_ip: m.last_login_ip,
       joined_at: m.joined_at,
+      has_google: hasGoogle.has(m.user_id),
       pending_stages: pendingMap.get(m.user_id) ?? 0,
     })),
     invites: pending.map((i) => ({

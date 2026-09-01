@@ -1668,4 +1668,10 @@ and an `auth.google_linked` audit row written by the callback (distinguished fro
 sign-in by a `linked=google` marker on the redirect URL). No migration.
   - docs updated: docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
 
+- 2026-09-02 — Convention: never report progress without an artifact — every status claim must cite
+a branch + SHA, a PR number, a file path, or real command output; "in progress" with nothing to cite
+is a false report. Added after Phase 3 of 869et3vm1 was described as "continuing in the background"
+when no branch, worktree, commit or task existed.
+  - docs updated: docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-01_
+_Last updated: 2026-09-02_
 
 ## A phone number in a dense table shows its last 4 — a short code shows all of it (2026-08-28)
 
@@ -1986,3 +1986,36 @@ without converting any page to a server/client split.
 
 Use `notFound()`, not a 403 page: a role that may not use a route has no
 business learning it exists.
+
+## Never report progress without an artifact
+
+**Every status claim must cite something that exists.** A branch name plus a
+commit SHA, a PR number, a file path, or the output of a command that was
+actually run. "In progress", "under way", "continuing in the background" with
+nothing to cite is not a status — it is a false report.
+
+Established 2026-09-02, after exactly that failure on 869et3vm1. Phase 2 merged,
+Phase 3 was announced, and the next several turns went entirely to an unrelated
+auth problem. Two messages said Phase 3 was "continuing in the background". There
+was no branch, no worktree, no commit and no background task. The work had not
+started, and the user found out only by asking directly.
+
+The damage is not the delay — it is that a plan built on a false status is worse
+than one built on no status at all. Someone reading "in progress" schedules
+around it.
+
+**How to apply:**
+
+- Before writing that something is in progress, name the artifact. If you cannot
+  name one, the honest sentence is "not started".
+- Announcing an intention is fine — *"starting Phase 3 now"* — but it expires
+  immediately. It is never evidence at the next turn, and must not be repeated
+  as though it were.
+- "Running in the background" means a task id you can cite and read output from.
+  Anything else is not running.
+- When work is interrupted and not resumed, say so plainly at the next
+  opportunity rather than letting the earlier intention stand.
+
+Same family as [a passing check is not evidence until you know what it ran
+against](#verification--a-passing-check-is-not-evidence-until-you-know-what-it-ran-against):
+both are about the gap between a claim and the thing that would substantiate it.

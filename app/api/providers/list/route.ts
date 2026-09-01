@@ -37,7 +37,14 @@ export async function GET(req: NextRequest) {
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "providers.view")) {
+  // provider_phones.view, not providers.view: this list is the stage form's
+  // ROUTE PICKER feed, and for an operator every provider identity in it is
+  // replaced by a route alias before it leaves the process. Requiring
+  // providers.view would have made the picker unusable for the one role that
+  // most needs it, while granting that permission would have said something
+  // about intent that is not true. Every role that holds providers.view also
+  // holds provider_phones.view, so nothing widens for anyone else.
+  if (!can(role, "provider_phones.view")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

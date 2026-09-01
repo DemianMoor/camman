@@ -138,6 +138,11 @@ export type Permission =
   // ── 869et3vm1 Phase 2 ──────────────────────────────────────────────────
   // Split out of the blanket *.view permissions so "may look at it" and "may
   // take a copy of it out of the system" stop being the same grant.
+  // Audience SIZE without audience IDENTITY. Split from contacts.view because
+  // "how many contacts are there" and "who are they" were previously the same
+  // grant, which made the aggregate counters unreachable for a role that must
+  // never see a row.
+  | "contacts.stats"
   | "contacts.export"
   | "campaigns.export"
   | "campaigns.import"
@@ -175,6 +180,7 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "utm_tags.view",
   "contact_groups.view",
   "contacts.view",
+  "contacts.stats",
   "opt_outs.view",
   "opt_ins.view",
   "clickers.view",
@@ -306,6 +312,8 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "segment_rules.create",
   "segment_rules.update",
   "segment_rules.delete",
+  // Audience SIZE only: count(*), count(distinct), carrier histogram. No rows.
+  "contacts.stats",
   // Spam scoring is part of authoring a creative.
   "spam.view",
   "spam.score",

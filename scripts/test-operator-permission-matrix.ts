@@ -36,6 +36,8 @@ const MATRIX_OPERATOR: Permission[] = [
   "segments.view", "segments.create", "segments.update",
   "segment_rules.view", "segment_rules.create", "segment_rules.update",
   "segment_rules.delete",
+  // Audience SIZE only — aggregates, never rows
+  "contacts.stats",
   // Spam scoring is part of authoring a creative
   "spam.view", "spam.score",
   // May ask for a deletion; only an Owner may approve
@@ -437,11 +439,11 @@ const FROZEN: Record<Exclude<Role, "operator">, Permission[]> = {
 // Permissions Phase 2 deliberately ADDS to a frozen role, listed explicitly so
 // an intentional grant is visible here instead of quietly widening a baseline.
 const PHASE2_ADDITIONS: Record<string, Permission[]> = {
-  viewer: [],
-  manager: ["contacts.export", "campaigns.export", "campaigns.import"],
-  admin: ["contacts.export", "campaigns.export", "campaigns.import"],
+  viewer: ["contacts.stats"],
+  manager: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import"],
+  admin: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import"],
   owner: [
-    "contacts.export", "campaigns.export", "campaigns.import",
+    "contacts.stats", "contacts.export", "campaigns.export", "campaigns.import",
     "compliance.manage", "deletion.approve", "audit.view",
   ],
 };

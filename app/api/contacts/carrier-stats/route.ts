@@ -23,7 +23,10 @@ export async function GET() {
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "contacts.view")) {
+  // contacts.stats, not contacts.view: this endpoint returns aggregates only
+  // (count(*), count(distinct), carrier histogram) and is deliberately reachable
+  // by a role that may never see a contact row.
+  if (!can(role, "contacts.stats")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

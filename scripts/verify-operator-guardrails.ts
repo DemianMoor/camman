@@ -126,9 +126,18 @@ async function main() {
       `/api/campaigns/${stage.campaign_id}/stages/${stage.id}/send/approve-send`,
       { method: "POST", body: JSON.stringify({ send_now: false }) },
     );
-    // 200 is the goal. 4xx OTHER than 403 means the route was reached and
-    // refused on its own merits (bad state, nothing to send) — still proof the
-    // authorization opened. 403 is the failure this section exists to catch.
+    // ⚠️ A 200 FROM approve-send IS NOT REACHABLE ON PREVIEW, and deliberately
+    // so. The handler walks provider capability -> credentials -> the two send
+    // switches, and preview fails at the first three ON PURPOSE: they are the
+    // documented reasons a preview cannot send (docs/preview-environment.md).
+    // Reaching 200 would mean seeding provider credentials into preview, i.e.
+    // dismantling a safety property to make a test go green.
+    //
+    // So the assertion is the one that actually carries meaning: NOT 403. The
+    // refusal reason is printed so the reader can see the handler was entered
+    // and rejected on send-state, not on authorization. retry-failed does
+    // return a real 200, which covers the "operator can invoke a send route"
+    // half end to end.
     if (r.status === 403) {
       bad(`approve-send returned 403 — still denied to the operator: ${r.body.slice(0, 200)}`);
     } else if (r.status === 200) {

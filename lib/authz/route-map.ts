@@ -82,16 +82,20 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "campaigns/[campaignId]/stages/[stageId]/send": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/send/abort": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/send/approve": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "campaigns/[campaignId]/stages/[stageId]/send/approve-send": null, // fires real SMS immediately -- campaigns.drain is manager+ and Phase 3 owns
-  // the volume caps
+  // 869et3vm1 Phase 3: OPENED to the operator, gated on the volume caps inside
+  // the handler. Phase 2 denied it only because no caps existed yet; denying it
+  // permanently would mean the hire cannot send, which is the job.
+  "campaigns/[campaignId]/stages/[stageId]/send/approve-send": { methods: ["POST"] },
   "campaigns/[campaignId]/stages/[stageId]/send/drain": null, // fires real SMS immediately -- campaigns.drain is manager+ and Phase 3 owns
   // the volume caps
   "campaigns/[campaignId]/stages/[stageId]/send/escalation": null, // contact-level rows or CSV export/import
   "campaigns/[campaignId]/stages/[stageId]/send/kickoff": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/send/materialize-progress": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/send/preflight": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "campaigns/[campaignId]/stages/[stageId]/send/retry-failed": null, // fires real SMS immediately -- campaigns.drain is manager+ and Phase 3 owns
-  // the volume caps
+  // 869et3vm1 Phase 3: OPENED to the operator, gated on the volume caps inside
+  // the handler. Phase 2 denied it only because no caps existed yet; denying it
+  // permanently would mean the hire cannot send, which is the job.
+  "campaigns/[campaignId]/stages/[stageId]/send/retry-failed": { methods: ["POST"] },
   "campaigns/[campaignId]/stages/[stageId]/split": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/status": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/audience-preview": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },

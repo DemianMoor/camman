@@ -3,6 +3,13 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import {
+  checkAggregateCap,
+  pendingScheduledRecipients,
+} from "@/lib/guardrails/caps";
+import { notifyGuardrail } from "@/lib/guardrails/notify";
+import { pendingForStage } from "@/lib/guardrails/pending";
+
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { isStageNumberBrandStale } from "@/lib/api/campaign-brand-change";
 import { logCampaignEvent } from "@/lib/campaign-events";
@@ -33,7 +40,10 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages/[stageId]/send/approve-send",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role, user } = auth;
 
@@ -90,7 +100,15 @@ export async function POST(
   }
 
   // Sending inline spends money → manager+ on top of the activate bar.
-  if (sendNow && !can(role, "campaigns.drain")) {
+  // ── 869et3vm1 Phase 3: the operator may send, behind the caps ───────────
+  //
+  // Phase 2 denied this route outright because it fires real SMS immediately and
+  // there were no volume limits yet. The caps are the precondition that was
+  // missing; without opening it the hire cannot actually send, which is the job.
+  //
+  // `campaigns.drain` remains the manager+ bypass. An operator passes here only
+  // if BOTH caps allow the volume, checked immediately below.
+  if (sendNow && !can(role, "campaigns.drain") && role !== "operator") {
     return apiError(
       403,
       "Sending now requires manager+. Schedule the stage for a future time to arm it instead.",
@@ -199,6 +217,35 @@ export async function POST(
   }
 
   // Send now + fully materialized → drain inline and return the real result.
+
+  // ── Aggregate volume cap (869et3vm1 Phase 3) ────────────────────────────
+  //
+  // Checked HERE, at the moment a human asks for the send — never in the drain.
+  // `pendingScheduledRecipients` is what makes "ten stages of 9,999" fail: each
+  // stage sees a near-zero SENT count at the moment it is scheduled, so without
+  // counting what is already scheduled-and-unsent every one of them would pass.
+  {
+    const requested = await pendingForStage(orgId, stageId);
+    const pending = await pendingScheduledRecipients(orgId);
+    const refusal = await checkAggregateCap({ orgId, requested, pending });
+    if (refusal) {
+      await notifyGuardrail({
+        orgId,
+        actorUserId: user.id,
+        event: "guardrail.cap_blocked",
+        headline: refusal.message,
+        detail: [`Campaign ${campaignId} · stage ${stageId}`],
+        entityType: "campaign_stage",
+        entityId: String(stageId),
+        metadata: refusal,
+      });
+      return apiError(409, refusal.message, API_ERROR_CODES.CONFLICT, {
+        reason: "aggregate_hourly_cap",
+        ...refusal,
+      });
+    }
+  }
+
   const drain = await runStageDrainAndRecord(db, {
     campaignId,
     stageId,

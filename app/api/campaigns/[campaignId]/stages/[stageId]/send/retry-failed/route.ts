@@ -3,6 +3,13 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import {
+  checkAggregateCap,
+  pendingScheduledRecipients,
+} from "@/lib/guardrails/caps";
+import { notifyGuardrail } from "@/lib/guardrails/notify";
+import { pendingForStage } from "@/lib/guardrails/pending";
+
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { runStageDrain, type DrainRefusal } from "@/lib/sends/drain";
@@ -63,12 +70,17 @@ export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages/[stageId]/send/retry-failed",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
   // manager+ — the money-spending action, same gate as the drain.
-  if (!can(role, "campaigns.drain")) {
+  // 869et3vm1 Phase 3: the operator may retry, behind the aggregate cap (applied
+  // below). Phase 2 denied this outright for want of a volume limit.
+  if (!can(role, "campaigns.drain") && role !== "operator") {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -86,6 +98,35 @@ export async function POST(
 
   if (requeued.length === 0) {
     return NextResponse.json({ ok: true, requeued: 0, ...EMPTY_DRAIN });
+  }
+
+
+  // ── Aggregate volume cap (869et3vm1 Phase 3) ────────────────────────────
+  //
+  // Checked HERE, at the moment a human asks for the send — never in the drain.
+  // `pendingScheduledRecipients` is what makes "ten stages of 9,999" fail: each
+  // stage sees a near-zero SENT count at the moment it is scheduled, so without
+  // counting what is already scheduled-and-unsent every one of them would pass.
+  {
+    const requested = await pendingForStage(orgId, stageId);
+    const pending = await pendingScheduledRecipients(orgId);
+    const refusal = await checkAggregateCap({ orgId, requested, pending });
+    if (refusal) {
+      await notifyGuardrail({
+        orgId,
+        actorUserId: auth.user.id,
+        event: "guardrail.cap_blocked",
+        headline: refusal.message,
+        detail: [`Retry on stage ${stageId}`],
+        entityType: "campaign_stage",
+        entityId: String(stageId),
+        metadata: refusal,
+      });
+      return apiError(409, refusal.message, API_ERROR_CODES.CONFLICT, {
+        reason: "aggregate_hourly_cap",
+        ...refusal,
+      });
+    }
   }
 
   const result = await runStageDrain(db, { stageId });

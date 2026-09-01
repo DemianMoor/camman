@@ -30,6 +30,11 @@ export type AuditAction =
   | "auth.login"
   | "auth.login_denied"
   | "auth.login_new_ip"
+  // An existing password account gained a Google identity. Distinct from
+  // auth.login because it is a change to HOW the account can authenticate, not
+  // an instance of authenticating — and it is the event an Owner would want to
+  // see if it happened without them.
+  | "auth.google_linked"
   | "user.invited"
   | "user.invite_revoked"
   | "user.joined"

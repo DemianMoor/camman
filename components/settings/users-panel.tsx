@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, ShieldOff, UserPlus } from "lucide-react";
+import { Link2, Loader2, ShieldOff, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
+import { linkGoogleIdentityAction } from "@/app/(protected)/actions";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -47,6 +48,8 @@ type MemberRow = {
   last_login_at: string | null;
   last_login_ip: string | null;
   joined_at: string;
+  /** Whether this account can already sign in with Google. */
+  has_google: boolean;
   /** Approved-but-unsent stages this member created — the kill switch's blast radius. */
   pending_stages: number;
 };
@@ -70,6 +73,7 @@ export function UsersPanel() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<string>("viewer");
   const [confirmTarget, setConfirmTarget] = useState<MemberRow | null>(null);
+  const [linking, setLinking] = useState(false);
 
   const { execute: listExec, isLoading } = useApiCall<ListResponse>();
   const inviteApi = useApiCall<unknown>();
@@ -257,6 +261,38 @@ export function UsersPanel() {
                         )}
                       </td>
                       <td className="px-4 py-2 text-right">
+                        {/* Link Google account — OWNER ONLY and SELF ONLY.
+                            linkIdentity() acts on whoever is signed in, so it
+                            is structurally impossible to link an identity onto
+                            somebody else's account; the row check keeps the
+                            button honest about that rather than implying a
+                            capability that does not exist. Hidden once the
+                            account already has a Google identity. */}
+                        {isSelf && isOwner && !m.has_google ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={linking}
+                            onClick={async () => {
+                              setLinking(true);
+                              // Redirects to Google on success and never
+                              // returns, so `linking` is only reset on error.
+                              const r = await linkGoogleIdentityAction();
+                              if (r?.error) {
+                                toast.error(r.error);
+                                setLinking(false);
+                              }
+                            }}
+                          >
+                            <Link2 className="size-4" aria-hidden />
+                            {linking ? "Redirecting…" : "Link Google account"}
+                          </Button>
+                        ) : null}
+                        {isSelf && m.has_google ? (
+                          <Badge variant="outline" className="text-[10px]">
+                            Google linked
+                          </Badge>
+                        ) : null}
                         {isSelf ? null : m.is_active ? (
                           <Button
                             variant="ghost"

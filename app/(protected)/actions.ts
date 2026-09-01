@@ -53,7 +53,10 @@ export async function linkGoogleIdentityAction(): Promise<{ error: string } | ne
   const { data, error } = await supabase.auth.linkIdentity({
     provider: "google",
     options: {
-      redirectTo: `${siteUrl}/auth/callback`,
+      // `linked=google` is how the callback tells a LINK from an ordinary
+      // sign-in: both arrive as an OAuth code for a user who now has a Google
+      // identity, and the two are otherwise indistinguishable at that point.
+      redirectTo: `${siteUrl}/auth/callback?linked=google`,
       queryParams: { hd: WORKSPACE_DOMAIN, prompt: "select_account" },
     },
   });

@@ -139,6 +139,28 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    // An identity LINK lands here exactly like a sign-in — same code exchange,
+    // same user, and by now the same Google identity on the account. The only
+    // thing that distinguishes them is the marker the link action put on its
+    // redirect URL.
+    //
+    // Note this runs AFTER the workspace gate above, so a link is subject to
+    // the same hd/domain rules as a login: linking a personal Google account to
+    // an owner account is refused for the same reason signing in with one is.
+    if (request.nextUrl.searchParams.get("linked") === "google") {
+      await writeAuditLog({
+        orgId: allow.orgId,
+        actorUserId: user.id,
+        action: "auth.google_linked",
+        entityType: "org_member",
+        entityId: user.id,
+        summary: `Linked the Google account ${identity.email} to this login`,
+        metadata: { google_email: identity.email },
+        ip,
+        userAgent,
+      });
+    }
+
     await recordLogin({
       orgId: allow.orgId,
       userId: user.id,

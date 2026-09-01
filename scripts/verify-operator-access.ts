@@ -239,10 +239,14 @@ async function main() {
     const methods = exportedMethods(route);
     if (methods.length === 0) continue; // nothing to call
     const method = methods.includes("GET") ? "GET" : methods[0];
-    const usesOurGate = readFileSync(
-      join(API_ROOT, route, "route.ts"),
-      "utf8",
-    ).includes("requireApiMembership");
+    const src = readFileSync(join(API_ROOT, route, "route.ts"), "utf8");
+    // The stage drain calls requireApiMembership() but deliberately does NOT
+    // return its error: it feeds the resolved role into decideDrainAuth, which
+    // owns the refusal because a CRON_SECRET caller has no session at all. An
+    // operator therefore gets 401 from that second gate, not 403 from ours.
+    // Still a denial — just one this check must not attribute to our gate.
+    const usesOurGate =
+      src.includes("requireApiMembership") && !src.includes("decideDrainAuth");
     const { status } = await get(concreteUrl(route, ids), method);
 
     if (status >= 200 && status < 300) {

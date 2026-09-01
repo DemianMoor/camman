@@ -1,6 +1,6 @@
 # Feature — Multi-tenancy, Auth & Permissions
 
-_Last updated: 2026-08-31_
+_Last updated: 2026-09-01_
 
 ## 1. Purpose
 Isolate every org's data behind an `org_id`, authenticate users via Supabase Auth, and enforce a five-role permission model on both server and client. A missing `org_id` filter is a data-leak bug — this is the most safety-critical convention in the codebase.
@@ -203,3 +203,122 @@ duplicate, behavioural split).
   `FORCE ROW LEVEL SECURITY`, so every policy here defends only against a leaked
   anon key. `can()` in application code is the real control. Role-aware RLS is
   deferred to its own card.
+
+---
+
+## Operator authorization & redaction (Phase 2, ClickUp 869et3vm1)
+
+### Default-deny is structural, not a lookup
+
+`requireApiMembership()` refuses an **operator** unless the handler passes an
+explicit `{ route, method }`. A route added tomorrow that never opts in denies
+the operator **without anyone editing the map**. That is what makes default-deny
+true rather than aspirational: a scheme that depends on remembering to add a
+deny entry fails the first time somebody forgets.
+
+[`lib/authz/route-map.ts`](../../lib/authz/route-map.ts) is the *second*,
+reviewable statement of intent — **85 allowed / 174 denied of 259 routes**. Both
+must agree before an operator gets through.
+
+- **A typed route key, not the request.** Passing `req` would have meant changing
+  the handler signature of 54 route files that declare `GET()` with no
+  parameters. The key is `keyof typeof OPERATOR_ROUTE_MAP`, so a typo is a
+  compile error rather than a silent 403.
+- **The method is required.** Registry route files export GET, POST and PATCH
+  from one module, so a route-level allow would have handed the operator write
+  access to Brands and Offers. Method granularity is what makes "view-only"
+  expressible.
+
+Other roles are untouched by this parameter — they are gated by `can()` exactly
+as before.
+
+### The permission set
+
+`operator` is **36 permissions**, defined standalone and deliberately **not**
+spread from `viewerPerms`, which carries `contacts.view`, `opt_outs.view`,
+`clickers.view` and `segment_contacts.view` — the whole audience block.
+
+⚠️ **`managerPerms` used to spread `operatorPerms`.** Narrowing operator would
+have silently stripped `contacts.upload`, `opt_outs.upload`, `lookup.run` and
+~20 more from manager, admin **and** owner. The shared base is now
+`staffBaselinePerms`, and
+[`scripts/test-operator-permission-matrix.ts`](../../scripts/test-operator-permission-matrix.ts)
+asserts the other four roles against sets frozen from `origin/main`.
+
+**`contacts.stats`** was split out of `contacts.view`: audience SIZE and audience
+IDENTITY were the same grant, which made the aggregate counters unreachable for
+a role that may never see a row.
+
+### redactForRole() sweeps VALUES, not a field list
+
+[`lib/authz/redact.ts`](../../lib/authz/redact.ts). Any string that is **exactly**
+a provider name or provider code becomes its route alias, however deeply nested.
+
+A field list ("null out `provider_name`") breaks the moment someone adds a join
+or returns a nested provider object — and breaks *silently*. The value sweep is
+what makes the end-to-end assertion ("no operator response contains any string
+from `SELECT name FROM sms_providers`") true **by construction**. Whole-string
+matches only, so prose is never mangled.
+
+Aliases are `Route A`, `Route B`, … seeded on first read in provider-id order
+and **stable forever** — an operator refers to routes by these letters, so a
+letter that moves is worse than no alias.
+
+⚠️ **Only 7 allowed routes actually reach provider identity.** 12 of the 19
+routes the Phase 0 recon flagged are now **denied outright**, so redaction there
+would be dead code. **Denial supersedes redaction.**
+
+⚠️ **A response-boundary layer only covers what crosses that boundary.**
+`SendStateStripLoader` is a **server component** rendered by the protected
+layout on *every* page, and it surfaced `sms_providers.name` without ever
+touching an API route. It needed explicit redaction. Any future server component
+that reads provider identity must do the same — which is why the verification
+script checks rendered pages, not just JSON.
+
+### Field-level compliance gates
+
+`stop_text` (stage PATCH) and `allow_multi_segment` (creative PATCH) are refused
+unless the caller holds `compliance.manage`, shaped like the existing
+`tracking_id_immutable` refusal. Field-level, not permission-level: the operator
+legitimately needs to edit stages and creatives — just not those fields.
+
+### Page guards live in LAYOUTS
+
+Nine of the ten gated pages are client components and cannot run a server check.
+A **layout is a server component regardless of what it wraps**, so one small
+file gates a whole subtree without converting any page:
+`contacts`, `contact-groups`, `clickers`, `opt-outs`, `opt-ins`, `drip`.
+`notFound()`, not 403 — the operator has no business knowing the route exists.
+
+The API routes behind those pages deny independently; the layout is defence in
+depth, not the control.
+
+### Identity linking
+
+The domain gate reads the **Google identity's** email
+(`identities[].identity_data.email`), **not `auth.users.email`**. Linking a
+Google identity to an existing password account leaves the primary address
+unchanged, so reading `user.email` would refuse the owner's own sign-in — the
+exact scenario linking exists to enable. Covered by
+[`scripts/test-workspace-gate.ts`](../../scripts/test-workspace-gate.ts) case 5.
+
+`linkGoogleIdentityAction` in [`app/(protected)/actions.ts`](../../app/(protected)/actions.ts)
+is Owner-only and **self-only** — `linkIdentity()` acts on whoever is signed in,
+so nobody can link an identity onto someone else's account.
+
+⚠️ **Requires a Supabase dashboard toggle:** Authentication → Sign In / Providers
+→ **"Allow manual linking"**, which is OFF by default. Automatic linking does not
+cover this case — it only fires when the identities share an email address.
+
+### Verification
+
+| Script | What it proves |
+|---|---|
+| `verify-operator-access.ts` | Signs in as a **real operator** and hits every route: no denied route reachable, every allowed route reachable, no provider name/code in any body, every phone-shaped value a known **sending** number. **Preview only** — it creates a user, and refuses to run against production. |
+| `test-route-map-coverage.ts` | Every `route.ts` on disk is classified; no stale keys; every allowed route actually passes its own key (an allow that isn't wired is a lie). |
+| `test-operator-permission-matrix.ts` | `operator` == the matrix in both directions; other roles unchanged vs `origin/main`. |
+| `test-workspace-gate.ts` | The domain gate, including the linked-identity case. Run with `--conditions=react-server`. |
+
+**Not covered:** the Google OAuth sign-in path (no scriptable consent screen)
+and allowed write methods (probing them would mutate data). Both are stated in
+the script's own output rather than left implied.

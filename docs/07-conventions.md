@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-31_
+_Last updated: 2026-09-01_
 
 ## A phone number in a dense table shows its last 4 — a short code shows all of it (2026-08-28)
 
@@ -1907,3 +1907,82 @@ inserting (which means the list is stale, not that the check passed).
 written** (394/397 rows) — a Phase 0 recon claimed otherwise for both tables and
 was right only about stages. Verify a column's absence against
 `information_schema`, not against a recon.
+
+## Default-deny must be structural, not a map you remember to update
+
+Established 2026-09-01 (869et3vm1 Phase 2).
+
+The operator gate denies unless a handler passes an explicit `{ route, method }`
+to `requireApiMembership()`. A route added later that never opts in is denied
+**without anyone editing the route map**.
+
+The map still exists — it makes the allowed set reviewable in one place and
+gives the verification script something to drive — but it is the *second*
+statement, not the mechanism. A design where safety depends on remembering to
+add a **deny** entry fails the first time somebody forgets; a design where
+safety is the absence of an **allow** cannot.
+
+Corollary: the coverage check asserts that every allowed route actually passes
+its own key. An allow entry that was never wired is a lie in the opposite
+direction — the map says reachable, the gate says no.
+
+## Narrowing a role means checking what INHERITS from it
+
+`managerPerms` spread `operatorPerms`. Redefining `operator` to a restricted set
+would have silently stripped ~20 permissions from manager, admin and owner —
+a severe regression inside a change whose entire purpose was to restrict one
+role.
+
+The fix was to rename the shared base (`staffBaselinePerms`) so the inheritance
+says what it means, and to assert the untouched roles against sets **frozen from
+`origin/main`** rather than recomputed from the file under test.
+
+Before narrowing any set that others spread from, grep for `...thatSet`.
+
+## Redact by VALUE, not by field name
+
+A redactor built as a field list ("null out `provider_name`") fails silently the
+moment someone adds a join, renames a field, or nests the object differently.
+
+`redactForRole()` instead replaces any string that is **exactly** a provider name
+or code, anywhere in the payload. That is what lets the verification assert "no
+operator response contains any string from `SELECT name FROM sms_providers`" and
+have it be true by construction rather than by vigilance.
+
+Whole-string matches only — substring matching would mangle legitimate prose.
+
+⚠️ **And a response-boundary layer only covers what crosses that boundary.**
+`SendStateStripLoader` is a server component rendered on every page; it read
+`sms_providers.name` and never touched an API route. Server components must
+redact explicitly.
+
+## An assertion that fails on correct behaviour must be sharpened, not deleted
+
+The first operator run reported three "failures" that were the test being wrong:
+
+- Cron and webhook routes answer **401**, not 403, because they authenticate by
+  bearer secret or path token and never look at the session. Both are denials.
+- `phone_number` in a response is **not** a leak — the access matrix explicitly
+  permits SENDING numbers.
+
+The tempting fix is to drop the assertion. Both were instead made **stronger**:
+denials are now counted per authentication mechanism, so a gate-protected route
+that started answering 401 (a dead session — which would otherwise read as a
+perfect pass) fails; and phone checks now assert on VALUES, requiring every
+phone-shaped string to be a known sending number, so a recipient number is
+caught even in a field nobody predicted.
+
+A third was a genuine carve-out: the stage drain calls `requireApiMembership()`
+but hands the role to `decideDrainAuth`, which owns the refusal because a
+CRON_SECRET caller has no session. Documented in the check rather than smoothed
+away.
+
+## Gate a client-component page from its LAYOUT
+
+Nine of the ten pages that had to be closed to the operator are client
+components and cannot run a server-side check. A **layout is a server component
+regardless of what it wraps**, so one small `layout.tsx` gates an entire subtree
+without converting any page to a server/client split.
+
+Use `notFound()`, not a 403 page: a role that may not use a route has no
+business learning it exists.

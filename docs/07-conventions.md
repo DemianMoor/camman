@@ -2019,3 +2019,48 @@ around it.
 Same family as [a passing check is not evidence until you know what it ran
 against](#verification--a-passing-check-is-not-evidence-until-you-know-what-it-ran-against):
 both are about the gap between a claim and the thing that would substantiate it.
+
+## A cap that counts only what HAPPENED is not a cap
+
+The aggregate volume cap measures sent **plus scheduled-but-unsent** recipients.
+Counting only what has been sent makes it trivially defeatable: ten stages of
+9,999 are each scheduled while the others have sent nothing, so each sees a
+near-zero count and every one of them passes.
+
+The general shape: when a limit governs work that is *committed now and performed
+later*, the committed-but-not-yet-performed volume is part of the measurement. A
+cap that ignores it measures history, not exposure.
+
+## An authorization intercept must run before the permission check it diverts
+
+The deletion queue turns an operator's delete into a request. Placed after
+`can()`, it never runs — the operator deliberately lacks the delete permission,
+so the permission check returns 403 first and no request is created.
+
+Correct order is **auth → parse id → intercept → `can()`**. The intercept only
+diverts roles holding `deletion.request`, so a role with neither still falls
+through to the same 403 and nothing is widened.
+
+Caught by `verify-operator-guardrails.ts` returning 403 where it expected 202 —
+which is the value of asserting the *specific* status rather than "not 2xx".
+
+## pg_stat_statements normalizes literals — never match on one
+
+A test asserting "this query ran exactly once" reported **0 executions for a query
+that had definitely run**, because it matched on `%America/New_York%` and
+pg_stat_statements had replaced that literal with `$3`.
+
+Match on something that survives normalization: a column alias, a table name, a
+join shape. And treat a zero count as a failure rather than a pass, which is what
+surfaced this — a check that silently matched nothing would have read as green.
+
+## Do not remove a safety property to make a test green
+
+`approve-send` cannot return 200 on preview: the handler walks provider
+capability → credentials → two send switches, and preview fails the first three
+*on purpose* — they are the documented reasons a preview cannot send.
+
+Reaching 200 would have meant seeding provider credentials into preview. The
+assertion was weakened to "not 403" with the refusal reason printed instead, and
+the limitation stated in the script's own output. A green test bought by
+dismantling an environment's safety is worth less than a yellow one that says so.

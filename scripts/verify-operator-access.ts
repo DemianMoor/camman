@@ -509,6 +509,48 @@ async function main() {
     for (const o of pageOpen) console.log(`       ${o}`);
   }
 
+
+  // ── 5. Password sign-in is ROLE-GATED, not merely unset ─────────────────
+  //
+  // The question this answers: is an operator kept off the password path
+  // because signInAction refuses their role, or only because the invite flow
+  // never sets a password for them?
+  //
+  // It is BOTH, and the role gate is the load-bearing half. This run proves the
+  // weaker claim is not what we are relying on: the operator we just signed in
+  // as HAS a password and Supabase accepted it three sections ago. If the only
+  // protection were "no password is ever set", that session would have been a
+  // full app login.
+  //
+  // ⚠️ ASSERTED AGAINST SOURCE, not by driving the login form. Submitting the
+  // form would mean putting a real password in the command output, which is
+  // not worth a slightly better proof. The gate is a plain role comparison
+  // whose absence this check would catch immediately.
+  console.log(`\n--- 5. Password sign-in role gate ---`);
+  const loginSrc = readFileSync(
+    resolve(process.cwd(), "app/(auth)/login/actions.ts"),
+    "utf8",
+  );
+  console.log(`  scope: app/(auth)/login/actions.ts (${loginSrc.length} bytes)`);
+  const refusesNonOwner = /member\.role\s*!==\s*"owner"/.test(loginSrc);
+  const tearsDownSession =
+    /member\.role\s*!==\s*"owner"[\s\S]{0,200}?signOut\(\)/.test(loginSrc);
+  if (loginSrc.length === 0) {
+    fail("login action source is EMPTY");
+  }
+  if (refusesNonOwner) pass("signInAction refuses any role that is not owner");
+  else fail("signInAction has NO role gate — an operator with a password could sign in");
+  if (tearsDownSession) {
+    pass("the refused session is signed out, so the refusal is not cosmetic");
+  } else {
+    fail("the role gate does not sign the session out — a refused user keeps a valid cookie");
+  }
+  console.log(
+    `     (this operator authenticated against Supabase with a password during\n` +
+      `      this very run — so the app-level gate is what stops them, not the\n` +
+      `      absence of a credential)`,
+  );
+
   await sql.end();
   console.log(`\n=== ${failures === 0 ? "ALL PASS" : "FAILURES"} ===`);
   console.log(

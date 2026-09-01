@@ -1635,4 +1635,16 @@ the two-line cell doesn't push the metric columns off screen. getStageMetricsInR
 left-joins provider_phones for the number (PK join, no fan-out); no schema change.
   - docs updated: docs/04-features/reports-rollup.md, docs/07-conventions.md, docs/CHANGELOG.md
 
+- 2026-08-31 — Multi-user Phase 1 (ClickUp 869et3vm1): Google Workspace sign-in gated on
+verified domain + allow-list + `is_active`; per-request `is_active` check in BOTH
+`getApiMembershipRow` and `getOrgMembership` (zero extra queries); deactivation kill switch
+(flag → revoke sessions → un-approve the departing user's approved-but-unsent stages, never
+touching `sent_at`); Owner-only `/settings/users` with invites, roles, last login/IP;
+self-signup closed at the server action; `created_by_user_id` added to `campaign_stages` and
+stamped at all five stage-insert sites. Migration **0175** (additive; also adds `audit_log`,
+`deletion_requests`, `provider_route_aliases` for phases 2-4, all shipping empty).
+`operator` invites are refused until Phase 2 redefines the role.
+  - docs updated: docs/03-data-model.md (+ERD), docs/04-features/multi-tenancy-auth.md,
+docs/05-flows.md, docs/06-integrations.md, docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

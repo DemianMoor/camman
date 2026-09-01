@@ -23,7 +23,11 @@ export type CampaignEventType =
   | "preflight_rearmed"
   | "results_imported"
   | "results_reverted"
-  | "stage_deleted";
+  | "stage_deleted"
+  // 869et3vm1 Phase 1: the deactivation kill switch un-approved this stage
+  // because the user who created it was deactivated. Distinct from a human
+  // un-approving it, which is what makes it reviewable.
+  | "stage_auto_paused";
 
 export interface LogCampaignEventInput {
   orgId: string;

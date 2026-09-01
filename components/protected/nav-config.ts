@@ -26,12 +26,22 @@ import {
 } from "lucide-react";
 
 import { isEntityAvailable } from "@/lib/feature-flags";
+import type { Permission } from "@/lib/permissions";
 
 export type NavItem = {
   label: string;
   href: string;
   icon: LucideIcon;
   disabled?: boolean;
+  // Hide the row entirely unless the signed-in role holds this permission.
+  //
+  // ⚠️ THIS IS TIDINESS, NOT A CONTROL. A hidden link stops nobody typing the
+  // URL, and the nav config ships in the client bundle either way. Every
+  // gated route re-checks server-side — /settings/users calls
+  // requireOrgMembership + can(role, "users.manage") in the page body, and its
+  // API routes check independently. Removing this line must never be the
+  // difference between safe and unsafe.
+  permission?: Permission;
   // Match the active state exactly (===) instead of the default prefix match.
   // Needed for a parent route that has child routes under the same path, e.g.
   // /reports (Overview) vs /reports/number — otherwise Overview would light up
@@ -239,11 +249,14 @@ export const navGroups: NavGroup[] = [
         href: "/settings/notifications",
         icon: Bell,
       },
+      // Owner-only member roster, invites and the deactivation kill switch
+      // (869et3vm1 Phase 1). Enforced server-side; `permission` only keeps the
+      // link out of the way for roles that would get a 403.
       {
         label: "User Management",
         href: "/settings/users",
         icon: UserCog,
-        disabled: true,
+        permission: "users.manage",
       },
     ],
   },

@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { ChevronRight } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { useAuth } from "@/components/protected/auth-context";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
 import { navGroups, type NavGroup, type NavItem } from "./nav-config";
@@ -86,6 +87,7 @@ const GROUP_LABEL_CLASS =
 
 export function SidebarNav() {
   const pathname = usePathname();
+  const { can } = useAuth();
   const [open, setOpen] = usePersistedFilters<Record<string, boolean>>(
     STORAGE_KEY,
     COLLAPSED_DEFAULTS,
@@ -144,15 +146,18 @@ export function SidebarNav() {
             ) : null}
             {expanded ? (
               <div id={panelId} className="flex flex-col gap-1">
-                {group.items.map((item) => (
-                  <NavRow
-                    key={item.href}
-                    item={item}
-                    active={
-                      !item.disabled && isActive(pathname, item.href, item.exact)
-                    }
-                  />
-                ))}
+                {group.items
+                  .filter((item) => !item.permission || can(item.permission))
+                  .map((item) => (
+                    <NavRow
+                      key={item.href}
+                      item={item}
+                      active={
+                        !item.disabled &&
+                        isActive(pathname, item.href, item.exact)
+                      }
+                    />
+                  ))}
               </div>
             ) : null}
           </div>

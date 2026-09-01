@@ -665,6 +665,10 @@ export async function POST(
     scheduled_at: input.scheduled_at ? new Date(input.scheduled_at) : null,
     notes: nullIfEmpty(input.notes),
     status: "draft",
+    // Migration 0175. Authorship, so the deactivation kill switch can find the
+    // stages a departing user left approved-but-unsent. Stamped at CREATE and
+    // never rewritten — an edit by someone else does not transfer authorship.
+    created_by_user_id: user.id,
   };
 
   // Stage insert + (conditional) campaign-tracking-id backfill + stage

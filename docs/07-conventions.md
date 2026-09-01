@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-08-29_
+_Last updated: 2026-08-31_
 
 ## A phone number in a dense table shows its last 4 — a short code shows all of it (2026-08-28)
 
@@ -1812,3 +1812,98 @@ describes, not whether any of it does. Prefer a structural boundary — majority
 over a tuned threshold, and check that the rule degenerates correctly at the
 finest grain: at stage grain `substituted === total`, so the same function
 returns the old answer and only grouped rows change.
+
+## A session that fails an authorization gate must be TORN DOWN, not redirected
+
+Established 2026-08-31 building the Google Workspace gate (869et3vm1 Phase 1).
+
+`app/auth/callback/route.ts` runs three checks after
+`exchangeCodeForSession` — Workspace identity, allow-list, `is_active`. On any
+failure it calls `supabase.auth.signOut()` **before** the redirect.
+
+Redirecting alone would be cosmetic. The session cookie would still be valid, so
+the user could type `/dashboard` and be admitted by a request that never re-runs
+the callback. The refusal has to remove the credential, not just the page.
+
+The same rule made `signInAction` sign a non-owner back out after a successful
+password authentication: "authenticated but not permitted to use this method"
+still leaves a usable session unless you end it.
+
+## A deactivated user must not be redirected to `/login`
+
+`proxy.ts` bounces any AUTHENTICATED request for `/login` or `/signup` back to
+`/dashboard`. A deactivated member still holds a valid session, so
+`requireOrgMembership()` sending them to `/login` produces
+`/dashboard → /login → /dashboard` forever.
+
+They go to **`/auth/deactivated`**, which is outside `AUTH_PAGE_PREFIXES`,
+explains the state, and offers sign-out as a **client** action — a Server
+Component cannot sign anyone out, because `lib/supabase/server.ts` swallows
+cookie writes made during a page render.
+
+The general shape: before redirecting an authenticated-but-unauthorized user,
+check what the middleware does with the destination.
+
+## Closing a self-service flow means disabling the SERVER ACTION
+
+Deleting or replacing the page does nothing. A Next.js Server Action is an RPC
+endpoint with a stable id that ships in the client bundle; anyone who has seen
+it can keep calling it with no UI at all.
+
+`signUpAction` therefore returns a refusal *without calling*
+`supabase.auth.signUp`, and `scripts/verify-multiuser-phase1.ts` asserts the
+call is absent from the source rather than asserting the page is gone.
+
+Same family as "'Don't show it' is rendering; 'don't send it' is security".
+
+## Revoking a token does not end a session — re-read authorization per request
+
+Supabase JWTs stay valid until they expire; `auth.admin.signOut` only stops the
+session being *renewed*. A kill switch built on revocation alone leaves a window
+of up to one token lifetime in which a removed user is still fully authorized.
+
+The fix is a per-request authorization read. `is_active` is selected in the
+query that **already** resolves `org_id` + role
+(`getApiMembershipRow`, `getOrgMembership`), so it costs **zero extra
+round-trips** and takes effect on the very next request.
+
+It must be in **both** helpers. `proxy.ts` cannot carry it alone: all of `api/`
+is excluded from the matcher, and `PROTECTED_PREFIXES` covers three page
+prefixes out of ~20.
+
+Order matters when cutting access: flip the flag **first**, then revoke, then
+clean up. Any other order leaves an instant where the account is un-revoked and
+still active.
+
+## To stop scheduled work, clear a gate the pipeline ALREADY reads
+
+The deactivation kill switch disarms a departing user's scheduled sends by
+setting `send_approved = false` — a flag the drain already checks — instead of
+adding a role-aware condition inside materialize or fire.
+
+Two reasons, and the second is the general one:
+
+- **Stabilise-first**: the send path's predicate is unchanged. Only data it
+  already reads changed.
+- **`sent_at` is off-limits.** It is the scheduler's atomic fire-lock, and a
+  second writer stamping it silently cancels a scheduled send — a real past
+  incident in this codebase. Un-approving is reversible and single-writer.
+
+Before adding a condition to a pipeline, look for a gate it already honours.
+
+## An authorship column is only as good as its INSERT sites
+
+`created_by_user_id` is useless to a kill switch if any create path forgets it.
+`campaign_stages` has **five**: stage create, stage duplicate, stage split,
+campaign duplicate, and `lib/stages/behavioral-split.ts` — the last reached
+through a library function that had no user parameter at all and needed one
+threaded in.
+
+`scripts/verify-multiuser-phase1.ts` asserts every known site both still inserts
+stages **and** stamps the column, and fails loudly if a listed file stops
+inserting (which means the list is stale, not that the check passed).
+
+⚠️ Note `campaigns.created_by_user_id` **already existed and was already
+written** (394/397 rows) — a Phase 0 recon claimed otherwise for both tables and
+was right only about stages. Verify a column's absence against
+`information_schema`, not against a recon.

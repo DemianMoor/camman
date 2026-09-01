@@ -1,6 +1,6 @@
 import { requirePagePermission } from "@/lib/authz/page-guard";
 
-// The SMS provider registry — the operator must never learn provider identity; they see route aliases only.
+// Settings is hidden from the operator in its entirety (access matrix): sending, providers, credentials, carrier limits, lookup, short domains, notifications, partner keys.
 //
 // Gated on `providers.view`, which is used here as an OPERATOR DISCRIMINATOR
 // rather than as a claim about providers: it is held by viewer, manager, admin
@@ -12,7 +12,7 @@ import { requirePagePermission } from "@/lib/authz/page-guard";
 //
 // A layout, not a page edit: the page below is a client component and cannot
 // run a server-side check itself.
-export default async function ProvidersLayout({
+export default async function SettingsLayout({
   children,
 }: {
   children: React.ReactNode;

@@ -373,6 +373,142 @@ async function main() {
     for (const l of contactLeaks.slice(0, 25)) console.log(`       ${l}`);
   }
 
+
+  // ── 4. Rendered PAGES must not leak either ──────────────────────────────
+  //
+  // ⚠️ THIS SECTION EXISTS BECAUSE THE API BOUNDARY WAS NOT ENOUGH.
+  //
+  // SendStateStripLoader is a server component rendered by the protected layout
+  // on EVERY page. It read sms_providers.name and never touched an API route,
+  // so every JSON assertion above passed while the name was being written
+  // straight into the HTML. Checking JSON alone would have certified a leak as
+  // clean.
+  //
+  // So this fetches the rendered HTML of every page an operator may open and
+  // applies the same two assertions. Note the honest limit: most pages here are
+  // client components, so their body arrives nearly empty and the check is only
+  // meaningful for what the SERVER renders — which is exactly the class of leak
+  // it was written for. The count of pages returning substantial HTML is
+  // printed so the strength of the run is visible rather than assumed.
+  console.log(`\n--- 4. Rendered PAGES: no provider identity, no recipient phones ---`);
+
+  const ALLOWED_PAGES = [
+    "/dashboard",
+    "/campaigns",
+    "/campaigns/new",
+    `/campaigns/${ids.campaignId ?? "1"}`,
+    `/campaigns/${ids.campaignId ?? "1"}/edit`,
+    "/segments",
+    "/segments/charts",
+    `/segments/${ids.id ?? "1"}`,
+    "/creatives",
+    "/brands",
+    "/offers",
+    "/affiliate-networks",
+    "/utm-tags",
+    "/routing-types",
+    "/traffic-types",
+    "/reports",
+    "/reports/delivery",
+    "/sends/today",
+  ];
+
+  const DENIED_PAGES = [
+    "/contacts",
+    "/contact-groups",
+    "/clickers",
+    "/opt-outs",
+    "/opt-ins",
+    "/drip/why-not-routed",
+    "/providers",
+    "/reports/partners",
+    "/sends/autopilot",
+    "/settings/sending",
+    "/settings/providers",
+    "/settings/lookup",
+    "/settings/short-domains",
+    "/settings/notifications",
+    "/settings/partners",
+    "/settings/users",
+  ];
+
+  const page = async (path: string) => {
+    const r = await fetch(`${BASE}${path}`, {
+      headers: { Cookie: cookie },
+      redirect: "manual",
+    });
+    return { status: r.status, html: await r.text() };
+  };
+
+  console.log(
+    `  scope: ${ALLOWED_PAGES.length} allowed pages + ${DENIED_PAGES.length} denied pages`,
+  );
+  if (ALLOWED_PAGES.length === 0 || DENIED_PAGES.length === 0) {
+    fail("page scope is EMPTY");
+  }
+
+  let substantial = 0;
+  const pageLeaks: string[] = [];
+  const pageBlocked: string[] = [];
+  for (const path of ALLOWED_PAGES) {
+    const { status, html } = await page(path);
+    if (status >= 300 && status < 400) {
+      pageBlocked.push(`${path} -> ${status} (redirected away)`);
+      continue;
+    }
+    if (status !== 200) {
+      pageBlocked.push(`${path} -> ${status}`);
+      continue;
+    }
+    if (html.length > 20000) substantial++;
+    const lower = html.toLowerCase();
+    for (const f of forbidden) {
+      if (
+        new RegExp(`(^|[^a-z0-9])${f.toLowerCase()}([^a-z0-9]|$)`).test(lower)
+      ) {
+        pageLeaks.push(`${path} rendered provider "${f}"`);
+        break;
+      }
+    }
+    for (const m of html.match(/\+?1?\d{10,15}/g) ?? []) {
+      const digits = m.replace(/[^0-9]/g, "");
+      if (digits.length >= 10 && !senders.has(digits)) {
+        pageLeaks.push(`${path} rendered a non-sending phone ending ${digits.slice(-4)}`);
+        break;
+      }
+    }
+  }
+  if (pageBlocked.length === 0) {
+    pass(`all ${ALLOWED_PAGES.length} allowed pages rendered for the operator`);
+  } else {
+    fail(`${pageBlocked.length} allowed page(s) were not reachable:`);
+    for (const b of pageBlocked) console.log(`       ${b}`);
+  }
+  console.log(
+    `     ${substantial}/${ALLOWED_PAGES.length} returned substantial HTML (>20KB) — the rest are\n` +
+      `     client-rendered, so the check is meaningful only for server output there`,
+  );
+  if (pageLeaks.length === 0) {
+    pass("no provider name and no recipient phone in any rendered page");
+  } else {
+    fail(`${pageLeaks.length} page(s) leaked in server-rendered HTML:`);
+    for (const l of pageLeaks) console.log(`       ${l}`);
+  }
+
+  const pageOpen: string[] = [];
+  for (const path of DENIED_PAGES) {
+    const { status } = await page(path);
+    // notFound() renders 404; a redirect away is also a refusal.
+    if (status === 404 || (status >= 300 && status < 400)) continue;
+    pageOpen.push(`${path} -> ${status}`);
+  }
+  if (pageOpen.length === 0) {
+    pass(`all ${DENIED_PAGES.length} denied pages refused (404 or redirect)`);
+  } else {
+    fail(`${pageOpen.length} denied page(s) still render for the operator:`);
+    for (const o of pageOpen) console.log(`       ${o}`);
+  }
+
   await sql.end();
   console.log(`\n=== ${failures === 0 ? "ALL PASS" : "FAILURES"} ===`);
   console.log(

@@ -135,6 +135,21 @@ export type Permission =
   | "import_mappings.update"
   | "import_mappings.delete"
   | "users.manage"
+  // ── 869et3vm1 Phase 2 ──────────────────────────────────────────────────
+  // Split out of the blanket *.view permissions so "may look at it" and "may
+  // take a copy of it out of the system" stop being the same grant.
+  | "contacts.export"
+  | "campaigns.export"
+  | "campaigns.import"
+  // Compliance & routing controls: quiet hours, breakers, dedup toggles,
+  // stop_text, allow_multi_segment, carrier limits, provider/credential
+  // changes. OWNER-ONLY per the access matrix.
+  | "compliance.manage"
+  // The deletion approval queue (Phase 3 builds the UI; the permissions and
+  // the table exist now so the split is settled before anything depends on it).
+  | "deletion.request"
+  | "deletion.approve"
+  | "audit.view"
   | "org.delete";
 
 const VALID_ROLES: ReadonlySet<Role> = new Set([
@@ -176,7 +191,20 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "contact_contact_groups.view",
 ]);
 
-const operatorPerms: ReadonlySet<Permission> = new Set([
+// ⚠️ THIS IS NOT THE OPERATOR SET. It is the staff baseline that manager and
+// above inherit, and it is EXACTLY what `operatorPerms` contained before
+// 869et3vm1 Phase 2 redefined that role.
+//
+// It had to be split out. `managerPerms` used to spread `operatorPerms`, so
+// narrowing operator to the access matrix would have silently stripped
+// contacts.upload, opt_outs.upload, clickers.upload, lookup.run and the rest
+// from manager, admin AND owner — a severe regression in a change whose whole
+// purpose is to restrict ONE role. Renaming the shared base makes the
+// inheritance say what it means.
+//
+// scripts/test-operator-permission-matrix.ts asserts manager/admin/owner/viewer
+// come out byte-identical to their pre-Phase-2 sets.
+const staffBaselinePerms: ReadonlySet<Permission> = new Set([
   ...viewerPerms,
   "contacts.upload",
   "contacts.update",
@@ -212,8 +240,82 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "lookup.run",
 ]);
 
+// ── The OPERATOR role (869et3vm1 Phase 2) ─────────────────────────────────
+//
+// DEFINED STANDALONE, and deliberately NOT spread from viewerPerms. `viewer`
+// carries contacts.view, opt_outs.view, clickers.view and segment_contacts.view
+// — the entire audience block — so inheriting from it would have re-granted in
+// one line what this role exists to withhold. Every entry below is here because
+// the access matrix on the card puts it there.
+//
+// This set is asserted against the matrix, literal for literal, by
+// scripts/test-operator-permission-matrix.ts. Adding a permission here without
+// adding it to the matrix in that script FAILS THE BUILD — which is the point:
+// the matrix is a product decision, not something to be widened by whoever is
+// nearest the file.
+//
+// NOTE what is absent and why:
+//   contacts.* / opt_outs.* / opt_ins.* / clickers.* / contact_groups.* /
+//   segment_contacts.* / contact_contact_groups.* — the audience block.
+//   *.export / *.import — no data leaves or enters the system.
+//   creatives.archive — archive IS delete here; the matrix says no delete.
+//   segments.archive / segments.delete — same, via the deletion queue.
+//   campaigns.drain — fires real SMS; Phase 3 owns the volume caps.
+//   compliance.manage — quiet hours, breakers, stop_text, allow_multi_segment.
+//   providers.* / provider_credentials.* / lookup.* / users.manage / audit.view.
+const operatorPerms: ReadonlySet<Permission> = new Set([
+  // Registry — VIEW ONLY.
+  "brands.view",
+  "offers.view",
+  "networks.view",
+  "utm_tags.view",
+  "routing_types.view",
+  "traffic_types.view",
+  "registry.view",
+  // Sending numbers: needed to choose a route on a stage. The response is
+  // redacted to a route alias, so this grants "pick Route B", never "learn
+  // which SSP Route B is".
+  "provider_phones.view",
+  // Campaigns & stages — the job. Delete is granted on STAGES only; campaigns
+  // have no hard delete in this codebase, so "delete a campaign" is archive.
+  "campaigns.view",
+  "campaigns.create",
+  "campaigns.update",
+  "campaigns.activate",
+  "campaigns.pause",
+  "campaigns.complete",
+  "campaigns.archive",
+  "campaigns.restore",
+  "stages.view",
+  "stages.create",
+  "stages.update",
+  "stages.send",
+  "stages.archive",
+  "stages.restore",
+  "stages.delete",
+  // Creatives — view + create + edit. No archive.
+  "creatives.view",
+  "creatives.create",
+  "creatives.update",
+  // Segments — view + create/edit, counts only. The contact-level endpoints
+  // under a segment are denied by the route map, not by these.
+  "segments.view",
+  "segments.create",
+  "segments.update",
+  "segment_rules.view",
+  "segment_rules.create",
+  "segment_rules.update",
+  "segment_rules.delete",
+  // Spam scoring is part of authoring a creative.
+  "spam.view",
+  "spam.score",
+  // May ASK for a deletion; only an Owner may approve one.
+  "deletion.request",
+]);
+
 const managerPerms: ReadonlySet<Permission> = new Set([
-  ...operatorPerms,
+  // Inherits the STAFF BASELINE, not the operator role — see the note above.
+  ...staffBaselinePerms,
   "brands.create",
   "brands.update",
   "brands.archive",
@@ -276,6 +378,11 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "registry.archive",
   "result_imports.revert",
   "import_mappings.delete",
+  // Taking data OUT of the system is a manager decision, not a side effect of
+  // being able to view it.
+  "contacts.export",
+  "campaigns.export",
+  "campaigns.import",
 ]);
 
 const adminPerms: ReadonlySet<Permission> = new Set([
@@ -288,6 +395,17 @@ const adminPerms: ReadonlySet<Permission> = new Set([
 const ownerPerms: ReadonlySet<Permission> = new Set([
   ...adminPerms,
   "org.delete",
+  // OWNER-ONLY per the access matrix: resuming tripped breakers, the dedup
+  // include/exclude toggle, allow_multi_segment, stop_text, quiet hours,
+  // carrier limits, provider/credential changes.
+  //
+  // ⚠️ BEHAVIOUR CHANGE for manager/admin: they could edit stop_text and
+  // allow_multi_segment before Phase 2 and can no longer. Nobody holds those
+  // roles in production today (one member, role owner), so nothing breaks now
+  // — but that is a fact about today, not a guarantee.
+  "compliance.manage",
+  "deletion.approve",
+  "audit.view",
 ]);
 
 export const rolePermissions: Record<Role, ReadonlySet<Permission>> = {

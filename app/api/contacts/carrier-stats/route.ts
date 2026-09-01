@@ -16,7 +16,10 @@ import {
 // (the default). Set ROLLUP_CONTACT_STATS=0 in Vercel env to revert to the live
 // full-table GROUP BY (631ms seq scan) instantly.
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "contacts/carrier-stats",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

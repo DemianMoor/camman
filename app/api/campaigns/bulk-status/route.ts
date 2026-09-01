@@ -59,7 +59,10 @@ function permissionFor(to: BulkTarget): Permission {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/bulk-status",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

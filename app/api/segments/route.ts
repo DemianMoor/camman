@@ -19,7 +19,10 @@ import {
 // is a thin create-only route since the rules-based audience model arrived
 // in 0029.
 export async function POST(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "segments",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

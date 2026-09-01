@@ -36,7 +36,10 @@ const SLUG_RETRY_LIMIT = 5;
 // bulk payload (detected by presence of `creatives` array). Both are
 // transactional — the bulk one rolls back all rows on any error.
 export async function POST(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "creatives",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

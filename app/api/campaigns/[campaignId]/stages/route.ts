@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, sql as drizzleSql } from "drizzle-orm";
-import { NextResponse, type NextRequest } from "next/server";
+import { type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { checkDripStageWindow } from "@/lib/api/drip-stage-window-guard";
@@ -18,6 +18,7 @@ import {
   parseListParams,
   requireApiMembership,
 } from "@/lib/api/helpers";
+import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
@@ -71,7 +72,10 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ campaignId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -412,7 +416,7 @@ export async function GET(
     );
   }
 
-  return NextResponse.json({
+  return await jsonForRole(role, orgId, {
     data,
     totalCount: data.length,
     inbound_stop_contacts: inboundStopContacts,
@@ -423,7 +427,10 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ campaignId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role, user } = auth;
 
@@ -744,5 +751,5 @@ export async function POST(
     return finalRow;
   });
 
-  return NextResponse.json(created, { status: 201 });
+  return await jsonForRole(role, orgId, created, { status: 201 });
 }

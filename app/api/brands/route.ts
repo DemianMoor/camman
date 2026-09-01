@@ -25,7 +25,10 @@ import { brandCreateSchema, nullIfEmpty } from "@/lib/validators/brands";
 // not a second one.
 
 export async function POST(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "brands",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

@@ -22,7 +22,10 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages/[stageId]/send/approve",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role, user } = auth;
 

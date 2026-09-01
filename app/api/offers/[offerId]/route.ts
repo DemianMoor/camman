@@ -27,7 +27,10 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ offerId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "offers/[offerId]",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -107,7 +110,10 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ offerId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "offers/[offerId]",
+    method: "PATCH",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

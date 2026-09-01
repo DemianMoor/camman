@@ -57,7 +57,10 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ campaignId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -193,7 +196,10 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ campaignId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]",
+    method: "PATCH",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

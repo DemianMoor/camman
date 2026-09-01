@@ -47,7 +47,10 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "creatives/[id]",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -105,7 +108,10 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "creatives/[id]",
+    method: "PATCH",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -137,6 +143,26 @@ export async function PATCH(
     );
   }
   const input = parsed.data;
+
+  // ── Compliance field gate (869et3vm1 Phase 2) ────────────────────────────
+  //
+  // `allow_multi_segment` is an OWNER-ONLY compliance control. It is rejected here as a
+  // FIELD-LEVEL refusal rather than by removing the route's permission,
+  // because the operator legitimately needs creating and editing creatives — they just may not touch
+  // this one field on it.
+  //
+  // Shaped like the tracking_id_immutable refusal: a stable machine code plus
+  // the offending field in `details`, so the client can point at the input
+  // instead of showing a generic "forbidden".
+  if (input.allow_multi_segment !== undefined && !can(role, "compliance.manage")) {
+    return apiError(
+      403,
+      "Allow multi-segment is an owner-only compliance setting.",
+      API_ERROR_CODES.FORBIDDEN,
+      { reason: "compliance_field_locked", field: "allow_multi_segment" },
+    );
+  }
+
 
   const current = await db
     .select({

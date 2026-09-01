@@ -1,5 +1,5 @@
 import { and, eq, sql as drizzleSql } from "drizzle-orm";
-import { NextResponse, type NextRequest } from "next/server";
+import { type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import {
@@ -11,6 +11,7 @@ import {
 } from "@/db/schema";
 import { checkDripStageWindow } from "@/lib/api/drip-stage-window-guard";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
 import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
@@ -88,7 +89,10 @@ export async function GET(
     params,
   }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages/[stageId]",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -182,7 +186,7 @@ export async function GET(
     });
   }
   const r = rows[0];
-  return NextResponse.json({
+  return await jsonForRole(role, orgId, {
     ...r,
     creative: r.creative?.id ? r.creative : null,
     provider: r.provider?.id ? r.provider : null,
@@ -196,7 +200,10 @@ export async function PATCH(
     params,
   }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages/[stageId]",
+    method: "PATCH",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role, user } = auth;
 
@@ -235,6 +242,25 @@ export async function PATCH(
     );
   }
   const input = parsed.data;
+
+  // ── Compliance field gate (869et3vm1 Phase 2) ────────────────────────────
+  //
+  // `stop_text` is an OWNER-ONLY compliance control. It is rejected here as a
+  // FIELD-LEVEL refusal rather than by removing the route's permission,
+  // because the operator legitimately needs editing stages — they just may not touch
+  // this one field on it.
+  //
+  // Shaped like the tracking_id_immutable refusal: a stable machine code plus
+  // the offending field in `details`, so the client can point at the input
+  // instead of showing a generic "forbidden".
+  if (input.stop_text !== undefined && !can(role, "compliance.manage")) {
+    return apiError(
+      403,
+      "The opt-out footer text (stop_text) is an owner-only compliance setting.",
+      API_ERROR_CODES.FORBIDDEN,
+      { reason: "compliance_field_locked", field: "stop_text" },
+    );
+  }
 
   // ⚠️ Drip P5 multi-row window rule, same guard as create. excludeStageId is
   // THIS stage — without it, every edit that leaves the window unchanged would
@@ -650,7 +676,7 @@ export async function PATCH(
     }
   }
 
-  return NextResponse.json(updated);
+  return await jsonForRole(role, orgId, updated);
 }
 
 export async function DELETE(
@@ -659,7 +685,10 @@ export async function DELETE(
     params,
   }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages/[stageId]",
+    method: "DELETE",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role, user } = auth;
 
@@ -698,7 +727,7 @@ export async function DELETE(
     },
   });
 
-  return NextResponse.json({
+  return await jsonForRole(role, orgId, {
     deleted: true,
     id: sid,
     split_reset_stage_id: result.split_reset_stage_id,

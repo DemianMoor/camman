@@ -21,7 +21,10 @@ const MAX_IDS = 10_000;
 // uses (no pagination). Powers "select all N matching this filter" in the
 // bulk-edit UI. Read-only; gated on creatives.view like the list.
 export async function GET(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "creatives/ids",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

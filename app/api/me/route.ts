@@ -6,7 +6,10 @@ import { organizations } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "me",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
 
   const orgs = await db

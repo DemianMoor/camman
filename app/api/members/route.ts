@@ -12,7 +12,10 @@ import { can } from "@/lib/permissions";
 // the whole auth.users shape. display_name lives in raw_user_meta_data and
 // may be null for users who haven't completed their profile yet.
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "members",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

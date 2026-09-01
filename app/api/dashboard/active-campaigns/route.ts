@@ -23,7 +23,10 @@ const LIMIT = 10;
 // counts as activity. NULLS LAST ordering puts campaigns with no activity at
 // the bottom; tiebreak on created_at desc.
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "dashboard/active-campaigns",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

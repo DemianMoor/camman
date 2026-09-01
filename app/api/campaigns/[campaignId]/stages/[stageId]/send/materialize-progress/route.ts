@@ -21,7 +21,10 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages/[stageId]/send/materialize-progress",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
   if (!can(role, "campaigns.view")) {

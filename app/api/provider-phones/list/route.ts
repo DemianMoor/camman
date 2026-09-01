@@ -1,9 +1,9 @@
 import { and, asc, eq, isNull, or } from "drizzle-orm";
-import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
 import { provider_phones, sms_providers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 
@@ -11,7 +11,10 @@ import { can } from "@/lib/permissions";
 // provider. Powers the campaign form's "Default send-from number" picker
 // (there is no campaign-level provider, so this crosses providers by design).
 export async function GET(request: Request) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "provider-phones/list",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -70,5 +73,5 @@ export async function GET(request: Request) {
     )
     .orderBy(asc(sms_providers.name), asc(provider_phones.phone_number));
 
-  return NextResponse.json({ data: rows });
+  return await jsonForRole(role, orgId, { data: rows });
 }

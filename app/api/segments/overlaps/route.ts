@@ -44,7 +44,10 @@ function buildSubsets(ids: number[]): number[][] {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "segments/overlaps",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

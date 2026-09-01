@@ -1,14 +1,14 @@
 import { requirePagePermission } from "@/lib/authz/page-guard";
 
-// Audience block — group membership is contact-level.
+// Drip/partner surfaces are hidden from the operator; why-not-routed is a phone -> contact lookup.
 // Gates this whole subtree server-side; the page below is a client component
 // and could not do this itself. The API routes behind it deny the operator
 // independently — this is defence in depth, not the only control.
-export default async function ContactGroupsLayout({
+export default async function DripLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  await requirePagePermission("contact_groups.view");
+  await requirePagePermission("campaigns.drain");
   return children;
 }

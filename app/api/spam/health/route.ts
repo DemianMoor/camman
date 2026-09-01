@@ -11,7 +11,10 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 // open (no API key required) — that's by design on the classifier side.
 // Operator-gated here so we don't reveal internal infra to viewers.
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "spam/health",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { role } = auth;
 

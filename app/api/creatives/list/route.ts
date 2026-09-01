@@ -65,7 +65,10 @@ export async function GET(req: NextRequest) {
   let tRows = 0;
   let tMetrics = 0;
 
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "creatives/list",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
   tAuth = performance.now() - t0;

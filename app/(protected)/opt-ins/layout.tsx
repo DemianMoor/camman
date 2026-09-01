@@ -1,9 +1,14 @@
-import type { Metadata } from "next";
+import { requirePagePermission } from "@/lib/authz/page-guard";
 
-// Title-only layout: the sibling page.tsx is a client component and so cannot
-// export metadata itself. Renders children unchanged.
-export const metadata: Metadata = { title: "Opt-Ins" };
-
-export default function OptInsTitleLayout({ children }: { children: React.ReactNode }) {
+// Audience block — opt-in rows carry phone numbers.
+// Gates this whole subtree server-side; the page below is a client component
+// and could not do this itself. The API routes behind it deny the operator
+// independently — this is defence in depth, not the only control.
+export default async function OptInsLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  await requirePagePermission("opt_ins.view");
   return children;
 }

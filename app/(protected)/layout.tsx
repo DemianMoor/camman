@@ -57,7 +57,10 @@ export default async function ProtectedLayout({
                 and streamed via Suspense so it never blocks the page shell. */}
             <div className="flex flex-1 items-center justify-end">
               <Suspense fallback={null}>
-                <SendStateStripLoader orgId={membership.org_id} />
+                <SendStateStripLoader
+                  orgId={membership.org_id}
+                  role={isRole(membership.role) ? membership.role : "viewer"}
+                />
               </Suspense>
             </div>
           </header>

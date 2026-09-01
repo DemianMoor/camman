@@ -22,7 +22,10 @@ const LIMIT = 10;
 const ACTIVE_STATUSES = ["draft", "pending", "sent"] as const;
 
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "dashboard/active-stages",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

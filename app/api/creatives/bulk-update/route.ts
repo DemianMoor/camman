@@ -24,7 +24,10 @@ import { creativeBulkUpdateSchema } from "@/lib/validators/creatives";
 // regardless of a creative's current status — bulk edit is a deliberate
 // management action across the explicit selection.
 export async function POST(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "creatives/bulk-update",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

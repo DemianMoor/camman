@@ -14,7 +14,10 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ offerId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "offers/[offerId]/report",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

@@ -5,7 +5,10 @@ import { redirect } from "next/navigation";
 
 import { db } from "@/db/client";
 import { org_members } from "@/db/schema";
+import { headers } from "next/headers";
+
 import { createClient } from "@/lib/supabase/server";
+import { recordLogin } from "@/lib/auth/record-login";
 import { WORKSPACE_DOMAIN } from "@/lib/auth/workspace-gate";
 import { loginSchema, type LoginInput } from "@/lib/validators/auth";
 
@@ -40,7 +43,11 @@ export async function signInAction(
   const user = data.user;
   if (user) {
     const rows = await db
-      .select({ role: org_members.role, is_active: org_members.is_active })
+      .select({
+        org_id: org_members.org_id,
+        role: org_members.role,
+        is_active: org_members.is_active,
+      })
       .from(org_members)
       .where(eq(org_members.user_id, user.id))
       .limit(1);
@@ -57,6 +64,22 @@ export async function signInAction(
           error: "Password sign-in is not available for this account. Use Sign in with Google.",
         };
       }
+    }
+    // Password sign-in never passed through /auth/callback, so nothing had
+    // recorded it: before this, an Owner who only ever used break-glass showed
+    // "Never" on the Users screen. The Google path records itself in the
+    // callback; this is the other half.
+    if (member) {
+      const h = await headers();
+      const xff = h.get("x-forwarded-for");
+      await recordLogin({
+        orgId: member.org_id,
+        userId: user.id,
+        email: user.email ?? null,
+        method: "password",
+        ip: xff?.split(",")[0]?.trim() ?? h.get("x-real-ip"),
+        userAgent: h.get("user-agent")?.slice(0, 512) ?? null,
+      });
     }
     // No membership row: a brand-new account mid-setup. /auth/complete handles
     // it, and it has no role to restrict yet.

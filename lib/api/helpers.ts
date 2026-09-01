@@ -9,6 +9,10 @@ import { db } from "@/db/client";
 import { org_members } from "@/db/schema";
 import { createClient } from "@/lib/supabase/server";
 import { isRole, type Role } from "@/lib/permissions";
+import {
+  decideOperatorAccess,
+  type RouteAccess,
+} from "@/lib/authz/operator-gate";
 import { API_ERROR_CODES } from "./error-codes";
 
 // API error contract.
@@ -96,9 +100,17 @@ export async function requireApiUser(): Promise<ApiUser | ApiAuthFailure> {
   return { user };
 }
 
-export async function requireApiMembership(): Promise<
-  ApiMembership | ApiAuthFailure
-> {
+// `access` is the OPERATOR gate (ClickUp 869et3vm1 Phase 2). Omitting it denies
+// the operator role — which is every existing route until it explicitly opts
+// in, and every route added in future until someone decides otherwise. Other
+// roles are unaffected by this parameter; they are gated by can() exactly as
+// before, so this change cannot alter owner/admin/manager/viewer behaviour.
+//
+// See lib/authz/operator-gate.ts for why this is a typed route key rather than
+// the request object.
+export async function requireApiMembership(
+  access?: RouteAccess,
+): Promise<ApiMembership | ApiAuthFailure> {
   const userResult = await requireApiUser();
   if ("error" in userResult) return userResult;
 
@@ -136,6 +148,23 @@ export async function requireApiMembership(): Promise<
       ),
     };
   }
+
+  // Operator default-deny. Deliberately AFTER the role check (so an unknown
+  // role still reports as invalid rather than as an authz refusal) and BEFORE
+  // the success return, so no handler body can run for a denied operator.
+  if (row.role === "operator") {
+    const decision = decideOperatorAccess(access);
+    if (!decision.allowed) {
+      return {
+        error: apiError(403, decision.detail, API_ERROR_CODES.FORBIDDEN, {
+          reason: decision.reason,
+          route: access?.route ?? null,
+          method: access?.method ?? null,
+        }),
+      };
+    }
+  }
+
   return { user: userResult.user, orgId: row.org_id, role: row.role };
 }
 

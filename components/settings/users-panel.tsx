@@ -375,10 +375,9 @@ export function UsersPanel() {
               </SelectContent>
             </Select>
             {inviteRole === "operator" ? (
-              <p className="text-xs text-destructive">
-                The operator role is not ready yet — it still grants full
-                contact access until Phase 2 redefines it. This invite will be
-                refused.
+              <p className="text-xs text-muted-foreground">
+                Campaigns, stages, creatives and segments. No contact data, no
+                exports or imports, no compliance controls.
               </p>
             ) : null}
           </div>

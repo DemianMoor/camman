@@ -31,7 +31,10 @@ const SORT_COLUMNS = {
 // not on segments). The list payload omits the previous `segment_groups`
 // aggregation; the `?segment_group_id=` query param is also gone.
 export async function GET(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "segments/list",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

@@ -46,6 +46,8 @@ export interface ForkResult {
   newCreativeId: number;
   newSlug: string;
   frozenCreativeId: number;
+  /** Index signature so the result can be passed straight to audit metadata. */
+  [k: string]: unknown;
 }
 
 /**

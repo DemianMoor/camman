@@ -122,15 +122,35 @@ export async function checkAggregateCap(opts: {
   pending?: number;
 }): Promise<CapRefusal | null> {
   const sent = await sentInLastHour(opts.orgId);
-  const pending = opts.pending ?? 0;
+  return decideAggregateCap({
+    sent,
+    pending: opts.pending ?? 0,
+    requested: opts.requested,
+  });
+}
+
+/**
+ * The cap DECISION, split out from the query so it can be tested at an exact
+ * boundary without seeding tens of thousands of rows.
+ *
+ * This is where the bug would live — off-by-one at the limit, forgetting to add
+ * `pending`, comparing before adding `requested`. The SQL half is exercised
+ * separately against a real database.
+ */
+export function decideAggregateCap(input: {
+  sent: number;
+  pending: number;
+  requested: number;
+}): CapRefusal | null {
+  const { sent, pending, requested } = input;
   const current = sent + pending;
-  const wouldTotal = current + opts.requested;
+  const wouldTotal = current + requested;
   if (wouldTotal <= AGGREGATE_HOURLY_CAP) return null;
   return {
     cap: "aggregate_hourly",
     limit: AGGREGATE_HOURLY_CAP,
     current,
-    requested: opts.requested,
+    requested,
     wouldTotal,
     message:
       `This would take the org to ${wouldTotal.toLocaleString()} recipients in one hour, ` +

@@ -25,9 +25,6 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role, user } = auth;
 
-  if (!can(role, "creatives.archive")) {
-    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
-  }
 
   const { id } = await params;
   const creativeId = parseId(id);
@@ -37,9 +34,7 @@ export async function POST(
     });
   }
 
-  // Allow archive from any non-archived status — pending/ready/paused/draft
-  // can all be archived directly. The state machine doesn't gate this since
-  // archive is a separate endpoint with its own permission.
+
 
   // ── Deletion approval queue (869et3vm1 Phase 3) ─────────────────────────
   //
@@ -56,6 +51,14 @@ export async function POST(
     });
     if (diverted.intercepted) return diverted.response;
   }
+
+  if (!can(role, "creatives.archive")) {
+    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
+  }
+
+  // Allow archive from any non-archived status — pending/ready/paused/draft
+  // can all be archived directly. The state machine doesn't gate this since
+  // archive is a separate endpoint with its own permission.
 
   const updated = await db
     .update(creatives)

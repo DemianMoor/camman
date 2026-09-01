@@ -25,9 +25,6 @@ export async function POST(
   if ("error" in auth) return auth.error;
   const { orgId, role, user } = auth;
 
-  if (!can(role, "segments.archive")) {
-    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
-  }
 
   const { id } = await params;
   const segmentId = parseId(id);
@@ -36,6 +33,8 @@ export async function POST(
       field: "id",
     });
   }
+
+
 
 
   // ── Deletion approval queue (869et3vm1 Phase 3) ─────────────────────────
@@ -51,6 +50,10 @@ export async function POST(
       entityId: segmentId,
     });
     if (diverted.intercepted) return diverted.response;
+  }
+
+  if (!can(role, "segments.archive")) {
+    return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
   const updated = await db

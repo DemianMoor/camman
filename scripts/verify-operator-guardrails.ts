@@ -47,9 +47,11 @@ async function main() {
   console.log(`  database: preview (${PREVIEW_REF})\n`);
 
   const sql = postgres(dbUrl, { prepare: false, max: 1 });
+  // SERVICE ROLE, not the anon key — admin.auth.admin.* refuses anon with
+  // "User not allowed", which is what the first run of this script did.
   const admin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } },
   );
 

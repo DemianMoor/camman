@@ -34,7 +34,10 @@ export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ campaignId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/behavioral-split",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role, user } = auth;
 

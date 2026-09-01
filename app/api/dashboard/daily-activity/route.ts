@@ -31,7 +31,10 @@ import { salesRevenueByDay } from "@/lib/reporting/attribution";
 // lib/reporting/attribution.ts (ATTRIBUTION_BASIS). The window comes from the
 // same preset/custom range params.
 export async function GET(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "dashboard/daily-activity",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

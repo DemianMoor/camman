@@ -9,7 +9,6 @@ import {
   sql as drizzleSql,
 } from "drizzle-orm";
 import type { NextRequest } from "next/server";
-import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
 import {
@@ -25,6 +24,7 @@ import {
   parseListParams,
   requireApiMembership,
 } from "@/lib/api/helpers";
+import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { CAMPAIGN_STATUSES } from "@/lib/validators/campaigns";
@@ -39,7 +39,10 @@ const SORT_COLUMNS = {
 const VALID_STATUSES = new Set<string>(CAMPAIGN_STATUSES);
 
 export async function GET(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/list",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -247,7 +250,7 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  return NextResponse.json({
+  return await jsonForRole(role, orgId, {
     data,
     totalCount: countRows[0]?.count ?? 0,
     page: params.page,

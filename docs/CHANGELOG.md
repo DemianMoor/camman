@@ -1647,4 +1647,18 @@ stamped at all five stage-insert sites. Migration **0175** (additive; also adds 
   - docs updated: docs/03-data-model.md (+ERD), docs/04-features/multi-tenancy-auth.md,
 docs/05-flows.md, docs/06-integrations.md, docs/07-conventions.md, docs/CHANGELOG.md
 
+- 2026-09-01 — Multi-user Phase 2 (ClickUp 869et3vm1): `operator` redefined to the access
+matrix (36 permissions, standalone — no longer spread from `viewerPerms`, and `managerPerms`
+no longer spreads it); default-deny operator gate in `requireApiMembership()` driven by a typed
+route key + method, with `lib/authz/route-map.ts` classifying all 259 routes (85 allowed);
+`redactForRole()` replacing provider names/codes by route alias as a VALUE sweep at the response
+boundary plus the `SendStateStripLoader` server component; new permissions `contacts.stats`,
+`contacts.export`, `campaigns.export`, `campaigns.import`, `compliance.manage`,
+`deletion.request`, `deletion.approve`, `audit.view`; field-level gates for `stop_text` and
+`allow_multi_segment`; server-layout page guards for the six audience subtrees; the Workspace
+domain gate now reads the Google identity's email so linking works; Owner-only self-service
+"link Google account"; `recordLogin` on password break-glass. **No migration** — 0175 already
+carries `provider_route_aliases`.
+  - docs updated: docs/04-features/multi-tenancy-auth.md, docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

@@ -37,7 +37,10 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "segments/[id]",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -106,7 +109,10 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "segments/[id]",
+    method: "PATCH",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -182,7 +188,10 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "segments/[id]",
+    method: "DELETE",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

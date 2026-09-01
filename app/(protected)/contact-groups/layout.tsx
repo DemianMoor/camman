@@ -1,12 +1,14 @@
-import type { Metadata } from "next";
+import { requirePagePermission } from "@/lib/authz/page-guard";
 
-import { sectionTitle } from "@/lib/page-title";
-
-// Title-only layout: the sibling page.tsx is a client component and so cannot
-// export metadata itself. Renders children unchanged. sectionTitle() (not a
-// bare string) because this segment has titled descendants.
-export const metadata: Metadata = { title: sectionTitle("Contact Groups") };
-
-export default function ContactGroupsTitleLayout({ children }: { children: React.ReactNode }) {
+// Audience block — group membership is contact-level.
+// Gates this whole subtree server-side; the page below is a client component
+// and could not do this itself. The API routes behind it deny the operator
+// independently — this is defence in depth, not the only control.
+export default async function ContactGroupsLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  await requirePagePermission("contact_groups.view");
   return children;
 }

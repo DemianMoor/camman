@@ -21,16 +21,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // NOT NULL UNIQUE, and keeping it real leaves the door open to an emailed-link
 // flow later without a migration.
 //
-// ⚠️ `operator` IS REFUSED IN PHASE 1. The role name already exists in
-// lib/permissions.ts and currently grants the entire audience block —
-// contacts.upload/update/archive, opt_outs.upload, clickers.view, and every
-// viewer *.view — which is the exact inverse of the Operator access matrix.
-// Phase 2 redefines operatorPerms to the matrix; until it lands, handing
-// someone this role would give the new hire precisely the access this project
-// exists to deny. Refusing here is a fail-closed placeholder, and removing it
-// is an explicit step in Phase 2, not something to be forgotten.
-const OPERATOR_LOCKED_UNTIL_PHASE_2 = true;
-
 const INVITE_TTL_DAYS = 30;
 
 export async function POST(req: NextRequest) {
@@ -59,15 +49,6 @@ export async function POST(req: NextRequest) {
     );
   }
   const { email, role: invitedRole } = parsed.data;
-
-  if (OPERATOR_LOCKED_UNTIL_PHASE_2 && invitedRole === "operator") {
-    return apiError(
-      409,
-      "The operator role is not ready yet. It still grants full contact access and is redefined in Phase 2.",
-      API_ERROR_CODES.CONFLICT,
-      { reason: "operator_role_not_ready" },
-    );
-  }
 
   // Already a member? Say so plainly instead of creating an invite that the
   // callback would ignore (resolveAllowlist checks membership first).

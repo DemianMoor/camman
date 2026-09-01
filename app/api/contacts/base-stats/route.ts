@@ -34,11 +34,17 @@ export type ContactBaseStats = {
 // W2 Task 1: reads from contact_org_stats rollup when ROLLUP_CONTACT_STATS != "0".
 // Set ROLLUP_CONTACT_STATS=0 in Vercel env to revert to the live aggregate path.
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "contacts/base-stats",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "contacts.view")) {
+  // contacts.stats, not contacts.view: this endpoint returns aggregates only
+  // (count(*), count(distinct), carrier histogram) and is deliberately reachable
+  // by a role that may never see a contact row.
+  if (!can(role, "contacts.stats")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

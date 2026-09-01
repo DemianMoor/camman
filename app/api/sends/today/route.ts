@@ -1,9 +1,9 @@
-import { NextResponse } from "next/server";
 import { inArray, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { stage_sends } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { can } from "@/lib/permissions";
@@ -20,7 +20,10 @@ import {
 // surface Orange (not prepared) and Red (needs attention) to the top — triage
 // from one screen instead of opening many campaign panels. Read-only.
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "sends/today",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -119,7 +122,7 @@ export async function GET() {
   }[];
 
   if (rows.length === 0) {
-    return NextResponse.json({ data: [], counts: {}, paused_campaigns: [], prepared_by_phone: [] });
+    return await jsonForRole(role, orgId, { data: [], counts: {}, paused_campaigns: [], prepared_by_phone: [] });
   }
 
   // Materialization counts for exactly these stages (single grouped query).
@@ -284,7 +287,7 @@ export async function GET() {
     counts[d.operational_status] = (counts[d.operational_status] ?? 0) + 1;
   }
 
-  return NextResponse.json({
+  return await jsonForRole(role, orgId, {
     data,
     counts,
     paused_campaigns: summarizePausedCampaigns(data),

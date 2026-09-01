@@ -9,7 +9,6 @@ import {
   sql as drizzleSql,
 } from "drizzle-orm";
 import type { NextRequest } from "next/server";
-import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
 import { provider_phones, sms_providers } from "@/db/schema";
@@ -18,6 +17,7 @@ import {
   parseListParams,
   requireApiMembership,
 } from "@/lib/api/helpers";
+import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { getDescriptor } from "@/lib/sends/providers/registry";
@@ -30,11 +30,21 @@ const SORT_COLUMNS = {
 } as const;
 
 export async function GET(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "providers/list",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "providers.view")) {
+  // provider_phones.view, not providers.view: this list is the stage form's
+  // ROUTE PICKER feed, and for an operator every provider identity in it is
+  // replaced by a route alias before it leaves the process. Requiring
+  // providers.view would have made the picker unusable for the one role that
+  // most needs it, while granting that permission would have said something
+  // about intent that is not true. Every role that holds providers.view also
+  // holds provider_phones.view, so nothing widens for anyone else.
+  if (!can(role, "provider_phones.view")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -120,7 +130,7 @@ export async function GET(req: NextRequest) {
       (r.adapter_code ? getDescriptor(r.adapter_code)?.appendsOwnOptOut : false) === true,
   }));
 
-  return NextResponse.json({
+  return await jsonForRole(role, orgId, {
     data,
     totalCount: countRows[0]?.count ?? 0,
     page: params.page,

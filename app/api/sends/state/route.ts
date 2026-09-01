@@ -13,7 +13,10 @@ import { getSendState } from "@/lib/sends/send-state";
 // can server-render the same snapshot into <SendStateStrip> without a client
 // round-trip. Response shape is unchanged.
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "sends/state",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

@@ -39,7 +39,10 @@ async function runPool<T>(
 // `force` is set. Scoring potentially costs money, so it's gated on
 // spam.score (operator+).
 export async function POST(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "creatives/bulk-score",
+    method: "POST",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

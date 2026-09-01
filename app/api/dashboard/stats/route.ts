@@ -181,7 +181,10 @@ function shapeTotals(t: StageTotals, completedInRange: number) {
 }
 
 export async function GET(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "dashboard/stats",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

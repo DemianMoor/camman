@@ -36,7 +36,10 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ campaignId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "campaigns/[campaignId]/stages/lane-counts",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 

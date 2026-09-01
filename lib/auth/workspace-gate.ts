@@ -68,7 +68,26 @@ export function verifyWorkspaceIdentity(user: User): WorkspaceIdentityResult {
     };
   }
 
-  const email = user.email?.trim().toLowerCase();
+  // ⚠️ READ THE GOOGLE IDENTITY'S EMAIL, NOT `user.email`.
+  //
+  // `auth.users.email` is the account's PRIMARY address and does not change
+  // when a Google identity is linked to an existing password account. The
+  // owner's account is `demmoor@proton.me`; after linking `demian@exuma.io`,
+  // `user.email` is STILL the proton address, so checking it would refuse the
+  // very sign-in linking exists to enable.
+  //
+  // It is also simply the right question: the thing that must be in the
+  // Workspace domain is the identity being authenticated, not whatever address
+  // the account happens to carry as primary. Falls back to `user.email` for a
+  // pure-Google account, where the two are the same value anyway.
+  const googleIdentity = (user.identities ?? []).find(
+    (i) => i.provider === "google",
+  );
+  const identityEmail =
+    typeof googleIdentity?.identity_data?.email === "string"
+      ? googleIdentity.identity_data.email
+      : null;
+  const email = (identityEmail ?? user.email)?.trim().toLowerCase();
   if (!email) {
     return {
       ok: false,
@@ -79,7 +98,11 @@ export function verifyWorkspaceIdentity(user: User): WorkspaceIdentityResult {
 
   // Google always marks its own addresses verified; a false here means the
   // identity is not one Google vouches for, so it must not pass.
-  const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+  // Prefer the identity's own claims; user_metadata is a merged view that can
+  // carry values from a different identity on a linked account.
+  const meta = (googleIdentity?.identity_data ??
+    user.user_metadata ??
+    {}) as Record<string, unknown>;
   if (meta.email_verified === false) {
     return {
       ok: false,

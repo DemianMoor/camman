@@ -16,11 +16,17 @@ import {
 // (the default). Set ROLLUP_CONTACT_STATS=0 in Vercel env to revert to the live
 // full-table GROUP BY (631ms seq scan) instantly.
 export async function GET() {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "contacts/carrier-stats",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "contacts.view")) {
+  // contacts.stats, not contacts.view: this endpoint returns aggregates only
+  // (count(*), count(distinct), carrier histogram) and is deliberately reachable
+  // by a role that may never see a contact row.
+  if (!can(role, "contacts.stats")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 

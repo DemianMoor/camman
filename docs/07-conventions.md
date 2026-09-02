@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-01_
+_Last updated: 2026-09-02_
 
 ## A phone number in a dense table shows its last 4 — a short code shows all of it (2026-08-28)
 
@@ -1986,3 +1986,81 @@ without converting any page to a server/client split.
 
 Use `notFound()`, not a 403 page: a role that may not use a route has no
 business learning it exists.
+
+## Never report progress without an artifact
+
+**Every status claim must cite something that exists.** A branch name plus a
+commit SHA, a PR number, a file path, or the output of a command that was
+actually run. "In progress", "under way", "continuing in the background" with
+nothing to cite is not a status — it is a false report.
+
+Established 2026-09-02, after exactly that failure on 869et3vm1. Phase 2 merged,
+Phase 3 was announced, and the next several turns went entirely to an unrelated
+auth problem. Two messages said Phase 3 was "continuing in the background". There
+was no branch, no worktree, no commit and no background task. The work had not
+started, and the user found out only by asking directly.
+
+The damage is not the delay — it is that a plan built on a false status is worse
+than one built on no status at all. Someone reading "in progress" schedules
+around it.
+
+**How to apply:**
+
+- Before writing that something is in progress, name the artifact. If you cannot
+  name one, the honest sentence is "not started".
+- Announcing an intention is fine — *"starting Phase 3 now"* — but it expires
+  immediately. It is never evidence at the next turn, and must not be repeated
+  as though it were.
+- "Running in the background" means a task id you can cite and read output from.
+  Anything else is not running.
+- When work is interrupted and not resumed, say so plainly at the next
+  opportunity rather than letting the earlier intention stand.
+
+Same family as [a passing check is not evidence until you know what it ran
+against](#verification--a-passing-check-is-not-evidence-until-you-know-what-it-ran-against):
+both are about the gap between a claim and the thing that would substantiate it.
+
+## A cap that counts only what HAPPENED is not a cap
+
+The aggregate volume cap measures sent **plus scheduled-but-unsent** recipients.
+Counting only what has been sent makes it trivially defeatable: ten stages of
+9,999 are each scheduled while the others have sent nothing, so each sees a
+near-zero count and every one of them passes.
+
+The general shape: when a limit governs work that is *committed now and performed
+later*, the committed-but-not-yet-performed volume is part of the measurement. A
+cap that ignores it measures history, not exposure.
+
+## An authorization intercept must run before the permission check it diverts
+
+The deletion queue turns an operator's delete into a request. Placed after
+`can()`, it never runs — the operator deliberately lacks the delete permission,
+so the permission check returns 403 first and no request is created.
+
+Correct order is **auth → parse id → intercept → `can()`**. The intercept only
+diverts roles holding `deletion.request`, so a role with neither still falls
+through to the same 403 and nothing is widened.
+
+Caught by `verify-operator-guardrails.ts` returning 403 where it expected 202 —
+which is the value of asserting the *specific* status rather than "not 2xx".
+
+## pg_stat_statements normalizes literals — never match on one
+
+A test asserting "this query ran exactly once" reported **0 executions for a query
+that had definitely run**, because it matched on `%America/New_York%` and
+pg_stat_statements had replaced that literal with `$3`.
+
+Match on something that survives normalization: a column alias, a table name, a
+join shape. And treat a zero count as a failure rather than a pass, which is what
+surfaced this — a check that silently matched nothing would have read as green.
+
+## Do not remove a safety property to make a test green
+
+`approve-send` cannot return 200 on preview: the handler walks provider
+capability → credentials → two send switches, and preview fails the first three
+*on purpose* — they are the documented reasons a preview cannot send.
+
+Reaching 200 would have meant seeding provider credentials into preview. The
+assertion was weakened to "not 403" with the refusal reason printed instead, and
+the limitation stated in the script's own output. A green test bought by
+dismantling an environment's safety is worth less than a yellow one that says so.

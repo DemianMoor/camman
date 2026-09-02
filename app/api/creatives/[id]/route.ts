@@ -9,6 +9,12 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import {
+  creativeHasSends,
+  forkCreative,
+} from "@/lib/guardrails/creative-versioning";
+import { notifyGuardrail } from "@/lib/guardrails/notify";
+import { checkCreativeBody } from "@/lib/guardrails/url-allowlist";
 import { can } from "@/lib/permissions";
 import { scoreAndPersistCreative } from "@/lib/spam/score-creative";
 import {
@@ -113,7 +119,7 @@ export async function PATCH(
     method: "PATCH",
   });
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "creatives.update")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -144,6 +150,71 @@ export async function PATCH(
   }
   const input = parsed.data;
 
+  // ── Creative versioning (869et3vm1 Phase 3) ──────────────────────────────
+  //
+  // Editing the BODY of a creative that has already sent forks a NEW creative
+  // and leaves the original frozen.
+  //
+  // ⚠️ WITHOUT THIS THE PROVEN GATE IS DECORATIVE. "Proven" is derived from send
+  // history keyed on creative_id; edit the text in place and an unsent copy
+  // inherits the old copy's history, so it is instantly proven and the
+  // unproven-volume warning never fires for it. It also stops history being
+  // silently re-labelled: every stage, link and stage_send row points at this
+  // id, so rewriting the text makes last Tuesday's report describe words that
+  // did not exist last Tuesday.
+  //
+  // Returns 200 with the NEW id rather than redirecting silently — the operator
+  // must be told which creative they are now looking at.
+  if (input.text !== undefined) {
+    const [existing] = await db
+      .select({ text: creatives.text })
+      .from(creatives)
+      .where(and(eq(creatives.id, creativeId), eq(creatives.org_id, orgId)))
+      .limit(1);
+
+    if (existing && existing.text !== input.text) {
+      const hasSends = await creativeHasSends(orgId, creativeId);
+      if (hasSends) {
+        const urlIssue = checkCreativeBody(input.text);
+        if (urlIssue) {
+          return apiError(400, urlIssue.message, API_ERROR_CODES.VALIDATION, {
+            reason: urlIssue.reason,
+            field: "text",
+          });
+        }
+        const fork = await forkCreative({
+          orgId,
+          creativeId,
+          newText: input.text,
+          actorUserId: user.id,
+        });
+        await notifyGuardrail({
+          orgId,
+          actorUserId: user.id,
+          event: "guardrail.creative_forked",
+          headline: `Creative ${creativeId} had sends, so the edit created ${fork.newSlug} instead`,
+          detail: [
+            `Frozen: creative ${fork.frozenCreativeId}`,
+            `New: creative ${fork.newCreativeId} (${fork.newSlug}) — unproven`,
+          ],
+          entityType: "creative",
+          entityId: String(fork.newCreativeId),
+          metadata: fork,
+        });
+        return NextResponse.json({
+          forked: true,
+          creative_id: fork.newCreativeId,
+          slug: fork.newSlug,
+          frozen_creative_id: fork.frozenCreativeId,
+          message:
+            "That creative has already been sent, so its text is frozen. " +
+            `Your edit was saved as a new creative (${fork.newSlug}), which starts unproven.`,
+        });
+      }
+    }
+  }
+
+
   // ── Compliance field gate (869et3vm1 Phase 2) ────────────────────────────
   //
   // `allow_multi_segment` is an OWNER-ONLY compliance control. It is rejected here as a
@@ -163,6 +234,32 @@ export async function PATCH(
     );
   }
 
+
+  // ── URL allowlist (869et3vm1 Phase 3) ────────────────────────────────────
+  //
+  // Creative bodies take {link} placeholders, never a literal URL. A raw URL in
+  // an SMS body is either dead weight or an untracked path out of the funnel
+  // that no report will ever see, because the tracked link is minted per
+  // recipient at send time.
+  if (input.text !== undefined) {
+    const urlIssue = checkCreativeBody(input.text);
+    if (urlIssue) {
+      await notifyGuardrail({
+        orgId,
+        actorUserId: user.id,
+        event: "guardrail.url_rejected",
+        headline: `Raw link rejected in creative ${creativeId}`,
+        detail: [`Found: ${urlIssue.found}`, `By: ${user.id}`],
+        entityType: "creative",
+        entityId: String(creativeId),
+        metadata: { found: urlIssue.found, reason: urlIssue.reason },
+      });
+      return apiError(400, urlIssue.message, API_ERROR_CODES.VALIDATION, {
+        reason: urlIssue.reason,
+        field: "text",
+      });
+    }
+  }
 
   const current = await db
     .select({

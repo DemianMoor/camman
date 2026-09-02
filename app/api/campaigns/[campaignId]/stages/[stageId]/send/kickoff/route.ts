@@ -2,6 +2,9 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { checkPerStageCap, PER_STAGE_HOURLY_CAP } from "@/lib/guardrails/caps";
+import { notifyGuardrail } from "@/lib/guardrails/notify";
+import { runPrepareGuardrails, stageAudienceSize } from "@/lib/guardrails/prepare";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
@@ -45,6 +48,49 @@ export async function POST(
   if (campaignId === null || stageId === null) {
     return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION);
   }
+
+  // ── Guardrails (869et3vm1 Phase 3) — BEFORE materialization ─────────────
+  //
+  // Everything here runs at PREPARE time, on the request a human is waiting on,
+  // and never inside materialize or the drain. Refusing an assignment that has
+  // not happened yet is reversible and explainable; stopping half-way through a
+  // send is neither.
+  const audience = await stageAudienceSize(db, { orgId, campaignId, stageId });
+
+  const capRefusal = await checkPerStageCap({
+    orgId,
+    stageId,
+    requested: audience,
+  });
+  if (capRefusal) {
+    await notifyGuardrail({
+      orgId,
+      actorUserId: user.id,
+      event: "guardrail.cap_blocked",
+      headline: capRefusal.message,
+      detail: [
+        `Campaign ${campaignId} · stage ${stageId}`,
+        `Limit ${PER_STAGE_HOURLY_CAP.toLocaleString()}/hour · already prepared ${capRefusal.current.toLocaleString()} · requested ${capRefusal.requested.toLocaleString()}`,
+      ],
+      entityType: "campaign_stage",
+      entityId: String(stageId),
+      metadata: { ...capRefusal, campaign_id: campaignId },
+    });
+    return apiError(409, capRefusal.message, API_ERROR_CODES.CONFLICT, {
+      reason: "per_stage_hourly_cap",
+      ...capRefusal,
+    });
+  }
+
+  // WARN-only checks. They never refuse; they post to Telegram and audit_log and
+  // let the Prepare proceed (Dmytro, 2026-08-31: "the stage proceeds").
+  await runPrepareGuardrails({
+    orgId,
+    campaignId,
+    stageId,
+    actorUserId: user.id,
+    plannedRecipients: audience,
+  });
 
   // Windowed + resumable: kickoffStageSend commits per window and manages its own
   // transactions, so it must NOT be wrapped in an outer transaction. It returns

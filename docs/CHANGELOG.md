@@ -1668,4 +1668,19 @@ and an `auth.google_linked` audit row written by the callback (distinguished fro
 sign-in by a `linked=google` marker on the redirect URL). No migration.
   - docs updated: docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
 
+- 2026-09-02 — Convention: never report progress without an artifact — every status claim must cite
+a branch + SHA, a PR number, a file path, or real command output; "in progress" with nothing to cite
+is a false report. Added after Phase 3 of 869et3vm1 was described as "continuing in the background"
+when no branch, worktree, commit or task existed.
+  - docs updated: docs/07-conventions.md, docs/CHANGELOG.md
+
+- 2026-09-02 — Multi-user Phase 3 guardrails (ClickUp 869et3vm1): per-stage 10K/hour cap at
+Prepare/kickoff and aggregate 60K/hour at approve-send/retry-failed (counting scheduled-but-unsent,
+so ten stages of 9,999 cannot pass); URL allowlist on creative bodies; creative versioning forking
+on edit-with-sends; deletion approval queue with `/api/deletion-requests`; approve-send and
+retry-failed opened to the operator behind the caps; WARNs for unproven creatives at volume,
+volume >20% over the trailing 7 sending-day average, and cross-campaign 3-day frequency collisions
+(all writing audit_log then Telegram). Nothing added to materialize or the drain. **No migration.**
+  - docs updated: docs/04-features/operator-guardrails.md (new), docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

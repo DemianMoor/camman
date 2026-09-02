@@ -9,6 +9,8 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { notifyGuardrail } from "@/lib/guardrails/notify";
+import { checkCreativeBody } from "@/lib/guardrails/url-allowlist";
 import { generateCreativeSlug } from "@/lib/creative-helpers";
 import { can } from "@/lib/permissions";
 import { scoreAndPersistCreative } from "@/lib/spam/score-creative";
@@ -41,7 +43,7 @@ export async function POST(req: NextRequest) {
     method: "POST",
   });
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "creatives.create")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -60,8 +62,8 @@ export async function POST(req: NextRequest) {
     Array.isArray((json as { creatives?: unknown }).creatives);
 
   return isBulk
-    ? handleBulk(json, orgId)
-    : handleSingle(json, orgId);
+    ? handleBulk(json, orgId, user.id)
+    : handleSingle(json, orgId, user.id);
 }
 
 // Verify every offer id belongs to the org. Returns null on success, or
@@ -83,7 +85,7 @@ async function verifyOffers(orgId: string, offerIds: number[]) {
   return null;
 }
 
-async function handleSingle(json: unknown, orgId: string) {
+async function handleSingle(json: unknown, orgId: string, actorUserId: string) {
   const parsed = creativeCreateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError(
@@ -93,6 +95,30 @@ async function handleSingle(json: unknown, orgId: string) {
     );
   }
   const input = parsed.data;
+
+  // URL allowlist (869et3vm1 Phase 3): bodies take {link} placeholders, never a
+  // literal URL — the tracked link is minted per recipient at send time, so a
+  // raw URL is an untracked path out of the funnel.
+  {
+    const urlIssue = checkCreativeBody(input.text);
+    if (urlIssue) {
+      await notifyGuardrail({
+        orgId,
+        actorUserId,
+        event: "guardrail.url_rejected",
+        headline: "Raw link rejected in a new creative",
+        detail: [`Found: ${urlIssue.found}`],
+        entityType: "creative",
+        entityId: null,
+        metadata: { found: urlIssue.found, reason: urlIssue.reason },
+      });
+      return apiError(400, urlIssue.message, API_ERROR_CODES.VALIDATION, {
+        reason: urlIssue.reason,
+        field: "text",
+      });
+    }
+  }
+
 
   const offerErr = await verifyOffers(orgId, input.offer_ids);
   if (offerErr) return offerErr;
@@ -162,7 +188,7 @@ async function handleSingle(json: unknown, orgId: string) {
   return apiError(500, "Slug retry exhausted", API_ERROR_CODES.INTERNAL);
 }
 
-async function handleBulk(json: unknown, orgId: string) {
+async function handleBulk(json: unknown, orgId: string, actorUserId: string) {
   const parsed = creativeBulkCreateSchema.safeParse(json);
   if (!parsed.success) {
     // Surface the cap separately so the client gets a sharp error.
@@ -170,6 +196,29 @@ async function handleBulk(json: unknown, orgId: string) {
     return apiError(400, msg, API_ERROR_CODES.VALIDATION);
   }
   const input = parsed.data;
+
+  // URL allowlist applies to every row in the batch, not just the first — a
+  // bulk import is exactly where a raw URL would slip through unnoticed.
+  for (const row of input.creatives) {
+    const urlIssue = checkCreativeBody(row.text);
+    if (urlIssue) {
+      await notifyGuardrail({
+        orgId,
+        actorUserId,
+        event: "guardrail.url_rejected",
+        headline: "Raw link rejected in a bulk creative import",
+        detail: [`Found: ${urlIssue.found}`],
+        entityType: "creative",
+        entityId: null,
+        metadata: { found: urlIssue.found, reason: urlIssue.reason },
+      });
+      return apiError(400, urlIssue.message, API_ERROR_CODES.VALIDATION, {
+        reason: urlIssue.reason,
+        field: "rows",
+      });
+    }
+  }
+
 
   if (input.creatives.length > BULK_CREATE_MAX) {
     return apiError(

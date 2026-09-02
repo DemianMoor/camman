@@ -3,6 +3,8 @@ import { formatInTimeZone } from "date-fns-tz";
 
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
+import { findFrequencyCollisions } from "@/lib/guardrails/frequency";
+import { notifyGuardrailOncePerDay } from "@/lib/guardrails/notify";
 import { CAMPAIGN_TIMEZONE, CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
 import {
   computePreflightBreakdown,
@@ -196,6 +198,46 @@ export async function runSendPreflight(
     if (claimed.length === 0) continue; // lost the race — another tick handled it
     items.push({ r, b });
     if (isRed(b)) await notifyTelegram(formatRedAlert(r, b));
+  }
+
+  // ── Frequency collision WARN (869et3vm1 Phase 3) ────────────────────────
+  //
+  // A contact reached by a SECOND campaign within 3 days. Warn only — Dmytro:
+  // "NOT a block; do not touch the send path". Detected here because this cron
+  // already runs every 5 minutes and is off the fire path, so the alert lands
+  // before the send without adding a condition to materialize or the drain.
+  //
+  // ONE message per run listing the count and campaigns, never one per contact:
+  // there were 54 such contacts when this was measured, and 54 notifications is
+  // 54 notifications nobody reads.
+  //
+  // Best-effort: a failure here must never break the preflight it rides on.
+  // orgId is optional on this cron (it can run org-wide); the collision check
+  // is per-org, so it only runs when one was supplied. A cron sweeping every org
+  // would need a loop here, which is not the shape today.
+  try {
+    if (orgId) {
+    const collision = await findFrequencyCollisions(orgId);
+    if (collision.contacts > 0) {
+      await notifyGuardrailOncePerDay(
+        {
+          orgId,
+          event: "guardrail.frequency_collision",
+          headline: `${collision.contacts.toLocaleString()} contact${collision.contacts === 1 ? "" : "s"} reached by a second campaign within 3 days`,
+          detail: [
+            `Campaigns involved: ${collision.campaigns.slice(0, 20).join(", ")}`,
+            "Allowed within one campaign; across campaigns it is worth a look.",
+          ],
+          entityType: "org",
+          entityId: orgId,
+          metadata: { contacts: collision.contacts, campaigns: collision.campaigns },
+        },
+        "frequency-collision",
+      );
+    }
+    }
+  } catch (err) {
+    console.error("[preflight] frequency collision check failed", err);
   }
 
   const redCount = items.filter((i) => isRed(i.b)).length;

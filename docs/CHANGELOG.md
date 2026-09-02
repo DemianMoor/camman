@@ -1683,4 +1683,12 @@ volume >20% over the trailing 7 sending-day average, and cross-campaign 3-day fr
 (all writing audit_log then Telegram). Nothing added to materialize or the drain. **No migration.**
   - docs updated: docs/04-features/operator-guardrails.md (new), docs/07-conventions.md, docs/CHANGELOG.md
 
+- 2026-09-03 — Multi-user Phase 4 audit visibility (ClickUp 869et3vm1): Owner-only `/settings/audit`
+(filter by actor/action/date, paged, newest first, no export) backed by `GET /api/audit-log`;
+login-from-new-IP now posts to Telegram as well as writing `auth.login_new_ip`; new daily digest cron
+`/api/cron/audit-digest` at 09:00 ET (per-actor counts, guardrail events, pending deletions; silent on
+a quiet day); `scripts/test-audit-coverage.ts` proves every guardrail event is raised and shows a live
+sample row per observed action. Off the send path. **No migration.**
+  - docs updated: docs/04-features/audit-log.md (new), docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

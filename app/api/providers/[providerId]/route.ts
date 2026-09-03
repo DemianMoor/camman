@@ -70,6 +70,7 @@ export async function GET(
     label: f.label,
     placeholder: f.placeholder ?? null,
     help: f.help ?? null,
+    required: f.required === true,
   }));
 
   // Whether this CONNECTION TYPE appends its own opt-out wording. Derived from

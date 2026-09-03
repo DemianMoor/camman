@@ -62,6 +62,12 @@ export type FieldSpec = {
   placeholder?: string;
   help?: string;
   secret?: boolean;    // true ⇒ masked in UI, never echoed back by the API
+  // true ⇒ the value is mandatory, enforced BOTH by the form (red asterisk) and
+  // server-side by the route that writes it. On a phoneSettingField this is for
+  // a setting the connection type cannot work without — see textrequest's
+  // dashboard_id, where an empty value leaves opt-out intake silently dark
+  // while sends keep succeeding.
+  required?: boolean;
 };
 
 // THREE states, deliberately. `unknown` is NOT a soft failure and must never be

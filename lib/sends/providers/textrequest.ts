@@ -223,10 +223,20 @@ export const textrequestAdapter: SmsProviderAdapter = {
     // column, because the form binds directly to it.
     phoneSettingFields: [
       {
+        // REQUIRED, and the reason is not cosmetic: sends are account-scoped
+        // (POST /messages carries `from`/`to`) and the DLR status_callback is
+        // credential-scoped, so a number with no dashboard id sends and reports
+        // delivery perfectly — while EVERY inbound path is dashboard-scoped and
+        // silently dark. resolveTxrPollTargets skips a NULL dashboard_id, and
+        // the msg_received / contact_updated hooks are registered per dashboard,
+        // so no STOP is ever ingested. Two numbers shipped that way on
+        // 2026-09-03 and took 16,918 sends with 265 un-ingested opt-outs before
+        // anyone noticed the report was empty.
         name: "dashboard_id",
         label: "Text Request dashboard ID",
         placeholder: "e.g. 68093",
-        help: "Each Text Request dashboard maps to one sending number. Run Test connection on the account to list the dashboard IDs.",
+        required: true,
+        help: "Each Text Request dashboard maps to one sending number. Required: inbound STOP replies are collected per dashboard, so a number without one sends fine but records no opt-outs. Run Test connection on the account to list the dashboard IDs.",
       },
     ],
     // Delegates to textrequestHealthcheck below — the same client that used to

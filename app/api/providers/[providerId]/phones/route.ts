@@ -12,6 +12,7 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { verifyShortDomainAssignable } from "@/lib/providers/short-domain-assignment";
 import { validatePhone } from "@/lib/phone-validation";
+import { getDescriptor } from "@/lib/sends/providers/registry";
 import { providerPhoneCreateSchema } from "@/lib/validators/provider-phones";
 
 function parseId(idParam: string) {
@@ -204,7 +205,7 @@ export async function POST(
   // Verify provider exists in this org (and isn't archived — adding phones to an
   // archived provider is allowed; archiving doesn't lock the FK).
   const providerRows = await db
-    .select({ id: sms_providers.id })
+    .select({ id: sms_providers.id, adapter_code: sms_providers.adapter_code })
     .from(sms_providers)
     .where(
       and(eq(sms_providers.id, pid), eq(sms_providers.org_id, orgId)),
@@ -230,6 +231,26 @@ export async function POST(
       parsed.error.issues[0]?.message ?? "Invalid input",
       API_ERROR_CODES.VALIDATION,
     );
+  }
+
+  // Per-number settings the CONNECTION TYPE declares as required must actually
+  // be present. Keyed on the descriptor, not on sms_provider_id, so a second
+  // account of a type gets the same rule and a new provider needs no branch
+  // here. This is the server half of the form's asterisk: for Text Request's
+  // dashboard_id an empty value is not a cosmetic omission — sends and DLRs are
+  // account/credential-scoped and keep working while every inbound path is
+  // dashboard-scoped and goes silently dark (no poll target, no webhook), so
+  // the number takes real traffic and records zero opt-outs.
+  const requiredSettings = (getDescriptor(providerRows[0].adapter_code ?? "")?.phoneSettingFields ?? [])
+    .filter((f) => f.required === true);
+  for (const f of requiredSettings) {
+    const v = (parsed.data as Record<string, unknown>)[f.name];
+    if (typeof v !== "string" || v.trim() === "") {
+      return apiError(400, `${f.label} is required for this provider`, API_ERROR_CODES.VALIDATION, {
+        field: f.name,
+        reason: "required_provider_setting_missing",
+      });
+    }
   }
 
   // Short codes are 5–6 digit numeric codes (already shape-checked by the

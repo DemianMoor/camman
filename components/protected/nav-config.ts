@@ -14,6 +14,7 @@ import {
   Network,
   Phone,
   Route,
+  ScrollText,
   Search,
   Send,
   ShoppingBag,
@@ -257,6 +258,13 @@ export const navGroups: NavGroup[] = [
         href: "/settings/users",
         icon: UserCog,
         permission: "users.manage",
+      },
+      // Owner-only audit feed (869et3vm1 Phase 4).
+      {
+        label: "Audit Log",
+        href: "/settings/audit",
+        icon: ScrollText,
+        permission: "audit.view",
       },
     ],
   },

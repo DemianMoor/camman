@@ -117,6 +117,44 @@ export async function POST(
     );
   }
 
+  // ⚠️ THE CAP RUNS BEFORE EVERY OPERATIONAL CHECK, DELIBERATELY.
+  //
+  // It used to sit just above the drain call, which meant a stage over the limit
+  // reported "provider not API-capable" or "no credentials" FIRST — an operator
+  // would go and fix the provider, then discover they were over the cap anyway.
+  // A POLICY refusal is the more useful thing to say, and it is the one that
+  // does not change when operational state does.
+  //
+  // Still off the fire path: this is the request a human made, not materialize
+  // and not the drain.
+  // ── Aggregate volume cap (869et3vm1 Phase 3) ────────────────────────────
+  //
+  // Checked HERE, at the moment a human asks for the send — never in the drain.
+  // `pendingScheduledRecipients` is what makes "ten stages of 9,999" fail: each
+  // stage sees a near-zero SENT count at the moment it is scheduled, so without
+  // counting what is already scheduled-and-unsent every one of them would pass.
+  {
+    const requested = await pendingForStage(orgId, stageId);
+    const pending = await pendingScheduledRecipients(orgId);
+    const refusal = await checkAggregateCap({ orgId, requested, pending });
+    if (refusal) {
+      await notifyGuardrail({
+        orgId,
+        actorUserId: user.id,
+        event: "guardrail.cap_blocked",
+        headline: refusal.message,
+        detail: [`Campaign ${campaignId} · stage ${stageId}`],
+        entityType: "campaign_stage",
+        entityId: String(stageId),
+        metadata: refusal,
+      });
+      return apiError(409, refusal.message, API_ERROR_CODES.CONFLICT, {
+        reason: "aggregate_hourly_cap",
+        ...refusal,
+      });
+    }
+  }
+
   // 1b rebrand guard, BEFORE materialization. This route materializes and only
   // then approves, so checking afterwards would leave a fully-materialized stage
   // behind on a refusal. Write-time only, same as the plain approve route.
@@ -217,34 +255,6 @@ export async function POST(
   }
 
   // Send now + fully materialized → drain inline and return the real result.
-
-  // ── Aggregate volume cap (869et3vm1 Phase 3) ────────────────────────────
-  //
-  // Checked HERE, at the moment a human asks for the send — never in the drain.
-  // `pendingScheduledRecipients` is what makes "ten stages of 9,999" fail: each
-  // stage sees a near-zero SENT count at the moment it is scheduled, so without
-  // counting what is already scheduled-and-unsent every one of them would pass.
-  {
-    const requested = await pendingForStage(orgId, stageId);
-    const pending = await pendingScheduledRecipients(orgId);
-    const refusal = await checkAggregateCap({ orgId, requested, pending });
-    if (refusal) {
-      await notifyGuardrail({
-        orgId,
-        actorUserId: user.id,
-        event: "guardrail.cap_blocked",
-        headline: refusal.message,
-        detail: [`Campaign ${campaignId} · stage ${stageId}`],
-        entityType: "campaign_stage",
-        entityId: String(stageId),
-        metadata: refusal,
-      });
-      return apiError(409, refusal.message, API_ERROR_CODES.CONFLICT, {
-        reason: "aggregate_hourly_cap",
-        ...refusal,
-      });
-    }
-  }
 
   const drain = await runStageDrainAndRecord(db, {
     campaignId,

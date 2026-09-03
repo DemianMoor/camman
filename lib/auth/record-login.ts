@@ -4,6 +4,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { audit_log, org_members } from "@/db/schema";
+import { notifyTelegram } from "@/lib/alerts/telegram";
 import { writeAuditLog } from "@/lib/audit";
 
 // Login telemetry: stamp org_members.last_login_at / last_login_ip, write the
@@ -80,6 +81,27 @@ export async function recordLogin(opts: {
       ip,
       userAgent: opts.userAgent,
     });
+
+    // 869et3vm1 Phase 4: alert, not just record. Phase 2 wrote the audit row
+    // and stopped there, which meant the one event most worth interrupting
+    // someone about was only discoverable by going and looking for it.
+    //
+    // ⚠️ THIS IS A PROMPT FOR A HUMAN, NOT A CONTROL. The address comes from
+    // x-forwarded-for, whose left-hand entries are client-controlled, so anyone
+    // able to spoof it can equally suppress the alert. Nothing gates on it.
+    //
+    // Fired AFTER the audit write, and its result deliberately ignored: a
+    // Telegram outage must never cost us the durable record.
+    await notifyTelegram(
+      [
+        "🔐 Sign-in from a new IP",
+        `${email ?? userId} · via ${method}`,
+        `IP: ${ip ?? "unknown"}`,
+        opts.userAgent ? `UA: ${opts.userAgent.slice(0, 120)}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
   }
 
   return { newIp };

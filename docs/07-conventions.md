@@ -2115,3 +2115,22 @@ Reaching 200 would have meant seeding provider credentials into preview. The
 assertion was weakened to "not 403" with the refusal reason printed instead, and
 the limitation stated in the script's own output. A green test bought by
 dismantling an environment's safety is worth less than a yellow one that says so.
+
+## Recording an event and alerting on it are two different features
+
+Phase 2 wrote an `auth.login_new_ip` audit row and shipped. The row was correct,
+queryable, and completely silent — the one event most worth interrupting someone
+about was discoverable only by going to look for it, which nobody does.
+
+Writing the record is durability. Sending the alert is attention. A design that
+delivers the first and calls the requirement met has delivered half of it.
+
+Order matters when you add the second: **record first, alert second, and ignore
+the alert's result.** A Telegram outage must never cost the durable row.
+
+## A daily digest that fires on a quiet day trains people to ignore it
+
+The audit digest sends nothing when there was no activity and the queue is
+empty. A predictable "nothing happened" message is worse than no message: it
+teaches the reader that this channel can be skimmed, and the real alerts share
+that channel.

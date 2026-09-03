@@ -42,6 +42,10 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "brands/[id]/short-domains/[domainId]": null, // settings / provider registry -- Owner only
   "brands/list": { methods: ["GET"] },
 
+  // ── audit-log ─────────────────────────────────────────────────────────
+  // Owner-only audit feed. Denied to the operator: it is a record OF them.
+  "audit-log": null, // owner-only, gated on audit.view
+
   // ── deletion-requests ─────────────────────────────────────────────────
   // The OWNER approval queue. Denied to the operator: they create requests as a
   // side effect of trying to delete, and must never see or decide the queue.
@@ -175,6 +179,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "creatives/list": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
 
   // ── cron ─────────────────────────────────────────────────────────────
+  "cron/audit-digest": null, // cron / webhook machinery -- no operator session reaches these
   "cron/ahoi-cdr-poll": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/carrier-triage": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/drip-followups": null, // cron / webhook / import machinery -- no operator session reaches these

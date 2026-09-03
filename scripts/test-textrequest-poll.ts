@@ -266,6 +266,45 @@ async function main() {
         calls.findIndex((c) => c.direction === "R") < calls.findIndex((c) => c.direction === "S"),
         JSON.stringify(calls),
       );
+
+      // ---- the same invariant with MORE THAN ONE dashboard ----
+      // The check above holds under EITHER flattening while only one dashboard
+      // exists, so it could not see the real bug (found live 2026-09-03):
+      // per-dashboard (R,S) pairs put dashboard A's 10K-row outbound walk AHEAD
+      // of dashboard B's inbound walk, and the shared 60s function budget dies
+      // in it — B's STOP intake never gets a turn, and resolveTxrPollTargets has
+      // no ORDER BY so which dashboard loses is arbitrary. Two dashboards is the
+      // smallest world that tells the two flattenings apart, so state the
+      // invariant globally: EVERY inbound request precedes EVERY outbound one.
+      const dashboardId2 = `d2${sfx}`;
+      await tx.execute(sql`
+        INSERT INTO provider_phones (org_id, provider_id, phone_number, dashboard_id, credential_id, number_type, status)
+        VALUES (${orgId}, ${prov.id}, ${"+1855" + sfx.slice(0, 7)}, ${dashboardId2}, ${cred.id}, 'toll_free', 'active')`);
+      const calls2: { dashboardId: string; direction?: string }[] = [];
+      await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        fetchMessages: async (o) => {
+          if (o.dashboardId !== dashboardId && o.dashboardId !== dashboardId2) {
+            return { ok: true as const, items: [], totalItems: 0 };
+          }
+          calls2.push({ dashboardId: o.dashboardId, direction: o.direction });
+          // Empty both sides: this block tests ORDER, not capture (the fixture's
+          // rows were already ingested by the run above).
+          return { ok: true as const, items: [], totalItems: 0 };
+        },
+      });
+      const lastInbound = calls2.reduce((acc, c, i) => (c.direction === "R" ? i : acc), -1);
+      const firstOutbound = calls2.findIndex((c) => c.direction === "S");
+      check(
+        "walk: with TWO dashboards, EVERY inbound request precedes EVERY outbound one",
+        lastInbound >= 0 && firstOutbound >= 0 && lastInbound < firstOutbound,
+        JSON.stringify(calls2),
+      );
+      check(
+        "walk: both dashboards get their own inbound walk",
+        new Set(calls2.filter((c) => c.direction === "R").map((c) => c.dashboardId)).size === 2,
+        JSON.stringify(calls2),
+      );
       check(
         "walk: every request is newest-first (sort=desc), not the oldest-first default",
         calls.length > 0 && calls.every((c) => c.sort === "desc"),

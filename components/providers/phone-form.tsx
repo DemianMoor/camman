@@ -59,6 +59,9 @@ export type PhoneSettingField = {
   label: string;
   placeholder: string | null;
   help: string | null;
+  /** Declared by the connection type's descriptor. The asterisk here is the
+   *  visible half; the route that writes the number enforces the same flag. */
+  required?: boolean;
 };
 
 // A short domain this number could mint links under. `status` is carried so the
@@ -560,9 +563,6 @@ export function PhoneForm({
           )}
         />
 
-        {/* Text Request only: the dashboard this number sends through. TR is
-            dashboard-scoped (one dashboard per number). Use "Check connection"
-            on the account to list the dashboard ids. */}
         {/* Per-number provider settings, rendered from the connection type's
             descriptor. `name` matches the provider_phones column, so the field
             binds directly. Nothing renders when the type declares none. */}
@@ -573,7 +573,7 @@ export function PhoneForm({
             name={sf.name as "dashboard_id"}
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{sf.label}</FormLabel>
+                <FormLabel required={sf.required === true}>{sf.label}</FormLabel>
                 <FormControl>
                   <Input
                     placeholder={sf.placeholder ?? ""}

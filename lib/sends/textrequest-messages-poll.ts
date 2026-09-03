@@ -329,12 +329,21 @@ export async function pollTxrMessages(
   // killed at 60s mid-walk). Outbound first would mean STOP intake never gets a
   // turn for the whole campaign, which is the opposite of the split's purpose.
   // Inbound is the small side (239 rows against 10,000 on 2026-08-21) and the
-  // compliance-critical one, so it goes first and always completes. Flattened to (dashboard x direction) pairs rather than nested so
+  // compliance-critical one, so it goes first and always completes.
+  //
+  // ⚠️ DIRECTION IS THE OUTER LOOP, dashboards the inner one — every dashboard's
+  // inbound walk runs before ANY dashboard's outbound walk. It read the other
+  // way round until 2026-09-03 (`targets.flatMap(t => ["R","S"])`), which is the
+  // same thing only while a single dashboard exists. With two, dashboard A's
+  // 10K-row outbound walk sits ahead of dashboard B's inbound walk and eats the
+  // whole shared 60s budget before STOP intake for B gets a turn — and
+  // resolveTxrPollTargets has no ORDER BY, so which dashboard loses is
+  // arbitrary. Flattened to (direction x dashboard) pairs rather than nested so
   // the row handling below keeps its shape. `message_direction` is honored
   // server-side (verified live), but TR SILENTLY IGNORES unknown params, so the
   // per-row direction checks below remain the real guard — if the filter ever
   // stopped working, both walks would just see every row and capture dedupes.
-  const walks = targets.flatMap((t) => (["R", "S"] as const).map((direction) => ({ t, direction })));
+  const walks = (["R", "S"] as const).flatMap((direction) => targets.map((t) => ({ t, direction })));
   const dashboardsSeen = new Set<string>();
 
   for (const { t, direction } of walks) {

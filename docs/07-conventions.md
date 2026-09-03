@@ -2,6 +2,57 @@
 
 _Last updated: 2026-09-03_
 
+## A sending number can be HALF-configured: sends work, opt-out intake is dark (2026-09-03)
+
+Text Request scopes its API three different ways, and only one of them touches a
+number's `dashboard_id`:
+
+| path | scoped by | works without `dashboard_id`? |
+|---|---|---|
+| send (`POST /messages`, `from`/`to`) | account | **yes** |
+| delivery status (per-message `status_callback`) | credential (`inbound_webhook_token`) | **yes** |
+| inbound STOP (`msg_received` / `contact_updated` hooks, `GET /dashboards/{id}/messages`) | **dashboard** | **no** |
+
+So a txr number added without a `dashboard_id` sends at full rate and reports
+delivery perfectly, while every opt-out path is silently absent —
+`resolveTxrPollTargets` filters `AND ph.dashboard_id IS NOT NULL`, and
+`register-textrequest-hooks` builds its dashboard list from numbers that already
+have one, so the number's dashboard never gets a hook either. Nothing errors and
+nothing alerts; the only visible symptom is an opt-out column that reads 0.
+
+**It happened.** `+18552245147` and `+18447434292` were added on 2026-09-02 with
+the field blank and sent **16,918** messages on 2026-09-03 while **265** contacts
+who replied STOP stayed sendable org-wide (Text Request rejects them on its own
+channel with error 2100/30050, which is exactly why the numbers looked healthy).
+Recovered with [`scripts/drain-textrequest-inbound.ts`](../scripts/drain-textrequest-inbound.ts).
+
+Consequences now enforced in code:
+
+- **`dashboard_id` is a REQUIRED per-number setting for Text Request**, declared
+  on the descriptor (`FieldSpec.required`) and enforced by BOTH phone routes —
+  create rejects a missing value, PATCH rejects clearing it
+  (`reason: "required_provider_setting_missing"`). The form's asterisk reads the
+  same flag, so the two cannot drift.
+- The general rule: **when a provider setting gates a compliance path but not the
+  send path, it is required, not optional.** "Optional" is only safe for a
+  setting whose absence is visible.
+
+## The txr message poll walks DIRECTION-major, not dashboard-major (2026-09-03)
+
+`pollTxrMessages` flattens its walks as `(["R","S"]).flatMap(d => targets.map(…))`
+— every dashboard's inbound walk runs before ANY dashboard's outbound walk. It
+read `targets.flatMap(t => ["R","S"])` until 2026-09-03, which is the same thing
+**only while a single dashboard exists**. With two, dashboard A's outbound walk
+(10K rows, several ticks to drain) sits ahead of dashboard B's inbound walk and
+eats the shared 60s `maxDuration` before B's STOP intake gets a turn — and
+`resolveTxrPollTargets` has no `ORDER BY`, so which dashboard loses is arbitrary.
+
+The existing test ("inbound is walked FIRST") passed under either flattening
+because the fixture had one dashboard: **the guard could not see the bug it was
+written for.** `scripts/test-textrequest-poll.ts` now adds a second fixture
+dashboard and asserts the invariant globally — every inbound request precedes
+every outbound one — which fails on the old ordering.
+
 ## A phone number in a dense table shows its last 4 — a short code shows all of it (2026-08-28)
 
 `formatPhoneLast4(phone_number, number_type)` ([lib/phone-validation.ts](../../lib/phone-validation.ts)) is the shared form for a number that has to sit inside a column of numbers: `+18449903688` → `…3688`.

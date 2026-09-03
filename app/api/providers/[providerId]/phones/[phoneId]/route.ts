@@ -13,6 +13,7 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { verifyShortDomainAssignable } from "@/lib/providers/short-domain-assignment";
+import { getDescriptor } from "@/lib/sends/providers/registry";
 import { providerPhoneUpdateSchema } from "@/lib/validators/provider-phones";
 
 function parseId(idParam: string) {
@@ -142,6 +143,33 @@ export async function PATCH(
   // specially below; the rest map straight to columns.
   const { provider_id: targetProviderId, confirm_move, ...editable } =
     parsed.data;
+
+  // A per-number setting the CONNECTION TYPE declares as REQUIRED cannot be
+  // cleared — the mirror of the create route's guard, and for the same reason:
+  // Text Request's dashboard_id gates every INBOUND path (poll target + the
+  // per-dashboard msg_received/contact_updated hooks) while sends and DLRs are
+  // account/credential-scoped, so emptying it leaves the number sending happily
+  // and recording no opt-outs at all. Costs one PK lookup on sms_providers per
+  // PATCH; the declared-settings list itself is code-owned, not a query.
+  const declared = getDescriptor(
+    (
+      await db
+        .select({ adapter_code: sms_providers.adapter_code })
+        .from(sms_providers)
+        .where(and(eq(sms_providers.id, pid), eq(sms_providers.org_id, orgId)))
+        .limit(1)
+    )[0]?.adapter_code ?? "",
+  )?.phoneSettingFields ?? [];
+  for (const f of declared) {
+    if (f.required !== true || !(f.name in editable)) continue;
+    const v = (editable as Record<string, unknown>)[f.name];
+    if (v === null || v === undefined || (typeof v === "string" && v.trim() === "")) {
+      return apiError(400, `${f.label} is required for this provider`, API_ERROR_CODES.VALIDATION, {
+        field: f.name,
+        reason: "required_provider_setting_missing",
+      });
+    }
+  }
 
   // Short-domain override: verify BEFORE writing. Org ownership is the
   // multi-tenancy invariant; the active-status check is what keeps a `pending`

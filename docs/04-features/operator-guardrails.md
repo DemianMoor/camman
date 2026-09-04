@@ -1,6 +1,6 @@
 # Feature — Operator guardrails
 
-_Last updated: 2026-09-02_
+_Last updated: 2026-09-04_
 
 ClickUp 869et3vm1 Phase 3. Volume caps, link policy, creative versioning, a
 deletion approval queue, and three warnings. No migration — `deletion_requests`
@@ -23,10 +23,48 @@ reversible, explainable, and costs the send path nothing.
 | Guardrail | Where | Refusal |
 |---|---|---|
 | **Per-stage 10,000 recipients/hour** | Prepare/kickoff, before materialization | 409 `per_stage_hourly_cap` |
-| **Aggregate 60,000 sent/hour, org-wide** | approve-send, retry-failed, before the drain call | 409 `aggregate_hourly_cap` |
+| ~~Aggregate 60,000/hour, org-wide~~ | approve-send, retry-failed | **WARN ONLY since 2026-09-04** — see §2.1 |
 | **URL allowlist** | creative create, bulk create, update | 400 `raw_url_in_body` |
 | **Creative versioning** | creative update | 200 with a **new** creative id |
 | **Deletion requests** | creative archive, segment archive/delete | 202 with a queued request |
+
+### 2.1 The aggregate cap no longer blocks (2026-09-04)
+
+It returned 409 for one day and was demoted to a warning after it refused a
+legitimate 62,487-recipient day. The defect is in the `pending` term:
+`pendingScheduledRecipients` sums **every** approved-unsent recipient in the org
+and applies **no `scheduled_at` window at all**. The refused day looked like this:
+
+| hour (UTC) | stages | recipients |
+|---|---|---|
+| 2026-08-26 22:00 | 1 | 1,900 |
+| 2026-09-04 13:00 | 10 | 10,413 |
+| 2026-09-04 14:00 | 10 | 28,249 |
+| 2026-09-04 15:00 | 2 | 5,310 |
+| 2026-09-04 22:00 | 6 | 16,615 |
+
+Five separate hours spanning nine days, summed and compared against a *per-hour*
+limit. The busiest real hour was **28,249 — less than half the cap**. Nothing was
+in breach; the measurement was.
+
+The refusal message compounded it by advising "move this to a later hour", which
+cannot work: with no window, a later hour adds to the very same total. **A remedy
+the system makes impossible is worse than no remedy** — it sends someone off to
+do work that cannot help.
+
+Crossing the threshold now raises `guardrail.cap_exceeded` and **proceeds**,
+deduped once per ET day (`notifyGuardrailOncePerDay`). The dedupe is not
+cosmetic: with no window the breach is *continuous* while a backlog sits above
+the line, so an undeduped warn fires on every approve-send and trains everyone to
+ignore it.
+
+⚠️ **Do not re-enable the block without fixing the window first.** The threshold
+arithmetic in `decideAggregateCap` is sound and still tested; the input is not.
+Dmytro is deciding the semantics (per target clock hour vs rolling 60 minutes)
+separately.
+
+The per-stage 10,000/hour cap in `kickoff` is untouched and still **blocks** —
+it counts one stage in one materialization window, so it has no equivalent defect.
 
 ### The aggregate cap counts what is scheduled, not only what is sent
 

@@ -28,6 +28,7 @@ import { db } from "@/db/client";
 
 const GUARDRAIL_EVENTS = [
   "guardrail.cap_blocked",
+  "guardrail.cap_exceeded",
   "guardrail.url_rejected",
   "guardrail.creative_forked",
   "guardrail.deletion_requested",
@@ -39,8 +40,12 @@ const GUARDRAIL_EVENTS = [
 
 // Where each is expected to be raised, so a missing emitter names its own file.
 const EMITTERS: Record<string, string[]> = {
+  // Per-stage cap only. The aggregate cap became warn-only on 2026-09-04 and
+  // now raises guardrail.cap_exceeded instead.
   "guardrail.cap_blocked": [
     "app/api/campaigns/[campaignId]/stages/[stageId]/send/kickoff/route.ts",
+  ],
+  "guardrail.cap_exceeded": [
     "app/api/campaigns/[campaignId]/stages/[stageId]/send/approve-send/route.ts",
     "app/api/campaigns/[campaignId]/stages/[stageId]/send/retry-failed/route.ts",
   ],

@@ -2134,3 +2134,31 @@ The audit digest sends nothing when there was no activity and the queue is
 empty. A predictable "nothing happened" message is worse than no message: it
 teaches the reader that this channel can be skimmed, and the real alerts share
 that channel.
+
+## A rate limit must bound the window it names
+
+The aggregate "60,000 per hour" cap summed every approved-unsent recipient in the
+org with no `scheduled_at` filter, so five hours of work spread over nine days
+were added together and compared against a per-hour limit. It refused a day whose
+busiest actual hour was 28,249.
+
+If a limit says *per hour*, every term in it must be bounded to an hour. A term
+that accumulates without a window measures a **backlog**, and a backlog compared
+against a rate refuses more the better the operation is doing — the failure grows
+with success, which is the signature of this bug class.
+
+## Never advise a remedy the system makes impossible
+
+The same refusal said "Move this to a later hour." Because the count had no
+window, a later hour added to the identical total — the advice could not work at
+any hour the user picked. A refusal that names an action must be one the refusing
+code would actually accept; otherwise it sends someone to do work that cannot
+help and costs them the time to discover it.
+
+## A continuous breach needs a deduped warning, or it is noise
+
+Demoting that cap from block to warn without a dedupe would have fired an alert
+on *every* approve-send for as long as the backlog sat above the line, because an
+unwindowed breach does not clear on its own. Warnings on a persistent condition
+must be deduped over a period (`notifyGuardrailOncePerDay`), or people learn to
+ignore the channel — and then the alerts that matter go unread too.

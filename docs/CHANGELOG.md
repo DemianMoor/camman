@@ -1693,4 +1693,12 @@ a quiet day); `scripts/test-audit-coverage.ts` proves every guardrail event is r
 sample row per observed action. Off the send path. **No migration.**
   - docs updated: docs/04-features/audit-log.md (new), docs/07-conventions.md, docs/CHANGELOG.md
 
+- 2026-09-04 — Aggregate hourly send cap demoted from BLOCK to WARN (869et3vm1). It refused a
+legitimate 62,487-recipient day: `pendingScheduledRecipients` applies no `scheduled_at` window, so
+five hours spanning nine days were summed against a per-hour limit (busiest real hour: 28,249).
+Crossing now raises the new `guardrail.cap_exceeded`, deduped once per ET day, and the send
+proceeds. `guardrail.cap_blocked` is now raised only by the per-stage cap in kickoff, which still
+blocks. Re-enabling the block is gated on fixing the window. **No migration.**
+  - docs updated: docs/04-features/operator-guardrails.md, docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

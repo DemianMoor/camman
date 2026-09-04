@@ -7,7 +7,7 @@ import {
   checkAggregateCap,
   pendingScheduledRecipients,
 } from "@/lib/guardrails/caps";
-import { notifyGuardrail } from "@/lib/guardrails/notify";
+import { notifyGuardrailOncePerDay } from "@/lib/guardrails/notify";
 import { pendingForStage } from "@/lib/guardrails/pending";
 
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
@@ -117,41 +117,44 @@ export async function POST(
     );
   }
 
-  // ⚠️ THE CAP RUNS BEFORE EVERY OPERATIONAL CHECK, DELIBERATELY.
+  // ── Aggregate volume cap — WARN ONLY (Dmytro, 2026-09-04) ───────────────
   //
-  // It used to sit just above the drain call, which meant a stage over the limit
-  // reported "provider not API-capable" or "no credentials" FIRST — an operator
-  // would go and fix the provider, then discover they were over the cap anyway.
-  // A POLICY refusal is the more useful thing to say, and it is the one that
-  // does not change when operational state does.
+  // This used to return 409. It was disabled as a block after it refused a
+  // legitimate 62,487-recipient day that was never anywhere near 60,000 in any
+  // single hour: `pendingScheduledRecipients` sums EVERY approved-unsent
+  // recipient with no `scheduled_at` window, so five hours spread across nine
+  // days were added together and compared against a per-hour limit. The busiest
+  // real hour was 28,249. The refusal also told the operator to "move this to a
+  // later hour", which cannot help — a later hour adds to the same total.
   //
-  // Still off the fire path: this is the request a human made, not materialize
-  // and not the drain.
-  // ── Aggregate volume cap (869et3vm1 Phase 3) ────────────────────────────
+  // Re-enabling the block needs that windowing fixed first; Dmytro is planning
+  // the semantics separately. Until then the threshold still computes and still
+  // reports, so the signal is not lost — it just does not refuse.
   //
-  // Checked HERE, at the moment a human asks for the send — never in the drain.
-  // `pendingScheduledRecipients` is what makes "ten stages of 9,999" fail: each
-  // stage sees a near-zero SENT count at the moment it is scheduled, so without
-  // counting what is already scheduled-and-unsent every one of them would pass.
+  // Deduped once per ET day: without a window the breach is CONTINUOUS while a
+  // backlog sits above the line, so an undeduped warn would fire on every single
+  // approve-send and train everyone to ignore it.
   {
     const requested = await pendingForStage(orgId, stageId);
     const pending = await pendingScheduledRecipients(orgId);
-    const refusal = await checkAggregateCap({ orgId, requested, pending });
-    if (refusal) {
-      await notifyGuardrail({
-        orgId,
-        actorUserId: user.id,
-        event: "guardrail.cap_blocked",
-        headline: refusal.message,
-        detail: [`Campaign ${campaignId} · stage ${stageId}`],
-        entityType: "campaign_stage",
-        entityId: String(stageId),
-        metadata: refusal,
-      });
-      return apiError(409, refusal.message, API_ERROR_CODES.CONFLICT, {
-        reason: "aggregate_hourly_cap",
-        ...refusal,
-      });
+    const breach = await checkAggregateCap({ orgId, requested, pending });
+    if (breach) {
+      await notifyGuardrailOncePerDay(
+        {
+          orgId,
+          actorUserId: user.id,
+          event: "guardrail.cap_exceeded",
+          headline: breach.message,
+          detail: [
+            `Campaign ${campaignId} · stage ${stageId}`,
+            "Warn-only — the send was NOT blocked.",
+          ],
+          entityType: "campaign_stage",
+          entityId: String(stageId),
+          metadata: { ...breach, campaign_id: campaignId, enforced: false },
+        },
+        `aggregate-cap:${orgId}`,
+      );
     }
   }
 

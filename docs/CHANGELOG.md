@@ -1725,4 +1725,14 @@ counter still did: the panel's totals disagreed with its own hourly series. Foun
 (nobody to attribute it to). **No migration.**
   - docs updated: docs/04-features/operator-api-tokens.md, docs/CHANGELOG.md
 
+2026-09-04 — fix(api): single-source the per-user API usage drill-in on `audit_log` (869evpmbz follow-up) — the
+hourly series read `api_token_usage` while the headline tiles read `audit_log`. Both correct, and they still disagreed:
+the counter increments BEFORE the route allowlist (deliberately, so a forbidden route still burns quota), so it counts
+calls audit_log records as `api.denied`, never `api.request`. Measured on prod: denied 8 = 8, but requests 7 vs 9 —
+exactly the two 403s. Both halves now derive from `audit_log` under one shared `SHARED_WHERE` fragment, and the series
+carries the same three buckets as the totals, so the bars sum to the tiles. Also RENDERS the series — the card asked for
+"requests over time" and the payload was being fetched and dropped. The screen no longer reports quota consumption;
+`api_token_usage` is untouched and stays the limiter's authority. **No migration.**
+  - docs updated: docs/04-features/operator-api-tokens.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

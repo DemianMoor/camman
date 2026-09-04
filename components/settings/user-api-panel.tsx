@@ -63,7 +63,12 @@ type UsageResponse = {
   totals: { requests: number; denied: number; rate_limited: number };
   last_ip: string | null;
   last_seen_at: string | null;
-  series: { hour: string; requests: number; denied: number }[];
+  series: {
+    hour: string;
+    requests: number;
+    denied: number;
+    rate_limited: number;
+  }[];
   top_endpoints: { endpoint: string | null; method: string | null; n: number }[];
   denials: {
     action: string;
@@ -337,6 +342,8 @@ export function UserApiPanel({
                       : ""}
                   </p>
 
+                  <ActivityBars series={usage.series} />
+
                   {usage.top_endpoints.length > 0 ? (
                     <div className="space-y-1 pt-2">
                       <p className="text-xs font-medium">Top endpoints</p>
@@ -475,6 +482,75 @@ export function UserApiPanel({
         </AlertDialogContent>
       </AlertDialog>
     </>
+  );
+}
+
+/**
+ * "Requests over time" — one bar per hour that had activity.
+ *
+ * ⚠️ THE SERIES AND THE TILES ABOVE COME FROM THE SAME audit_log ROWS WITH THE
+ * SAME PREDICATE, so the bars sum to the tiles exactly. That identity is the
+ * whole point: the first cut drew this from the rate limiter's counters, which
+ * count a superset (a call denied by the route allowlist still burns quota), so
+ * the chart and the headline disagreed for reasons no reader could infer.
+ *
+ * Hours with no activity are absent rather than drawn as zero-width gaps — the
+ * axis is "hours in which something happened", which is what an Owner scanning
+ * for a burst is actually looking for. The label under the bars says so, so the
+ * spacing is never mistaken for a continuous timeline.
+ */
+function ActivityBars({ series }: { series: UsageResponse["series"] }) {
+  if (series.length === 0) {
+    return (
+      <p className="pt-2 text-xs text-muted-foreground">
+        No API activity in this window.
+      </p>
+    );
+  }
+  const peak = Math.max(
+    ...series.map((s) => s.requests + s.denied + s.rate_limited),
+    1,
+  );
+  return (
+    <div className="space-y-1 pt-2">
+      <p className="text-xs font-medium">Requests over time</p>
+      <div className="flex h-16 items-end gap-px overflow-x-auto">
+        {series.map((s) => {
+          const total = s.requests + s.denied + s.rate_limited;
+          return (
+            <div
+              key={s.hour}
+              className="flex min-w-[3px] flex-1 flex-col justify-end"
+              style={{ height: `${Math.max(4, (total / peak) * 100)}%` }}
+              title={`${formatCampaignDateTime(s.hour)} — ${s.requests} allowed, ${s.denied} denied, ${s.rate_limited} rate-limited`}
+            >
+              {s.rate_limited > 0 ? (
+                <div
+                  className="w-full bg-amber-500"
+                  style={{ height: `${(s.rate_limited / total) * 100}%` }}
+                />
+              ) : null}
+              {s.denied > 0 ? (
+                <div
+                  className="w-full bg-destructive"
+                  style={{ height: `${(s.denied / total) * 100}%` }}
+                />
+              ) : null}
+              {s.requests > 0 ? (
+                <div
+                  className="w-full bg-primary"
+                  style={{ height: `${(s.requests / total) * 100}%` }}
+                />
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {series.length} hour{series.length === 1 ? "" : "s"} with activity · peak{" "}
+        {peak.toLocaleString()}/h · allowed, denied, rate-limited
+      </p>
+    </div>
   );
 }
 

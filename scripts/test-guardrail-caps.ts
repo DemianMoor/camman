@@ -25,6 +25,9 @@ function check(label: string, ok: boolean, detail: string) {
 }
 
 console.log("=== guardrail caps ===\n");
+console.log("  NOTE: the aggregate cap is WARN-ONLY since 2026-09-04 — crossing it");
+console.log("  raises guardrail.cap_exceeded and the send PROCEEDS. These cases");
+console.log("  still pin the threshold arithmetic that decides when to warn.");
 console.log(`  scope: per-stage cap ${PER_STAGE_HOURLY_CAP.toLocaleString()}/h, aggregate cap ${AGGREGATE_HOURLY_CAP.toLocaleString()}/h`);
 if (AGGREGATE_HOURLY_CAP !== 60_000) {
   check("aggregate cap value", false, `expected 60,000 (Dmytro, final), got ${AGGREGATE_HOURLY_CAP}`);
@@ -44,9 +47,9 @@ const crossing = decideAggregateCap({
   requested: 6_000,
 });
 check(
-  "a 6,000 stage that would reach 61,000 is REFUSED",
+  "a 6,000 stage reaching 61,000 crosses the line",
   crossing !== null && crossing.wouldTotal === 61_000,
-  crossing ? `refused at ${crossing.wouldTotal.toLocaleString()}` : "NOT refused",
+  crossing ? `warns at ${crossing.wouldTotal.toLocaleString()}` : "NO warn raised",
 );
 
 const fits = decideAggregateCap({
@@ -55,9 +58,9 @@ const fits = decideAggregateCap({
   requested: 4_000,
 });
 check(
-  "a 4,000 stage that lands exactly on 59,999... (59,000) is ALLOWED",
+  "a 4,000 stage landing on 59,000 does not",
   fits === null,
-  fits ? `wrongly refused at ${fits.wouldTotal}` : "allowed",
+  fits ? `wrongly warned at ${fits.wouldTotal}` : "quiet",
 );
 
 const exact = decideAggregateCap({
@@ -66,9 +69,9 @@ const exact = decideAggregateCap({
   requested: 5_000,
 });
 check(
-  "landing EXACTLY on the 60,000 limit is ALLOWED (<=, not <)",
+  "landing EXACTLY on 60,000 does not (<=, not <)",
   exact === null,
-  exact ? `wrongly refused at exactly ${exact.wouldTotal}` : "allowed at exactly 60,000",
+  exact ? `wrongly warned at exactly ${exact.wouldTotal}` : "quiet at exactly 60,000",
 );
 
 const oneOver = decideAggregateCap({
@@ -77,9 +80,9 @@ const oneOver = decideAggregateCap({
   requested: 5_001,
 });
 check(
-  "one recipient over the limit is REFUSED",
+  "one recipient over the limit does",
   oneOver !== null && oneOver.wouldTotal === 60_001,
-  oneOver ? `refused at ${oneOver.wouldTotal.toLocaleString()}` : "NOT refused",
+  oneOver ? `warns at ${oneOver.wouldTotal.toLocaleString()}` : "NO warn raised",
 );
 
 console.log("\n--- ten stages of 9,999 (the case `pending` exists for) ---");
@@ -97,16 +100,16 @@ for (let i = 1; i <= 10; i++) {
 }
 console.log(`  scope: 10 stages x 9,999 = ${(9_999 * 10).toLocaleString()} against a ${AGGREGATE_HOURLY_CAP.toLocaleString()} cap`);
 check(
-  "the run is stopped before all ten pass",
+  "the tenth of ten 9,999 stages is flagged",
   refusedAt !== null,
-  refusedAt ? `refused at stage ${refusedAt} (${accumulated.toLocaleString()} already committed)` : "ALL TEN PASSED — pending is not being counted",
+  refusedAt ? `crossed at stage ${refusedAt} (${accumulated.toLocaleString()} already committed)` : "ALL TEN PASSED — pending is not being counted",
 );
 
-console.log("\n--- sanity: an empty org is not blocked ---");
+console.log("\n--- sanity: an empty org does not warn ---");
 check(
   "nothing scheduled, nothing sent, small request",
   decideAggregateCap({ sent: 0, pending: 0, requested: 1_000 }) === null,
-  "allowed",
+  "quiet",
 );
 
 console.log(`\n=== ${failures === 0 ? "ALL PASS" : "FAILURES"} ===`);

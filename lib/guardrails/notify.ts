@@ -28,6 +28,7 @@ export type GuardrailEvent =
   | "guardrail.deletion_requested"
   | "guardrail.deletion_decided"
   // WARNs — the action proceeded
+  | "guardrail.cap_exceeded"
   | "guardrail.unproven_creative"
   | "guardrail.volume_deviation"
   | "guardrail.frequency_collision";
@@ -51,6 +52,7 @@ const LABEL: Record<GuardrailEvent, string> = {
   "guardrail.creative_forked": "🔀 Creative versioned",
   "guardrail.deletion_requested": "🗑 Deletion requested",
   "guardrail.deletion_decided": "🗑 Deletion decided",
+  "guardrail.cap_exceeded": "⚠️ Aggregate volume cap exceeded",
   "guardrail.unproven_creative": "⚠️ Unproven creative at volume",
   "guardrail.volume_deviation": "⚠️ Volume above trailing average",
   "guardrail.frequency_collision": "⚠️ Contacts hit by a second campaign",

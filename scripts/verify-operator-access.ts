@@ -656,12 +656,29 @@ async function main() {
     }
   }
 
-  // 6c — revoked ⇒ 401.
+  // 6c — revoked ⇒ 401, and the denial is ATTRIBUTED to the owning member.
+  //
+  // ⚠️ THE ATTRIBUTION HALF IS NOT DECORATION. The per-user usage drill-in
+  // filters audit_log on actor_user_id, so a 401 denial written with a NULL
+  // actor is invisible on the one screen built to show denials — while the
+  // token-keyed counter still counts it, so the panel's totals and its own
+  // hourly series disagree. That shipped and was caught by the production smoke
+  // test, not by this script; this assertion is why it cannot come back.
   {
     const t = await mintToken({ label: "revoked", memberId, revoked: true });
     const { status } = await tokenGet(PROBE, "GET", t.plaintext);
     if (status === 401) pass("revoked token -> 401");
     else fail(`revoked token -> ${status} (expected 401)`);
+
+    const [attributed] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM audit_log
+      WHERE org_id = ${org.id}::uuid AND action = 'api.denied'
+        AND entity_id = ${t.id} AND actor_user_id IS NOT NULL`;
+    if ((attributed?.n ?? 0) >= 1) {
+      pass("the 401 denial is attributed to the owning member (visible in their drill-in)");
+    } else {
+      fail("the 401 denial has a NULL actor_user_id — invisible in the per-user usage panel");
+    }
   }
 
   // 6d — expired ⇒ 401.

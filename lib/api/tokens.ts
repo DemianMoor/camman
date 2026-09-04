@@ -109,7 +109,25 @@ export interface ResolvedApiToken {
 
 export type TokenResolution =
   | { ok: true; token: ResolvedApiToken }
-  | { ok: false; reason: TokenRejection; tokenId: string | null; orgId: string | null };
+  | {
+      ok: false;
+      reason: TokenRejection;
+      tokenId: string | null;
+      orgId: string | null;
+      /**
+       * The member the token belongs to.
+       *
+       * ⚠️ CARRIED ON THE FAILURE BRANCH ON PURPOSE. The per-user usage drill-in
+       * filters audit_log on `actor_user_id`, so a denial written without one is
+       * invisible on the screen built to show denials. Caught by the production
+       * smoke test: three `api.denied` rows (api_enabled=false, revoked,
+       * switched-off) landed with a NULL actor while the token-keyed counter
+       * still counted them, so the panel's totals and its hourly series
+       * disagreed. Null only for `unknown_token`, which by definition has no
+       * member.
+       */
+      userId: string | null;
+    };
 
 /**
  * Resolve a plaintext token to the membership it authorises.
@@ -166,15 +184,15 @@ export async function resolveApiToken(
 
   const row = rows[0];
   if (!row) {
-    return { ok: false, reason: "unknown_token", tokenId: null, orgId: null };
+    return { ok: false, reason: "unknown_token", tokenId: null, orgId: null, userId: null };
   }
   // Redundant after an index hit on a unique column, but free and it keeps the
   // comparison constant-time if this lookup is ever widened.
   if (!tokenHashMatches(row.token_hash, hash)) {
-    return { ok: false, reason: "unknown_token", tokenId: null, orgId: null };
+    return { ok: false, reason: "unknown_token", tokenId: null, orgId: null, userId: null };
   }
 
-  const ids = { tokenId: row.token_id, orgId: row.org_id };
+  const ids = { tokenId: row.token_id, orgId: row.org_id, userId: row.user_id };
 
   // ORDER IS DELIBERATE: properties of the TOKEN first, then of the MEMBERSHIP.
   // A revoked token belonging to a deactivated user should report as revoked —

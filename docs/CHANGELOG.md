@@ -1716,4 +1716,13 @@ the `AuditAction` union, removing an `as never` cast.
   - docs updated: docs/operator-api.md (new, handed to the worker), docs/04-features/operator-api-tokens.md (new),
     docs/03-data-model.md (+ERD), docs/04-features/crons.md, docs/07-conventions.md, docs/CHANGELOG.md
 
+2026-09-04 — fix(api): attribute 401 token denials to the owning member (869evpmbz follow-up) — `resolveApiToken()`
+now returns `userId` on its failure branch and `requireApiMembership()` passes it as `actorUserId`. Without it the three
+401 paths (api_enabled=false, revoked, switched-off) wrote `api.denied` rows with a NULL actor, so
+`/api/users/[memberId]/api-usage` — which filters on `actor_user_id` — could not see them, while the token-keyed
+counter still did: the panel's totals disagreed with its own hourly series. Found by the production smoke test, not by
+`verify-operator-access.ts`; §6c now asserts attribution so it cannot regress. `unknown_token` still writes nothing
+(nobody to attribute it to). **No migration.**
+  - docs updated: docs/04-features/operator-api-tokens.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

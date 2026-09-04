@@ -206,6 +206,10 @@ const authenticateRequestToken = cache(
       if (resolution.orgId && resolution.tokenId) {
         await writeAuditLog({
           orgId: resolution.orgId,
+          // Attributed to the owning member, so this denial shows up in THEIR
+          // usage drill-in — which filters on actor_user_id. Leaving it null
+          // made the panel's totals disagree with its own hourly series.
+          actorUserId: resolution.userId,
           action: "api.denied",
           entityType: "api_token",
           entityId: resolution.tokenId,

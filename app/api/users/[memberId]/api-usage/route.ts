@@ -11,18 +11,35 @@ import { TOKEN_REQUESTS_PER_HOUR } from "@/lib/api/token-usage";
 // Per-user API usage drill-in for /settings/users (ClickUp 869evpmbz).
 // Owner-only, and unreachable by any token — see the note on ../tokens/route.ts.
 //
-// ⚠️ TWO SOURCES, ON PURPOSE, AND THEY ANSWER DIFFERENT QUESTIONS.
+// ⚠️ ONE SOURCE: audit_log. THE HEADLINE NUMBERS AND THE HOURLY SERIES MUST
+// AGREE, AND THE ONLY WAY TO GUARANTEE THAT IS TO DERIVE THEM FROM THE SAME
+// ROWS WITH THE SAME PREDICATE.
 //
-//   api_token_usage — the COUNTERS. Cheap, exact, and the same rows the rate
-//     limiter decides from, so the "requests this hour" the Owner reads is
-//     literally the number that gated the last request rather than a
-//     reconstruction of it.
+// The first cut read the series from `api_token_usage` (the rate limiter's own
+// counters) and the totals from audit_log. Both were correct, and they still
+// disagreed, because they count different things:
 //
-//   audit_log       — the DETAIL. Which endpoints, which denials, from which IP.
-//     Filtered to this member's own api.* rows.
+//   * the counter increments BEFORE the route allowlist is applied — that is
+//     deliberate, so hammering a forbidden route still burns quota — so it
+//     includes calls that audit_log records as `api.denied`, never as
+//     `api.request`;
+//   * and any denial written without an actor (fixed, but historical rows
+//     remain) is counted by the token-keyed counter and invisible to an
+//     actor-filtered audit query.
 //
-// Reading endpoint breakdowns out of the counters instead would mean a row per
-// (token, endpoint, hour) — a much wider table for a screen nobody loads often.
+// Measured on production: audit denied 8 = counter denied 8, but audit requests
+// 7 vs counter requests 9 — the gap being exactly the two 403s. Two defensible
+// numbers that do not add up are worse on a screen than one slightly narrower
+// number, because the reader cannot tell which to trust.
+//
+// ⚠️ WHAT THIS DELIBERATELY NO LONGER REPORTS: quota consumption. `api_token_usage`
+// remains the limiter's authority and is untouched; this screen now answers
+// "what did they do", not "how much of the hour's budget is left". If the latter
+// is wanted it needs its OWN clearly-named field sourced from the counter —
+// never a reused one, which is how the two got conflated in the first place.
+//
+// SHARED_WHERE below is a single fragment used by both queries so the predicate
+// cannot drift between them.
 
 const DEFAULT_DAYS = 7;
 const MAX_DAYS = 90;
@@ -57,24 +74,36 @@ export async function GET(
   }
   const userId = member[0].user_id;
 
-  // Hourly request/denial series, straight off the counters. Joined through
-  // api_tokens so a member's tokens are the scope — including revoked ones,
-  // whose history stays readable (revoke is a stamp, not a delete).
+  // The ONE predicate both queries below run against. Written once so the
+  // headline totals and the hourly series cannot drift apart.
+  const SHARED_WHERE = sql`
+    org_id = ${orgId}::uuid
+      AND actor_user_id = ${userId}::uuid
+      AND action IN ('api.request', 'api.denied', 'api.rate_limited')
+      AND created_at >= now() - make_interval(days => ${days})
+  `;
+
+  // Hourly series. Carries the SAME three buckets the totals do, so
+  // sum(series.requests) === totals.requests and likewise for the other two —
+  // an identity a reader can check on the screen itself.
   const series = (await db.execute(sql`
     SELECT
-      u.window_start AS hour,
-      sum(u.count) FILTER (WHERE u.window_kind = 'request')::int AS requests,
-      sum(u.count) FILTER (WHERE u.window_kind = 'denied')::int  AS denied
-    FROM api_token_usage u
-    JOIN api_tokens t ON t.id = u.api_token_id
-    WHERE u.org_id = ${orgId}::uuid
-      AND t.org_member_id = ${memberId}::uuid
-      AND u.window_start >= now() - make_interval(days => ${days})
-    GROUP BY u.window_start
-    ORDER BY u.window_start
-  `)) as unknown as { hour: Date; requests: number | null; denied: number | null }[];
+      date_trunc('hour', created_at) AS hour,
+      count(*) FILTER (WHERE action = 'api.request')::int      AS requests,
+      count(*) FILTER (WHERE action = 'api.denied')::int       AS denied,
+      count(*) FILTER (WHERE action = 'api.rate_limited')::int AS rate_limited
+    FROM audit_log
+    WHERE ${SHARED_WHERE}
+    GROUP BY 1
+    ORDER BY 1
+  `)) as unknown as {
+    hour: Date;
+    requests: number | null;
+    denied: number | null;
+    rate_limited: number | null;
+  }[];
 
-  // Endpoint / denial / IP detail from the audit trail.
+  // Endpoint / denial / IP detail, same rows grouped a different way.
   const detail = (await db.execute(sql`
     SELECT
       action,
@@ -85,10 +114,7 @@ export async function GET(
       max(created_at)       AS last_at,
       (array_agg(ip ORDER BY created_at DESC) FILTER (WHERE ip IS NOT NULL))[1] AS last_ip
     FROM audit_log
-    WHERE org_id = ${orgId}::uuid
-      AND actor_user_id = ${userId}::uuid
-      AND action IN ('api.request', 'api.denied', 'api.rate_limited')
-      AND created_at >= now() - make_interval(days => ${days})
+    WHERE ${SHARED_WHERE}
     GROUP BY action, metadata->>'endpoint', metadata->>'method', metadata->>'reason'
     ORDER BY n DESC
     LIMIT 100
@@ -129,6 +155,7 @@ export async function GET(
       hour: s.hour,
       requests: s.requests ?? 0,
       denied: s.denied ?? 0,
+      rate_limited: s.rate_limited ?? 0,
     })),
     top_endpoints: detail
       .filter((d) => d.action === "api.request" && d.endpoint)

@@ -236,7 +236,24 @@ a sheet per member ([`components/settings/user-api-panel.tsx`](../../components/
 - the `api_enabled` switch,
 - their tokens — create (plaintext shown **once**, via `<CopyableId>`), revoke,
   with live/revoked/expired state and last-used,
-- last-7-days usage: requests, denials, rate-limit hits, top endpoints, last IP.
+- last-7-days usage: requests, denials, rate-limit hits, an hourly "requests
+  over time" bar row, top endpoints and last IP.
+
+⚠️ **The drill-in reads `audit_log` and only `audit_log`** — headline tiles and
+hourly series from the same rows under a single shared predicate, so the bars sum
+to the tiles exactly. The first cut drew the series from `api_token_usage` (the
+limiter's counters) and the tiles from `audit_log`; both were correct and they
+still disagreed, because the counter increments BEFORE the route allowlist is
+applied (deliberately — hammering a forbidden route must still burn quota), so it
+counts calls that `audit_log` records as `api.denied`, never `api.request`.
+Measured on production: audit denied 8 = counter denied 8, but audit requests 7 vs
+counter requests 9 — the gap being exactly the two 403s.
+
+**What that deliberately gives up:** the screen no longer reports quota
+consumption. `api_token_usage` is untouched and remains the limiter's authority;
+this screen answers "what did they do", not "how much of the hour's budget
+remains". If the latter is wanted it needs its own clearly-named field sourced
+from the counter — never a reused one, which is how the two were conflated.
 
 The switch lives in the sheet rather than the table because "API on" and "has a
 live token" only make sense read together — the sheet warns on either mismatch.

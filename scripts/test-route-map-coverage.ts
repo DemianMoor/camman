@@ -92,6 +92,46 @@ if (allowed.length === 0) {
   );
 }
 
+// ── API-token allowlist (ClickUp 869evpmbz) ───────────────────────────────
+//
+// Two properties, and they fail for different reasons.
+//
+// SUBSET. A token is its owner's authority NARROWED. If `token` ever names a
+// method absent from `methods`, the map would be granting a token something the
+// operator role itself may not do — the one thing this design promises cannot
+// happen. TypeScript cannot express "subset of a sibling field", so it is
+// asserted here.
+//
+// WIRING. Same trap as the allowed half above: a `token` list on a route whose
+// handler never passes { route, method } reads as "the agent can call this" and
+// silently 403s. The wiring check above already covers every non-null entry, and
+// a token entry can only exist on a non-null entry, so this re-states the
+// requirement rather than re-testing it — but it names the token surface
+// explicitly in the output, which is the list a reviewer actually wants to see.
+const tokenRoutes = inMap.filter((r) => OPERATOR_ROUTE_MAP[r]?.token !== undefined);
+const notSubset: string[] = [];
+for (const r of tokenRoutes) {
+  const entry = OPERATOR_ROUTE_MAP[r];
+  if (!entry?.token) continue;
+  const extra = entry.token.filter((m) => !entry.methods.includes(m));
+  if (extra.length > 0) notSubset.push(`${r} (${extra.join(", ")})`);
+}
+
+console.log(`\n  scope: ${tokenRoutes.length} routes reachable by an API token`);
+if (tokenRoutes.length === 0) {
+  // Not a failure in principle, but it means the token feature reaches nothing
+  // — which is never what someone editing this file intended.
+  check("token allowlist non-empty", false, "EMPTY — no route grants token access");
+} else {
+  check(
+    "token methods are a subset of operator methods",
+    notSubset.length === 0,
+    notSubset.length
+      ? `${notSubset.length} route(s) grant a token MORE than the role: ${notSubset.join(", ")}`
+      : `all ${tokenRoutes.length} within the role's methods`,
+  );
+}
+
 const denied = inMap.length - allowed.length;
 console.log(`\n  summary: ${allowed.length} allowed / ${denied} denied of ${inMap.length}`);
 console.log(`\n=== ${failures === 0 ? "ALL PASS" : "FAILURES"} ===`);

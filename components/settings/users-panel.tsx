@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Link2, Loader2, ShieldOff, UserPlus } from "lucide-react";
+import { KeyRound, Link2, Loader2, ShieldOff, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
@@ -38,6 +38,7 @@ import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { ASSIGNABLE_ROLES } from "@/lib/validators/user-roles";
+import { UserApiPanel } from "@/components/settings/user-api-panel";
 
 type MemberRow = {
   id: string;
@@ -45,6 +46,10 @@ type MemberRow = {
   email: string | null;
   role: string;
   is_active: boolean;
+  /** Per-user API on/off switch (869evpmbz). Independent of is_active. */
+  api_enabled: boolean;
+  /** Un-revoked, un-expired tokens this member holds. */
+  live_tokens: number;
   last_login_at: string | null;
   last_login_ip: string | null;
   joined_at: string;
@@ -73,6 +78,7 @@ export function UsersPanel() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<string>("viewer");
   const [confirmTarget, setConfirmTarget] = useState<MemberRow | null>(null);
+  const [apiTarget, setApiTarget] = useState<MemberRow | null>(null);
   const [linking, setLinking] = useState(false);
 
   const { execute: listExec, isLoading } = useApiCall<ListResponse>();
@@ -207,6 +213,7 @@ export function UsersPanel() {
                   <th className="px-4 py-2 font-medium">Last login</th>
                   <th className="px-4 py-2 font-medium">Last IP</th>
                   <th className="px-4 py-2 font-medium">Status</th>
+                  <th className="px-4 py-2 font-medium">API</th>
                   <th className="px-4 py-2" />
                 </tr>
               </thead>
@@ -259,6 +266,25 @@ export function UsersPanel() {
                         ) : (
                           <Badge variant="destructive">Deactivated</Badge>
                         )}
+                      </td>
+                      <td className="px-4 py-2">
+                        {/* One button, not a switch: the switch itself lives in
+                            the sheet next to the tokens it governs, because "API
+                            on" and "has a live token" are two conditions that
+                            only make sense read together. */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setApiTarget(m)}
+                        >
+                          <KeyRound className="size-4" aria-hidden />
+                          {m.api_enabled ? "On" : "Off"}
+                          {m.live_tokens > 0 ? (
+                            <Badge variant="outline" className="ml-1 text-[10px]">
+                              {m.live_tokens}
+                            </Badge>
+                          ) : null}
+                        </Button>
                       </td>
                       <td className="px-4 py-2 text-right">
                         {/* Link Google account — OWNER ONLY and SELF ONLY.
@@ -430,6 +456,17 @@ export function UsersPanel() {
           </div>
         </div>
       </FormDialog>
+
+      {apiTarget ? (
+        <UserApiPanel
+          memberId={apiTarget.id}
+          memberLabel={apiTarget.email ?? apiTarget.user_id}
+          apiEnabled={apiTarget.api_enabled}
+          open={apiTarget !== null}
+          onOpenChange={(o) => !o && setApiTarget(null)}
+          onChanged={refresh}
+        />
+      ) : null}
 
       <AlertDialog
         open={confirmTarget !== null}

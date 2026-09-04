@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-03_
+_Last updated: 2026-09-04_
 
 ## A sending number can be HALF-configured: sends work, opt-out intake is dark (2026-09-03)
 
@@ -2162,3 +2162,95 @@ on *every* approve-send for as long as the backlog sat above the line, because a
 unwindowed breach does not clear on its own. Warnings on a persistent condition
 must be deduped over a period (`notifyGuardrailOncePerDay`), or people learn to
 ignore the channel — and then the alerts that matter go unread too.
+
+## A capability flag is the mirror image of a kill switch, so its default flips (2026-09-04)
+
+`org_members.is_active` (0175) defaults **TRUE**: it describes something every
+member already had, so the migration had to change nothing. `org_members.
+api_enabled` (0176) defaults **FALSE**, for the same reason read the other way —
+it *creates* a capability, so nobody should get it merely by having the migration
+applied. Copying the neighbouring column's default would have switched API access
+on for every existing member the moment 0176 ran.
+
+The corollary: deactivation forces `api_enabled = false`, even though `is_active`
+alone already blocks every token. Not redundancy — it is the half that survives
+**re**activation. Without it, restoring an account silently restores API access,
+and the Owner re-grants a capability they never revisited.
+
+## "Read-only" is not an HTTP method in this codebase (2026-09-04)
+
+The obvious design for a read-only API token is "GET only; everything else 405".
+It is wrong here, and measurably so: **every endpoint that can compute an
+audience number is a POST**, because its input is a filter object too big for a
+query string — `campaigns/audience-preview`, `segments/overlaps`,
+`segments/[id]/rules/preview`. A method rule 405s exactly the endpoints the token
+exists to read, while still waving through any future GET that turns out to
+mutate.
+
+So `OPERATOR_ROUTE_MAP` entries carry an explicit `token?: HttpMethod[]` naming
+the (route, method) pairs a token may use. Absent = denied, matching the
+operator gate's structural default. It **must be a subset of `methods`** —
+TypeScript cannot express "subset of a sibling field", so
+`scripts/test-route-map-coverage.ts` asserts it.
+
+Generalisation: when a safety property is expressed as a rule *about* a
+mechanism ("mutating verbs"), check the mechanism actually correlates with the
+property in THIS codebase before relying on it. Naming the permitted set is
+longer and cannot be wrong by accident.
+
+## A cached count of a rolling window is not merely stale — it answers a different question (2026-09-04)
+
+`segment_stats.rule_filtered_count` is written only by a POST, and no cron
+refreshes it. That alone makes it stale. But the segments that matter here use
+`in_use_in_campaign_last_period`, whose SQL anchors on `now()` — so the stored
+number describes *the week it was computed in*, and drifts even when no data
+changes. Measured 2026-09-04: "Not Used Last 1 Week" held 610,148 stamped
+2026-07-16, with 682,558 distinct contacts messaged since.
+
+Two rules follow. **Any endpoint serving a rollup must return `computed_at` in
+the payload**, so the caller can judge the age instead of being misled about it
+— `/api/audience/fresh-counts` returns `computed_at` and `stale_seconds` on
+every response. And **"the rollup has not run" must not be reported as zero**:
+that endpoint answers 503, because an agent reading `0` as "no leads available"
+is a worse failure than an error.
+
+## Two names for the same English phrase will disagree forever (2026-09-04)
+
+`fresh-counts` reports `not_used`, defined as "not snapshotted into a campaign
+pool in the window" — deliberately the same definition as the
+`in_use_in_campaign_last_period` rule, so the endpoint and the operator's "Not
+Used N Days" segments reconcile. The more literal "not messaged" reading
+(`stage_sends`, `status='sent'`) was built first and rejected: it disagreed with
+the segments by ~24K contacts, and cost 26–40s against production versus 13.5s,
+because `stage_sends` is 3,441 MB against the pool's 302 MB. Making it fast
+needed a covering index on `stage_sends` — write amplification on the send path.
+
+When a new surface reports a quantity a screen already reports, adopt the
+existing definition or rename the field. Do not ship a second definition under
+the first one's name.
+
+## An alert that fires per-request needs the period in its key (2026-09-04)
+
+`notifyOnTransition` sends on the transition into `firing` and stays quiet while
+the condition persists — correct for a cron that re-evaluates a standing
+condition, wrong for a per-request trip like "this token was denied again". A
+stable key alerts once and then goes silent for exactly as long as the probing
+continues, which is backwards.
+
+Putting the current hour in the alert key (`api-token-denials:<id>:<YYYY-MM-DDTHH>`)
+makes "at most one message per token per hour" fall out of the existing
+machinery, with no second piece of state to keep and no new table.
+
+## Lazy seeding means a feature can be untested in production and look shipped (2026-09-04)
+
+`provider_route_aliases` shipped with 0175 and held **0 rows in production** ever
+since, because `loadAliasTable()` seeds on the first operator page load and no
+operator had signed in. Every check was green; the redactor had simply never
+executed against production data.
+
+Two lessons. A table that "ships empty" and fills on first *use* has not been
+exercised by shipping — check row counts, not deploy status, before calling such
+a path verified. And when a seed script is written for one of these, **have it
+call the real seeding function** rather than reimplement the rule: a second
+implementation of "which provider gets Route B" only has to disagree once to
+produce two different Route Bs.

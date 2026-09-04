@@ -8,17 +8,23 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { requestIp, requestUserAgent, writeAuditLog } from "@/lib/audit";
 import { deactivateMember, reactivateMember } from "@/lib/auth/deactivate";
-import { changeRoleSchema, setActiveSchema } from "@/lib/validators/users";
+import {
+  changeRoleSchema,
+  setActiveSchema,
+  setApiEnabledSchema,
+} from "@/lib/validators/users";
 
 // Member mutations for the Owner-only Users screen (ClickUp 869et3vm1 Phase 1).
 //
-// PATCH takes EITHER { role } OR { is_active }, never both. They are different
-// kinds of act with different consequences — a role change is reversible and
-// local, a deactivation revokes sessions and disarms scheduled sends — and
-// merging them into one body would make the audit trail ambiguous about which
-// one the Owner actually intended.
+// PATCH takes EXACTLY ONE of { role }, { is_active } or { api_enabled }, never
+// two. They are different kinds of act with different consequences — a role
+// change is reversible and local, a deactivation revokes sessions and disarms
+// scheduled sends, an API switch-off kills every token of that member on their
+// next request while leaving their browser session untouched — and merging them
+// into one body would make the audit trail ambiguous about which one the Owner
+// actually intended.
 
-type Body = { role?: unknown; is_active?: unknown };
+type Body = { role?: unknown; is_active?: unknown; api_enabled?: unknown };
 
 export async function PATCH(
   req: NextRequest,
@@ -43,10 +49,11 @@ export async function PATCH(
 
   const wantsRole = "role" in json;
   const wantsActive = "is_active" in json;
-  if (wantsRole === wantsActive) {
+  const wantsApiEnabled = "api_enabled" in json;
+  if ([wantsRole, wantsActive, wantsApiEnabled].filter(Boolean).length !== 1) {
     return apiError(
       400,
-      "Send exactly one of `role` or `is_active`.",
+      "Send exactly one of `role`, `is_active` or `api_enabled`.",
       API_ERROR_CODES.VALIDATION,
     );
   }
@@ -57,6 +64,7 @@ export async function PATCH(
       user_id: org_members.user_id,
       role: org_members.role,
       is_active: org_members.is_active,
+      api_enabled: org_members.api_enabled,
       invited_email: org_members.invited_email,
     })
     .from(org_members)
@@ -68,6 +76,55 @@ export async function PATCH(
   }
   const member = target[0];
   const label = member.invited_email ?? member.user_id;
+
+  // ── api_enabled ──────────────────────────────────────────────────────────
+  //
+  // Handled BEFORE the last-owner and self-modification guards below, because
+  // NEITHER APPLIES. Toggling API access cannot lock the org out of anything:
+  // it grants and revokes token access only, and sessions are untouched. And an
+  // Owner switching their OWN API access on is the normal first use of this
+  // feature — refusing it as "self modification" would make the switch
+  // unreachable in a single-owner org, which is the org this ships into.
+  if (wantsApiEnabled) {
+    const parsedApi = setApiEnabledSchema.safeParse(json);
+    if (!parsedApi.success) {
+      return apiError(
+        400,
+        parsedApi.error.issues[0]?.message ?? "Invalid input",
+        API_ERROR_CODES.VALIDATION,
+        { field: "api_enabled" },
+      );
+    }
+    const nextApi = parsedApi.data.api_enabled;
+    if (nextApi === member.api_enabled) {
+      return NextResponse.json({ ok: true, unchanged: true });
+    }
+
+    await db
+      .update(org_members)
+      .set({ api_enabled: nextApi })
+      .where(and(eq(org_members.id, memberId), eq(org_members.org_id, orgId)));
+
+    // No token rows are touched. Turning the switch off does not revoke
+    // anything — resolveApiToken() reads api_enabled in the SAME query that
+    // resolves the token, so every one of that member's tokens 401s on its very
+    // next request and starts working again the moment it is switched back on.
+    // That reversibility is the point: revoke is for a token that leaked, this
+    // is for "pause the robot".
+    await writeAuditLog({
+      orgId,
+      actorUserId: user.id,
+      action: nextApi ? "user.api_enabled" : "user.api_disabled",
+      entityType: "org_member",
+      entityId: member.user_id,
+      summary: `${nextApi ? "Enabled" : "Disabled"} API access for ${label}`,
+      metadata: { api_enabled: nextApi },
+      ip: requestIp(req),
+      userAgent: requestUserAgent(req),
+    });
+
+    return NextResponse.json({ ok: true, api_enabled: nextApi });
+  }
 
   // ── Never let the org lock itself out ────────────────────────────────────
   //

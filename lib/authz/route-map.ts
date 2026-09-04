@@ -28,7 +28,30 @@
 export type HttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 
 /** `null` = denied for operator. Otherwise the methods they may use. */
-export type OperatorAccess = null | { methods: HttpMethod[] };
+export type OperatorAccess = null | {
+  methods: HttpMethod[];
+  /**
+   * The (route, method) pairs a PERSONAL API TOKEN may use — ClickUp 869evpmbz.
+   *
+   * ⚠️ ABSENT MEANS DENIED, for tokens, exactly as absence from this map means
+   * denied for the operator. A route added tomorrow is unreachable by every
+   * token until someone writes this field, whatever role the token resolves to.
+   *
+   * ⚠️ AND IT IS AN EXPLICIT ALLOWLIST, NOT "read_only ⇒ GET". Deriving
+   * read-only from the HTTP method was the original design and it is the wrong
+   * axis in this codebase: every endpoint that can compute an audience number
+   * is a POST, because its input is a filter object too big for a query string
+   * (campaigns/audience-preview, segments/overlaps, segments/[id]/rules/
+   * preview). A method rule would have 405'd exactly the endpoints the token
+   * exists to read, while still permitting any future GET that turns out to
+   * mutate. Naming the pairs says what we mean.
+   *
+   * MUST BE A SUBSET OF `methods`. A token can never exceed what its owning
+   * role may do — it is that member's authority, narrowed, never widened.
+   * scripts/test-route-map-coverage.ts asserts the subset property.
+   */
+  token?: HttpMethod[];
+};
 
 export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // ── brands ─────────────────────────────────────────────────────────────
@@ -40,7 +63,13 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "brands/[id]/restore": null, // not granted by the access matrix
   "brands/[id]/short-domains": null, // settings / provider registry -- Owner only
   "brands/[id]/short-domains/[domainId]": null, // settings / provider registry -- Owner only
-  "brands/list": { methods: ["GET"] },
+  "brands/list": { methods: ["GET"], token: ["GET"] },
+
+  // ── audience ─────────────────────────────────────────────
+  // AGGREGATES ONLY: group names and integers, no rows and no contact fields
+  // (ClickUp 869evpmbz). Reachable by a token because answering "how many
+  // fresh leads" is the whole reason the token exists.
+  "audience/fresh-counts": { methods: ["GET"], token: ["GET"] },
 
   // ── audit-log ─────────────────────────────────────────────────────────
   // Owner-only audit feed. Denied to the operator: it is a record OF them.
@@ -56,13 +85,13 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // Campaigns & stages: the operator runs these end-to-end. Aggregate
   // counts only -- every contact-level sibling is denied below.
   "campaigns": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "campaigns/[campaignId]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "campaigns/[campaignId]/activity": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "campaigns/[campaignId]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
+  "campaigns/[campaignId]/activity": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
   "campaigns/[campaignId]/activity/messages": null, // contact-level rows or CSV export/import
   "campaigns/[campaignId]/archive": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/behavioral-split": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/behavioral-split/preview": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "campaigns/[campaignId]/click-report": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "campaigns/[campaignId]/click-report": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
   "campaigns/[campaignId]/drip-config": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/drip-followups": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/drip-journeys": null, // drip / partner intake -- hidden from the operator
@@ -73,10 +102,10 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "campaigns/[campaignId]/export-clickers": null, // contact-level rows or CSV export/import
   "campaigns/[campaignId]/restore": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/send-circuit": null, // compliance control -- Owner only
-  "campaigns/[campaignId]/stages": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "campaigns/[campaignId]/stages/[stageId]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "campaigns/[campaignId]/stages": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
+  "campaigns/[campaignId]/stages/[stageId]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
   "campaigns/[campaignId]/stages/[stageId]/archive": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "campaigns/[campaignId]/stages/[stageId]/audience-count": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "campaigns/[campaignId]/stages/[stageId]/audience-count": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
   "campaigns/[campaignId]/stages/[stageId]/duplicate": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/export-phones": null, // contact-level rows or CSV export/import
   "campaigns/[campaignId]/stages/[stageId]/import": null, // contact-level rows or CSV export/import
@@ -113,9 +142,9 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "campaigns/[campaignId]/stages/lane-counts": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/status": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/upload-contacts": null, // contact-level rows or CSV export/import
-  "campaigns/audience-preview": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "campaigns/audience-preview": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["POST"] },
   "campaigns/bulk-status": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "campaigns/list": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "campaigns/list": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
 
   // ── carrier ─────────────────────────────────────────────────────────────
   "carrier/triage-queue": null, // cron / webhook / import machinery -- no operator session reaches these
@@ -152,9 +181,9 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // AGGREGATES ONLY (verified: count(*), count(distinct), carrier histogram --
   // no rows, no phones). Explicitly allowed so the operator can see audience
   // size without audience identity.
-  "contacts/base-stats": { methods: ["GET"] },
+  "contacts/base-stats": { methods: ["GET"], token: ["GET"] },
   "contacts/bulk-apply-groups": null, // audience block -- contact-level data
-  "contacts/carrier-stats": { methods: ["GET"] },
+  "contacts/carrier-stats": { methods: ["GET"], token: ["GET"] },
   "contacts/export": null, // audience block -- contact-level data
   "contacts/import-attributes": null, // audience block -- contact-level data
   "contacts/list": null, // audience block -- contact-level data
@@ -165,7 +194,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // Creatives: view + create + edit. Archive/restore denied -- archive IS
   // delete here, and the matrix says no delete.
   "creatives": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "creatives/[id]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "creatives/[id]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
   // 869et3vm1 Phase 3: reachable so the DELETION QUEUE can intercept it. The
   // handler diverts an operator into a deletion_requests row and returns 202 —
   // nothing is archived without an owner decision.
@@ -176,7 +205,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "creatives/bulk-score": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/bulk-update": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/ids": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "creatives/list": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "creatives/list": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
 
   // ── cron ─────────────────────────────────────────────────────────────
   "cron/audit-digest": null, // cron / webhook machinery -- no operator session reaches these
@@ -190,6 +219,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/lookup-worker": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/propagate-clickers": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-contact-stats": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/refresh-fresh-counts": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-offer-group-report": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/report-rollup": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/send-preflight": null, // cron / webhook / import machinery -- no operator session reaches these
@@ -203,10 +233,10 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // ── dashboard ─────────────────────────────────────────────────────────────
   // Reports/dashboard/today: aggregates only. Provider identity is replaced
   // by a route alias in redactForRole().
-  "dashboard/active-campaigns": { methods: ["GET"] },
-  "dashboard/active-stages": { methods: ["GET"] },
-  "dashboard/daily-activity": { methods: ["GET"] },
-  "dashboard/stats": { methods: ["GET"] },
+  "dashboard/active-campaigns": { methods: ["GET"], token: ["GET"] },
+  "dashboard/active-stages": { methods: ["GET"], token: ["GET"] },
+  "dashboard/daily-activity": { methods: ["GET"], token: ["GET"] },
+  "dashboard/stats": { methods: ["GET"], token: ["GET"] },
 
   // ── drip ─────────────────────────────────────────────────────────────
   "drip/why-not-routed": null, // drip / partner intake -- hidden from the operator
@@ -224,7 +254,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // ── me ─────────────────────────────────────────────────────────────
   // Shell plumbing: /api/me hydrates the auth context, /api/members feeds the
   // campaign assignee picker (ids + roles only, no email).
-  "me": { methods: ["GET"] },
+  "me": { methods: ["GET"], token: ["GET"] },
 
   // ── members ─────────────────────────────────────────────────────────────
   // Shell plumbing: /api/me hydrates the auth context, /api/members feeds the
@@ -238,7 +268,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "networks/[id]": { methods: ["GET"] },
   "networks/[id]/archive": null, // not granted by the access matrix
   "networks/[id]/restore": null, // not granted by the access matrix
-  "networks/list": { methods: ["GET"] },
+  "networks/list": { methods: ["GET"], token: ["GET"] },
 
   // ── offers ─────────────────────────────────────────────────────────────
   // Registry is VIEW-ONLY (matrix). GET only -- these files export POST and
@@ -248,9 +278,9 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "offers/[offerId]/archive": null, // not granted by the access matrix
   "offers/[offerId]/landing-pages": null, // offer destination URLs -- hidden by the matrix
   "offers/[offerId]/landing-pages/[pageId]": null, // offer destination URLs -- hidden by the matrix
-  "offers/[offerId]/report": { methods: ["GET"] },
+  "offers/[offerId]/report": { methods: ["GET"], token: ["GET"] },
   "offers/[offerId]/restore": null, // not granted by the access matrix
-  "offers/list": { methods: ["GET"] },
+  "offers/list": { methods: ["GET"], token: ["GET"] },
 
   // ── opt-ins ─────────────────────────────────────────────────────────────
   "opt-ins/[id]": null, // audience block -- contact-level data
@@ -277,7 +307,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // ── provider-phones ─────────────────────────────────────────────────────────────
   // Needed to choose a sending number. Provider identity is redacted to a
   // route alias; the operator selects a Route, never an SSP name.
-  "provider-phones/list": { methods: ["GET"] },
+  "provider-phones/list": { methods: ["GET"], token: ["GET"] },
 
   // ── provider-types ─────────────────────────────────────────────────────────────
   "provider-types": null, // settings / provider registry -- Owner only
@@ -306,15 +336,15 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // The stage form's route picker fetches this. GET only, and the response is
   // aliased by redactForRole -- the operator picks "Route B", never an SSP name.
   // Denying it would leave the operator unable to choose a sending route at all.
-  "providers/list": { methods: ["GET"] },
+  "providers/list": { methods: ["GET"], token: ["GET"] },
 
   // ── reports ─────────────────────────────────────────────────────────────
   // Reports/dashboard/today: aggregates only. Provider identity is replaced
   // by a route alias in redactForRole().
-  "reports/delivery": { methods: ["GET"] },
+  "reports/delivery": { methods: ["GET"], token: ["GET"] },
   "reports/epc-monitors": null, // maintenance job, not a report
   "reports/partners": null, // drip / partner intake -- hidden from the operator
-  "reports/performance": { methods: ["GET"] },
+  "reports/performance": { methods: ["GET"], token: ["GET"] },
   "reports/rebuild-counted-clickers": null, // maintenance job, not a report
 
   // ── result-import-mappings ─────────────────────────────────────────────────────────────
@@ -341,7 +371,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // Segments: view + create/edit. Every response here is COUNTS ONLY --
   // audience/contacts/export siblings are denied below.
   "segments": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "segments/[id]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "segments/[id]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
   // 869et3vm1 Phase 3: reachable so the DELETION QUEUE can intercept it. The
   // handler diverts an operator into a deletion_requests row and returns 202 —
   // nothing is archived without an owner decision.
@@ -354,21 +384,21 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "segments/[id]/export-contacts": null, // contact rows / CSV of contacts
   "segments/[id]/refresh-stats": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "segments/[id]/restore": null, // archive IS delete here -- goes through the deletion queue in Phase 3
-  "segments/[id]/rules": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "segments/[id]/rules": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
   "segments/[id]/rules/[ruleId]": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "segments/[id]/rules/preview": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "segments/[id]/rules/preview": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["POST"] },
   "segments/[id]/rules/reorder": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "segments/export": null, // contact rows / CSV of contacts
-  "segments/list": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "segments/overlaps": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "segments/list": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
+  "segments/overlaps": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["POST"] },
 
   // ── sends ─────────────────────────────────────────────────────────────
   "sends/autopilot": null, // compliance control -- Owner only
   "sends/pause": null, // compliance control -- Owner only
   // Reports/dashboard/today: aggregates only. Provider identity is replaced
   // by a route alias in redactForRole().
-  "sends/state": { methods: ["GET"] },
-  "sends/today": { methods: ["GET"] },
+  "sends/state": { methods: ["GET"], token: ["GET"] },
+  "sends/today": { methods: ["GET"], token: ["GET"] },
 
   // ── settings ─────────────────────────────────────────────────────────────
   "settings/notifications": null, // settings / provider registry -- Owner only
@@ -409,6 +439,12 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
 
   // ── users ─────────────────────────────────────────────────────────────
   "users/[memberId]": null, // settings / provider registry -- Owner only
+  // API-token administration (ClickUp 869evpmbz). Denied to the operator, and
+  // absent from every `token` list so a token can never mint, list or revoke a
+  // token — including its own.
+  "users/[memberId]/api-usage": null, // settings / provider registry -- Owner only
+  "users/[memberId]/tokens": null, // settings / provider registry -- Owner only
+  "users/[memberId]/tokens/[tokenId]": null, // settings / provider registry -- Owner only
   "users/invite": null, // settings / provider registry -- Owner only
   "users/invites/[inviteId]": null, // settings / provider registry -- Owner only
   "users/list": null, // settings / provider registry -- Owner only

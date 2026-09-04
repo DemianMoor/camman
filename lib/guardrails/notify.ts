@@ -62,7 +62,7 @@ export async function notifyGuardrail(n: GuardrailNotice): Promise<void> {
   await writeAuditLog({
     orgId: n.orgId,
     actorUserId: n.actorUserId ?? null,
-    action: n.event as never,
+    action: n.event,
     entityType: n.entityType ?? null,
     entityId: n.entityId ?? null,
     summary: n.headline,

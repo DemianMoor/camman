@@ -1,5 +1,6 @@
 import "./_env-preload";
 
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -8,6 +9,8 @@ import { createClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 
 import { OPERATOR_ROUTE_MAP, type HttpMethod } from "@/lib/authz/route-map";
+import { allowedTokenRoutes } from "@/lib/authz/operator-gate";
+import { TOKEN_REQUESTS_PER_HOUR } from "@/lib/api/token-usage";
 
 // End-to-end operator access verification (ClickUp 869et3vm1, Phase 2).
 //
@@ -551,11 +554,342 @@ async function main() {
       `      absence of a credential)`,
   );
 
+  // ── 6. API TOKENS (ClickUp 869evpmbz) ───────────────────────────────────
+  //
+  // ⚠️ THE POINT OF THIS SECTION IS THAT IT RE-RUNS THE SWEEP, not that it adds
+  // a few auth cases. Sections 2 and 3 proved the redactor and the contact-field
+  // rules hold for a SESSION. A token takes a different path into
+  // requireApiMembership(), so "the operator cannot see provider names" is a
+  // fresh claim for tokens and is asserted the same way, against the same
+  // forbidden-string scope, rather than assumed to carry over.
+  //
+  // Tokens are minted by direct INSERT rather than through the Owner API: the
+  // point here is the AUTH path, and provisioning through HTTP would need an
+  // Owner session this script does not have. The hash is computed exactly as
+  // lib/api/tokens.ts computes it — if that ever changes, every case below
+  // fails loudly rather than silently testing nothing.
+  console.log(`\n--- 6. API TOKENS: auth gates, allowlist, and the same leak sweep ---`);
+
+  const mintToken = async (opts: {
+    label: string;
+    memberId: string;
+    revoked?: boolean;
+    expired?: boolean;
+  }) => {
+    const plaintext = `cmt_${randomBytes(32).toString("base64url")}`;
+    const hash = createHash("sha256").update(plaintext, "utf-8").digest("hex");
+    const [row] = await sql<{ id: string }[]>`
+      INSERT INTO api_tokens
+        (org_id, org_member_id, token_hash, token_prefix, name, revoked_at, expires_at)
+      VALUES (
+        ${org.id}::uuid, ${opts.memberId}::uuid, ${hash},
+        ${plaintext.slice(0, 10)}, ${`verify:${opts.label}`},
+        ${opts.revoked ? new Date().toISOString() : null}::timestamptz,
+        ${opts.expired ? new Date(Date.now() - 60_000).toISOString() : null}::timestamptz
+      )
+      RETURNING id`;
+    return { plaintext, id: row.id };
+  };
+
+  const [memberRow] = await sql<{ id: string }[]>`
+    SELECT id FROM org_members WHERE user_id = ${userId}::uuid AND org_id = ${org.id}::uuid`;
+  const memberId = memberRow.id;
+
+  const tokenGet = async (
+    path: string,
+    method: HttpMethod,
+    plaintext: string,
+  ) => {
+    const r = await fetch(`${BASE}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${plaintext}`,
+        "Content-Type": "application/json",
+      },
+      body: method === "GET" || method === "DELETE" ? undefined : "{}",
+      redirect: "manual",
+    });
+    return { status: r.status, body: await r.text() };
+  };
+
+  const auditCount = async (action: string, tokenId: string) => {
+    const [r] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM audit_log
+      WHERE org_id = ${org.id}::uuid AND action = ${action} AND entity_id = ${tokenId}`;
+    return r?.n ?? 0;
+  };
+
+  // A route every case below probes. GET, token-allowed, and it returns a real
+  // body, so a 2xx here is a meaningful pass rather than an empty one.
+  const PROBE = "/api/contacts/base-stats";
+  // Token-DENIED but operator-ALLOWED. This is the pair that proves the token
+  // allowlist is a real second gate: the same member reaching the same route
+  // with a session gets through, and with a token does not.
+  const TOKEN_DENIED_PROBE = "/api/campaigns";
+
+  // 6a — api_enabled false ⇒ 401, even with a perfectly valid token.
+  await sql`UPDATE org_members SET api_enabled = false WHERE id = ${memberId}::uuid`;
+  const disabledTok = await mintToken({ label: "api-disabled", memberId });
+  {
+    const { status } = await tokenGet(PROBE, "GET", disabledTok.plaintext);
+    if (status === 401) pass("token of an api_enabled=false member -> 401");
+    else fail(`token of an api_enabled=false member -> ${status} (expected 401)`);
+  }
+
+  // Everything below needs the switch on.
+  await sql`UPDATE org_members SET api_enabled = true WHERE id = ${memberId}::uuid`;
+
+  // 6b — the switch is genuinely what gated it: same token, now allowed.
+  {
+    const { status } = await tokenGet(PROBE, "GET", disabledTok.plaintext);
+    if (status >= 200 && status < 300) {
+      pass("the SAME token works once api_enabled is on (the switch is the gate)");
+    } else {
+      fail(`token still refused after enabling API access -> ${status}`);
+    }
+  }
+
+  // 6c — revoked ⇒ 401.
+  {
+    const t = await mintToken({ label: "revoked", memberId, revoked: true });
+    const { status } = await tokenGet(PROBE, "GET", t.plaintext);
+    if (status === 401) pass("revoked token -> 401");
+    else fail(`revoked token -> ${status} (expected 401)`);
+  }
+
+  // 6d — expired ⇒ 401.
+  {
+    const t = await mintToken({ label: "expired", memberId, expired: true });
+    const { status } = await tokenGet(PROBE, "GET", t.plaintext);
+    if (status === 401) pass("expired token -> 401");
+    else fail(`expired token -> ${status} (expected 401)`);
+  }
+
+  // 6e — a garbage bearer ⇒ 401, and NOTHING is written for it (an unresolved
+  // token is a scanner; it must not be able to create audit rows).
+  {
+    const before = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM audit_log WHERE org_id = ${org.id}::uuid`;
+    const { status } = await tokenGet(PROBE, "GET", "cmt_not-a-real-token");
+    const after = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM audit_log WHERE org_id = ${org.id}::uuid`;
+    if (status === 401) pass("unknown token -> 401");
+    else fail(`unknown token -> ${status} (expected 401)`);
+    if (after[0].n === before[0].n) {
+      pass("an unknown token wrote no audit rows (a scanner cannot fill the log)");
+    } else {
+      fail(`an unknown token wrote ${after[0].n - before[0].n} audit row(s)`);
+    }
+  }
+
+  // 6f — non-flagged route ⇒ 403 AND an api.denied row.
+  const liveTok = await mintToken({ label: "live", memberId });
+  {
+    const { status } = await tokenGet(TOKEN_DENIED_PROBE, "GET", liveTok.plaintext);
+    const denials = await auditCount("api.denied", liveTok.id);
+    if (status === 403) pass(`token on a non-allowlisted route (${TOKEN_DENIED_PROBE}) -> 403`);
+    else fail(`token on a non-allowlisted route -> ${status} (expected 403)`);
+    if (denials >= 1) pass(`the denial wrote an api.denied audit row (${denials})`);
+    else fail("the denial wrote NO api.denied row — it would be invisible to the Owner");
+  }
+
+  // 6g — the SAME route with a SESSION succeeds. Without this the 403 above
+  // could just mean "that route is broken", and the allowlist would look
+  // effective while testing nothing.
+  {
+    const { status } = await get(TOKEN_DENIED_PROBE, "GET");
+    if (status >= 200 && status < 300) {
+      pass(`the same route is reachable with a SESSION -> ${status} (the allowlist is the difference)`);
+    } else {
+      fail(
+        `${TOKEN_DENIED_PROBE} is ${status} for a session too — the 403 above proves nothing`,
+      );
+    }
+  }
+
+  // 6h — a method NOT in the route's token list ⇒ 403, on a route whose token
+  // list is GET only. This is what replaces "read_only ⇒ GET".
+  {
+    const { status } = await tokenGet(PROBE, "POST", liveTok.plaintext);
+    // 403 from our gate, or 405 if Next refuses the unexported method first.
+    // Both are refusals; only a 2xx is a failure.
+    if (status === 403 || status === 405) {
+      pass(`POST to a GET-only token route -> ${status}`);
+    } else {
+      fail(`POST to a GET-only token route -> ${status} (expected 403/405)`);
+    }
+  }
+
+  // 6i — rate limit. Pre-loading the counter to the limit rather than firing 300
+  // real requests: the assertion is that the GATE refuses at the boundary, and
+  // 300 round-trips against preview would add minutes to every run to test the
+  // same branch. The counter row IS the limiter's only state, so setting it is
+  // equivalent to having spent it.
+  {
+    const hourStart = new Date();
+    hourStart.setUTCMinutes(0, 0, 0);
+    await sql`
+      INSERT INTO api_token_usage (org_id, api_token_id, window_kind, window_start, count)
+      VALUES (${org.id}::uuid, ${liveTok.id}::uuid, 'request', ${hourStart.toISOString()}::timestamptz, ${TOKEN_REQUESTS_PER_HOUR})
+      ON CONFLICT (api_token_id, window_kind, window_start)
+      DO UPDATE SET count = ${TOKEN_REQUESTS_PER_HOUR}`;
+    const { status } = await tokenGet(PROBE, "GET", liveTok.plaintext);
+    const limited = await auditCount("api.rate_limited", liveTok.id);
+    if (status === 429) pass(`token over the hourly limit -> 429`);
+    else fail(`token over the hourly limit -> ${status} (expected 429)`);
+    if (limited >= 1) pass(`the trip wrote an api.rate_limited audit row (${limited})`);
+    else fail("the rate-limit trip wrote NO api.rate_limited row");
+
+    // The Telegram side latches through alert_state, so the row is the
+    // observable proof that a send was owed. Asserting delivery itself would
+    // mean asserting Telegram is up, which is not what this verifies.
+    const [alert] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM alert_state
+      WHERE alert_key LIKE ${`api-token-ratelimit:${liveTok.id}:%`}`;
+    if ((alert?.n ?? 0) >= 1) {
+      pass("the trip armed an alert_state row (a Telegram send was owed)");
+    } else {
+      fail("no alert_state row — the rate-limit trip would never page anyone");
+    }
+
+    // And the refusal must NOT have burned more quota (the guard is on the
+    // DO UPDATE). If it had, a retry loop would extend its own lockout.
+    const [usage] = await sql<{ count: number }[]>`
+      SELECT count FROM api_token_usage
+      WHERE api_token_id = ${liveTok.id}::uuid AND window_kind = 'request'
+        AND window_start = ${hourStart.toISOString()}::timestamptz`;
+    if (Number(usage?.count) === TOKEN_REQUESTS_PER_HOUR) {
+      pass("a refused request did NOT increment the counter (rejections don't burn quota)");
+    } else {
+      fail(
+        `a refused request moved the counter to ${usage?.count} (expected ${TOKEN_REQUESTS_PER_HOUR})`,
+      );
+    }
+    // Clear it so the sweep below is not rate-limited.
+    await sql`DELETE FROM api_token_usage WHERE api_token_id = ${liveTok.id}::uuid`;
+  }
+
+  // 6j — THE SWEEP. Every token-allowed GET, fetched WITH TOKEN AUTH, run
+  // through the same forbidden-string and contact-field assertions as sections
+  // 2 and 3. This is the check the card asks for, and the reason this section
+  // lives in this file rather than in one of its own.
+  const tokenGetRoutes = allowedTokenRoutes()
+    .filter((t) => t.methods.includes("GET"))
+    .map((t) => t.route)
+    .filter((r) => exportedMethods(r).includes("GET"));
+
+  console.log(`  scope: ${tokenGetRoutes.length} token-allowed GET routes swept with bearer auth`);
+  if (tokenGetRoutes.length === 0) fail("token GET sweep scope is EMPTY");
+
+  // The limiter is real and this sweep spends it. Raise the ceiling for the run
+  // by clearing the counter rather than by special-casing the code path.
+  await sql`DELETE FROM api_token_usage WHERE api_token_id = ${liveTok.id}::uuid`;
+
+  let tokenReachable = 0;
+  let token2xx = 0;
+  const tokenBlocked: string[] = [];
+  const tokenLeaks: string[] = [];
+  for (const route of tokenGetRoutes) {
+    const { status, body } = await tokenGet(
+      concreteUrl(route, ids),
+      "GET",
+      liveTok.plaintext,
+    );
+    if (status === 401 || status === 403 || status === 429) {
+      tokenBlocked.push(`${route} -> ${status}`);
+      continue;
+    }
+    tokenReachable++;
+    if (status < 200 || status >= 300) continue;
+    token2xx++;
+
+    const lower = body.toLowerCase();
+    for (const f of forbidden) {
+      if (new RegExp(`(^|[^a-z0-9])${f.toLowerCase()}([^a-z0-9]|$)`).test(lower)) {
+        tokenLeaks.push(`${route} leaked provider "${f}"`);
+        break;
+      }
+    }
+    if (body.includes("contact_id")) {
+      tokenLeaks.push(`${route} contains contact_id`);
+    }
+    for (const m of body.match(/\+?1?\d{10,15}/g) ?? []) {
+      const digits = m.replace(/[^0-9]/g, "");
+      if (digits.length >= 10 && !senders.has(digits)) {
+        tokenLeaks.push(`${route} contains a non-sending phone ending ${digits.slice(-4)}`);
+        break;
+      }
+    }
+  }
+  if (tokenBlocked.length === 0) {
+    pass(`all ${tokenReachable} token-allowed GET routes were reachable by token`);
+  } else {
+    fail(`${tokenBlocked.length} token-allowed route(s) refused a valid token:`);
+    for (const b of tokenBlocked.slice(0, 25)) console.log(`       ${b}`);
+  }
+  console.log(`     of which ${token2xx} returned 2xx (a real body, so a meaningful leak check)`);
+  if (tokenLeaks.length === 0) {
+    pass("no provider identity and no contact field in ANY token response");
+  } else {
+    fail(`${tokenLeaks.length} token response(s) leaked:`);
+    for (const l of tokenLeaks.slice(0, 25)) console.log(`       ${l}`);
+  }
+
+  // 6k — fresh-counts carries group names and integers, and nothing else.
+  {
+    const { status, body } = await tokenGet(
+      "/api/audience/fresh-counts",
+      "GET",
+      liveTok.plaintext,
+    );
+    if (status === 503) {
+      console.log("     fresh-counts: 503 (rollup not computed yet in preview) — shape not checked");
+    } else if (status >= 200 && status < 300) {
+      let bad: string[] = [];
+      try {
+        const parsed = JSON.parse(body) as {
+          by_group?: Record<string, unknown>[];
+        };
+        for (const g of parsed.by_group ?? []) {
+          for (const [k, v] of Object.entries(g)) {
+            // group_name is the ONLY string allowed anywhere in a group entry.
+            if (k === "group_name") {
+              if (typeof v !== "string") bad.push(`group_name is ${typeof v}`);
+              continue;
+            }
+            if (k === "not_used") {
+              for (const [w, n] of Object.entries(v as Record<string, unknown>)) {
+                if (typeof n !== "number") bad.push(`not_used.${w} is ${typeof n}`);
+              }
+              continue;
+            }
+            if (typeof v !== "number") bad.push(`${k} is ${typeof v}, expected number`);
+          }
+        }
+      } catch {
+        bad = ["response was not JSON"];
+      }
+      if (bad.length === 0) {
+        pass("fresh-counts groups carry only a group_name string and integers");
+      } else {
+        fail(`fresh-counts leaked non-count fields: ${bad.slice(0, 5).join(", ")}`);
+      }
+    } else {
+      fail(`fresh-counts -> ${status}`);
+    }
+  }
+
+  // Clean up the tokens this run minted. Revoked rather than deleted would leave
+  // preview accumulating rows every run; these are synthetic and named, so a
+  // targeted delete is safe and keeps the table honest.
+  await sql`DELETE FROM api_tokens WHERE org_id = ${org.id}::uuid AND name LIKE 'verify:%'`;
+
   await sql.end();
   console.log(`\n=== ${failures === 0 ? "ALL PASS" : "FAILURES"} ===`);
   console.log(
     "\n  NOT covered by this run: the Google OAuth sign-in path (no interactive\n" +
-      "  consent from a script) and allowed write methods (would mutate data).",
+      "  consent from a script), allowed write methods (would mutate data), and\n" +
+      "  actual Telegram delivery (asserted as an armed alert_state row instead).",
   );
   process.exit(failures === 0 ? 0 : 1);
 }

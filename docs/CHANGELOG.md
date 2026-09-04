@@ -1735,4 +1735,12 @@ carries the same three buckets as the totals, so the bars sum to the tiles. Also
 `api_token_usage` is untouched and stays the limiter's authority. **No migration.**
   - docs updated: docs/04-features/operator-api-tokens.md, docs/CHANGELOG.md
 
+2026-09-04 — docs: the aggregate 60,000/hour cap is WARN-ONLY PERMANENTLY (Dmytro's decision, card 869et3vm1) —
+the limit is removed, not deferred. `docs/04-features/operator-guardrails.md` previously stated "Dmytro is deciding the
+semantics (per target clock hour vs rolling 60 minutes) separately", which this decision makes false; corrected, and the
+consequence stated plainly (ten stages of 9,999 in one hour now pass — the exact case 869et3vm1 §3 was written to
+prevent; the per-stage 10K/hour cap at kickoff is the only volume BLOCK left). No code change — `decideAggregateCap`
+still computes and reports, it just never refuses. **No migration.**
+  - docs updated: docs/04-features/operator-guardrails.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

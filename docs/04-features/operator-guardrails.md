@@ -23,7 +23,7 @@ reversible, explainable, and costs the send path nothing.
 | Guardrail | Where | Refusal |
 |---|---|---|
 | **Per-stage 10,000 recipients/hour** | Prepare/kickoff, before materialization | 409 `per_stage_hourly_cap` |
-| ~~Aggregate 60,000/hour, org-wide~~ | approve-send, retry-failed | **WARN ONLY since 2026-09-04** — see §2.1 |
+| ~~Aggregate 60,000/hour, org-wide~~ | approve-send, retry-failed | **WARN ONLY, PERMANENTLY** (2026-09-04 decision) — see §2.1 |
 | **URL allowlist** | creative create, bulk create, update | 400 `raw_url_in_body` |
 | **Creative versioning** | creative update | 200 with a **new** creative id |
 | **Deletion requests** | creative archive, segment archive/delete | 202 with a queued request |
@@ -58,10 +58,21 @@ cosmetic: with no window the breach is *continuous* while a backlog sits above
 the line, so an undeduped warn fires on every approve-send and trains everyone to
 ignore it.
 
-⚠️ **Do not re-enable the block without fixing the window first.** The threshold
-arithmetic in `decideAggregateCap` is sound and still tested; the input is not.
-Dmytro is deciding the semantics (per target clock hour vs rolling 60 minutes)
-separately.
+⚠️ **THE BLOCK IS NOT COMING BACK. This is permanent, by decision (2026-09-04).**
+Dmytro removed the aggregate limit outright: there is no clock-hour-vs-rolling-60
+semantics decision pending, and no re-windowing work queued. Earlier revisions of
+this file said the opposite — treat any note about "restoring the block once the
+window is fixed" as superseded.
+
+`decideAggregateCap`'s arithmetic stays in place and stays tested, so the
+threshold still computes and still reports; it simply never refuses. If a future
+card wants an enforcing org-wide cap, it must **fix the window first** — the
+input, not the arithmetic, is what was wrong — but nothing is waiting on that.
+
+**What this gives up, stated plainly:** there is no longer any org-wide volume
+refusal. Ten stages of 9,999 in one hour now pass, which is precisely the case
+card 869et3vm1 §3 was written to prevent. The per-stage cap below is the only
+volume BLOCK that remains.
 
 The per-stage 10,000/hour cap in `kickoff` is untouched and still **blocks** —
 it counts one stage in one materialization window, so it has no equivalent defect.

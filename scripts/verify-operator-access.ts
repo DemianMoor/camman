@@ -625,7 +625,14 @@ async function main() {
   // Token-DENIED but operator-ALLOWED. This is the pair that proves the token
   // allowlist is a real second gate: the same member reaching the same route
   // with a session gets through, and with a token does not.
-  const TOKEN_DENIED_PROBE = "/api/campaigns";
+  //
+  // ⚠️ IT MUST EXPORT GET. The first pick here was /api/campaigns, which turned
+  // out to be POST-only (the collection routes in this codebase are POST; the
+  // GET lives at /list) — so Next returned 405 before any authorization ran, and
+  // the "denied" result was meaningless. Check 6g below is what caught it: it
+  // fetches the same route with a SESSION and fails if that is not a 2xx, so a
+  // probe that is broken for everyone can never be mistaken for a working gate.
+  const TOKEN_DENIED_PROBE = "/api/members";
 
   // 6a — api_enabled false ⇒ 401, even with a perfectly valid token.
   await sql`UPDATE org_members SET api_enabled = false WHERE id = ${memberId}::uuid`;

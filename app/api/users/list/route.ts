@@ -1,8 +1,8 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
 import { db } from "@/db/client";
-import { campaign_stages, invites, org_members } from "@/db/schema";
+import { api_tokens, campaign_stages, invites, org_members } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
@@ -35,6 +35,7 @@ export async function GET() {
       user_id: org_members.user_id,
       role: org_members.role,
       is_active: org_members.is_active,
+      api_enabled: org_members.api_enabled,
       last_login_at: org_members.last_login_at,
       last_login_ip: org_members.last_login_ip,
       invited_email: org_members.invited_email,
@@ -67,6 +68,28 @@ export async function GET() {
   for (const row of pendingByCreator) {
     if (row.user_id) pendingMap.set(row.user_id, row.n);
   }
+
+  // Live (un-revoked, un-expired) token count per member, so the roster can show
+  // at a glance who has an agent connected. Counted here rather than fetched
+  // per-row by the client: one grouped query beats N requests from a table.
+  const tokenRows = await db
+    .select({
+      org_member_id: api_tokens.org_member_id,
+      n: sql<number>`count(*)::int`,
+    })
+    .from(api_tokens)
+    .where(
+      and(
+        eq(api_tokens.org_id, orgId),
+        isNull(api_tokens.revoked_at),
+        or(
+          isNull(api_tokens.expires_at),
+          gt(api_tokens.expires_at, new Date()),
+        ),
+      ),
+    )
+    .groupBy(api_tokens.org_member_id);
+  const tokenCounts = new Map(tokenRows.map((r) => [r.org_member_id, r.n]));
 
   // Resolve emails. Best-effort: if the Admin API is unavailable the roster
   // still renders with the address we recorded at invite time, because a
@@ -112,6 +135,8 @@ export async function GET() {
       email: emailById.get(m.user_id) ?? m.invited_email ?? null,
       role: m.role,
       is_active: m.is_active,
+      api_enabled: m.api_enabled,
+      live_tokens: tokenCounts.get(m.id) ?? 0,
       last_login_at: m.last_login_at,
       last_login_ip: m.last_login_ip,
       joined_at: m.joined_at,

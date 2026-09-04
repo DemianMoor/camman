@@ -124,10 +124,19 @@ export async function deactivateMember(opts: {
 }): Promise<DeactivationResult> {
   const { orgId, targetUserId, actorUserId, targetLabel } = opts;
 
-  // 1. Flip the flag first — see the ordering note above.
+  // 1. Flip the flags first — see the ordering note above.
+  //
+  // api_enabled goes off in the SAME statement (ClickUp 869evpmbz): deactivating
+  // someone must imply "and their robot too". is_active alone would already stop
+  // every token — resolveApiToken() reads both columns in one query — so this is
+  // belt-and-braces, but it is the half that SURVIVES REACTIVATION. Without it,
+  // restoring an account would silently restore API access as well, and the
+  // Owner would be re-granting a capability they never revisited. Same principle
+  // as step 3: reactivation restores the account, not the things that were armed
+  // when it was cut.
   await db
     .update(org_members)
-    .set({ is_active: false })
+    .set({ is_active: false, api_enabled: false })
     .where(
       and(
         eq(org_members.org_id, orgId),

@@ -91,6 +91,63 @@ export function decideOperatorAccess(
   return { allowed: true };
 }
 
+/**
+ * Decide whether a PERSONAL API TOKEN may run this handler (ClickUp 869evpmbz).
+ *
+ * ⚠️ THIS APPLIES TO EVERY ROLE, INCLUDING THE OWNER. A token is not a session:
+ * it is a long-lived bearer secret that lives in an agent's configuration, so
+ * the set of things it can reach is deliberately much smaller than the set its
+ * owner can reach. An Owner's token gets the same allowlist an operator's does.
+ * Widening that is a decision for a later card, not a side effect of who minted
+ * the token.
+ *
+ * ⚠️ AND IT COMPOSES WITH, NEVER REPLACES, decideOperatorAccess(). A token
+ * whose owner is an operator must pass BOTH gates — the caller runs this one
+ * and then falls through to the ordinary role checks. Passing here grants
+ * nothing on its own.
+ */
+export function decideTokenAccess(
+  access: RouteAccess | undefined,
+): OperatorDecision {
+  if (!access) {
+    return {
+      allowed: false,
+      reason: "route_not_wired",
+      detail:
+        "This route is not available to API tokens. If it should be, add a `token` method list to its OPERATOR_ROUTE_MAP entry.",
+    };
+  }
+
+  const entry: OperatorAccess | undefined = OPERATOR_ROUTE_MAP[access.route];
+  if (entry == null || entry.token === undefined) {
+    return {
+      allowed: false,
+      reason: "route_denied",
+      detail: "This route is not available to API tokens.",
+    };
+  }
+
+  if (!entry.token.includes(access.method)) {
+    return {
+      allowed: false,
+      reason: "method_denied",
+      detail: `API tokens may not ${access.method} this route.`,
+    };
+  }
+
+  return { allowed: true };
+}
+
+/** Every (route, method) pair a token may reach, for the verification script. */
+export function allowedTokenRoutes(): { route: string; methods: HttpMethod[] }[] {
+  return Object.entries(OPERATOR_ROUTE_MAP)
+    .filter(
+      (e): e is [string, { methods: HttpMethod[]; token: HttpMethod[] }] =>
+        e[1] != null && e[1].token !== undefined,
+    )
+    .map(([route, v]) => ({ route, methods: v.token }));
+}
+
 /** Every route key the operator may reach, for the verification script. */
 export function allowedOperatorRoutes(): { route: string; methods: HttpMethod[] }[] {
   return Object.entries(OPERATOR_ROUTE_MAP)

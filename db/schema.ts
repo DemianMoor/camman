@@ -59,6 +59,13 @@ export const org_members = pgTable(
     // rather than at token expiry. Defaults true: applying the migration
     // changes nothing for existing members.
     is_active: boolean("is_active").notNull().default(true),
+    // Migration 0176. The per-user API on/off switch, INDEPENDENT of is_active:
+    // turning it off 401s every one of that member's tokens on the next request
+    // and leaves their browser session untouched. Defaults FALSE — unlike
+    // is_active, this column creates a capability rather than describing one
+    // that already existed, so nobody gets it by having the migration applied.
+    // Deactivating a member also forces this false (lib/auth/deactivate.ts).
+    api_enabled: boolean("api_enabled").notNull().default(false),
     last_login_at: timestamp("last_login_at", { withTimezone: true }),
     // text, not inet — x-forwarded-for is a comma-separated LIST behind more
     // than one proxy, which inet rejects. Same choice as clicks.ip.
@@ -4866,3 +4873,140 @@ export const deletion_requests = pgTable(
 
 export type DeletionRequest = typeof deletion_requests.$inferSelect;
 export type NewDeletionRequest = typeof deletion_requests.$inferInsert;
+
+// ── api_tokens (ClickUp 869evpmbz, migration 0176) ──────────────────────────
+//
+// A personal bearer token bound to ONE membership. NOT a second identity: it
+// resolves to the owning member's org_id + role and then rides the exact same
+// gate a session does — is_active, the operator route map, can(), and
+// redactForRole(). Whatever the member can reach, their token can reach; never
+// more.
+//
+// ⚠️ THE FK IS org_member_id, NOT user_id. The token's authority IS the
+// membership, so the two live and die together — removing someone from the org
+// takes their tokens with it by CASCADE rather than by a cleanup step somebody
+// has to remember. It also lets the auth resolver fetch token + org + role +
+// is_active + api_enabled in ONE join, matching the single round-trip
+// getApiMembershipRow() already costs for a session.
+export const api_tokens = pgTable(
+  "api_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    org_member_id: uuid("org_member_id")
+      .notNull()
+      .references(() => org_members.id, { onDelete: "cascade" }),
+    // SHA-256 hex of the plaintext. THE ONLY COPY — the plaintext is shown once
+    // at creation and never stored, so a database dump yields nothing usable.
+    token_hash: text("token_hash").notNull(),
+    // Leading, NON-SECRET characters ("cmt_3f9a…") so the Owner can tell two
+    // tokens apart in the UI and match a usage row to a token without the
+    // plaintext ever being retrievable.
+    token_prefix: text("token_prefix").notNull(),
+    name: text("name").notNull(),
+    // Read-only is the default and, today, the only shape that ships. WHAT a
+    // token may reach is decided by the `token` flag in OPERATOR_ROUTE_MAP, not
+    // by HTTP method — see lib/authz/route-map.ts for why method-based
+    // read-only was the wrong axis. Nothing sets this false yet.
+    read_only: boolean("read_only").notNull().default(true),
+    expires_at: timestamp("expires_at", { withTimezone: true }),
+    last_used_at: timestamp("last_used_at", { withTimezone: true }),
+    revoked_at: timestamp("revoked_at", { withTimezone: true }),
+    created_by_user_id: uuid("created_by_user_id").references(
+      () => authUsers.id,
+      { onDelete: "set null" },
+    ),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("api_tokens_token_hash_uniq").on(table.token_hash),
+    // Partial on revoked_at: revoked rows are kept forever as the record of
+    // what once existed, and must not bloat the index the hot path uses.
+    index("api_tokens_org_member_live_idx")
+      .on(table.org_id, table.org_member_id)
+      .where(sql`revoked_at IS NULL`),
+    check("api_tokens_name_not_blank", sql`length(btrim(${table.name})) > 0`),
+  ],
+);
+
+export type ApiToken = typeof api_tokens.$inferSelect;
+export type NewApiToken = typeof api_tokens.$inferInsert;
+
+// ── api_token_usage (migration 0176) ───────────────────────────────────────
+//
+// Per-token counters, one row per (token, window kind, window start). Modelled
+// directly on partner_key_usage (Drip Phase 2) because that construction is
+// already live and proven against production.
+//
+// ⚠️ THE RATE-LIMIT GUARD LIVES ON THE `DO UPDATE`, NOT IN APPLICATION CODE —
+// see lib/api/token-usage.ts. An unconditional increment means rejected
+// requests burn quota, so a bad retry loop locks the caller out for the rest of
+// the window without ever succeeding.
+//
+// 'request' is the rate-limited counter; 'denied' is an unbounded tally that
+// must keep counting PAST the alert threshold so the burst alert can report the
+// real figure rather than the threshold.
+export const api_token_usage = pgTable(
+  "api_token_usage",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    api_token_id: uuid("api_token_id")
+      .notNull()
+      .references(() => api_tokens.id, { onDelete: "cascade" }),
+    window_kind: text("window_kind").notNull(),
+    // Truncated to the hour, UTC. Both counters are hourly, so unlike
+    // partner_key_usage there is no ET calendar-day boundary to honour.
+    window_start: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (table) => [
+    uniqueIndex("api_token_usage_token_window_uniq").on(
+      table.api_token_id,
+      table.window_kind,
+      table.window_start,
+    ),
+    index("api_token_usage_org_window_idx").on(table.org_id, table.window_start),
+    check(
+      "api_token_usage_window_kind_check",
+      sql`${table.window_kind} IN ('request', 'denied')`,
+    ),
+  ],
+);
+
+export type ApiTokenUsage = typeof api_token_usage.$inferSelect;
+
+// ── audience_fresh_counts (migration 0176) ─────────────────────────────────
+//
+// The rollup behind GET /api/audience/fresh-counts. One row per org, refreshed
+// by /api/cron/refresh-fresh-counts, read by the endpoint. Mirrors
+// contact_org_stats.carrier_breakdown (0145): a JSONB blob computed on a
+// schedule plus the timestamp the reader needs to state its own staleness.
+//
+// ⚠️ THE BLOB STORES EXACTLY WHAT THE ENDPOINT RETURNS — group NAMES and
+// integers. No ids, no phone numbers, no contact fields. Nothing is stripped at
+// the response boundary because there is nothing here to strip; a redaction
+// step somebody can forget is weaker than a payload that never held the secret.
+export const audience_fresh_counts = pgTable("audience_fresh_counts", {
+  org_id: uuid("org_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  // Shape: see FreshCounts in lib/audience/fresh-counts.ts, which is the
+  // authoritative type.
+  counts: jsonb("counts"),
+  // NULL until the first cron run — the endpoint must handle "no row yet"
+  // rather than assume the cron has already fired.
+  computed_at: timestamp("computed_at", { withTimezone: true }),
+  duration_ms: integer("duration_ms"),
+  updated_at: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export type AudienceFreshCounts = typeof audience_fresh_counts.$inferSelect;

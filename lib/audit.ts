@@ -42,7 +42,41 @@ export type AuditAction =
   | "user.activated"
   | "user.deactivated"
   | "user.sessions_revoked"
-  | "stage.auto_paused";
+  | "stage.auto_paused"
+  // Phase 4 — guardrails. These were ALREADY being written by
+  // lib/guardrails/notify.ts, which cast past this union with `action: n.event
+  // as never`. The cast is gone; the union now states the truth, so the next
+  // guardrail event is a compile error here rather than a surprise in the
+  // Owner's audit feed. (Verified against production: guardrail.cap_blocked and
+  // guardrail.cap_exceeded rows already exist.)
+  | "guardrail.cap_blocked"
+  | "guardrail.url_rejected"
+  | "guardrail.creative_forked"
+  | "guardrail.deletion_requested"
+  | "guardrail.deletion_decided"
+  | "guardrail.cap_exceeded"
+  | "guardrail.unproven_creative"
+  | "guardrail.volume_deviation"
+  | "guardrail.frequency_collision"
+  // ── API tokens (ClickUp 869evpmbz) ────────────────────────────────────
+  // Owner-side lifecycle.
+  | "token.created"
+  | "token.revoked"
+  | "user.api_enabled"
+  | "user.api_disabled"
+  // Per-request trail. `api.request` is the high-volume one and is written on
+  // every ALLOWED token request; the two failure actions are written on every
+  // single occurrence and are never sampled, because they are the ones an
+  // Owner investigates.
+  //
+  // ⚠️ `api.request` RECORDS THE AUTH OUTCOME, NOT THE HANDLER'S FINAL STATUS.
+  // It is written by requireApiMembership() before the handler body runs, so
+  // there is no response to read yet. Its metadata carries `outcome:
+  // "allowed"`, deliberately not a `status` field that would look like an HTTP
+  // code and be wrong for any request the handler later 404s or 500s.
+  | "api.request"
+  | "api.denied"
+  | "api.rate_limited";
 
 export interface AuditInput {
   orgId: string;
@@ -99,17 +133,33 @@ export async function writeAuditLog(input: AuditInput): Promise<boolean> {
 // Callers must therefore never treat audit_log.ip as authenticated. The
 // "login from a new IP" alert is a prompt for a human to look, not a control.
 
-export function requestIp(req: Request | NextRequest): string | null {
-  const xff = req.headers.get("x-forwarded-for");
+/**
+ * Accepts a request OR a bare Headers.
+ *
+ * requireApiMembership() takes no request argument — it reads the session
+ * through cookies() and, since 869evpmbz, the bearer token through headers() —
+ * so the token audit path has a Headers and nothing else. Detecting on the
+ * `headers` property rather than `instanceof Headers` keeps this working for
+ * Next's ReadonlyHeaders, which is not guaranteed to be that exact class.
+ */
+type HeaderSource = Request | NextRequest | Headers;
+
+function asHeaders(src: HeaderSource): Headers {
+  return "headers" in src ? src.headers : src;
+}
+
+export function requestIp(src: HeaderSource): string | null {
+  const headers = asHeaders(src);
+  const xff = headers.get("x-forwarded-for");
   if (xff) {
     const first = xff.split(",")[0]?.trim();
     if (first) return first;
   }
-  return req.headers.get("x-real-ip");
+  return headers.get("x-real-ip");
 }
 
-export function requestUserAgent(req: Request | NextRequest): string | null {
-  const ua = req.headers.get("user-agent");
+export function requestUserAgent(src: HeaderSource): string | null {
+  const ua = asHeaders(src).get("user-agent");
   // Bound it: a UA is attacker-controlled free text and this column is read
   // into an Owner-facing table.
   return ua ? ua.slice(0, 512) : null;

@@ -37,3 +37,26 @@ export const changeRoleSchema = z.object({
 export const setActiveSchema = z.object({
   is_active: z.boolean(),
 });
+
+// ── API tokens (ClickUp 869evpmbz) ─────────────────────────────────────────
+
+export const setApiEnabledSchema = z.object({
+  api_enabled: z.boolean(),
+});
+
+export const createApiTokenSchema = z.object({
+  // A label the Owner will read back in the token list and in usage rows. Bounded
+  // because it is echoed into audit_log summaries, which render in an
+  // Owner-facing table.
+  name: z.string().trim().min(1, "Give the token a name").max(80),
+  // Optional expiry. Absent = no expiry, which is deliberate: the primary
+  // controls are revoke and the api_enabled switch, both of which take effect on
+  // the next request. A mandatory expiry would mostly produce an agent that
+  // silently stops working at an hour nobody remembers choosing.
+  expires_at: z
+    .string()
+    .datetime({ offset: true })
+    .optional()
+    .nullable(),
+});
+export type CreateApiTokenInput = z.infer<typeof createApiTokenSchema>;

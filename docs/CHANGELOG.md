@@ -1701,4 +1701,19 @@ proceeds. `guardrail.cap_blocked` is now raised only by the per-stage cap in kic
 blocks. Re-enabling the block is gated on fixing the window. **No migration.**
   - docs updated: docs/04-features/operator-guardrails.md, docs/07-conventions.md, docs/CHANGELOG.md
 
+2026-09-04 — Operator API tokens for Claude access (ClickUp 869evpmbz, migration **0176**) — personal bearer tokens
+bound to an `org_members` row, resolved inside the single existing `requireApiMembership()` chokepoint so `is_active`,
+the operator default-deny map, `can()` and `redactForRole()` apply by construction (no handler signature changed).
+Method-based `read_only` was REPLACED by an explicit `token?: HttpMethod[]` allowlist in `OPERATOR_ROUTE_MAP` (33
+route/method pairs) because every audience-counting endpoint in this codebase is a POST. Adds `org_members.api_enabled`
+(default **false**), per-token 300/hour DB-backed rate limiting with the guard on the `DO UPDATE`, `api.request` /
+`api.denied` / `api.rate_limited` audit actions (unbatched — prod `audit_log` was 13 rows), hour-keyed Telegram alerts
+for denial bursts and rate-limit trips, Owner UI at `/settings/users` (issue/revoke, `api_enabled` switch, usage
+drill-in), and `GET /api/audience/fresh-counts` backed by a new `audience_fresh_counts` rollup + a 30-min cron.
+Also: seeded `provider_route_aliases`, which had been EMPTY in production since 0175 (lazy seeding, no operator had
+ever signed in — the redactor had never run against prod data), and brought `lib/guardrails/notify.ts`'s 9 actions into
+the `AuditAction` union, removing an `as never` cast.
+  - docs updated: docs/operator-api.md (new, handed to the worker), docs/04-features/operator-api-tokens.md (new),
+    docs/03-data-model.md (+ERD), docs/04-features/crons.md, docs/07-conventions.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

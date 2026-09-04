@@ -204,9 +204,17 @@ degrades to a dropped row rather than a failed request. If retention becomes a
 problem the lever is a sweep of `api.request` rows, not a more complicated write
 path.
 
-An **unknown** token writes nothing at all: it cannot be attributed, and a public
-endpoint is scanned constantly, so those rows would be noise rather than signal.
-`scripts/verify-operator-access.ts` asserts this.
+⚠️ **Every attributable denial carries `actor_user_id`.** The per-user drill-in
+filters `audit_log` on that column, so a 401 written with a NULL actor is
+invisible on the one screen built to show denials — while the token-keyed counter
+still counts it, leaving the panel's totals disagreeing with its own hourly
+series. That shipped in the first cut and was caught by the production smoke
+test; `resolveApiToken()` now returns `userId` on its failure branch and
+`verify-operator-access.ts` §6c asserts the row is attributed.
+
+An **unknown** token is the one exception, and writes nothing at all: it cannot
+be attributed to anyone, and a public endpoint is scanned constantly, so those
+rows would be noise rather than signal. That is also asserted.
 
 **Alerts** ([`lib/api/token-alerts.ts`](../../lib/api/token-alerts.ts)) go through
 `notifyOnTransition`, not `notifyTelegram` directly — these fire per-request, so a

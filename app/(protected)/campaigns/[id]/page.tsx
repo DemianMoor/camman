@@ -7,6 +7,7 @@ import {
   Archive as ArchiveIcon,
   ArrowLeft,
   Ban,
+  Check,
   CheckCircle2,
   ChevronDown,
   Copy,
@@ -597,6 +598,12 @@ export default function CampaignDetailPage() {
   // "is the confirm modal open" plus the provisional preview it renders.
   const [behavioralSplitOpen, setBehavioralSplitOpen] = useState(false);
   const [splitPreview, setSplitPreview] = useState<SplitLanePreview | null>(null);
+  // Which behavioural lanes the split will create. Mirrors DEFAULT_LANE_TIERS in
+  // lib/stages/behavioral-split.ts — tier 0 ("Ignored") starts OFF because the
+  // operator deleted it by hand after all but 4 of the first 77 splits, and a
+  // forgotten one silently freezes its scheduled siblings. Reset in
+  // openBehavioralSplit (an event handler), never in an effect.
+  const [selectedTiers, setSelectedTiers] = useState<number[]>([1, 2]);
   const [importStage, setImportStage] = useState<Stage | null>(null);
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
@@ -756,6 +763,7 @@ export default function CampaignDetailPage() {
   // is fetched on open — never inline in the stages list.
   async function openBehavioralSplit() {
     setSplitPreview(null);
+    setSelectedTiers([1, 2]);
     setBehavioralSplitOpen(true);
     const result = await splitPreviewApi.execute(
       `/api/campaigns/${campaignId}/behavioral-split/preview`,
@@ -767,14 +775,25 @@ export default function CampaignDetailPage() {
   async function handleBehavioralSplit() {
     const result = await behavioralSplitApi.execute(
       `/api/campaigns/${campaignId}/behavioral-split`,
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tiers: selectedTiers }),
+      },
     );
     if (!result.ok) {
       toastApiError(result, "Couldn't create behavioral lanes");
       return;
     }
+    // Name the lanes ACTUALLY created — the old copy hard-coded "3 lanes", which
+    // stops being true the moment the operator unticks one. Reuses the page's
+    // existing tier→label map; the lib's LANE_TIERS can't be imported here
+    // because this is a client component and that module pulls in the db client.
+    const created = [...selectedTiers]
+      .sort((a, b) => a - b)
+      .map((t) => BEHAVIORAL_TIER_META[t]?.label ?? `Tier ${t}`);
     toast.success(
-      "Behavioral split — 3 lanes created (Ignored / Clicked / Reached offer). Set a send time on each lane.",
+      `Behavioral split — ${created.length} lane${created.length === 1 ? "" : "s"} created (${created.join(" / ")}). Set a send time on each lane.`,
     );
     setBehavioralSplitOpen(false);
     setSplitPreview(null);
@@ -2161,13 +2180,15 @@ export default function CampaignDetailPage() {
             <AlertDialogDescription asChild>
               <div className="space-y-3">
                 <p>
-                  This stamps out <span className="font-medium">three</span> lane
-                  stages for this campaign — one each for{" "}
-                  <span className="font-medium">Ignored</span>,{" "}
-                  <span className="font-medium">Clicked</span>, and{" "}
-                  <span className="font-medium">Reached offer</span>. Each lane
-                  starts as a copy of the most recently completed stage; edit its
-                  message and set its send time afterward.
+                  Pick the behavioural lanes to stamp out for this campaign. Each
+                  lane starts as a copy of the most recently completed stage; edit
+                  its message and set its send time afterward.
+                </p>
+                <p>
+                  <span className="font-medium">Ignored</span> is off by default —
+                  a lane you create but never schedule can never be prepared, and
+                  the split holds <em>every</em> lane back until all of them are,
+                  so it would silently block the ones you did schedule.
                 </p>
 
                 {splitPreviewApi.isLoading || splitPreview === null ? (
@@ -2198,19 +2219,51 @@ export default function CampaignDetailPage() {
 
                     <div className="grid gap-1 rounded-md border border-dashed p-3">
                       <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                        Lane counts (provisional)
+                        Lanes to create — counts provisional
                       </span>
-                      {splitPreview.lanes.map((ln) => (
-                        <div
-                          key={ln.tier}
-                          className="flex items-center justify-between gap-2 text-xs"
-                        >
-                          <span className="text-muted-foreground">{ln.label}</span>
-                          <span className="font-medium tabular-nums text-foreground">
-                            {ln.count.toLocaleString()}
-                          </span>
-                        </div>
-                      ))}
+                      {splitPreview.lanes.map((ln) => {
+                        const checked = selectedTiers.includes(ln.tier);
+                        return (
+                          <button
+                            key={ln.tier}
+                            type="button"
+                            role="checkbox"
+                            aria-checked={checked}
+                            onClick={() =>
+                              setSelectedTiers((prev) =>
+                                prev.includes(ln.tier)
+                                  ? prev.filter((t) => t !== ln.tier)
+                                  : [...prev, ln.tier].sort((a, b) => a - b),
+                              )
+                            }
+                            className="-mx-1 flex items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-xs hover:bg-accent"
+                          >
+                            <span className="flex items-center gap-2">
+                              <span
+                                className={cn(
+                                  "flex size-4 shrink-0 items-center justify-center rounded border",
+                                  checked
+                                    ? "border-foreground bg-foreground text-background"
+                                    : "border-muted-foreground/40 bg-background",
+                                )}
+                                aria-hidden
+                              >
+                                {checked ? <Check className="size-3" /> : null}
+                              </span>
+                              <span
+                                className={
+                                  checked ? "text-foreground" : "text-muted-foreground"
+                                }
+                              >
+                                {ln.label}
+                              </span>
+                            </span>
+                            <span className="font-medium tabular-nums text-foreground">
+                              {ln.count.toLocaleString()}
+                            </span>
+                          </button>
+                        );
+                      })}
                       <div className="mt-1 flex items-center justify-between gap-2 border-t pt-1 text-xs text-muted-foreground">
                         <span>Converted (exits — no lane)</span>
                         <span className="tabular-nums">
@@ -2262,10 +2315,13 @@ export default function CampaignDetailPage() {
               disabled={
                 behavioralSplitApi.isLoading ||
                 splitPreviewApi.isLoading ||
-                splitPreview?.can_split !== true
+                splitPreview?.can_split !== true ||
+                selectedTiers.length === 0
               }
             >
-              Create 3 lanes
+              {selectedTiers.length === 0
+                ? "Pick at least one lane"
+                : `Create ${selectedTiers.length} lane${selectedTiers.length === 1 ? "" : "s"}`}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

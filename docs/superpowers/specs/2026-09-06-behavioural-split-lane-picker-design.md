@@ -1,7 +1,10 @@
 # Behavioural split — pick which lanes get created
 
 **Date:** 2026-09-06
-**Status:** Design approved, not yet implemented
+**Status:** Implemented 2026-09-06. Body validation came out stricter than
+designed — a body carrying a malformed `tiers` is a 400 rather than a silent
+fallback to the default (see §2), because `{"tiers":["0","1","2"]}` quietly
+producing 2 lanes is a wrong answer dressed as a success.
 **Surfaces:** `lib/stages/behavioral-split.ts`, `app/api/campaigns/[campaignId]/behavioral-split/route.ts`, `app/(protected)/campaigns/[id]/page.tsx`
 
 ## Problem

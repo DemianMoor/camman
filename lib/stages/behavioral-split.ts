@@ -45,11 +45,56 @@ import { loadStageUrlContext } from "@/lib/stage-url-context";
 // preflight code paths keep working unchanged.
 
 // tier → human label for the lane's starting label. Tier 3 deliberately absent.
+// This is the REGISTRY of every lane a split can create — it is not the set that
+// gets created. `tiers` on performBehavioralSplit filters it (see below).
 export const LANE_TIERS = [
   { tier: 0, label: "Ignored" },
   { tier: 1, label: "Clicked" },
   { tier: 2, label: "Reached offer" },
 ] as const;
+
+// Which lanes a split creates when the caller doesn't say.
+//
+// NOT all three, deliberately. Tier 0 ("Ignored") is a lane the operator does
+// not want and deleted BY HAND after all but 4 of the first 77 splits — and when
+// that manual delete was skipped on 2026-09-05 the leftover lane, never
+// scheduled and never approved, could never materialize, so its group could
+// never settle and the all-or-nothing release gate froze its two SCHEDULED
+// siblings: 650 built messages stranded for ~13h across campaigns 1151/1152/1171
+// while the drain was healthy. Creating only what the operator asked for is what
+// removes that trap — see
+// docs/superpowers/specs/2026-09-06-behavioural-split-lane-picker-design.md.
+export const DEFAULT_LANE_TIERS: readonly number[] = [1, 2];
+
+const VALID_LANE_TIERS = new Set(LANE_TIERS.map((t) => t.tier as number));
+
+// Normalize the requested tiers: de-duplicate and sort ascending so lane
+// stage_number assignment is deterministic regardless of tick order. Returns a
+// refusal (never throws) so both the route and the direct test callers get the
+// same codes.
+export function resolveLaneTiers(
+  tiers: number[] | undefined,
+): { ok: true; tiers: number[] } | { ok: false; code: string; message: string } {
+  if (tiers === undefined) return { ok: true, tiers: [...DEFAULT_LANE_TIERS] };
+  const unique = [...new Set(tiers)].sort((a, b) => a - b);
+  if (unique.length === 0) {
+    return {
+      ok: false,
+      code: "no_lanes_selected",
+      message: "Pick at least one behavioural lane to create.",
+    };
+  }
+  const bad = unique.filter((t) => !VALID_LANE_TIERS.has(t));
+  if (bad.length > 0) {
+    return {
+      ok: false,
+      code: "invalid_lane_tier",
+      // Tier 3 (converted) exits the sequence and never gets a lane.
+      message: `Not a behavioural lane tier: ${bad.join(", ")}. Valid tiers are 0, 1, 2.`,
+    };
+  }
+  return { ok: true, tiers: unique };
+}
 
 export type BehavioralSplitResult =
   | {
@@ -74,10 +119,32 @@ export async function performBehavioralSplit(
   // lane created through the API must carry one: the deactivation kill switch
   // finds approved-but-unsent stages by author, and an unstamped lane child
   // would survive its creator's deactivation still armed to send.
-  opts: { orgId: string; campaignId: number; actorUserId?: string | null },
+  // `tiers` is which lanes to create (subset of LANE_TIERS' 0/1/2). Omitted ⇒
+  // DEFAULT_LANE_TIERS. Validated here rather than only in the route so the
+  // script harnesses that call this directly exercise the same rules.
+  opts: {
+    orgId: string;
+    campaignId: number;
+    actorUserId?: string | null;
+    tiers?: number[];
+  },
   database: typeof db = db,
 ): Promise<BehavioralSplitResult> {
   const { orgId, campaignId } = opts;
+
+  // Refuse BEFORE any read or write — an invalid selection must not create a
+  // group row, which would trip the campaign's own split_already_pending guard.
+  const laneTiers = resolveLaneTiers(opts.tiers);
+  if (!laneTiers.ok) {
+    return {
+      ok: false,
+      status: 400,
+      code: laneTiers.code,
+      message: laneTiers.message,
+      details: { field: "tiers" },
+    };
+  }
+  const selectedTiers = new Set(laneTiers.tiers);
 
   const campaignRow = await database
     .select({
@@ -208,13 +275,15 @@ export async function performBehavioralSplit(
       .returning({ id: campaign_stage_split_groups.id });
     const groupId = groupRows[0].id;
 
-    // One lane per tier. stage_number is auto-assigned by the BEFORE INSERT
-    // trigger; send-state counters reset; split_index/split_total left NULL.
+    // One lane per SELECTED tier. stage_number is auto-assigned by the BEFORE
+    // INSERT trigger; send-state counters reset; split_index/split_total left NULL.
     type StageInsertable = Omit<
       typeof campaign_stages.$inferInsert,
       "stage_number"
     > & { stage_number?: number };
-    const newRows: StageInsertable[] = LANE_TIERS.map(({ tier, label }) => ({
+    const newRows: StageInsertable[] = LANE_TIERS.filter(({ tier }) =>
+      selectedTiers.has(tier),
+    ).map(({ tier, label }) => ({
       org_id: orgId,
       campaign_id: campaignId,
       label: `${baseLabel} — ${label} (tier ${tier})`,

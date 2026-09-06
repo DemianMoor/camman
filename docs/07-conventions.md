@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-04_
+_Last updated: 2026-09-06_
 
 ## A sending number can be HALF-configured: sends work, opt-out intake is dark (2026-09-03)
 
@@ -2254,3 +2254,52 @@ a path verified. And when a seed script is written for one of these, **have it
 call the real seeding function** rather than reimplement the rule: a second
 implementation of "which provider gets Route B" only has to disagree once to
 produce two different Route Bs.
+
+## A step the operator performs by hand every time is part of the design, and it will be skipped (2026-09-06)
+
+A campaign-level behavioural split created **three** lanes — `Ignored` (tier 0),
+`Clicked`, `Reached offer` — because `LANE_TIERS` was a hard-coded trio and the
+insert was `LANE_TIERS.map(...)`. The operator did not want the `Ignored` lane
+and deleted it by hand after every split. That delete was **load-bearing** and
+nothing enforced it.
+
+Measured 2026-09-06: of the first 77 split groups, **73 had only two lanes**.
+Only 4 tier-0 lanes ever survived creation and exactly **1** ever fired.
+`campaign_events` held **124 `stage_deleted`** rows in 30 days; 24 of the 25 most
+recent were "Stage 3 deleted", one per campaign, a minute or two apart.
+
+On 2026-09-05 the operator ran that delete pass across 14 campaigns, then created
+three more splits and scheduled their tier-1/tier-2 lanes without going back to
+delete their tier-0 lanes. Because a split group releases **all-or-nothing**, and
+because Phase A only selects stages with `send_approved = true AND scheduled_at
+IS NOT NULL`, each leftover lane could never materialize → its group could never
+settle → **both scheduled siblings were frozen**. 650 fully-materialized messages
+sat undelivered for ~13 hours across campaigns 1151/1152/1171 while the drain was
+perfectly healthy (13,225 messages went out on the same provider and the same two
+numbers in that hour).
+
+⭐ **The lesson is not "add a warning".** The manual step was the defect. The fix
+is `DEFAULT_LANE_TIERS = [1, 2]` plus a per-tier picker in the confirm dialog, so
+the trap row is never created. See
+[behavioral-lanes.md](04-features/behavioral-lanes.md) and
+[the design spec](superpowers/specs/2026-09-06-behavioural-split-lane-picker-design.md).
+
+⭐ **A silent-hold gate needs a timeout or a picker, not just an alarm.** The
+existing `sweepStuckSplitGroups` alarm fires 60 min after the LAST lane's due
+time — correct for staggered lanes, useless here, because by then the evening
+send window was gone. It also cannot stamp `schedule_missed_at`, since Phase B
+never selects a held lane at all: the stages neither send nor expire, they simply
+stop existing as far as the pipeline is concerned.
+
+⭐ **Recovery order matters, and getting it backwards writes the send off.**
+Reschedule the stuck lanes to a future in-window time **first**, *then* remove the
+blocking lane. Settle the group while the old date is still in the past and
+Phase B's day-anchored `decideScheduledSend` returns `missed`, stamps
+`schedule_missed_at`, and the messages are permanently burned.
+
+⭐ **Changing a default silently changes every existing caller, and `tsc` cannot
+see it.** `tiers` is optional, so all 11 call sites still type-checked while
+quietly dropping from 3 lanes to 2. The 10 script call sites were pinned to an
+explicit `tiers: [0, 1, 2]` — rewriting their assertions down to 2 would have
+deleted the only coverage the three-lane path has. Only running the scripts
+finds this class of change.

@@ -112,7 +112,7 @@ async function main() {
       UPDATE campaign_stages SET landing_page_id = ${lpId}::int WHERE id = ${s1}::int`);
 
     console.log("\nOperator flow: create the split, then click Prepare on a lane");
-    const split = await performBehavioralSplit({ orgId, campaignId }, db);
+    const split = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] }, db);
     check("split created", split.ok, JSON.stringify(split));
     if (!split.ok) throw new Error("split failed");
 
@@ -207,7 +207,7 @@ async function main() {
     await db.execute(sql`
       INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
       VALUES (${orgId}::uuid, ${camp2}::int, ${c2s1}::int, ${contactId}::uuid, ${"z"}, ${"body"}, ${"sent"})`);
-    const split2 = await performBehavioralSplit({ orgId, campaignId: camp2 }, db);
+    const split2 = await performBehavioralSplit({ orgId, campaignId: camp2, tiers: [0, 1, 2] }, db);
     if (!split2.ok) throw new Error("second split failed: " + JSON.stringify(split2));
     // Now REMOVE the completed stage, so the group can no longer resolve.
     await db.execute(sql`UPDATE campaign_stages SET sent_at = NULL WHERE id = ${c2s1}::int`);

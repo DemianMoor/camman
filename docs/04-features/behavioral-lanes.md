@@ -1,12 +1,14 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-08-28_
+_Last updated: 2026-09-06_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
-("position") is split into three **lane-stages**, one per behavioral tier; at
-send time each still-in-sequence recipient is routed into exactly one lane by
-their current high-water tier.
+("position") is split into **lane-stages**, one per behavioral tier the operator
+picks (up to three; `Ignored` is off by default — see
+[Lane picker](#operator-ui-campaign-detail-page)); at send time each
+still-in-sequence recipient is routed into exactly one lane by their current
+high-water tier.
 
 > **Status: LIVE and heavily used.** Measured on production 2026-08-27: **569
 > lane stages**, **551 of them fired**, **860,323 messages** sent through lanes
@@ -188,6 +190,23 @@ doubles as the post-once marker (no re-alert every 5 minutes) and
 > lanes together unless you specifically want them to fire as one batch at the
 > latest time.
 
+> 🚨 **A lane that is never scheduled freezes its siblings FOREVER.** The gate
+> above has no timeout. Phase A only selects stages with `send_approved = true`
+> AND `scheduled_at IS NOT NULL`, so an unscheduled, unapproved lane can never
+> materialize, so `settleSplitGroup` can never flip the group, so Phase B holds
+> every sibling indefinitely — `schedule_missed_at` is never stamped either,
+> because Phase B never selects them. **This happened on 2026-09-05**: three
+> campaigns (1151/1152/1171) kept a tier-0 lane the operator normally deletes by
+> hand, and **650 fully-materialized messages sat undelivered for ~13 hours**
+> while the drain was healthy (13,225 messages went out on the same provider, on
+> the same two numbers, in the same hour). The only signal was the hourly
+> backlog-stall alert, which fires 60 min AFTER the last lane's due time — too
+> late to save that evening's window. Recovery is: reschedule the stuck lanes to
+> a future in-window time **first**, then delete or archive the blocking lane
+> (order matters — settling the group while the old date is in the past makes
+> Phase B stamp `schedule_missed_at` and write the send off). The picker below is
+> the structural fix.
+
 ### An empty lane is skipped, not burned
 
 `no_recipients` is a PERMANENT kickoff refusal, so before 0174 a zero-recipient
@@ -250,7 +269,7 @@ Two entry points for two different actions; deliberately not two for one action.
   at `POST /api/campaigns/[campaignId]/behavioral-split` (the old per-stage
   endpoint was REMOVED in 0174 -- one action, one entry point; the provisional
   preview is `GET /api/campaigns/[campaignId]/behavioral-split/preview`). Stamps
-  three lane-stages cloning the parent's config, sets tier + parent, regenerates
+  **the selected** lane-stages cloning the parent's config, sets tier + parent, regenerates
   each lane's stage `tracking_id`, and rewrites only `sub_id3` in the cloned
   `full_url` to that new tracking id (preserving `sub_id1`/other params). Like
   every copy path, each lane starts with **`scheduled_at = null`** (never inherits
@@ -271,8 +290,33 @@ Two entry points for two different actions; deliberately not two for one action.
   stage (hidden on lanes — a "this stage is a behavioral lane" note shows
   instead — and on stages that already have lanes, where the parent's
   `onBehavioralSplit` callback is withheld). It closes the editor and opens a
-  shared confirm dialog → endpoint → refetch; the three lanes then appear in the
-  stages table.
+  shared confirm dialog → endpoint → refetch; the selected lanes then appear in
+  the stages table.
+- **Lane picker (2026-09-06).** The confirm dialog's lane list is a **picker**,
+  not just a preview: each tier row is a checkbox alongside its provisional
+  count, and only ticked tiers are created. **Tier 0 (`Ignored`) is OFF by
+  default** — `DEFAULT_LANE_TIERS = [1, 2]` in
+  [lib/stages/behavioral-split.ts](../../lib/stages/behavioral-split.ts). The
+  confirm button reads "Create N lanes" and is disabled at zero.
+  - **Why the default is two, not three.** Measured 2026-09-06: of the first 77
+    split groups, **73 had only two lanes** because the operator deleted the
+    tier-0 lane by hand every time (`campaign_events` held 124 `stage_deleted`
+    rows in 30 days; 24 of the 25 most recent were "Stage 3 deleted" right after
+    a split). Only 4 tier-0 lanes ever survived and exactly **1** ever fired —
+    and 3 of the other 3 were the ones that caused the 2026-09-05 freeze above.
+    The manual delete was load-bearing and nothing enforced it; not creating the
+    lane removes the trap at the source.
+  - `tiers` is an **optional** body field. Absent body / unparseable JSON ⇒ the
+    default; a body carrying a malformed `tiers` ⇒ `400 invalid_lane_tier` (never
+    a silent fallback to the default). `[]` ⇒ `400 no_lanes_selected`; any tier
+    outside `{0,1,2}` ⇒ `400 invalid_lane_tier`. Validation lives in
+    `resolveLaneTiers` in the lib, not only the route, so the script harnesses
+    that call `performBehavioralSplit` directly exercise the same rules. A
+    refused selection writes **nothing** — no group row, no lane rows — because
+    an orphan group would permanently block the campaign via its own
+    `split_already_pending` guard.
+  - Tier 3 (`converted`) stays unrepresentable: it exits the sequence and never
+    gets a lane.
 - **Lane display:** each lane row shows a tier chip (`↳ Ignored` / `Clicked` /
   `Reached offer`) with `· from #N` pointing at the parent position; the parent
   row shows an `N behavioral lanes` badge.
@@ -301,6 +345,7 @@ Two entry points for two different actions; deliberately not two for one action.
 
 - [scripts/test-campaign-tier.ts](../../scripts/test-campaign-tier.ts) — tier fragment.
 - [scripts/test-recipients-lanes.ts](../../scripts/test-recipients-lanes.ts) — lane recipient sets + ordinary-SQL-unchanged.
-- [scripts/test-behavioral-split.ts](../../scripts/test-behavioral-split.ts) — the split endpoint + guards + rollback.
+- [scripts/test-behavioral-split.ts](../../scripts/test-behavioral-split.ts) — the split endpoint + guards + rollback. Its call sites pass `tiers: [0, 1, 2]` explicitly so they keep exercising the three-lane path after the default changed to `[1, 2]`.
+- [scripts/test-behavioral-split-lane-picker.ts](../../scripts/test-behavioral-split-lane-picker.ts) — the lane picker: the `[1,2]` default, the explicit trio, a single lane, de-duplication, both refusal codes writing nothing, and — the regression guard for 2026-09-05 — that a **default two-lane group can reach `materialized`** with no tier-0 lane present. Asserts against the group it just created, never a global "no tier-0 lanes exist" count, which would go red the first time someone legitimately ticks `Ignored`.
 - [scripts/test-lane-preview-count.ts](../../scripts/test-lane-preview-count.ts) — the live preview counts (incl. zero-data).
 - [scripts/verify-campaign-level-split.ts](../../scripts/verify-campaign-level-split.ts) — **the 0174 enforcement proof.** Scope is printed and an empty scope FAILS; the three lanes partition the source set; cross-stage precedence (Offer > Clicked > Ignored); a stage completing between the split and the recompute is included; a click before materialization re-routes the contact; frozen after materialization; a failed group releases nothing; an empty lane is skipped not burned; plus old-is-a-subset-of-new against REAL production lanes. Run with `--conditions=react-server`.

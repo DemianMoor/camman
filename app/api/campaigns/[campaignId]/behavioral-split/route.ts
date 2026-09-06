@@ -1,8 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { z } from "zod";
+
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { can } from "@/lib/permissions";
-import { performBehavioralSplit } from "@/lib/stages/behavioral-split";
+import { LANE_TIERS, performBehavioralSplit } from "@/lib/stages/behavioral-split";
 
 // Behavioural split, CAMPAIGN-LEVEL (migration 0174). Stamps three lane-stages —
 // one per behavioural tier (0 ignored / 1 clicked / 2 reached offer) — plus the
@@ -30,8 +32,17 @@ function parseId(idParam: string): number | null {
   return n;
 }
 
+// Which lanes to create. OPTIONAL: an absent body, an empty body, or
+// unparseable JSON all mean "not supplied" and fall through to
+// DEFAULT_LANE_TIERS ([1, 2]) — so an older client cannot silently resurrect the
+// three-lane behaviour, and a malformed body cannot 500. An explicitly INVALID
+// selection (`[]`, `[5]`) is a real 400, raised by performBehavioralSplit.
+const bodySchema = z.object({
+  tiers: z.array(z.number().int()).max(LANE_TIERS.length).optional(),
+});
+
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ campaignId: string }> },
 ) {
   const auth = await requireApiMembership({
@@ -51,10 +62,24 @@ export async function POST(
     return apiError(400, "Invalid id", "validation");
   }
 
+  // No body at all / unparseable JSON ⇒ `{}` ⇒ `tiers` undefined ⇒ the default.
+  // But a body that DOES carry a malformed `tiers` is a real 400 — silently
+  // handing `{"tiers":["0","1","2"]}` the 2-lane default would be a wrong answer
+  // dressed as a success.
+  const raw: unknown = await req.json().catch(() => null);
+  const parsed = bodySchema.safeParse(raw ?? {});
+  if (!parsed.success) {
+    return apiError(400, "Invalid lane selection", "invalid_lane_tier", {
+      field: "tiers",
+    });
+  }
+  const tiers = parsed.data.tiers;
+
   const result = await performBehavioralSplit({
     orgId,
     campaignId: cid,
     actorUserId: user.id,
+    tiers,
   });
   if (!result.ok) {
     return apiError(result.status, result.message, result.code, result.details);

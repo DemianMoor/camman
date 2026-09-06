@@ -131,7 +131,7 @@ async function main() {
     const parent = await newStage(campaignId, creativeId);
 
     console.log("\nCase 1a - split with NO completed stages (must be rejected):");
-    const r1a = await performBehavioralSplit({ orgId, campaignId });
+    const r1a = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
     check(
       "rejected with conflict / reason=no_completed_stages",
       !r1a.ok && r1a.status === 409 &&
@@ -143,7 +143,7 @@ async function main() {
 
     console.log("\nCase 1b - split a campaign with one completed stage:");
     await markComplete(parent.id);
-    const r1 = await performBehavioralSplit({ orgId, campaignId });
+    const r1 = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
     check("returns ok with 3 lane ids", r1.ok && r1.lane_stage_ids.length === 3, JSON.stringify(r1));
     const lanes = await lanesOf(parent.id);
     check("exactly 3 lanes persisted", lanes.length === 3, `got ${lanes.length}`);
@@ -182,7 +182,7 @@ async function main() {
     check("all 3 lanes carry split_group_id", Number(lanesLinked[0].n) === 3, `got ${lanesLinked[0].n}`);
 
     console.log("\nCase 2 - re-split while one is still pending (must be rejected):");
-    const r2 = await performBehavioralSplit({ orgId, campaignId });
+    const r2 = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
     check(
       "rejected with conflict / reason=split_already_pending",
       !r2.ok && r2.status === 409 &&
@@ -196,7 +196,7 @@ async function main() {
       UPDATE campaign_stages SET status = 'archived'
       WHERE split_group_id = ${g1.id}::uuid
     `);
-    const r2b = await performBehavioralSplit({ orgId, campaignId });
+    const r2b = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
     check("re-split ALLOWED once lanes are archived", r2b.ok, JSON.stringify(r2b));
     const liveLanes = (await db.execute(sql`
       SELECT count(*)::int AS n FROM campaign_stages
@@ -263,7 +263,7 @@ async function main() {
 
     let threw = false;
     try {
-      await performBehavioralSplit({ orgId, campaignId: campaign2Id });
+      await performBehavioralSplit({ orgId, campaignId: campaign2Id, tiers: [0, 1, 2] });
     } catch {
       threw = true;
     }

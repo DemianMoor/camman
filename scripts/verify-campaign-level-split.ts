@@ -345,7 +345,7 @@ async function main() {
 
     // ── (6) A STAGE COMPLETING LATE IS INCLUDED ──────────────────────────────
     console.log("\n(6) A stage completing AFTER the split is created is in the source set");
-    const split = await performBehavioralSplit({ orgId, campaignId }, db);
+    const split = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] }, db);
     check("split created", split.ok, JSON.stringify(split));
     if (!split.ok) throw new Error("split failed; cannot continue");
     const groupId = split.split_group_id;
@@ -527,7 +527,7 @@ async function main() {
       VALUES (${orgId}::uuid, ${camp3}::int, ${c3s1}::int, ${cid["ign"]}::uuid,
               ${"x"}, ${"body"}, ${"sent"})
     `);
-    const split3 = await performBehavioralSplit({ orgId, campaignId: camp3 }, db);
+    const split3 = await performBehavioralSplit({ orgId, campaignId: camp3, tiers: [0, 1, 2] }, db);
     if (!split3.ok) throw new Error("camp3 split failed: " + JSON.stringify(split3));
     const g3 = split3.split_group_id;
 

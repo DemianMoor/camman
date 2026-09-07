@@ -2347,3 +2347,39 @@ is unselectable regardless of `skipped_empty_at`).
 `sweepStuckSplitGroups` fired a Tier-1 "every lane is held unreleased" alert.
 Post-change that sentence is false; the condition is just an unfinished lane.
 It was downgraded rather than left to cry outage at a routine state.
+
+## A test that refuses everything still exits "passed" (2026-09-07)
+
+`scripts/test-lane-send.ts` reported **9 passed / 15 failed** for ~2.5 months and
+nobody noticed. Its fixture never set `scheduled_at`; `kickoffStageSend` gained a
+`no_schedule` refusal on 2026-06-23 (11a1e12) and every kickoff in the test has
+silently refused since. The script was even edited on 2026-07-03 without the
+failures being spotted.
+
+⭐ **A refusal reason is not a failure mode you can read past.** Nine assertions
+kept passing (the SEND_ENABLED gate, the mock dispatcher, "no duplicate rows")
+because they assert on an EMPTY result set, which an all-refusing run produces
+perfectly. Assertions that pass vacuously are what let a dead test look alive.
+
+⭐ **Fixing a dead test can strand data in the LIVE database.** With kickoff
+working again the test created real rows, and the teardown's `DELETE FROM
+contacts` hit the default `statement_timeout`, aborting part-way: 1 org / 1
+brand / 6 contacts / 1 creative were left in production. Deleting a contact
+cascades into 14 tables, five with **no leading index on `contact_id`**
+(`creative_exposures` 3.4M, `stage_sends` 3.8M, `offer_exposures` 1.4M,
+`counted_clickers`, `drip_journeys`), so one delete seq-scans ~8.6M rows and
+takes ~150s. **Every teardown that deletes contacts must run in a transaction
+with `SET LOCAL statement_timeout = '300s'`**, deleting all contacts in ONE
+statement (the seq-scan cost is per-statement).
+
+⭐ **A global before/after row-count check is the WRONG drift test on a live DB.**
+The failing run reported +1,368 `clicks` and +3,900 `send_attempts` — genuine
+production traffic arriving mid-run — which buried the 6 rows that were actually
+the test's. Ask two separate questions instead:
+- *"did I leave anything behind?"* → **per-org**, exact, no false positives
+- *"did I delete someone else's data?"* → global, but fail only on a **DECREASE**
+
+Safe to date a fixture stage even on prod **only because** the fixture campaign is
+`link_mode='manual'` and both cron phases require `'tracked'`, so it can never be
+picked up by a live send. Check that property before adding a schedule to any
+fixture.

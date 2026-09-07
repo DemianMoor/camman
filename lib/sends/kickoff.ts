@@ -634,6 +634,12 @@ export async function kickoffStageSend(
       // 0174: widens aliveness to the group's completed source stages. NULL /
       // empty ⇒ the parentStageId path, byte-identical to pre-0174.
       sourceStageIds: resolvedSourceStageIds,
+      // Lanes are independent (2026-09-07): they no longer wait for each other to
+      // release, so they can no longer rely on simultaneous release to stay
+      // disjoint. A contact already claimed by a sibling lane is excluded here,
+      // at materialization — the first lane to take them owns them.
+      splitGroupId: row.split_group_id,
+      laneStageId: stageId,
     },
     eligibility: {
       creativeId: row.creative_id ?? null,

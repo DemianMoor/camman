@@ -5,9 +5,11 @@
 // stage — that's the ship gate. Creates no data; only SELECTs.
 //
 // Run: npx tsx scripts/verify-lane-batch.ts
-import { config } from "dotenv";
-import { resolve } from "node:path";
-config({ path: resolve(process.cwd(), ".env.local") });
+// MUST be the FIRST import: ESM hoists every `import` above ordinary
+// statements, so an inline `config({path: ".env.local"})` here ran AFTER
+// db/client had already read process.env.DATABASE_URL — the script died with
+// `password authentication failed for user "dimat"` (28P01) every time.
+import "./_env-preload";
 
 import { sql as drizzleSql } from "drizzle-orm";
 
@@ -38,7 +40,7 @@ async function main() {
     const laneRows = (await db.execute(drizzleSql`
       SELECT id, behavioral_tier, parent_stage_id,
              include_no_status, include_clickers, exclude_clickers,
-             split_index, split_total
+             split_index, split_total, split_group_id
       FROM campaign_stages
       WHERE campaign_id = ${cid} AND org_id = ${org}::uuid
         AND behavioral_tier IS NOT NULL AND status <> 'archived'
@@ -52,6 +54,7 @@ async function main() {
       exclude_clickers: boolean;
       split_index: number | null;
       split_total: number | null;
+      split_group_id: string | null;
     }[];
     if (laneRows.length === 0) continue;
 
@@ -64,6 +67,12 @@ async function main() {
       exclude_clickers: r.exclude_clickers,
       split_index: r.split_index == null ? null : Number(r.split_index),
       split_total: r.split_total == null ? null : Number(r.split_total),
+      // Both sides MUST carry this. The sibling exclusion (2026-09-07) is
+      // implemented TWICE — once in stageRecipientsSql "Block 3", once inline in
+      // computeLaneAudienceCountsBatch — and this script is the only thing that
+      // compares them on real data. Omit it here and the mirror goes untested,
+      // which is exactly how the two drift.
+      splitGroupId: r.split_group_id,
     }));
 
     // Batch (one query, tier computed once).
@@ -86,6 +95,8 @@ async function main() {
           splitTotal: r.split_total,
           behavioralTier: r.behavioral_tier,
           parentStageId: r.parent_stage_id,
+          splitGroupId: r.split_group_id,
+          laneStageId: Number(r.id),
         },
       });
       perLane.set(Number(r.id), n);

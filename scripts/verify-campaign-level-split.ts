@@ -416,8 +416,15 @@ async function main() {
       !dueNow.some((r) => Number(r.stage_id) === ignLane),
       dueNow.map((r) => r.stage_id).join(","));
 
-    // ── (9) A FAILED GROUP RELEASES NOTHING ──────────────────────────────────
-    console.log("\n(9) A FAILED group releases nothing");
+    // ── (9) LANES ARE INDEPENDENT OF THEIR GROUP'S STATE ─────────────────────
+    // INVERTED 2026-09-07. This block used to assert the opposite ("NO lane of a
+    // failed group is drainable") — the 0174 all-or-nothing release gate. That
+    // gate had no timeout: one unscheduled sibling could never materialize, so the
+    // group could never settle, so every other lane was held forever AND never
+    // marked missed. It froze 650 built messages for ~13h on 2026-09-05. The gate
+    // is gone; these assertions now pin the replacement property so nobody
+    // reintroduces the coupling by accident.
+    console.log("\n(9) Lanes are INDEPENDENT of group state (no all-or-nothing gate)");
     await db.execute(sql`
       UPDATE campaign_stages
       SET send_approved = true, scheduled_at = now() - interval '1 minute'
@@ -425,18 +432,43 @@ async function main() {
     `);
     await failSplitGroup(db, groupId, "verify_forced_failure");
     const drainFailed = await selectDrainableStages(db, { now: new Date(), orgId, maxStages: 50 });
-    const releasedWhileFailed = drainFailed.filter((r) => laneIds.includes(Number(r.stage_id)));
-    check("NO lane of a failed group is drainable",
-      releasedWhileFailed.length === 0,
-      `released ${releasedWhileFailed.map((r) => r.stage_id).join(",")}`);
-    // And the counterfactual: the ONLY thing holding them is the group state.
+    check("a lane IS drainable even though its group is 'failed'",
+      drainFailed.some((r) => Number(r.stage_id) === ignLane),
+      `drainable: ${drainFailed.map((r) => r.stage_id).join(",")}`);
+
+    // The exact incident shape: group stuck 'materializing' because a sibling was
+    // never scheduled. The materialized lane must still release.
     await db.execute(sql`
-      UPDATE campaign_stage_split_groups SET state = 'materialized' WHERE id = ${groupId}::uuid
+      UPDATE campaign_stage_split_groups SET state = 'materializing' WHERE id = ${groupId}::uuid
     `);
-    const drainOk = await selectDrainableStages(db, { now: new Date(), orgId, maxStages: 50 });
-    check("the same lane IS drainable once the group is materialized",
-      drainOk.some((r) => Number(r.stage_id) === ignLane),
-      drainOk.map((r) => r.stage_id).join(","));
+    await db.execute(sql`
+      UPDATE campaign_stages
+      SET send_approved = false, scheduled_at = NULL, materialized_at = NULL
+      WHERE split_group_id = ${groupId}::uuid AND id <> ${ignLane}::int
+    `);
+    const drainStuck = await selectDrainableStages(db, { now: new Date(), orgId, maxStages: 50 });
+    check("a lane IS drainable while a sibling is unscheduled + unmaterialized (the 2026-09-05 freeze)",
+      drainStuck.some((r) => Number(r.stage_id) === ignLane),
+      `drainable: ${drainStuck.map((r) => r.stage_id).join(",")}`);
+    check("group state is irrelevant to drainability — no lane row carries a state gate",
+      drainStuck.filter((r) => Number(r.stage_id) === ignLane).length === 1);
+
+    // RESTORE the fixture. The stuck-sibling check above unapproved/unscheduled
+    // the other two lanes; leaving them that way would make (10)'s "Phase A no
+    // longer selects the skipped lane" pass for the WRONG reason — an unscheduled
+    // lane is unselectable regardless of skipped_empty_at. Put them back so that
+    // assertion still tests what it was written to test.
+    await db.execute(sql`
+      UPDATE campaign_stages
+      SET send_approved = true,
+          scheduled_at = now() - interval '1 minute',
+          materialized_at = NULL
+      WHERE split_group_id = ${groupId}::uuid AND id <> ${ignLane}::int
+    `);
+    const dueRestored = await selectDueScheduledStages(db, { now: new Date(), orgId, maxStages: 50 });
+    check("fixture restored: the soon-to-be-skipped lane IS Phase-A selectable again",
+      dueRestored.some((r) => Number(r.stage_id) === laneIds[2]),
+      `due: ${dueRestored.map((r) => r.stage_id).join(",")}`);
 
     // A recompute that fails BEFORE any lane materialized leaves zero rows.
     const camp2 = (

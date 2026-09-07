@@ -102,6 +102,7 @@ export async function GET(
       exclude_clickers: campaign_stages.exclude_clickers,
       split_index: campaign_stages.split_index,
       split_total: campaign_stages.split_total,
+      split_group_id: campaign_stages.split_group_id,
       // 0174: the lane's group source set, so the displayed count uses the SAME
       // aliveness universe the send will. NULL for legacy lanes; empty while the
       // group is still 'pending' (both fall back to parent_stage_id).
@@ -125,6 +126,9 @@ export async function GET(
     split_index: r.split_index,
     split_total: r.split_total,
     sourceStageIds: r.source_stage_ids ?? null,
+    // Lanes are independent (2026-09-07): a contact taken by a sibling lane
+    // is excluded at materialization, so the count must exclude them too.
+    splitGroupId: r.split_group_id ?? null,
   }));
 
   const counts = await computeLaneAudienceCountsBatch(cid, orgId, items);

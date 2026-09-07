@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-06_
+_Last updated: 2026-09-07_
 
 ## A sending number can be HALF-configured: sends work, opt-out intake is dark (2026-09-03)
 
@@ -2303,3 +2303,47 @@ quietly dropping from 3 lanes to 2. The 10 script call sites were pinned to an
 explicit `tiers: [0, 1, 2]` — rewriting their assertions down to 2 would have
 deleted the only coverage the three-lane path has. Only running the scripts
 finds this class of change.
+
+## Removing a coupling also removes what it was silently guarding (2026-09-07)
+
+Behavioural split lanes released **all-or-nothing**: Phase B drained no lane
+until the whole group reached `materialized`. The stated purpose was "never send a
+partial split". It had no timeout, so one never-scheduled sibling froze every
+other lane forever — 650 messages, ~13h, 2026-09-05. Lanes are now INDEPENDENT.
+
+⭐ **The gate was load-bearing for a second reason nobody wrote down.** A lane's
+audience is an EXACT match on a HIGH-WATER tier that only rises, and each lane
+snapshots when IT materializes. A contact who is tier 0 when lane A materializes
+and tier 2 when lane B materializes lands in BOTH. Simultaneous release kept
+every collision inside the drain's 1-hour dedup window — so the bug was real but
+unreachable. Measured before the change: 73 of 77 groups scheduled all lanes at
+the IDENTICAL time, 76 of 77 materialized within 5 min, **0 contacts had ever
+appeared in two lanes**. Deleting the gate would have made that reachable, and
+staggering — the whole point of independence — is what triggers it.
+
+⭐ **"It has never happened" measured under the OLD behaviour does not survive
+the change.** The zero was produced BY the coupling being removed. Before
+deleting any constraint, ask what its removal makes reachable, not just whether
+the failure has occurred. The replacement is structural: `stageRecipientsSql`
+"Block 3" excludes any contact already claimed by a sibling lane, so lanes stay
+disjoint at any stagger instead of depending on a 1-hour timing window.
+
+⭐ **A duplicated predicate needs a test that compares the copies.** The sibling
+exclusion exists twice — `stageRecipientsSql` and `computeLaneAudienceCountsBatch`
+(the lane-count preview must predict what materializes).
+[scripts/verify-lane-batch.ts](../scripts/verify-lane-batch.ts) is the only thing
+comparing them on real data, and it passed `splitGroupId` on NEITHER side until
+it was wired in — an unexercised mirror that would have drifted silently.
+
+⭐ **Inverting a guard beats deleting it.** `verify-campaign-level-split.ts` §9
+asserted "NO lane of a failed group is drainable". It now asserts the opposite,
+including the exact 2026-09-05 shape (a sibling unscheduled + unmaterialized),
+so the coupling cannot be reintroduced by accident. Its fixture mutation is also
+restored afterwards: leaving the siblings unscheduled made §10's "Phase A no
+longer selects the skipped lane" pass for the WRONG reason (an unscheduled lane
+is unselectable regardless of `skipped_empty_at`).
+
+⭐ **An alarm must be re-scoped when the thing it watches stops being fatal.**
+`sweepStuckSplitGroups` fired a Tier-1 "every lane is held unreleased" alert.
+Post-change that sentence is false; the condition is just an unfinished lane.
+It was downgraded rather than left to cry outage at a routine state.

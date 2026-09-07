@@ -199,16 +199,24 @@ export async function selectDrainableStages(
       -- materialization is COMPLETE (materialized_at set) are drainable. Phase A
       -- finishes any in-progress materialization first.
       AND s.materialized_at IS NOT NULL
-      -- 0174: ALL-OR-NOTHING AT THE RELEASE BOUNDARY. A lane belonging to a
-      -- behavioural split group releases ONLY once the WHOLE group is
-      -- 'materialized' — so a group whose recompute failed, or one lane of which
-      -- is still materializing, never lets its siblings send a partial split.
-      -- Ordinary stages and legacy (pre-0174, split_group_id NULL) lanes are
-      -- unaffected: the NOT EXISTS is vacuously true for them.
-      AND NOT EXISTS (
-        SELECT 1 FROM campaign_stage_split_groups g
-        WHERE g.id = s.split_group_id AND g.state <> 'materialized'
-      )
+      -- LANES ARE INDEPENDENT (2026-09-07). There is deliberately NO group-state
+      -- gate here. 0174 released a split all-or-nothing: a lane drained only once
+      -- the WHOLE group was 'materialized'. That coupling had no timeout and no
+      -- escape — Phase A only selects send_approved AND scheduled_at IS NOT NULL,
+      -- so ONE unscheduled sibling could never materialize, its group could never
+      -- settle, and every other lane was held forever WITHOUT being marked missed
+      -- (Phase B never selected them, so nothing stamped schedule_missed_at). That
+      -- froze 650 built messages for ~13h on 2026-09-05 while the drain was healthy.
+      --
+      -- Each lane now releases on its own merits. An unprepared, unscheduled, or
+      -- permanently failed sibling cannot hold anyone back.
+      --
+      -- What replaced the coupling: lanes stay mutually exclusive by AUDIENCE, not
+      -- by timing. stageRecipientsSql (lib/sends/recipients.ts, "Block 3") excludes
+      -- any contact already taken by a sibling lane of the same group, so two lanes
+      -- can never message the same person however far apart they are scheduled —
+      -- strictly stronger than the group gate, which only held because
+      -- simultaneous release kept collisions inside the drain 1-hour dedup window.
       -- Released already, OR due for first release. Future-armed stages
       -- (sent_at NULL and scheduled_at in the future) are held until due.
       AND (s.sent_at IS NOT NULL OR (s.scheduled_at IS NOT NULL AND s.scheduled_at <= ${nowIso}))

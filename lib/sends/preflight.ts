@@ -93,6 +93,7 @@ interface MainRow {
   // stages). Must flow into stageRecipientsSql or preflight's recipient_count
   // stops matching what kickoff materializes.
   source_stage_ids: number[] | null;
+  split_group_id: string | null;
   sender_max_sends_per_second: number | null;
   allow_unknown_carrier: boolean | null;
 }
@@ -123,6 +124,7 @@ export async function preflightStageSend(
       s.behavioral_tier   AS behavioral_tier,
       s.parent_stage_id   AS parent_stage_id,
       sg.source_stage_ids AS source_stage_ids,
+      s.split_group_id AS split_group_id,
       pp.max_sends_per_second AS sender_max_sends_per_second,
       pp.allow_unknown_carrier AS allow_unknown_carrier
     FROM campaigns c
@@ -170,6 +172,10 @@ export async function preflightStageSend(
           behavioralTier: row.behavioral_tier ?? null,
           parentStageId: row.parent_stage_id ?? null,
           sourceStageIds: row.source_stage_ids ?? null,
+          // Lanes are independent (2026-09-07): a contact already taken by a
+          // sibling lane is excluded, so the preflight count must exclude them.
+          splitGroupId: row.split_group_id ?? null,
+          laneStageId: stageId,
         },
         // Match the kickoff's content-dedup so the previewed recipient count
         // equals what will actually materialize.

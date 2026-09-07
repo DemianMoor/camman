@@ -930,6 +930,12 @@ export interface LaneCountBatchItem {
   // MUST mirror stageRecipientsSql's overlay or the count shown on the stages
   // list stops predicting what materializes.
   sourceStageIds?: number[] | null;
+  // The lane's split group. Lanes became INDEPENDENT on 2026-09-07 (they no
+  // longer wait for each other to release), so a contact already taken by a
+  // SIBLING lane is excluded from this one at materialization. The count must
+  // mirror that or it over-predicts once one lane has run. NULL ⇒ overlay off,
+  // which is what every legacy (pre-0174) lane keeps using.
+  splitGroupId?: string | null;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -966,7 +972,8 @@ function buildLanesCte(lanes: LaneCountBatchItem[]): SQL {
       ${l.include_clickers}::boolean as inc_cl,
       ${l.exclude_clickers}::boolean as exc_cl,
       ${l.split_index}::int as split_index,
-      ${l.split_total}::int as split_total`,
+      ${l.split_total}::int as split_total,
+      ${l.splitGroupId ?? null}::uuid as split_group_id`,
   );
   return rows.reduce((acc, r, i) =>
     i === 0 ? r : drizzleSql`${acc} union all ${r}`,
@@ -1049,6 +1056,22 @@ export async function computeLaneAudienceCountsBatch(
         and not (ln.exc_cl and p.was_clicker_at_snapshot)
         and coalesce(t.tier, 0) = ln.tier
         and coalesce(t.tier, 0) <> 3
+        -- Sibling exclusion — mirrors "Block 3" in stageRecipientsSql. Lanes are
+        -- independent now, so the first lane to materialize a contact owns them;
+        -- without this the displayed count would over-predict every lane that
+        -- runs after the first. NULL split_group_id ⇒ vacuously true (legacy).
+        and (
+          ln.split_group_id is null
+          or not exists (
+            select 1 from stage_sends sib
+            join campaign_stages sibs on sibs.id = sib.stage_id
+            where sibs.split_group_id = ln.split_group_id
+              and sibs.id <> ln.stage_id
+              and sib.contact_id = p.contact_id
+              and sib.org_id = ${orgId}::uuid
+              and sib.status <> 'rejected'
+          )
+        )
     )
     select stage_id, ${BATCH_SPLIT_FILTER}
     from qualified

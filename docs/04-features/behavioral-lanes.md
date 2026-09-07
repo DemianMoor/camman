@@ -1,6 +1,6 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-09-06_
+_Last updated: 2026-09-07_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
@@ -134,16 +134,44 @@ pending --recompute--> materializing --all lanes done--> materialized
   > RESOLVE, not from the row it read beforehand — that row still carries the empty
   > array the group was created with, and using it would silently fall through to
   > the single-parent aliveness and materialize the narrower audience.
-- **Atomicity is at the RELEASE boundary, not the insert boundary.** Lanes
-  materialize independently (windowed, per-window commit, resumable -- unchanged);
-  **Phase B refuses to release a grouped lane until the whole group is
-  `materialized`**. One transaction for the trio was measured at ~30-65s for the
-  largest real trio (18,755 combined rows at ~500-900 rows/s): it would hold one
-  transaction-pooler connection that long, breach the 300s route ceiling at ~3x
-  today's size, and discard the resumability that exists because a 60s timeout used
-  to roll back ~17K recipients. On failure the group goes `failed`, no lane
-  releases, a Tier-1 Telegram alert fires, and rows already written stay in place
-  unreleased -- the abort route is how an operator clears them.
+- **LANES ARE INDEPENDENT (2026-09-07). There is no group-state release gate.**
+  Each lane materializes and sends on its own schedule; an unprepared,
+  unscheduled, or permanently `failed` sibling holds nobody back.
+
+  > **What this replaced, and why.** 0174 released a split all-or-nothing:
+  > **Phase B refused to release a grouped lane until the whole group was
+  > `materialized`.** That coupling had no timeout and no
+  > escape: Phase A only selects `send_approved AND scheduled_at IS NOT NULL`, so
+  > ONE never-scheduled sibling could never materialize, the group could never
+  > settle, and every other lane was held forever **without even being marked
+  > missed** (Phase B never selected them, so nothing stamped
+  > `schedule_missed_at` -- the stages neither sent nor expired). On 2026-09-05
+  > that froze **650 built messages for ~13h** across campaigns 1151/1152/1171
+  > while the drain was healthy: 13,225 messages went out on the same provider,
+  > on the same two numbers, in that hour. The only signal was the hourly
+  > backlog-stall alert, which fires 60 min AFTER the last lane's due time.
+  >
+  > A group can still go `failed` and the state machine still runs -- it is now
+  > **observability only** and gates nothing.
+
+- **Disjointness is structural, not timing-based.** Removing the gate removed
+  something load-bearing that was never its stated purpose: it was also the only
+  reason lanes could not double-message. A lane's audience is an EXACT match on a
+  HIGH-WATER tier that only ever rises, and each lane snapshots when IT
+  materializes -- so a contact who is tier 0 when the Ignored lane materializes
+  and tier 2 an hour later, when another lane materializes, lands in BOTH
+  snapshots. Simultaneous release kept every such collision inside the drain's
+  1-hour dedup window, which is why it never happened (measured 2026-09-06 across
+  all 77 groups: 73 scheduled every lane at the IDENTICAL time, 76 materialized
+  within 5 minutes, and ZERO contacts had ever appeared in two lanes). Deliberate
+  staggering is now the POINT, so `stageRecipientsSql` **"Block 3"** excludes any
+  contact already claimed by a SIBLING lane of the same group: first lane to
+  materialize a contact owns them, at any stagger. `rejected` rows do NOT hold a
+  claim (they are the cancel audit trail). **This is duplicated in
+  `computeLaneAudienceCountsBatch`** so the displayed lane count keeps predicting
+  what materializes; [scripts/verify-lane-batch.ts](../../scripts/verify-lane-batch.ts)
+  compares the two on real production campaigns and is the only thing preventing
+  them from drifting -- it must keep passing `splitGroupId` on BOTH sides.
 - **`parent_stage_id` STAYS on a grouped lane**, pointing at the group's
   `anchor_stage_id` (the latest completed stage at creation). It is the P4 slip
   anchor only. Widening the parent-complete gate to wait on ALL source stages
@@ -182,15 +210,18 @@ doubles as the post-once marker (no re-alert every 5 minutes) and
 > so the clock runs from the last lane that has one — which is exactly the "you
 > never scheduled lane 3" case worth flagging.
 
-> ⚠️ **Consequence of the all-or-nothing release gate: staggered lanes all wait
-> for the last one.** If lane 1 is scheduled 10:00 and lane 3 at 14:00, lane 1
-> materializes at 10:00 but does NOT send until the group settles at 14:00,
-> because Phase B gates on group state. This is the design working as specified
-> (nothing goes out until everything is ready), not a bug — but schedule the three
-> lanes together unless you specifically want them to fire as one batch at the
-> latest time.
+> ✅ **Staggered lanes now fire on their own times (changed 2026-09-07).** Lane 1
+> scheduled 10:00 and lane 3 at 14:00 each send at their own slot. Until
+> 2026-09-07 lane 1 materialized at 10:00 but did NOT send until the group settled
+> at 14:00, because Phase B gated on group state — staggering silently collapsed
+> to "everything at the last lane's time". Contacts stay non-overlapping across
+> the stagger via the sibling exclusion, not via simultaneous release.
 
-> 🚨 **A lane that is never scheduled freezes its siblings FOREVER.** The gate
+> ✅ **FIXED 2026-09-07 — kept here as the reason the gate is gone.** The text
+> below described live behaviour until lanes were made independent; a
+> never-scheduled lane can no longer hold anything back.
+>
+> 🚨 ~~A lane that is never scheduled freezes its siblings FOREVER.~~ The gate
 > above has no timeout. Phase A only selects stages with `send_approved = true`
 > AND `scheduled_at IS NOT NULL`, so an unscheduled, unapproved lane can never
 > materialize, so `settleSplitGroup` can never flip the group, so Phase B holds

@@ -69,6 +69,7 @@ interface CfgRow {
   parent_stage_id: number | null;
   // 0174: split-group source set. NULL for legacy lanes / ordinary stages.
   source_stage_ids: number[] | null;
+  split_group_id: string | null;
   creative_id: number | null;
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
@@ -157,6 +158,8 @@ export async function computePreflightBreakdown(
           behavioralTier: cfg.behavioral_tier ?? null,
           parentStageId: cfg.parent_stage_id ?? null,
           sourceStageIds: cfg.source_stage_ids ?? null,
+          splitGroupId: cfg.split_group_id ?? null,
+          laneStageId: stageId,
         },
         eligibility,
         carrierPolicy,
@@ -194,6 +197,8 @@ export async function computePreflightBreakdown(
             behavioralTier: cfg.behavioral_tier ?? null,
             parentStageId: cfg.parent_stage_id ?? null,
             sourceStageIds: cfg.source_stage_ids ?? null,
+            splitGroupId: cfg.split_group_id ?? null,
+            laneStageId: stageId,
           },
           eligibility,
         })}
@@ -208,6 +213,8 @@ export async function computePreflightBreakdown(
               behavioralTier: cfg.behavioral_tier ?? null,
               parentStageId: cfg.parent_stage_id ?? null,
               sourceStageIds: cfg.source_stage_ids ?? null,
+              splitGroupId: cfg.split_group_id ?? null,
+              laneStageId: stageId,
             },
             eligibility,
             carrierPolicy,

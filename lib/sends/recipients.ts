@@ -48,6 +48,17 @@ export interface StageRecipientFilters {
   // lane (~569 in production, none backfilled) and every existing caller emits
   // byte-identical SQL.
   sourceStageIds?: number[] | null;
+  // The lane's split group (migration 0174). When set, the lane excludes any
+  // contact ALREADY TAKEN by a sibling lane of the same group — see "Block 3"
+  // below. Absent/null ⇒ that overlay is off and the emitted SQL is unchanged,
+  // which keeps every legacy (pre-0174, split_group_id NULL) lane byte-identical.
+  splitGroupId?: string | null;
+  // This lane's OWN stage id. Required alongside splitGroupId so the sibling
+  // exclusion can skip the lane's own rows. Without it a lane that has already
+  // materialized would subtract its own recipients from its own audience — which
+  // the send path would not notice (`excludeMaterializedStageId` masks it) but the
+  // read-only lane-count preview WOULD, collapsing the displayed count to ~0.
+  laneStageId?: number | null;
 }
 
 export interface StageRecipientRow {
@@ -160,10 +171,47 @@ export function stageRecipientsSql(opts: {
     ? sql`
       left join (${campaignTierExpr(campaignId, orgId)}) bt on bt.contact_id = p.contact_id`
     : sql``;
+  // Block 3 — SIBLING EXCLUSION (2026-09-07). A contact already taken by ANOTHER
+  // lane of the same split group is excluded from this one.
+  //
+  // Why this exists: the exact-tier match above makes the lanes disjoint AT ONE
+  // INSTANT, and that is all it makes them. `campaignTierExpr` is a HIGH-WATER
+  // mark that only ever rises, and each lane snapshots its audience when IT
+  // materializes. So a contact who is tier 0 when the Ignored lane materializes
+  // and tier 1 an hour later, when the Clicked lane materializes, lands in BOTH
+  // snapshots and is messaged twice for the same position.
+  //
+  // That never happened under 0174 only because the all-or-nothing release gate
+  // forced every lane to drain together, which kept collisions inside the drain's
+  // 1-hour dedup window (measured 2026-09-06: 73 of 77 groups scheduled all lanes
+  // at the IDENTICAL time, 76 of 77 materialized within 5 minutes, and ZERO
+  // contacts had ever appeared in two lanes of one group). Removing that gate to
+  // make lanes independent is exactly what opens the window — a deliberately
+  // staggered split is now the POINT — so the guarantee has to stop depending on
+  // timing. This makes it structural: first lane to materialize a contact owns
+  // them, permanently, at any stagger.
+  //
+  // `status <> 'rejected'` mirrors `notYetMaterialized` above: rejected rows are
+  // the by-design cancel/recall audit trail, not a live claim on the contact.
+  // Needs BOTH ids: the group to scope the siblings, and this lane's own id to
+  // exclude itself. Either missing ⇒ the overlay is off and the SQL is unchanged.
+  const siblingExclusion =
+    isLane && f.splitGroupId && f.laneStageId != null
+      ? sql`
+        and not exists (
+          select 1 from stage_sends sib
+          join campaign_stages sibs on sibs.id = sib.stage_id
+          where sibs.split_group_id = ${f.splitGroupId}::uuid
+            and sibs.id <> ${f.laneStageId}::int
+            and sib.contact_id = p.contact_id
+            and sib.org_id = ${orgId}::uuid
+            and sib.status <> 'rejected'
+        )`
+      : sql``;
   const behavioralWhere = isLane
     ? sql`${aliveness}
         and coalesce(bt.tier, 0) = ${f.behavioralTier!}::int
-        and coalesce(bt.tier, 0) <> 3`
+        and coalesce(bt.tier, 0) <> 3${siblingExclusion}`
     : sql``;
 
   // Content-dedup exclusions (Phase 2). Built from the stage's creative + the

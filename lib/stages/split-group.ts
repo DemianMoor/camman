@@ -564,13 +564,20 @@ export async function notifyGroupStuck(
         (s.scheduled_at ? `due ${s.scheduled_at}` : "NO SEND TIME SET"),
     )
     .join("\n");
+  // Severity DOWNGRADED 2026-09-07, when lanes became independent. This used to
+  // be a Tier-1 "silent non-delivery" alarm and it was telling the truth: the
+  // all-or-nothing release gate meant one unprepared lane held every sibling
+  // unreleased forever. That gate is gone — siblings now send on their own — so
+  // the same condition is no longer an outage, just an unfinished lane. Saying
+  // "every lane is held" here would now be false, and a Tier-1 alarm that cries
+  // outage at a routine state is one people learn to ignore.
   await notifyTelegram(
-    `🛑 Behavioural split STUCK — lanes materialized but NOT sending.\n` +
+    `⚠️ Behavioural split lane never prepared.\n` +
       `Campaign "${ctx.campaign}" (id ${ctx.campaignId})\n` +
-      `The group has been mid-materialization well past its last lane's slot, so ` +
-      `every lane is held unreleased. Outstanding:\n${list || "  (none listed)"}\n` +
-      `Action needed: set a send time on any lane missing one, or cancel the split. ` +
-      `Nothing is auto-failed — the messages already prepared are intact.`,
+      `These lanes are past their slot and still not prepared:\n${list || "  (none listed)"}\n` +
+      `Their SIBLING LANES ARE UNAFFECTED and send on their own schedule — this is ` +
+      `not a stalled send. Action: set a send time on any lane missing one, or ` +
+      `delete the lane if you don't want it. Nothing is auto-failed.`,
   );
 }
 

@@ -136,15 +136,25 @@ async function main() {
       tier?: number | null;
       parent?: number | null;
     }): Promise<{ id: number }> {
+      // scheduled_at MUST be set. kickoffStageSend refuses `no_schedule` when it
+      // is NULL (added 2026-06-23, lib/sends/kickoff.ts) — this fixture predates
+      // that gate and every kickoff here silently refused, taking 15 assertions
+      // down with it for ~2.5 months while the script still exited "9 passed".
+      //
+      // Safe in the SHARED production database: the fixture campaign is
+      // link_mode='manual', and BOTH cron phases (selectDueScheduledStages and
+      // selectDrainableStages) require link_mode='tracked', so a dated stage here
+      // can never be picked up by a live send. The test drives kickoff directly.
       const r = (await db.execute(sql`
         INSERT INTO campaign_stages
           (org_id, campaign_id, stage_number, creative_id, include_no_status,
-           include_clickers, exclude_clickers, stop_text, behavioral_tier, parent_stage_id)
+           include_clickers, exclude_clickers, stop_text, behavioral_tier,
+           parent_stage_id, scheduled_at)
         VALUES
           (${orgId}::uuid, ${campaignId}::int,
            (SELECT coalesce(max(stage_number), 0) + 1 FROM campaign_stages WHERE campaign_id = ${campaignId}::int),
            ${creativeId}::int, true, true, false, ${"Stop to END"},
-           ${opts.tier ?? null}, ${opts.parent ?? null})
+           ${opts.tier ?? null}, ${opts.parent ?? null}, now())
         RETURNING id
       `)) as unknown as { id: number }[];
       return { id: r[0].id };
@@ -353,26 +363,60 @@ async function main() {
         if (!name.startsWith(ORG_MARKER)) {
           throw new Error(`Refusing teardown: org ${orgId} name "${name}" is not the test marker.`);
         }
-        await db.execute(sql`DELETE FROM campaigns WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM link_destinations WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM short_domains WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM opt_outs WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM contacts WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM creatives WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM brands WHERE org_id = ${orgId}::uuid`);
-        await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
+        // ONE transaction with a raised statement_timeout. `DELETE FROM contacts`
+        // on production takes ~150s for a handful of rows: deleting a contact
+        // cascades into 14 tables and five have NO leading index on contact_id
+        // (creative_exposures 3.4M, stage_sends 3.8M, offer_exposures 1.4M,
+        // counted_clickers, drip_journeys), so one delete seq-scans ~8.6M rows.
+        // Under the default timeout the teardown is CANCELLED part-way and LEAVES
+        // FIXTURE ROWS IN THE LIVE DATABASE — exactly what happened once the
+        // no_schedule fix made this test create real rows again (1 org / 1 brand /
+        // 6 contacts / 1 creative stranded 2026-09-07, removed by hand).
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL statement_timeout = '300s'`);
+          await tx.execute(sql`DELETE FROM campaigns WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM link_destinations WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM short_domains WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM opt_outs WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM contacts WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM creatives WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM brands WHERE org_id = ${orgId}::uuid`);
+          await tx.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
+        });
         console.log("  cleanup complete");
       }
     } finally {
+      // TWO DIFFERENT QUESTIONS. A global before/after equality check is the WRONG
+      // test against a live database — real traffic lands mid-run. The failing
+      // 2026-09-07 run reported +1,368 clicks and +3,900 send_attempts that were
+      // genuine production activity, burying the 6 rows that were actually mine.
+      //   "did I leave anything behind?"      -> per-org, exact, no false positives
+      //   "did I delete someone else's data?" -> global, but only a DECREASE is bad
+      // Guarded: if the run died before the org existed, orgId is "" and the
+      // uuid cast below would throw from inside `finally`, masking the real error.
+      const leftovers = orgId ? (await db.execute(sql`
+        SELECT
+          (SELECT count(*)::int FROM organizations WHERE id = ${orgId}::uuid) +
+          (SELECT count(*)::int FROM contacts WHERE org_id = ${orgId}::uuid) +
+          (SELECT count(*)::int FROM brands WHERE org_id = ${orgId}::uuid) +
+          (SELECT count(*)::int FROM creatives WHERE org_id = ${orgId}::uuid) +
+          (SELECT count(*)::int FROM campaigns WHERE org_id = ${orgId}::uuid) +
+          (SELECT count(*)::int FROM opt_outs WHERE org_id = ${orgId}::uuid) +
+          (SELECT count(*)::int FROM short_domains WHERE org_id = ${orgId}::uuid) +
+          (SELECT count(*)::int FROM link_destinations WHERE org_id = ${orgId}::uuid) AS n
+      `)) as unknown as { n: number }[] : [{ n: 0 }];
+      const left = Number(leftovers[0]?.n ?? -1);
+      check("ZERO fixture rows left behind for the test org", left === 0, `got ${left}`);
+
       const after = await tableCounts();
-      let drift = false;
+      let shrank = false;
       for (const t of COUNTED_TABLES) {
-        if (before[t] !== after[t]) {
-          drift = true;
-          console.log(`  \x1b[31mDRIFT\x1b[0m ${t}: before=${before[t]} after=${after[t]}`);
+        if (after[t] < before[t]) {
+          shrank = true;
+          console.log(`  [31mSHRANK[0m ${t}: before=${before[t]} after=${after[t]}`);
         }
       }
-      check("real-data table counts unchanged after teardown", !drift);
+      check("no counted table SHRANK (teardown stayed inside the test org)", !shrank);
       await pgConn.end({ timeout: 5 });
     }
   }

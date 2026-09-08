@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-08-27_
+_Last updated: 2026-09-08_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -203,9 +203,40 @@ grain `substituted === total`**, so stage rows behave exactly as before. Over th
 trailing 30 days the change takes marked campaign rows from **11 to 4**; over the
 2026-08-27 range specifically, from **2 to 0**.
 
-**Scope:** Overview only. The By Number / Offer / Sequence / Group tabs are
-excluded — their rows aggregate many stages, and `counted_clickers` is not
-additive across a dimension.
+**Scope:** the Reports **Overview** tab and the **campaign detail** totals card.
+The By Number / Offer / Sequence / Group tabs are excluded — their rows aggregate
+many stages, and `counted_clickers` is not additive across a dimension.
+
+### Campaign detail totals card (added 2026-09-08)
+
+The Overview substitution shipped in PR #129; the campaign detail page kept a bare
+`clickers += s.click_count`, so **the same campaign read `23*` on Overview and `0`
+on its own page** — two contradictory numbers for one campaign. Reported against
+campaign `8_130_090826_1`, whose Leadpages landing page (`lp.guidekn.com`) shipped
+with no Keitaro visit script: 5,999 sends, 1,015 CamMan taps, 23 counted clickers,
+0 Keitaro visits, "Clickers 0" on screen.
+
+[app/(protected)/campaigns/[id]/page.tsx](<../../app/(protected)/campaigns/[id]/page.tsx>)
+now applies `shouldSubstituteClickers()` per stage inside the totals memo and
+`substitutionDominates()` for the `*` marker, plus a footnote naming the likely
+cause. The three inputs it needs — `keitaro_visit_clicks_raw`,
+`keitaro_visit_clicks_clean`, `counted_clickers` — are returned per stage by
+[the stages route](<../../app/api/campaigns/[campaignId]/stages/route.ts>); a
+stage with no `keitaro_stage_results` row at all maps to `0/0`, which is the
+strongest gap signal, never "unknown".
+
+⚠️ **The predicates live in
+[lib/reporting/tracking-gap-rules.ts](../../lib/reporting/tracking-gap-rules.ts),
+which has ZERO imports.** The campaign page is a client component, so importing
+`tracking-gap.ts` (drizzle + db types) would pull the ORM into the browser
+bundle. `tracking-gap.ts` re-exports every predicate, so all existing importers
+are unchanged and there is still exactly one definition — same reason
+`lib/stage-url.ts` is a pure builder.
+
+**This does not restore revenue.** Sales, checkout clicks and revenue have no
+source but Keitaro, and a gap campaign's conversions stay unreported. The
+substitution stops the page claiming nobody clicked; it does not make the
+campaign measurable. The fix is still the visit script on the landing page.
 
 ## 7. Extension points / limitations
 - Re-score pass (`mode=rescore`) lets you retune weights and re-grade history.

@@ -34,6 +34,12 @@ import { DripConfigPanel } from "@/components/campaigns/drip-config-panel";
 import { CampaignSendMode } from "@/components/campaigns/campaign-send-mode";
 import { CampaignActivitySection } from "@/components/campaigns/campaign-activity-section";
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
+// The PURE rules module — importing "@/lib/reporting/tracking-gap" here would
+// drag drizzle-orm into the client bundle. Same rule object either way.
+import {
+  shouldSubstituteClickers,
+  substitutionDominates,
+} from "@/lib/reporting/tracking-gap-rules";
 import { ExportClickersDialog } from "@/components/campaigns/export-clickers-dialog";
 import {
   StagePrepareDialog,
@@ -246,6 +252,12 @@ type Stage = {
   // Real per-conversion revenue from Keitaro (summed across stat_dates). The
   // revenue source of truth — never sales × the offer's current CPA.
   keitaro_revenue: string;
+  // Tracking-gap inputs. When a tracked stage's landing page ships without the
+  // Keitaro visit script, these stay 0 while CamMan keeps recording every tap —
+  // so the Clickers total substitutes counted_clickers. See the totals memo.
+  keitaro_visit_clicks_raw: number;
+  keitaro_visit_clicks_clean: number;
+  counted_clickers: number;
   sales_payout_each: string | null;
   notes: string | null;
   tracking_id: string | null;
@@ -1482,12 +1494,37 @@ export default function CampaignDetailPage() {
     // render "—" rather than a misleading $0 for purely-manual campaigns.
     let revenue = 0;
     let revenueKnown = false;
+    // Tracking-gap substitution, the SAME rule the Reports Overview tab applies
+    // (shouldSubstituteClickers / substitutionDominates in
+    // lib/reporting/tracking-gap.ts — imported, never transcribed, so the two
+    // screens cannot drift). A tracked stage whose landing page lacks the
+    // Keitaro visit script reports 0 visits forever while CamMan keeps
+    // recording taps; without this the card reads "Clickers 0" as though nobody
+    // clicked. The substitute is counted_clickers (human-classified people),
+    // NOT raw taps — raw runs ~11x Keitaro's clean visits because most SMS taps
+    // are carrier scanners.
+    let substitutedClickers = 0;
+    const now = new Date();
     for (const s of stages) {
       if (s.archived_at) continue;
       sms += s.sms_count;
       delivered += s.delivered_count;
       optOuts += s.opt_out_count;
-      clickers += s.click_count;
+      if (
+        shouldSubstituteClickers({
+          linkMode: s.link_mode,
+          visitClicksRaw: s.keitaro_visit_clicks_raw,
+          visitClicksClean: s.keitaro_visit_clicks_clean,
+          countedClickers: s.counted_clickers,
+          stageSentAt: s.sent_at,
+          now,
+        })
+      ) {
+        clickers += s.counted_clickers;
+        substitutedClickers += s.counted_clickers;
+      } else {
+        clickers += s.click_count;
+      }
       scrubbed += s.scrubbed_count;
       bounced += s.bounced_count;
       checkoutClicks += s.checkout_click_count;
@@ -1509,6 +1546,9 @@ export default function CampaignDetailPage() {
       // sum of per-stage credits, which window-attribution would over-count.
       inboundStops: inboundStopContacts,
       clickers,
+      // Marker only when the substitute DOMINATES the total — one patched stage
+      // beside four healthy ones is a Keitaro reading, not a CamMan one.
+      clickersSubstituted: substitutionDominates(substitutedClickers, clickers),
       scrubbed,
       bounced,
       checkoutClicks,
@@ -1805,7 +1845,16 @@ export default function CampaignDetailPage() {
               />
               <TotalsMetric
                 label="Clickers"
-                value={campaignTotals.clickers}
+                value={
+                  campaignTotals.clickersSubstituted
+                    ? `${campaignTotals.clickers.toLocaleString()}*`
+                    : campaignTotals.clickers
+                }
+                title={
+                  campaignTotals.clickersSubstituted
+                    ? "Keitaro recorded no landing-page visits for this campaign, so this is CamMan's own count of human clickers on the tracked link. The landing page is probably missing the Keitaro visit script."
+                    : undefined
+                }
               />
               <TotalsMetric
                 label="Scrubbed"
@@ -1836,6 +1885,18 @@ export default function CampaignDetailPage() {
                 raw
               />
             </CardContent>
+            {campaignTotals.clickersSubstituted ? (
+              // A tooltip alone is not discoverable enough for a number that
+              // changed source. Say it in the open, and name the likely cause so
+              // the operator can act rather than just distrust the figure.
+              <CardContent className="border-t pt-3 text-xs text-muted-foreground">
+                <span className="font-medium">*</span> Keitaro recorded no
+                landing-page visits, so Clickers shows CamMan&apos;s own count of
+                human clickers on the tracked link. Usually means the landing
+                page is missing the Keitaro visit script — sales, checkout clicks
+                and revenue stay unreported until it&apos;s added.
+              </CardContent>
+            ) : null}
           </Card>
         ) : null}
 
@@ -2689,13 +2750,17 @@ function TotalsMetric({
   label,
   value,
   raw,
+  title,
 }: {
   label: string;
   value: number | string;
   raw?: boolean;
+  // Hover explanation. Used by the Clickers tile to say why the figure carries
+  // a "*" (CamMan's count standing in for absent Keitaro visits).
+  title?: string;
 }) {
   return (
-    <div>
+    <div title={title}>
       <div className="text-xs uppercase text-muted-foreground">{label}</div>
       <div className="font-mono text-lg tabular-nums">
         {raw ? value : typeof value === "number" ? value.toLocaleString() : value}

@@ -259,6 +259,11 @@ export interface CountedClickerBounds {
   // ignores the date filter entirely — that is the primary displayed number.
   fromUtc?: Date;
   toExclusiveUtc?: Date;
+  // Restrict to one campaign. The campaign detail page needs the same per-stage
+  // figure the Reports Overview substitutes, for ONE campaign — without this it
+  // would either scan the whole org or transcribe the counter (`count(*)` at
+  // stage grain, DISTINCT elsewhere) into a second place and drift from it.
+  campaignId?: number;
 }
 
 // Counted clickers per grain id. Returns a Map<grainId, count>.
@@ -278,11 +283,13 @@ export async function getCountedClickers(
       : sql``;
   const counter =
     grain === "stage" ? sql`count(*)::int` : sql`count(DISTINCT contact_id)::int`;
+  const campaignFilter =
+    b.campaignId != null ? sql`AND campaign_id = ${b.campaignId}` : sql``;
 
   const rows = (await dbc.execute(sql`
     SELECT ${col} AS grain_id, ${counter} AS n
     FROM counted_clickers
-    WHERE org_id = ${orgId}::uuid AND ${col} IS NOT NULL ${dateFilter}
+    WHERE org_id = ${orgId}::uuid AND ${col} IS NOT NULL ${dateFilter} ${campaignFilter}
     GROUP BY 1
   `)) as unknown as { grain_id: number; n: number }[];
 

@@ -28,6 +28,7 @@ import {
 } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
+import { getCountedClickers } from "@/lib/reporting/counted-clickers";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { buildStageFullUrl, validateBrandLpShape, validateDestination } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
@@ -307,6 +308,13 @@ export async function GET(
   // (2) WS4 §0 materialization signal: stage_sends counts by status, one grouped
   // query (indexed on stage_id) — no N+1. Drives the Orange↔Blue operational-status
   // split on the client via deriveStageOperationalStatus.
+  // CamMan's own per-stage clicker count, for the tracking-gap substitution in
+  // the totals card. Started here so it runs alongside the grouped queries
+  // below rather than after them; awaited once they resolve.
+  const countedClickersPromise = getCountedClickers(db, orgId, "stage", {
+    campaignId: cid,
+  });
+
   const [inboundStopContactsRow, sendCountRows, keitaroRows] = (await Promise.all([
     db.execute(drizzleSql`
       SELECT count(DISTINCT oo.contact_id)::int AS n
@@ -344,7 +352,12 @@ export async function GET(
     db.execute(drizzleSql`
       SELECT stage_id,
              sum(sales)::int AS sales,
-             sum(revenue)::numeric(12,4)::text AS revenue
+             sum(revenue)::numeric(12,4)::text AS revenue,
+             -- Both visit columns: the clickers-gap rule is a ZERO-test across
+             -- the pair (hasNoKeitaroVisits), never clean alone — raw is a
+             -- superset, so "raw > 0, clean = 0" is common and is NOT a gap.
+             sum(visit_clicks_raw)::int AS visit_clicks_raw,
+             sum(visit_clicks_clean)::int AS visit_clicks_clean
       FROM ${keitaro_stage_results}
       WHERE org_id = ${orgId} AND campaign_id = ${cid}
       GROUP BY stage_id
@@ -360,13 +373,24 @@ export async function GET(
       failed: number;
       skipped_duplicate: number;
     }[],
-    { stage_id: number; sales: number; revenue: string }[],
+    {
+      stage_id: number;
+      sales: number;
+      revenue: string;
+      visit_clicks_raw: number;
+      visit_clicks_clean: number;
+    }[],
   ];
   const inboundStopContacts = Number(inboundStopContactsRow[0]?.n ?? 0);
   const keitaroByStage = new Map(
     keitaroRows.map((r) => [
       Number(r.stage_id),
-      { sales: Number(r.sales ?? 0), revenue: r.revenue ?? "0.0000" },
+      {
+        sales: Number(r.sales ?? 0),
+        revenue: r.revenue ?? "0.0000",
+        visitClicksRaw: Number(r.visit_clicks_raw ?? 0),
+        visitClicksClean: Number(r.visit_clicks_clean ?? 0),
+      },
     ]),
   );
   const sendCountsByStage = new Map(
@@ -383,6 +407,8 @@ export async function GET(
     ]),
   );
 
+  const countedClickersByStage = await countedClickersPromise;
+
   let data = rows.map((r, i) => ({
     ...r,
     link_mode: linkMode,
@@ -395,6 +421,12 @@ export async function GET(
     inbound_stop_count: r.inbound_opt_out_count,
     keitaro_sales_count: keitaroByStage.get(r.id)?.sales ?? 0,
     keitaro_revenue: keitaroByStage.get(r.id)?.revenue ?? "0.0000",
+    // Inputs to shouldSubstituteClickers (lib/reporting/tracking-gap.ts). A
+    // stage with no keitaro_stage_results row at all is the strongest gap
+    // signal, so a missing row must read 0/0 — never "unknown".
+    keitaro_visit_clicks_raw: keitaroByStage.get(r.id)?.visitClicksRaw ?? 0,
+    keitaro_visit_clicks_clean: keitaroByStage.get(r.id)?.visitClicksClean ?? 0,
+    counted_clickers: countedClickersByStage.get(r.id) ?? 0,
     send_counts: sendCountsByStage.get(r.id) ?? {
       total: 0,
       pending: 0,

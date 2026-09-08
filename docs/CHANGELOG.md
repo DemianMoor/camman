@@ -1749,4 +1749,19 @@ prevent; the per-stage 10K/hour cap at kickoff is the only volume BLOCK left). N
 still computes and reports, it just never refuses. **No migration.**
   - docs updated: docs/04-features/operator-guardrails.md, docs/CHANGELOG.md
 
+- 2026-09-08 — Campaign detail totals card now applies the Keitaro tracking-gap
+  substitution: when a tracked campaign's stages have zero Keitaro visits and are
+  past the maturity gate, "Clickers" shows CamMan's `counted_clickers` with a `*`
+  and a footnote instead of a bare `0`. Reported against `8_130_090826_1`
+  (Leadpages LP with no Keitaro visit script — 1,015 taps, 23 counted clickers,
+  Clickers read 0). Same rule the Reports Overview has used since PR #129, now
+  imported rather than duplicated: the pure predicates moved to
+  `lib/reporting/tracking-gap-rules.ts` (zero imports, so the CLIENT campaign page
+  can share them without pulling drizzle into the browser bundle) and
+  `tracking-gap.ts` re-exports them, leaving every existing importer unchanged.
+  Stages route returns `keitaro_visit_clicks_raw` / `_clean` / `counted_clickers`;
+  `getCountedClickers` gained an optional `campaignId` scope. Does NOT restore
+  sales/revenue — those remain Keitaro-only. **No migration.**
+  - docs updated: docs/04-features/tracking-attribution.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-08-31_
+_Last updated: 2026-09-11_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -17,6 +17,7 @@ sequenceDiagram
   App->>SB: auth.signUp(emailRedirectTo=/auth/callback)
   SB->>DB: INSERT auth.users → trigger handle_new_user()
   DB->>DB: create organizations + org_members(owner)
+  Note over DB: skipped when an open invite matches<br/>the address (0177) — the Google callback<br/>provisions that membership instead
   SB-->>U: verification email
   U->>App: click link → /auth/callback (exchangeCodeForSession)
   App-->>U: /dashboard (layout requireOrgMembership)

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import type { User } from "@supabase/supabase-js";
 
 import { db } from "@/db/client";
@@ -165,6 +165,13 @@ export async function resolveAllowlist(
     })
     .from(org_members)
     .where(eq(org_members.user_id, userId))
+    // A user should only ever hold one membership, but `LIMIT 1` with no
+    // ORDER BY picks an arbitrary row if that assumption is ever broken, and
+    // this lookup decides which org someone is let into. Order it: an
+    // invite-provisioned row (invited_email set) wins over one the signup
+    // trigger created, then oldest first. Deterministic, and it resolves in
+    // favour of the org the person was actually invited to.
+    .orderBy(sql`(${org_members.invited_email} is not null) desc`, asc(org_members.joined_at))
     .limit(1);
 
   if (existing[0]) {

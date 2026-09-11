@@ -157,7 +157,7 @@ function LoginForm() {
             </Button>
             <div className="flex flex-col gap-1 text-sm text-muted-foreground">
               <Link
-                href="/auth/forgot-password"
+                href="/forgot-password"
                 className="text-foreground underline underline-offset-4"
               >
                 Forgot password?

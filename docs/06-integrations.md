@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-09-03_
+_Last updated: 2026-09-11_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -208,6 +208,36 @@ Sign-in provider for everyone except the Owner break-glass path.
 | `GOOGLE_ALLOWED_HD` | Workspace domain the gate accepts. **Optional — defaults to `exuma.io`.** Read by `lib/auth/workspace-gate.ts`; also feeds the invite validator, so changing it changes which addresses can be invited. |
 | `NEXT_PUBLIC_SITE_URL` | Already required. The OAuth `redirectTo` is built from it, so a wrong value sends users to another origin after Google. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Already required. Now additionally used for `auth.admin.signOut` (session revocation) and `auth.admin.listUsers` (resolving member emails for the Users screen). |
+
+⚠️ **A stale Client Secret looks exactly like "login is broken", with no error
+anywhere in our code.** Google refuses the code-for-token exchange, Supabase
+500s before it ever creates the `auth.users` row, and the browser lands back on
+`/login` with nothing rendered to explain it — so there is no app log, no audit
+row, and no user to inspect. Diagnose it in **Supabase → Logs → Auth**, where it
+appears verbatim as:
+
+```
+oauth2: "invalid_client" "The provided client secret is invalid."
+500: Unable to exchange external code    path=/callback
+```
+
+Confirm which half is wrong before re-pasting anything. The Client **ID** is not
+secret and is visible in the `authorize` redirect:
+
+```bash
+curl -s -o /dev/null -w '%{redirect_url}'   "https://<project>.supabase.co/auth/v1/authorize?provider=google"
+```
+
+A secret can be tested against Google directly with a deliberately invalid code —
+`invalid_grant` means the client id + secret pair authenticated and only the fake
+code was rejected, `invalid_client` means the secret is wrong:
+
+```bash
+curl -s -X POST https://oauth2.googleapis.com/token   -d "client_id=$CID" -d "client_secret=$CSEC"   -d "grant_type=authorization_code" -d "code=deliberately-invalid"   -d "redirect_uri=https://<project>.supabase.co/auth/v1/callback"
+```
+
+Rotating the secret in Google Cloud Console does **not** update Supabase — it is
+a manual paste on both ends, and a trailing space on paste fails identically.
 
 ⚠️ **Supabase does not enforce the `hd` claim.** Enabling the provider accepts
 any Google account; the domain restriction is entirely ours. See

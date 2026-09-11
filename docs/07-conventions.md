@@ -1,6 +1,42 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-07_
+_Last updated: 2026-09-11_
+
+## A signup trigger and an invite system are two answers to the same question (migration 0177, 2026-09-11)
+
+`handle_new_user()` (`0001`) fires on EVERY `auth.users` INSERT and hands the
+new user an organization of their own with `role = 'owner'`. That was the whole
+onboarding story until `0175` added Owner-issued invites — and then nobody
+reconciled the two, because a trigger written for self-signup does not announce
+itself when a second way in appears.
+
+**The ordering is what makes it a bug, and it is not negotiable:** Supabase
+creates the `auth.users` row during its OWN `/auth/v1/callback`, *before* it
+redirects to [`app/auth/callback/route.ts`](../app/auth/callback/route.ts). So
+the trigger has always already run by the time `resolveAllowlist()` looks. That
+function checks `org_members` BEFORE `invites` and returns on the first hit, so
+it finds the stray membership, reports `status: 'member'`, and the invite branch
+is unreachable. The invitee signs in *successfully*, lands in an empty org as
+its owner, sees zero contacts and zero campaigns, and their invite stays
+`pending` forever. Nothing errors. Nothing logs. It looks like the feature
+working.
+
+`0177` makes the trigger return early when an open, unexpired `invites` row
+matches the address. Self-signup is byte-identical when no invite matches — and
+so is a NULL email, since `lower(NULL) = lower(NULL)` is NULL, not true.
+
+⭐ **A trigger is a caller you will forget you have.** Grep for triggers on any
+table a new feature writes to, not just for the code paths that call it. The
+residue is visible in `camman-v2` to this day: a stray
+`operator-test's Organization` holding 0 contacts, parked next to the real one.
+
+⭐ **`LIMIT 1` without `ORDER BY` is a coin flip that decides which tenant
+someone sees.** The same account in `camman-v2` ended up holding TWO
+`org_members` rows, and `resolveAllowlist` had no ordering — so which org it
+resolved to was arbitrary. It now prefers the invite-provisioned row
+(`invited_email IS NOT NULL`), then oldest. Any `LIMIT 1` that selects an
+authorization scope needs a total order, even where you believe duplicates are
+impossible.
 
 ## A sending number can be HALF-configured: sends work, opt-out intake is dark (2026-09-03)
 

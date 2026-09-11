@@ -1,6 +1,6 @@
 # Feature — Multi-tenancy, Auth & Permissions
 
-_Last updated: 2026-09-01_
+_Last updated: 2026-09-11_
 
 ## 1. Purpose
 Isolate every org's data behind an `org_id`, authenticate users via Supabase Auth, and enforce a five-role permission model on both server and client. A missing `org_id` filter is a data-leak bug — this is the most safety-critical convention in the codebase.
@@ -54,7 +54,7 @@ sequenceDiagram
   U->>App: Sign up (email, password, display_name)
   App->>SB: auth.signUp(emailRedirectTo=/auth/callback)
   SB->>DB: INSERT auth.users
-  DB->>DB: handle_new_user() → create org + owner member
+  DB->>DB: handle_new_user() → create org + owner member<br/>(skipped when an open invite matches the address)
   SB-->>U: verification email
   U->>App: click link → /auth/callback?code=...
   App->>SB: exchangeCodeForSession(code)
@@ -62,7 +62,7 @@ sequenceDiagram
   Note over App: layout.tsx requireOrgMembership();<br/>if missing → /auth/complete
 ```
 - Owner break-glass is email + password (NOT magic link); **email verification required**. Everyone else signs in with Google (below).
-- Org auto-creation is a **DB trigger** (`handle_new_user()` in `0001`), not app code: new org named `"<name>'s Organization"`, user inserted as `owner`.
+- Org auto-creation is a **DB trigger** (`handle_new_user()` in `0001`, amended in `0177`), not app code: new org named `"<name>'s Organization"`, user inserted as `owner`. **It returns early for an invited address** (open, unexpired `invites` row) so the invitee joins the *inviting* org via the callback instead of getting an empty one of their own.
 - `/auth/complete` is the fallback if membership is somehow missing post-verification; it rechecks and forwards to `/dashboard`.
 
 ### Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)

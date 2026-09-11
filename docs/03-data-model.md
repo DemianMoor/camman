@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-09-04_
+_Last updated: 2026-09-11_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -426,7 +426,7 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 > **⚠️ "In use" is now defined in one shared builder** ([lib/drip/in-use.ts](../lib/drip/in-use.ts)) used by BOTH `iu_set` (campaign flag) and `applyInUseExclusion` (segment flag). They were independent definitions that agreed only by coincidence.
 
 ## Triggers & DB-side logic (in migrations, not Drizzle)
-- **`handle_new_user()`** (`0001`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row.
+- **`handle_new_user()`** (`0001`, amended `0177`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row — **unless an open, unexpired `invites` row matches the new address**, in which case it returns early and leaves the membership to the invite branch of [`app/auth/callback/route.ts`](../app/auth/callback/route.ts). Without that skip an invitee gets a stray org of their own and never joins the inviting one (see [07-conventions.md](07-conventions.md)).
 - **`current_org_id()`** (`0001`): SECURITY DEFINER, backs RLS policies.
 - **`segment_contacts` AFTER INSERT/DELETE trigger**: keeps `segment_stats.total_count` in sync.
 - **`campaign_stages` BEFORE INSERT trigger**: auto-assigns `stage_number`.

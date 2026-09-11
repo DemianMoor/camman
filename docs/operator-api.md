@@ -1,13 +1,14 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-04_
+_Last updated: 2026-09-11_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
 
 **Everything here is read-only and aggregate-only.** No contact rows, no phone
-numbers of recipients, no exports. Sending routes (SSPs) appear as `Route A`,
-`Route B` … rather than by name — that is deliberate and permanent.
+numbers of recipients, no exports. Provider/SSP names ARE shown by name as of
+2026-09-11 (they used to be aliased as `Route A` / `Route B`); the registry name
+is the display name.
 
 ---
 
@@ -118,7 +119,7 @@ Sends, delivered, clicks, conversions, revenue, cost, EPC per row.
 ### Delivery report
 
 **`GET /api/reports/delivery`** — delivery rate per sending route, same
-`from`/`to` params. Sending routes appear as `Route A` / `Route B`.
+`from`/`to` params. Providers appear by name.
 
 ### Campaigns and stages
 
@@ -152,7 +153,7 @@ curl -s https://camman.vercel.app/api/sends/today \
 ```
 
 Includes `prepared_by_phone` so you can see per-number load for the day.
-Sending numbers are shown; the provider behind them is `Route A` / `Route B`.
+Sending numbers are shown, and so is the provider behind them, by name.
 
 **`GET /api/sends/state`** — whether sending is on, paused, or circuit-broken.
 
@@ -237,7 +238,6 @@ Not an oversight, and not something a retry or a different URL will reach:
 - Contact rows, phone numbers of recipients, any CSV export or import.
 - Contact groups as a list — group **names** appear in `fresh-counts`, but the
   group endpoints themselves are closed.
-- Provider names. Sending routes are `Route A`, `Route B` … permanently.
 - Anything that writes: creating or editing campaigns, stages, creatives or
   segments; approving, scheduling or sending; compliance controls; user
   management.

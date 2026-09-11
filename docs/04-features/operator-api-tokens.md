@@ -1,6 +1,6 @@
 # Operator API tokens
 
-_Last updated: 2026-09-04_
+_Last updated: 2026-09-11_
 
 ClickUp 869evpmbz. Migration `0176`. Lets a member's own tools (in practice,
 Claude) read CamMan through **that member's existing permissions** — no new data
@@ -29,9 +29,9 @@ requireApiMembership(access?)
                                               └─ { user, orgId, role, token? }
 ```
 
-Because the tail is shared, `is_active`, the default-deny route map, `can()` and
-`redactForRole()` apply to tokens **by construction**, not by anyone remembering
-to re-apply them.
+Because the tail is shared, `is_active`, the default-deny route map and `can()`
+apply to tokens **by construction**, not by anyone remembering to re-apply
+them.
 
 **One plug point.** `requireApiMembership()` in
 [`lib/api/helpers.ts`](../../lib/api/helpers.ts) is called by 245 route files and
@@ -39,10 +39,6 @@ every route that calls `requireApiUser()` also calls it — there is exactly one
 door. It takes **no `req`** (it already reaches the session through `cookies()`),
 so the bearer token is read the same way via `headers()` and **not one handler
 signature changed**.
-
-`redactForRole()` needed **zero** changes: it keys off the `role` string the
-above returns, so a token resolving to `role: "operator"` is aliased exactly like
-a session.
 
 ---
 
@@ -275,31 +271,24 @@ single-owner org, which is the org this ships into.
 
 ---
 
-## 7. Provider route aliases were empty in production
+## 7. Provider route aliases — removed (historical)
 
-`provider_route_aliases` had **0 rows** in production since 0175 shipped, because
-`loadAliasTable()` seeds **lazily** on the first operator page load and no
-operator had ever signed in (`org_members` held one row, the Owner). The redactor
-had therefore never executed against production data — "Route A hides TextHub"
-was a claim tested only against preview.
+`provider_route_aliases` had **0 rows** in production from 0175 until 2026-09-04,
+because `loadAliasTable()` seeded **lazily** on the first operator page load and
+no operator had ever signed in (`org_members` held one row, the Owner). The
+redactor had therefore never executed against production data — "Route A hides
+TextHub" was a claim tested only against preview.
 
-[`scripts/seed-provider-route-aliases.ts`](../../scripts/seed-provider-route-aliases.ts)
-seeds every org. It **calls `loadAliasTable()` rather than reimplementing the
-letter assignment**, which is the whole point of its design: a second
-implementation would only have to disagree once — on the day a provider is added
-between a seed run and a lazy load — to produce two different "Route B"s.
+**The redactor was removed entirely on 2026-09-11**: provider names are shown to
+every role, because the registry name is the display name and the owner renames
+providers to whatever should be visible. `lib/authz/redact.ts`, the
+`jsonForRole()` helper and the seed script are deleted. The table is retained but
+unused, so the decision stays reversible.
 
-Run once per environment before anyone relies on the mapping:
+The lesson is kept because it generalises: **a table that "ships empty" and fills
+on first use has not been exercised by shipping** — check row counts, not deploy
+status, before calling such a path verified.
 
-```
-npx tsx --conditions=react-server scripts/seed-provider-route-aliases.ts
-```
-
-Idempotent (`ON CONFLICT DO NOTHING`, never reassigns). Letters are assigned in
-provider-id order and **stable forever** — a letter that moves is worse than no
-alias at all.
-
----
 
 ## 8. Verification
 

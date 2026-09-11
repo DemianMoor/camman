@@ -258,31 +258,38 @@ asserts the other four roles against sets frozen from `origin/main`.
 IDENTITY were the same grant, which made the aggregate counters unreachable for
 a role that may never see a row.
 
-### redactForRole() sweeps VALUES, not a field list
+### Provider names are shown to EVERY role (removed 2026-09-11)
 
-[`lib/authz/redact.ts`](../../lib/authz/redact.ts). Any string that is **exactly**
-a provider name or provider code becomes its route alias, however deeply nested.
+There is no redaction layer any more. `lib/authz/redact.ts`, the `jsonForRole()`
+response helper and the per-role value sweep are **deleted**: the owner decided
+that the registry name IS the display name, and renames providers to whatever
+should be visible. Every role sees real provider names, codes and ids.
 
-A field list ("null out `provider_name`") breaks the moment someone adds a join
-or returns a nested provider object — and breaks *silently*. The value sweep is
-what makes the end-to-end assertion ("no operator response contains any string
-from `SELECT name FROM sms_providers`") true **by construction**. Whole-string
-matches only, so prose is never mangled.
+What this replaced: a value sweep that turned any string exactly matching a
+provider name or code into a `Route A` / `Route B` alias, anywhere in a payload.
+It is worth remembering **why it was a value sweep and not a field list** if
+anything like it is ever needed again — a field list ("null out `provider_name`")
+breaks silently the moment someone adds a join or returns a nested provider
+object, whereas the value sweep made the end-to-end assertion true by
+construction.
 
-Aliases are `Route A`, `Route B`, … seeded on first read in provider-id order
-and **stable forever** — an operator refers to routes by these letters, so a
-letter that moves is worse than no alias.
+`provider_route_aliases` (migration 0175) is **retained but unused** — nothing
+reads or writes it. It was left in place rather than dropped so the decision
+stays reversible; drop it if that changes.
 
-⚠️ **Only 7 allowed routes actually reach provider identity.** 12 of the 19
-routes the Phase 0 recon flagged are now **denied outright**, so redaction there
-would be dead code. **Denial supersedes redaction.**
+⚠️ **Confidentiality of CONTACT data is unaffected.** The audience block is
+still denied to the operator by `OPERATOR_ROUTE_MAP` and the permission matrix,
+and `scripts/verify-operator-access.ts` still sweeps every response, rendered
+page and token body for recipient phone numbers and contact ids. Only the
+provider-identity half is gone.
 
-⚠️ **A response-boundary layer only covers what crosses that boundary.**
-`SendStateStripLoader` is a **server component** rendered by the protected
-layout on *every* page, and it surfaced `sms_providers.name` without ever
-touching an API route. It needed explicit redaction. Any future server component
-that reads provider identity must do the same — which is why the verification
-script checks rendered pages, not just JSON.
+⚠️ **A response-boundary layer only covers what crosses that boundary** — the
+lesson outlives the redactor. `SendStateStripLoader` is a **server component**
+rendered by the protected layout on *every* page; it surfaced
+`sms_providers.name` without ever touching an API route, so every JSON assertion
+passed while the name went straight into the HTML. Any future per-role filtering
+must be applied in server components by hand, which is why
+`scripts/verify-operator-access.ts` checks rendered pages and not just JSON.
 
 ### Field-level compliance gates
 

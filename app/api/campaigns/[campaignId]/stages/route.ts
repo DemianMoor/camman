@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, sql as drizzleSql } from "drizzle-orm";
-import { type NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { checkDripStageWindow } from "@/lib/api/drip-stage-window-guard";
@@ -18,7 +18,6 @@ import {
   parseListParams,
   requireApiMembership,
 } from "@/lib/api/helpers";
-import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
@@ -448,7 +447,7 @@ export async function GET(
     );
   }
 
-  return await jsonForRole(role, orgId, {
+  return NextResponse.json({
     data,
     totalCount: data.length,
     inbound_stop_contacts: inboundStopContacts,
@@ -783,5 +782,5 @@ export async function POST(
     return finalRow;
   });
 
-  return await jsonForRole(role, orgId, created, { status: 201 });
+  return NextResponse.json(created, { status: 201 });
 }

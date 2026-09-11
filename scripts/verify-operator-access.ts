@@ -16,8 +16,8 @@ import { TOKEN_REQUESTS_PER_HOUR } from "@/lib/api/token-usage";
 //
 // Signs in as a REAL operator against a REAL deployment and hits every route in
 // the map. This is the check that the whole phase rests on: the route map, the
-// permission set and the redactor are all claims, and this is the only thing
-// that tests them against a running system rather than against themselves.
+// permission set and the contact-level rules are all claims, and this is the
+// only thing that tests them against a running system, not against themselves.
 //
 // ── SAFETY: PREVIEW ONLY ──────────────────────────────────────────────────
 // It CREATES a user and an org membership, so it refuses to run unless both the
@@ -29,7 +29,7 @@ import { TOKEN_REQUESTS_PER_HOUR } from "@/lib/api/token-usage";
 // not through Google OAuth — an interactive Google consent screen cannot be
 // driven from a script. That is a real limitation and it is reported in the
 // output rather than glossed: this proves the AUTHORIZATION layer (route map,
-// permissions, redaction), not the Google sign-in path. The domain gate is
+// permissions, contact-level scoping), not the Google sign-in path. The gate is
 // covered separately by scripts/test-workspace-gate.ts, which unit-tests
 // verifyWorkspaceIdentity against synthetic identity payloads.
 //
@@ -193,15 +193,23 @@ async function main() {
   if (offerId) ids.offerId = offerId;
   ids.fallback = "1";
 
-  // ── The strings that must never appear in an operator response ──────────
+  // ── Provider names are now SHOWN to every role (owner decision, 2026-09-11) ──
+  //
+  // This list used to be the "must never appear" set, swept across every
+  // operator response, rendered page and token body. The redactor is gone: the
+  // registry name IS the display name, and the owner renames providers to
+  // whatever should be visible. So the assertion is INVERTED below — a name
+  // must actually reach the operator — and the sweeps that hunted for it are
+  // removed. The contact-level and recipient-phone sweeps are untouched and
+  // remain the real confidentiality guarantee.
   const providerRows = await sql<{ name: string; code: string }[]>`
     SELECT name, sms_provider_id AS code FROM sms_providers`;
-  const forbidden = providerRows
-    .flatMap((p) => [p.name, p.code])
+  const providerNames = providerRows
+    .map((p) => p.name)
     .filter((v): v is string => typeof v === "string" && v.trim().length > 1);
-  console.log(`  scope: ${forbidden.length} forbidden provider strings: ${forbidden.join(", ")}`);
-  if (forbidden.length === 0) {
-    fail("forbidden-string scope is EMPTY — nothing would ever be detected");
+  console.log(`  scope: ${providerNames.length} provider names, now expected to be VISIBLE`);
+  if (providerNames.length === 0) {
+    fail("no providers in this environment — the visibility check below proves nothing");
   }
 
   const get = async (path: string, method: HttpMethod) => {
@@ -297,35 +305,38 @@ async function main() {
   let reachable = 0;
   let with2xx = 0;
   const wrongly403: string[] = [];
-  const leaked: string[] = [];
   for (const route of allowedGet) {
-    const { status, body } = await get(concreteUrl(route, ids), "GET");
+    const { status } = await get(concreteUrl(route, ids), "GET");
     if (status === 403) {
       wrongly403.push(route);
       continue;
     }
     reachable++;
     if (status >= 200 && status < 300) with2xx++;
-    const lower = body.toLowerCase();
-    for (const f of forbidden) {
-      // Whole-word match, so a provider code like "ahi" cannot trip on a
-      // substring inside an unrelated word.
-      if (new RegExp(`(^|[^a-z0-9])${f.toLowerCase()}([^a-z0-9]|$)`).test(lower)) {
-        leaked.push(`${route} leaked "${f}"`);
-        break;
-      }
-    }
   }
   if (wrongly403.length === 0) pass(`all ${reachable} probeable allowed routes were reachable (not 403)`);
   else {
     fail(`${wrongly403.length} allowed route(s) returned 403: ${wrongly403.join(", ")}`);
   }
-  console.log(`     of which ${with2xx} returned 2xx (a real body, so a meaningful leak check)`);
+  console.log(`     of which ${with2xx} returned 2xx (a real body)`);
 
-  if (leaked.length === 0) pass(`no provider name or code appeared in any operator response`);
-  else {
-    fail(`${leaked.length} response(s) leaked provider identity:`);
-    for (const l of leaked.slice(0, 25)) console.log(`       ${l}`);
+  // ⭐ POSITIVE CHECK, AND IT CAN GO RED. Deleting a redactor is only "done" if
+  // the thing it used to hide actually arrives. If this fails, some redaction
+  // survived the removal.
+  {
+    const { status, body } = await get("/api/providers/list", "GET");
+    const lower = body.toLowerCase();
+    const shown = providerNames.filter((n) => lower.includes(n.toLowerCase()));
+    if (status >= 200 && status < 300 && shown.length > 0) {
+      pass(`operator sees real provider names on providers/list (${shown.length} of ${providerNames.length})`);
+    } else if (status < 200 || status >= 300) {
+      fail(`providers/list returned ${status} for the operator — cannot prove names are visible`);
+    } else {
+      fail("providers/list returned no real provider name — redaction may still be active");
+    }
+    if (/route [a-z]/i.test(lower)) {
+      fail('providers/list still contains a "Route X" alias — redaction was not fully removed');
+    }
   }
 
   // ── 3. Contact-level fields must never appear ───────────────────────────
@@ -377,23 +388,24 @@ async function main() {
   }
 
 
-  // ── 4. Rendered PAGES must not leak either ──────────────────────────────
+  // ── 4. Rendered PAGES must not leak recipient phones ────────────────────
   //
   // ⚠️ THIS SECTION EXISTS BECAUSE THE API BOUNDARY WAS NOT ENOUGH.
   //
-  // SendStateStripLoader is a server component rendered by the protected layout
-  // on EVERY page. It read sms_providers.name and never touched an API route,
-  // so every JSON assertion above passed while the name was being written
-  // straight into the HTML. Checking JSON alone would have certified a leak as
-  // clean.
+  // A server component rendered by the protected layout never touches an API
+  // route, so every JSON assertion above can pass while data is written
+  // straight into the HTML. Checking JSON alone would certify that as clean.
+  // (That is not hypothetical: SendStateStripLoader did exactly this with
+  // provider names, which is why this section was written.)
   //
-  // So this fetches the rendered HTML of every page an operator may open and
-  // applies the same two assertions. Note the honest limit: most pages here are
-  // client components, so their body arrives nearly empty and the check is only
-  // meaningful for what the SERVER renders — which is exactly the class of leak
-  // it was written for. The count of pages returning substantial HTML is
-  // printed so the strength of the run is visible rather than assumed.
-  console.log(`\n--- 4. Rendered PAGES: no provider identity, no recipient phones ---`);
+  // The provider half of the sweep is gone — names are shown to every role as
+  // of 2026-09-11. The RECIPIENT-PHONE half stays, and it is the assertion that
+  // still matters: an operator must never see a contact's number. Note the
+  // honest limit: most pages here are client components, so their body arrives
+  // nearly empty and the check is only meaningful for what the SERVER renders.
+  // The count of pages returning substantial HTML is printed so the strength of
+  // the run is visible rather than assumed.
+  console.log(`\n--- 4. Rendered PAGES: no recipient phones ---`);
 
   const ALLOWED_PAGES = [
     "/dashboard",
@@ -464,15 +476,6 @@ async function main() {
       continue;
     }
     if (html.length > 20000) substantial++;
-    const lower = html.toLowerCase();
-    for (const f of forbidden) {
-      if (
-        new RegExp(`(^|[^a-z0-9])${f.toLowerCase()}([^a-z0-9]|$)`).test(lower)
-      ) {
-        pageLeaks.push(`${path} rendered provider "${f}"`);
-        break;
-      }
-    }
     for (const m of html.match(/\+?1?\d{10,15}/g) ?? []) {
       const digits = m.replace(/[^0-9]/g, "");
       if (digits.length >= 10 && !senders.has(digits)) {
@@ -492,7 +495,7 @@ async function main() {
       `     client-rendered, so the check is meaningful only for server output there`,
   );
   if (pageLeaks.length === 0) {
-    pass("no provider name and no recipient phone in any rendered page");
+    pass("no recipient phone in any rendered page");
   } else {
     fail(`${pageLeaks.length} page(s) leaked in server-rendered HTML:`);
     for (const l of pageLeaks) console.log(`       ${l}`);
@@ -557,11 +560,10 @@ async function main() {
   // ── 6. API TOKENS (ClickUp 869evpmbz) ───────────────────────────────────
   //
   // ⚠️ THE POINT OF THIS SECTION IS THAT IT RE-RUNS THE SWEEP, not that it adds
-  // a few auth cases. Sections 2 and 3 proved the redactor and the contact-field
-  // rules hold for a SESSION. A token takes a different path into
-  // requireApiMembership(), so "the operator cannot see provider names" is a
-  // fresh claim for tokens and is asserted the same way, against the same
-  // forbidden-string scope, rather than assumed to carry over.
+  // a few auth cases. Sections 2 and 3 proved the contact-field rules hold for
+  // a SESSION. A token takes a different path into
+  // requireApiMembership(), so the contact-level guarantees are a fresh claim
+  // for tokens and are asserted directly rather than assumed to carry over.
   //
   // Tokens are minted by direct INSERT rather than through the Owner API: the
   // point here is the AUTH path, and provisioning through HTTP would need an
@@ -794,7 +796,7 @@ async function main() {
   }
 
   // 6j — THE SWEEP. Every token-allowed GET, fetched WITH TOKEN AUTH, run
-  // through the same forbidden-string and contact-field assertions as sections
+  // through the same contact-field and recipient-phone assertions as sections
   // 2 and 3. This is the check the card asks for, and the reason this section
   // lives in this file rather than in one of its own.
   const tokenGetRoutes = allowedTokenRoutes()
@@ -827,13 +829,6 @@ async function main() {
     if (status < 200 || status >= 300) continue;
     token2xx++;
 
-    const lower = body.toLowerCase();
-    for (const f of forbidden) {
-      if (new RegExp(`(^|[^a-z0-9])${f.toLowerCase()}([^a-z0-9]|$)`).test(lower)) {
-        tokenLeaks.push(`${route} leaked provider "${f}"`);
-        break;
-      }
-    }
     if (body.includes("contact_id")) {
       tokenLeaks.push(`${route} contains contact_id`);
     }
@@ -853,7 +848,7 @@ async function main() {
   }
   console.log(`     of which ${token2xx} returned 2xx (a real body, so a meaningful leak check)`);
   if (tokenLeaks.length === 0) {
-    pass("no provider identity and no contact field in ANY token response");
+    pass("no contact field in ANY token response");
   } else {
     fail(`${tokenLeaks.length} token response(s) leaked:`);
     for (const l of tokenLeaks.slice(0, 25)) console.log(`       ${l}`);

@@ -8,7 +8,7 @@ import {
   or,
   sql as drizzleSql,
 } from "drizzle-orm";
-import type { NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import {
@@ -24,7 +24,6 @@ import {
   parseListParams,
   requireApiMembership,
 } from "@/lib/api/helpers";
-import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { CAMPAIGN_STATUSES } from "@/lib/validators/campaigns";
@@ -250,7 +249,7 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  return await jsonForRole(role, orgId, {
+  return NextResponse.json({
     data,
     totalCount: countRows[0]?.count ?? 0,
     page: params.page,

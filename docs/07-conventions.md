@@ -2,36 +2,35 @@
 
 _Last updated: 2026-09-11_
 
-## The operator redactor must not RECONSTRUCT types — only rewrite strings (2026-09-11)
+## A role nobody holds is untested by construction (2026-09-11)
 
-`redactValue()` in [lib/authz/redact.ts](../lib/authz/redact.ts) rebuilt every
-object it walked from `Object.entries()`. **A Date has no own enumerable
-properties**, so every timestamp in an operator's payload came out as `{}`.
-Downstream, `new Date({})` is `Invalid Date` and date-fns `format()` throws
-`RangeError: Invalid time value` on it — which killed `/campaigns` outright for
-the first real operator, with no error boundary anywhere in the app to catch it
-(the browser just shows "This page couldn't load").
+CamMan had exactly ONE member — the Owner — for a year. `redactForRole()`
+returned the payload untouched for every role except `operator`, and
+`OPERATOR_ROUTE_MAP` gated only that role, so the whole operator path was dead
+code in practice while every check stayed green. Four defects surfaced within
+minutes of the first real operator signing in (PR #172), the worst of which was
+not a permission bug at all:
 
-Drizzle returns `timestamptz` as a `Date`, and **7 of the 9 redacting routes
-select one**, so this was every one of them, not one page.
+> the redactor rebuilt every object from `Object.entries()`. **A `Date` has no
+> own enumerable properties**, so every timestamp in an operator payload became
+> `{}`; `new Date({})` is Invalid Date and date-fns `format()` throws
+> `RangeError` on it. `/campaigns` died outright, across 7 of the 9 redacting
+> routes — and since there is **no error boundary anywhere in this app**, it
+> presented as a blank browser "This page couldn't load" with no diagnostic.
 
-⭐ **AN OWNER CANNOT REPRODUCE AN OPERATOR-ONLY DEFECT, AND THIS CODEBASE HAD
-EXACTLY ONE OWNER FOR A YEAR.** `redactForRole()` returns the payload untouched
-for every role except `operator`, so the entire redaction path was dead code in
-practice until a second human logged in. Anything gated on a role nobody holds
-is untested by construction, however green the suite looks — the same shape as
-[provider_route_aliases sitting empty](#) while every check passed.
+The redactor itself is gone (owner decision, provider names are shown to every
+role — see [04-features/multi-tenancy-auth.md](04-features/multi-tenancy-auth.md)),
+so that specific bug cannot recur. The lessons that outlive it:
 
-The fix is a one-line guard: recurse only into **plain** objects and arrays, and
-return anything else as-is. `NextResponse.json()` serialises a `Date` to the
-same ISO string the Owner receives, so passing it through untouched is both the
-fix and the correct wire format. The redactor's job is to rewrite provider
-strings and provider ids; reconstructing types was never part of it.
-
-Guarded by [scripts/test-operator-redaction.ts](../scripts/test-operator-redaction.ts)
-(`npm run check:authz`), which asserts the operator payload against the OWNER
-payload wherever the two must agree, and carries a can-go-red control that
-reproduces the old rebuild-everything branch.
+- **A code path gated on a role nobody holds is untested no matter how green the
+  suite is.** Same shape as `provider_route_aliases` sitting empty in production
+  for months while every check passed.
+- **A transform that rebuilds objects must not reconstruct TYPES.** Recurse into
+  plain objects and arrays only; return everything else as-is. A `Date`, a `Map`,
+  a `Buffer` and a class instance all survive `typeof value === "object"`.
+- **Assert the restricted output against the UNRESTRICTED one** wherever the two
+  are supposed to agree, so the reference side cannot drift with the code under
+  test.
 
 ## Nav items are hidden by PERMISSION, and 32 of 34 never declared one (2026-09-11)
 
@@ -2105,20 +2104,14 @@ Before narrowing any set that others spread from, grep for `...thatSet`.
 
 ## Redact by VALUE, not by field name
 
-A redactor built as a field list ("null out `provider_name`") fails silently the
-moment someone adds a join, renames a field, or nests the object differently.
-
-`redactForRole()` instead replaces any string that is **exactly** a provider name
-or code, anywhere in the payload. That is what lets the verification assert "no
-operator response contains any string from `SELECT name FROM sms_providers`" and
-have it be true by construction rather than by vigilance.
-
-Whole-string matches only — substring matching would mangle legitimate prose.
-
-⚠️ **And a response-boundary layer only covers what crosses that boundary.**
-`SendStateStripLoader` is a server component rendered on every page; it read
-`sms_providers.name` and never touched an API route. Server components must
-redact explicitly.
+**REMOVED 2026-09-11 — provider names are shown to every role.** The redactor
+and its `Route A` aliases are deleted (owner decision; the registry name is the
+display name). Kept here only as design guidance if per-role filtering is ever
+needed again: build it as a **value sweep, not a field list**. A field list
+("null out `provider_name`") fails silently the first time someone adds a join
+or returns a nested object, whereas sweeping values makes the end-to-end
+assertion true by construction. And remember a response-boundary layer only
+covers what crosses that boundary — server components must opt in by hand.
 
 ## An assertion that fails on correct behaviour must be sharpened, not deleted
 
@@ -2357,9 +2350,11 @@ machinery, with no second piece of state to keep and no new table.
 ## Lazy seeding means a feature can be untested in production and look shipped (2026-09-04)
 
 `provider_route_aliases` shipped with 0175 and held **0 rows in production** ever
-since, because `loadAliasTable()` seeds on the first operator page load and no
+since, because `loadAliasTable()` seeded on the first operator page load and no
 operator had signed in. Every check was green; the redactor had simply never
-executed against production data.
+executed against production data. (The redactor and its seed script were removed
+on 2026-09-11 — provider names are shown to every role — but the lesson stands
+and the table remains, unused.)
 
 Two lessons. A table that "ships empty" and fills on first *use* has not been
 exercised by shipping — check row counts, not deploy status, before calling such

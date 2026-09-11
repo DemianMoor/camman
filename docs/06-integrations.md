@@ -196,7 +196,21 @@ Sign-in provider for everyone except the Owner break-glass path.
   `/auth/callback` — the app route is where Supabase sends the user afterwards.
 - Authentication → URL Configuration must already list our origins under Site
   URL and Redirect URLs (`/auth/callback`, `/auth/complete`,
-  `/auth/reset-password`).
+  `/auth/reset-password`). ⚠️ **List EVERY hostname the app answers on**, not
+  just the primary: since 2026-09-11 the OAuth callback follows the host the
+  user started on (`authCallbackOrigin()`, docs/07-conventions.md), so
+  `https://camman.exuma.io/auth/callback` must be present alongside the
+  `camman.vercel.app` one or Supabase substitutes the Site URL and the sign-in
+  silently fails.
+- ⚠️ **The Redirect URL allowlist is currently permissive.** Probing
+  `/auth/v1/authorize?provider=google&redirect_to=…` on 2026-09-11 showed an
+  arbitrary third-party origin being echoed back as the honored target, which
+  means the list is empty or wildcarded. PKCE limits the impact (the returned
+  `code` is useless without the verifier cookie, which lives on the legitimate
+  origin), but it should be narrowed to the origins we actually serve. Note
+  CamMan's own `authCallbackOrigin()` cannot emit an undeclared origin
+  regardless — this is about what Supabase would accept from a hand-crafted
+  link.
 - Authentication → Sessions → **JWT expiry / refresh-token rotation.** ClickUp
   869et3vm1 asks for a session TTL ≤ 12 h. **There is no code path for this** —
   it is a dashboard setting and an ops step.

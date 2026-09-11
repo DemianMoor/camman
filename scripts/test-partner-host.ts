@@ -55,7 +55,8 @@ async function main() {
   // The module reads process.env at CALL time, so set it before each import-use.
   // (In a client bundle Next inlines these at BUILD time — same logic, earlier
   // substitution. What is under test here is the resolution logic.)
-  const { appOrigin, partnerOrigin, partnerBase } = await import("../lib/app-origin");
+  const { appOrigin, partnerOrigin, partnerBase, authCallbackOrigin } =
+    await import("../lib/app-origin");
 
   console.log("\nnormalization");
   process.env.NEXT_PUBLIC_PARTNER_HOST = "camman.exuma.io";
@@ -83,6 +84,63 @@ async function main() {
   delete process.env.NEXT_PUBLIC_PARTNER_HOST;
   check("falls back to the current origin", partnerBase(PRIMARY), PRIMARY);
   check("fallback keeps preview behavior unchanged", partnerBase(PREVIEW), PREVIEW);
+
+  // ⭐ THE OAUTH ROUND TRIP IS THE OPPOSITE RULE, AND DELIBERATELY SO.
+  // A sign-in must come back to the origin it LEFT, because the PKCE code
+  // verifier is a cookie on that origin. Pinning it to the primary is what
+  // broke the first invited user on 2026-09-11: they started on the partner
+  // host, the callback landed on the primary, the verifier cookie was not
+  // there, and exchangeCodeForSession() failed WITHOUT ISSUING A REQUEST — a
+  // clean /callback and no /token in Supabase's log, and a bare bounce to
+  // /login. The host SELECTS among env-declared origins; it never supplies one.
+  console.log("\nOAuth callback origin — follows the tab, but only within env");
+  process.env.NEXT_PUBLIC_SITE_URL = PRIMARY;
+  process.env.NEXT_PUBLIC_PARTNER_HOST = PARTNER;
+  check("primary host → primary origin", authCallbackOrigin("camman.vercel.app"), PRIMARY);
+  check("partner host → PARTNER origin (the 2026-09-11 bug)", authCallbackOrigin("camman.exuma.io"), PARTNER);
+  check("case-insensitive host match", authCallbackOrigin("CamMan.Exuma.IO"), PARTNER);
+  check(
+    "x-forwarded-host chain uses the first entry",
+    authCallbackOrigin("camman.exuma.io, internal-proxy.vercel.app"),
+    PARTNER,
+  );
+  check("no host → primary", authCallbackOrigin(null), PRIMARY);
+  check("empty host → primary", authCallbackOrigin("   "), PRIMARY);
+
+  // ⭐ The security half: an origin we did NOT declare can never come back out.
+  check("preview host is NOT honored → primary", authCallbackOrigin("camman-git-feat-x.vercel.app"), PRIMARY);
+  check("spoofed Host is NOT honored → primary", authCallbackOrigin("evil.example.com"), PRIMARY);
+  check(
+    "spoofed Host never returns itself",
+    authCallbackOrigin("evil.example.com")?.includes("evil.example.com"),
+    false,
+  );
+  delete process.env.NEXT_PUBLIC_PARTNER_HOST;
+  check(
+    "partner host unset → partner name falls back to primary",
+    authCallbackOrigin("camman.exuma.io"),
+    PRIMARY,
+  );
+  delete process.env.NEXT_PUBLIC_SITE_URL;
+  check("primary unset → null (caller must refuse, not guess)", authCallbackOrigin("camman.exuma.io"), null);
+  process.env.NEXT_PUBLIC_SITE_URL = PRIMARY;
+  process.env.NEXT_PUBLIC_PARTNER_HOST = PARTNER;
+
+  // Structural: both OAuth entry points must resolve through the helper rather
+  // than pinning process.env directly, which is the shape that caused the bug.
+  console.log("\nOAuth call sites resolve through authCallbackOrigin()");
+  for (const [label, path] of [
+    ["login signInWithGoogleAction", "app/(auth)/login/actions.ts"],
+    ["linkGoogleIdentityAction", "app/(protected)/actions.ts"],
+  ] as const) {
+    const src = read(path);
+    check(`${label}: builds redirectTo via authCallbackOrigin()`, /authCallbackOrigin\(/.test(src), true);
+    check(
+      `${label}: no NEXT_PUBLIC_SITE_URL pinned into the redirect`,
+      /process\.env\.NEXT_PUBLIC_SITE_URL/.test(src),
+      false,
+    );
+  }
 
   // ⭐ The other half: registration must NEVER emit the partner or preview host.
   console.log("\nregistration origin — env only, partner host must not leak in");
@@ -136,6 +194,20 @@ async function main() {
       return null;
     }`;
   check("control: host-read pattern matches the old code", hostRead.test(reintroduced), true);
+  // ⭐ …and the OAuth structural check must detect a re-pinned origin.
+  const repinned = `
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+    redirectTo: \`\${siteUrl}/auth/callback\`,`;
+  check(
+    "control: pinned-origin pattern matches the old OAuth code",
+    /process\.env\.NEXT_PUBLIC_SITE_URL/.test(repinned),
+    true,
+  );
+  check(
+    "control: authCallbackOrigin pattern does NOT match the old OAuth code",
+    /authCallbackOrigin\(/.test(repinned),
+    false,
+  );
   check(
     "control: resolveOrigin pattern matches the old code",
     /function resolveOrigin/.test(reintroduced),

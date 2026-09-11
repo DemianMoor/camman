@@ -5,6 +5,9 @@ import { redirect } from "next/navigation";
 
 import { db } from "@/db/client";
 import { org_members } from "@/db/schema";
+import { headers } from "next/headers";
+
+import { authCallbackOrigin } from "@/lib/app-origin";
 import { createClient } from "@/lib/supabase/server";
 import { WORKSPACE_DOMAIN } from "@/lib/auth/workspace-gate";
 
@@ -47,7 +50,12 @@ export async function linkGoogleIdentityAction(): Promise<{ error: string } | ne
     return { error: "Only an owner can link a Google account." };
   }
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  // Same round-trip rule as sign-in: come back to the origin we left, or the
+  // PKCE verifier cookie is missing and the exchange fails before it is sent.
+  const h = await headers();
+  const siteUrl = authCallbackOrigin(
+    h.get("x-forwarded-host") ?? h.get("host"),
+  );
   if (!siteUrl) return { error: "NEXT_PUBLIC_SITE_URL is not set." };
 
   const { data, error } = await supabase.auth.linkIdentity({

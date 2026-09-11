@@ -2,6 +2,53 @@
 
 _Last updated: 2026-09-11_
 
+## The operator redactor must not RECONSTRUCT types — only rewrite strings (2026-09-11)
+
+`redactValue()` in [lib/authz/redact.ts](../lib/authz/redact.ts) rebuilt every
+object it walked from `Object.entries()`. **A Date has no own enumerable
+properties**, so every timestamp in an operator's payload came out as `{}`.
+Downstream, `new Date({})` is `Invalid Date` and date-fns `format()` throws
+`RangeError: Invalid time value` on it — which killed `/campaigns` outright for
+the first real operator, with no error boundary anywhere in the app to catch it
+(the browser just shows "This page couldn't load").
+
+Drizzle returns `timestamptz` as a `Date`, and **7 of the 9 redacting routes
+select one**, so this was every one of them, not one page.
+
+⭐ **AN OWNER CANNOT REPRODUCE AN OPERATOR-ONLY DEFECT, AND THIS CODEBASE HAD
+EXACTLY ONE OWNER FOR A YEAR.** `redactForRole()` returns the payload untouched
+for every role except `operator`, so the entire redaction path was dead code in
+practice until a second human logged in. Anything gated on a role nobody holds
+is untested by construction, however green the suite looks — the same shape as
+[provider_route_aliases sitting empty](#) while every check passed.
+
+The fix is a one-line guard: recurse only into **plain** objects and arrays, and
+return anything else as-is. `NextResponse.json()` serialises a `Date` to the
+same ISO string the Owner receives, so passing it through untouched is both the
+fix and the correct wire format. The redactor's job is to rewrite provider
+strings and provider ids; reconstructing types was never part of it.
+
+Guarded by [scripts/test-operator-redaction.ts](../scripts/test-operator-redaction.ts)
+(`npm run check:authz`), which asserts the operator payload against the OWNER
+payload wherever the two must agree, and carries a can-go-red control that
+reproduces the old rebuild-everything branch.
+
+## Nav items are hidden by PERMISSION, and 32 of 34 never declared one (2026-09-11)
+
+`SidebarNav` has always filtered on `!item.permission || can(item.permission)`.
+The mechanism was fine; almost nothing opted in. Only `User Management` and
+`Audit Log` declared a permission, so every other role saw the entire nav —
+Contacts, Opt-Outs, Clickers, SMS Providers and all of Settings included — and
+clicking any of them reached a page whose API then refused them.
+
+Every item now declares the permission that guards what the page actually does,
+cross-checked against `OPERATOR_ROUTE_MAP`. `Dashboard` stays open to everyone.
+
+⚠️ **This is rendering, not a control.** Hiding a link does not stop anyone
+typing the URL; the real gate remains the route map plus `can()` inside each
+handler. Treat the nav permission as a duplicate of the server rule, and expect
+it to drift unless it is chosen to match.
+
 ## A signup trigger and an invite system are two answers to the same question (migration 0177, 2026-09-11)
 
 `handle_new_user()` (`0001`) fires on EVERY `auth.users` INSERT and hands the

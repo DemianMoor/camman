@@ -70,7 +70,7 @@ export const navGroups: NavGroup[] = [
       // Deliberate duplicate of the Reports > Overview row. The Reports group
       // is collapsible, so this pins the most-visited report to the top of the
       // sidebar. Both rows highlight on /reports — that is intended.
-      { label: "Overview", href: "/reports", icon: BarChart3, exact: true },
+      { label: "Overview", href: "/reports", icon: BarChart3, exact: true, permission: "campaigns.view" },
     ],
   },
   {
@@ -81,6 +81,7 @@ export const navGroups: NavGroup[] = [
       {
         label: "Campaigns",
         href: "/campaigns",
+        permission: "campaigns.view",
         icon: Send,
         disabled: !isEntityAvailable("campaigns"),
       },
@@ -88,12 +89,14 @@ export const navGroups: NavGroup[] = [
       {
         label: "Today's sends",
         href: "/sends/today",
+        permission: "stages.view",
         icon: CalendarClock,
         disabled: !isEntityAvailable("campaigns"),
       },
       {
         label: "Creatives",
         href: "/creatives",
+        permission: "creatives.view",
         icon: MessageSquare,
         disabled: !isEntityAvailable("creatives"),
       },
@@ -107,13 +110,13 @@ export const navGroups: NavGroup[] = [
     // EPC/revenue funnel) — see docs/04-features/delivery-report.md.
     label: "Reports",
     items: [
-      { label: "Overview", href: "/reports", icon: BarChart3, exact: true },
-      { label: "By Number", href: "/reports/number", icon: Phone },
-      { label: "By Offer", href: "/reports/offer", icon: ShoppingBag },
-      { label: "By Sequence", href: "/reports/sequence", icon: Layers },
-      { label: "Hourly", href: "/reports/hourly", icon: CalendarClock },
-      { label: "By Group", href: "/reports/group", icon: FolderTree },
-      { label: "Delivery", href: "/reports/delivery", icon: CheckCheck },
+      { label: "Overview", href: "/reports", icon: BarChart3, exact: true, permission: "campaigns.view" },
+      { label: "By Number", href: "/reports/number", icon: Phone, permission: "campaigns.view" },
+      { label: "By Offer", href: "/reports/offer", icon: ShoppingBag, permission: "campaigns.view" },
+      { label: "By Sequence", href: "/reports/sequence", icon: Layers, permission: "campaigns.view" },
+      { label: "Hourly", href: "/reports/hourly", icon: CalendarClock, permission: "campaigns.view" },
+      { label: "By Group", href: "/reports/group", icon: FolderTree, permission: "campaigns.view" },
+      { label: "Delivery", href: "/reports/delivery", icon: CheckCheck, permission: "campaigns.view" },
     ],
   },
   {
@@ -122,36 +125,42 @@ export const navGroups: NavGroup[] = [
       {
         label: "Contacts",
         href: "/contacts",
+        permission: "contacts.view",
         icon: Users,
         disabled: !isEntityAvailable("contacts"),
       },
       {
         label: "Segments",
         href: "/segments",
+        permission: "segments.view",
         icon: Layers,
         disabled: !isEntityAvailable("segments"),
       },
       {
         label: "Contact Groups",
         href: "/contact-groups",
+        permission: "contact_groups.view",
         icon: FolderTree,
         disabled: !isEntityAvailable("contact_groups"),
       },
       {
         label: "Opt-Outs",
         href: "/opt-outs",
+        permission: "opt_outs.view",
         icon: UserMinus,
         disabled: !isEntityAvailable("opt_outs"),
       },
       {
         label: "Opt-Ins",
         href: "/opt-ins",
+        permission: "opt_ins.view",
         icon: UserCheck,
         disabled: !isEntityAvailable("opt_ins"),
       },
       {
         label: "Clickers",
         href: "/clickers",
+        permission: "clickers.view",
         icon: MousePointer,
         disabled: !isEntityAvailable("clickers"),
       },
@@ -163,42 +172,49 @@ export const navGroups: NavGroup[] = [
       {
         label: "Brands",
         href: "/brands",
+        permission: "brands.view",
         icon: Tag,
         disabled: !isEntityAvailable("brands"),
       },
       {
         label: "Offers",
         href: "/offers",
+        permission: "offers.view",
         icon: ShoppingBag,
         disabled: !isEntityAvailable("offers"),
       },
       {
         label: "Affiliate Networks",
         href: "/affiliate-networks",
+        permission: "networks.view",
         icon: Network,
         disabled: !isEntityAvailable("networks"),
       },
       {
         label: "SMS Providers",
         href: "/providers",
+        permission: "providers.view",
         icon: Phone,
         disabled: !isEntityAvailable("providers"),
       },
       {
         label: "Routing Types",
         href: "/routing-types",
+        permission: "routing_types.view",
         icon: Route,
         disabled: !isEntityAvailable("routing_types"),
       },
       {
         label: "Traffic Types",
         href: "/traffic-types",
+        permission: "traffic_types.view",
         icon: Activity,
         disabled: !isEntityAvailable("traffic_types"),
       },
       {
         label: "UTM Tags",
         href: "/utm-tags",
+        permission: "utm_tags.view",
         icon: LinkIcon,
         disabled: !isEntityAvailable("utm_tags"),
       },
@@ -210,6 +226,7 @@ export const navGroups: NavGroup[] = [
       {
         label: "Sending",
         href: "/settings/sending",
+        permission: "compliance.manage",
         icon: Send,
       },
       // Per-provider sending posture (R4). Distinct from "Sending" above, which
@@ -217,6 +234,7 @@ export const navGroups: NavGroup[] = [
       {
         label: "Providers",
         href: "/settings/providers",
+        permission: "provider_credentials.view",
         icon: Phone,
       },
       // Brand short domains (B1). The only write surface for them — the brand
@@ -224,11 +242,13 @@ export const navGroups: NavGroup[] = [
       {
         label: "Short Domains",
         href: "/settings/short-domains",
+        permission: "brands.update",
         icon: LinkIcon,
       },
       {
         label: "Carrier Lookup",
         href: "/settings/lookup",
+        permission: "lookup.admin",
         icon: Phone,
       },
       // Partner intake credentials (Drip P2). Leads captured through these keys
@@ -236,6 +256,7 @@ export const navGroups: NavGroup[] = [
       {
         label: "Partner Keys",
         href: "/settings/partners",
+        permission: "partner_keys.view",
         icon: KeyRound,
       },
       // The drip routing debugger. Lives under Settings because it is an
@@ -243,11 +264,13 @@ export const navGroups: NavGroup[] = [
       {
         label: "Why Not Routed",
         href: "/drip/why-not-routed",
+        permission: "campaigns.drain",
         icon: Search,
       },
       {
         label: "Notifications",
         href: "/settings/notifications",
+        permission: "campaigns.drain",
         icon: Bell,
       },
       // Owner-only member roster, invites and the deactivation kill switch

@@ -145,7 +145,25 @@ function redactValue(value: unknown, table: AliasTable, key?: string): unknown {
   if (Array.isArray(value)) {
     return value.map((v) => redactValue(v, table));
   }
+  // ⚠️ ONLY PLAIN OBJECTS ARE WALKED, AND THE GUARD IS LOAD-BEARING.
+  //
+  // The branch below rebuilds an object from Object.entries(). A Date has NO
+  // own enumerable properties, so rebuilding one yields `{}` — every timestamp
+  // in an operator's payload silently became an empty object, `new Date({})`
+  // is Invalid Date, and date-fns `format()` throws RangeError on it. That is
+  // what made /campaigns die for the first real operator (2026-09-11) while
+  // the Owner saw the page fine: redactForRole() returns early for every other
+  // role, so nothing in a year of use could surface it.
+  //
+  // Drizzle hands back `timestamptz` as a Date, 7 of the 9 redacting routes
+  // select one, and NextResponse.json() serialises a Date to the same ISO
+  // string the Owner receives — so passing them through untouched is both the
+  // fix and the correct wire format. Anything that is not a plain object or an
+  // array is returned AS IS for the same reason: this redactor rewrites
+  // STRINGS and provider ids, and it has no business reconstructing types.
   if (value && typeof value === "object") {
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       out[k] = redactValue(v, table, k);

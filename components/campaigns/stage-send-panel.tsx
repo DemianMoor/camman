@@ -87,7 +87,7 @@ export function StageSendPanel({
   campaignId: number;
   stageId: number;
 }) {
-  const { can } = useAuth();
+  const { can, auth } = useAuth();
   const statusApi = useApiCall<SendStatus>();
   const drainApi = useApiCall<{
     ok: boolean;
@@ -122,7 +122,21 @@ export function StageSendPanel({
   const refresh = () => setTick((n) => n + 1);
 
   const canActivate = can("campaigns.activate");
-  const canSend = can("campaigns.drain"); // manager+ (the money-spending action)
+
+  // ⚠️ TWO DIFFERENT SEND RULES, BECAUSE THERE ARE TWO DIFFERENT ROUTES.
+  //
+  // `canDrain` gates POST send/drain, which really is manager+ — the operator
+  // is denied that route in OPERATOR_ROUTE_MAP outright.
+  //
+  // `canSendNow` gates approve-send(sendNow) and retry-failed, and BOTH of
+  // those routes deliberately carve the operator out of the campaigns.drain
+  // check server-side (`&& role !== "operator"`), because sending is the
+  // operator's job — their volume is bounded by the caps instead. This is a
+  // MIRROR of that server expression; change one and you must change the
+  // other, or the UI silently withholds an action the API would have allowed.
+  // That drift is what hid the send button from the first real operator.
+  const canDrain = can("campaigns.drain");
+  const canSendNow = canDrain || auth?.org.role === "operator";
 
   async function drain() {
     const r = await drainApi.execute(
@@ -186,7 +200,7 @@ export function StageSendPanel({
     : !status.env_send_enabled
       ? "Sending is blocked at the deploy level (SEND_ENABLED is off)"
       : null;
-  const drainBlockedReason = !canSend
+  const drainBlockedReason = !canDrain
     ? "Requires manager+ to send"
     : sendOffReason
       ? sendOffReason
@@ -377,12 +391,12 @@ export function StageSendPanel({
           />
           <Button
             onClick={() => setPrepareOpen(true)}
-            disabled={!canActivate || (!willSchedule && !canSend)}
+            disabled={!canActivate || (!willSchedule && !canSendNow)}
             title={
               !canActivate
                 ? "Requires operator+ to commit a send"
-                : !willSchedule && !canSend
-                  ? "Sending now requires manager+. Set a Scheduled time to prepare it instead."
+                : !willSchedule && !canSendNow
+                  ? "Sending now requires operator+. Set a Scheduled time to prepare it instead."
                   : undefined
             }
           >
@@ -415,7 +429,7 @@ export function StageSendPanel({
             >
               {drainApi.isLoading ? "Sending…" : `Send now${pending > 0 ? ` (${pending})` : ""}`}
             </Button>
-            {canSend && status.counts.failed > 0 ? (
+            {canSendNow && status.counts.failed > 0 ? (
               <Button
                 variant="outline"
                 onClick={() => void retryFailed()}

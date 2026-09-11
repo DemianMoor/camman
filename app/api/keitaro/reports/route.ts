@@ -1,6 +1,7 @@
-import { NextResponse, type NextRequest } from "next/server";
+import type { NextRequest } from "next/server";
 
 import { requireApiMembership } from "@/lib/api/helpers";
+import { jsonForRole } from "@/lib/authz/redact";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import {
   emptyFunnel,
@@ -73,10 +74,18 @@ function rateOfSent(numerator: number, totalSent: number): number {
 }
 
 export async function GET(req: NextRequest) {
-  const auth = await requireApiMembership();
+  // This route backs the /reports "Overview" TAB — a screen an operator is
+  // meant to use — so it must hand the operator gate a route key. Without one
+  // requireApiMembership() refuses the operator structurally, which is what
+  // made Reports show "This route is not available to the operator role" while
+  // the sibling performance/delivery reports worked.
+  const auth = await requireApiMembership({
+    route: "keitaro/reports",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   if (!can(auth.role, "campaigns.view")) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return await jsonForRole(auth.role, auth.orgId, { error: "Forbidden" }, { status: 403 });
   }
 
   const sp = req.nextUrl.searchParams;
@@ -91,7 +100,9 @@ export async function GET(req: NextRequest) {
   const from = fromRaw && DATE_RE.test(fromRaw) ? fromRaw : sevenDaysAgoEt;
   const to = toRaw && DATE_RE.test(toRaw) ? toRaw : todayEt;
   if (from > to) {
-    return NextResponse.json(
+    return await jsonForRole(
+      auth.role,
+      auth.orgId,
       { error: "`from` must be on or before `to`" },
       { status: 400 },
     );
@@ -99,7 +110,9 @@ export async function GET(req: NextRequest) {
   const spanDays =
     (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
   if (spanDays > MAX_RANGE_DAYS) {
-    return NextResponse.json(
+    return await jsonForRole(
+      auth.role,
+      auth.orgId,
       { error: `Date range cannot exceed ${MAX_RANGE_DAYS} days` },
       { status: 400 },
     );
@@ -426,7 +439,7 @@ export async function GET(req: NextRequest) {
   const totalCount = withDelivery.length;
   const paged = withDelivery.slice(page * pageSize, page * pageSize + pageSize);
 
-  return NextResponse.json({
+  return await jsonForRole(auth.role, auth.orgId, {
     data: paged,
     delivery: {
       available: deliveryAvailable,

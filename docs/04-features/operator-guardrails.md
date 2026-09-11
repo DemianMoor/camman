@@ -1,6 +1,6 @@
 # Feature — Operator guardrails
 
-_Last updated: 2026-09-04_
+_Last updated: 2026-09-11_
 
 ClickUp 869et3vm1 Phase 3. Volume caps, link policy, creative versioning, a
 deletion approval queue, and three warnings. No migration — `deletion_requests`
@@ -174,6 +174,31 @@ switches to an index-only scan on `stage_sends_org_phone_sent_idx` and pays
 Phase 2 denied both because they fire real SMS and no volume limits existed. The
 caps are the precondition that was missing. Leaving them denied would mean the
 hire cannot send, which is the job.
+
+### 4a. The UI must MIRROR that carve-out — it did not (fixed 2026-09-11)
+
+Both routes carve the operator out of the `campaigns.drain` check server-side:
+
+```ts
+if (sendNow && !can(role, "campaigns.drain") && role !== "operator") { … 403 }
+```
+
+`components/campaigns/stage-send-panel.tsx` did **not** mirror it. It computed a
+single `canSend = can("campaigns.drain")` and used that for three different
+things, so the first real operator saw "Prepare & send now" permanently disabled
+with the tooltip *"Sending now requires manager+"* — an action the API would
+have accepted. The panel now carries **two** flags, because there are two rules:
+
+| flag | gates | rule |
+|---|---|---|
+| `canDrain` | `POST send/drain` | `campaigns.drain` — genuinely manager+, and the operator is denied that route in `OPERATOR_ROUTE_MAP` |
+| `canSendNow` | `approve-send(sendNow)`, `retry-failed` | `campaigns.drain` **OR** `role === "operator"` — a mirror of the server expression above |
+
+⭐ **A permission expressed in two places must be written as a mirror, not as a
+paraphrase.** The server said "drain OR operator"; the client said "drain". No
+test compared them, nothing errored, and the failure mode is the quiet one — a
+capability withheld looks identical to a capability that was never granted. When
+either side changes, change both.
 
 ## 5. Verification
 

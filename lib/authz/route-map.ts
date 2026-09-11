@@ -248,7 +248,12 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "keitaro/poll": null, // cron / webhook / import machinery -- no operator session reaches these
   "keitaro/poll-conversions": null, // cron / webhook / import machinery -- no operator session reaches these
   "keitaro/poll-offer-reaches": null, // cron / webhook / import machinery -- no operator session reaches these
-  "keitaro/reports": null, // cron / webhook / import machinery -- no operator session reaches these
+  // NOT machinery: this backs the /reports "Overview" TAB, which the operator
+  // is meant to use. It was classified with the keitaro cron/import routes and
+  // that was simply wrong -- the Overview screen 403'd for the operator while
+  // reports/performance and reports/delivery beside it worked. GET only (the
+  // file exports no writer), and the handler redacts via jsonForRole().
+  "keitaro/reports": { methods: ["GET"] },
   "keitaro/results": null, // cron / webhook / import machinery -- no operator session reaches these
 
   // ── me ─────────────────────────────────────────────────────────────

@@ -72,6 +72,15 @@ Google account, personal gmail.com included. The hosted-domain restriction is
 ours, and it lives in [`lib/auth/workspace-gate.ts`](../../lib/auth/workspace-gate.ts),
 enforced in [`app/auth/callback/route.ts`](../../app/auth/callback/route.ts).
 
+**The callback returns to the origin the sign-in started from.**
+`signInWithGoogleAction` and `linkGoogleIdentityAction` build `redirectTo` via
+`authCallbackOrigin()` ([`lib/app-origin.ts`](../../lib/app-origin.ts)), which
+matches the request host against the env-declared origins and falls back to the
+primary. This is required, not cosmetic: the PKCE code verifier is a cookie on
+the starting origin, so a callback that lands on a different hostname fails the
+exchange **locally, without contacting Supabase** — no `/token` in the auth log,
+no error surfaced, just a bounce to `/login`. See docs/07-conventions.md.
+
 Three independent checks, all required — "domain alone is not enough":
 
 1. **Verified Google identity in our domain.** The address domain is the

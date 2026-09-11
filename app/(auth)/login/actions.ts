@@ -9,6 +9,7 @@ import { headers } from "next/headers";
 
 import { createClient } from "@/lib/supabase/server";
 import { recordLogin } from "@/lib/auth/record-login";
+import { authCallbackOrigin } from "@/lib/app-origin";
 import { WORKSPACE_DOMAIN } from "@/lib/auth/workspace-gate";
 import { loginSchema, type LoginInput } from "@/lib/validators/auth";
 
@@ -95,7 +96,14 @@ export async function signInAction(
  * the way back in app/auth/callback/route.ts.
  */
 export async function signInWithGoogleAction(next?: string): Promise<{ error: string }> {
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  // The callback MUST land on the origin this request came from, or the PKCE
+  // code verifier — a cookie on that origin — is not there to exchange with.
+  // authCallbackOrigin() only ever returns an env-declared origin; an
+  // unrecognised host falls back to the primary. See lib/app-origin.ts.
+  const h = await headers();
+  const siteUrl = authCallbackOrigin(
+    h.get("x-forwarded-host") ?? h.get("host"),
+  );
   if (!siteUrl) {
     return { error: "Server misconfiguration: NEXT_PUBLIC_SITE_URL is not set" };
   }

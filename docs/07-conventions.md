@@ -247,6 +247,36 @@ weeks later, which is exactly why it needs a guard rather than care.
 `scripts/test-partner-host.ts` (in `npm run check:docs`) asserts the resolution
 behavior and that neither route contains a host read, with a can-go-red control.
 
+### The ONE exception: an OAuth round trip must come back where it left (2026-09-11)
+
+`authCallbackOrigin(requestHost)` in the same module is the single call that
+lets the browser's host influence the result — and it is not really a breach of
+the rule, because **the host never SUPPLIES an origin, it only SELECTS one that
+env already declares.** An unrecognised host (a spoofed `Host`, a preview URL)
+matches nothing and falls back to `appOrigin()`, so no request can introduce a
+redirect target of its own.
+
+**Why it cannot use `appOrigin()`.** An OAuth sign-in is a round trip, and the
+PKCE **code verifier is a cookie on the origin the flow started from**. Pinning
+the callback to the primary host meant anyone who began on the partner host came
+back to an origin that had no verifier cookie.
+
+⭐ **THE FAILURE PRODUCES NO ERROR ANYWHERE, IN EITHER SYSTEM.**
+`exchangeCodeForSession()` fails **locally** when the verifier is missing — it
+never issues a request — so Supabase's auth log shows a clean `/callback` and
+**no `/token` at all**, and CamMan just redirects to `/login`. There is no app
+error, no audit row, and (because Supabase 500s before creating anything on the
+failing paths) sometimes not even a user to inspect. The absence of a `/token`
+line between `/authorize` and the next event is the diagnostic fingerprint.
+
+The rule is unchanged for everything else, and the distinction is exactly
+"persisted vs consumed": a URL a **provider stores** outlives the request and
+must come from `appOrigin()`; the OAuth callback is consumed inside the same
+browser flow and is never written down, which is why it is allowed to follow the
+tab. `scripts/test-partner-host.ts` covers both halves, including that a spoofed
+host is refused and that re-pinning `process.env.NEXT_PUBLIC_SITE_URL` into
+either OAuth call site goes red.
+
 ## The tracked link is built ONCE — the host is inside the counted body (B2)
 
 `https://<host>/r/<code>` sits **inside** the SMS body that gets counted, so any disagreement about which host wins silently moves the GSM-7 segment boundary. `gdkn.org` is 8 characters and `g.guidekn.com` is 13: the same creative can preview as one segment and send as two — at double the cost, with nothing on screen to show it.

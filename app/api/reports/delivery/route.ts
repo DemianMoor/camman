@@ -1,7 +1,6 @@
-import { type NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 import { requireApiMembership } from "@/lib/api/helpers";
-import { jsonForRole } from "@/lib/authz/redact";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { can } from "@/lib/permissions";
 import {
@@ -33,7 +32,7 @@ export async function GET(req: NextRequest) {
   });
   if ("error" in auth) return auth.error;
   if (!can(auth.role, "campaigns.view")) {
-    return await jsonForRole(auth.role, auth.orgId, { error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const sp = req.nextUrl.searchParams;
@@ -44,13 +43,12 @@ export async function GET(req: NextRequest) {
   const to = toRaw && DATE_RE.test(toRaw) ? toRaw : todayEt;
 
   if (from > to) {
-    return await jsonForRole(auth.role, auth.orgId, { error: "`from` must be on or before `to`" }, { status: 400 });
+    return NextResponse.json({ error: "`from` must be on or before `to`" }, { status: 400 });
   }
   const spanDays =
     (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000 + 1;
   if (spanDays > MAX_RANGE_DAYS) {
-    return await jsonForRole(auth.role, auth.orgId, 
-      {
+    return NextResponse.json({
         error: `Date range cannot exceed ${MAX_RANGE_DAYS} days`,
         code: "range_too_wide",
       },
@@ -79,7 +77,7 @@ export async function GET(req: NextRequest) {
     no_receipt: capable.reduce((n, p) => n + (p.no_receipt ?? 0), 0),
   };
 
-  return await jsonForRole(auth.role, auth.orgId, {
+  return NextResponse.json({
     data,
     totals,
     no_dlr_note: NO_DLR_NOTE,

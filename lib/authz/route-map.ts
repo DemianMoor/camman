@@ -231,8 +231,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/tracking-monitors": null, // cron / webhook / import machinery -- no operator session reaches these
 
   // ── dashboard ─────────────────────────────────────────────────────────────
-  // Reports/dashboard/today: aggregates only. Provider identity is replaced
-  // by a route alias in redactForRole().
+  // Reports/dashboard/today: aggregates only.
   "dashboard/active-campaigns": { methods: ["GET"], token: ["GET"] },
   "dashboard/active-stages": { methods: ["GET"], token: ["GET"] },
   "dashboard/daily-activity": { methods: ["GET"], token: ["GET"] },
@@ -252,7 +251,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // is meant to use. It was classified with the keitaro cron/import routes and
   // that was simply wrong -- the Overview screen 403'd for the operator while
   // reports/performance and reports/delivery beside it worked. GET only (the
-  // file exports no writer), and the handler redacts via jsonForRole().
+  // file exports no writer).
   "keitaro/reports": { methods: ["GET"] },
   "keitaro/results": null, // cron / webhook / import machinery -- no operator session reaches these
 
@@ -338,14 +337,13 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "providers/[providerId]/restore": null, // settings / provider registry -- Owner only
   "providers/[providerId]/send-circuit": null, // settings / provider registry -- Owner only
   "providers/[providerId]/sends-enabled": null, // settings / provider registry -- Owner only
-  // The stage form's route picker fetches this. GET only, and the response is
-  // aliased by redactForRole -- the operator picks "Route B", never an SSP name.
+  // The stage form's route picker fetches this. GET only -- picking a sending
+  // number is the operator's job; provider names are shown to every role.
   // Denying it would leave the operator unable to choose a sending route at all.
   "providers/list": { methods: ["GET"], token: ["GET"] },
 
   // ── reports ─────────────────────────────────────────────────────────────
-  // Reports/dashboard/today: aggregates only. Provider identity is replaced
-  // by a route alias in redactForRole().
+  // Reports/dashboard/today: aggregates only.
   "reports/delivery": { methods: ["GET"], token: ["GET"] },
   "reports/epc-monitors": null, // maintenance job, not a report
   "reports/partners": null, // drip / partner intake -- hidden from the operator
@@ -400,8 +398,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // ── sends ─────────────────────────────────────────────────────────────
   "sends/autopilot": null, // compliance control -- Owner only
   "sends/pause": null, // compliance control -- Owner only
-  // Reports/dashboard/today: aggregates only. Provider identity is replaced
-  // by a route alias in redactForRole().
+  // Reports/dashboard/today: aggregates only.
   "sends/state": { methods: ["GET"], token: ["GET"] },
   "sends/today": { methods: ["GET"], token: ["GET"] },
 

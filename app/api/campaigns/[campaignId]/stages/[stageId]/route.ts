@@ -1,5 +1,5 @@
 import { and, eq, sql as drizzleSql } from "drizzle-orm";
-import { type NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import {
@@ -11,7 +11,6 @@ import {
 } from "@/db/schema";
 import { checkDripStageWindow } from "@/lib/api/drip-stage-window-guard";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
-import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
 import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
@@ -186,7 +185,7 @@ export async function GET(
     });
   }
   const r = rows[0];
-  return await jsonForRole(role, orgId, {
+  return NextResponse.json({
     ...r,
     creative: r.creative?.id ? r.creative : null,
     provider: r.provider?.id ? r.provider : null,
@@ -676,7 +675,7 @@ export async function PATCH(
     }
   }
 
-  return await jsonForRole(role, orgId, updated);
+  return NextResponse.json(updated);
 }
 
 export async function DELETE(
@@ -727,7 +726,7 @@ export async function DELETE(
     },
   });
 
-  return await jsonForRole(role, orgId, {
+  return NextResponse.json({
     deleted: true,
     id: sid,
     split_reset_stage_id: result.split_reset_stage_id,

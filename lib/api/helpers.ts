@@ -153,8 +153,8 @@ export async function requireApiUser(): Promise<ApiUser | ApiAuthFailure> {
 //
 // ⚠️ AND THE TAIL IS SHARED ON PURPOSE. A token resolves to { orgId, role } and
 // then falls through the IDENTICAL is_active / isRole / operator-gate sequence a
-// session runs. is_active, the default-deny route map, can() and redactForRole()
-// therefore apply to tokens BY CONSTRUCTION rather than by anyone remembering to
+// session runs. is_active, the default-deny route map and can() therefore
+// apply to tokens BY CONSTRUCTION rather than by anyone remembering to
 // re-apply them. A token is its owner's authority, narrowed by the allowlist —
 // never a second authorization system that could drift from the first.
 

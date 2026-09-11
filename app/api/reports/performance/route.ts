@@ -1,7 +1,6 @@
-import { type NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 import { requireApiMembership } from "@/lib/api/helpers";
-import { jsonForRole } from "@/lib/authz/redact";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { can } from "@/lib/permissions";
 import {
@@ -28,15 +27,14 @@ export async function GET(req: NextRequest) {
   });
   if ("error" in auth) return auth.error;
   if (!can(auth.role, "campaigns.view")) {
-    return await jsonForRole(auth.role, auth.orgId, { error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const sp = req.nextUrl.searchParams;
 
   const dimensionRaw = sp.get("dimension") ?? "";
   if (!REPORT_DIMENSIONS.includes(dimensionRaw as ReportDimension)) {
-    return await jsonForRole(auth.role, auth.orgId, 
-      { error: `Unknown dimension. Expected one of: ${REPORT_DIMENSIONS.join(", ")}` },
+    return NextResponse.json({ error: `Unknown dimension. Expected one of: ${REPORT_DIMENSIONS.join(", ")}` },
       { status: 400 },
     );
   }
@@ -51,16 +49,14 @@ export async function GET(req: NextRequest) {
   const to = toRaw && DATE_RE.test(toRaw) ? toRaw : todayEt;
 
   if (from > to) {
-    return await jsonForRole(auth.role, auth.orgId, 
-      { error: "`from` must be on or before `to`" },
+    return NextResponse.json({ error: "`from` must be on or before `to`" },
       { status: 400 },
     );
   }
   const spanDays =
     (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
   if (spanDays > MAX_RANGE_DAYS) {
-    return await jsonForRole(auth.role, auth.orgId, 
-      { error: `Date range cannot exceed ${MAX_RANGE_DAYS} days` },
+    return NextResponse.json({ error: `Date range cannot exceed ${MAX_RANGE_DAYS} days` },
       { status: 400 },
     );
   }
@@ -74,7 +70,7 @@ export async function GET(req: NextRequest) {
     getReportProviderOptions(auth.orgId),
   ]);
 
-  return await jsonForRole(auth.role, auth.orgId, {
+  return NextResponse.json({
     dimension,
     data: report.rows,
     totals: report.totals,

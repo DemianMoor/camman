@@ -1,9 +1,9 @@
+import { NextResponse } from "next/server";
 import { and, asc, eq, isNull, or } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { provider_phones, sms_providers } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
-import { jsonForRole } from "@/lib/authz/redact";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 
@@ -73,5 +73,5 @@ export async function GET(request: Request) {
     )
     .orderBy(asc(sms_providers.name), asc(provider_phones.phone_number));
 
-  return await jsonForRole(role, orgId, { data: rows });
+  return NextResponse.json({ data: rows });
 }

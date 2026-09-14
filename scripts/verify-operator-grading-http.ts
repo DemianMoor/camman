@@ -264,6 +264,45 @@ async function main() {
     check(`opt-outs ${name}: 400`, r.status === 400, r.status);
   }
 
+  // ---- creative usage + campaign audit ----
+  console.log("\n9. /api/creatives/{id}/usage and /api/campaigns/audit");
+  const [topCr] = await db`
+    SELECT creative_id FROM campaign_stages
+    WHERE org_id = ${orgId} AND creative_id IS NOT NULL AND sent_at IS NOT NULL
+    GROUP BY 1 ORDER BY count(*) DESC LIMIT 1`;
+  const us = await get(`/api/creatives/${Number(topCr.creative_id)}/usage`);
+  check("usage: 200", us.status === 200, us.status);
+  check("usage: carries creative_slug", typeof us.json?.creative_slug === "string", us.json?.creative_slug);
+  check(
+    "usage rows carry sending_number, group_names, clicks_human, reached, conversions",
+    (us.json?.data ?? []).length > 0 &&
+      (us.json?.data ?? []).every((r: object) =>
+        ["sending_number", "group_names", "clicks_human", "reached", "conversions"].every((k) => k in r),
+      ),
+  );
+  // 9 digits: a missing id that cannot look like a phone to the privacy sweep.
+  const usMissing = await get("/api/creatives/999999999/usage");
+  check("usage for a creative outside the org: 404", usMissing.status === 404, usMissing.status);
+  const au = await get("/api/campaigns/audit?status=active");
+  check("audit: 200", au.status === 200, au.status);
+  check(
+    "audit stages carry stage_seq, split_index, behavioral_tier, status, creative_slug",
+    (au.json?.data ?? []).length > 0 &&
+      (au.json?.data ?? []).every((c: { stages?: object[] }) =>
+        (c.stages ?? []).every((s) =>
+          ["stage_seq", "split_index", "behavioral_tier", "status", "creative_slug"].every((k) => k in s),
+        ),
+      ),
+  );
+  const auBad = await get("/api/campaigns/audit?status=archived");
+  // Must name `status`: /api/campaigns/[campaignId] also 400s "audit" as an
+  // invalid campaign id, which would make a bare status check pass vacuously.
+  check(
+    "audit status=archived: 400 naming status",
+    auBad.status === 400 && String(auBad.json?.error ?? "").includes("status"),
+    { status: auBad.status, error: auBad.json?.error },
+  );
+
   // ---- privacy sweep over every body fetched above ----
   console.log("\n5. Privacy sweep");
   const senders = new Set(

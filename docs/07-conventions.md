@@ -59,6 +59,20 @@ and the per-surface queries that feed it. Spec:
   never from summing rows. The window constant lives in the zero-import
   `lib/sends/opt-out-window.ts` so reporting doesn't load the STOP ingester's
   send-side dependencies; `poll-opt-outs.ts` re-exports it unchanged.
+- **Creative usage rows are campaign + sending number + ET send day.** The
+  creative is the stage's current `creative_id` (it matches the minted-link
+  creative on 99.4% of stages). `link_mode` is per campaign, so a row is
+  all-tracked or all-manual: `reached` is `null` only for an all-manual row, and
+  `clicks_human` dedupes across the row's tracked stages (manual stages add their
+  Keitaro visits). Archived stages are included — usage is history.
+- **The campaign audit carries split siblings side by side.** `stage_seq` is
+  `stage_number`, which A/B and behavioural-lane siblings share, so every stage
+  also carries `split_index` and `behavioral_tier`. A campaign with no live stages
+  still appears with `stages: []`. The call costs 1 against the token rate limit
+  regardless of how many campaigns it returns.
+- **A test id that is 10+ digits trips the phone sweep.** A 404 page echoes the
+  request path, so `/api/creatives/2147483000/usage` read as a recipient phone.
+  Missing-entity probes use a 9-digit id (`999999999`).
 
 ## A role nobody holds is untested by construction (2026-09-11)
 

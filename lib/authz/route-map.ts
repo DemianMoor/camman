@@ -142,6 +142,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "campaigns/[campaignId]/stages/lane-counts": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/status": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/upload-contacts": null, // contact-level rows or CSV export/import
+  // Operator API creative grading (2026-09-14): every campaign in one status with its stages.
+  "campaigns/audit": { methods: ["GET"], token: ["GET"] },
   "campaigns/audience-preview": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["POST"] },
   "campaigns/bulk-status": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/list": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
@@ -202,6 +204,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "creatives/[id]/duplicate": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/[id]/rescore": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/[id]/restore": null, // archive IS delete here -- goes through the deletion queue in Phase 3
+  // Operator API creative grading (2026-09-14): where a text has already run.
+  "creatives/[id]/usage": { methods: ["GET"], token: ["GET"] },
   "creatives/bulk-score": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/bulk-update": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/ids": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },

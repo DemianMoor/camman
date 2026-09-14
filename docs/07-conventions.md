@@ -38,6 +38,14 @@ and the per-surface queries that feed it. Spec:
   digit or `.`, and carries a control proving a real phone string still goes red.
   `scripts/verify-operator-access.ts` still uses the bare pattern and can
   false-positive the same way on a summed float.
+- **A cell's halves are cut by send ORDER, not clock time.** A ~4,500-send cell
+  drains in 3–6 minutes, so per-hour buckets hold the whole cell and cannot
+  compare its first half with its second (the spec's `/hourly` was dropped for
+  this). `/send-groups` runs `ntile` over `(sent_at, id)`, with `id` breaking
+  ties. Groups carry no conversions: the tracker reports per stage, not per
+  message. Postgres gotcha for any reference query: `ORDER BY id` after
+  `SELECT id::text AS id` sorts by the TEXT output column (an output name wins
+  over the input column), so qualify it (`ss.id`).
 - **Two attribution bases, each with its own stage set.** `conversion_date` (the
   default, unchanged) takes the stages with a Keitaro row OR a send in range and
   dates every metric by its own event. `send_date` takes ONLY the stages sent in

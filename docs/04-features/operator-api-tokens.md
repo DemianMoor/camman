@@ -75,9 +75,10 @@ belongs to.
 `read_only` survives as a column for a future write-capable token. Nothing sets
 it false.
 
-**37 (route, method) pairs are token-reachable** out of 272 classified routes.
-`GET reports/tails`, `GET reports/opt-outs`, `GET creatives/[id]/usage` and
-`GET campaigns/audit` were added 2026-09-14 for creative grading — see
+**38 (route, method) pairs are token-reachable** out of 273 classified routes.
+`GET reports/tails`, `GET reports/opt-outs`, `GET creatives/[id]/usage`,
+`GET campaigns/audit` and `GET campaigns/[campaignId]/stages/[stageId]/send-groups`
+were added 2026-09-14 for creative grading — see
 [reports-rollup.md](reports-rollup.md).
 The first two of `segments/[id]/rules/preview`'s side effects are accepted
 deliberately: it is semantically a read (gated on `segment_rules.view`) whose

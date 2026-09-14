@@ -109,20 +109,29 @@ ago that sent yesterday leaves its contacts counted as "not used in 30d".
 | `dimension` | `number`, `offer`, `sequence`, `group` or `hourly` |
 | `from`, `to` | `YYYY-MM-DD`, in ET; today if omitted; at most 92 days apart |
 | `provider_phone_id` | optional — only stages sent from that number |
+| `attribution` | `conversion_date` (default) or `send_date` — see below. `hourly` accepts only the default |
 
 ```bash
 curl -s "https://camman.vercel.app/api/reports/performance?dimension=offer&from=2026-09-07&to=2026-09-13" \
   -H "Authorization: Bearer $CAMMAN_TOKEN"
 ```
 
-Response: `{ dimension, data: [row, …], totals, refreshedAt, providers, range }`.
+Response: `{ dimension, attribution, data: [row, …], totals, refreshedAt, providers, range }`.
 Every row, and `totals`, carries `sent`, `opt_outs`, `clickers` (the tracker's
 clean landing visits — not human clicks), `redirects`, `counted_clickers`,
 `sales`, `revenue`, `cost`, and the grading fields `reached`, `clicks_human`,
-`click_to_reach_pct`, `reach_to_sale_pct` and `opt_rate` (see §7). Each metric is
-dated by its own event: sends by send day, `reached` by the day the recipient
-reached the offer, `clicks_human` by first click, sales and revenue by
-conversion day.
+`click_to_reach_pct`, `reach_to_sale_pct` and `opt_rate` (see §7).
+
+**Which days a number belongs to (`attribution`):**
+
+- `conversion_date` (default) — each metric is dated by its own event: sends by
+  send day, `reached` by the day the recipient reached the offer, `clicks_human`
+  by first click, sales and revenue by conversion day. Use it for "what happened
+  on these days".
+- `send_date` — takes the stages **sent** in the range and counts everything they
+  have produced so far, whenever it happened. Use it to grade a send day. Its
+  numbers keep growing for days after the send: about a quarter of sales arrive
+  on a later day (see Tails, below), and late STOPs and clicks keep landing.
 
 One real row, 2026-09-07..13 (offer name redacted, cost rounded):
 
@@ -136,6 +145,43 @@ One real row, 2026-09-07..13 (offer name redacted, cost rounded):
   "click_to_reach_pct": 8.93, "reach_to_sale_pct": 12.5, "opt_rate": 2.97
 }
 ```
+
+### Tails — conversions that came in after the send day
+
+**`GET /api/reports/tails?date=YYYY-MM-DD`** (an ET day; today if omitted)
+
+Tracker conversions dated that day, split by when the stage that earned them was
+sent. About a quarter of sales land on a later day than their send — up to 34
+days later over the 30 days to 2026-09-14 — so check tails before grading a send
+day.
+
+```bash
+curl -s "https://camman.vercel.app/api/reports/tails?date=2026-09-14" \
+  -H "Authorization: Bearer $CAMMAN_TOKEN"
+```
+
+Real response, early on 2026-09-14 (campaign name redacted):
+
+```json
+{
+  "date": "2026-09-14",
+  "data": [
+    { "campaign_id": 1251, "campaign_name": "<campaign name>", "creative_id": 726,
+      "creative_slug": "8h9tap", "send_date": "2026-09-08", "days_after_send": 6,
+      "conversions": 1, "revenue": 73 }
+  ],
+  "totals": { "conversions": 1, "revenue": 73, "same_day_conversions": 0,
+              "tail_conversions": 1, "unknown_send_date_conversions": 0,
+              "tail_revenue": 73 }
+}
+```
+
+- `data` lists only the tails, grouped by campaign + creative + send day, oldest
+  send first.
+- `same_day_conversions + tail_conversions + unknown_send_date_conversions`
+  always equals `conversions`. "Unknown" means the stage has no send time, or one
+  later than the conversion day.
+- An impossible date (e.g. `2026-02-31`) returns `400`.
 
 ### Delivery report
 

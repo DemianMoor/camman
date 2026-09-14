@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
@@ -12,11 +12,16 @@ import {
 } from "@/db/schema";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { addRowToFunnel, emptyFunnel, type FunnelTally } from "@/lib/keitaro/funnel";
-import { manualSalesByStageInRange } from "@/lib/reporting/attribution";
+import {
+  lifetimeManualSalesByStage,
+  manualSalesByStageInRange,
+} from "@/lib/reporting/attribution";
 import {
   getCountedClickers,
   getTotalCountedClickers,
+  type CountedClickerBounds,
 } from "@/lib/reporting/counted-clickers";
+import type { AttributionBasis } from "@/lib/reporting/report-dimensions";
 
 // SINGLE SOURCE OF TRUTH for the per-stage Clickers → Offer Redirect → Sales
 // funnel over an ET date range. Extracted from app/api/keitaro/reports/route.ts
@@ -95,15 +100,26 @@ export async function getStageMetricsInRange(
   orgId: string,
   from: string,
   to: string,
+  opts: { attribution?: AttributionBasis } = {},
 ): Promise<StageMetricsResult> {
+  // conversion_date (the default, and the only basis before 2026-09-14) = each
+  // metric on its own event day within the range. send_date = the COHORT of
+  // stages sent in range, with everything they have produced to date: every
+  // stat_date, every attribution, every reach, lifetime clickers.
+  const sendDate = opts.attribution === "send_date";
   const byStage = new Map<number, StageMetrics>();
   const grand = emptyFunnel();
 
-  const rows = await db
+  const fromUtc = fromZonedTime(`${from}T00:00:00`, CAMPAIGN_TIMEZONE);
+  const toExclusiveUtc = fromZonedTime(`${addOneDay(to)}T00:00:00`, CAMPAIGN_TIMEZONE);
+
+  // Stages SENT in range. Under conversion_date they seed stages Keitaro has no
+  // results row for (zero-click or unpolled) so their send Cost + Total Sent
+  // aren't silently dropped; under send_date they ARE the stage set.
+  const sentStageRows = await db
     .select({
-      stage_id: keitaro_stage_results.stage_id,
-      campaign_id: keitaro_stage_results.campaign_id,
-      stage_tracking_id: keitaro_stage_results.stage_tracking_id,
+      stage_id: campaign_stages.id,
+      campaign_id: campaign_stages.campaign_id,
       campaign_name: campaigns.name,
       link_mode: campaigns.link_mode,
       offer_id: campaigns.offer_id,
@@ -113,30 +129,69 @@ export async function getStageMetricsInRange(
       provider_phone_id: campaign_stages.provider_phone_id,
       phone_number: provider_phones.phone_number,
       phone_number_type: provider_phones.number_type,
+      stage_tracking_id: campaign_stages.tracking_id,
       stage_sent_at: campaign_stages.sent_at,
       stage_sms_count: campaign_stages.sms_count,
       stage_total_cost: campaign_stages.total_cost,
-      visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
-      visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
-      redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
-      redirect_clicks_clean: keitaro_stage_results.redirect_clicks_clean,
-      raw_clicks: keitaro_stage_results.raw_clicks,
-      clean_clicks: keitaro_stage_results.clean_clicks,
-      sales: keitaro_stage_results.sales,
-      revenue: keitaro_stage_results.revenue,
-      cost: keitaro_stage_results.cost,
     })
-    .from(keitaro_stage_results)
-    .innerJoin(campaigns, eq(campaigns.id, keitaro_stage_results.campaign_id))
-    .leftJoin(campaign_stages, eq(campaign_stages.id, keitaro_stage_results.stage_id))
+    .from(campaign_stages)
+    .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
     .leftJoin(provider_phones, eq(provider_phones.id, campaign_stages.provider_phone_id))
     .where(
       and(
-        eq(keitaro_stage_results.org_id, orgId),
-        gte(keitaro_stage_results.stat_date, from),
-        lte(keitaro_stage_results.stat_date, to),
+        eq(campaign_stages.org_id, orgId),
+        isNull(campaign_stages.archived_at),
+        gte(campaign_stages.sent_at, fromUtc),
+        lt(campaign_stages.sent_at, toExclusiveUtc),
       ),
     );
+  const cohortIds = sentStageRows.map((r) => r.stage_id);
+
+  const rows =
+    sendDate && cohortIds.length === 0
+      ? []
+      : await db
+          .select({
+            stage_id: keitaro_stage_results.stage_id,
+            campaign_id: keitaro_stage_results.campaign_id,
+            stage_tracking_id: keitaro_stage_results.stage_tracking_id,
+            campaign_name: campaigns.name,
+            link_mode: campaigns.link_mode,
+            offer_id: campaigns.offer_id,
+            brand_id: campaigns.brand_id,
+            stage_number: campaign_stages.stage_number,
+            stage_label: campaign_stages.label,
+            provider_phone_id: campaign_stages.provider_phone_id,
+            phone_number: provider_phones.phone_number,
+            phone_number_type: provider_phones.number_type,
+            stage_sent_at: campaign_stages.sent_at,
+            stage_sms_count: campaign_stages.sms_count,
+            stage_total_cost: campaign_stages.total_cost,
+            visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
+            visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
+            redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
+            redirect_clicks_clean: keitaro_stage_results.redirect_clicks_clean,
+            raw_clicks: keitaro_stage_results.raw_clicks,
+            clean_clicks: keitaro_stage_results.clean_clicks,
+            sales: keitaro_stage_results.sales,
+            revenue: keitaro_stage_results.revenue,
+            cost: keitaro_stage_results.cost,
+          })
+          .from(keitaro_stage_results)
+          .innerJoin(campaigns, eq(campaigns.id, keitaro_stage_results.campaign_id))
+          .leftJoin(campaign_stages, eq(campaign_stages.id, keitaro_stage_results.stage_id))
+          .leftJoin(provider_phones, eq(provider_phones.id, campaign_stages.provider_phone_id))
+          .where(
+            and(
+              eq(keitaro_stage_results.org_id, orgId),
+              ...(sendDate
+                ? [inArray(keitaro_stage_results.stage_id, cohortIds)]
+                : [
+                    gte(keitaro_stage_results.stat_date, from),
+                    lte(keitaro_stage_results.stat_date, to),
+                  ]),
+            ),
+          );
 
   // Carry per-stage send anchor + lifetime SMS count for manual attribution.
   const anchor = new Map<number, { sentAt: Date | null; smsCount: number; totalCost: number }>();
@@ -174,40 +229,7 @@ export async function getStageMetricsInRange(
     addRowToFunnel(acc.tally, r);
   }
 
-  const fromUtc = fromZonedTime(`${from}T00:00:00`, CAMPAIGN_TIMEZONE);
-  const toExclusiveUtc = fromZonedTime(`${addOneDay(to)}T00:00:00`, CAMPAIGN_TIMEZONE);
-
-  // Seed stages SENT in-range that Keitaro has no results row for (zero-click or
-  // unpolled) so their send Cost + Total Sent aren't silently dropped.
-  const sentStageRows = await db
-    .select({
-      stage_id: campaign_stages.id,
-      campaign_id: campaign_stages.campaign_id,
-      campaign_name: campaigns.name,
-      link_mode: campaigns.link_mode,
-      offer_id: campaigns.offer_id,
-      brand_id: campaigns.brand_id,
-      stage_number: campaign_stages.stage_number,
-      stage_label: campaign_stages.label,
-      provider_phone_id: campaign_stages.provider_phone_id,
-      phone_number: provider_phones.phone_number,
-      phone_number_type: provider_phones.number_type,
-      stage_tracking_id: campaign_stages.tracking_id,
-      stage_sent_at: campaign_stages.sent_at,
-      stage_sms_count: campaign_stages.sms_count,
-      stage_total_cost: campaign_stages.total_cost,
-    })
-    .from(campaign_stages)
-    .innerJoin(campaigns, eq(campaigns.id, campaign_stages.campaign_id))
-    .leftJoin(provider_phones, eq(provider_phones.id, campaign_stages.provider_phone_id))
-    .where(
-      and(
-        eq(campaign_stages.org_id, orgId),
-        isNull(campaign_stages.archived_at),
-        gte(campaign_stages.sent_at, fromUtc),
-        lt(campaign_stages.sent_at, toExclusiveUtc),
-      ),
-    );
+  // Seed the in-range sent stages that have no Keitaro row (see sentStageRows).
   for (const r of sentStageRows) {
     if (byStage.has(r.stage_id)) continue;
     byStage.set(r.stage_id, {
@@ -242,6 +264,8 @@ export async function getStageMetricsInRange(
   let grandSalesTopup = 0;
   let grandTotalCost = 0;
   if (stageIds.length > 0) {
+    // Under send_date every per-stage window below is dropped: a cohort stage's
+    // metrics are everything it has produced to date, whenever it happened.
     const [optOutRows, sentRows, manualSalesByStage, reachedRows] = await Promise.all([
       db
         .select({ stage_id: opt_out_attributions.stage_id, n: sql<number>`count(*)::int` })
@@ -250,8 +274,12 @@ export async function getStageMetricsInRange(
           and(
             eq(opt_out_attributions.org_id, orgId),
             inArray(opt_out_attributions.stage_id, stageIds),
-            gte(opt_out_attributions.created_at, fromUtc),
-            lt(opt_out_attributions.created_at, toExclusiveUtc),
+            ...(sendDate
+              ? []
+              : [
+                  gte(opt_out_attributions.created_at, fromUtc),
+                  lt(opt_out_attributions.created_at, toExclusiveUtc),
+                ]),
           ),
         )
         .groupBy(opt_out_attributions.stage_id),
@@ -263,16 +291,20 @@ export async function getStageMetricsInRange(
             eq(stage_sends.org_id, orgId),
             eq(stage_sends.status, "sent"),
             inArray(stage_sends.stage_id, stageIds),
-            gte(stage_sends.sent_at, fromUtc),
-            lt(stage_sends.sent_at, toExclusiveUtc),
+            ...(sendDate
+              ? []
+              : [gte(stage_sends.sent_at, fromUtc), lt(stage_sends.sent_at, toExclusiveUtc)]),
           ),
         )
         .groupBy(stage_sends.stage_id),
-      manualSalesByStageInRange({ orgId, fromUtc, toExclusiveUtc }),
-      // Per-recipient offer reach by REACH day (operator-API grading). Counted
-      // for the stages already in the set: a reach is an offer click, which
-      // Keitaro books the same day, so a reached stage already has a row here
-      // (measured 0 reach-only stages on 1-day and 7-day ranges).
+      sendDate
+        ? lifetimeManualSalesByStage({ orgId, stageIds })
+        : manualSalesByStageInRange({ orgId, fromUtc, toExclusiveUtc }),
+      // Per-recipient offer reach (operator-API grading): by REACH day under
+      // conversion_date, ever-reached under send_date. Counted for the stages
+      // already in the set: a reach is an offer click, which Keitaro books the
+      // same day, so a reached stage already has a row here (measured 0
+      // reach-only stages on 1-day and 7-day ranges).
       db
         .select({ stage_id: stage_sends.stage_id, n: sql<number>`count(*)::int` })
         .from(stage_sends)
@@ -280,8 +312,12 @@ export async function getStageMetricsInRange(
           and(
             eq(stage_sends.org_id, orgId),
             inArray(stage_sends.stage_id, stageIds),
-            gte(stage_sends.offer_reached_at, fromUtc),
-            lt(stage_sends.offer_reached_at, toExclusiveUtc),
+            ...(sendDate
+              ? [isNotNull(stage_sends.offer_reached_at)]
+              : [
+                  gte(stage_sends.offer_reached_at, fromUtc),
+                  lt(stage_sends.offer_reached_at, toExclusiveUtc),
+                ]),
           ),
         )
         .groupBy(stage_sends.stage_id),
@@ -296,7 +332,8 @@ export async function getStageMetricsInRange(
       const a = anchor.get(acc.stage_id)!;
       acc.opt_outs = optOutsByStage.get(acc.stage_id) ?? 0;
       acc.reached = acc.link_mode === "tracked" ? reachedByStage.get(acc.stage_id) ?? 0 : null;
-      const inRange = sentInRange(a.sentAt);
+      // A send_date cohort stage is in range by definition.
+      const inRange = sendDate || sentInRange(a.sentAt);
       acc.total_sent =
         acc.link_mode === "tracked"
           ? sentByStage.get(acc.stage_id) ?? 0
@@ -316,18 +353,21 @@ export async function getStageMetricsInRange(
   grand.sales += grandSalesTopup;
   grand.cost = grandTotalCost;
 
-  const clickers = await getClickerDenominators(orgId, fromUtc, toExclusiveUtc);
+  const clickers = await getClickerDenominators(
+    orgId,
+    sendDate ? { stageIds: cohortIds } : { fromUtc, toExclusiveUtc },
+  );
 
   return { stages: [...byStage.values()], grand, grandOptOuts, grandTotalSent, clickers };
 }
 
 // Both time bases, both grains, plus unbounded revenue for the lifetime figure.
+// `period` is the ET date window (conversion_date) or exactly the cohort's stages
+// with no date bound (send_date).
 async function getClickerDenominators(
   orgId: string,
-  fromUtc: Date,
-  toExclusiveUtc: Date,
+  period: CountedClickerBounds,
 ): Promise<ClickerDenominators> {
-  const period = { fromUtc, toExclusiveUtc };
   const [
     periodByCampaign,
     periodByStage,

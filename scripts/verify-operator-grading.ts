@@ -10,6 +10,7 @@ import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
+import { getConversionTails } from "@/lib/reporting/grading";
 import { pct } from "@/lib/reporting/grading-rates";
 import { getPerformanceReport, gradePerf } from "@/lib/reporting/performance-report";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
@@ -161,6 +162,106 @@ async function main() {
     h.totals.counted_clickers === clickTruth,
     h.totals.counted_clickers,
   );
+
+  console.log("\nC. attribution=send_date — the cohort of stages sent in range");
+  const [cohortTruth] = (await db.execute(sql`
+    WITH cohort AS (
+      SELECT cs.id, c.link_mode, cs.sms_count FROM campaign_stages cs
+      JOIN campaigns c ON c.id = cs.campaign_id
+      WHERE cs.org_id = ${orgId}::uuid AND cs.archived_at IS NULL
+        AND cs.sent_at >= ${fromIso}::timestamptz AND cs.sent_at < ${toIso}::timestamptz
+    )
+    SELECT
+      (SELECT count(*) FROM stage_sends ss JOIN cohort ON cohort.id = ss.stage_id
+         AND cohort.link_mode = 'tracked' WHERE ss.status = 'sent')::int
+        + (SELECT coalesce(sum(sms_count), 0) FROM cohort WHERE link_mode <> 'tracked')::int AS sent,
+      (SELECT count(*) FROM stage_sends ss JOIN cohort ON cohort.id = ss.stage_id
+         AND cohort.link_mode = 'tracked' WHERE ss.offer_reached_at IS NOT NULL)::int AS reached,
+      (SELECT count(*) FROM opt_out_attributions oa JOIN cohort ON cohort.id = oa.stage_id)::int AS opt_outs,
+      (SELECT coalesce(sum(k.revenue), 0) FROM keitaro_stage_results k
+         JOIN cohort ON cohort.id = k.stage_id)::float8 AS revenue,
+      (SELECT coalesce(sum(greatest(coalesce(ms.m, 0), coalesce(ks.s, 0))), 0) FROM cohort
+         LEFT JOIN (SELECT stage_id, sum(sales) AS s FROM keitaro_stage_results GROUP BY 1) ks ON ks.stage_id = cohort.id
+         LEFT JOIN (SELECT stage_id, sum(delta) AS m FROM stage_manual_sales GROUP BY 1) ms ON ms.stage_id = cohort.id
+      )::int AS sales,
+      (SELECT count(DISTINCT (cc.campaign_id::text || ':' || cc.contact_id::text))
+         FROM counted_clickers cc JOIN cohort ON cohort.id = cc.stage_id)::int AS clickers,
+      (SELECT coalesce(sum(k.visit_clicks_clean), 0) FROM keitaro_stage_results k
+         JOIN cohort ON cohort.id = k.stage_id AND cohort.link_mode <> 'tracked')::int AS manual_visits
+  `)) as unknown as {
+    sent: number;
+    reached: number;
+    opt_outs: number;
+    revenue: number;
+    sales: number;
+    clickers: number;
+    manual_visits: number;
+  }[];
+  const convTotals = (await getPerformanceReport(orgId, "offer", { from, to, providerPhoneId: null })).totals;
+  for (const dim of ["number", "offer", "sequence"] as const) {
+    const r = await getPerformanceReport(orgId, dim, {
+      from,
+      to,
+      providerPhoneId: null,
+      attribution: "send_date",
+    });
+    const t = r.totals;
+    check(`${dim} send_date: totals.sent = cohort sends`, t.sent === cohortTruth.sent, { got: t.sent, want: cohortTruth.sent });
+    check(`${dim} send_date: totals.reached = cohort reaches`, t.reached === cohortTruth.reached, { got: t.reached, want: cohortTruth.reached });
+    check(`${dim} send_date: totals.opt_outs = cohort attributions`, t.opt_outs === cohortTruth.opt_outs, { got: t.opt_outs, want: cohortTruth.opt_outs });
+    check(`${dim} send_date: totals.sales = cohort tracker+manual sales`, t.sales === cohortTruth.sales, { got: t.sales, want: cohortTruth.sales });
+    check(
+      `${dim} send_date: totals.revenue = cohort revenue`,
+      Math.abs(t.revenue - cohortTruth.revenue) < 0.01,
+      { got: t.revenue, want: cohortTruth.revenue },
+    );
+    check(
+      `${dim} send_date: totals.counted_clickers = cohort distinct + manual visits`,
+      t.counted_clickers === cohortTruth.clickers + cohortTruth.manual_visits,
+      { got: t.counted_clickers, want: cohortTruth.clickers + cohortTruth.manual_visits },
+    );
+    check(`${dim} send_date: rows' reached sum to totals`, r.rows.reduce((a, x) => a + (x.reached ?? 0), 0) === t.reached);
+    check(`${dim} send_date: rows' sent sum to totals`, r.rows.reduce((a, x) => a + x.sent, 0) === t.sent);
+  }
+  check(
+    "control: the two bases really differ on sales (tails exist)",
+    convTotals.sales !== cohortTruth.sales,
+    { conversion_date: convTotals.sales, send_date: cohortTruth.sales },
+  );
+
+  console.log("\nD. getConversionTails");
+  // The most recent day in the last 14 with a real tail, so the check can't pass vacuously.
+  const [tailDay] = (await db.execute(sql`
+    SELECT to_char(k.stat_date, 'YYYY-MM-DD') AS d
+    FROM keitaro_stage_results k JOIN campaign_stages cs ON cs.id = k.stage_id
+    WHERE k.org_id = ${orgId}::uuid AND k.sales > 0
+      AND k.stat_date >= (now() AT TIME ZONE 'America/New_York')::date - 14
+      AND (cs.sent_at AT TIME ZONE 'America/New_York')::date < k.stat_date
+    ORDER BY k.stat_date DESC LIMIT 1`)) as unknown as { d: string }[];
+  check("control: a recent day with a real tail exists", tailDay != null, tailDay);
+  if (tailDay) {
+    const D = tailDay.d;
+    const [truth] = (await db.execute(sql`
+      SELECT coalesce(sum(k.sales), 0)::int AS conversions,
+             coalesce(sum(k.sales) FILTER (
+               WHERE (cs.sent_at AT TIME ZONE 'America/New_York')::date < k.stat_date), 0)::int AS tail
+      FROM keitaro_stage_results k JOIN campaign_stages cs ON cs.id = k.stage_id
+      WHERE k.org_id = ${orgId}::uuid AND k.stat_date = ${D}::date`)) as unknown as {
+      conversions: number;
+      tail: number;
+    }[];
+    const tails = await getConversionTails(orgId, D);
+    const tt = tails.totals;
+    check(`tails ${D}: totals.conversions = tracker sum for the day`, tt.conversions === truth.conversions, { got: tt.conversions, want: truth.conversions });
+    check(`tails ${D}: totals.tail_conversions = sends before the day`, tt.tail_conversions === truth.tail, { got: tt.tail_conversions, want: truth.tail });
+    check(
+      `tails ${D}: same_day + tail + unknown = conversions`,
+      tt.same_day_conversions + tt.tail_conversions + tt.unknown_send_date_conversions === tt.conversions,
+      tt,
+    );
+    check(`tails ${D}: rows sum to tail_conversions`, tails.data.reduce((a, x) => a + x.conversions, 0) === tt.tail_conversions);
+    check(`tails ${D}: every row is at least a day after its send`, tails.data.every((x) => x.days_after_send >= 1));
+  }
 
   console.log(
     failures === 0

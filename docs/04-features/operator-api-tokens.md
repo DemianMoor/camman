@@ -1,6 +1,6 @@
 # Operator API tokens
 
-_Last updated: 2026-09-11_
+_Last updated: 2026-09-14_
 
 ClickUp 869evpmbz. Migration `0176`. Lets a member's own tools (in practice,
 Claude) read CamMan through **that member's existing permissions** — no new data
@@ -75,7 +75,9 @@ belongs to.
 `read_only` survives as a column for a future write-capable token. Nothing sets
 it false.
 
-**33 (route, method) pairs are token-reachable** out of 268 classified routes.
+**34 (route, method) pairs are token-reachable** out of 269 classified routes (the
+34th, `GET reports/tails`, was added 2026-09-14 for creative grading — see
+[reports-rollup.md](reports-rollup.md)).
 The first two of `segments/[id]/rules/preview`'s side effects are accepted
 deliberately: it is semantically a read (gated on `segment_rules.view`) whose
 only write refreshes a cache the segment page already shows, and it is the sole

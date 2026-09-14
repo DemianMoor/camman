@@ -32,3 +32,14 @@ export const DIMENSION_TAB_LABEL: Record<ReportDimension, string> = {
 export function isReportDimension(v: string | null | undefined): v is ReportDimension {
   return v != null && (REPORT_DIMENSIONS as readonly string[]).includes(v);
 }
+
+// Attribution basis for the performance report. conversion_date = every metric on
+// its own event day (the historical behaviour, and the default); send_date = the
+// stages SENT in range with everything they have produced to date. Hourly buckets
+// by event time and accepts only the default.
+export const ATTRIBUTION_BASES = ["conversion_date", "send_date"] as const;
+export type AttributionBasis = (typeof ATTRIBUTION_BASES)[number];
+
+export function isAttributionBasis(v: string | null | undefined): v is AttributionBasis {
+  return v != null && (ATTRIBUTION_BASES as readonly string[]).includes(v);
+}

@@ -264,6 +264,18 @@ export interface CountedClickerBounds {
   // would either scan the whole org or transcribe the counter (`count(*)` at
   // stage grain, DISTINCT elsewhere) into a second place and drift from it.
   campaignId?: number;
+  // Restrict to these stages — the send-date cohort (operator API). An EMPTY
+  // array means "no stages" and returns nothing; it must never widen to "all".
+  stageIds?: number[];
+}
+
+function stageIdFilter(b: CountedClickerBounds, column: string): SQL {
+  if (b.stageIds == null) return sql``;
+  if (b.stageIds.length === 0) return sql`AND false`;
+  return sql`AND ${sql.raw(column)} IN (${sql.join(
+    b.stageIds.map((id) => sql`${id}`),
+    sql`, `,
+  )})`;
 }
 
 // Counted clickers per grain id. Returns a Map<grainId, count>.
@@ -290,6 +302,7 @@ export async function getCountedClickers(
     SELECT ${col} AS grain_id, ${counter} AS n
     FROM counted_clickers
     WHERE org_id = ${orgId}::uuid AND ${col} IS NOT NULL ${dateFilter} ${campaignFilter}
+      ${stageIdFilter(b, "stage_id")}
     GROUP BY 1
   `)) as unknown as { grain_id: number; n: number }[];
 
@@ -318,7 +331,7 @@ export async function getTotalCountedClickers(
   const rows = (await dbc.execute(sql`
     SELECT count(DISTINCT (cc.campaign_id::text || ':' || cc.contact_id::text))::int AS n
     FROM counted_clickers cc ${providerJoin}
-    WHERE cc.org_id = ${orgId}::uuid ${dateFilter}
+    WHERE cc.org_id = ${orgId}::uuid ${dateFilter} ${stageIdFilter(b, "cc.stage_id")}
   `)) as unknown as { n: number }[];
   return Number(rows[0]?.n ?? 0);
 }
@@ -468,7 +481,7 @@ export async function getCountedClickersByDimension(
            count(DISTINCT cc.contact_id)::int AS n
     FROM counted_clickers cc
     ${join}
-    WHERE cc.org_id = ${orgId}::uuid ${dateFilter}
+    WHERE cc.org_id = ${orgId}::uuid ${dateFilter} ${stageIdFilter(b, "cc.stage_id")}
     GROUP BY 1
   `)) as unknown as { dim_key: number; n: number }[];
   return new Map(rows.map((r) => [Number(r.dim_key), Number(r.n)]));

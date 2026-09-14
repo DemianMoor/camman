@@ -168,3 +168,24 @@ export async function manualSalesByStageInRange(args: {
   `)) as unknown as { stage_id: number; m_sales: number }[];
   return new Map(rows.map((row) => [row.stage_id, row.m_sales]));
 }
+
+// Manual sales per stage over the stage's WHOLE life (no date window) — the
+// send-date cohort basis of the performance report, where every sale a cohort
+// stage ever earned counts.
+export async function lifetimeManualSalesByStage(args: {
+  orgId: string;
+  stageIds: number[];
+}): Promise<Map<number, number>> {
+  if (args.stageIds.length === 0) return new Map();
+  const rows = (await db.execute(sql`
+    select sms.stage_id, sum(sms.delta)::int as m_sales
+    from stage_manual_sales sms
+    where sms.org_id = ${args.orgId}::uuid
+      and sms.stage_id in (${sql.join(
+        args.stageIds.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+    group by sms.stage_id
+  `)) as unknown as { stage_id: number; m_sales: number }[];
+  return new Map(rows.map((row) => [row.stage_id, row.m_sales]));
+}

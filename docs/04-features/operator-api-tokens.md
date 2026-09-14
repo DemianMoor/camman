@@ -75,9 +75,9 @@ belongs to.
 `read_only` survives as a column for a future write-capable token. Nothing sets
 it false.
 
-**34 (route, method) pairs are token-reachable** out of 269 classified routes (the
-34th, `GET reports/tails`, was added 2026-09-14 for creative grading — see
-[reports-rollup.md](reports-rollup.md)).
+**35 (route, method) pairs are token-reachable** out of 270 classified routes.
+`GET reports/tails` and `GET reports/opt-outs` were added 2026-09-14 for creative
+grading — see [reports-rollup.md](reports-rollup.md).
 The first two of `segments/[id]/rules/preview`'s side effects are accepted
 deliberately: it is semantically a read (gated on `segment_rules.view`) whose
 only write refreshes a cache the segment page already shows, and it is the sole

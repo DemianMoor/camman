@@ -183,6 +183,59 @@ Real response, early on 2026-09-14 (campaign name redacted):
   later than the conversion day.
 - An impossible date (e.g. `2026-02-31`) returns `400`.
 
+### Opt-outs by number, campaign, stage or group, per day
+
+**`GET /api/reports/opt-outs`**
+
+| Param | Values |
+| --- | --- |
+| `dimension` | `number`, `campaign`, `stage` or `group` (required) |
+| `from`, `to` | `YYYY-MM-DD`, in ET; today if omitted; at most **14 days** per call |
+| `granularity` | `day` (the only value; may be omitted) |
+
+Each row is a **send-day cohort**: the STOPs credited to the messages **sent** on
+that ET day, divided by those messages. A STOP is credited to the single most
+recent stage that messaged that person within 72 hours, so it always lands on the
+day of the send that caused it — which is what a per-number daily ceiling needs.
+
+```bash
+curl -s "https://camman.vercel.app/api/reports/opt-outs?dimension=number&from=2026-09-12&to=2026-09-12" \
+  -H "Authorization: Bearer $CAMMAN_TOKEN"
+```
+
+Real response (sending numbers shortened to their last 4 digits here; the API
+returns them in full):
+
+```json
+{
+  "dimension": "number", "granularity": "day", "basis": "send_date", "window_hours": 72,
+  "range": { "from": "2026-09-12", "to": "2026-09-12", "timezone": "America/New_York" },
+  "data": [
+    { "date": "2026-09-12", "key": "285", "label": "…5147", "sent": 28911, "opt_outs": 967, "opt_rate": 3.34, "complete": false },
+    { "date": "2026-09-12", "key": "286", "label": "…4292", "sent": 27024, "opt_outs": 465, "opt_rate": 1.72, "complete": false },
+    { "date": "2026-09-12", "key": "27",  "label": "…0404", "sent": 13662, "opt_outs": 485, "opt_rate": 3.55, "complete": false },
+    { "date": "2026-09-12", "key": "43",  "label": "…1637", "sent": 12678, "opt_outs": 423, "opt_rate": 3.34, "complete": false },
+    { "date": "2026-09-12", "key": "114", "label": "…3688", "sent": 12167, "opt_outs": 197, "opt_rate": 1.62, "complete": false },
+    { "date": "2026-09-12", "key": "261", "label": "…2936", "sent": 6311,  "opt_outs": 74,  "opt_rate": 1.17, "complete": false }
+  ],
+  "totals": [
+    { "date": "2026-09-12", "sent": 100753, "opt_outs": 2611, "opt_rate": 2.59, "complete": false }
+  ]
+}
+```
+
+- **`complete`** turns `true` once 72 hours have passed since the day ended. Until
+  then late STOPs can still land on that day, so its rate can only go up.
+  (2026-09-12 above completes at 00:00 ET on 2026-09-16.)
+- **`label`** is the sending number, the campaign name, "campaign · stage N", or
+  the contact group's name. A send with no sending number is key `-1`, "No number".
+- **`totals`** are per day, computed from the sends themselves. For `number`,
+  `campaign` and `stage` the rows add up to them. For `group` they do **not**: a
+  contact in two of the campaign's targeted groups counts in both rows.
+- `400` for a missing or unknown `dimension`, any `granularity` other than `day`,
+  an impossible date, `from` after `to`, or more than 14 days.
+- Manual-mode campaigns have no per-message rows and do not appear.
+
 ### Delivery report
 
 **`GET /api/reports/delivery`** — delivery rate per sending route, same

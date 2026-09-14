@@ -175,7 +175,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "contact-groups/[id]/contacts/add": null, // audience block -- contact-level data
   "contact-groups/[id]/contacts/remove": null, // audience block -- contact-level data
   "contact-groups/[id]/restore": null, // audience block -- contact-level data
-  "contact-groups/list": null, // audience block -- contact-level data
+  "contact-groups/list": { methods: ["GET"] }, // names for the campaign/segment group pickers; descriptions blanked, no contacts (Dmytro, 2026-09-14)
 
   // ── contacts ─────────────────────────────────────────────────────────────
   "contacts/[id]": null, // audience block -- contact-level data

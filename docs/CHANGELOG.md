@@ -1782,4 +1782,6 @@ still computes and reports, it just never refuses. **No migration.**
   sales/revenue — those remain Keitaro-only. **No migration.**
   - docs updated: docs/04-features/tracking-attribution.md, docs/CHANGELOG.md
 
+- 2026-09-14 — Operator can select contact groups on campaigns: `contact-groups/list` opened to the operator (GET) and re-gated to `contact_groups.view` OR `campaigns.create`; descriptions blanked and unsearchable for picker-only callers. The Contact Groups screen, group detail and group contacts stay denied; no permission granted, no migration. — docs updated: docs/04-features/multi-tenancy-auth.md, docs/04-features/contacts-and-groups.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

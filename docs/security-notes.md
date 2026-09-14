@@ -87,9 +87,13 @@ migration advisor shows **zero ERRORs**; the five tables now report
 `rls_enabled_no_policy` (INFO — the intended end-state).
 
 **Hardening still open (advisor WARNs, not addressed here):**
-- Two report matviews (`offer_report_org_summary_mv`, `offer_group_report_mv`)
-  are still `SELECT`-able by anon/authenticated (`materialized_view_in_api`) —
-  revoke those grants.
+- Three report matviews (`offer_report_org_summary_mv`, `offer_group_report_mv`,
+  and `offer_report_offer_totals_mv` from migration 0132) are still
+  `SELECT`-able by anon/authenticated (`materialized_view_in_api`) — revoke
+  those grants. Confirmed from `pg_class.relacl` on 2026-09-14: all three grant
+  `arwdDxtm` to both roles. `audience_report_group_totals_mv` (migration 0180)
+  was created with `REVOKE ALL … FROM anon, authenticated` and is not exposed;
+  `scripts/verify-audience-report.ts` asserts it.
 - Seven `SECURITY DEFINER` functions are callable as public RPCs
   (`handle_new_user`, `assign_stage_number`, `current_org_id`, …) — revoke
   `EXECUTE` from anon/authenticated (check `current_org_id` isn't relied on by

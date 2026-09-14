@@ -181,15 +181,17 @@ erDiagram
 > redirect time) back to the row. `sub_id_1` is the per-recipient counterpart of
 > `sub_id_3` (the per-stage join key for `keitaro_stage_results`).
 
-> **Offer group report (migrations 0093, 0132):** the reporting layer is not in
-> the ERD above — `offer_report_campaign_econ` / `offer_report_tracked_campaigns`
-> (plain views) and `offer_group_report_mv` / `offer_report_offer_totals_mv` /
-> `offer_report_org_summary_mv` (materialized views) are **derived**, not base
-> tables. They read across `campaigns`, `campaign_stages`, `stage_sends`,
-> `stage_manual_sales`, `keitaro_stage_results`, `opt_out_attributions`, and
-> `contact_contact_groups`/`contact_groups` rather than declaring their own FKs.
-> See the "Reporting" subsection below and
-> [04-features/offer-group-report.md](04-features/offer-group-report.md).
+> **Offer group report (migrations 0093, 0132) and Audience Stats (0180):** the
+> reporting layer is not in the ERD above — `offer_report_campaign_econ` /
+> `offer_report_tracked_campaigns` (plain views) and `offer_group_report_mv` /
+> `offer_report_offer_totals_mv` / `offer_report_org_summary_mv` /
+> `audience_report_group_totals_mv` (materialized views) are **derived**, not
+> base tables. They read across `campaigns`, `campaign_stages`, `stage_sends`,
+> `stage_manual_sales`, `keitaro_stage_results`, `opt_out_attributions`,
+> `opt_outs`, `counted_clickers`, and `contact_contact_groups`/`contact_groups`
+> rather than declaring their own FKs. See the "Reporting" subsection below,
+> [04-features/offer-group-report.md](04-features/offer-group-report.md) and
+> [04-features/audience-report.md](04-features/audience-report.md).
 
 ## Tables by domain
 
@@ -356,8 +358,9 @@ erDiagram
 | `offer_group_report_mv` (**materialized**) | UNIQUE(`org_id`, `offer_id`, `group_id`); `group_name`, `sends`, `revenue`, `sales`, `clicks`, `cost`, `optouts`, `sent_7d`, `sent_30d`, `sent_90d`, `fresh_pool` | per org×offer×group rollup, built **directly per-recipient** (migration `0132`) from `stage_sends` joined to `contact_contact_groups`, restricted to `offer_report_tracked_campaigns` — no longer derived from `offer_report_campaign_econ`/`unnest(group_ids)`. `sent_7d`/`sent_30d`/`sent_90d` share that same tracked-only, this-offer scope; `fresh_pool` is unchanged — across **all** offers and **both** link modes, no opt-out filter. Lost `has_manual_stages`/`offer_clicks`/`offer_has_manual` (moved to `offer_report_offer_totals_mv` — a row here can never mix units, since a manual-mode campaign can't reach a group row at all) |
 | `offer_report_offer_totals_mv` (**materialized**, migration `0132`) | UNIQUE(`org_id`, `offer_id`); `sends`, `revenue`, `sales`, `clicks`, `cost`, `optouts`, `has_manual_stages`, `attributable_sends`, `attributable_revenue`, `attributable_sales`, `unattributed_sends` | the offer-grain footer, sourced from `offer_report_campaign_econ` (tracked + manual, unchanged basis) — read directly, never summed from `offer_group_report_mv`'s rows. `attributable_*` are the same per-recipient basis as the group rows, deduplicated at offer grain (an `EXISTS` membership test, not a join, so a recipient in several targeted groups still counts once); `unattributed_sends = sends - attributable_sends`. Exists for every offer with a sent campaign — including offers whose sends were 100% recorded outside the app — so the footer renders with zero group rows. `attributable_revenue`/`attributable_sales` sit beside `revenue`/`sales` to make the per-recipient coverage gap measurable (~97% of revenue, ~90% of the `GREATEST(keitaro, manual)` sales basis org-wide) — **not** a whole-and-part pair with `revenue`/`sales`; never subtract them to derive an "unattributed" revenue/sales figure |
 | `offer_report_org_summary_mv` (**materialized**) | UNIQUE(`org_id`); `sends`, `revenue`, `sales`, `clicks`, `cost`, `optouts`, `has_manual_stages` | de-duplicated org-wide benchmark — each campaign counted **once** (no group unnest), so it does NOT equal the sum of `offer_group_report_mv`'s group rows when multi-group campaigns exist. Unchanged by migration `0132` |
+| `audience_report_group_totals_mv` (**materialized**, migration `0180`) | UNIQUE(`org_id`, `group_id`); `sends`, `revenue`, `sales`, `clicks`, `cost`, `optouts`, `sent_7d`, `sent_30d`, `sent_90d` | the Audience Stats report's "This group · all offers" row ([04-features/audience-report.md](04-features/audience-report.md)). `sends`/`revenue`/`sales`/`cost`/`sent_*` are `SUM`s of the group's `offer_group_report_mv` cells (additive: one send → one offer); `clicks` (`counted_clickers`) and `optouts` (`opt_out_attributions`, recipient via `opt_outs.contact_id`) are `COUNT(DISTINCT …)` at **group** grain with the cells' scope — never summed across offers. Refreshed after `offer_group_report_mv`. `REVOKE`d from anon/authenticated |
 
-> **Matviews carry no RLS.** Postgres materialized views cannot have row-level security policies. All three matviews above are read only through the server-side helper [`lib/reporting/offer-group-report.ts`](../lib/reporting/offer-group-report.ts), which explicitly filters `WHERE org_id = ${orgId}`; the API route (`GET /api/offers/[id]/report`) never exposes them directly. Same primary-defense posture as CLAUDE.md §3 — here there is simply no RLS layer to add, so the application-level filter is the *only* defense (not defense-in-depth-plus-RLS as with base tables).
+> **Matviews carry no RLS.** Postgres materialized views cannot have row-level security policies. All four matviews above are read only through server-side helpers — [`lib/reporting/offer-group-report.ts`](../lib/reporting/offer-group-report.ts) and [`lib/reporting/audience-report.ts`](../lib/reporting/audience-report.ts) — which explicitly filter `WHERE org_id = ${orgId}`; the API routes (`GET /api/offers/[id]/report`, `GET /api/reports/audience`) never expose them directly. Only `audience_report_group_totals_mv` has its anon/authenticated grants revoked (see [security-notes.md](security-notes.md)). Same primary-defense posture as CLAUDE.md §3 — here there is simply no RLS layer to add, so the application-level filter is the *only* defense (not defense-in-depth-plus-RLS as with base tables).
 
 > **New indexes (migration 0093):** `stage_sends (sent_at, contact_id)` and `contact_contact_groups (contact_group_id, contact_id)` — support the twice-daily refresh's list-pressure/fresh-pool joins. The pre-existing `contact_contact_groups` PK is `(contact_id, contact_group_id)`, the wrong column order for "all contacts in a group."
 

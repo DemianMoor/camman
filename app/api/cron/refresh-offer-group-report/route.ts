@@ -6,10 +6,12 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat"
 import { refreshOfferGroupReport } from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
-// Measured 2026-08-13 across all three matviews (summary + group + the 0132
-// offer-totals matview): ~40.5s total against this 300s ceiling. 60s left no
-// cold-start headroom, so this cron gets a larger budget. It is a background
-// job (not user-facing), so a longer ceiling costs nothing.
+// Measured 2026-08-13 across the first three matviews (summary + group + the
+// 0132 offer-totals matview): ~40.5s total against this 300s ceiling. 60s left
+// no cold-start headroom, so this cron gets a larger budget. It is a background
+// job (not user-facing), so a longer ceiling costs nothing. Migration 0180 added
+// a fourth (Audience Stats group totals, defining SELECT ~5s); its time is
+// logged as audienceTotalsMs.
 export const maxDuration = 300;
 
 async function handle(req: NextRequest): Promise<NextResponse> {
@@ -29,7 +31,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     await recordHeartbeat(db, HEARTBEAT_JOBS.offerReportRefresh.job_name);
     // Log runtime every run so we can watch it grow toward the 300s ceiling.
     console.log(
-      `[refresh-offer-group-report] ok totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} totalMs=${durations.totalMs}`,
+      `[refresh-offer-group-report] ok totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} audienceTotalsMs=${durations.audienceTotalsMs} totalMs=${durations.totalMs}`,
     );
     return NextResponse.json({ ok: true, durations });
   } catch (err) {

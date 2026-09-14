@@ -19,6 +19,7 @@ import {
   Send,
   ShoppingBag,
   Tag,
+  Target,
   type LucideIcon,
   UserCheck,
   UserCog,
@@ -107,7 +108,10 @@ export const navGroups: NavGroup[] = [
     // always enabled. Overview is the Keitaro funnel; then the five rollup
     // dimensions (each a /reports/<dimension> tab route); then Delivery, which
     // has its own route and its own column set (delivery receipts, not the
-    // EPC/revenue funnel) — see docs/04-features/delivery-report.md.
+    // EPC/revenue funnel) — see docs/04-features/delivery-report.md. Last,
+    // Audience Stats: offer results per contact group — see
+    // docs/04-features/audience-report.md. Not "Audience": that label is the
+    // nav group below.
     label: "Reports",
     items: [
       { label: "Overview", href: "/reports", icon: BarChart3, exact: true, permission: "campaigns.view" },
@@ -117,6 +121,7 @@ export const navGroups: NavGroup[] = [
       { label: "Hourly", href: "/reports/hourly", icon: CalendarClock, permission: "campaigns.view" },
       { label: "By Group", href: "/reports/group", icon: FolderTree, permission: "campaigns.view" },
       { label: "Delivery", href: "/reports/delivery", icon: CheckCheck, permission: "campaigns.view" },
+      { label: "Audience Stats", href: "/reports/audience", icon: Target, permission: "campaigns.view" },
     ],
   },
   {

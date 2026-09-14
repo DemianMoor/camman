@@ -915,6 +915,36 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
   asserts `security_invoker=true` in `pg_class.reloptions` for both views
   directly, so this is checkable without a live advisor call.
 
+### Audience Stats group totals (migration 0180, see [04-features/audience-report.md](04-features/audience-report.md))
+
+- **Never sum clicks or opt-outs across a group's offer cells.** A contact who
+  clicked two offers is one clicker in the group; summing overcounted by 25–50%
+  on the large groups (2026-09-14). The "This group · all offers" row reads
+  `audience_report_group_totals_mv`, which recomputes both at group grain. Sends,
+  revenue, sales, cost and `sent_7d/30d/90d` *are* additive across a group's
+  cells (one send → one offer, placed at most once per group) and are summed.
+  Same rule as the EPC workstream: dedup at the grain the row renders.
+- **Opt-outs are deduplicated even though no opt-out currently spans offers.**
+  `opt_out_attributions` is unique on `(opt_out_id, stage_id)`, not on
+  `opt_out_id`, so multi-stage credit is structurally allowed. "0 of 124,717 on
+  2026-09-14" is a fact about the data, not a guarantee; never replace the
+  distinct count with a sum on that basis.
+- **An opt-out's recipient can be read from `opt_outs.contact_id` instead of
+  `stage_sends.contact_id`.** The two are equal (measured on 124,718
+  attributions, 0 NULL, 0 mismatched), and the `opt_outs` path is ~65x faster
+  (0.57s vs 36.8s) because it skips ~125K primary-key lookups into
+  `stage_sends`. Keep `oa.stage_send_id IS NOT NULL` so the population matches
+  `cell_optouts`. `scripts/verify-audience-report.ts` re-asserts the equality
+  on every run — if it ever fails, the matview must go back to the
+  `stage_sends` path.
+- **`audience_report_group_totals_mv` refreshes LAST** in
+  `refreshOfferGroupReport()`: it sums `offer_group_report_mv`, so it depends on
+  that refresh, and last is also the deploy-safe position. Moving it earlier
+  makes its sums one refresh stale.
+- **No status filter on offers or groups anywhere in the Audience Stats read
+  path.** Showing archived offers (and archived groups with data) is the
+  report's stated requirement, not an oversight.
+
 ## Reports rollup (migration 0112, see [04-features/reports-rollup.md](04-features/reports-rollup.md))
 - **Bucketed by the SEND hour in ET, not the event hour.** Every metric (opt-outs, clicks, redirects, sales, cost) is attributed to the hour the message was SENT, so each rate is a batch rate ("of messages sent in hour H, X% opted out"). `date_trunc('hour', sent_at AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'` → the stored `bucket_start_utc`. Only ever done inside the bounded rolling-window build, never in a hot read.
 - **Sales/revenue use the PER-RECIPIENT `stage_sends` attribution** (`converted_at`/`sale_revenue`), NOT the `keitaro_stage_results` daily aggregate — that's the only source that can be split by hour and group. It recovers ~93% of the authoritative aggregate (295 vs 319 sales; $20,982 vs $22,324); the read layer surfaces the delta so the structural gap isn't mistaken for a bug. This is a DIFFERENT sales basis than `/reports` and the offer-group report's footer and org benchmark (which use the aggregate); the offer-group report's group rows use the per-recipient basis (migration 0132), same as here.

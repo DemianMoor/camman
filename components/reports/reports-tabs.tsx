@@ -14,9 +14,10 @@ import {
 // derived from the pathname so it stays correct on refresh and matches the
 // sidebar's Reports group.
 //
-// Delivery is listed explicitly rather than through REPORT_DIMENSIONS: like
-// Overview it has its own route and its own column set (delivery receipts, not
-// the shared EPC/revenue funnel), so it is not a PerformanceReport dimension.
+// Delivery and Audience Stats are listed explicitly rather than through
+// REPORT_DIMENSIONS: like Overview each has its own route and its own column
+// set (delivery receipts; offer results per contact group from the offer group
+// report matviews), so neither is a PerformanceReport dimension.
 const TABS: { href: string; label: string; exact: boolean }[] = [
   { href: "/reports", label: "Overview", exact: true },
   ...REPORT_DIMENSIONS.map((d) => ({
@@ -25,6 +26,7 @@ const TABS: { href: string; label: string; exact: boolean }[] = [
     exact: false,
   })),
   { href: "/reports/delivery", label: "Delivery", exact: false },
+  { href: "/reports/audience", label: "Audience Stats", exact: false },
 ];
 
 export function ReportsTabs() {

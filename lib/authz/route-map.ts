@@ -352,6 +352,9 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
 
   // ── reports ─────────────────────────────────────────────────────────────
   // Reports/dashboard/today: aggregates only.
+  // Audience Stats (/reports/audience, ClickUp 869eydqn0): offer results per
+  // contact group, read from the offer group report matviews.
+  "reports/audience": { methods: ["GET"], token: ["GET"] },
   "reports/delivery": { methods: ["GET"], token: ["GET"] },
   "reports/epc-monitors": null, // maintenance job, not a report
   "reports/partners": null, // drip / partner intake -- hidden from the operator

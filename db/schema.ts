@@ -2000,6 +2000,10 @@ export const campaign_stages = pgTable(
       .defaultNow(),
     previous_status: text("previous_status"),
     status: text("status").notNull().default("draft"),
+    // 0179 (ClickUp 869evxbgb). True once a person has picked this stage's status
+    // (status route / bulk-status). The system's automatic draft ⇄ pending moves
+    // (lib/stages/auto-status.ts) refuse a stage carrying it — manual always wins.
+    status_set_manually: boolean("status_set_manually").notNull().default(false),
     sms_count: integer("sms_count").notNull().default(0),
     total_cost: numeric("total_cost", { precision: 12, scale: 4 })
       .notNull()

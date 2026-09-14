@@ -2,6 +2,20 @@
 
 _Last updated: 2026-09-14_
 
+## Stage status: the system moves draft ⇄ pending, a person always wins (2026-09-14)
+
+`campaign_stages.status` is the operator's record of a stage, but two send-pipeline events now write it ([lib/stages/auto-status.ts](../lib/stages/auto-status.ts), migration 0179, ClickUp 869evxbgb):
+
+| Event | Move | Where |
+|---|---|---|
+| materialization completes (`materialized_at` stamped) | `draft → pending` | `markMaterialized` in [lib/sends/kickoff.ts](../lib/sends/kickoff.ts), same transaction as the stamp |
+| prepared send cancelled | `pending → draft` | `…/send/abort` route, same transaction as the reset |
+
+- **Only these two moves, only from the expected state.** The UPDATE matches `status = from`, so a repeated or racing call is a no-op.
+- **`status_set_manually` is sticky.** Every manual status write (the status route, bulk-status) sets it. Nothing clears it, and archive/restore don't touch it. The system never moves a stage that carries it. **Any new path that lets a person set `status` must set the flag too**, or the next Prepare/cancel will overwrite that choice.
+- **`status` is still not pipeline truth.** "Finished sending" is `stageCompleteExpr` ([lib/sends/stage-complete.ts](../lib/sends/stage-complete.ts)); "prepared" is `materialized_at`. A system-set `pending` means prepared. A hand-set `pending` means whatever the operator meant.
+- **The backfill rule is spent.** Before 0179 only people wrote stage status, and each of those writes set `previous_status`, so the migration marked `previous_status IS NOT NULL` as manual (1,944 of 1,966 prod stages). The automatic move also writes `previous_status`, so that test no longer identifies manual changes. Read the flag.
+
 ## Audience pools — rest is measured from the last message sent (2026-09-14)
 
 `GET /api/audience/pools` ([lib/audience/pools.ts](../lib/audience/pools.ts))

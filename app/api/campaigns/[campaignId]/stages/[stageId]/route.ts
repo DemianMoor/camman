@@ -53,6 +53,7 @@ const NON_UPDATABLE = new Set([
   "sent_at",
   "previous_status",
   "status",
+  "status_set_manually",
   "status_changed_at",
   "sms_count",
   "total_cost",

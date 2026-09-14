@@ -16,6 +16,11 @@ import {
   ensureGroupSourceResolved,
   settleSplitGroup,
 } from "@/lib/stages/split-group";
+import {
+  autoMoveStageStatus,
+  logAutoStatusMove,
+  type AutoStatusMove,
+} from "@/lib/stages/auto-status";
 import { getDescriptor } from "@/lib/sends/providers/registry";
 import {
   optOutGateSubject,
@@ -665,7 +670,7 @@ export async function kickoffStageSend(
       SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${stageId}
     `)) as unknown as { n: number }[];
     if (Number(existing[0]?.n ?? 0) > 0) {
-      await markMaterialized(dbc, stageId);
+      await markMaterialized(dbc, { orgId, campaignId, stageId });
       return { ok: true, mode, materialized: 0, complete: true, shortDomain: null };
     }
     return { ok: false, reason: "no_recipients" };
@@ -754,7 +759,7 @@ export async function kickoffStageSend(
   // windows landed). If the budget was hit, materialized_at stays NULL and the
   // next invocation resumes.
   if (complete) {
-    await markMaterialized(dbc, stageId);
+    await markMaterialized(dbc, { orgId, campaignId, stageId });
     // SETTLE THE GROUP HERE for the same reason the resolve lives here: every
     // caller that can finish a lane must be able to finish its GROUP. Phase A
     // settles too, but Phase A only ever sees lanes with `materialized_at IS
@@ -799,12 +804,33 @@ async function resolveProviderKeyForGuard(
   return rows[0]?.key ?? null;
 }
 
-// Stamp materialized_at exactly once (only when currently NULL).
-async function markMaterialized(dbc: typeof db, stageId: number): Promise<void> {
-  await dbc.execute(sql`
-    UPDATE campaign_stages SET materialized_at = now()
-    WHERE id = ${stageId} AND materialized_at IS NULL
-  `);
+// Stamp materialized_at exactly once (only when currently NULL). The stamp and
+// the draft ⇒ pending status move share one transaction, so a crash between them
+// can't leave a stage Prepared-but-Draft (lib/stages/auto-status.ts).
+async function markMaterialized(
+  dbc: typeof db,
+  ids: { orgId: string; campaignId: number; stageId: number },
+): Promise<void> {
+  const move: AutoStatusMove = {
+    ...ids,
+    from: "draft",
+    to: "pending",
+    reason: "messages prepared",
+  };
+  const movedStageNumber = await dbc.transaction(async (tx) => {
+    const stamped = (await tx.execute(sql`
+      UPDATE campaign_stages SET materialized_at = now()
+      WHERE id = ${ids.stageId} AND materialized_at IS NULL
+      RETURNING id
+    `)) as unknown as { id: number }[];
+    if (stamped.length === 0) return null;
+    return autoMoveStageStatus(tx, move);
+  });
+  // Logged after commit: a failed audit insert inside the transaction would roll
+  // the materialized_at stamp back with it.
+  if (movedStageNumber != null) {
+    await logAutoStatusMove(dbc, move, movedStageNumber);
+  }
 }
 
 interface StageSendInsertRow {

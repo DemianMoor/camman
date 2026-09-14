@@ -142,6 +142,8 @@ export async function POST(
             status: target_status,
             previous_status: from,
             status_changed_at: drizzleSql`now()`,
+            // Same as the single status route: manual outranks automatic.
+            status_set_manually: true,
           })
           .where(
             and(

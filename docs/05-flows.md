@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-09-11_
+_Last updated: 2026-09-14_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -84,6 +84,7 @@ sequenceDiagram
   Op->>Kick: kickoff stage (tracked, send_approved)
   Kick->>Mint: per recipient → links + link_destinations
   Kick->>Kick: INSERT stage_sends (rendered_text frozen, send_token=id)
+  Kick->>Kick: last window landed: stamp materialized_at + status draft→pending (skipped if status_set_manually)
   Op->>Drain: drain (SEND_ENABLED + approved + !paused + breakers)
   Drain->>Drain: resolve key: stage.provider_phone_id -> provider_phones.credential_id -> provider_credentials
   Drain->>Drain: decryptCredentialKey (api_key_encrypted else legacy plaintext api_key)

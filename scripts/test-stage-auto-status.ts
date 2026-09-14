@@ -1,6 +1,6 @@
 // Verifies the automatic stage status moves (ClickUp 869evxbgb, migration 0179)
 // on the PREVIEW environment, against an ISOLATED manual-mode fixture in the
-// preview test user's org, with full cleanup. link_mode='manual' +
+// preview operator's org (operator-test@exuma.io), with full cleanup. link_mode='manual' +
 // send_approved=false is inert to both cron phases, so nothing is ever sent
 // (same fixture pattern as test-cancel-rematerialize.ts).
 //
@@ -24,6 +24,7 @@
 import "./_env-preload";
 
 import { createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -33,6 +34,7 @@ import { autoMoveStageStatus, logAutoStatusMove, type AutoStatusMove } from "@/l
 
 const PREVIEW_DB_REF = "fdzxzxayhknywvmrhjcj";
 const TAG = "__wt-stage-auto-status-test__";
+const OPERATOR_EMAIL = "operator-test@exuma.io";
 
 let pass = 0;
 let fail = 0;
@@ -54,7 +56,23 @@ async function main() {
     process.exit(1);
   }
 
-  // Sign in as the preview test user; the routes read the SSR auth cookies.
+  // Sign in as the preview operator, the role that runs Prepare / cancel / status
+  // day to day. Same provisioning as verify-operator-access.ts: the user exists on
+  // the preview project with a random password, reset here through the service
+  // role (a password change doesn't end anyone else's session).
+  const admin = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const users = await admin.auth.admin.listUsers({ perPage: 200 });
+  const operator = users.data?.users.find((u) => u.email === OPERATOR_EMAIL);
+  if (!operator) {
+    throw new Error(`${OPERATOR_EMAIL} is not on the preview project; run verify-operator-access.ts once`);
+  }
+  const password = `Op-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+  const reset = await admin.auth.admin.updateUserById(operator.id, { password });
+  if (reset.error) throw new Error(`password reset failed: ${reset.error.message}`);
+
+  // The routes read the SSR auth cookies.
   const cookieJar = new Map<string, string>();
   const supabase = createServerClient(supabaseUrl, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
     cookies: {
@@ -64,18 +82,13 @@ async function main() {
       },
     },
   });
-  const signIn = await supabase.auth.signInWithPassword({
-    email: process.env.TEST_USER_EMAIL!,
-    password: process.env.TEST_USER_PASSWORD!,
-  });
+  const signIn = await supabase.auth.signInWithPassword({ email: OPERATOR_EMAIL, password });
   if (signIn.error || !signIn.data.user) throw new Error(`sign-in failed: ${signIn.error?.message}`);
+  const cookie = () => Array.from(cookieJar, ([n, v]) => `${n}=${v}`).join("; ");
   const post = async (path: string, body: unknown) => {
     const res = await fetch(`${base}${path}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Cookie: Array.from(cookieJar, ([n, v]) => `${n}=${v}`).join("; "),
-      },
+      headers: { "Content-Type": "application/json", Cookie: cookie() },
       body: JSON.stringify(body),
     });
     return { status: res.status, text: await res.text() };
@@ -93,7 +106,7 @@ async function main() {
         FROM org_members m
         JOIN campaigns c ON c.org_id = m.org_id AND c.brand_id IS NOT NULL
         JOIN creatives cr ON cr.org_id = m.org_id AND cr.text IS NOT NULL
-        WHERE m.user_id = ${signIn.data.user.id}
+        WHERE m.user_id = ${signIn.data.user.id} AND m.role = 'operator' AND m.is_active
         ORDER BY length(cr.text)
         LIMIT 1`)
     )[0] as { org_id: string; role: string; brand_id: number; creative_id: number } | undefined;
@@ -160,6 +173,13 @@ async function main() {
       kickoffStageSend(dbc, { orgId, campaignId: cid, stageId: id, budgetMs });
 
     const stageId = await createStage(1);
+    // The API resolves ONE of the user's memberships (getApiMembershipRow,
+    // LIMIT 1) and this user has two. Prove it lands on the fixture's org before
+    // trusting any route result below.
+    const probe = await fetch(`${base}/api/campaigns/${cid}/stages`, { headers: { Cookie: cookie() } });
+    if (probe.status !== 200) {
+      throw new Error(`the API does not resolve the fixture org for ${OPERATOR_EMAIL} (GET stages → ${probe.status})`);
+    }
     console.log(`fixture: org role ${seed.role}, campaign ${cid}, stage ${stageId}, pool ${contacts.length}\n`);
 
     // The abort route's writes, in its order (app/api/campaigns/[campaignId]/

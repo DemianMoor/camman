@@ -358,27 +358,37 @@ async function main() {
       (SELECT count(*) FROM stage_sends ss JOIN st ON st.id = ss.stage_id
          AND st.link_mode = 'tracked' WHERE ss.offer_reached_at IS NOT NULL)::int AS reached,
       (SELECT coalesce(sum(k.sales), 0) FROM keitaro_stage_results k
-         JOIN st ON st.id = k.stage_id)::int AS conversions
-  `)) as unknown as { sends: number; reached: number; conversions: number }[];
+         JOIN st ON st.id = k.stage_id)::int AS conversions,
+      (SELECT count(*) FROM stage_sends ss JOIN st ON st.id = ss.stage_id
+         WHERE ss.status IN ('pending', 'sending'))::int AS in_flight
+  `)) as unknown as { sends: number; reached: number; conversions: number; in_flight: number }[];
+  // ⚠️ The most-reused creative can be MID-SEND while this runs. Here the truth is
+  // read BEFORE getCreativeUsage, so while any of its stages has pending/sending
+  // rows the later lib sums may only be >= the truth (section G hit this race in the
+  // other direction); with nothing in flight they must be equal.
+  const usageLive = Number(usageTruth.in_flight) > 0;
+  const atLeastIfLive = (got: number, truth: number) => (usageLive ? got >= truth : got === truth);
+  console.log(`    creative ${creativeId}: ${usageLive ? `still sending (${usageTruth.in_flight} in flight)` : "settled"}`);
   const usage = await getCreativeUsage(orgId, creativeId);
   check(`creative ${creativeId}: usage found (control for the not-found check)`, usage != null);
   check("an id outside the org returns null", (await getCreativeUsage(orgId, 999_999_999)) === null);
   if (usage) {
     const rows = usage.data;
+    const op = usageLive ? ">=" : "=";
     check(
-      `creative ${creativeId}: rows' sends sum to its stages' sends`,
-      rows.reduce((a, r) => a + r.sends, 0) === usageTruth.sends,
-      { got: rows.reduce((a, r) => a + r.sends, 0), want: usageTruth.sends },
+      `creative ${creativeId}: rows' sends ${op} its stages' sends`,
+      atLeastIfLive(rows.reduce((a, r) => a + r.sends, 0), usageTruth.sends),
+      { got: rows.reduce((a, r) => a + r.sends, 0), truth: usageTruth.sends },
     );
     check(
-      `creative ${creativeId}: rows' reached sum to its stages' reaches`,
-      rows.reduce((a, r) => a + (r.reached ?? 0), 0) === usageTruth.reached,
-      { got: rows.reduce((a, r) => a + (r.reached ?? 0), 0), want: usageTruth.reached },
+      `creative ${creativeId}: rows' reached ${op} its stages' reaches`,
+      atLeastIfLive(rows.reduce((a, r) => a + (r.reached ?? 0), 0), usageTruth.reached),
+      { got: rows.reduce((a, r) => a + (r.reached ?? 0), 0), truth: usageTruth.reached },
     );
     check(
-      `creative ${creativeId}: rows' conversions sum to tracker sales`,
-      rows.reduce((a, r) => a + r.conversions, 0) === usageTruth.conversions,
-      { got: rows.reduce((a, r) => a + r.conversions, 0), want: usageTruth.conversions },
+      `creative ${creativeId}: rows' conversions ${op} tracker sales`,
+      atLeastIfLive(rows.reduce((a, r) => a + r.conversions, 0), usageTruth.conversions),
+      { got: rows.reduce((a, r) => a + r.conversions, 0), truth: usageTruth.conversions },
     );
     check(`creative ${creativeId}: rows are newest first`, rows.every((r, i) => i === 0 || rows[i - 1].date >= r.date));
     // A row is one campaign + sending number + ET send day; link_mode is per
@@ -396,10 +406,14 @@ async function main() {
           AND cs.campaign_id = ${topRow.campaign_id}
           AND pp.phone_number IS NOT DISTINCT FROM ${topRow.sending_number}
           AND to_char((cs.sent_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') = ${topRow.date}`)) as unknown as { n: number }[];
+      // This truth is read AFTER getCreativeUsage, so while the creative is still
+      // sending the lib figure may only be <= it; settled, they must be equal.
       check(
-        `creative ${creativeId} ${topRow.date}: largest row's clicks_human = independent distinct count`,
-        topRow.clicks_human === Number(ccTruth.n),
-        { got: topRow.clicks_human, want: ccTruth.n },
+        `creative ${creativeId} ${topRow.date}: largest row's clicks_human ${usageLive ? "<=" : "="} independent distinct count`,
+        usageLive
+          ? topRow.clicks_human <= Number(ccTruth.n)
+          : topRow.clicks_human === Number(ccTruth.n),
+        { got: topRow.clicks_human, truth: ccTruth.n },
       );
     }
   }
@@ -413,12 +427,14 @@ async function main() {
   const stageTruth = (await db.execute(sql`
     SELECT cs.id AS stage_id, cs.campaign_id, c.link_mode, cs.sms_count,
            coalesce(se.sent, 0)::int AS sent, coalesce(se.reached, 0)::int AS reached,
+           coalesce(se.in_flight, 0)::int AS in_flight,
            coalesce(k.sales, 0)::int AS sales, coalesce(k.revenue, 0)::float8 AS revenue
     FROM campaign_stages cs
     JOIN campaigns c ON c.id = cs.campaign_id
     LEFT JOIN (
       SELECT stage_id, count(*) FILTER (WHERE status = 'sent')::int AS sent,
-             count(*) FILTER (WHERE offer_reached_at IS NOT NULL)::int AS reached
+             count(*) FILTER (WHERE offer_reached_at IS NOT NULL)::int AS reached,
+             count(*) FILTER (WHERE status IN ('pending', 'sending'))::int AS in_flight
       FROM stage_sends
       WHERE org_id = ${orgId}::uuid
         AND campaign_id IN (SELECT id FROM campaigns WHERE org_id = ${orgId}::uuid AND status = 'active')
@@ -435,34 +451,56 @@ async function main() {
     sms_count: number | null;
     sent: number;
     reached: number;
+    in_flight: number;
     sales: number;
     revenue: number;
   }[];
+  // ⚠️ ACTIVE CAMPAIGNS ARE SENDING WHILE THIS RUNS. The audit is read BEFORE the
+  // truth, so a stage that still has pending/sending rows can have gained sends
+  // (and, rarely, a conversion) between the two reads — exact equality raced on the
+  // first run (stages 4279/4278/4271 were mid-drain: audit 2795 vs truth 2801).
+  // Settled stages must match exactly; live stages may only have grown.
   const truthByStage = new Map(stageTruth.map((s) => [Number(s.stage_id), s]));
   let auditConversionsSeen = false;
+  let settledStages = 0;
+  const liveStages: number[] = [];
   for (const camp of audit.data) {
     const truthStages = stageTruth.filter((s) => Number(s.campaign_id) === camp.campaign_id);
     check(`campaign ${camp.campaign_id}: stage_count = non-archived stages`, camp.stage_count === truthStages.length && camp.stages.length === truthStages.length, { got: camp.stage_count, want: truthStages.length });
     for (const s of camp.stages) {
       const t = truthByStage.get(s.stage_id);
       const tracked = t?.link_mode === "tracked";
-      check(
-        `campaign ${camp.campaign_id} stage ${s.stage_id}: sent / reached / conversions = direct counts`,
-        t != null &&
-          s.sent === (tracked ? t.sent : Number(t.sms_count ?? 0)) &&
-          s.reached === (tracked ? t.reached : null) &&
-          s.conversions === t.sales,
-        { got: [s.sent, s.reached, s.conversions], want: t && [tracked ? t.sent : t.sms_count, tracked ? t.reached : null, t.sales] },
-      );
+      if (t != null && t.in_flight > 0) {
+        liveStages.push(s.stage_id);
+        check(
+          `campaign ${camp.campaign_id} stage ${s.stage_id} (still sending): audit counts <= the later direct counts`,
+          s.sent <= t.sent && (s.reached ?? 0) <= t.reached && s.conversions <= t.sales,
+          { got: [s.sent, s.reached, s.conversions], later: [t.sent, t.reached, t.sales] },
+        );
+      } else {
+        settledStages++;
+        check(
+          `campaign ${camp.campaign_id} stage ${s.stage_id}: sent / reached / conversions = direct counts`,
+          t != null &&
+            s.sent === (tracked ? t.sent : Number(t.sms_count ?? 0)) &&
+            s.reached === (tracked ? t.reached : null) &&
+            s.conversions === t.sales,
+          { got: [s.sent, s.reached, s.conversions], want: t && [tracked ? t.sent : t.sms_count, tracked ? t.reached : null, t.sales] },
+        );
+      }
     }
     check(`campaign ${camp.campaign_id}: total_conversions = its stages' conversions`, camp.total_conversions === camp.stages.reduce((a, s) => a + s.conversions, 0));
+    const truthRevenue = truthStages.reduce((a, s) => a + Number(s.revenue), 0);
+    const campaignLive = truthStages.some((s) => s.in_flight > 0);
     check(
-      `campaign ${camp.campaign_id}: revenue = its stages' tracker revenue`,
-      Math.abs(camp.revenue - truthStages.reduce((a, s) => a + Number(s.revenue), 0)) < 0.01,
-      { got: camp.revenue, want: truthStages.reduce((a, s) => a + Number(s.revenue), 0) },
+      `campaign ${camp.campaign_id}: revenue ${campaignLive ? "<= the later" : "="} stages' tracker revenue`,
+      campaignLive ? camp.revenue <= truthRevenue + 0.01 : Math.abs(camp.revenue - truthRevenue) < 0.01,
+      { got: camp.revenue, truth: truthRevenue },
     );
     if (camp.total_conversions > 0) auditConversionsSeen = true;
   }
+  console.log(`    ${settledStages} settled stage(s) checked exactly; still sending: ${liveStages.join(", ") || "none"}`);
+  check("control: the exact check covered at least one settled stage", settledStages > 0, settledStages);
   check("control: at least one active campaign has conversions", auditConversionsSeen);
 
   console.log(

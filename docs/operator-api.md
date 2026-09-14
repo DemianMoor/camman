@@ -180,7 +180,7 @@ Real response (offer name redacted; 3 of 12 groups shown):
 
 | Param | Values |
 | --- | --- |
-| `dimension` | `number`, `offer`, `sequence`, `group` or `hourly` |
+| `dimension` | `number`, `offer`, `sequence`, `group`, `hourly` or `creative` (API only — see Creative bank, below) |
 | `from`, `to` | `YYYY-MM-DD`, in ET; today if omitted; at most 92 days apart |
 | `provider_phone_id` | optional — only stages sent from that number |
 | `attribution` | `conversion_date` (default) or `send_date` — see below. `hourly` accepts only the default |
@@ -219,6 +219,62 @@ One real row, 2026-09-07..13 (offer name redacted, cost rounded):
   "click_to_reach_pct": 8.93, "reach_to_sale_pct": 12.5, "opt_rate": 2.97
 }
 ```
+
+### Creative bank — `dimension=creative`
+
+**`GET /api/reports/performance?dimension=creative`** — operator API only; there
+is no Reports tab for it.
+
+One row per creative × offer: a creative sent on two offers is two rows. Every
+column of the other dimensions and the grading fields (§7), plus:
+
+| Field | Meaning |
+| --- | --- |
+| `creative_id`, `offer_id` | The row's creative and offer. `label` is `"{slug} — {offer name}"`. |
+| `first_sent_date`, `last_sent_date` | First and last ET day a stage of this row was sent inside the range (all time for `range=lifetime`). `null` when none was — the row then carries only later conversions. |
+| `distinct_send_days` | How many different ET days it was sent on in that window. |
+| `rpm` | Revenue per 1,000 messages sent, 2 decimals; `null` at 0 sent. Also on `totals`. |
+
+| Param (creative only) | Values |
+| --- | --- |
+| `range=lifetime` | All time, from the first send — ignores the 92-day cap. Not combinable with `from`, `to` or `provider_phone_id`. |
+| `offer_id` | Only that offer's rows; `totals` become that offer's numbers (equal to its `dimension=offer` row). Not combinable with `provider_phone_id`. |
+| `min_sent` | Hide rows with fewer sends (default 0). `totals` stay whole; `hidden_rows` says how many rows were hidden. |
+| `sortBy` | `revenue` (default), `rpm`, `sent` or `click_to_reach_pct` — highest first, empty values last. |
+
+Any of these four with another dimension is a `400`.
+
+```bash
+curl -s "https://camman.vercel.app/api/reports/performance?dimension=creative&range=lifetime&min_sent=1500&sortBy=rpm" \
+  -H "Authorization: Bearer $CAMMAN_TOKEN"
+```
+
+Real top row of that call on 2026-09-14 (offer name redacted, cost rounded):
+
+```json
+{
+  "key": "337:58", "label": "48562j — <offer name>", "creative_id": 337, "offer_id": 58,
+  "sent": 2167, "opt_outs": 83, "clickers": 300, "redirects": 32,
+  "reached": 37, "counted_clickers": 475, "clicks_human": 475,
+  "sales": 9, "revenue": 414, "cost": 18.43,
+  "first_sent_date": "2026-07-17", "last_sent_date": "2026-09-14", "distinct_send_days": 31,
+  "click_to_reach_pct": 7.79, "reach_to_sale_pct": 24.32, "opt_rate": 3.83, "rpm": 191.05
+}
+```
+
+The response also carries `sort_by`, `min_sent`, `offer_id` and `hidden_rows`
+(that call hid 117 of 418 lifetime rows), and for lifetime `computed_at`,
+`stale_seconds` and `range: { "lifetime": true, "from": "2026-05-29", "to": "2026-09-14" }`.
+
+- ⚠️ **Grade with `min_sent>=1500`.** Below that, one sale swings `rpm` and the
+  rates wildly, and ranking the bank without it puts micro cells on top by noise.
+- **Lifetime rows are heavy and cached hourly** (two all-time passes, about 40s).
+  Read `stale_seconds` before quoting a number. `503` with
+  `details.reason: "rollup_not_ready"` means the first hourly refresh has not
+  run. `refreshedAt` is the last tracker sync as of that snapshot.
+- `attribution` works as on every other dimension, lifetime included.
+- Human clickers are counted once per creative × offer, so the rows'
+  `clicks_human` do not add up to `totals` — the same rule as every dimension.
 
 ### Tails — conversions that came in after the send day
 
@@ -584,6 +640,7 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 | `click_to_reach_pct` | `reached ÷ clicks_human × 100`. Can exceed 100: a recipient can reach the offer without a click the scorer called human. |
 | `reach_to_sale_pct` | `conversions ÷ reached × 100`. Conversions come from the tracker (`sales` on report rows, `keitaro_sales_count` on stages). |
 | `opt_rate` | `opt_outs ÷ sent × 100`. |
+| `rpm` | Revenue per 1,000 messages sent: `revenue ÷ sent × 1000`, 2 decimals. `dimension=creative` rows and totals only. |
 
 - **Percent units**, 2 decimals: `3.04` means 3.04%.
 - **`null` means "cannot be computed", never zero** — a denominator of 0, or a row

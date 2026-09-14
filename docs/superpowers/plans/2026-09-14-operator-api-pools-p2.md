@@ -187,7 +187,7 @@ export function isCreativeSortKey(v: string | null | undefined): v is CreativeSo
 }
 ```
 
-- [ ] **Step 5: Run** the test → `test-creative-rows OK.` (18 checks). **Commit.**
+- [ ] **Step 5: Run** the test → `test-creative-rows OK.` (17 checks). **Commit.**
 
 ### Task 2: Creative grouping in the shared report
 

@@ -112,6 +112,9 @@ export async function POST(
       status: next,
       previous_status: from,
       status_changed_at: drizzleSql`now()`,
+      // A hand-picked status outranks the automatic draft ⇄ pending moves
+      // (lib/stages/auto-status.ts) — permanently.
+      status_set_manually: true,
       // Only stamp sent_at when actually entering the 'sent' state.
       sent_at: next === "sent" ? drizzleSql`now()` : undefined,
     })

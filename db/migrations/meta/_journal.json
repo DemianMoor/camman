@@ -1254,6 +1254,13 @@
       "when": 1791763200000,
       "tag": "0178_operator_rollups",
       "breakpoints": true
+    },
+    {
+      "idx": 179,
+      "version": "7",
+      "when": 1791849600000,
+      "tag": "0179_stage_status_set_manually",
+      "breakpoints": true
     }
   ]
 }

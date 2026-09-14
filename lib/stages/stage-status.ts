@@ -7,7 +7,9 @@
 //
 // IMPORTANT — this is DISTINCT from the user-editable `status` column on
 // campaign_stages (draft/pending/sent/success/cancelled/failed), which is a
-// manual record the operator keeps for campaign results. The operational status
+// manual record the operator keeps for campaign results — the system only ever
+// moves it draft ⇄ pending, and never once a person has set it (see
+// lib/stages/auto-status.ts). The operational status
 // below is DERIVED from the send pipeline (schedule + materialized stage_sends)
 // and answers a different question: "is this stage actually going to fire?".
 //

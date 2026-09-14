@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { readCreativeCtr } from "@/lib/creatives/ctr-rollup";
 
 // Per-creative 30-day performance metrics, cached in memory.
 //
@@ -42,7 +43,33 @@ export interface CreativeMetricsRow {
   // picker's sort (which stays on the 30-day number — see the header note).
   lifetime_payout: number;
   lifetime_clean: number;
+  // CTR counters — messages sent and counted clickers per window — from the
+  // hourly snapshot in lib/creatives/ctr-rollup.ts, NOT from the statement below.
+  // Zero until that snapshot's first refresh.
+  ctr_sent_7d: number;
+  ctr_clicks_7d: number;
+  ctr_sent_30d: number;
+  ctr_clicks_30d: number;
+  ctr_sent_lifetime: number;
+  ctr_clicks_lifetime: number;
 }
+
+const NO_ACTIVITY: Omit<CreativeMetricsRow, "creative_id"> = {
+  delivered: 0,
+  checkouts: 0,
+  sales: 0,
+  payout: 0,
+  manual_clean: 0,
+  tracked_clean: 0,
+  lifetime_payout: 0,
+  lifetime_clean: 0,
+  ctr_sent_7d: 0,
+  ctr_clicks_7d: 0,
+  ctr_sent_30d: 0,
+  ctr_clicks_30d: 0,
+  ctr_sent_lifetime: 0,
+  ctr_clicks_lifetime: 0,
+};
 
 const TTL_MS = 15 * 60 * 1000;
 
@@ -139,17 +166,36 @@ export async function computeCreativeMetrics(
       LEFT JOIN click_life kl ON kl.creative_id = coalesce(s.creative_id, k.creative_id)
   `)) as unknown as Record<string, unknown>[];
 
-  return rows.map((r) => ({
-    creative_id: Number(r.creative_id),
-    delivered: Number(r.delivered ?? 0),
-    checkouts: Number(r.checkouts ?? 0),
-    sales: Number(r.sales ?? 0),
-    payout: Number(r.payout ?? 0),
-    manual_clean: Number(r.manual_clean ?? 0),
-    tracked_clean: Number(r.tracked_clean ?? 0),
-    lifetime_payout: Number(r.lifetime_payout ?? 0),
-    lifetime_clean: Number(r.lifetime_clean ?? 0),
-  }));
+  const byId = new Map<number, CreativeMetricsRow>();
+  for (const r of rows) {
+    byId.set(Number(r.creative_id), {
+      ...NO_ACTIVITY,
+      creative_id: Number(r.creative_id),
+      delivered: Number(r.delivered ?? 0),
+      checkouts: Number(r.checkouts ?? 0),
+      sales: Number(r.sales ?? 0),
+      payout: Number(r.payout ?? 0),
+      manual_clean: Number(r.manual_clean ?? 0),
+      tracked_clean: Number(r.tracked_clean ?? 0),
+      lifetime_payout: Number(r.lifetime_payout ?? 0),
+      lifetime_clean: Number(r.lifetime_clean ?? 0),
+    });
+  }
+  // A creative can have sends in the CTR snapshot but no row above (nothing in
+  // the 30-day stage/click windows) — it gets a zeroed row rather than losing
+  // its all-time and 7-day CTR.
+  for (const c of await readCreativeCtr(orgId)) {
+    byId.set(c.creative_id, {
+      ...(byId.get(c.creative_id) ?? { ...NO_ACTIVITY, creative_id: c.creative_id }),
+      ctr_sent_7d: c.sent_7d,
+      ctr_clicks_7d: c.clicks_7d,
+      ctr_sent_30d: c.sent_30d,
+      ctr_clicks_30d: c.clicks_30d,
+      ctr_sent_lifetime: c.sent_lifetime,
+      ctr_clicks_lifetime: c.clicks_lifetime,
+    });
+  }
+  return [...byId.values()];
 }
 
 // Read path. Serves the cached rows when fresh, otherwise computes once and

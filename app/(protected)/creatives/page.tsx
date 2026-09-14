@@ -105,9 +105,13 @@ type Creative = {
   created_at: string;
   offers: Info[];
   // 30-day performance metrics. Ratios are null when their denominator
-  // (delivered for CTR; clean clicks for the rest) is 0.
+  // (messages sent for CTR; clean clicks for the rest) is 0.
   metrics: {
     delivered: number;
+    // CTR's own counts — counted clickers ÷ messages sent, from the hourly
+    // snapshot (lib/creatives/ctr-rollup.ts), not clean_clicks / delivered.
+    sent: number;
+    ctr_clickers: number;
     clean_clicks: number;
     checkouts: number;
     sales: number;
@@ -851,7 +855,7 @@ export default function CreativesPage() {
             <MetricCell
               value={m.ctr}
               format={formatPercent}
-              title={`${numberFmt.format(m.clean_clicks)} clean clicks / ${numberFmt.format(m.delivered)} delivered (30d)`}
+              title={`${numberFmt.format(m.ctr_clickers)} clickers / ${numberFmt.format(m.sent)} sent (30d, refreshed hourly)`}
             />
           );
         },

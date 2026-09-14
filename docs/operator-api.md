@@ -618,7 +618,12 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 ## 6. Creatives and registry
 
 - **`GET /api/creatives/list`** — `offer_id`, `status`, plus the standard list
-  params. Carries the spam score where one is cached.
+  params. Carries the spam score where one is cached, and per-creative
+  `metrics`: EPC, and CTR = counted clickers ÷ messages sent over 30 days
+  (`ctr`), 7 days (`ctr_7d`) and all time (`ctr_lifetime`), each with its
+  `sent*` / `ctr_clickers*` counts. CTR comes from an hourly snapshot and is
+  `null` when nothing was sent. `delivered` is the receipt/import tally, not a
+  send count.
 - **`GET /api/creatives/{id}`** — one creative.
 - **`GET /api/creatives/{id}/usage`** — every campaign, sending number and day it
   has already run on (see Creative usage, §3).

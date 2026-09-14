@@ -118,6 +118,10 @@ export async function GET(req: NextRequest) {
   // on the click's clicked_at (two distinct time bases, by design). Clean clicks
   // = manual-mode stage clicks (click_count) + tracked-mode clean clicks
   // (bot/prefetch/suspect excluded — same definition as the click report).
+  //
+  // CTR is the exception: its sends and clickers (the ctr_* columns) come from
+  // the hourly snapshot in lib/creatives/ctr-rollup.ts, because counting sends
+  // per creative is a full stage_sends pass.
   const tMetricsStart = performance.now();
   const metricsRows = includeMetrics ? await getCreativeMetrics(orgId) : [];
   // Its own Server-Timing segment: on a cache HIT this is ~0ms, on a MISS it is
@@ -136,15 +140,17 @@ export async function GET(req: NextRequest) {
     SELECT * FROM jsonb_to_recordset(${JSON.stringify(metricsRows)}::jsonb)
       AS m(creative_id int, delivered int, checkouts int, sales int,
            payout numeric, manual_clean int, tracked_clean int,
-           lifetime_payout numeric, lifetime_clean int)
+           lifetime_payout numeric, lifetime_clean int,
+           ctr_sent_7d int, ctr_clicks_7d int, ctr_sent_30d int, ctr_clicks_30d int,
+           ctr_sent_lifetime int, ctr_clicks_lifetime int)
   ) AS metrics_agg`;
 
   const cleanExpr = drizzleSql`(coalesce(metrics_agg.manual_clean, 0) + coalesce(metrics_agg.tracked_clean, 0))`;
-  const deliveredExpr = drizzleSql`coalesce(metrics_agg.delivered, 0)`;
+  const ctrSentExpr = drizzleSql`coalesce(metrics_agg.ctr_sent_30d, 0)`;
   // CASE without ELSE yields NULL when the denominator is 0, so "no data"
   // sorts/renders as "—" rather than a misleading 0%.
   const RATIO_SQL = {
-    ctr: drizzleSql`CASE WHEN ${deliveredExpr} > 0 THEN ${cleanExpr}::numeric / ${deliveredExpr} END`,
+    ctr: drizzleSql`CASE WHEN ${ctrSentExpr} > 0 THEN coalesce(metrics_agg.ctr_clicks_30d, 0)::numeric / ${ctrSentExpr} END`,
     checkout_rate: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.checkouts, 0)::numeric / ${cleanExpr} END`,
     sales_cr: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.sales, 0)::numeric / ${cleanExpr} END`,
     epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.payout, 0)::numeric / ${cleanExpr} END`,
@@ -218,6 +224,12 @@ export async function GET(req: NextRequest) {
           m_tracked_clean: drizzleSql<number>`metrics_agg.tracked_clean`.as("m_tracked_clean"),
           m_lifetime_payout: drizzleSql<number>`metrics_agg.lifetime_payout`.as("m_lifetime_payout"),
           m_lifetime_clean: drizzleSql<number>`metrics_agg.lifetime_clean`.as("m_lifetime_clean"),
+          m_ctr_sent_7d: drizzleSql<number>`metrics_agg.ctr_sent_7d`.as("m_ctr_sent_7d"),
+          m_ctr_clicks_7d: drizzleSql<number>`metrics_agg.ctr_clicks_7d`.as("m_ctr_clicks_7d"),
+          m_ctr_sent_30d: drizzleSql<number>`metrics_agg.ctr_sent_30d`.as("m_ctr_sent_30d"),
+          m_ctr_clicks_30d: drizzleSql<number>`metrics_agg.ctr_clicks_30d`.as("m_ctr_clicks_30d"),
+          m_ctr_sent_lifetime: drizzleSql<number>`metrics_agg.ctr_sent_lifetime`.as("m_ctr_sent_lifetime"),
+          m_ctr_clicks_lifetime: drizzleSql<number>`metrics_agg.ctr_clicks_lifetime`.as("m_ctr_clicks_lifetime"),
         })
         .from(creatives)
         // LEFT JOIN so a creative with no activity in the window still returns
@@ -349,6 +361,12 @@ export async function GET(req: NextRequest) {
             m_tracked_clean: number | null;
             m_lifetime_payout: number | null;
             m_lifetime_clean: number | null;
+            m_ctr_sent_7d: number | null;
+            m_ctr_clicks_7d: number | null;
+            m_ctr_sent_30d: number | null;
+            m_ctr_clicks_30d: number | null;
+            m_ctr_sent_lifetime: number | null;
+            m_ctr_clicks_lifetime: number | null;
           };
           const delivered = Number(row.m_delivered ?? 0);
           const checkouts = Number(row.m_checkouts ?? 0);
@@ -356,14 +374,32 @@ export async function GET(req: NextRequest) {
           const payout = Number(row.m_payout ?? 0);
           const cleanClicks =
             Number(row.m_manual_clean ?? 0) + Number(row.m_tracked_clean ?? 0);
+          const sent = Number(row.m_ctr_sent_30d ?? 0);
+          const ctrClickers = Number(row.m_ctr_clicks_30d ?? 0);
+          const sent7d = Number(row.m_ctr_sent_7d ?? 0);
+          const ctrClickers7d = Number(row.m_ctr_clicks_7d ?? 0);
+          const sentLifetime = Number(row.m_ctr_sent_lifetime ?? 0);
+          const ctrClickersLifetime = Number(row.m_ctr_clicks_lifetime ?? 0);
           return {
             metrics: {
+              // Receipt / CSV-import tally only. API sends never write
+              // delivered_count, so it is NOT the CTR denominator.
               delivered,
               clean_clicks: cleanClicks,
               checkouts,
               sales,
               payout,
-              ctr: delivered > 0 ? cleanClicks / delivered : null,
+              // CTR = counted clickers ÷ messages sent, from the hourly snapshot
+              // (lib/creatives/ctr-rollup.ts): last 30 days, last 7 days, all time.
+              sent,
+              ctr_clickers: ctrClickers,
+              ctr: sent > 0 ? ctrClickers / sent : null,
+              sent_7d: sent7d,
+              ctr_clickers_7d: ctrClickers7d,
+              ctr_7d: sent7d > 0 ? ctrClickers7d / sent7d : null,
+              sent_lifetime: sentLifetime,
+              ctr_clickers_lifetime: ctrClickersLifetime,
+              ctr_lifetime: sentLifetime > 0 ? ctrClickersLifetime / sentLifetime : null,
               checkout_rate: cleanClicks > 0 ? checkouts / cleanClicks : null,
               sales_cr: cleanClicks > 0 ? sales / cleanClicks : null,
               epc: cleanClicks > 0 ? payout / cleanClicks : null,

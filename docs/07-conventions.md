@@ -49,6 +49,16 @@ and the per-surface queries that feed it. Spec:
   same-day (stage sent that ET day), tail (sent on an earlier day — returned as
   rows), and unknown (no `sent_at`, or a `sent_at` later than the conversion day,
   which a real sale cannot be).
+- **Opt-out rates are send-day cohorts, and a day stays open for 72 hours.**
+  `/api/reports/opt-outs` divides the STOPs credited to the messages SENT on a day
+  by those messages, per sending number / campaign / stage / contact group. A STOP
+  credits the single most recent stage within `OPT_OUT_ATTRIBUTION_WINDOW_HOURS`,
+  so a day's figure can still rise until that window has passed since the day
+  ended — `complete: false` until then. Group rows overlap (a contact in two
+  targeted groups counts in both), so the per-day `totals` come from the sends,
+  never from summing rows. The window constant lives in the zero-import
+  `lib/sends/opt-out-window.ts` so reporting doesn't load the STOP ingester's
+  send-side dependencies; `poll-opt-outs.ts` re-exports it unchanged.
 
 ## A role nobody holds is untested by construction (2026-09-11)
 

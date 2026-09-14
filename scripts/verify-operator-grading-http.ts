@@ -236,6 +236,34 @@ async function main() {
   const badDate = await get("/api/reports/tails?date=2026-02-31");
   check("impossible date: 400", badDate.status === 400, badDate.status);
 
+  // ---- opt-outs ----
+  console.log("\n8. /api/reports/opt-outs");
+  const ooTo = addDays(etToday(), -1);
+  const ooFrom = addDays(ooTo, -1);
+  const oo = await get(`/api/reports/opt-outs?dimension=number&from=${ooFrom}&to=${ooTo}`);
+  check("dimension=number: 200", oo.status === 200, oo.status);
+  check(
+    "basis send_date, granularity day, window 72h",
+    oo.json?.basis === "send_date" && oo.json?.granularity === "day" && oo.json?.window_hours === 72,
+    { basis: oo.json?.basis, granularity: oo.json?.granularity, window_hours: oo.json?.window_hours },
+  );
+  check(
+    "every row has a boolean complete and a numeric sent",
+    (oo.json?.data ?? []).every(
+      (r: { complete: unknown; sent: unknown }) => typeof r.complete === "boolean" && typeof r.sent === "number",
+    ),
+  );
+  for (const [name, path] of [
+    ["missing dimension", `/api/reports/opt-outs?from=${ooFrom}&to=${ooTo}`],
+    ["unknown dimension", `/api/reports/opt-outs?dimension=creative&from=${ooFrom}&to=${ooTo}`],
+    ["granularity=hour", `/api/reports/opt-outs?dimension=number&granularity=hour&from=${ooFrom}&to=${ooTo}`],
+    ["a 15-day range", `/api/reports/opt-outs?dimension=number&from=${addDays(ooTo, -14)}&to=${ooTo}`],
+    ["an impossible date", `/api/reports/opt-outs?dimension=number&from=2026-02-31&to=${ooTo}`],
+  ] as const) {
+    const r = await get(path);
+    check(`opt-outs ${name}: 400`, r.status === 400, r.status);
+  }
+
   // ---- privacy sweep over every body fetched above ----
   console.log("\n5. Privacy sweep");
   const senders = new Set(

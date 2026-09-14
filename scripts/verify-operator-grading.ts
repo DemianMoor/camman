@@ -10,7 +10,13 @@ import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
-import { getConversionTails } from "@/lib/reporting/grading";
+import {
+  getConversionTails,
+  getOptOutCohorts,
+  OPT_OUT_DIMENSIONS,
+} from "@/lib/reporting/grading";
+import { OPT_OUT_ATTRIBUTION_WINDOW_HOURS } from "@/lib/sends/opt-out-window";
+import { OPT_OUT_ATTRIBUTION_WINDOW_HOURS as POLLER_WINDOW } from "@/lib/sends/poll-opt-outs";
 import { pct } from "@/lib/reporting/grading-rates";
 import { getPerformanceReport, gradePerf } from "@/lib/reporting/performance-report";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
@@ -262,6 +268,74 @@ async function main() {
     check(`tails ${D}: rows sum to tail_conversions`, tails.data.reduce((a, x) => a + x.conversions, 0) === tt.tail_conversions);
     check(`tails ${D}: every row is at least a day after its send`, tails.data.every((x) => x.days_after_send >= 1));
   }
+
+  console.log("\nE. getOptOutCohorts — send-day cohort opt-outs");
+  // The 5 closed ET days ending yesterday, so both `complete` values occur.
+  const eTo = addDays(formatInCampaignTimezone(new Date(), "yyyy-MM-dd"), -1);
+  const eFrom = addDays(eTo, -4);
+  const eFromIso = fromZonedTime(`${eFrom}T00:00:00`, CAMPAIGN_TIMEZONE).toISOString();
+  const eToIso = fromZonedTime(`${addDays(eTo, 1)}T00:00:00`, CAMPAIGN_TIMEZONE).toISOString();
+  const sentByDay = new Map(
+    (
+      (await db.execute(sql`
+        SELECT to_char((ss.sent_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') AS day,
+               count(*)::int AS n
+        FROM stage_sends ss
+        WHERE ss.org_id = ${orgId}::uuid AND ss.status = 'sent'
+          AND ss.sent_at >= ${eFromIso}::timestamptz AND ss.sent_at < ${eToIso}::timestamptz
+        GROUP BY 1`)) as unknown as { day: string; n: number }[]
+    ).map((r) => [r.day, Number(r.n)]),
+  );
+  const optByDay = new Map(
+    (
+      (await db.execute(sql`
+        SELECT to_char((ss.sent_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') AS day,
+               count(DISTINCT oa.opt_out_id)::int AS n
+        FROM stage_sends ss JOIN opt_out_attributions oa ON oa.stage_send_id = ss.id
+        WHERE ss.org_id = ${orgId}::uuid AND ss.status = 'sent'
+          AND ss.sent_at >= ${eFromIso}::timestamptz AND ss.sent_at < ${eToIso}::timestamptz
+        GROUP BY 1`)) as unknown as { day: string; n: number }[]
+    ).map((r) => [r.day, Number(r.n)]),
+  );
+  check("control: the 5-day range has sends", sentByDay.size > 0, { eFrom, eTo });
+  const completeSeen = new Set<boolean>();
+  for (const dim of OPT_OUT_DIMENSIONS) {
+    const oc = await getOptOutCohorts(orgId, dim, eFrom, eTo);
+    check(`${dim}: window_hours = 72`, oc.window_hours === OPT_OUT_ATTRIBUTION_WINDOW_HOURS && oc.window_hours === 72, oc.window_hours);
+    for (const t of oc.totals) {
+      check(`${dim} ${t.date}: totals.sent = direct count`, t.sent === (sentByDay.get(t.date) ?? 0), { got: t.sent, want: sentByDay.get(t.date) });
+      check(`${dim} ${t.date}: totals.opt_outs = distinct STOPs`, t.opt_outs === (optByDay.get(t.date) ?? 0), { got: t.opt_outs, want: optByDay.get(t.date) });
+      // Computed here, not trusted from the lib: end of the ET day + the window.
+      const completeAt =
+        fromZonedTime(`${addDays(t.date, 1)}T00:00:00`, CAMPAIGN_TIMEZONE).getTime() + 72 * 3_600_000;
+      check(`${dim} ${t.date}: complete = (now >= day end + 72h)`, t.complete === Date.now() >= completeAt, t.complete);
+      completeSeen.add(t.complete);
+      const rows = oc.data.filter((r) => r.date === t.date);
+      if (dim === "group") {
+        check(`group ${t.date}: every row's sent <= the day's total`, rows.every((r) => r.sent <= t.sent));
+      } else {
+        check(`${dim} ${t.date}: rows' sent sum to the day's total`, rows.reduce((a, r) => a + r.sent, 0) === t.sent);
+        check(`${dim} ${t.date}: rows' opt-outs sum to the day's total`, rows.reduce((a, r) => a + r.opt_outs, 0) === t.opt_outs);
+      }
+    }
+    check(`${dim}: opt_rate arithmetic on every row`, oc.data.every((r) => r.opt_rate === pct(r.opt_outs, r.sent)));
+    if (dim === "group" && oc.data.length > 0) {
+      const top = [...oc.data].sort((a, b) => b.sent - a.sent)[0];
+      const [g] = (await db.execute(sql`
+        SELECT count(*)::int AS n
+        FROM stage_sends ss
+        JOIN campaigns c ON c.id = ss.campaign_id
+        JOIN contact_contact_groups ccg ON ccg.contact_id = ss.contact_id
+          AND ccg.contact_group_id = ANY(c.audience_contact_group_ids)
+        WHERE ss.org_id = ${orgId}::uuid AND ss.status = 'sent'
+          AND ccg.contact_group_id = ${Number(top.key)}
+          AND ss.sent_at >= ${eFromIso}::timestamptz AND ss.sent_at < ${eToIso}::timestamptz
+          AND to_char((ss.sent_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') = ${top.date}`)) as unknown as { n: number }[];
+      check(`group ${top.key} on ${top.date}: sent = independent membership count`, top.sent === Number(g.n), { got: top.sent, want: g.n });
+    }
+  }
+  check("control: both complete values occur in the range", completeSeen.has(true) && completeSeen.has(false), [...completeSeen]);
+  check("the STOP ingester re-exports the same window", POLLER_WINDOW === OPT_OUT_ATTRIBUTION_WINDOW_HOURS, POLLER_WINDOW);
 
   console.log(
     failures === 0

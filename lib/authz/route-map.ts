@@ -351,6 +351,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "reports/rebuild-counted-clickers": null, // maintenance job, not a report
   // Operator API creative grading (2026-09-14): same-day vs tail conversions.
   "reports/tails": { methods: ["GET"], token: ["GET"] },
+  // Operator API creative grading (2026-09-14): send-day cohort opt-out rates.
+  "reports/opt-outs": { methods: ["GET"], token: ["GET"] },
 
   // ── result-import-mappings ─────────────────────────────────────────────────────────────
   "result-import-mappings": null, // cron / webhook / import machinery -- no operator session reaches these

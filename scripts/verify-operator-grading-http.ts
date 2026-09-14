@@ -399,6 +399,103 @@ async function main() {
     check("control: a day in the range has tracker sales", days.some((d) => d.sales > 0));
   }
 
+  // ---- audience pools ----
+  console.log("\n11. /api/audience/pools");
+  const [poolOffer] = await db`
+    SELECT c.offer_id FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
+    WHERE cs.org_id = ${orgId} AND cs.sent_at IS NOT NULL AND c.offer_id IS NOT NULL
+    GROUP BY 1 ORDER BY count(*) DESC LIMIT 1`;
+  const poolsBase = `/api/audience/pools?offer_id=${Number(poolOffer.offer_id)}`;
+  const POOL_KEYS = [
+    "group_total_eligible", "never_received", "never_received_rested",
+    "received_not_clicked_rested", "clickers_non_buyers", "clickers_non_buyers_rested",
+  ];
+  const pl = await get(poolsBase);
+  check("pools: 200", pl.status === 200, { status: pl.status, body: pl.json });
+  check("pools: rest_days defaults to 7", pl.json?.rest_days === 7, pl.json?.rest_days);
+  const plRows = (pl.json?.data ?? []) as Record<string, unknown>[];
+  check(
+    "pools rows carry exactly group_name + the six integers",
+    plRows.length > 0 &&
+      plRows.every(
+        (r) =>
+          typeof r.group_name === "string" &&
+          Object.keys(r).sort().join() === ["group_name", ...POOL_KEYS].sort().join() &&
+          POOL_KEYS.every((k) => Number.isInteger(r[k])),
+      ),
+  );
+  check("pools totals carry the six integers", POOL_KEYS.every((k) => Number.isInteger(pl.json?.totals?.[k])));
+  check(
+    "pools: computed_at string and integer stale_seconds",
+    typeof pl.json?.computed_at === "string" && Number.isInteger(pl.json?.stale_seconds),
+  );
+  const [eligibleLive] = await db`
+    SELECT count(*)::int AS n FROM contacts ct
+    WHERE ct.org_id = ${orgId} AND ct.is_archived = false
+      AND NOT EXISTS (SELECT 1 FROM opt_outs o WHERE o.org_id = ${orgId} AND o.contact_id = ct.id)`;
+  check(
+    "pools totals: eligible within 1% of a live count (the snapshot is up to 30 min old)",
+    Math.abs(Number(pl.json?.totals?.group_total_eligible) - Number(eligibleLive.n)) <= Number(eligibleLive.n) * 0.01,
+    { got: pl.json?.totals?.group_total_eligible, live: eligibleLive.n },
+  );
+  const pl0 = await get(`${poolsBase}&rest_days=0`);
+  check(
+    "pools rest_days=0: every rested count equals its unrested count",
+    pl0.status === 200 &&
+      ((pl0.json?.data ?? []) as Record<string, number>[]).every(
+        (r) => r.never_received_rested === r.never_received && r.clickers_non_buyers_rested === r.clickers_non_buyers,
+      ),
+  );
+  const pl30 = await get(`${poolsBase}&rest_days=30`);
+  const poolsAt7 = new Map(plRows.map((r) => [r.group_name as string, r as Record<string, number>]));
+  check(
+    "pools rest_days=30 <= rest_days=7 on every row",
+    pl30.status === 200 &&
+      ((pl30.json?.data ?? []) as Record<string, number | string>[]).every((r) => {
+        const s = poolsAt7.get(r.group_name as string);
+        return (
+          s != null &&
+          (r.never_received_rested as number) <= s.never_received_rested &&
+          (r.received_not_clicked_rested as number) <= s.received_not_clicked_rested &&
+          (r.clickers_non_buyers_rested as number) <= s.clickers_non_buyers_rested
+        );
+      }),
+  );
+  for (const [name, path, field] of [
+    ["missing offer_id", "/api/audience/pools", "offer_id"],
+    ["offer_id=abc", "/api/audience/pools?offer_id=abc", "offer_id"],
+    ["rest_days=31", `${poolsBase}&rest_days=31`, "rest_days"],
+    ["rest_days=-1", `${poolsBase}&rest_days=-1`, "rest_days"],
+    ["rest_days=2.5", `${poolsBase}&rest_days=2.5`, "rest_days"],
+  ] as const) {
+    const r = await get(path);
+    check(`pools ${name}: 400 naming ${field}`, r.status === 400 && r.json?.details?.field === field, {
+      status: r.status,
+      body: r.json,
+    });
+  }
+  const plMissing = await get("/api/audience/pools?offer_id=999999999");
+  check("pools for an offer outside the org: 404", plMissing.status === 404, plMissing.status);
+  const [neverSent] = await db`
+    SELECT o.id FROM offers o
+    WHERE o.org_id = ${orgId}
+      AND NOT EXISTS (SELECT 1 FROM campaigns c JOIN stage_sends ss ON ss.campaign_id = c.id
+                      WHERE c.offer_id = o.id AND ss.status = 'sent')
+    LIMIT 1`;
+  if (!neverSent) {
+    skip("pools for a never-sent offer", "every offer in the org has sent");
+  } else {
+    const pn = await get(`/api/audience/pools?offer_id=${Number(neverSent.id)}`);
+    check(
+      "pools for a never-sent offer: 200, never_received = group total, no clickers",
+      pn.status === 200 &&
+        ((pn.json?.data ?? []) as Record<string, number>[]).every(
+          (r) => r.never_received === r.group_total_eligible && r.clickers_non_buyers === 0,
+        ),
+      { status: pn.status },
+    );
+  }
+
   // ---- privacy sweep over every body fetched above ----
   console.log("\n5. Privacy sweep");
   const senders = new Set(

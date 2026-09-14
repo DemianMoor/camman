@@ -3,8 +3,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, RefreshCw, Download, AlertTriangle } from "lucide-react";
+import { ArrowLeft, RefreshCw, Download } from "lucide-react";
 
+import {
+  type Derived,
+  derive,
+  downloadCsv,
+  fmtInt,
+  fmtNum,
+  fmtPct,
+  fmtUsd,
+  ManualMix,
+  netRpmClass,
+  ooClass,
+  StaleBanner,
+} from "@/components/reports/report-metrics";
 import { Button } from "@/components/ui/button";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
@@ -24,73 +37,6 @@ type ReportResponse = {
   unattributedSends: number;
   refreshedAt: string | null;
 };
-
-// ---- formatting ----
-const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-const int = new Intl.NumberFormat("en-US");
-const fmtUsd = (n: number | null) => (n == null ? "—" : usd.format(n));
-
-// Staleness thresholds for the "Data as of" line. The refresh cron runs twice
-// daily (05:00 / 20:00 UTC), so the worst NORMAL age — just before the later
-// run, having last refreshed at 05:00 — is 15h. Anything past 16h means a run
-// was missed; past 26h means two were.
-//
-// This matters because the failure path is already covered: a refresh that
-// throws alerts and returns 500. What nothing catches from the page's side is
-// the job never being invoked, which leaves the previous numbers on screen,
-// internally consistent and arbitrarily old. A bare timestamp does not carry
-// that — 3 days ago and 6 hours ago render identically — so the age is stated
-// and flagged rather than left for the reader to compute.
-// Rows whose clicks mix a deduplicated contact count with Keitaro visit counts
-// (manual-mode stages mint no links, so there is no set to deduplicate). Since
-// migration 0132 this can only occur on the offer footer and the org benchmark:
-// a group row is built from per-recipient rows, and every manual-fallback visit
-// in this data sits on a stage that has none. Verified, not assumed -- of 938
-// sent stages, the 22 with sends but no clickers all have zero visits.
-function ManualMix() {
-  return (
-    <span
-      title="Includes manual-mode stages. Their clicks are Keitaro visit counts, not deduplicated contacts, so this figure mixes the two."
-      className="ml-1.5 rounded bg-amber-500/10 px-1 py-0.5 text-[10px] font-medium text-amber-700 align-middle dark:text-amber-500"
-    >
-      +manual
-    </span>
-  );
-}
-
-const STALE_WARN_HOURS = 16;
-const STALE_ALERT_HOURS = 26;
-
-function refreshAge(refreshedAt: string | null): {
-  hours: number | null;
-  level: "fresh" | "warn" | "alert";
-  note: string | null;
-} {
-  if (!refreshedAt) {
-    return { hours: null, level: "alert", note: "never refreshed" };
-  }
-  const hours = (Date.now() - new Date(refreshedAt).getTime()) / 3_600_000;
-  if (hours > STALE_ALERT_HOURS) {
-    return { hours, level: "alert", note: `${Math.floor(hours)}h old — at least two refreshes missed` };
-  }
-  if (hours > STALE_WARN_HOURS) {
-    return { hours, level: "warn", note: `${Math.floor(hours)}h old — a refresh was missed` };
-  }
-  return { hours, level: "fresh", note: null };
-}
-const fmtInt = (n: number) => int.format(n);
-const fmtNum = (n: number | null, dp = 2) => (n == null ? "—" : n.toFixed(dp));
-const fmtPct = (n: number | null) => (n == null ? "—" : `${n.toFixed(2)}%`);
-
-// ---- derived ratios (uniform for group rows, offer total, benchmark) ----
-type Derived = { rpm: number | null; net_rpm: number | null; epc: number | null; net_profit: number; oo_pct: number | null };
-function derive(m: RawMetrics): Derived {
-  const rpm = m.sends > 0 ? (m.revenue / m.sends) * 1000 : null;
-  const net_rpm = m.sends > 0 ? ((m.revenue - m.cost) / m.sends) * 1000 : null;
-  const epc = m.clicks > 0 ? m.revenue / m.clicks : null;
-  const oo_pct = m.sends > 0 ? (m.optouts / m.sends) * 100 : null;
-  return { rpm, net_rpm, epc, net_profit: m.revenue - m.cost, oo_pct };
-}
 
 type SortKey =
   | "group_name" | "sends" | "rpm" | "net_rpm" | "epc" | "sales"
@@ -126,17 +72,6 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
 
 type ViewRow = GroupRawRow & Derived;
 
-// ---- color helpers (pure, module scope) ----
-function netRpmClass(v: number | null, breakEven: number | null) {
-  return v == null || breakEven == null
-    ? ""
-    : v >= breakEven
-      ? "text-emerald-600"
-      : "text-destructive";
-}
-function ooClass(v: number | null) {
-  return v == null ? "" : v <= 2 ? "text-emerald-600" : v <= 3 ? "text-amber-600" : "text-destructive";
-}
 // "read low" / "read high" / "match" is derived from the actual ratio, never
 // assumed: attributable_revenue/attributable_sales and revenue/sales are not
 // a whole-and-part pair (different sources, not a subset — see the comment on
@@ -210,7 +145,6 @@ export default function OfferGroupReportPage() {
   }, [viewRows, sortBy, sortDir]);
 
   const breakEven = data?.breakEvenPer1k ?? null;
-  const staleness = refreshAge(data?.refreshedAt ?? null);
   const offerTotal = data ? { ...data.offerTotals, ...derive(data.offerTotals) } : null;
   const benchmark = data ? { ...data.orgBenchmark, ...derive(data.orgBenchmark) } : null;
 
@@ -258,18 +192,12 @@ export default function OfferGroupReportPage() {
       "sent_90d" in m ? (m as ViewRow).sent_90d : "",
       "fresh_pool" in m ? (m as ViewRow).fresh_pool : "",
     ];
-    const rows = [
+    downloadCsv(`offer-${offerId}-group-report.csv`, [
       header,
       ...(benchmark ? [line("All offers (org-wide)", benchmark as ViewRow)] : []),
       ...sorted.map((r) => line(r.group_name, r)),
       ...(offerTotal ? [line("This offer · all groups", offerTotal)] : []),
-    ];
-    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `offer-${offerId}-group-report.csv`; a.click();
-    URL.revokeObjectURL(url);
+    ]);
   }
 
   return (
@@ -286,18 +214,7 @@ export default function OfferGroupReportPage() {
             Data as of {data ? formatCampaignDateTime(data.refreshedAt) : "…"}
             {breakEven != null ? ` · break-even ${fmtUsd(breakEven)}/1k` : ""}
           </p>
-          {data && staleness.level !== "fresh" ? (
-            <p
-              className={`mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium ${
-                staleness.level === "alert"
-                  ? "bg-destructive/10 text-destructive"
-                  : "bg-amber-500/10 text-amber-700 dark:text-amber-500"
-              }`}
-            >
-              <AlertTriangle className="size-3.5 shrink-0" />
-              Stale: {staleness.note}. These numbers are a snapshot, not live.
-            </p>
-          ) : null}
+          {data ? <StaleBanner refreshedAt={data.refreshedAt} /> : null}
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={api.isLoading}>

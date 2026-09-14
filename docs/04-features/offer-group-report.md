@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-08-14_
+_Last updated: 2026-09-14_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -146,6 +146,10 @@ lookups.
   basis, deduplicated at offer grain) and `unattributed_sends`.
 - **`offer_report_org_summary_mv`** (materialized, unique on `org_id`) — the
   de-duplicated org-wide benchmark row. Unchanged by migration 0132.
+- **`audience_report_group_totals_mv`** (materialized, unique on
+  `(org_id, group_id)`, migration 0180) — not read by this page: the
+  "This group · all offers" row of the Audience Stats report, built from
+  `offer_group_report_mv`'s cells. See [audience-report.md](audience-report.md).
 - **`report_refresh_log`** — `(view_name, refreshed_at)`, one row per matview,
   read for the page's "data as of" line.
 - Supporting indexes: `stage_sends (sent_at, contact_id)`,
@@ -154,31 +158,38 @@ lookups.
 Full column lists and the no-RLS note are in
 [03-data-model.md](../03-data-model.md#reporting-migration-0093).
 
-`lib/reporting/offer-group-report.ts` exposes two functions:
-- `getOfferGroupReport(orgId, offerId)` — reads all **three** matviews
-  (org-scoped) and the refresh log, shapes the result into
+`lib/reporting/offer-group-report.ts` exposes:
+- `getOfferGroupReport(orgId, offerId)` — reads this report's **three**
+  matviews (org-scoped) and the refresh log, shapes the result into
   `{ rows, offerTotals, orgBenchmark, benchmarkHasManual, refreshedAt }`.
   `offerTotals` comes from `offer_report_offer_totals_mv`, not from summing
   `rows` — a separate matview because an offer whose sends were all recorded
   outside the app has zero group rows and still needs a footer.
+- `readOrgBenchmark(orgId)` and `readGroupReportRefreshedAt()` — the org
+  benchmark row and the "data as of" stamp, shared with the Audience Stats
+  report ([lib/reporting/audience-report.ts](../../lib/reporting/audience-report.ts))
+  so both screens read one definition.
 - `refreshOfferGroupReport()` — runs `REFRESH MATERIALIZED VIEW CONCURRENTLY`
-  on all three matviews (separate statements — `CONCURRENTLY` cannot run
-  inside an explicit transaction), `offer_report_offer_totals_mv` **last** —
-  not for footer freshness, but for deploy-order blast radius: this code and
-  migration 0132 are meant to deploy together (migration first, per
-  [CLAUDE.md](../../CLAUDE.md) §14), but if this code ever ships before 0132
-  applies, the `offer_report_offer_totals_mv` refresh is the statement that
-  throws (relation does not exist). With it last, the two pre-existing
-  matviews (`offer_report_org_summary_mv`, `offer_group_report_mv`) still
-  refresh and stay live before the throw ends the invocation — refreshing it
-  first would freeze all three reports at their last snapshot (twice-daily
-  cron, so potentially days) instead of just one. One side effect: the skew
-  now runs the other way — the footer can be a few seconds *newer* than the
-  group rows beside it, not older — an accepted consequence of the ordering,
-  not a defect to "fix" back. Each matview's `report_refresh_log` row is
-  stamped with `now()` immediately after that matview's own refresh succeeds
-  (not once at the end after all three), so a mid-sequence throw leaves only
-  the not-yet-refreshed matviews' rows unstamped.
+  on all four matviews (separate statements — `CONCURRENTLY` cannot run
+  inside an explicit transaction), `offer_report_offer_totals_mv` after the
+  two 0093 matviews — not for footer freshness, but for deploy-order blast
+  radius: this code and migration 0132 are meant to deploy together (migration
+  first, per [CLAUDE.md](../../CLAUDE.md) §14), but if this code ever ships
+  before 0132 applies, the `offer_report_offer_totals_mv` refresh is the
+  statement that throws (relation does not exist). With it after them, the two
+  pre-existing matviews (`offer_report_org_summary_mv`, `offer_group_report_mv`)
+  still refresh and stay live before the throw ends the invocation —
+  refreshing it first would freeze all three reports at their last snapshot
+  (twice-daily cron, so potentially days) instead of just one. One side
+  effect: the skew now runs the other way — the footer can be a few seconds
+  *newer* than the group rows beside it, not older — an accepted consequence
+  of the ordering, not a defect to "fix" back. `audience_report_group_totals_mv`
+  (migration 0180) refreshes **last**: it sums `offer_group_report_mv`, and by
+  the same reasoning a deploy that precedes 0180 throws only on that final
+  statement. Each matview's `report_refresh_log` row is stamped with `now()`
+  immediately after that matview's own refresh succeeds (not once at the end
+  after all of them), so a mid-sequence throw leaves only the
+  not-yet-refreshed matviews' rows unstamped.
 
 ## Refresh (twice-daily cron)
 
@@ -194,7 +205,10 @@ data pre-migration-0132 — a 60s ceiling left no cold-start headroom. Post-0132
 measured 2026-08-13: `offer_report_offer_totals_mv` ~4.5s,
 `offer_report_org_summary_mv` ~11s, `offer_group_report_mv` ~25s — ~40.5s
 total against the 300s ceiling. This is a background job with no user waiting
-on it, so the larger budget costs nothing.
+on it, so the larger budget costs nothing. The same cron also refreshes the
+Audience Stats group totals (`audience_report_group_totals_mv`, migration 0180)
+last; its defining SELECT measured 5.3s on 2026-09-14, logged per run as
+`audienceTotalsMs`.
 
 **DST drift:** Vercel Cron schedules are fixed-UTC. `0 5,20 * * *` lands at
 **00:00 & 15:00 ET** in winter (EST) and **01:00 & 16:00 ET** in summer (EDT) —

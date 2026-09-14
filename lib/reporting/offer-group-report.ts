@@ -79,16 +79,8 @@ export async function getOfferGroupReport(
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
   `)) as unknown as Record<string, unknown>[];
 
-  const benchRows = (await db.execute(sql`
-    select sends, revenue, sales, clicks, cost, optouts, has_manual_stages
-    from offer_report_org_summary_mv
-    where org_id = ${orgId}::uuid
-  `)) as unknown as Record<string, unknown>[];
-
-  const logRows = (await db.execute(sql`
-    select refreshed_at from report_refresh_log
-    where view_name = 'offer_group_report_mv'
-  `)) as unknown as { refreshed_at: string | null }[];
+  const { orgBenchmark, benchmarkHasManual } = await readOrgBenchmark(orgId);
+  const refreshedAt = await readGroupReportRefreshedAt();
 
   const n = (v: unknown) => Number(v ?? 0);
   const t = totalsRows[0];
@@ -129,40 +121,71 @@ export async function getOfferGroupReport(
           attributable_revenue: 0,
           attributable_sales: 0,
         },
-    orgBenchmark: benchRows[0]
+    orgBenchmark,
+    benchmarkHasManual,
+    refreshedAt,
+  };
+}
+
+// The de-duplicated org-wide benchmark row. Shared with the Audience Stats
+// report (lib/reporting/audience-report.ts) so both screens read one definition.
+export async function readOrgBenchmark(
+  orgId: string,
+): Promise<{ orgBenchmark: RawMetrics; benchmarkHasManual: boolean }> {
+  const benchRows = (await db.execute(sql`
+    select sends, revenue, sales, clicks, cost, optouts, has_manual_stages
+    from offer_report_org_summary_mv
+    where org_id = ${orgId}::uuid
+  `)) as unknown as Record<string, unknown>[];
+
+  const n = (v: unknown) => Number(v ?? 0);
+  const b = benchRows[0];
+  return {
+    orgBenchmark: b
       ? {
-          sends: n(benchRows[0].sends),
-          revenue: n(benchRows[0].revenue),
-          sales: n(benchRows[0].sales),
-          clicks: n(benchRows[0].clicks),
-          cost: n(benchRows[0].cost),
-          optouts: n(benchRows[0].optouts),
+          sends: n(b.sends),
+          revenue: n(b.revenue),
+          sales: n(b.sales),
+          clicks: n(b.clicks),
+          cost: n(b.cost),
+          optouts: n(b.optouts),
         }
       : { ...ZERO },
-    benchmarkHasManual: Boolean(benchRows[0]?.has_manual_stages),
-    refreshedAt: logRows[0]?.refreshed_at
-      ? new Date(logRows[0].refreshed_at).toISOString()
-      : null,
+    benchmarkHasManual: Boolean(b?.has_manual_stages),
   };
+}
+
+// "Data as of" for both group reports: offer_group_report_mv's refresh. The
+// Audience Stats totals matview is derived from it and refreshed moments later
+// in the same cron run, so this one stamp is honest for both.
+export async function readGroupReportRefreshedAt(): Promise<string | null> {
+  const logRows = (await db.execute(sql`
+    select refreshed_at from report_refresh_log
+    where view_name = 'offer_group_report_mv'
+  `)) as unknown as { refreshed_at: string | null }[];
+  return logRows[0]?.refreshed_at
+    ? new Date(logRows[0].refreshed_at).toISOString()
+    : null;
 }
 
 export type RefreshDurations = {
   totalsMs: number;
   summaryMs: number;
   groupMs: number;
+  audienceTotalsMs: number;
   totalMs: number;
 };
 
-// Rebuild all three matviews (CONCURRENTLY -- non-blocking) and stamp the
+// Rebuild all four matviews (CONCURRENTLY -- non-blocking) and stamp the
 // refresh log. Called by the twice-daily cron. CONCURRENTLY must run outside a
 // transaction, so each statement is its own execute() call.
 //
-// offer_report_offer_totals_mv (introduced in migration 0132) refreshes LAST,
-// not for a cosmetic footer-freshness reason, but for deploy-order blast
-// radius: this code and 0132 are meant to deploy together (0132 first, per
-// CLAUDE.md §14), but if this code ever ships before 0132 applies, the
-// `offer_report_offer_totals_mv` statement is the one that throws (relation
-// does not exist). With it last, the two PRE-EXISTING matviews
+// offer_report_offer_totals_mv (introduced in migration 0132) refreshes after
+// the two 0093 matviews, not for a cosmetic footer-freshness reason, but for
+// deploy-order blast radius: this code and 0132 are meant to deploy together
+// (0132 first, per CLAUDE.md §14), but if this code ever ships before 0132
+// applies, the `offer_report_offer_totals_mv` statement is the one that throws
+// (relation does not exist). With it after them, the two PRE-EXISTING matviews
 // (offer_report_org_summary_mv, offer_group_report_mv -- both from 0093,
 // refreshed by this function since before 0132 existed) still refresh and
 // stay live before the throw ends the invocation. Refreshing it first would
@@ -172,11 +195,17 @@ export type RefreshDurations = {
 // Measured 2026-08-13: summary ~11s, group ~25s, totals ~4.5s -- ~40.5s
 // against a 300s ceiling.
 //
+// audience_report_group_totals_mv (migration 0180, Audience Stats) refreshes
+// LAST, for two reasons that agree: it sums offer_group_report_mv, so it must
+// follow that refresh; and by the same blast-radius reasoning, a deploy that
+// precedes 0180 throws on this final statement, after the other three have
+// refreshed and been stamped.
+//
 // Each view's report_refresh_log row is stamped immediately after that
-// view's OWN refresh succeeds, not once at the end after all three. If the
-// LAST refresh throws -- precisely the code-before-migration case the reorder
-// above exists for -- the two that DID refresh are correctly marked fresh
-// instead of the page reporting "a refresh was missed" over data that is
+// view's OWN refresh succeeds, not once at the end after all of them. If a
+// LATER refresh throws -- precisely the code-before-migration case the
+// ordering above exists for -- the ones that DID refresh are correctly marked
+// fresh instead of the page reporting "a refresh was missed" over data that is
 // actually seconds old.
 export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
   const t0 = Date.now();
@@ -198,10 +227,17 @@ export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
     update report_refresh_log set refreshed_at = now() where view_name = 'offer_report_offer_totals_mv'
   `);
 
+  await db.execute(sql`refresh materialized view concurrently audience_report_group_totals_mv`);
+  const t4 = Date.now();
+  await db.execute(sql`
+    update report_refresh_log set refreshed_at = now() where view_name = 'audience_report_group_totals_mv'
+  `);
+
   return {
     summaryMs: t1 - t0,
     groupMs: t2 - t1,
     totalsMs: t3 - t2,
+    audienceTotalsMs: t4 - t3,
     totalMs: Date.now() - t0,
   };
 }

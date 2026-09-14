@@ -111,6 +111,10 @@
     {
       "path": "/api/cron/refresh-fresh-counts",
       "schedule": "11,41 * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-audience-pools",
+      "schedule": "29,59 * * * *"
     }
   ]
 }

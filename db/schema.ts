@@ -5010,3 +5010,30 @@ export const audience_fresh_counts = pgTable("audience_fresh_counts", {
 });
 
 export type AudienceFreshCounts = typeof audience_fresh_counts.$inferSelect;
+
+// ── operator_rollups (migration 0178) ──────────────────────────────────────
+//
+// Saved results behind operator-API endpoints too slow to compute per request:
+// one row per (org, rollup_key), refreshed by a cron, read by the endpoint.
+// Keys: "audience_pools" (lib/audience/pools.ts) and
+// "performance_creative_lifetime". Like audience_fresh_counts, the blob holds
+// only group names, ids of offers / creatives and integers — never a contact.
+export const operator_rollups = pgTable(
+  "operator_rollups",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    rollup_key: text("rollup_key").notNull(),
+    data: jsonb("data"),
+    // NULL until the first cron run — the endpoint answers 503, not zeros.
+    computed_at: timestamp("computed_at", { withTimezone: true }),
+    duration_ms: integer("duration_ms"),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.org_id, table.rollup_key] })],
+);
+
+export type OperatorRollup = typeof operator_rollups.$inferSelect;

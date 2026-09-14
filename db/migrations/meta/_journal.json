@@ -1247,6 +1247,13 @@
       "when": 1791676800000,
       "tag": "0177_invite_skips_org_autocreate",
       "breakpoints": true
+    },
+    {
+      "idx": 178,
+      "version": "7",
+      "when": 1791763200000,
+      "tag": "0178_operator_rollups",
+      "breakpoints": true
     }
   ]
 }

@@ -70,6 +70,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // (ClickUp 869evpmbz). Reachable by a token because answering "how many
   // fresh leads" is the whole reason the token exists.
   "audience/fresh-counts": { methods: ["GET"], token: ["GET"] },
+  "audience/pools": { methods: ["GET"], token: ["GET"] },
 
   // ── audit-log ─────────────────────────────────────────────────────────
   // Owner-only audit feed. Denied to the operator: it is a record OF them.
@@ -224,6 +225,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/lookup-worker": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/propagate-clickers": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-contact-stats": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/refresh-audience-pools": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-fresh-counts": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-offer-group-report": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/report-rollup": null, // cron / webhook / import machinery -- no operator session reaches these

@@ -2,6 +2,34 @@
 
 _Last updated: 2026-09-14_
 
+## Audience pools — rest is measured from the last message sent (2026-09-14)
+
+`GET /api/audience/pools` ([lib/audience/pools.ts](../lib/audience/pools.ts))
+answers "who could still get offer X" from a 30-minute rollup in
+`operator_rollups` (migration 0178). Spec:
+[superpowers/specs/2026-09-14-operator-api-pools-creative-design.md](superpowers/specs/2026-09-14-operator-api-pools-creative-design.md).
+
+- **Rest = whole days since the contact's last `status='sent'` message of ANY
+  offer**, measured from the snapshot instant — NOT campaign creation, which is
+  fresh-counts' basis. Different on purpose, and both are spelled out to the caller.
+- **One org-wide pass covers every offer.** Rest needs each contact's last send
+  of any offer, so the `stage_sends` scan is org-wide whatever the offer count;
+  grouping by (contact, offer) in the same pass makes every offer free. 40.2s on
+  prod (2026-09-14) at default `work_mem` — kept at default because the send
+  drain shares the database.
+- **Store histograms, not answers.** Per group and per offer the rollup stores
+  contacts per rest bucket (0..30 days, 31 = 31+ or never), so any `rest_days`
+  0–30 is an exact sum of the buckets ≥ N
+  ([lib/audience/pool-math.ts](../lib/audience/pool-math.ts)) — no recompute per
+  parameter value.
+- **Verify a rollup over live data inside one REPEATABLE READ transaction.**
+  `scripts/verify-audience-pools.ts` runs the rollup statement and an independent
+  per-contact recount in the same snapshot — the same rows and the same frozen
+  `now()` — so sends landing mid-check cannot fail an exact comparison.
+- **`stage_sends` has no index leading with `contact_id`.** A per-contact probe
+  goes through `stage_sends_org_phone_sent_idx (org_id, phone, sent_at) WHERE
+  status='sent'` with `contact_id` as an extra filter.
+
 ## Grading metrics — one vocabulary for the operator API (2026-09-14)
 
 The creative-grading fields a personal token sees are defined once, in

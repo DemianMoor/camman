@@ -27,7 +27,8 @@ import {
 } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
-import { getCountedClickers } from "@/lib/reporting/counted-clickers";
+import { denominatorFor, getCountedClickers } from "@/lib/reporting/counted-clickers";
+import { gradingRates } from "@/lib/reporting/grading-rates";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { buildStageFullUrl, validateBrandLpShape, validateDestination } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
@@ -339,7 +340,9 @@ export async function GET(
         count(*) FILTER (WHERE status = 'sending')::int AS sending,
         count(*) FILTER (WHERE status = 'sent')::int AS sent,
         count(*) FILTER (WHERE status = 'failed')::int AS failed,
-        count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate
+        count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate,
+        -- Per-recipient offer reach (operator-API grading). Same scan, no extra query.
+        count(*) FILTER (WHERE offer_reached_at IS NOT NULL)::int AS reached
       FROM stage_sends
       WHERE org_id = ${orgId} AND campaign_id = ${cid}
       GROUP BY stage_id
@@ -371,6 +374,7 @@ export async function GET(
       sent: number;
       failed: number;
       skipped_duplicate: number;
+      reached: number;
     }[],
     {
       stage_id: number;
@@ -407,6 +411,34 @@ export async function GET(
   );
 
   const countedClickersByStage = await countedClickersPromise;
+  const reachedByStage = new Map(
+    sendCountRows.map((r) => [Number(r.stage_id), Number(r.reached)]),
+  );
+  // Operator-API grading fields (docs/07-conventions.md "Grading metrics").
+  // Manual-mode stages mint no links: reach is unknowable (null), and the
+  // clicker figure falls back to Keitaro clean visits exactly as the EPC
+  // denominator does.
+  const gradingFor = (r: (typeof rows)[number]) => {
+    const tracked = linkMode === "tracked";
+    const keitaro = keitaroByStage.get(r.id);
+    const reached = tracked ? reachedByStage.get(r.id) ?? 0 : null;
+    const clicksHuman = denominatorFor(
+      linkMode,
+      countedClickersByStage.get(r.id),
+      keitaro?.visitClicksClean ?? 0,
+    );
+    return {
+      reached,
+      clicks_human: clicksHuman,
+      ...gradingRates({
+        sent: tracked ? sendCountsByStage.get(r.id)?.sent ?? 0 : r.sms_count ?? 0,
+        opt_outs: r.inbound_opt_out_count ?? 0,
+        clicks_human: clicksHuman,
+        reached,
+        conversions: keitaro?.sales ?? 0,
+      }),
+    };
+  };
 
   let data = rows.map((r, i) => ({
     ...r,
@@ -434,6 +466,7 @@ export async function GET(
       failed: 0,
       skippedDuplicate: 0,
     },
+    ...gradingFor(r),
   }));
 
   // audience_count is derived in JS post-query; sort it here when the

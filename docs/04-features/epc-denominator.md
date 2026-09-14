@@ -1,6 +1,6 @@
 # Feature — EPC denominator (counted clickers)
 
-_Last updated: 2026-08-27_
+_Last updated: 2026-09-14_
 
 ## 1. Purpose
 
@@ -69,6 +69,7 @@ That distinction was got wrong once and is worth stating plainly: the by-dimensi
 | `/creatives` + picker | creative | ✅ |
 | `/offers/[id]/report` cells | offer × group | ✅ (0128) |
 | `/offers/[id]/report` footer | offer | ✅ (0128) |
+| `/api/reports/performance` totals | report (campaign + contact) | ✅ (2026-09-14 — was a sum of per-stage counts) |
 | `/offers/[id]/report` benchmark | org | ✅ (0128) |
 
 **By Group is exempt by construction.** Its metrics are fractionally split across each contact's groups — a contact in three of a campaign's used groups contributes ⅓ to each — and a fractional share has no set to take a `DISTINCT` over. Its click counts are split sums and are **not comparable** with the other tabs. The UI says so on the tab; this is a documented exemption, not a silent inconsistency.

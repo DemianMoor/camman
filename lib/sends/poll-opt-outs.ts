@@ -18,6 +18,7 @@ import {
 import { validatePhone } from "@/lib/phone-validation";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 import { closeJourneyOnOptOut } from "@/lib/drip/lifecycle";
+import { OPT_OUT_ATTRIBUTION_WINDOW_HOURS } from "@/lib/sends/opt-out-window";
 
 // Polls TextHub's inbox per credential and turns inbound STOP messages into
 // org-wide opt_outs. Idempotent: each TextHub message id is recorded once in
@@ -50,7 +51,11 @@ import { closeJourneyOnOptOut } from "@/lib/drip/lifecycle";
 // Trailing window: a STOP credits any stage that sent to the number in the last
 // 72h. Tunable — the single knob for how aggressively one STOP spreads across
 // recently-used campaigns.
-export const OPT_OUT_ATTRIBUTION_WINDOW_HOURS = 72;
+//
+// The value lives in the zero-import lib/sends/opt-out-window.ts (2026-09-14) so
+// read-only reporting can read it without loading this module's send-side
+// dependencies; re-exported here so existing importers are unchanged.
+export { OPT_OUT_ATTRIBUTION_WINDOW_HOURS };
 
 // TextHub stamps inbound `received_at` in US Mountain Time with no zone suffix
 // (operator-confirmed; empirically our own ingest clock ran ~6h ahead of the

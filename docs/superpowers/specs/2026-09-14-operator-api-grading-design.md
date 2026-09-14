@@ -165,7 +165,9 @@ by construction.
 
 ### `GET /api/reports/opt-outs?dimension=number|campaign|stage|group&from&to&granularity=day` — `campaigns.view`
 Send-day cohort per ET day per dimension value. `from`/`to` default today ET,
-max 31 days; `granularity` accepts only `day` (default). `maxDuration = 60`.
+max **14** days (revised from 31 during PR 3: the number dimension measured 11.8s
+for 7 days, so 31 would sit at the 60s route limit); `granularity` accepts only
+`day` (default). `maxDuration = 60`.
 
 ```json
 {

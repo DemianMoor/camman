@@ -38,6 +38,17 @@ and the per-surface queries that feed it. Spec:
   digit or `.`, and carries a control proving a real phone string still goes red.
   `scripts/verify-operator-access.ts` still uses the bare pattern and can
   false-positive the same way on a summed float.
+- **Two attribution bases, each with its own stage set.** `conversion_date` (the
+  default, unchanged) takes the stages with a Keitaro row OR a send in range and
+  dates every metric by its own event. `send_date` takes ONLY the stages sent in
+  range (the cohort) and drops every date window, so a cohort's totals keep
+  growing for days as tails, late STOPs and late clicks land. A cohort's clickers
+  are scoped by `CountedClickerBounds.stageIds` — and an EMPTY list must return
+  nothing, never everything (`stageIdFilter` emits `AND false`).
+- **Tails split one day's tracker conversions three ways that always add up:**
+  same-day (stage sent that ET day), tail (sent on an earlier day — returned as
+  rows), and unknown (no `sent_at`, or a `sent_at` later than the conversion day,
+  which a real sale cannot be).
 
 ## A role nobody holds is untested by construction (2026-09-11)
 

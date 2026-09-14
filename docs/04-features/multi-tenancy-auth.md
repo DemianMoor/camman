@@ -1,6 +1,6 @@
 # Feature — Multi-tenancy, Auth & Permissions
 
-_Last updated: 2026-09-11_
+_Last updated: 2026-09-14_
 
 ## 1. Purpose
 Isolate every org's data behind an `org_id`, authenticate users via Supabase Auth, and enforce a five-role permission model on both server and client. A missing `org_id` filter is a data-leak bug — this is the most safety-critical convention in the codebase.
@@ -308,6 +308,30 @@ file gates a whole subtree without converting any page:
 
 The API routes behind those pages deny independently; the layout is defence in
 depth, not the control.
+
+### Contact group NAMES are open to the operator — the screen is not (2026-09-14)
+
+Contact groups became a required campaign field (`31db02f`) after Phase 2 had
+already denied `contact-groups/list` to the operator, so the operator could not
+create a campaign at all. The fix opens exactly one route, for pickers:
+
+| Surface | Operator |
+|---|---|
+| `GET /api/contact-groups/list` — campaign audience picker, segment rule picker | **allowed**: id, name, color, count |
+| `/contact-groups` page + nav item | denied (layout guard on `contact_groups.view`) |
+| `contact-groups/[id]`, `[id]/contacts`, add/remove/archive/restore | denied (route map) |
+
+The list route no longer requires `contact_groups.view`; it accepts that **or**
+`campaigns.create` — anyone who can build a campaign can choose its groups. The
+permission itself was deliberately **not** granted to the operator: it is also
+the key for the page guard, the nav item and `[id]/contacts` (phone numbers).
+
+⚠️ **Descriptions are blanked for picker-only callers, and excluded from their
+search.** A description is a free-text note and can name where a list came from
+(one in production reads "Test group from Big Data group"). Blanking it without
+also dropping it from the `search` filter would let a caller recover the text by
+probing substrings. The picker renders only id, name and color, so nothing
+visible changes.
 
 ### Identity linking
 

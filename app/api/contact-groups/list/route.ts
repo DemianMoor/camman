@@ -20,11 +20,21 @@ const SORT_COLUMNS = {
 } as const;
 
 export async function GET(req: NextRequest) {
-  const auth = await requireApiMembership();
+  const auth = await requireApiMembership({
+    route: "contact-groups/list",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
-  if (!can(role, "contact_groups.view")) {
+  // Two kinds of caller. The Contact Groups screen needs `contact_groups.view`.
+  // The campaign audience picker and the segment rule picker only need names to
+  // choose from, so anyone who can build a campaign may list them — which is
+  // what lets the operator fill the required Contact groups field. The
+  // contact-level endpoint (`[id]/contacts`) stays denied to the operator in
+  // lib/authz/route-map.ts.
+  const fullView = can(role, "contact_groups.view");
+  if (!fullView && !can(role, "campaigns.create")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
@@ -37,7 +47,9 @@ export async function GET(req: NextRequest) {
       or(
         ilike(contact_groups.name, pattern),
         ilike(contact_groups.contact_group_id, pattern),
-        ilike(contact_groups.description, pattern),
+        // Picker-only callers can't see descriptions, so they can't search them
+        // either — otherwise a search would reveal what a description says.
+        ...(fullView ? [ilike(contact_groups.description, pattern)] : []),
       )!,
     );
   }
@@ -82,8 +94,10 @@ export async function GET(req: NextRequest) {
       .where(where),
   ]);
 
+  // Descriptions are free-text notes and can name where a list came from
+  // ("Test group from Big Data group"). Picker-only callers don't get them.
   return NextResponse.json({
-    data: rows,
+    data: fullView ? rows : rows.map((r) => ({ ...r, description: null })),
     totalCount: countRows[0]?.count ?? 0,
     page: params.page,
     pageSize: params.pageSize,

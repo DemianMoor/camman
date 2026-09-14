@@ -1,6 +1,6 @@
 # Feature — Contacts, Contact Groups, Opt-outs/ins & Clickers
 
-_Last updated: 2026-07-02_
+_Last updated: 2026-09-14_
 
 ## 1. Purpose
 The central phone registry and the suppression/engagement records attached to it. Contacts are the atomic audience unit (scaling to millions); contact groups are tags; opt-outs/ins and clickers are the status signals that audience filters and segment rules read.
@@ -40,6 +40,7 @@ The central phone registry and the suppression/engagement records attached to it
 - Opt-outs are **append-only** — multiple rows per contact over time (different sources/scopes) are expected.
 - Contact-status import maps free text → `opt_out` / `suppressed` / `scrubbed` reasons ([`lib/imports/contact-status.ts`](../../lib/imports/contact-status.ts)).
 - Permissions: upload = operator+; delete = manager+ (`contacts.delete`, `opt_outs.delete`, etc.).
+- `GET /api/contact-groups/list` accepts `contact_groups.view` **or** `campaigns.create`, so the operator can pick groups in the campaign form and segment rules without access to the Contact Groups screen. Callers without `contact_groups.view` get `description: null` and cannot search descriptions. See [multi-tenancy-auth.md](multi-tenancy-auth.md).
 
 ## 7. Extension points / limitations
 - No per-contact send history yet (`has_been_sent_*` deferred — CLAUDE.md §12). The segment-rules system is structured to absorb a `has_been_sent_to_by_campaign` rule type without schema churn.

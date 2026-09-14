@@ -62,6 +62,9 @@ export async function GET() {
       s.send_approved   AS send_approved,
       s.status          AS status,
       s.tracking_id     AS tracking_id,
+      -- Creative identity, so same-day text collisions are checkable in one call.
+      s.creative_id     AS creative_id,
+      cr.slug           AS creative_slug,
       c.id              AS campaign_id,
       c.name            AS campaign_name,
       c.link_mode       AS link_mode,
@@ -82,6 +85,7 @@ export async function GET() {
     JOIN campaigns c ON c.id = s.campaign_id AND c.org_id = ${orgId}
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id AND p.org_id = ${orgId}
     LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id AND pp.org_id = ${orgId}
+    LEFT JOIN creatives cr ON cr.id = s.creative_id AND cr.org_id = ${orgId}
     WHERE s.org_id = ${orgId}
       AND s.status <> 'archived'
       AND c.link_mode = 'tracked'
@@ -106,6 +110,8 @@ export async function GET() {
     send_approved: boolean;
     status: string;
     tracking_id: string | null;
+    creative_id: number | null;
+    creative_slug: string | null;
     campaign_id: number;
     campaign_name: string;
     link_mode: string;
@@ -250,6 +256,8 @@ export async function GET() {
       campaign_id: Number(r.campaign_id),
       campaign_name: r.campaign_name,
       tracking_id: r.tracking_id,
+      creative_id: r.creative_id == null ? null : Number(r.creative_id),
+      creative_slug: r.creative_slug,
       scheduled_at: r.scheduled_at,
       sent_at: r.sent_at,
       schedule_missed_at: r.schedule_missed_at,

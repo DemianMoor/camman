@@ -6,7 +6,11 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
-import { autoMoveStageStatus } from "@/lib/stages/auto-status";
+import {
+  autoMoveStageStatus,
+  logAutoStatusMove,
+  type AutoStatusMove,
+} from "@/lib/stages/auto-status";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -115,14 +119,18 @@ export async function POST(
 
     // A Pending the system set when the stage finished preparing goes back to
     // Draft. A status the operator picked by hand is left alone.
-    await autoMoveStageStatus(tx, {
+    const move: AutoStatusMove = {
       orgId,
       campaignId,
       stageId,
       from: "pending",
       to: "draft",
       reason: "send cancelled",
-    });
+    };
+    const movedStageNumber = await autoMoveStageStatus(tx, move);
+    if (movedStageNumber != null) {
+      await logAutoStatusMove(tx, move, movedStageNumber);
+    }
 
     return { discarded: rejected.length };
   });

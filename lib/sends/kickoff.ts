@@ -16,7 +16,11 @@ import {
   ensureGroupSourceResolved,
   settleSplitGroup,
 } from "@/lib/stages/split-group";
-import { autoMoveStageStatus } from "@/lib/stages/auto-status";
+import {
+  autoMoveStageStatus,
+  logAutoStatusMove,
+  type AutoStatusMove,
+} from "@/lib/stages/auto-status";
 import { getDescriptor } from "@/lib/sends/providers/registry";
 import {
   optOutGateSubject,
@@ -801,26 +805,32 @@ async function resolveProviderKeyForGuard(
 }
 
 // Stamp materialized_at exactly once (only when currently NULL). The stamp and
-// the draft ⇒ pending status move share one transaction, so a stage can never be
-// left Prepared-but-Draft by a crash between them (lib/stages/auto-status.ts).
+// the draft ⇒ pending status move share one transaction, so a crash between them
+// can't leave a stage Prepared-but-Draft (lib/stages/auto-status.ts).
 async function markMaterialized(
   dbc: typeof db,
   ids: { orgId: string; campaignId: number; stageId: number },
 ): Promise<void> {
-  await dbc.transaction(async (tx) => {
+  const move: AutoStatusMove = {
+    ...ids,
+    from: "draft",
+    to: "pending",
+    reason: "messages prepared",
+  };
+  const movedStageNumber = await dbc.transaction(async (tx) => {
     const stamped = (await tx.execute(sql`
       UPDATE campaign_stages SET materialized_at = now()
       WHERE id = ${ids.stageId} AND materialized_at IS NULL
       RETURNING id
     `)) as unknown as { id: number }[];
-    if (stamped.length === 0) return;
-    await autoMoveStageStatus(tx, {
-      ...ids,
-      from: "draft",
-      to: "pending",
-      reason: "messages prepared",
-    });
+    if (stamped.length === 0) return null;
+    return autoMoveStageStatus(tx, move);
   });
+  // Logged after commit: a failed audit insert inside the transaction would roll
+  // the materialized_at stamp back with it.
+  if (movedStageNumber != null) {
+    await logAutoStatusMove(dbc, move, movedStageNumber);
+  }
 }
 
 interface StageSendInsertRow {

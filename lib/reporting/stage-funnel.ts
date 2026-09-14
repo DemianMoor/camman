@@ -50,6 +50,10 @@ export interface StageMetrics {
   // Computed metrics (identical to Overview).
   opt_outs: number;
   total_sent: number;
+  // Per-recipient offer reach: stage_sends.offer_reached_at dated by REACH day
+  // in range. null for manual-mode stages — they mint no links, so reach is
+  // unknowable, and null must never read as a real zero.
+  reached: number | null;
   tally: FunnelTally; // visit_clicks_clean = clickers, redirect_clicks_clean = offer redirect, sales, revenue, cost
 }
 
@@ -157,6 +161,7 @@ export async function getStageMetricsInRange(
         brand_id: r.brand_id ?? null,
         opt_outs: 0,
         total_sent: 0,
+        reached: null,
         tally: emptyFunnel(),
       };
       byStage.set(r.stage_id, acc);
@@ -221,6 +226,7 @@ export async function getStageMetricsInRange(
       brand_id: r.brand_id ?? null,
       opt_outs: 0,
       total_sent: 0,
+      reached: null,
       tally: emptyFunnel(),
     });
     anchor.set(r.stage_id, {
@@ -236,7 +242,7 @@ export async function getStageMetricsInRange(
   let grandSalesTopup = 0;
   let grandTotalCost = 0;
   if (stageIds.length > 0) {
-    const [optOutRows, sentRows, manualSalesByStage] = await Promise.all([
+    const [optOutRows, sentRows, manualSalesByStage, reachedRows] = await Promise.all([
       db
         .select({ stage_id: opt_out_attributions.stage_id, n: sql<number>`count(*)::int` })
         .from(opt_out_attributions)
@@ -263,15 +269,33 @@ export async function getStageMetricsInRange(
         )
         .groupBy(stage_sends.stage_id),
       manualSalesByStageInRange({ orgId, fromUtc, toExclusiveUtc }),
+      // Per-recipient offer reach by REACH day (operator-API grading). Counted
+      // for the stages already in the set: a reach is an offer click, which
+      // Keitaro books the same day, so a reached stage already has a row here
+      // (measured 0 reach-only stages on 1-day and 7-day ranges).
+      db
+        .select({ stage_id: stage_sends.stage_id, n: sql<number>`count(*)::int` })
+        .from(stage_sends)
+        .where(
+          and(
+            eq(stage_sends.org_id, orgId),
+            inArray(stage_sends.stage_id, stageIds),
+            gte(stage_sends.offer_reached_at, fromUtc),
+            lt(stage_sends.offer_reached_at, toExclusiveUtc),
+          ),
+        )
+        .groupBy(stage_sends.stage_id),
     ]);
     const optOutsByStage = new Map(optOutRows.map((o) => [o.stage_id, Number(o.n)]));
     const sentByStage = new Map(sentRows.map((s) => [s.stage_id, Number(s.sent)]));
+    const reachedByStage = new Map(reachedRows.map((r) => [r.stage_id, Number(r.n)]));
     const sentInRange = (sentAt: Date | null): boolean =>
       sentAt != null && sentAt >= fromUtc && sentAt < toExclusiveUtc;
 
     for (const acc of byStage.values()) {
       const a = anchor.get(acc.stage_id)!;
       acc.opt_outs = optOutsByStage.get(acc.stage_id) ?? 0;
+      acc.reached = acc.link_mode === "tracked" ? reachedByStage.get(acc.stage_id) ?? 0 : null;
       const inRange = sentInRange(a.sentAt);
       acc.total_sent =
         acc.link_mode === "tracked"

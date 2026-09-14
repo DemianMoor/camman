@@ -6,6 +6,7 @@ import { can } from "@/lib/permissions";
 import {
   getPerformanceReport,
   getReportProviderOptions,
+  gradePerf,
 } from "@/lib/reporting/performance-report";
 import {
   REPORT_DIMENSIONS,
@@ -72,8 +73,9 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     dimension,
-    data: report.rows,
-    totals: report.totals,
+    // Operator-API grading fields on every row and the totals (gradePerf).
+    data: report.rows.map((r) => gradePerf(r)),
+    totals: gradePerf(report.totals),
     refreshedAt: report.refreshedAt,
     providers,
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },

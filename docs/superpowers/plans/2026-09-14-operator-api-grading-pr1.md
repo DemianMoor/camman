@@ -468,7 +468,7 @@ async function dedupeTotalClickers(
 }
 ```
 9. `applyDimensionDistinctClickers`: replace its inline `fromUtc` / `nextDay` / `toExclusiveUtc` lines with `const { fromUtc, toExclusiveUtc } = etRangeUtc(b);`.
-10. `distributeToGroups`: `const [wSent, wClick, wSale, wOpt, wReach] = await Promise.all([` adding `trackedWeights(orgId, trackedIds, b, "reach"),`; in the tracked branch after the `redirects` spread add:
+10. `distributeToGroups`: add `const wReach = await trackedWeights(orgId, trackedIds, b, "reach");` AFTER the existing four-way `Promise.all` — not inside it (revised in build: By Group's click-weight query walks every human click, ~50s at any range, and a fifth concurrent query adds contention near the 2-minute statement timeout); in the tracked branch after the `redirects` spread add:
 ```ts
       if (m.reached != null) {
         spread(add, m.reached, nonEmpty(wReach.get(s.stage_id)) ?? sentW, "reached");

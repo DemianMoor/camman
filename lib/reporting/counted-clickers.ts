@@ -298,20 +298,27 @@ export async function getCountedClickers(
 
 // Org-wide total at a given grain. NOT the sum of getCountedClickers values —
 // see the non-additivity note above; a contact spanning two campaigns counts
-// once here and twice there.
+// once here and twice there. `opts.providerPhoneId` narrows it to stages sent
+// from one number (the performance report's number filter). Columns are
+// qualified because that filter joins campaign_stages, which also has org_id.
 export async function getTotalCountedClickers(
   dbc: DbOrTx,
   orgId: string,
   b: CountedClickerBounds = {},
+  opts: { providerPhoneId?: number | null } = {},
 ): Promise<number> {
   const dateFilter =
     b.fromUtc && b.toExclusiveUtc
-      ? sql`AND first_click_at >= ${b.fromUtc.toISOString()}::timestamptz AND first_click_at < ${b.toExclusiveUtc.toISOString()}::timestamptz`
+      ? sql`AND cc.first_click_at >= ${b.fromUtc.toISOString()}::timestamptz AND cc.first_click_at < ${b.toExclusiveUtc.toISOString()}::timestamptz`
+      : sql``;
+  const providerJoin =
+    opts.providerPhoneId != null
+      ? sql`JOIN campaign_stages cs ON cs.id = cc.stage_id AND cs.provider_phone_id = ${opts.providerPhoneId}`
       : sql``;
   const rows = (await dbc.execute(sql`
-    SELECT count(DISTINCT (campaign_id::text || ':' || contact_id::text))::int AS n
-    FROM counted_clickers
-    WHERE org_id = ${orgId}::uuid ${dateFilter}
+    SELECT count(DISTINCT (cc.campaign_id::text || ':' || cc.contact_id::text))::int AS n
+    FROM counted_clickers cc ${providerJoin}
+    WHERE cc.org_id = ${orgId}::uuid ${dateFilter}
   `)) as unknown as { n: number }[];
   return Number(rows[0]?.n ?? 0);
 }

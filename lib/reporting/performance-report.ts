@@ -8,11 +8,18 @@ import {
   DIMENSION_NONE_KEY,
   denominatorFor,
   getCountedClickersByDimension,
+  getTotalCountedClickers,
   type ReportDimensionKey,
 } from "@/lib/reporting/counted-clickers";
+import {
+  addNullable,
+  gradingRates,
+  type GradingRates,
+} from "@/lib/reporting/grading-rates";
 import type { ReportDimension } from "@/lib/reporting/report-dimensions";
 import {
   getStageMetricsInRange,
+  type ClickerDenominators,
   type StageMetrics,
 } from "@/lib/reporting/stage-funnel";
 
@@ -34,6 +41,10 @@ export interface PerfMetrics {
   opt_outs: number;
   clickers: number;
   redirects: number;
+  // Per-recipient offer reach (stage_sends.offer_reached_at). null only when
+  // every stage in the row is manual-mode (see addNullable). Operator-API
+  // grading input.
+  reached: number | null;
   // The EPC denominator — counted clickers (lib/reporting/counted-clickers.ts),
   // the same source every other surface divides by. `clickers` above is the
   // Keitaro landing-visit count and is display-only; `redirects` is no longer a
@@ -88,6 +99,9 @@ const ZERO: PerfMetrics = {
   opt_outs: 0,
   clickers: 0,
   redirects: 0,
+  // null, not 0: it is addNullable's identity. Starting an accumulator at 0 would
+  // turn a row made only of manual-mode stages into a real-looking 0.
+  reached: null,
   counted_clickers: 0,
   lifetime_clickers: 0,
   lifetime_revenue: 0,
@@ -107,6 +121,7 @@ function stageMetrics(
     opt_outs: s.opt_outs,
     clickers: s.tally.visit_clicks_clean,
     redirects: s.tally.redirect_clicks_clean,
+    reached: s.reached,
     counted_clickers: denominatorFor(
       s.link_mode,
       countedByStage.get(s.stage_id),
@@ -130,6 +145,7 @@ function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     opt_outs: a.opt_outs + b.opt_outs,
     clickers: a.clickers + b.clickers,
     redirects: a.redirects + b.redirects,
+    reached: addNullable(a.reached, b.reached),
     counted_clickers: a.counted_clickers + b.counted_clickers,
     lifetime_clickers: a.lifetime_clickers + b.lifetime_clickers,
     lifetime_revenue: a.lifetime_revenue + b.lifetime_revenue,
@@ -144,6 +160,7 @@ function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     opt_outs: m.opt_outs * f,
     clickers: m.clickers * f,
     redirects: m.redirects * f,
+    reached: m.reached == null ? null : m.reached * f,
     counted_clickers: m.counted_clickers * f,
     lifetime_clickers: m.lifetime_clickers * f,
     lifetime_revenue: m.lifetime_revenue * f,
@@ -169,6 +186,37 @@ interface Bounds {
   providerPhoneId: number | null;
 }
 
+// ET day range → [fromUtc, toExclusiveUtc), identical to stage-funnel's window.
+function etRangeUtc(b: Bounds): { fromUtc: Date; toExclusiveUtc: Date } {
+  const nextDay = new Date(Date.parse(`${b.to}T00:00:00Z`) + 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  return {
+    fromUtc: fromZonedTime(`${b.from}T00:00:00`, CAMPAIGN_TIMEZONE),
+    toExclusiveUtc: fromZonedTime(`${nextDay}T00:00:00`, CAMPAIGN_TIMEZONE),
+  };
+}
+
+export type GradedPerfMetrics<T extends PerfMetrics = PerfMetrics> = T &
+  GradingRates & { clicks_human: number };
+
+// The operator-API grading fields for one row or the totals. `clicks_human` IS
+// the row's counted clickers (the EPC denominator) under the name every
+// operator-API surface uses; conversions are the row's tracker `sales`.
+export function gradePerf<T extends PerfMetrics>(m: T): GradedPerfMetrics<T> {
+  return {
+    ...m,
+    clicks_human: m.counted_clickers,
+    ...gradingRates({
+      sent: m.sent,
+      opt_outs: m.opt_outs,
+      clicks_human: m.counted_clickers,
+      reached: m.reached,
+      conversions: m.sales,
+    }),
+  };
+}
+
 export async function getPerformanceReport(
   orgId: string,
   dimension: ReportDimension,
@@ -188,6 +236,7 @@ export async function getPerformanceReport(
       : stages;
 
   const totals = filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), { ...ZERO });
+  await dedupeTotalClickers(orgId, b, filtered, totals, clickers);
   const refreshedAt = await maxSyncedAt(orgId);
 
   let rows: PerfRow[];
@@ -207,6 +256,34 @@ export async function getPerformanceReport(
     await applyDimensionDistinctClickers(orgId, dimension, b, rows, filtered);
   }
   return { dimension, rows, totals, refreshedAt };
+}
+
+// The totals row dedupes clickers at REPORT grain — distinct (campaign,
+// contact), the Overview totals-card definition — instead of summing per-stage
+// counts, which double-counts anyone who clicked two stages. Manual stages add
+// their Keitaro visits (an aggregate with no set to dedup), same as dimension rows.
+async function dedupeTotalClickers(
+  orgId: string,
+  b: Bounds,
+  stages: StageMetrics[],
+  totals: PerfMetrics,
+  clickers: ClickerDenominators,
+): Promise<void> {
+  const manualVisits = stages
+    .filter((s) => s.link_mode !== "tracked")
+    .reduce((a, s) => a + s.tally.visit_clicks_clean, 0);
+  if (b.providerPhoneId == null) {
+    totals.counted_clickers = clickers.periodTotal + manualVisits;
+    totals.lifetime_clickers = clickers.lifetimeTotal + manualVisits;
+    return;
+  }
+  const opts = { providerPhoneId: b.providerPhoneId };
+  const [period, lifetime] = await Promise.all([
+    getTotalCountedClickers(db, orgId, etRangeUtc(b), opts),
+    getTotalCountedClickers(db, orgId, {}, opts),
+  ]);
+  totals.counted_clickers = period + manualVisits;
+  totals.lifetime_clickers = lifetime + manualVisits;
 }
 
 // ---- number / offer / sequence: group the shared stage metrics -------------
@@ -283,11 +360,7 @@ async function applyDimensionDistinctClickers(
 ): Promise<void> {
   // Same ET-range → UTC conversion stage-funnel uses, so the period window here
   // is byte-identical to the one the funnel metrics were computed over.
-  const fromUtc = fromZonedTime(`${b.from}T00:00:00`, CAMPAIGN_TIMEZONE);
-  const nextDay = new Date(Date.parse(`${b.to}T00:00:00Z`) + 86_400_000)
-    .toISOString()
-    .slice(0, 10);
-  const toExclusiveUtc = fromZonedTime(`${nextDay}T00:00:00`, CAMPAIGN_TIMEZONE);
+  const { fromUtc, toExclusiveUtc } = etRangeUtc(b);
   const [period, lifetime] = await Promise.all([
     getCountedClickersByDimension(db, orgId, dimension as ReportDimensionKey, {
       fromUtc,
@@ -340,6 +413,12 @@ async function distributeToGroups(
     trackedWeights(orgId, trackedIds, b, "sale"),
     trackedWeights(orgId, trackedIds, b, "optout"),
   ]);
+  // Reach weights run AFTER that batch, deliberately not inside it. The click
+  // query above walks every scored-human click (~50s at any range, measured
+  // 2026-09-14) and already brushes the 2-minute statement timeout when its
+  // siblings contend with it; a fifth concurrent query would push it over more
+  // often. Sequenced here it costs ~4s of wall time and adds no contention.
+  const wReach = await trackedWeights(orgId, trackedIds, b, "reach");
   // Per-(campaign, group) allocation weights for manual campaigns.
   const manualAlloc = await manualAllocationWeights(orgId, manualCampaignIds);
   // Campaign → used contact groups, for the last-resort equal split that
@@ -372,6 +451,11 @@ async function distributeToGroups(
       spread(add, m.lifetime_clickers, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "lifetime_clickers");
       spread(add, m.lifetime_revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "lifetime_revenue");
       spread(add, m.redirects, nonEmpty(wClick.get(s.stage_id)) ?? sentW, "redirects");
+      // Reach splits on who REACHED (per-contact reach weights), like sales on
+      // who converted. Only tracked stages carry a reach to split.
+      if (m.reached != null) {
+        spread(add, m.reached, nonEmpty(wReach.get(s.stage_id)) ?? sentW, "reached");
+      }
       spread(add, m.sales, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "sales");
       spread(add, m.revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "revenue");
       spread(add, m.cost, sentW, "cost");
@@ -391,6 +475,7 @@ async function distributeToGroups(
       opt_outs: round2(m.opt_outs),
       clickers: round2(m.clickers),
       redirects: round2(m.redirects),
+      reached: m.reached == null ? null : round2(m.reached),
       counted_clickers: round2(m.counted_clickers),
       lifetime_clickers: round2(m.lifetime_clickers),
       lifetime_revenue: round2(m.lifetime_revenue),
@@ -443,7 +528,7 @@ function shares(weights: Map<number, number>): Map<number, number> {
   return out;
 }
 
-type WeightBasis = "sent" | "click" | "sale" | "optout";
+type WeightBasis = "sent" | "click" | "sale" | "optout" | "reach";
 
 // Per-(stage, group) weight = Σ over the stage's qualifying contacts of 1/k,
 // where k = how many of the contact's groups were USED in the campaign audience.
@@ -478,7 +563,14 @@ async function trackedWeights(
         JOIN campaign_stages cs ON cs.id = ss.stage_id
         WHERE ss.org_id = ${orgId}::uuid AND ss.converted_at IS NOT NULL
           AND ss.stage_id IN (${inList(stageIds)})`
-          : sql`
+          : basis === "reach"
+            ? sql`
+        SELECT ss.stage_id, ss.contact_id, cs.campaign_id
+        FROM stage_sends ss
+        JOIN campaign_stages cs ON cs.id = ss.stage_id
+        WHERE ss.org_id = ${orgId}::uuid AND ss.offer_reached_at IS NOT NULL
+          AND ss.stage_id IN (${inList(stageIds)})`
+            : sql`
         SELECT ss.stage_id, ss.contact_id, cs.campaign_id
         FROM stage_sends ss
         JOIN campaign_stages cs ON cs.id = ss.stage_id
@@ -562,7 +654,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[];
 
-  const [sentRows, clicks, redirects, sales, revenue, optouts] = await Promise.all([
+  const [sentRows, clicks, redirects, sales, revenue, optouts, clickerRows] = await Promise.all([
     // Sent messages by SEND hour (tracked stage_sends; manual-campaign sends have
     // no per-message time and roll up into the Manual row). This is the one column
     // bucketed by send time, not activity time — it's the denominator for the rates.
@@ -597,16 +689,32 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
         AND oa.created_at >= ${rangeStart} AND oa.created_at < ${rangeEnd}
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[],
+    // Distinct counted clickers (the EPC denominator) by FIRST-click ET hour.
+    (await db.execute(sql`
+      SELECT ${hourExpr("cc.first_click_at")} AS hour, count(DISTINCT cc.contact_id)::int AS v
+      FROM counted_clickers cc
+      ${provFilter ? sql`JOIN campaign_stages cs ON cs.id = cc.stage_id AND cs.provider_phone_id = ${b.providerPhoneId}` : sql``}
+      WHERE cc.org_id = ${orgId}::uuid
+        AND cc.first_click_at >= ${rangeStart} AND cc.first_click_at < ${rangeEnd}
+      GROUP BY 1
+    `)) as unknown as { hour: number; v: number }[],
   ]);
 
   const hours = new Map<number, PerfMetrics>();
   const bump = (h: number, field: keyof PerfMetrics, v: number) => {
-    if (!hours.has(h)) hours.set(h, { ...ZERO });
+    // Hour buckets are built from tracked per-recipient events, so an hour with
+    // no reach is a real 0 — unlike ZERO's null, which marks "no per-recipient data".
+    if (!hours.has(h)) hours.set(h, { ...ZERO, reached: 0 });
     (hours.get(h)![field] as number) += v;
   };
   for (const r of sentRows) bump(r.hour, "sent", Number(r.v));
   for (const r of clicks) bump(r.hour, "clickers", Number(r.v));
-  for (const r of redirects) bump(r.hour, "redirects", Number(r.v));
+  for (const r of redirects) {
+    bump(r.hour, "redirects", Number(r.v));
+    // Hourly "redirects" already IS per-recipient reach by reach hour.
+    bump(r.hour, "reached", Number(r.v));
+  }
+  for (const r of clickerRows) bump(r.hour, "counted_clickers", Number(r.v));
   for (const r of sales) bump(r.hour, "sales", Number(r.v));
   for (const r of revenue) bump(r.hour, "revenue", Number(r.v));
   for (const r of optouts) bump(r.hour, "opt_outs", Number(r.v));
@@ -623,6 +731,10 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
   }
 
   const totals = rows.reduce((acc, r) => addMetrics(acc, r), { ...ZERO });
+  // Hour rows dedupe clickers per hour; the total dedupes across the whole range.
+  totals.counted_clickers = await getTotalCountedClickers(db, orgId, etRangeUtc(b), {
+    providerPhoneId: b.providerPhoneId,
+  });
   return { dimension: "hourly", rows, totals, refreshedAt: await maxSyncedAt(orgId) };
 }
 

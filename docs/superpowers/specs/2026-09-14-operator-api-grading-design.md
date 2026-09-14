@@ -236,17 +236,34 @@ One row per campaign with its stages, for the "sales but no D2/D3 yet" sweep.
   `behavioral_tier` are included to tell them apart. Archived stages excluded.
 - Lifetime per stage; conversions/revenue from the tracker.
 
-### `GET /api/campaigns/{campaignId}/stages/{stageId}/hourly` — `stages.view`
-Per ET clock hour of SEND (cohort), for first-half vs second-half checks.
+### `GET /api/campaigns/{campaignId}/stages/{stageId}/send-groups?groups=2` — `stages.view`
+**Revised during PR 5 (was `/hourly`).** A ~4,500-send cell drains in 3–6
+minutes, so a per-clock-hour histogram puts a whole cell in one or two buckets
+and cannot show first half vs second half. The Owner chose equal groups by send
+order (2026-09-14).
+
+The stage's sent messages (`stage_sends.status='sent'`) ordered by
+`(sent_at, id)` and cut into `groups` equal groups with `ntile` — default 2,
+allowed 2–10; sizes differ by at most one and the earlier groups take the extra.
 
 ```json
-{ "stage_id": 3401, "link_mode": "tracked",
-  "data": [ { "hour_start": "2026-09-10T14:00:00-04:00", "sent": 4100,
-              "clicks_human": 96, "reached": 14, "opt_outs": 120 } ] }
+{ "stage_id": 4095, "campaign_id": 1258, "link_mode": "tracked", "groups": 2,
+  "sent": 4500, "pending_sends": 0, "opt_outs_complete": true,
+  "data": [ { "group": 1, "first_sent_at": "2026-09-09T14:12:01Z",
+              "last_sent_at": "2026-09-09T14:15:30Z", "sent": 2250,
+              "clicks_human": 40, "reached": 6, "opt_outs": 51,
+              "click_to_reach_pct": 15.0, "opt_rate": 2.27 } ] }
 ```
-- `clicks_human` / `reached` / `opt_outs` are attributed to the hour the
-  recipient's message was sent. Manual stage → `data: []`, `link_mode: "manual"`.
-  `404` if the stage is not in that campaign/org.
+- `reached`: the group's sends with `offer_reached_at`. `opt_outs`: distinct
+  attributions whose `stage_send_id` is in the group. `clicks_human`: the
+  stage's counted clickers whose send is in the group (one sent row per
+  recipient per stage — 0 exceptions over 20 days, measured).
+- No conversions: the tracker reports per stage, not per message.
+- `pending_sends`: rows not sent yet — the groups still move until it is 0.
+  `opt_outs_complete`: 72h have passed since the stage's last send.
+- Manual stage (no per-message rows) → `data: []`, `sent: 0`. `404` if the stage
+  is not in that campaign/org; `400` naming `groups` outside 2–10.
+- One statement; a 4,500-send stage measured 100ms.
 
 ## 4. Errors, limits, performance
 
@@ -295,7 +312,7 @@ production deployment ID).
 | 2 | 2 | `attribution=send_date`; `/api/reports/tails` |
 | 3 | 3 | `/api/reports/opt-outs` |
 | 4 | 5a, 6 | `/api/creatives/{id}/usage`; `/api/campaigns/audit` |
-| 5 | 8, 7 | stage `/hourly`; document `daily-activity` as tracker daily sums |
+| 5 | 8, 7 | stage `/send-groups` (revised from `/hourly`); document `daily-activity` as tracker daily sums |
 
 Docs per PR: `docs/operator-api.md`, `docs/04-features/operator-api-tokens.md`
 (token-reachable count), `docs/04-features/reports-rollup.md`,

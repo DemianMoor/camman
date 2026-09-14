@@ -15,6 +15,7 @@ import {
   getConversionTails,
   getCreativeUsage,
   getOptOutCohorts,
+  getStageSendGroups,
   OPT_OUT_DIMENSIONS,
 } from "@/lib/reporting/grading";
 import { OPT_OUT_ATTRIBUTION_WINDOW_HOURS } from "@/lib/sends/opt-out-window";
@@ -502,6 +503,136 @@ async function main() {
   console.log(`    ${settledStages} settled stage(s) checked exactly; still sending: ${liveStages.join(", ") || "none"}`);
   check("control: the exact check covered at least one settled stage", settledStages > 0, settledStages);
   check("control: at least one active campaign has conversions", auditConversionsSeen);
+
+  console.log("\nH. getStageSendGroups — first half vs second half of a cell");
+  // A SETTLED tracked cell: nothing pending, sent more than 5 days ago (clicks and
+  // the 72h STOP window have settled), so the lib and the reference read the same rows.
+  const cell = await one<{ stage_id: number; campaign_id: number } | undefined>(sql`
+    WITH cand AS (
+      SELECT cs.id, cs.campaign_id, cs.sent_at
+      FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
+      WHERE cs.org_id = ${orgId}::uuid AND c.link_mode = 'tracked'
+        AND cs.sent_at > now() - interval '30 days' AND cs.sent_at < now() - interval '5 days'
+      ORDER BY cs.sent_at DESC LIMIT 40
+    )
+    SELECT cand.id AS stage_id, cand.campaign_id
+    FROM cand JOIN stage_sends ss ON ss.stage_id = cand.id AND ss.org_id = ${orgId}::uuid
+    GROUP BY cand.id, cand.campaign_id, cand.sent_at
+    HAVING count(*) FILTER (WHERE ss.status = 'sent') >= 4000
+       AND count(*) FILTER (WHERE ss.status IN ('pending', 'sending')) = 0
+    ORDER BY cand.sent_at DESC LIMIT 1`);
+  check("control: a settled tracked cell of >= 4,000 sends exists", cell != null);
+  if (cell) {
+    const stageId = Number(cell.stage_id);
+    const campaignId = Number(cell.campaign_id);
+    // Reference side, built WITHOUT ntile or the lib's joins: the sent rows in send
+    // order, the stage's counted clickers and each send's attributed opt-outs, then
+    // the equal split re-derived in JS. ORDER BY is table-qualified on purpose: a
+    // bare `id` would sort by the ::text output column, not the bigint.
+    const sends = (await db.execute(sql`
+      SELECT ss.id::text AS id, ss.contact_id::text AS contact_id, ss.offer_reached_at IS NOT NULL AS reached
+      FROM stage_sends ss
+      WHERE ss.org_id = ${orgId}::uuid AND ss.stage_id = ${stageId} AND ss.status = 'sent'
+      ORDER BY ss.sent_at, ss.id`)) as unknown as { id: string; contact_id: string; reached: boolean }[];
+    const clickerIds = new Set(
+      ((await db.execute(sql`
+        SELECT contact_id::text AS contact_id FROM counted_clickers
+        WHERE org_id = ${orgId}::uuid AND stage_id = ${stageId}`)) as unknown as { contact_id: string }[]).map(
+        (r) => r.contact_id,
+      ),
+    );
+    const optBySend = new Map<string, string[]>();
+    for (const r of (await db.execute(sql`
+      SELECT oa.stage_send_id::text AS send_id, oa.opt_out_id::text AS opt_out_id
+      FROM opt_out_attributions oa JOIN stage_sends ss ON ss.id = oa.stage_send_id
+      WHERE oa.org_id = ${orgId}::uuid AND ss.stage_id = ${stageId}`)) as unknown as { send_id: string; opt_out_id: string }[]) {
+      optBySend.set(r.send_id, [...(optBySend.get(r.send_id) ?? []), r.opt_out_id]);
+    }
+    // ntile semantics: every group gets floor(N/g); the first N mod g get one more.
+    const split = (g: number) => {
+      const base = Math.floor(sends.length / g);
+      const extra = sends.length % g;
+      const out: number[][] = [];
+      let at = 0;
+      for (let k = 0; k < g; k++) {
+        const part = sends.slice(at, at + base + (k < extra ? 1 : 0));
+        at += part.length;
+        if (part.length === 0) continue;
+        const optIds = new Set(part.flatMap((s) => optBySend.get(s.id) ?? []));
+        const clickers = new Set(part.map((s) => s.contact_id).filter((c) => clickerIds.has(c)));
+        out.push([part.length, part.filter((s) => s.reached).length, optIds.size, clickers.size]);
+      }
+      return out;
+    };
+    for (const g of [2, 10]) {
+      const got = await getStageSendGroups(orgId, campaignId, stageId, g);
+      const want = split(g);
+      const gotRows = (got?.data ?? []).map((r) => [r.sent, r.reached, r.opt_outs, r.clicks_human]);
+      check(
+        `stage ${stageId} groups=${g}: [sent, reached, opt_outs, clicks_human] per group = the independent split`,
+        JSON.stringify(gotRows) === JSON.stringify(want),
+        { got: gotRows, want },
+      );
+      check(
+        `stage ${stageId} groups=${g}: numbered 1..${g} and in send order`,
+        got != null && got.data.every((r, k) => r.group === k + 1 && (k === 0 || got.data[k - 1].last_sent_at <= r.first_sent_at)),
+      );
+      check(
+        `stage ${stageId} groups=${g}: rates are pct() of the group's own counts`,
+        got != null && got.data.every((r) => r.opt_rate === pct(r.opt_outs, r.sent) && r.click_to_reach_pct === pct(r.reached, r.clicks_human)),
+      );
+    }
+    const halves = await getStageSendGroups(orgId, campaignId, stageId, 2);
+    const stageTruth = await one<{ sent: number; reached: number; opt_outs: number; clickers: number }>(sql`
+      SELECT count(*)::int AS sent,
+             count(*) FILTER (WHERE offer_reached_at IS NOT NULL)::int AS reached,
+             (SELECT count(DISTINCT oa.opt_out_id)::int FROM opt_out_attributions oa
+                JOIN stage_sends s2 ON s2.id = oa.stage_send_id
+                WHERE oa.org_id = ${orgId}::uuid AND s2.stage_id = ${stageId} AND s2.status = 'sent') AS opt_outs,
+             (SELECT count(DISTINCT cc.contact_id)::int FROM counted_clickers cc
+                WHERE cc.org_id = ${orgId}::uuid AND cc.stage_id = ${stageId}
+                  AND EXISTS (SELECT 1 FROM stage_sends s3 WHERE s3.stage_id = cc.stage_id
+                              AND s3.contact_id = cc.contact_id AND s3.status = 'sent')) AS clickers
+      FROM stage_sends
+      WHERE org_id = ${orgId}::uuid AND stage_id = ${stageId} AND status = 'sent'`);
+    const sumOf = (k: "sent" | "reached" | "opt_outs" | "clicks_human") =>
+      (halves?.data ?? []).reduce((a, r) => a + r[k], 0);
+    check(
+      `stage ${stageId}: the halves add up to the stage's sent / reached / opt-outs / human clickers`,
+      halves != null &&
+        halves.sent === stageTruth.sent &&
+        sumOf("sent") === stageTruth.sent &&
+        sumOf("reached") === stageTruth.reached &&
+        sumOf("opt_outs") === stageTruth.opt_outs &&
+        sumOf("clicks_human") === stageTruth.clickers,
+      { got: [halves?.sent, sumOf("sent"), sumOf("reached"), sumOf("opt_outs"), sumOf("clicks_human")], want: stageTruth },
+    );
+    check(
+      `stage ${stageId}: settled — pending_sends 0 and opt_outs_complete`,
+      halves?.pending_sends === 0 && halves?.opt_outs_complete === true,
+      { pending: halves?.pending_sends, complete: halves?.opt_outs_complete },
+    );
+    check("control: the halves have human clickers", sumOf("clicks_human") > 0);
+    check("control: the halves have opt-outs", sumOf("opt_outs") > 0);
+    check(
+      `stage ${stageId} asked for under another campaign id: null`,
+      (await getStageSendGroups(orgId, campaignId + 1, stageId, 2)) === null,
+    );
+  }
+  const manualStage = await one<{ id: number; campaign_id: number } | undefined>(sql`
+    SELECT cs.id, cs.campaign_id FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
+    WHERE cs.org_id = ${orgId}::uuid AND c.link_mode <> 'tracked' AND cs.sent_at IS NOT NULL
+    ORDER BY cs.sent_at DESC LIMIT 1`);
+  if (manualStage) {
+    const m = await getStageSendGroups(orgId, Number(manualStage.campaign_id), Number(manualStage.id), 2);
+    check(
+      `manual stage ${manualStage.id}: not tracked, no groups, sent 0`,
+      m != null && m.link_mode !== "tracked" && m.data.length === 0 && m.sent === 0,
+      m && { link_mode: m.link_mode, rows: m.data.length, sent: m.sent },
+    );
+  } else {
+    skip("manual stage send groups", "no sent manual-mode stage in the org");
+  }
 
   console.log(
     failures === 0

@@ -318,6 +318,50 @@ Real entry (campaign and offer redacted):
 - A campaign whose stages are all archived still appears, with `stages: []`.
 - `400` for any other `status`.
 
+### Send groups — first half vs second half of a cell
+
+**`GET /api/campaigns/{campaignId}/stages/{stageId}/send-groups?groups=2`**
+
+The stage's sent messages in the order they went out, cut into equal groups —
+two by default (first half, second half), up to 10. Use it on cells of 4,000+
+sends to see whether a text held up across the whole send. A cell goes out in a
+few minutes, which is why this splits by send order rather than by clock hour.
+
+```bash
+curl -s "https://camman.vercel.app/api/campaigns/1258/stages/4095/send-groups?groups=2" \
+  -H "Authorization: Bearer $CAMMAN_TOKEN"
+```
+
+Real response:
+
+```json
+{
+  "stage_id": 4095, "campaign_id": 1258, "link_mode": "tracked", "groups": 2,
+  "sent": 4500, "pending_sends": 0, "opt_outs_complete": true,
+  "data": [
+    { "group": 1, "first_sent_at": "2026-09-09T14:15:35Z", "last_sent_at": "2026-09-09T14:17:14Z",
+      "sent": 2250, "clicks_human": 84, "reached": 10, "opt_outs": 73,
+      "click_to_reach_pct": 11.9, "opt_rate": 3.24 },
+    { "group": 2, "first_sent_at": "2026-09-09T14:17:15Z", "last_sent_at": "2026-09-09T14:18:54Z",
+      "sent": 2250, "clicks_human": 84, "reached": 10, "opt_outs": 66,
+      "click_to_reach_pct": 11.9, "opt_rate": 2.93 }
+  ]
+}
+```
+
+- Groups differ in size by at most one message; the earlier groups take the
+  extra. Times are UTC.
+- `clicks_human`, `reached` and `opt_outs` count in the group whose message that
+  person received.
+- **No conversions per group.** The tracker reports sales per stage, not per
+  message — grade sales at stage level (`/stages`, `/campaigns/audit`).
+- `pending_sends` above 0 means the stage is still sending and the groups will
+  still shift. `opt_outs_complete` turns `true` once nothing is pending and 72
+  hours have passed since the last send; until then late STOPs can still land.
+- A manual-mode stage has no per-message tracking: `data: []`, `sent: 0`.
+- `404` if the stage is not in that campaign; `400` if `groups` is not a whole
+  number from 2 to 10.
+
 ### Delivery report
 
 **`GET /api/reports/delivery`** — delivery rate per sending route, same
@@ -335,6 +379,8 @@ Real entry (campaign and offer redacted):
   excerpt, one stage:
   `"send_counts": { "sent": 1376, … }, "inbound_stop_count": 45, "keitaro_sales_count": 1, "reached": 43, "clicks_human": 256, "click_to_reach_pct": 16.8, "reach_to_sale_pct": 2.33, "opt_rate": 3.27`.
 - **`GET /api/campaigns/{campaignId}/stages/{stageId}`** — one stage.
+- **`GET /api/campaigns/{campaignId}/stages/{stageId}/send-groups`** — the stage
+  split into equal groups by send order (see Send groups, §3).
 - **`GET /api/campaigns/{campaignId}/activity`** — timeline of what happened.
 - **`GET /api/campaigns/{campaignId}/click-report`** — per stage: raw click events
   by class (`raw`, `suspect`, `bot`, `prefetch`, `unknown`, `unscored`), `human`
@@ -345,8 +391,29 @@ Real entry (campaign and offer redacted):
 ### Dashboard
 
 - **`GET /api/dashboard/stats`** — headline totals, accepts a range.
-- **`GET /api/dashboard/active-campaigns`**, **`/active-stages`**,
-  **`/daily-activity`**.
+- **`GET /api/dashboard/active-campaigns`**, **`/active-stages`**.
+
+### Revenue per day — the tracker's daily sums
+
+**`GET /api/dashboard/daily-activity?preset=custom&from=YYYY-MM-DD&to=YYYY-MM-DD`**
+
+One entry per ET day in the range (up to 92 days; without `preset` it returns
+the last 7 days). `sales` and `revenue` are dated by the day the **conversion**
+happened and come from the tracker — the daily sums to set against the
+tracker's own report. The other fields (`stages_sent`, `sms_count`, `cost`,
+`opt_outs`, `clickers`) are dated by the send day, and `clickers` there is the
+stage's stored click count, not `clicks_human`.
+
+```bash
+curl -s "https://camman.vercel.app/api/dashboard/daily-activity?preset=custom&from=2026-09-07&to=2026-09-13" \
+  -H "Authorization: Bearer $CAMMAN_TOKEN"
+```
+
+Real excerpt, one day: `{ "date": "2026-09-13", …, "revenue": 319, "sales": 4, … }`.
+
+- If a stage's sales were also entered by hand, that stage-day takes the larger
+  of the tracker count and the hand count. Archived stages are left out.
+- `400` for a range over 92 days, or `from` after `to`.
 
 ---
 

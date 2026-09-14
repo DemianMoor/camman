@@ -11,7 +11,9 @@ import { fromZonedTime } from "date-fns-tz";
 import { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import {
+  getCampaignAudit,
   getConversionTails,
+  getCreativeUsage,
   getOptOutCohorts,
   OPT_OUT_DIMENSIONS,
 } from "@/lib/reporting/grading";
@@ -336,6 +338,132 @@ async function main() {
   }
   check("control: both complete values occur in the range", completeSeen.has(true) && completeSeen.has(false), [...completeSeen]);
   check("the STOP ingester re-exports the same window", POLLER_WINDOW === OPT_OUT_ATTRIBUTION_WINDOW_HOURS, POLLER_WINDOW);
+
+  console.log("\nF. getCreativeUsage — where a text has already run");
+  const [topCreative] = (await db.execute(sql`
+    SELECT creative_id FROM campaign_stages
+    WHERE org_id = ${orgId}::uuid AND creative_id IS NOT NULL AND sent_at IS NOT NULL
+    GROUP BY 1 ORDER BY count(*) DESC LIMIT 1`)) as unknown as { creative_id: number }[];
+  const creativeId = Number(topCreative.creative_id);
+  const [usageTruth] = (await db.execute(sql`
+    WITH st AS (
+      SELECT cs.id, cs.sms_count, c.link_mode
+      FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
+      WHERE cs.org_id = ${orgId}::uuid AND cs.creative_id = ${creativeId} AND cs.sent_at IS NOT NULL
+    )
+    SELECT
+      (SELECT count(*) FROM stage_sends ss JOIN st ON st.id = ss.stage_id
+         AND st.link_mode = 'tracked' WHERE ss.status = 'sent')::int
+        + (SELECT coalesce(sum(sms_count), 0) FROM st WHERE link_mode <> 'tracked')::int AS sends,
+      (SELECT count(*) FROM stage_sends ss JOIN st ON st.id = ss.stage_id
+         AND st.link_mode = 'tracked' WHERE ss.offer_reached_at IS NOT NULL)::int AS reached,
+      (SELECT coalesce(sum(k.sales), 0) FROM keitaro_stage_results k
+         JOIN st ON st.id = k.stage_id)::int AS conversions
+  `)) as unknown as { sends: number; reached: number; conversions: number }[];
+  const usage = await getCreativeUsage(orgId, creativeId);
+  check(`creative ${creativeId}: usage found (control for the not-found check)`, usage != null);
+  check("an id outside the org returns null", (await getCreativeUsage(orgId, 999_999_999)) === null);
+  if (usage) {
+    const rows = usage.data;
+    check(
+      `creative ${creativeId}: rows' sends sum to its stages' sends`,
+      rows.reduce((a, r) => a + r.sends, 0) === usageTruth.sends,
+      { got: rows.reduce((a, r) => a + r.sends, 0), want: usageTruth.sends },
+    );
+    check(
+      `creative ${creativeId}: rows' reached sum to its stages' reaches`,
+      rows.reduce((a, r) => a + (r.reached ?? 0), 0) === usageTruth.reached,
+      { got: rows.reduce((a, r) => a + (r.reached ?? 0), 0), want: usageTruth.reached },
+    );
+    check(
+      `creative ${creativeId}: rows' conversions sum to tracker sales`,
+      rows.reduce((a, r) => a + r.conversions, 0) === usageTruth.conversions,
+      { got: rows.reduce((a, r) => a + r.conversions, 0), want: usageTruth.conversions },
+    );
+    check(`creative ${creativeId}: rows are newest first`, rows.every((r, i) => i === 0 || rows[i - 1].date >= r.date));
+    // A row is one campaign + sending number + ET send day; link_mode is per
+    // campaign, so a row with a numeric `reached` is all-tracked and its
+    // clicks_human is purely the distinct counted clickers over its stages.
+    const topRow = [...rows].filter((r) => r.reached !== null).sort((a, b) => b.sends - a.sends)[0];
+    check(`creative ${creativeId}: has a tracked row to check clickers on`, topRow != null);
+    if (topRow) {
+      const [ccTruth] = (await db.execute(sql`
+        SELECT count(DISTINCT cc.contact_id)::int AS n
+        FROM counted_clickers cc
+        JOIN campaign_stages cs ON cs.id = cc.stage_id
+        LEFT JOIN provider_phones pp ON pp.id = cs.provider_phone_id
+        WHERE cc.org_id = ${orgId}::uuid AND cs.creative_id = ${creativeId} AND cs.sent_at IS NOT NULL
+          AND cs.campaign_id = ${topRow.campaign_id}
+          AND pp.phone_number IS NOT DISTINCT FROM ${topRow.sending_number}
+          AND to_char((cs.sent_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') = ${topRow.date}`)) as unknown as { n: number }[];
+      check(
+        `creative ${creativeId} ${topRow.date}: largest row's clicks_human = independent distinct count`,
+        topRow.clicks_human === Number(ccTruth.n),
+        { got: topRow.clicks_human, want: ccTruth.n },
+      );
+    }
+  }
+
+  console.log("\nG. getCampaignAudit — every active campaign with its stages");
+  const audit = await getCampaignAudit(orgId, "active");
+  const [activeTruth] = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM campaigns
+    WHERE org_id = ${orgId}::uuid AND status = 'active'`)) as unknown as { n: number }[];
+  check("audit: one entry per active campaign", audit.data.length === Number(activeTruth.n), { got: audit.data.length, want: activeTruth.n });
+  const stageTruth = (await db.execute(sql`
+    SELECT cs.id AS stage_id, cs.campaign_id, c.link_mode, cs.sms_count,
+           coalesce(se.sent, 0)::int AS sent, coalesce(se.reached, 0)::int AS reached,
+           coalesce(k.sales, 0)::int AS sales, coalesce(k.revenue, 0)::float8 AS revenue
+    FROM campaign_stages cs
+    JOIN campaigns c ON c.id = cs.campaign_id
+    LEFT JOIN (
+      SELECT stage_id, count(*) FILTER (WHERE status = 'sent')::int AS sent,
+             count(*) FILTER (WHERE offer_reached_at IS NOT NULL)::int AS reached
+      FROM stage_sends
+      WHERE org_id = ${orgId}::uuid
+        AND campaign_id IN (SELECT id FROM campaigns WHERE org_id = ${orgId}::uuid AND status = 'active')
+      GROUP BY 1
+    ) se ON se.stage_id = cs.id
+    LEFT JOIN (
+      SELECT stage_id, sum(sales)::int AS sales, sum(revenue)::float8 AS revenue
+      FROM keitaro_stage_results WHERE org_id = ${orgId}::uuid GROUP BY 1
+    ) k ON k.stage_id = cs.id
+    WHERE cs.org_id = ${orgId}::uuid AND c.status = 'active' AND cs.status <> 'archived'`)) as unknown as {
+    stage_id: number;
+    campaign_id: number;
+    link_mode: string;
+    sms_count: number | null;
+    sent: number;
+    reached: number;
+    sales: number;
+    revenue: number;
+  }[];
+  const truthByStage = new Map(stageTruth.map((s) => [Number(s.stage_id), s]));
+  let auditConversionsSeen = false;
+  for (const camp of audit.data) {
+    const truthStages = stageTruth.filter((s) => Number(s.campaign_id) === camp.campaign_id);
+    check(`campaign ${camp.campaign_id}: stage_count = non-archived stages`, camp.stage_count === truthStages.length && camp.stages.length === truthStages.length, { got: camp.stage_count, want: truthStages.length });
+    for (const s of camp.stages) {
+      const t = truthByStage.get(s.stage_id);
+      const tracked = t?.link_mode === "tracked";
+      check(
+        `campaign ${camp.campaign_id} stage ${s.stage_id}: sent / reached / conversions = direct counts`,
+        t != null &&
+          s.sent === (tracked ? t.sent : Number(t.sms_count ?? 0)) &&
+          s.reached === (tracked ? t.reached : null) &&
+          s.conversions === t.sales,
+        { got: [s.sent, s.reached, s.conversions], want: t && [tracked ? t.sent : t.sms_count, tracked ? t.reached : null, t.sales] },
+      );
+    }
+    check(`campaign ${camp.campaign_id}: total_conversions = its stages' conversions`, camp.total_conversions === camp.stages.reduce((a, s) => a + s.conversions, 0));
+    check(
+      `campaign ${camp.campaign_id}: revenue = its stages' tracker revenue`,
+      Math.abs(camp.revenue - truthStages.reduce((a, s) => a + Number(s.revenue), 0)) < 0.01,
+      { got: camp.revenue, want: truthStages.reduce((a, s) => a + Number(s.revenue), 0) },
+    );
+    if (camp.total_conversions > 0) auditConversionsSeen = true;
+  }
+  check("control: at least one active campaign has conversions", auditConversionsSeen);
 
   console.log(
     failures === 0

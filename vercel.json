@@ -115,6 +115,10 @@
     {
       "path": "/api/cron/refresh-audience-pools",
       "schedule": "29,59 * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-creative-lifetime",
+      "schedule": "14 * * * *"
     }
   ]
 }

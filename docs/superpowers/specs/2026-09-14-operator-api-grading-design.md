@@ -59,9 +59,13 @@ nice-to-haves) give them the metrics that grading needs.
 
 - Percentages are percent units (3.12 = 3.12%), rounded to 2 decimals, `null` when
   the denominator is 0.
-- A row containing any manual-mode stage returns `reached`, `click_to_reach_pct`
-  and `reach_to_sale_pct` as `null` — no per-recipient data exists, and `null`
-  never reads as a real zero.
+- Manual-mode stages have no per-recipient data, so their `reached` is `null`
+  and contributes nothing to a sum. A row is `null` for `reached`,
+  `click_to_reach_pct` and `reach_to_sale_pct` only when ALL its stages are
+  manual — `null` never reads as a real zero. (Revised during build: the first
+  rule, "any manual stage nulls the row", nulled nearly every total, because old
+  manual campaigns keep trickling Keitaro visits into any range — 13 of 836
+  stages over 2026-09-07..13, carrying 7 of 12,769 visits and 0 of 125 sales.)
 
 **Attribution basis** (`attribution` param):
 
@@ -87,10 +91,12 @@ the by-group report).
   echoed in the response; any other value → `400`. `dimension=hourly` with
   `send_date` → `400`.
 - `lib/reporting/stage-funnel.ts` `getStageMetricsInRange` gains `reached` per
-  stage and an `attribution` option. Under `conversion_date`, stages with a reach
-  in range but no Keitaro row and no send in range are **seeded** (like sent
-  stages already are), so no reach is dropped. The Overview route calls it with
-  the default and is unaffected.
+  stage (counted for the stages already in its set) and an `attribution` option.
+  No extra stages are seeded for reach: a reach is an offer click, which Keitaro
+  books on the same day, so a reached stage already has a row — measured **0**
+  reach-only stages on 1-day (38 stages) and 7-day (248 stages) ranges. The
+  verification compares the sum with an independent org-wide count, so a future
+  gap goes red. The Overview route calls it with the default and is unaffected.
 - `group` splits `reached` on a new per-recipient `reach` weight basis (who
   reached), mirroring how sales split on the `sale` basis.
 - `hourly` reuses its existing `offer_reached_at` query for `reached`;

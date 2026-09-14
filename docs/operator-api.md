@@ -38,6 +38,7 @@ open in the browser, the token cannot fetch either.
 | `403` | The endpoint is not on the token allowlist | Not a bug. Use one of the endpoints below. Repeated 403s alert the Owner. |
 | `429` | More than **300 requests in one hour** | Wait for the hour to roll over. Retrying does **not** extend the lockout, but it does not help either. |
 | `503` on `/api/audience/fresh-counts` | The rollup has not been computed yet | Retry in a few minutes. Never read this as "zero leads". |
+| `503` on `/api/audience/pools` | The rollup has not been computed yet, or the offer first sent after the last refresh (`details.reason`) | Retry within 30 minutes. Never read this as "empty pool". |
 
 Every request is logged against your token: endpoint, method, time, IP. Denials
 and rate-limit hits are logged individually and alert the Owner.
@@ -95,6 +96,79 @@ the "Not Used N Days" segments in the app exactly, so the two agree.
 One wrinkle worth knowing: the window is measured from when the **campaign** was
 created, not when the message went out. A long-running campaign created 45 days
 ago that sent yesterday leaves its contacts counted as "not used in 30d".
+
+### Pools — who could still get an offer
+
+**`GET /api/audience/pools?offer_id={id}&rest_days=7`**
+
+For one offer, per contact group: how many contacts have never received it, how
+many of those are rested, and the two re-touch pools. Use it to size a campaign
+for an offer before building it.
+
+| Param | Values |
+| --- | --- |
+| `offer_id` | required — the offer's id (from `/api/offers/list`) |
+| `rest_days` | whole number 0–30, default 7 |
+
+```bash
+curl -s "https://camman.vercel.app/api/audience/pools?offer_id=118&rest_days=7" \
+  -H "Authorization: Bearer $CAMMAN_TOKEN"
+```
+
+Real response (offer name redacted; 3 of 12 groups shown):
+
+```json
+{
+  "offer_id": 118, "offer_name": "<offer name>", "rest_days": 7,
+  "data": [
+    { "group_name": "Manifestation", "group_total_eligible": 195181,
+      "never_received": 165370, "never_received_rested": 147882,
+      "received_not_clicked_rested": 22350,
+      "clickers_non_buyers": 1289, "clickers_non_buyers_rested": 68 },
+    { "group_name": "Memory", "group_total_eligible": 142002,
+      "never_received": 97659, "never_received_rested": 41067,
+      "received_not_clicked_rested": 2789,
+      "clickers_non_buyers": 1563, "clickers_non_buyers_rested": 89 },
+    { "group_name": "AstroEnergy", "group_total_eligible": 131452,
+      "never_received": 119860, "never_received_rested": 118202,
+      "received_not_clicked_rested": 7042,
+      "clickers_non_buyers": 326, "clickers_non_buyers_rested": 3 }
+  ],
+  "totals": { "group_total_eligible": 708823, "never_received": 479441,
+              "never_received_rested": 390119, "received_not_clicked_rested": 73417,
+              "clickers_non_buyers": 9637, "clickers_non_buyers_rested": 214 },
+  "computed_at": "2026-09-14T16:02:23.247Z",
+  "stale_seconds": 86,
+  "definition": "eligible = not archived and not opted out; received = at least one sent message of this offer; …"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `group_total_eligible` | Contacts in the group that are not archived and have not opted out. |
+| `never_received` | Of those, never sent a message of this offer. |
+| `never_received_rested` | Of those, rested: their last message of **any** offer went out at least `rest_days` days ago, or they have never been messaged. **The fresh inventory for this offer.** |
+| `received_not_clicked_rested` | Received this offer, never clicked it (human click), never bought it, and rested — the re-touch pool. |
+| `clickers_non_buyers` | Clicked this offer (a human click, the same definition as `clicks_human`) but never bought it. |
+| `clickers_non_buyers_rested` | Of those, rested. |
+
+- ⚠️ **"Rested" is measured from the last message actually sent**, of any offer —
+  not from when a campaign was created. This deliberately differs from
+  `fresh-counts`, whose windows follow campaign creation, so the two do not
+  reconcile and are not meant to.
+- **Rest is measured from `computed_at`**, the moment of the snapshot. The rollup
+  refreshes every 30 minutes; read `stale_seconds` before quoting a number.
+- A contact in two groups counts in both, so group rows do not add up to
+  `totals`. `totals` is every eligible contact in the organisation. Only active
+  contact groups appear.
+- "Bought" means a conversion on this offer recorded by the tracker.
+- `400` for a missing or non-numeric `offer_id`, or a `rest_days` outside 0–30
+  (`details.field` names the parameter). `404` for an offer outside your
+  organisation.
+- `503` with `details.reason`: `rollup_not_ready` (the first refresh has not run)
+  or `offer_not_in_rollup_yet` (the offer's first message went out after the
+  last refresh — wait up to 30 minutes). An offer that has never sent answers
+  normally: nobody has received it.
 
 ---
 
@@ -543,6 +617,8 @@ Not an oversight, and not something a retry or a different URL will reach:
 - Contact rows, phone numbers of recipients, any CSV export or import.
 - Contact groups as a list — group **names** appear in `fresh-counts`, but the
   group endpoints themselves are closed.
+- Which contacts are in a pool. `pools` returns counts only; no endpoint lists,
+  exports or identifies the contacts behind a pool number.
 - Anything that writes: creating or editing campaigns, stages, creatives or
   segments; approving, scheduling or sending; compliance controls; user
   management.

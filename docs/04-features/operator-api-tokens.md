@@ -75,7 +75,10 @@ belongs to.
 `read_only` survives as a column for a future write-capable token. Nothing sets
 it false.
 
-**38 (route, method) pairs are token-reachable** out of 273 classified routes.
+**39 (route, method) pairs are token-reachable** out of 275 classified routes.
+`GET audience/pools` (pool discovery per offer and contact group, a 30-minute
+rollup in `operator_rollups`) was added 2026-09-14 — see
+[operator-api.md §2](../operator-api.md).
 `GET reports/tails`, `GET reports/opt-outs`, `GET creatives/[id]/usage`,
 `GET campaigns/audit` and `GET campaigns/[campaignId]/stages/[stageId]/send-groups`
 were added 2026-09-14 for creative grading — see

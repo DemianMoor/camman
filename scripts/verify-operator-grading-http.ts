@@ -202,6 +202,40 @@ async function main() {
     }
   }
 
+  // ---- attribution param ----
+  console.log("\n6. /api/reports/performance?attribution=");
+  const sd = await get(
+    `/api/reports/performance?dimension=offer&from=${from}&to=${to}&attribution=send_date`,
+  );
+  check("send_date: 200", sd.status === 200, sd.status);
+  check("send_date: response echoes the basis", sd.json?.attribution === "send_date", sd.json?.attribution);
+  check("default: response echoes conversion_date", perf.json?.attribution === "conversion_date", perf.json?.attribution);
+  const bad = await get(
+    `/api/reports/performance?dimension=offer&from=${from}&to=${to}&attribution=click_date`,
+  );
+  check("unknown attribution: 400", bad.status === 400, bad.status);
+  const hr = await get(
+    `/api/reports/performance?dimension=hourly&from=${to}&to=${to}&attribution=send_date`,
+  );
+  check("hourly + send_date: 400", hr.status === 400, hr.status);
+
+  // ---- tails ----
+  console.log("\n7. /api/reports/tails");
+  const tl = await get(`/api/reports/tails?date=${to}`);
+  check("200", tl.status === 200, tl.status);
+  const tt = tl.json?.totals ?? {};
+  check(
+    "same_day + tail + unknown = conversions",
+    tt.same_day_conversions + tt.tail_conversions + tt.unknown_send_date_conversions === tt.conversions,
+    tt,
+  );
+  check(
+    "rows carry creative_slug and days_after_send",
+    (tl.json?.data ?? []).every((r: object) => "creative_slug" in r && "days_after_send" in r),
+  );
+  const badDate = await get("/api/reports/tails?date=2026-02-31");
+  check("impossible date: 400", badDate.status === 400, badDate.status);
+
   // ---- privacy sweep over every body fetched above ----
   console.log("\n5. Privacy sweep");
   const senders = new Set(

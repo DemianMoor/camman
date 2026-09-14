@@ -9,6 +9,7 @@ import {
   denominatorFor,
   getCountedClickersByDimension,
   getTotalCountedClickers,
+  type CountedClickerBounds,
   type ReportDimensionKey,
 } from "@/lib/reporting/counted-clickers";
 import {
@@ -16,7 +17,7 @@ import {
   gradingRates,
   type GradingRates,
 } from "@/lib/reporting/grading-rates";
-import type { ReportDimension } from "@/lib/reporting/report-dimensions";
+import type { AttributionBasis, ReportDimension } from "@/lib/reporting/report-dimensions";
 import {
   getStageMetricsInRange,
   type ClickerDenominators,
@@ -184,6 +185,9 @@ interface Bounds {
   from: string; // ET day
   to: string; // ET day
   providerPhoneId: number | null;
+  // Omitted = conversion_date (every metric on its own event day). send_date = the
+  // cohort of stages sent in range. Hourly always buckets by event time.
+  attribution?: AttributionBasis;
 }
 
 // ET day range → [fromUtc, toExclusiveUtc), identical to stage-funnel's window.
@@ -195,6 +199,14 @@ function etRangeUtc(b: Bounds): { fromUtc: Date; toExclusiveUtc: Date } {
     fromUtc: fromZonedTime(`${b.from}T00:00:00`, CAMPAIGN_TIMEZONE),
     toExclusiveUtc: fromZonedTime(`${nextDay}T00:00:00`, CAMPAIGN_TIMEZONE),
   };
+}
+
+// The PERIOD clicker scope for this basis: the ET date range (conversion_date), or
+// exactly the report's own stages with no date bound (the send_date cohort).
+function periodBounds(b: Bounds, stages: StageMetrics[]): CountedClickerBounds {
+  return b.attribution === "send_date"
+    ? { stageIds: stages.map((s) => s.stage_id) }
+    : etRangeUtc(b);
 }
 
 export type GradedPerfMetrics<T extends PerfMetrics = PerfMetrics> = T &
@@ -224,7 +236,9 @@ export async function getPerformanceReport(
 ): Promise<PerformanceReport> {
   if (dimension === "hourly") return getHourlyReport(orgId, b);
 
-  const { stages, clickers } = await getStageMetricsInRange(orgId, b.from, b.to);
+  const { stages, clickers } = await getStageMetricsInRange(orgId, b.from, b.to, {
+    attribution: b.attribution,
+  });
   const countedByStage = clickers.periodByStage;
   const lifeByStage = clickers.lifetimeByStage;
   const lifeRevByStage = clickers.lifetimeRevenueByStage;
@@ -279,7 +293,10 @@ async function dedupeTotalClickers(
   }
   const opts = { providerPhoneId: b.providerPhoneId };
   const [period, lifetime] = await Promise.all([
-    getTotalCountedClickers(db, orgId, etRangeUtc(b), opts),
+    // send_date: the cohort stages are already number-filtered, so scope by them.
+    b.attribution === "send_date"
+      ? getTotalCountedClickers(db, orgId, periodBounds(b, stages))
+      : getTotalCountedClickers(db, orgId, etRangeUtc(b), opts),
     getTotalCountedClickers(db, orgId, {}, opts),
   ]);
   totals.counted_clickers = period + manualVisits;
@@ -360,12 +377,14 @@ async function applyDimensionDistinctClickers(
 ): Promise<void> {
   // Same ET-range → UTC conversion stage-funnel uses, so the period window here
   // is byte-identical to the one the funnel metrics were computed over.
-  const { fromUtc, toExclusiveUtc } = etRangeUtc(b);
+  // Under send_date the period scope is the cohort's own stages, not a window.
   const [period, lifetime] = await Promise.all([
-    getCountedClickersByDimension(db, orgId, dimension as ReportDimensionKey, {
-      fromUtc,
-      toExclusiveUtc,
-    }),
+    getCountedClickersByDimension(
+      db,
+      orgId,
+      dimension as ReportDimensionKey,
+      periodBounds(b, stages),
+    ),
     getCountedClickersByDimension(db, orgId, dimension as ReportDimensionKey),
   ]);
 

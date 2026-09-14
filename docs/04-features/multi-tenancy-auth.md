@@ -333,6 +333,29 @@ also dropping it from the `search` filter would let a caller recover the text by
 probing substrings. The picker renders only id, name and color, so nothing
 visible changes.
 
+### Provider phone numbers are open to the operator for stage forms (2026-09-14)
+
+The stage form loads its **Phone number** dropdown from
+`GET /api/providers/[providerId]/phones`, which the route map denied to the
+operator — so the dropdown was always empty and disabled ("No active phones for
+this provider"), and an operator's stage could never be assigned a number.
+
+The route map now opens **GET only**; `POST` (create a number) stays denied.
+`provider_phones.view`, which the operator already holds, still gates the route.
+
+Callers without `providers.view` get the numbers with the provider's **account
+wiring and sending limits blanked**: `credential_id`, `dashboard_id`,
+`max_sends_per_second`, `short_domain_id` and `allow_unknown_carrier` are `null`,
+`carrier_limits` is `[]`. Those belong to the Owner-only provider settings screen.
+
+Kept, because the stage form uses them: the number, `cost_per_sms` (shown next to
+each number in the dropdown) and the two message-preview candidates
+`short_domain` and `opt_out_footer`. Dropping those would make an operator's
+preview resolve a different link host and footer than the send path uses.
+
+Switching the form to the already-open `provider-phones/list` was rejected for
+that reason: it returns none of the three.
+
 ### Identity linking
 
 The domain gate reads the **Google identity's** email

@@ -119,6 +119,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "campaigns/[campaignId]/stages/[stageId]/release-hold": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/restore": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/send": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+  "campaigns/[campaignId]/stages/[stageId]/send-groups": { methods: ["GET"], token: ["GET"] },
   "campaigns/[campaignId]/stages/[stageId]/send/abort": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/stages/[stageId]/send/approve": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   // 869et3vm1 Phase 3: OPENED to the operator, gated on the volume caps inside

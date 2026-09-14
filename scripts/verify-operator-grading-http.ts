@@ -303,6 +303,102 @@ async function main() {
     { status: auBad.status, error: auBad.json?.error },
   );
 
+  // ---- send groups + tracker daily sums ----
+  console.log("\n10. /api/campaigns/{id}/stages/{id}/send-groups and /api/dashboard/daily-activity");
+  const [sgCell] = await db`
+    SELECT cs.id AS stage_id, cs.campaign_id
+    FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
+    WHERE cs.org_id = ${orgId} AND c.link_mode = 'tracked'
+      AND cs.sent_at > now() - interval '30 days' AND cs.sent_at < now() - interval '1 day'
+      AND EXISTS (SELECT 1 FROM stage_sends ss WHERE ss.stage_id = cs.id AND ss.status = 'sent' OFFSET 10)
+    ORDER BY cs.sent_at DESC LIMIT 1`;
+  const sgBase = `/api/campaigns/${Number(sgCell.campaign_id)}/stages/${Number(sgCell.stage_id)}/send-groups`;
+  const sg = await get(sgBase);
+  check("send-groups: 200", sg.status === 200, sg.status);
+  check(
+    "send-groups: 2 groups by default",
+    sg.json?.groups === 2 && (sg.json?.data ?? []).length === 2,
+    { groups: sg.json?.groups, rows: sg.json?.data?.length },
+  );
+  check(
+    "send-groups: carries sent, pending_sends, opt_outs_complete, link_mode",
+    ["sent", "pending_sends", "opt_outs_complete", "link_mode"].every((k) => k in (sg.json ?? {})),
+  );
+  check(
+    "send-groups rows carry first/last_sent_at, sent, clicks_human, reached, opt_outs and both rates",
+    (sg.json?.data ?? []).every((r: object) =>
+      ["first_sent_at", "last_sent_at", "sent", "clicks_human", "reached", "opt_outs", "click_to_reach_pct", "opt_rate"].every(
+        (k) => k in r,
+      ),
+    ),
+  );
+  const [sgTruth] = await db`
+    SELECT count(*)::int AS n FROM stage_sends
+    WHERE org_id = ${orgId} AND stage_id = ${Number(sgCell.stage_id)} AND status = 'sent'`;
+  const sgSum = (sg.json?.data ?? []).reduce((a: number, r: { sent: number }) => a + r.sent, 0);
+  check(
+    "send-groups: the groups add up to the stage's sent messages",
+    sgSum === Number(sgTruth.n) && sg.json?.sent === Number(sgTruth.n),
+    { got: [sgSum, sg.json?.sent], truth: sgTruth.n },
+  );
+  const sg3 = await get(`${sgBase}?groups=3`);
+  check("send-groups groups=3: 3 groups", sg3.status === 200 && sg3.json?.data?.length === 3, {
+    status: sg3.status,
+    rows: sg3.json?.data?.length,
+  });
+  for (const bad of ["1", "11", "abc", "2.5"]) {
+    const r = await get(`${sgBase}?groups=${bad}`);
+    check(
+      `send-groups groups=${bad}: 400 naming groups`,
+      r.status === 400 && String(r.json?.error ?? "").includes("groups"),
+      { status: r.status, error: r.json?.error },
+    );
+  }
+  const sgWrong = await get(
+    `/api/campaigns/${Number(sgCell.campaign_id) + 1}/stages/${Number(sgCell.stage_id)}/send-groups`,
+  );
+  check("send-groups for the stage under another campaign: 404", sgWrong.status === 404, sgWrong.status);
+  const sgMissing = await get(`/api/campaigns/${Number(sgCell.campaign_id)}/stages/999999999/send-groups`);
+  check("send-groups for a stage that does not exist: 404", sgMissing.status === 404, sgMissing.status);
+
+  // daily-activity is documented as the tracker's daily sums: sales and revenue
+  // per ET conversion day. It takes max(tracker, manual ledger) per stage-day, so
+  // the exact comparison only holds when no manual entries sit near the range.
+  const daTo = addDays(etToday(), -1);
+  const daFrom = addDays(daTo, -6);
+  const da = await get(`/api/dashboard/daily-activity?preset=custom&from=${daFrom}&to=${daTo}`);
+  check("daily-activity custom 7 days: 200 with 7 days", da.status === 200 && da.json?.days?.length === 7, {
+    status: da.status,
+    days: da.json?.days?.length,
+  });
+  const [manualNear] = await db`
+    SELECT count(*)::int AS n FROM stage_manual_sales
+    WHERE org_id = ${orgId}
+      AND created_at >= ${addDays(daFrom, -1)}::date AND created_at < ${addDays(daTo, 2)}::date`;
+  if (Number(manualNear.n) > 0) {
+    skip("daily-activity sales = tracker sums", `${manualNear.n} manual sales entries near the range`);
+  } else {
+    const trackerDays = await db`
+      SELECT ksr.stat_date::text AS day, sum(ksr.sales)::int AS sales, sum(ksr.revenue)::float8 AS revenue
+      FROM keitaro_stage_results ksr
+      JOIN campaign_stages cs ON cs.id = ksr.stage_id AND cs.archived_at IS NULL
+      WHERE ksr.org_id = ${orgId} AND ksr.stat_date >= ${daFrom}::date AND ksr.stat_date <= ${daTo}::date
+      GROUP BY 1`;
+    const byDay = new Map(trackerDays.map((r) => [String(r.day), r]));
+    const days = (da.json?.days ?? []) as { date: string; sales: number; revenue: number }[];
+    check(
+      "daily-activity: every day's sales and revenue = the tracker's sums for that conversion day",
+      days.length === 7 &&
+        days.every(
+          (d) =>
+            d.sales === Number(byDay.get(d.date)?.sales ?? 0) &&
+            Math.abs(d.revenue - Number(byDay.get(d.date)?.revenue ?? 0)) < 0.01,
+        ),
+      days.map((d) => [d.date, d.sales, d.revenue, byDay.get(d.date)?.sales ?? 0, byDay.get(d.date)?.revenue ?? 0]),
+    );
+    check("control: a day in the range has tracker sales", days.some((d) => d.sales > 0));
+  }
+
   // ---- privacy sweep over every body fetched above ----
   console.log("\n5. Privacy sweep");
   const senders = new Set(

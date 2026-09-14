@@ -650,3 +650,144 @@ export async function getCampaignAudit(orgId: string, status: AuditStatus): Prom
 
   return { status, data };
 }
+
+// ---- send groups (first half vs second half of a cell) -------------------------
+
+export const SEND_GROUPS_DEFAULT = 2;
+export const SEND_GROUPS_MIN = 2;
+export const SEND_GROUPS_MAX = 10;
+
+export interface SendGroupRow {
+  group: number;
+  first_sent_at: string;
+  last_sent_at: string;
+  sent: number;
+  clicks_human: number;
+  reached: number;
+  opt_outs: number;
+  click_to_reach_pct: number | null;
+  opt_rate: number | null;
+}
+
+export interface StageSendGroups {
+  stage_id: number;
+  campaign_id: number;
+  link_mode: string;
+  groups: number;
+  sent: number;
+  pending_sends: number;
+  opt_outs_complete: boolean;
+  data: SendGroupRow[];
+}
+
+// A stage's sent messages in send order, cut into `groups` equal groups (ntile:
+// sizes differ by at most one, the earlier groups take the extra) — "did the first
+// half of the cell do better than the second". A cell drains in minutes, so clock-
+// hour buckets would hold the whole cell. Per group: its sends, reaches, the STOPs
+// credited to those sends, and the stage's counted clickers whose send is in the
+// group (a recipient has one sent row per stage). No conversions: the tracker
+// reports per stage, not per message. Manual-mode stages have no per-message rows,
+// so `data` is empty. Returns null when the stage is not in that campaign and org.
+export async function getStageSendGroups(
+  orgId: string,
+  campaignId: number,
+  stageId: number,
+  groups: number,
+): Promise<StageSendGroups | null> {
+  const stage = (await db.execute(sql`
+    SELECT cs.id, cs.campaign_id, c.link_mode
+    FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
+    WHERE cs.org_id = ${orgId}::uuid AND cs.id = ${stageId} AND cs.campaign_id = ${campaignId}
+  `)) as unknown as { id: number; campaign_id: number; link_mode: string }[];
+  if (!stage[0]) return null;
+
+  const [rows, pending] = await Promise.all([
+    db.execute(sql`
+      WITH s AS MATERIALIZED (
+        SELECT ss.id, ss.contact_id, ss.offer_reached_at, ss.sent_at,
+               ntile(${groups}::int) OVER (ORDER BY ss.sent_at, ss.id) AS grp
+        FROM stage_sends ss
+        WHERE ss.org_id = ${orgId}::uuid AND ss.stage_id = ${stageId} AND ss.status = 'sent'
+      ),
+      g AS (
+        SELECT grp, count(*)::int AS sent,
+               count(*) FILTER (WHERE offer_reached_at IS NOT NULL)::int AS reached,
+               min(sent_at) AS first_sent_at, max(sent_at) AS last_sent_at
+        FROM s GROUP BY grp
+      ),
+      opt AS (
+        SELECT s.grp, count(DISTINCT oa.opt_out_id)::int AS opt_outs
+        FROM s JOIN opt_out_attributions oa ON oa.stage_send_id = s.id AND oa.org_id = ${orgId}::uuid
+        GROUP BY 1
+      ),
+      first_grp AS (SELECT contact_id, min(grp) AS grp FROM s GROUP BY 1),
+      cc AS (
+        SELECT fg.grp, count(*)::int AS clicks_human
+        FROM counted_clickers c JOIN first_grp fg ON fg.contact_id = c.contact_id
+        WHERE c.org_id = ${orgId}::uuid AND c.stage_id = ${stageId}
+        GROUP BY 1
+      )
+      SELECT g.grp, g.sent, g.reached,
+             coalesce(opt.opt_outs, 0)::int AS opt_outs,
+             coalesce(cc.clicks_human, 0)::int AS clicks_human,
+             to_char(g.first_sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS first_sent_at,
+             to_char(g.last_sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_sent_at,
+             extract(epoch FROM g.last_sent_at)::float8 AS last_sent_epoch
+      FROM g
+      LEFT JOIN opt ON opt.grp = g.grp
+      LEFT JOIN cc ON cc.grp = g.grp
+      ORDER BY g.grp
+    `) as unknown as Promise<
+      {
+        grp: number;
+        sent: number;
+        reached: number;
+        opt_outs: number;
+        clicks_human: number;
+        first_sent_at: string;
+        last_sent_at: string;
+        last_sent_epoch: number;
+      }[]
+    >,
+    db.execute(sql`
+      SELECT count(*)::int AS n FROM stage_sends
+      WHERE org_id = ${orgId}::uuid AND stage_id = ${stageId} AND status IN ('pending', 'sending')
+    `) as unknown as Promise<{ n: number }[]>,
+  ]);
+
+  const data: SendGroupRow[] = rows.map((r) => {
+    const sent = Number(r.sent);
+    const reached = Number(r.reached);
+    const optOuts = Number(r.opt_outs);
+    const clicksHuman = Number(r.clicks_human);
+    return {
+      group: Number(r.grp),
+      first_sent_at: r.first_sent_at,
+      last_sent_at: r.last_sent_at,
+      sent,
+      clicks_human: clicksHuman,
+      reached,
+      opt_outs: optOuts,
+      click_to_reach_pct: pct(reached, clicksHuman),
+      opt_rate: pct(optOuts, sent),
+    };
+  });
+  const pendingSends = Number(pending[0]?.n ?? 0);
+  // Groups are in send order, so the last one holds the stage's latest send. More
+  // STOPs can still land until nothing is pending and the window has passed.
+  const lastSentMs = rows.length > 0 ? Number(rows[rows.length - 1].last_sent_epoch) * 1000 : null;
+
+  return {
+    stage_id: Number(stage[0].id),
+    campaign_id: Number(stage[0].campaign_id),
+    link_mode: stage[0].link_mode,
+    groups,
+    sent: data.reduce((a, r) => a + r.sent, 0),
+    pending_sends: pendingSends,
+    opt_outs_complete:
+      lastSentMs != null &&
+      pendingSends === 0 &&
+      Date.now() >= lastSentMs + OPT_OUT_ATTRIBUTION_WINDOW_HOURS * 3_600_000,
+    data,
+  };
+}

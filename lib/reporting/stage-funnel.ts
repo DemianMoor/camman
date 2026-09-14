@@ -51,6 +51,8 @@ export interface StageMetrics {
   phone_number: string | null;
   phone_number_type: string | null;
   offer_id: number | null;
+  // The stage's creative (campaign_stages.creative_id) — the creative dimension's key.
+  creative_id: number | null;
   brand_id: number | null;
   // Computed metrics (identical to Overview).
   opt_outs: number;
@@ -124,6 +126,7 @@ export async function getStageMetricsInRange(
       link_mode: campaigns.link_mode,
       offer_id: campaigns.offer_id,
       brand_id: campaigns.brand_id,
+      creative_id: campaign_stages.creative_id,
       stage_number: campaign_stages.stage_number,
       stage_label: campaign_stages.label,
       provider_phone_id: campaign_stages.provider_phone_id,
@@ -159,6 +162,7 @@ export async function getStageMetricsInRange(
             link_mode: campaigns.link_mode,
             offer_id: campaigns.offer_id,
             brand_id: campaigns.brand_id,
+            creative_id: campaign_stages.creative_id,
             stage_number: campaign_stages.stage_number,
             stage_label: campaign_stages.label,
             provider_phone_id: campaign_stages.provider_phone_id,
@@ -214,6 +218,7 @@ export async function getStageMetricsInRange(
         phone_number_type: r.phone_number_type ?? null,
         offer_id: r.offer_id ?? null,
         brand_id: r.brand_id ?? null,
+        creative_id: r.creative_id ?? null,
         opt_outs: 0,
         total_sent: 0,
         reached: null,
@@ -246,6 +251,7 @@ export async function getStageMetricsInRange(
       phone_number_type: r.phone_number_type ?? null,
       offer_id: r.offer_id ?? null,
       brand_id: r.brand_id ?? null,
+      creative_id: r.creative_id ?? null,
       opt_outs: 0,
       total_sent: 0,
       reached: null,

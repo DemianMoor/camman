@@ -486,3 +486,29 @@ export async function getCountedClickersByDimension(
   `)) as unknown as { dim_key: number; n: number }[];
   return new Map(rows.map((r) => [Number(r.dim_key), Number(r.n)]));
 }
+
+// Distinct counted clickers per creative × offer, keyed "creative_id:offer_id"
+// (-1 for a missing id). The creative is the STAGE's (campaign_stages.creative_id),
+// the key the creative dimension groups stages by — not counted_clickers.creative_id,
+// which is the link's creative at mint time and can differ after an edit.
+export async function getCountedClickersByCreativeOffer(
+  dbc: DbOrTx,
+  orgId: string,
+  b: CountedClickerBounds = {},
+): Promise<Map<string, number>> {
+  const dateFilter =
+    b.fromUtc && b.toExclusiveUtc
+      ? sql`AND cc.first_click_at >= ${b.fromUtc.toISOString()}::timestamptz AND cc.first_click_at < ${b.toExclusiveUtc.toISOString()}::timestamptz`
+      : sql``;
+  const rows = (await dbc.execute(sql`
+    SELECT coalesce(cs.creative_id, ${DIMENSION_NONE_KEY}) AS creative_id,
+           coalesce(ca.offer_id, ${DIMENSION_NONE_KEY}) AS offer_id,
+           count(DISTINCT cc.contact_id)::int AS n
+    FROM counted_clickers cc
+    JOIN campaign_stages cs ON cs.id = cc.stage_id
+    JOIN campaigns ca ON ca.id = cc.campaign_id
+    WHERE cc.org_id = ${orgId}::uuid ${dateFilter} ${stageIdFilter(b, "cc.stage_id")}
+    GROUP BY 1, 2
+  `)) as unknown as { creative_id: number; offer_id: number; n: number }[];
+  return new Map(rows.map((r) => [`${Number(r.creative_id)}:${Number(r.offer_id)}`, Number(r.n)]));
+}

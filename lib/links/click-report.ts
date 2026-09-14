@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { getCountedClickers, HUMAN_CLICK } from "@/lib/reporting/counted-clickers";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -21,7 +22,12 @@ export interface TrackedStageRow {
   stage_number: number;
   raw: number;
   clean: number;
+  // Scored human click EVENTS (HUMAN_CLICK: classification = 'human' AND
+  // scored_at IS NOT NULL — an unscored row is only a first-pass guess).
   human: number;
+  // Distinct recipients with a scored human click or a conversion (the EPC
+  // denominator) — the operator API's `clicks_human`.
+  clicks_human: number;
   suspect: number;
   bot: number;
   prefetch: number;
@@ -36,6 +42,8 @@ export interface ManualStageRow {
   stage_id: number;
   stage_number: number;
   click_count: number;
+  // No per-recipient links in manual mode, so no human-clicker set exists.
+  clicks_human: null;
 }
 
 export type ClickReport =
@@ -61,17 +69,17 @@ export async function getCampaignClickReport(
       SELECT
         cs.id AS stage_id,
         cs.stage_number AS stage_number,
-        count(c.id)::int AS raw,
-        count(c.id) FILTER (WHERE c.classification = 'human')::int    AS human,
-        count(c.id) FILTER (WHERE c.classification = 'suspect')::int  AS suspect,
-        count(c.id) FILTER (WHERE c.classification = 'bot')::int      AS bot,
-        count(c.id) FILTER (WHERE c.classification = 'prefetch')::int AS prefetch,
-        count(c.id) FILTER (WHERE c.classification = 'unknown')::int  AS unknown,
-        count(c.id) FILTER (WHERE c.scored_at IS NULL)::int           AS unscored,
-        count(c.id) FILTER (WHERE c.asn IS NOT NULL)::int             AS enriched
+        count(ck.id)::int AS raw,
+        count(ck.id) FILTER (WHERE ${HUMAN_CLICK})::int                AS human,
+        count(ck.id) FILTER (WHERE ck.classification = 'suspect')::int  AS suspect,
+        count(ck.id) FILTER (WHERE ck.classification = 'bot')::int      AS bot,
+        count(ck.id) FILTER (WHERE ck.classification = 'prefetch')::int AS prefetch,
+        count(ck.id) FILTER (WHERE ck.classification = 'unknown')::int  AS unknown,
+        count(ck.id) FILTER (WHERE ck.scored_at IS NULL)::int           AS unscored,
+        count(ck.id) FILTER (WHERE ck.asn IS NOT NULL)::int             AS enriched
       FROM campaign_stages cs
-      LEFT JOIN links l  ON l.stage_id = cs.id
-      LEFT JOIN clicks c ON c.link_id = l.id
+      LEFT JOIN links l   ON l.stage_id = cs.id
+      LEFT JOIN clicks ck ON ck.link_id = l.id
       WHERE cs.campaign_id = ${campaignId} AND cs.org_id = ${orgId}
       GROUP BY cs.id, cs.stage_number
       ORDER BY cs.stage_number
@@ -88,6 +96,8 @@ export async function getCampaignClickReport(
       enriched: number;
     }>;
 
+    const clickers = await getCountedClickers(dbc, orgId, "stage", { campaignId });
+
     return {
       source: "tracked",
       stages: rows.map((r) => ({
@@ -97,6 +107,7 @@ export async function getCampaignClickReport(
         // clean excludes bot/prefetch/suspect (leaves human + unknown).
         clean: Number(r.raw) - Number(r.bot) - Number(r.prefetch) - Number(r.suspect),
         human: Number(r.human),
+        clicks_human: clickers.get(Number(r.stage_id)) ?? 0,
         suspect: Number(r.suspect),
         bot: Number(r.bot),
         prefetch: Number(r.prefetch),
@@ -124,6 +135,7 @@ export async function getCampaignClickReport(
       stage_id: Number(r.stage_id),
       stage_number: Number(r.stage_number),
       click_count: Number(r.click_count),
+      clicks_human: null,
     })),
   };
 }

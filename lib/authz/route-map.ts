@@ -337,7 +337,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "providers/[providerId]/credentials/[credentialId]/test-connection": null, // settings / provider registry -- Owner only
   "providers/[providerId]/credentials/test": null, // settings / provider registry -- Owner only
   "providers/[providerId]/opt-out-footer": null, // settings / provider registry -- Owner only
-  "providers/[providerId]/phones": null, // settings / provider registry -- Owner only
+  "providers/[providerId]/phones": { methods: ["GET"] }, // stage form phone picker; account wiring + limits blanked, POST stays denied (Dmytro, 2026-09-14)
   "providers/[providerId]/phones/[phoneId]": null, // settings / provider registry -- Owner only
   "providers/[providerId]/phones/[phoneId]/archive": null, // settings / provider registry -- Owner only
   "providers/[providerId]/phones/[phoneId]/restore": null, // settings / provider registry -- Owner only

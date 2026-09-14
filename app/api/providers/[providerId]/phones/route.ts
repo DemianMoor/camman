@@ -43,7 +43,12 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ providerId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  // GET is reachable by the operator (stage form phone picker); POST is not —
+  // see lib/authz/route-map.ts, which opens GET only.
+  const auth = await requireApiMembership({
+    route: "providers/[providerId]/phones",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
 
@@ -174,9 +179,26 @@ export async function GET(
     .where(where)
     .orderBy(orderFn(sortColumn));
 
+  // The stage form's phone picker reaches this route as the operator, who has
+  // no `providers.view`. It needs the number, its cost, and the two message-
+  // preview candidates (short_domain, opt_out_footer) — not the provider's
+  // account wiring or sending limits, which belong to the Owner-only provider
+  // settings screen. Those are blanked rather than dropped so the shape stays
+  // the same for every caller.
+  const fullView = can(role, "providers.view");
   const data = rows.map((r) => ({
     ...r,
     brand: r.brand && r.brand.id !== null ? r.brand : null,
+    ...(fullView
+      ? {}
+      : {
+          credential_id: null,
+          dashboard_id: null,
+          max_sends_per_second: null,
+          short_domain_id: null,
+          allow_unknown_carrier: null,
+          carrier_limits: [],
+        }),
   }));
 
   return NextResponse.json({ data });

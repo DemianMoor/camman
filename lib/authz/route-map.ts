@@ -349,6 +349,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "reports/partners": null, // drip / partner intake -- hidden from the operator
   "reports/performance": { methods: ["GET"], token: ["GET"] },
   "reports/rebuild-counted-clickers": null, // maintenance job, not a report
+  // Operator API creative grading (2026-09-14): same-day vs tail conversions.
+  "reports/tails": { methods: ["GET"], token: ["GET"] },
 
   // ── result-import-mappings ─────────────────────────────────────────────────────────────
   "result-import-mappings": null, // cron / webhook / import machinery -- no operator session reaches these

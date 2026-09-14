@@ -42,13 +42,20 @@ export type PickerCreative = {
   spam_score: number | null;
   spam_verdict: "spam" | "not_spam" | null;
   metrics: {
-    ctr: number | null;
     epc: number | null;
     // LIFETIME pair, shown alongside the 30-day figure. The picker still SORTS
     // by the 30-day EPC — this exists so the full history is visible when
     // choosing, not to change what gets chosen.
     epc_lifetime: number | null;
     clean_clicks_lifetime: number;
+    // CTR = counted clickers ÷ messages sent, all time and last 7 days, from the
+    // hourly snapshot (lib/creatives/ctr-rollup.ts).
+    ctr_lifetime: number | null;
+    sent_lifetime: number;
+    ctr_clickers_lifetime: number;
+    ctr_7d: number | null;
+    sent_7d: number;
+    ctr_clickers_7d: number;
   };
 };
 
@@ -314,7 +321,7 @@ export function CreativePickerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] gap-0 overflow-hidden p-0 sm:max-w-5xl">
+      <DialogContent className="max-h-[92vh] gap-0 overflow-hidden p-0 sm:max-w-6xl">
         <DialogHeader className="border-b px-5 py-4">
           <DialogTitle>Select a creative</DialogTitle>
           <DialogDescription>
@@ -324,7 +331,9 @@ export function CreativePickerDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid max-h-[calc(92vh-9rem)] grid-cols-1 gap-4 overflow-y-auto p-5 lg:grid-cols-2">
+        {/* The list gets the wider share so all seven columns fit without
+            horizontal scrolling; the SMS preview is phone-width anyway. */}
+        <div className="grid max-h-[calc(92vh-9rem)] grid-cols-1 gap-4 overflow-y-auto p-5 lg:grid-cols-[minmax(0,5fr)_minmax(0,3fr)]">
           {/* ---- Left column: search + list + sequence filters ---- */}
           <div className="flex min-w-0 flex-col gap-3">
             <Input
@@ -336,21 +345,40 @@ export function CreativePickerDialog({
 
             <div className="rounded-md border">
               <div className="max-h-[44vh] overflow-y-auto">
-                <table className="w-full text-sm">
+                {/* table-fixed: every column but Creative has a set width and the
+                    creative text truncates into what is left. With auto layout a
+                    long creative widened its cell and the list scrolled sideways
+                    (max-width on a table cell is ignored). */}
+                <table className="w-full table-fixed text-sm">
                   <thead className="sticky top-0 z-10 bg-muted/60 text-xs text-muted-foreground backdrop-blur">
                     <tr>
-                      <th className="px-2 py-2 text-left font-medium">Spam</th>
+                      <th className="w-14 px-2 py-2 text-left font-medium">Spam</th>
                       <th className="px-2 py-2 text-left font-medium">Creative</th>
-                      <th className="px-2 py-2 text-left font-medium">Seq</th>
+                      <th className="w-16 px-2 py-2 text-left font-medium">Seq</th>
                       {/* SORTED BY THIS COLUMN — named so the basis is visible.
                           The picker decides what gets sent next and recency
                           predicts that better; the lifetime column beside it is
                           context for a deliberate override, not the sort key. */}
-                      <th className="px-2 py-2 text-right font-medium">EPC (30d) ↓</th>
-                      <th className="px-2 py-2 text-right font-medium text-muted-foreground">
-                        EPC (all time)
+                      <th className="w-[4.5rem] px-2 py-2 text-right font-medium">
+                        EPC
+                        <br />
+                        30d ↓
                       </th>
-                      <th className="px-2 py-2 text-right font-medium">CTR</th>
+                      <th className="w-[4.5rem] px-2 py-2 text-right font-medium text-muted-foreground">
+                        EPC
+                        <br />
+                        all time
+                      </th>
+                      <th className="w-[4.5rem] px-2 py-2 text-right font-medium">
+                        CTR
+                        <br />
+                        all time
+                      </th>
+                      <th className="w-[4.5rem] px-2 py-2 text-right font-medium">
+                        CTR
+                        <br />
+                        7d
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -359,13 +387,13 @@ export function CreativePickerDialog({
                         visible so the list doesn't flash empty. */}
                     {creativesApi.isLoading && creatives.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="py-10 text-center text-muted-foreground">
+                        <td colSpan={7} className="py-10 text-center text-muted-foreground">
                           <Loader2 className="mx-auto size-4 animate-spin" />
                         </td>
                       </tr>
                     ) : visibleCreatives.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
+                        <td colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
                           No matching creatives.
                         </td>
                       </tr>
@@ -384,7 +412,7 @@ export function CreativePickerDialog({
                             <td className="px-2 py-1.5 align-top">
                               <SpamDot score={c.spam_score} verdict={c.spam_verdict} />
                             </td>
-                            <td className="max-w-[18rem] px-2 py-1.5 align-top">
+                            <td className="px-2 py-1.5 align-top">
                               <div className="flex items-center gap-1.5">
                                 {isActive ? (
                                   <Check className="size-3.5 shrink-0 text-foreground" aria-hidden />
@@ -394,7 +422,7 @@ export function CreativePickerDialog({
                                   {c.text}
                                 </span>
                               </div>
-                              <div className="font-mono text-[10px] text-muted-foreground">
+                              <div className="truncate font-mono text-[10px] text-muted-foreground">
                                 {c.slug}
                               </div>
                             </td>
@@ -415,8 +443,17 @@ export function CreativePickerDialog({
                             >
                               {formatEpc(c.metrics.epc_lifetime)}
                             </td>
-                            <td className="px-2 py-1.5 text-right align-top tabular-nums">
-                              {formatPercent(c.metrics.ctr)}
+                            <td
+                              className="px-2 py-1.5 text-right align-top tabular-nums"
+                              title={`All time: ${c.metrics.ctr_clickers_lifetime.toLocaleString()} clickers / ${c.metrics.sent_lifetime.toLocaleString()} sent. Refreshed hourly.`}
+                            >
+                              {formatPercent(c.metrics.ctr_lifetime)}
+                            </td>
+                            <td
+                              className="px-2 py-1.5 text-right align-top tabular-nums"
+                              title={`Last 7 days: ${c.metrics.ctr_clickers_7d.toLocaleString()} clickers / ${c.metrics.sent_7d.toLocaleString()} sent. Refreshed hourly.`}
+                            >
+                              {formatPercent(c.metrics.ctr_7d)}
                             </td>
                           </tr>
                         );

@@ -15,6 +15,8 @@ import postgres from "postgres";
 // Run against a dev server:  npx tsx scripts/test-creative-metrics-cache.ts
 type Metrics = {
   delivered: number;
+  sent: number;
+  ctr_clickers: number;
   clean_clicks: number;
   checkouts: number;
   sales: number;
@@ -159,19 +161,20 @@ async function main() {
     `${activeTruthIds.length} matched`,
   );
 
-  const withActivity = api.body.data.filter((c) => (c.metrics?.delivered ?? 0) > 0 || (c.metrics?.clean_clicks ?? 0) > 0);
+  const withActivity = api.body.data.filter((c) => (c.metrics?.sent ?? 0) > 0 || (c.metrics?.clean_clicks ?? 0) > 0);
   check("non-trivial: some creatives carry real numbers", withActivity.length > 0, `${withActivity.length} with activity`);
 
   console.log("\n[2] Derived ratios are consistent with their own base counts");
   const badRatio = api.body.data.filter((c) => {
     const m = c.metrics!;
-    const expCtr = m.delivered > 0 ? m.clean_clicks / m.delivered : null;
+    // CTR divides by messages sent (hourly snapshot), not delivered_count.
+    const expCtr = m.sent > 0 ? m.ctr_clickers / m.sent : null;
     const expEpc = m.clean_clicks > 0 ? m.payout / m.clean_clicks : null;
     const near = (a: number | null, b: number | null) =>
       (a === null && b === null) || (a !== null && b !== null && Math.abs(a - b) < 1e-9);
     return !near(m.ctr, expCtr) || !near(m.epc, expEpc);
   });
-  check("ctr/epc derive from delivered/clean_clicks/payout", badRatio.length === 0, `${badRatio.length} inconsistent`);
+  check("ctr derives from ctr_clickers/sent, epc from payout/clean_clicks", badRatio.length === 0, `${badRatio.length} inconsistent`);
 
   console.log("\n[3] Cache is CONSULTED, not recomputed per request");
   await get("status=active&pageSize=5");            // ensure warm

@@ -33,6 +33,25 @@ export function isReportDimension(v: string | null | undefined): v is ReportDime
   return v != null && (REPORT_DIMENSIONS as readonly string[]).includes(v);
 }
 
+// Dimensions the operator API accepts that have NO Reports tab — the tab bar and
+// the /reports/[dimension] page map REPORT_DIMENSIONS, so these stay out of it.
+// `creative` = one row per creative × offer.
+export const API_ONLY_DIMENSIONS = ["creative"] as const;
+export type ApiOnlyDimension = (typeof API_ONLY_DIMENSIONS)[number];
+export type PerformanceDimension = ReportDimension | ApiOnlyDimension;
+
+export function isPerformanceDimension(v: string | null | undefined): v is PerformanceDimension {
+  return isReportDimension(v) || (v != null && (API_ONLY_DIMENSIONS as readonly string[]).includes(v));
+}
+
+// Server-side sort keys for dimension=creative (always descending).
+export const CREATIVE_SORT_KEYS = ["revenue", "rpm", "sent", "click_to_reach_pct"] as const;
+export type CreativeSortKey = (typeof CREATIVE_SORT_KEYS)[number];
+
+export function isCreativeSortKey(v: string | null | undefined): v is CreativeSortKey {
+  return v != null && (CREATIVE_SORT_KEYS as readonly string[]).includes(v);
+}
+
 // Attribution basis for the performance report. conversion_date = every metric on
 // its own event day (the historical behaviour, and the default); send_date = the
 // stages SENT in range with everything they have produced to date. Hourly buckets

@@ -496,6 +496,120 @@ async function main() {
     );
   }
 
+  // ---- dimension=creative ----
+  console.log("\n12. /api/reports/performance dimension=creative");
+  // Descending by `k` with every null after every number.
+  const nonIncreasing = (rs: Record<string, unknown>[], k: string) =>
+    rs.every((r, i) => {
+      if (i === 0) return true;
+      const a = rs[i - 1][k] as number | null;
+      const b = r[k] as number | null;
+      if (b == null) return true;
+      if (a == null) return false;
+      return a >= b;
+    });
+  const crBase = `/api/reports/performance?dimension=creative&from=${from}&to=${to}`;
+  const crv = await get(crBase);
+  check("creative: 200", crv.status === 200, { status: crv.status, error: crv.json?.error });
+  const crRows = (crv.json?.data ?? []) as Record<string, unknown>[];
+  const CREATIVE_KEYS = [
+    "creative_id", "offer_id", "first_sent_date", "last_sent_date", "distinct_send_days",
+    "rpm", "clicks_human", "click_to_reach_pct", "reach_to_sale_pct", "opt_rate",
+  ];
+  check(
+    "creative rows carry creative_id, offer_id, send days, rpm and the grading fields, with a 'slug — offer' label",
+    crRows.length > 0 &&
+      crRows.every((r) => CREATIVE_KEYS.every((k) => k in r) && String(r.label).includes(" — ")),
+  );
+  check("creative: sort_by defaults to revenue, revenue non-increasing", crv.json?.sort_by === "revenue" && nonIncreasing(crRows, "revenue"));
+  check(
+    "creative: rows' sent add up to totals",
+    crRows.reduce((a, r) => a + Number(r.sent), 0) === crv.json?.totals?.sent,
+  );
+  for (const k of ["rpm", "sent", "click_to_reach_pct"]) {
+    const r = await get(`${crBase}&sortBy=${k}`);
+    check(
+      `creative sortBy=${k}: 200, non-increasing, nulls last`,
+      r.status === 200 && r.json?.sort_by === k && nonIncreasing(r.json?.data ?? [], k),
+      { status: r.status },
+    );
+  }
+  const sentSorted = crRows.map((r) => Number(r.sent)).sort((a, b) => a - b);
+  const minSentThreshold = sentSorted[Math.floor(sentSorted.length / 2)] ?? 0;
+  const crMin = await get(`${crBase}&min_sent=${minSentThreshold}`);
+  check(
+    "creative min_sent: rows at or above it, hidden_rows counts the rest, totals unchanged",
+    crMin.status === 200 &&
+      ((crMin.json?.data ?? []) as Record<string, number>[]).every((r) => r.sent >= minSentThreshold) &&
+      crMin.json?.hidden_rows === crRows.filter((r) => Number(r.sent) < minSentThreshold).length &&
+      crMin.json?.totals?.sent === crv.json?.totals?.sent,
+    { threshold: minSentThreshold, hidden: crMin.json?.hidden_rows },
+  );
+  const crOffer = Number(crRows[0]?.offer_id);
+  const crByOffer = await get(`${crBase}&offer_id=${crOffer}`);
+  const offerDim = await get(`/api/reports/performance?dimension=offer&from=${from}&to=${to}`);
+  const offerDimRow = ((offerDim.json?.data ?? []) as Record<string, unknown>[]).find(
+    (r) => r.key === String(crOffer),
+  );
+  check(
+    "creative offer_id: every row carries it; totals sent / sales = the dimension=offer row",
+    crByOffer.status === 200 &&
+      ((crByOffer.json?.data ?? []) as Record<string, unknown>[]).every((r) => r.offer_id === crOffer) &&
+      offerDimRow != null &&
+      crByOffer.json?.totals?.sent === offerDimRow.sent &&
+      crByOffer.json?.totals?.sales === offerDimRow.sales,
+    { totals: crByOffer.json?.totals?.sent, offerRow: offerDimRow?.sent },
+  );
+  for (const [name, path, names] of [
+    ["sortBy on dimension=offer", `/api/reports/performance?dimension=offer&sortBy=rpm`, "sortBy"],
+    ["range=lifetime on dimension=number", `/api/reports/performance?dimension=number&range=lifetime`, "range"],
+    ["min_sent on dimension=offer", `/api/reports/performance?dimension=offer&min_sent=5`, "min_sent"],
+    ["offer_id on dimension=offer", `/api/reports/performance?dimension=offer&offer_id=1`, "offer_id"],
+    ["sortBy=profit", `${crBase}&sortBy=profit`, "sortBy"],
+    ["min_sent=-1", `${crBase}&min_sent=-1`, "min_sent"],
+    ["range=weekly", `/api/reports/performance?dimension=creative&range=weekly`, "range"],
+    ["range=lifetime with from", `/api/reports/performance?dimension=creative&range=lifetime&from=${from}`, "range=lifetime"],
+    ["offer_id with provider_phone_id", `${crBase}&offer_id=1&provider_phone_id=2`, "offer_id"],
+    ["offer_id=abc", `${crBase}&offer_id=abc`, "offer_id"],
+  ] as const) {
+    const r = await get(path);
+    check(
+      `creative ${name}: 400 naming ${names}`,
+      r.status === 400 && String(r.json?.error ?? "").includes(names),
+      { status: r.status, error: r.json?.error },
+    );
+  }
+  const lt = await get("/api/reports/performance?dimension=creative&range=lifetime");
+  if (lt.status === 503) {
+    skip("creative range=lifetime", "the lifetime snapshot has not been computed yet");
+  } else {
+    check(
+      "lifetime: 200 with range.lifetime, computed_at and stale_seconds",
+      lt.status === 200 &&
+        lt.json?.range?.lifetime === true &&
+        typeof lt.json?.computed_at === "string" &&
+        Number.isInteger(lt.json?.stale_seconds),
+      { status: lt.status, range: lt.json?.range },
+    );
+    const ltRows = (lt.json?.data ?? []) as Record<string, number>[];
+    check(
+      "lifetime: rows' sent add up to totals, which cover at least the 7-day totals",
+      ltRows.reduce((a, r) => a + r.sent, 0) === lt.json?.totals?.sent &&
+        lt.json?.totals?.sent >= crv.json?.totals?.sent,
+      { rows: ltRows.reduce((a, r) => a + r.sent, 0), totals: lt.json?.totals?.sent },
+    );
+    const lt1500 = await get("/api/reports/performance?dimension=creative&range=lifetime&min_sent=1500");
+    check(
+      "lifetime min_sent=1500: every row sent >= 1500 and some rows hidden",
+      lt1500.status === 200 &&
+        ((lt1500.json?.data ?? []) as Record<string, number>[]).every((r) => r.sent >= 1500) &&
+        lt1500.json?.hidden_rows > 0,
+      { hidden: lt1500.json?.hidden_rows },
+    );
+    const ltSend = await get("/api/reports/performance?dimension=creative&range=lifetime&attribution=send_date");
+    check("lifetime attribution=send_date: 200 and echoed", ltSend.status === 200 && ltSend.json?.attribution === "send_date");
+  }
+
   // ---- privacy sweep over every body fetched above ----
   console.log("\n5. Privacy sweep");
   const senders = new Set(

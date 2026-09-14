@@ -1,12 +1,13 @@
 import { sql } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
-import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
+import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 
 import { db } from "@/db/client";
 import {
   DIMENSION_NONE_KEY,
   denominatorFor,
+  getCountedClickersByCreativeOffer,
   getCountedClickersByDimension,
   getTotalCountedClickers,
   type CountedClickerBounds,
@@ -17,7 +18,8 @@ import {
   gradingRates,
   type GradingRates,
 } from "@/lib/reporting/grading-rates";
-import type { AttributionBasis, ReportDimension } from "@/lib/reporting/report-dimensions";
+import { sendDaysOf } from "@/lib/reporting/creative-rows";
+import type { AttributionBasis, PerformanceDimension } from "@/lib/reporting/report-dimensions";
 import {
   getStageMetricsInRange,
   type ClickerDenominators,
@@ -77,6 +79,12 @@ export interface PerfRow extends PerfMetrics {
   group_color?: string | null;
   // hourly: a pinned "Manual" row sorts first.
   pinned?: boolean;
+  // creative dimension:
+  creative_id?: number | null;
+  offer_id?: number | null;
+  first_sent_date?: string | null;
+  last_sent_date?: string | null;
+  distinct_send_days?: number;
 }
 
 export interface ProviderOption {
@@ -89,13 +97,13 @@ export interface ProviderOption {
 }
 
 export interface PerformanceReport {
-  dimension: ReportDimension;
+  dimension: PerformanceDimension;
   rows: PerfRow[];
   totals: PerfMetrics;
   refreshedAt: string | null;
 }
 
-const ZERO: PerfMetrics = {
+export const ZERO: PerfMetrics = {
   sent: 0,
   opt_outs: 0,
   clickers: 0,
@@ -185,6 +193,8 @@ interface Bounds {
   from: string; // ET day
   to: string; // ET day
   providerPhoneId: number | null;
+  // Only this offer's stages (dimension=creative with offer_id).
+  offerId?: number | null;
   // Omitted = conversion_date (every metric on its own event day). send_date = the
   // cohort of stages sent in range. Hourly always buckets by event time.
   attribution?: AttributionBasis;
@@ -229,13 +239,26 @@ export function gradePerf<T extends PerfMetrics>(m: T): GradedPerfMetrics<T> {
   };
 }
 
+export type StageDimension = Exclude<PerformanceDimension, "hourly">;
+
 export async function getPerformanceReport(
   orgId: string,
-  dimension: ReportDimension,
+  dimension: PerformanceDimension,
   b: Bounds,
 ): Promise<PerformanceReport> {
   if (dimension === "hourly") return getHourlyReport(orgId, b);
+  const [report] = await getStageDimensionReports(orgId, [dimension], b);
+  return report;
+}
 
+// Several groupings of ONE stage-metrics pass — the funnel is the expensive part
+// (~13s for all time), so the lifetime job builds creative rows and per-offer
+// totals from a single pass instead of two.
+export async function getStageDimensionReports(
+  orgId: string,
+  dimensions: StageDimension[],
+  b: Bounds,
+): Promise<PerformanceReport[]> {
   const { stages, clickers } = await getStageMetricsInRange(orgId, b.from, b.to, {
     attribution: b.attribution,
   });
@@ -244,32 +267,39 @@ export async function getPerformanceReport(
   const lifeRevByStage = clickers.lifetimeRevenueByStage;
   const metricsOf = (s: StageMetrics) =>
     stageMetrics(s, countedByStage, lifeByStage, lifeRevByStage);
-  const filtered =
-    b.providerPhoneId != null
-      ? stages.filter((s) => s.provider_phone_id === b.providerPhoneId)
-      : stages;
+  const filtered = stages.filter(
+    (s) =>
+      (b.providerPhoneId == null || s.provider_phone_id === b.providerPhoneId) &&
+      (b.offerId == null || s.offer_id === b.offerId),
+  );
 
   const totals = filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), { ...ZERO });
   await dedupeTotalClickers(orgId, b, filtered, totals, clickers);
   const refreshedAt = await maxSyncedAt(orgId);
 
-  let rows: PerfRow[];
-  if (dimension === "group") {
-    // BY-GROUP IS EXEMPT from dimension-grain deduplication, by construction.
-    // Its metrics are FRACTIONALLY SPLIT across a contact's groups (a contact in
-    // 3 used groups contributes ⅓ to each), and a fractional share cannot be
-    // deduplicated — there is no set to take a DISTINCT over. Its clicker counts
-    // therefore remain split sums and are NOT comparable with the other tabs.
-    // Labelled as such in the UI. See docs/04-features/epc-denominator.md.
-    rows = await distributeToGroups(orgId, filtered, b, metricsOf);
-  } else {
-    rows = await groupByStageDimension(filtered, dimension, metricsOf);
-    // Replace the summed clicker counts with DISTINCT counts at the dimension's
-    // own grain — the row grain the rule refers to. Revenue stays summed; it is
-    // genuinely additive.
-    await applyDimensionDistinctClickers(orgId, dimension, b, rows, filtered);
-  }
-  return { dimension, rows, totals, refreshedAt };
+  return Promise.all(
+    dimensions.map(async (dimension): Promise<PerformanceReport> => {
+      let rows: PerfRow[];
+      if (dimension === "group") {
+        // BY-GROUP IS EXEMPT from dimension-grain deduplication, by construction.
+        // Its metrics are FRACTIONALLY SPLIT across a contact's groups (a contact in
+        // 3 used groups contributes ⅓ to each), and a fractional share cannot be
+        // deduplicated — there is no set to take a DISTINCT over. Its clicker counts
+        // therefore remain split sums and are NOT comparable with the other tabs.
+        // Labelled as such in the UI. See docs/04-features/epc-denominator.md.
+        rows = await distributeToGroups(orgId, filtered, b, metricsOf);
+      } else if (dimension === "creative") {
+        rows = await groupByCreativeOffer(orgId, filtered, b, metricsOf);
+      } else {
+        rows = await groupByStageDimension(filtered, dimension, metricsOf);
+        // Replace the summed clicker counts with DISTINCT counts at the dimension's
+        // own grain — the row grain the rule refers to. Revenue stays summed; it is
+        // genuinely additive.
+        await applyDimensionDistinctClickers(orgId, dimension, b, rows, filtered);
+      }
+      return { dimension, rows, totals, refreshedAt };
+    }),
+  );
 }
 
 // The totals row dedupes clickers at REPORT grain — distinct (campaign,
@@ -286,6 +316,17 @@ async function dedupeTotalClickers(
   const manualVisits = stages
     .filter((s) => s.link_mode !== "tracked")
     .reduce((a, s) => a + s.tally.visit_clicks_clean, 0);
+  if (b.offerId != null) {
+    // One offer's totals = that offer's row in dimension=offer: distinct clickers
+    // at the offer grain, over the same period scope.
+    const [period, lifetime] = await Promise.all([
+      getCountedClickersByDimension(db, orgId, "offer", periodBounds(b, stages)),
+      getCountedClickersByDimension(db, orgId, "offer"),
+    ]);
+    totals.counted_clickers = (period.get(b.offerId) ?? 0) + manualVisits;
+    totals.lifetime_clickers = (lifetime.get(b.offerId) ?? 0) + manualVisits;
+    return;
+  }
   if (b.providerPhoneId == null) {
     totals.counted_clickers = clickers.periodTotal + manualVisits;
     totals.lifetime_clickers = clickers.lifetimeTotal + manualVisits;
@@ -407,6 +448,66 @@ async function applyDimensionDistinctClickers(
     row.counted_clickers = (period.get(dimKey) ?? 0) + manual;
     row.lifetime_clickers = (lifetime.get(dimKey) ?? 0) + manual;
   }
+}
+
+// ---- creative: one row per creative × offer --------------------------------
+// Additive metrics summed over the row's stages; clickers DISTINCT at creative ×
+// offer grain plus manual-mode visits (the denominatorFor rule, aggregated). The
+// send-day fields cover the row's stages SENT inside the range — for lifetime the
+// range starts at the first send, so that is every stage.
+async function groupByCreativeOffer(
+  orgId: string,
+  stages: StageMetrics[],
+  b: Bounds,
+  metricsOf: (s: StageMetrics) => PerfMetrics,
+): Promise<PerfRow[]> {
+  const { fromUtc, toExclusiveUtc } = etRangeUtc(b);
+  const acc = new Map<
+    string,
+    { m: PerfMetrics; creativeId: number | null; offerId: number | null; days: string[]; manualVisits: number }
+  >();
+  for (const s of stages) {
+    const key = `${s.creative_id ?? DIMENSION_NONE_KEY}:${s.offer_id ?? DIMENSION_NONE_KEY}`;
+    const e = acc.get(key) ?? {
+      m: { ...ZERO },
+      creativeId: s.creative_id,
+      offerId: s.offer_id,
+      days: [],
+      manualVisits: 0,
+    };
+    e.m = addMetrics(e.m, metricsOf(s));
+    if (s.sent_at && s.sent_at >= fromUtc && s.sent_at < toExclusiveUtc) {
+      e.days.push(formatInCampaignTimezone(s.sent_at, "yyyy-MM-dd"));
+    }
+    if (s.link_mode !== "tracked") e.manualVisits += s.tally.visit_clicks_clean;
+    acc.set(key, e);
+  }
+
+  const entries = [...acc.entries()];
+  const [period, lifetime, slugs, offers] = await Promise.all([
+    getCountedClickersByCreativeOffer(db, orgId, periodBounds(b, stages)),
+    getCountedClickersByCreativeOffer(db, orgId),
+    creativeSlugs(
+      orgId,
+      entries.map(([, e]) => e.creativeId).filter((id): id is number => id != null),
+    ),
+    offerInfo(entries.map(([, e]) => e.offerId).filter((id): id is number => id != null)),
+  ]);
+
+  return entries.map(([key, e]) => {
+    const slug = e.creativeId == null ? "No creative" : slugs.get(e.creativeId) ?? `#${e.creativeId}`;
+    const oi = e.offerId == null ? null : offers.get(e.offerId);
+    return {
+      key,
+      label: `${slug} — ${oi ? oi.name || oi.code : "No offer"}`,
+      creative_id: e.creativeId,
+      offer_id: e.offerId,
+      ...e.m,
+      counted_clickers: (period.get(key) ?? 0) + e.manualVisits,
+      lifetime_clickers: (lifetime.get(key) ?? 0) + e.manualVisits,
+      ...sendDaysOf(e.days),
+    };
+  });
 }
 
 // ---- group: distribute each stage's totals across its used contact groups ---
@@ -826,6 +927,17 @@ async function offerInfo(ids: number[]) {
     SELECT id, offer_id AS code, name FROM offers WHERE id IN (${inList(ids)})
   `)) as unknown as { id: number; code: string; name: string | null }[];
   for (const r of rows) out.set(Number(r.id), { code: r.code, name: r.name });
+  return out;
+}
+
+async function creativeSlugs(orgId: string, ids: number[]) {
+  const out = new Map<number, string>();
+  if (ids.length === 0) return out;
+  const rows = (await db.execute(sql`
+    SELECT id, slug FROM creatives
+    WHERE org_id = ${orgId}::uuid AND id IN (${inList([...new Set(ids)])})
+  `)) as unknown as { id: number; slug: string }[];
+  for (const r of rows) out.set(Number(r.id), r.slug);
   return out;
 }
 

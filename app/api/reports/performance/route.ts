@@ -3,21 +3,32 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { can } from "@/lib/permissions";
+import { readCreativeLifetime } from "@/lib/reporting/creative-lifetime";
+import { hideBelowMinSent, rpmOf, sortCreativeRows } from "@/lib/reporting/creative-rows";
 import {
   getPerformanceReport,
   getReportProviderOptions,
   gradePerf,
+  ZERO,
+  type PerfMetrics,
+  type PerfRow,
 } from "@/lib/reporting/performance-report";
 import {
+  API_ONLY_DIMENSIONS,
   ATTRIBUTION_BASES,
+  CREATIVE_SORT_KEYS,
   isAttributionBasis,
+  isCreativeSortKey,
+  isPerformanceDimension,
   REPORT_DIMENSIONS,
-  type ReportDimension,
+  type CreativeSortKey,
 } from "@/lib/reporting/report-dimensions";
 
-// Read API for the five performance reports. Number/offer/sequence/group source
-// from the shared per-stage Keitaro funnel (matches the Overview tab); hourly
-// buckets by user-activity time. Gated on campaigns.view (same as Overview).
+// Read API for the performance reports. Number/offer/sequence/group/creative
+// source from the shared per-stage Keitaro funnel (matches the Overview tab);
+// hourly buckets by user-activity time. `creative` is API-only (no Reports tab)
+// and adds range=lifetime (hourly snapshot), offer_id, min_sent and sortBy.
+// Gated on campaigns.view (same as Overview).
 export const dynamic = "force-dynamic";
 // A long attribution=send_date range counts every send of every cohort stage
 // (~10s for 7 days, measured 2026-09-14); give it headroom over the default.
@@ -25,6 +36,29 @@ export const maxDuration = 60;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_RANGE_DAYS = 92;
+const MAX_INT4 = 2_147_483_647;
+const CREATIVE_ONLY_PARAMS = ["range", "offer_id", "min_sent", "sortBy"] as const;
+
+const badRequest = (error: string) => NextResponse.json({ error }, { status: 400 });
+
+// Creative rows and totals for the response: grading fields + rpm, the offer
+// filter, the min_sent hide and the server-side sort.
+function creativeBody(
+  rows: PerfRow[],
+  totals: PerfMetrics,
+  offerId: number | null,
+  minSent: number,
+  sortBy: CreativeSortKey,
+) {
+  const inOffer = offerId == null ? rows : rows.filter((r) => r.offer_id === offerId);
+  const graded = inOffer.map((r) => ({ ...gradePerf(r), rpm: rpmOf(r.revenue, r.sent) }));
+  const { rows: kept, hidden } = hideBelowMinSent(graded, minSent);
+  return {
+    data: sortCreativeRows(kept, sortBy),
+    totals: { ...gradePerf(totals), rpm: rpmOf(totals.revenue, totals.sent) },
+    hidden_rows: hidden,
+  };
+}
 
 export async function GET(req: NextRequest) {
   const auth = await requireApiMembership({
@@ -39,12 +73,92 @@ export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
 
   const dimensionRaw = sp.get("dimension") ?? "";
-  if (!REPORT_DIMENSIONS.includes(dimensionRaw as ReportDimension)) {
-    return NextResponse.json({ error: `Unknown dimension. Expected one of: ${REPORT_DIMENSIONS.join(", ")}` },
-      { status: 400 },
+  if (!isPerformanceDimension(dimensionRaw)) {
+    return badRequest(
+      `Unknown dimension. Expected one of: ${[...REPORT_DIMENSIONS, ...API_ONLY_DIMENSIONS].join(", ")}`,
     );
   }
-  const dimension = dimensionRaw as ReportDimension;
+  const dimension = dimensionRaw;
+  const creative = dimension === "creative";
+
+  // Creative-only params are rejected elsewhere, never silently ignored.
+  for (const p of CREATIVE_ONLY_PARAMS) {
+    if (!creative && sp.has(p)) return badRequest(`${p} is only supported for dimension=creative`);
+  }
+  const rangeRaw = sp.get("range");
+  if (rangeRaw != null && rangeRaw !== "lifetime") {
+    return badRequest("range must be lifetime, or omitted to use from/to");
+  }
+  const lifetime = rangeRaw === "lifetime";
+  if (lifetime && (sp.has("from") || sp.has("to") || sp.has("provider_phone_id"))) {
+    return badRequest("range=lifetime cannot be combined with from, to or provider_phone_id");
+  }
+  const offerRaw = sp.get("offer_id");
+  const offerId =
+    offerRaw == null
+      ? null
+      : /^\d+$/.test(offerRaw) && Number(offerRaw) > 0 && Number(offerRaw) <= MAX_INT4
+        ? Number(offerRaw)
+        : Number.NaN;
+  if (Number.isNaN(offerId)) return badRequest("offer_id must be a positive whole number");
+  if (offerId != null && sp.has("provider_phone_id")) {
+    return badRequest("offer_id cannot be combined with provider_phone_id");
+  }
+  const minSentRaw = sp.get("min_sent");
+  const minSent = minSentRaw == null ? 0 : /^\d+$/.test(minSentRaw) ? Number(minSentRaw) : Number.NaN;
+  if (Number.isNaN(minSent)) return badRequest("min_sent must be a whole number of 0 or more");
+  const sortRaw = sp.get("sortBy") ?? "revenue";
+  if (!isCreativeSortKey(sortRaw)) {
+    return badRequest(`Unknown sortBy. Expected one of: ${CREATIVE_SORT_KEYS.join(", ")}`);
+  }
+  const sortBy = sortRaw;
+
+  // conversion_date (default) = every metric on its own event day; send_date = the
+  // cohort of stages sent in range, with everything they have produced to date.
+  const attributionRaw = sp.get("attribution") ?? "conversion_date";
+  if (!isAttributionBasis(attributionRaw)) {
+    return badRequest(`Unknown attribution. Expected one of: ${ATTRIBUTION_BASES.join(", ")}`);
+  }
+  const attribution = attributionRaw;
+  if (dimension === "hourly" && attribution === "send_date") {
+    return badRequest("hourly buckets by event time; attribution=send_date is not supported for it");
+  }
+
+  if (lifetime) {
+    const stored = await readCreativeLifetime(auth.orgId, attribution);
+    if (!stored) {
+      // 503, not an empty 200: "never computed" is a service state, not zero rows.
+      return NextResponse.json(
+        {
+          error: "Lifetime creative rows have not been computed yet. The refresh runs hourly.",
+          code: "internal",
+          details: { reason: "rollup_not_ready" },
+        },
+        { status: 503 },
+      );
+    }
+    const totals =
+      offerId == null ? stored.basis.totals : stored.basis.offer_totals[String(offerId)] ?? ZERO;
+    const providers = await getReportProviderOptions(auth.orgId);
+    return NextResponse.json({
+      dimension,
+      attribution,
+      sort_by: sortBy,
+      min_sent: minSent,
+      offer_id: offerId,
+      ...creativeBody(stored.basis.rows, totals, offerId, minSent, sortBy),
+      refreshedAt: stored.basis.refreshedAt,
+      providers,
+      range: {
+        lifetime: true,
+        from: stored.basis.from,
+        to: stored.basis.to,
+        timezone: CAMPAIGN_TIMEZONE,
+      },
+      computed_at: stored.computedAt,
+      stale_seconds: Math.max(0, Math.round((Date.now() - Date.parse(stored.computedAt)) / 1000)),
+    });
+  }
 
   const todayEt = formatInCampaignTimezone(new Date(), "yyyy-MM-dd");
   const fromRaw = sp.get("from");
@@ -54,44 +168,33 @@ export async function GET(req: NextRequest) {
   // all days), so it takes a from/to range like every other dimension.
   const to = toRaw && DATE_RE.test(toRaw) ? toRaw : todayEt;
 
-  if (from > to) {
-    return NextResponse.json({ error: "`from` must be on or before `to`" },
-      { status: 400 },
-    );
-  }
+  if (from > to) return badRequest("`from` must be on or before `to`");
   const spanDays =
     (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
-  if (spanDays > MAX_RANGE_DAYS) {
-    return NextResponse.json({ error: `Date range cannot exceed ${MAX_RANGE_DAYS} days` },
-      { status: 400 },
-    );
-  }
-
-  // conversion_date (default) = every metric on its own event day; send_date = the
-  // cohort of stages sent in range, with everything they have produced to date.
-  const attributionRaw = sp.get("attribution") ?? "conversion_date";
-  if (!isAttributionBasis(attributionRaw)) {
-    return NextResponse.json(
-      { error: `Unknown attribution. Expected one of: ${ATTRIBUTION_BASES.join(", ")}` },
-      { status: 400 },
-    );
-  }
-  const attribution = attributionRaw;
-  if (dimension === "hourly" && attribution === "send_date") {
-    return NextResponse.json(
-      { error: "hourly buckets by event time; attribution=send_date is not supported for it" },
-      { status: 400 },
-    );
-  }
+  if (spanDays > MAX_RANGE_DAYS) return badRequest(`Date range cannot exceed ${MAX_RANGE_DAYS} days`);
 
   const providerRaw = sp.get("provider_phone_id");
   const providerPhoneId =
     providerRaw && /^\d+$/.test(providerRaw) ? Number(providerRaw) : null;
 
   const [report, providers] = await Promise.all([
-    getPerformanceReport(auth.orgId, dimension, { from, to, providerPhoneId, attribution }),
+    getPerformanceReport(auth.orgId, dimension, { from, to, providerPhoneId, attribution, offerId }),
     getReportProviderOptions(auth.orgId),
   ]);
+
+  if (creative) {
+    return NextResponse.json({
+      dimension,
+      attribution,
+      sort_by: sortBy,
+      min_sent: minSent,
+      offer_id: offerId,
+      ...creativeBody(report.rows, report.totals, offerId, minSent, sortBy),
+      refreshedAt: report.refreshedAt,
+      providers,
+      range: { from, to, timezone: CAMPAIGN_TIMEZONE },
+    });
+  }
 
   return NextResponse.json({
     dimension,

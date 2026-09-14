@@ -75,7 +75,7 @@ belongs to.
 `read_only` survives as a column for a future write-capable token. Nothing sets
 it false.
 
-**39 (route, method) pairs are token-reachable** out of 275 classified routes.
+**39 (route, method) pairs are token-reachable** out of 276 classified routes.
 `GET audience/pools` (pool discovery per offer and contact group, a 30-minute
 rollup in `operator_rollups`) was added 2026-09-14 — see
 [operator-api.md §2](../operator-api.md).

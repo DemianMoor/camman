@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-09-08_
+_Last updated: 2026-09-14_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -51,7 +51,7 @@ sequenceDiagram
 - Reads `short_domains`, `links` (redirect), `clicks` (scoring), MaxMind service.
 
 ## 5. UI surface
-- `components/campaigns/click-report-section.tsx` + `app/api/campaigns/[campaignId]/click-report/` — attribution reporting (filters out bot/prefetch via the score).
+- `components/campaigns/click-report-section.tsx` + `app/api/campaigns/[campaignId]/click-report/` — attribution reporting (filters out bot/prefetch via the score). `human` counts **scored** human click events (`HUMAN_CLICK`, since 2026-09-14 — it used to count the unscored first-pass guess too), and each tracked stage also carries `clicks_human` = its distinct counted clickers, the operator API's grading field ([07-conventions.md](../07-conventions.md) "Grading metrics").
 - `CopyableId` / link mode toggle on the campaign editor.
 
 ## 5b. Destination-URL contract & validation (guidekn shape guard)

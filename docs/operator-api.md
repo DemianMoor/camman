@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-11_
+_Last updated: 2026-09-14_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -106,15 +106,36 @@ ago that sent yesterday leaves its contacts counted as "not used in 30d".
 
 | Param | Values |
 | --- | --- |
-| `dimension` | the breakdown you want (campaign, offer, creative, number, …) |
-| `from`, `to` | `YYYY-MM-DD`, in ET |
+| `dimension` | `number`, `offer`, `sequence`, `group` or `hourly` |
+| `from`, `to` | `YYYY-MM-DD`, in ET; today if omitted; at most 92 days apart |
+| `provider_phone_id` | optional — only stages sent from that number |
 
 ```bash
-curl -s "https://camman.vercel.app/api/reports/performance?dimension=offer&from=2026-09-01&to=2026-09-04" \
+curl -s "https://camman.vercel.app/api/reports/performance?dimension=offer&from=2026-09-07&to=2026-09-13" \
   -H "Authorization: Bearer $CAMMAN_TOKEN"
 ```
 
-Sends, delivered, clicks, conversions, revenue, cost, EPC per row.
+Response: `{ dimension, data: [row, …], totals, refreshedAt, providers, range }`.
+Every row, and `totals`, carries `sent`, `opt_outs`, `clickers` (the tracker's
+clean landing visits — not human clicks), `redirects`, `counted_clickers`,
+`sales`, `revenue`, `cost`, and the grading fields `reached`, `clicks_human`,
+`click_to_reach_pct`, `reach_to_sale_pct` and `opt_rate` (see §7). Each metric is
+dated by its own event: sends by send day, `reached` by the day the recipient
+reached the offer, `clicks_human` by first click, sales and revenue by
+conversion day.
+
+One real row, 2026-09-07..13 (offer name redacted, cost rounded):
+
+```json
+{
+  "key": "118", "label": "<offer name> - 15173 (lhj)",
+  "sent": 183664, "opt_outs": 5450, "clickers": 4301, "redirects": 357,
+  "reached": 400, "counted_clickers": 4480, "clicks_human": 4480,
+  "lifetime_clickers": 10934, "lifetime_revenue": 11599,
+  "sales": 50, "revenue": 3650, "cost": 1796.56,
+  "click_to_reach_pct": 8.93, "reach_to_sale_pct": 12.5, "opt_rate": 2.97
+}
+```
 
 ### Delivery report
 
@@ -126,10 +147,18 @@ Sends, delivered, clicks, conversions, revenue, cost, EPC per row.
 - **`GET /api/campaigns/list`** — `page`, `pageSize`, `search`, `showArchived`,
   `sortBy`, `sortDir`. Response: `{ data, totalCount, page, pageSize }`.
 - **`GET /api/campaigns/{campaignId}`** — one campaign.
-- **`GET /api/campaigns/{campaignId}/stages`** — its stages.
+- **`GET /api/campaigns/{campaignId}/stages`** — its stages. Each stage carries
+  its whole-life `reached`, `clicks_human`, `click_to_reach_pct`,
+  `reach_to_sale_pct` and `opt_rate` (§7), next to the inputs that feed them —
+  `send_counts.sent`, `inbound_stop_count` and `keitaro_sales_count`. Real
+  excerpt, one stage:
+  `"send_counts": { "sent": 1376, … }, "inbound_stop_count": 45, "keitaro_sales_count": 1, "reached": 43, "clicks_human": 256, "click_to_reach_pct": 16.8, "reach_to_sale_pct": 2.33, "opt_rate": 3.27`.
 - **`GET /api/campaigns/{campaignId}/stages/{stageId}`** — one stage.
 - **`GET /api/campaigns/{campaignId}/activity`** — timeline of what happened.
-- **`GET /api/campaigns/{campaignId}/click-report`** — click breakdown.
+- **`GET /api/campaigns/{campaignId}/click-report`** — per stage: raw click events
+  by class (`raw`, `suspect`, `bot`, `prefetch`, `unknown`, `unscored`), `human`
+  (scored human click events) and `clicks_human` (distinct human clickers, §7).
+  Grade on `clicks_human`: raw clicks are about 91% bots.
 - **`GET /api/offers/{offerId}/report`** — one offer across campaigns.
 
 ### Dashboard
@@ -153,7 +182,11 @@ curl -s https://camman.vercel.app/api/sends/today \
 ```
 
 Includes `prepared_by_phone` so you can see per-number load for the day.
-Sending numbers are shown, and so is the provider behind them, by name.
+Sending numbers are shown, and so is the provider behind them, by name. Every
+stage also carries `creative_id` and `creative_slug`, so a same-day text
+collision — one creative on two numbers, or twice on one number — is visible
+from this single call. Real excerpt, one stage:
+`{ "stage_id": 4251, …, "creative_id": 703, "creative_slug": "tbhprk", … }`.
 
 **`GET /api/sends/state`** — whether sending is on, paused, or circuit-broken.
 
@@ -211,14 +244,36 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 - **`GET /api/creatives/{id}`** — one creative.
 - **`GET /api/brands/list`**, **`/api/offers/list`**, **`/api/networks/list`** —
   names and ids so report rows are legible.
-- **`GET /api/provider-phones/list`** — sending numbers, each tagged with its
-  `Route X` alias.
-- **`GET /api/providers/list`** — the routes themselves, as aliases.
+- **`GET /api/provider-phones/list`** — sending numbers, each with its provider
+  by name.
+- **`GET /api/providers/list`** — the providers themselves, by name.
 - **`GET /api/me`** — who this token belongs to and what role it carries.
 
 ---
 
-## 7. Rules of the road
+## 7. Grading metrics — what the numbers mean
+
+| Field | Meaning |
+| --- | --- |
+| `reached` | Messages whose recipient reached the offer page (their first offer click, tracked per recipient). |
+| `clicks_human` | Distinct recipients with at least one click scored human, or a conversion. The same number the platform's EPC divides by. |
+| `click_to_reach_pct` | `reached ÷ clicks_human × 100`. Can exceed 100: a recipient can reach the offer without a click the scorer called human. |
+| `reach_to_sale_pct` | `conversions ÷ reached × 100`. Conversions come from the tracker (`sales` on report rows, `keitaro_sales_count` on stages). |
+| `opt_rate` | `opt_outs ÷ sent × 100`. |
+
+- **Percent units**, 2 decimals: `3.04` means 3.04%.
+- **`null` means "cannot be computed", never zero** — a denominator of 0, or a row
+  made up only of manual-mode stages (those have no per-recipient reach).
+- **Grade on `clicks_human`.** Raw clicks are about 91% bots (only click-report
+  shows them), and `clickers` on report rows is the tracker's landing-visit
+  count, not a human-click count.
+- **`reached` is not `redirects`.** `redirects` counts the tracker's clean offer
+  click events; `reached` counts recipients. They run close (1,226 vs 1,115 over
+  2026-09-07..13) but measure different things.
+
+---
+
+## 8. Rules of the road
 
 1. **300 requests per hour.** Cache what you fetch; do not poll in a loop.
 2. **Do not retry a 403.** The endpoint is not on the allowlist and never will
@@ -231,7 +286,7 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 
 ---
 
-## 8. What is deliberately not here
+## 9. What is deliberately not here
 
 Not an oversight, and not something a retry or a different URL will reach:
 

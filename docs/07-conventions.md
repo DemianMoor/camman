@@ -1,6 +1,43 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-11_
+_Last updated: 2026-09-14_
+
+## Grading metrics — one vocabulary for the operator API (2026-09-14)
+
+The creative-grading fields a personal token sees are defined once, in
+[lib/reporting/grading-rates.ts](../lib/reporting/grading-rates.ts) (pure math)
+and the per-surface queries that feed it. Spec:
+[superpowers/specs/2026-09-14-operator-api-grading-design.md](superpowers/specs/2026-09-14-operator-api-grading-design.md).
+
+- **`reached` is per-recipient** (`stage_sends.offer_reached_at`, the first offer
+  click), NOT Keitaro `redirect_clicks_clean` (click events). Close but different:
+  4,557 vs 4,204 over the 30 days to 2026-09-14. `redirects` stays on report rows
+  for the UI.
+- **`clicks_human` IS the counted-clicker figure** — distinct recipients, deduped
+  at the row's grain. Raw clicks are ~91% non-human (708,086 raw vs 65,154 scored
+  human over 30 days) and must never be a grading denominator. Counting human
+  click EVENTS per stage costs 4s (7 days) to 13s (30 days), which is why report
+  rows carry the cached distinct figure instead.
+- **`null` means "unknowable", never 0.** A manual-mode stage has no per-recipient
+  reach, so its `reached` is `null`; `addNullable()` skips a null part, and a row
+  is `null` only when ALL its parts are. Absorbing nulls were tried first and
+  nulled nearly every total: old manual campaigns keep trickling Keitaro visits
+  into any range (13 of 836 stages over 2026-09-07..13, carrying 7 of 12,769
+  visits and 0 sales). So an accumulator starts from `null` (`ZERO.reached`) —
+  except a bucket built purely from tracked events (hourly), which starts at 0.
+- **Percent units everywhere** (`3.04` = 3.04%), 2 decimals, via `pct()`; a zero
+  denominator is `null`.
+- **`click_to_reach_pct` can exceed 100** and is not clamped: a recipient can
+  reach the offer without a click the scorer called human.
+- **A totals row dedupes at ITS grain.** `/api/reports/performance` totals summed
+  per-stage clicker counts until 2026-09-14; they are now distinct (campaign,
+  contact), the Overview totals-card definition.
+- **A phone sweep must skip a float's fraction.** The bare `/\+?1?\d{10,15}/`
+  flagged `"cost":1234.9999999999995` as a phone on the first run.
+  `scripts/verify-operator-grading-http.ts` excludes digit runs preceded by a
+  digit or `.`, and carries a control proving a real phone string still goes red.
+  `scripts/verify-operator-access.ts` still uses the bare pattern and can
+  false-positive the same way on a summed float.
 
 ## A role nobody holds is untested by construction (2026-09-11)
 

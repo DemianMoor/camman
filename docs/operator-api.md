@@ -236,6 +236,88 @@ returns them in full):
   an impossible date, `from` after `to`, or more than 14 days.
 - Manual-mode campaigns have no per-message rows and do not appear.
 
+### Creative usage — where a text has already run
+
+**`GET /api/creatives/{id}/usage`**
+
+Every campaign, sending number and ET day this creative has been sent on, with
+the results of each. Use it to check cohort freshness and the one-text-one-number
+-per-day rule before scheduling the creative again.
+
+```bash
+curl -s https://camman.vercel.app/api/creatives/779/usage \
+  -H "Authorization: Bearer $CAMMAN_TOKEN"
+```
+
+Real response (campaign names redacted, sending numbers shortened to their last 4
+digits; the API returns them in full):
+
+```json
+{
+  "creative_id": 779,
+  "creative_slug": "v3eg2u",
+  "data": [
+    { "campaign_id": 1290, "campaign_name": "<campaign name>", "group_names": ["WL_Sep_2026"],
+      "sending_number": "…5147", "date": "2026-09-12",
+      "sends": 4500, "clicks_human": 146, "reached": 7, "conversions": 1 },
+    { "campaign_id": 1276, "campaign_name": "<campaign name>", "group_names": ["WL_Sep_2026"],
+      "sending_number": "…5147", "date": "2026-09-10",
+      "sends": 4000, "clicks_human": 86, "reached": 4, "conversions": 2 }
+  ]
+}
+```
+
+That example is exactly what this endpoint exists to catch: the same text went to
+the same contact group from the same number twice in three days.
+
+- One row per campaign + sending number + send day, newest first. Archived stages
+  are included — this is history.
+- `clicks_human` counts each person once across the row's stages; `sends`,
+  `reached` and `conversions` add up. `reached` is `null` for a manual-mode
+  campaign (no per-message tracking).
+- `404` if the creative is not in your organisation; `400` for a non-numeric id.
+
+### Campaign audit — every campaign and its stages in one call
+
+**`GET /api/campaigns/audit?status=active`** (`active` is the default; also
+`paused` or `completed`)
+
+One entry per campaign in that status, with all its live stages — for the daily
+"which campaigns have sales but no Day 2 / Day 3 yet" sweep, instead of one call
+per campaign. It counts as **one** request against the 300/hour limit.
+
+```bash
+curl -s "https://camman.vercel.app/api/campaigns/audit?status=active" \
+  -H "Authorization: Bearer $CAMMAN_TOKEN"
+```
+
+Real entry (campaign and offer redacted):
+
+```json
+{
+  "campaign_id": 1307, "campaign_name": "<campaign name>",
+  "offer": { "id": "<offer id>", "name": "<offer name>" },
+  "group_names": ["Blood Sugar"],
+  "stage_count": 2, "last_send_date": "2026-09-12",
+  "total_conversions": 2, "revenue": 200,
+  "stages": [
+    { "stage_id": 4246, "stage_seq": 1, "label": "Day 1", "split_index": null, "behavioral_tier": null,
+      "status": "success", "scheduled_date": "2026-09-12", "sent_date": "2026-09-12",
+      "sent": 3411, "reached": 11, "conversions": 2, "creative_slug": "53wp5d" },
+    { "stage_id": 4277, "stage_seq": 2, "label": "Day 2", "split_index": null, "behavioral_tier": null,
+      "status": "pending", "scheduled_date": "2026-09-14", "sent_date": null,
+      "sent": 0, "reached": 0, "conversions": 0, "creative_slug": "ytf396" }
+  ]
+}
+```
+
+- `stage_seq` is the stage number. A/B splits and behavioural lanes share it, so
+  use `split_index` and `behavioral_tier` to tell siblings apart.
+- `sent`, `reached` and `conversions` are the stage's whole life; `conversions` and
+  `revenue` come from the tracker. `reached` is `null` for manual-mode stages.
+- A campaign whose stages are all archived still appears, with `stages: []`.
+- `400` for any other `status`.
+
 ### Delivery report
 
 **`GET /api/reports/delivery`** — delivery rate per sending route, same
@@ -341,6 +423,8 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 - **`GET /api/creatives/list`** — `offer_id`, `status`, plus the standard list
   params. Carries the spam score where one is cached.
 - **`GET /api/creatives/{id}`** — one creative.
+- **`GET /api/creatives/{id}/usage`** — every campaign, sending number and day it
+  has already run on (see Creative usage, §3).
 - **`GET /api/brands/list`**, **`/api/offers/list`**, **`/api/networks/list`** —
   names and ids so report rows are legible.
 - **`GET /api/provider-phones/list`** — sending numbers, each with its provider

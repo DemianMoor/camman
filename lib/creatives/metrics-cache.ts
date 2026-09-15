@@ -43,6 +43,8 @@ export interface CreativeMetricsRow {
   // picker's sort (which stays on the 30-day number — see the header note).
   lifetime_payout: number;
   lifetime_clean: number;
+  // All-time sales: per stage max(manual sales_count, Keitaro conversions).
+  lifetime_sales: number;
   // CTR counters — messages sent and counted clickers per window — from the
   // hourly snapshot in lib/creatives/ctr-rollup.ts, NOT from the statement below.
   // Zero until that snapshot's first refresh.
@@ -63,6 +65,7 @@ const NO_ACTIVITY: Omit<CreativeMetricsRow, "creative_id"> = {
   tracked_clean: 0,
   lifetime_payout: 0,
   lifetime_clean: 0,
+  lifetime_sales: 0,
   ctr_sent_7d: 0,
   ctr_clicks_7d: 0,
   ctr_sent_30d: 0,
@@ -90,19 +93,32 @@ export async function computeCreativeMetrics(
   orgId: string,
 ): Promise<CreativeMetricsRow[]> {
   const rows = (await db.execute(sql`
-    WITH stage_agg AS (
+    WITH k_stage AS (
+      -- Keitaro totals per stage, aggregated ONCE and joined into both stage CTEs.
+      -- They were per-stage correlated subqueries (an index scan of
+      -- keitaro_stage_results per stage, twice): 1,535 ms / 343,794 buffers for
+      -- the stage part vs 17 ms / 991 buffers joined (prod, 2026-09-15).
+      SELECT stage_id,
+             sum(sales)::int AS sales,
+             sum(revenue)    AS revenue
+        FROM keitaro_stage_results
+       WHERE org_id = ${orgId}
+       GROUP BY stage_id
+    ),
+    stage_agg AS (
       SELECT cs.creative_id,
              coalesce(sum(cs.delivered_count), 0)::int AS delivered,
              coalesce(sum(cs.checkout_click_count), 0)::int AS checkouts,
-             coalesce(sum(cs.sales_count), 0)::int AS sales,
-             coalesce(sum(
-               (SELECT coalesce(sum(ksr.revenue), 0)
-                  FROM keitaro_stage_results ksr
-                 WHERE ksr.stage_id = cs.id)
-             ), 0)::numeric AS payout,
+             -- A stage's sales = max(manual tally, Keitaro conversions): the
+             -- combineSales rule (lib/stage-results.ts). sales_count ALONE is only
+             -- the manual tally — the Keitaro poll never writes it — so summing it
+             -- read 0 and Sales CR showed 0.0% on every creative (fixed 2026-09-15).
+             coalesce(sum(greatest(cs.sales_count, coalesce(ks.sales, 0))), 0)::int AS sales,
+             coalesce(sum(ks.revenue), 0)::numeric AS payout,
              coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS manual_clean
         FROM campaign_stages cs
         JOIN campaigns c ON c.id = cs.campaign_id
+        LEFT JOIN k_stage ks ON ks.stage_id = cs.id
        WHERE cs.org_id = ${orgId}
          AND cs.creative_id IS NOT NULL
          AND cs.created_at >= now() - interval '30 days'
@@ -125,14 +141,12 @@ export async function computeCreativeMetrics(
     -- deliberately. Sort by recent, show both.
     stage_life AS (
       SELECT cs.creative_id,
-             coalesce(sum(
-               (SELECT coalesce(sum(ksr.revenue), 0)
-                  FROM keitaro_stage_results ksr
-                 WHERE ksr.stage_id = cs.id)
-             ), 0)::numeric AS lifetime_payout,
+             coalesce(sum(ks.revenue), 0)::numeric AS lifetime_payout,
+             coalesce(sum(greatest(cs.sales_count, coalesce(ks.sales, 0))), 0)::int AS lifetime_sales,
              coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS lifetime_manual
         FROM campaign_stages cs
         JOIN campaigns c ON c.id = cs.campaign_id
+        LEFT JOIN k_stage ks ON ks.stage_id = cs.id
        WHERE cs.org_id = ${orgId} AND cs.creative_id IS NOT NULL
        GROUP BY cs.creative_id
     ),
@@ -151,7 +165,11 @@ export async function computeCreativeMetrics(
          AND cc.first_click_at >= now() - interval '30 days'
        GROUP BY cc.creative_id
     )
-    SELECT coalesce(s.creative_id, k.creative_id) AS creative_id,
+    -- Driven by the LIFETIME aggregates, with the 30-day ones LEFT JOINed (each is
+    -- a subset of its lifetime counterpart). It used to be driven by the 30-day
+    -- aggregates, so a creative with no activity in the last 30 days got no row
+    -- and its all-time columns read 0 or a dash (60 of 405 creatives, 2026-09-15).
+    SELECT coalesce(sl.creative_id, kl.creative_id) AS creative_id,
            coalesce(s.delivered, 0)      AS delivered,
            coalesce(s.checkouts, 0)      AS checkouts,
            coalesce(s.sales, 0)          AS sales,
@@ -159,11 +177,12 @@ export async function computeCreativeMetrics(
            coalesce(s.manual_clean, 0)   AS manual_clean,
            coalesce(k.tracked_clean, 0)  AS tracked_clean,
            coalesce(sl.lifetime_payout, 0) AS lifetime_payout,
-           (coalesce(sl.lifetime_manual, 0) + coalesce(kl.lifetime_tracked, 0)) AS lifetime_clean
-      FROM stage_agg s
-      FULL OUTER JOIN click_agg k ON k.creative_id = s.creative_id
-      LEFT JOIN stage_life sl ON sl.creative_id = coalesce(s.creative_id, k.creative_id)
-      LEFT JOIN click_life kl ON kl.creative_id = coalesce(s.creative_id, k.creative_id)
+           (coalesce(sl.lifetime_manual, 0) + coalesce(kl.lifetime_tracked, 0)) AS lifetime_clean,
+           coalesce(sl.lifetime_sales, 0) AS lifetime_sales
+      FROM stage_life sl
+      FULL OUTER JOIN click_life kl ON kl.creative_id = sl.creative_id
+      LEFT JOIN stage_agg s ON s.creative_id = coalesce(sl.creative_id, kl.creative_id)
+      LEFT JOIN click_agg k ON k.creative_id = coalesce(sl.creative_id, kl.creative_id)
   `)) as unknown as Record<string, unknown>[];
 
   const byId = new Map<number, CreativeMetricsRow>();
@@ -179,6 +198,7 @@ export async function computeCreativeMetrics(
       tracked_clean: Number(r.tracked_clean ?? 0),
       lifetime_payout: Number(r.lifetime_payout ?? 0),
       lifetime_clean: Number(r.lifetime_clean ?? 0),
+      lifetime_sales: Number(r.lifetime_sales ?? 0),
     });
   }
   // A creative can have sends in the CTR snapshot but no row above (nothing in

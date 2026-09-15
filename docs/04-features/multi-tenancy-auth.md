@@ -298,6 +298,16 @@ unless the caller holds `compliance.manage`, shaped like the existing
 `tracking_id_immutable` refusal. Field-level, not permission-level: the operator
 legitimately needs to edit stages and creatives — just not those fields.
 
+⚠️ **A client must not send a locked field it cannot change** (fixed 2026-09-15).
+The gate refuses `allow_multi_segment` whenever it is *present*, not only when it
+changes. The Creatives page's edit save sent the switch's value on every save, so
+**every** operator edit — text, quality, sequence, funnel stage — failed with
+"Allow multi-segment is an owner-only compliance setting", and the only edit that
+got through was a text change on a creative with sends (the fork path returns
+before the gate). The fix is client-side and leaves the gate untouched:
+`CreativeForm` locks the switch without `compliance.manage`, and the page omits
+the field from the PATCH for those roles.
+
 ### Page guards live in LAYOUTS
 
 Nine of the ten gated pages are client components and cannot run a server check.

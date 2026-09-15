@@ -1090,6 +1090,9 @@ export function StageForm({
             : undefined,
         quality: values.quality,
         sequence_placement: values.sequence_placement,
+        // Was missing: the dialog's Funnel stage choice was silently dropped
+        // and every inline-created creative saved as "unknown".
+        funnel_stage: values.funnel_stage,
         applies_to_all_offers: values.applies_to_all_offers,
         offer_ids: values.offer_ids,
       }),

@@ -690,7 +690,12 @@ export default function CreativesPage() {
       sequence_placement: values.sequence_placement,
       funnel_stage: values.funnel_stage,
       applies_to_all_offers: values.applies_to_all_offers,
-      allow_multi_segment: values.allow_multi_segment,
+      // Owner-only compliance field. The PATCH refuses it (403) from any role
+      // without compliance.manage — even unchanged — so sending it on every
+      // save made EVERY operator edit fail. Omit it for those roles.
+      ...(can("compliance.manage")
+        ? { allow_multi_segment: values.allow_multi_segment }
+        : {}),
       offer_ids: values.offer_ids,
     };
     const result = await updateApi.execute(`/api/creatives/${editing.id}`, {

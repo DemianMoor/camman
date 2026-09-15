@@ -38,6 +38,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { calculateSmsSegments, containsEmDash } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { useAuth } from "@/components/protected/auth-context";
 import { MAX_SEGMENTS } from "@/lib/sends/segments";
 import { cn } from "@/lib/utils";
 import {
@@ -140,6 +141,11 @@ export function CreativeForm({
   isSubmitting,
 }: CreativeFormProps) {
   const isEdit = mode === "edit";
+  // allow_multi_segment is an Owner-only compliance setting: the creative PATCH
+  // refuses it from any role without compliance.manage. Lock the switch for
+  // those roles so the form cannot offer a change the server will reject.
+  const { can } = useAuth();
+  const canEditCompliance = can("compliance.manage");
   const offersApi = useApiCall<{ data: OfferInfo[] }>();
   const [offers, setOffers] = useState<OfferInfo[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(
@@ -409,6 +415,7 @@ export function CreativeForm({
                 Off (default): this creative is refused at send if it renders
                 to more than 1 SMS segment. On: allows up to {MAX_SEGMENTS}{" "}
                 segments — never more, a hard limit.
+                {canEditCompliance ? null : " Only an Owner can change this."}
               </p>
             </div>
             <FormField
@@ -419,7 +426,7 @@ export function CreativeForm({
                   id="allow-multi-segment"
                   checked={field.value}
                   onCheckedChange={field.onChange}
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || !canEditCompliance}
                 />
               )}
             />

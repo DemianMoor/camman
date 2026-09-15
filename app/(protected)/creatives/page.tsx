@@ -104,6 +104,8 @@ type Creative = {
   archived_at: string | null;
   created_at: string;
   offers: Info[];
+  // Distinct campaigns with a sent stage using this creative, all time.
+  used_campaigns: number;
   // 30-day performance metrics. Ratios are null when their denominator
   // (messages sent for CTR; clean clicks for the rest) is 0.
   metrics: {
@@ -938,6 +940,19 @@ export default function CreativesPage() {
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">
             {numberFmt.format(row.original.metrics.clean_clicks_lifetime)}
+          </span>
+        ),
+      },
+      {
+        id: "used_campaigns",
+        header: "Used Campaigns",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span
+            className="tabular-nums text-muted-foreground"
+            title="Campaigns with a sent stage using this creative (all time)"
+          >
+            {numberFmt.format(row.original.used_campaigns)}
           </span>
         ),
       },

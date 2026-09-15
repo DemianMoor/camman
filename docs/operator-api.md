@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-15_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -623,7 +623,9 @@ Both are counts only. There is no endpoint on this list that returns a contact.
   (`ctr`), 7 days (`ctr_7d`) and all time (`ctr_lifetime`), each with its
   `sent*` / `ctr_clickers*` counts. CTR comes from an hourly snapshot and is
   `null` when nothing was sent. `delivered` is the receipt/import tally, not a
-  send count.
+  send count. `used_campaigns` (on every row, even with `include_metrics=false`)
+  is the number of distinct campaigns with a sent stage using the creative, all
+  time — the campaigns `/usage` lists. Sortable with `sortBy=used_campaigns`.
 - **`GET /api/creatives/{id}`** — one creative.
 - **`GET /api/creatives/{id}/usage`** — every campaign, sending number and day it
   has already run on (see Creative usage, §3).

@@ -156,6 +156,24 @@ export async function GET(req: NextRequest) {
     epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.payout, 0)::numeric / ${cleanExpr} END`,
   } as const;
 
+  // All-time count of distinct campaigns with a SENT stage using this creative —
+  // the same "used" rule as getCreativeUsage (lib/reporting/grading.ts). Live, not
+  // cached: an indexed lookup on campaign_stages_creative_id_idx, ~3 ms for the
+  // whole org (measured 2026-09-15), so it needs no include_metrics opt-out.
+  //
+  // ⚠️ The outer reference is the literal `creatives.id`, NOT ${creatives.id}.
+  // In a single-table select (the include_metrics=false path) Drizzle renders a
+  // column interpolated into a SELECT-list expression as a bare "id", which
+  // inside this subquery binds to campaign_stages.id — every row came back 0.
+  // ORDER BY and joined selects qualify it, so only that one path broke.
+  const usedCampaignsSql = drizzleSql<number>`(
+    SELECT count(DISTINCT cs.campaign_id)::int
+      FROM campaign_stages cs
+     WHERE cs.org_id = ${orgId}
+       AND cs.creative_id = creatives.id
+       AND cs.sent_at IS NOT NULL
+  )`;
+
   const sortBy = params.sortBy ?? "created_at";
   const sortDirSql = params.sortDir === "asc" ? "ASC" : "DESC";
   const orderFn = params.sortDir === "asc" ? asc : desc;
@@ -171,6 +189,8 @@ export async function GET(req: NextRequest) {
       drizzleSql`${RATIO_SQL[sortBy as keyof typeof RATIO_SQL]} ${drizzleSql.raw(sortDirSql)} NULLS LAST`,
       asc(creatives.id),
     ];
+  } else if (sortBy === "used_campaigns") {
+    orderByClause = [orderFn(usedCampaignsSql), asc(creatives.id)];
   } else if (sortBy === "spam_score") {
     orderByClause = [
       drizzleSql`${creatives.spam_score} ${drizzleSql.raw(sortDirSql)} NULLS LAST`,
@@ -210,6 +230,7 @@ export async function GET(req: NextRequest) {
     status: creatives.status,
     archived_at: creatives.archived_at,
     created_at: creatives.created_at,
+    used_campaigns: usedCampaignsSql.as("used_campaigns"),
   } as const;
 
   const rowsQuery = includeMetrics
@@ -434,6 +455,7 @@ export async function GET(req: NextRequest) {
       archived_at: r.archived_at,
       created_at: r.created_at,
       offers: offersByCreative.get(r.id) ?? [],
+      used_campaigns: Number(r.used_campaigns),
       ...m,
       spam_score: score,
       spam_label: label,

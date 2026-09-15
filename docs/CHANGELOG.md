@@ -1796,4 +1796,6 @@ still computes and reports, it just never refuses. **No migration.**
 
 - 2026-09-14 — Operator can pick a phone number on stages: `providers/[providerId]/phones` opened to the operator for GET only (POST stays denied); callers without `providers.view` get credential_id, dashboard_id, max_sends_per_second, short_domain_id, allow_unknown_carrier blanked and carrier_limits empty. Number, cost and preview candidates kept. No permission granted, no migration. — docs updated: docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
 
+- 2026-09-15 — Operator can archive creatives directly from /creatives (row action and bulk edit): `creatives.archive` granted to the operator; the deletion-request intercept removed from `creatives/[id]/archive`. Restore stays Owner-side. Segments still go through the queue. No migration. — docs updated: docs/04-features/operator-guardrails.md, docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

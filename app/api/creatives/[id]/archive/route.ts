@@ -5,7 +5,6 @@ import { db } from "@/db/client";
 import { creatives } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
-import { interceptDeletion } from "@/lib/guardrails/deletion-requests";
 import { can } from "@/lib/permissions";
 
 function parseId(idParam: string) {
@@ -23,8 +22,7 @@ export async function POST(
     method: "POST",
   });
   if ("error" in auth) return auth.error;
-  const { orgId, role, user } = auth;
-
+  const { orgId, role } = auth;
 
   const { id } = await params;
   const creativeId = parseId(id);
@@ -34,24 +32,9 @@ export async function POST(
     });
   }
 
-
-
-  // ── Deletion approval queue (869et3vm1 Phase 3) ─────────────────────────
-  //
-  // For an operator this becomes a REQUEST, not a deletion. 202 rather than
-  // 403: they MAY do this, it just needs an owner's decision first, and the
-  // status code is what lets the UI say "requested" instead of "forbidden".
-  {
-    const diverted = await interceptDeletion({
-      orgId,
-      role,
-      actorUserId: user.id,
-      entityType: "creative",
-      entityId: creativeId,
-    });
-    if (diverted.intercepted) return diverted.response;
-  }
-
+  // No deletion-request intercept here (removed 2026-09-15): the operator now
+  // holds creatives.archive and archives directly. Segments still go through
+  // the queue — see lib/guardrails/deletion-requests.ts.
   if (!can(role, "creatives.archive")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }

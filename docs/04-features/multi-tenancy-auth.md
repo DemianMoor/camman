@@ -1,6 +1,6 @@
 # Feature — Multi-tenancy, Auth & Permissions
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-15_
 
 ## 1. Purpose
 Isolate every org's data behind an `org_id`, authenticate users via Supabase Auth, and enforce a five-role permission model on both server and client. A missing `org_id` filter is a data-leak bug — this is the most safety-critical convention in the codebase.
@@ -243,7 +243,7 @@ as before.
 
 ### The permission set
 
-`operator` is **36 permissions**, defined standalone and deliberately **not**
+`operator` is **38 permissions** (36 at Phase 2; `provider_phones.view` since, and `creatives.archive` on 2026-09-15), defined standalone and deliberately **not**
 spread from `viewerPerms`, which carries `contacts.view`, `opt_outs.view`,
 `clickers.view` and `segment_contacts.view` — the whole audience block.
 

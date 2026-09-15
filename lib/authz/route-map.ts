@@ -205,7 +205,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "creatives/[id]/archive": { methods: ["POST"] },
   "creatives/[id]/duplicate": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "creatives/[id]/rescore": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
-  "creatives/[id]/restore": null, // archive IS delete here -- goes through the deletion queue in Phase 3
+  "creatives/[id]/restore": null, // operator archives directly (2026-09-15) but may not restore -- undo is an Owner call
   // Operator API creative grading (2026-09-14): where a text has already run.
   "creatives/[id]/usage": { methods: ["GET"], token: ["GET"] },
   "creatives/bulk-score": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },

@@ -299,10 +299,12 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "stages.archive",
   "stages.restore",
   "stages.delete",
-  // Creatives — view + create + edit. No archive.
+  // Creatives — view + create + edit + archive (Dmytro, 2026-09-15). Archive
+  // is direct, not a deletion request. No restore: undoing one is an Owner's call.
   "creatives.view",
   "creatives.create",
   "creatives.update",
+  "creatives.archive",
   // Segments — view + create/edit, counts only. The contact-level endpoints
   // under a segment are denied by the route map, not by these.
   "segments.view",

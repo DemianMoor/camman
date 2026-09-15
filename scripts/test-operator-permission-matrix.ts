@@ -30,8 +30,8 @@ const MATRIX_OPERATOR: Permission[] = [
   "campaigns.pause", "campaigns.complete", "campaigns.archive", "campaigns.restore",
   "stages.view", "stages.create", "stages.update", "stages.send",
   "stages.archive", "stages.restore", "stages.delete",
-  // Creatives — view + create + edit, no archive
-  "creatives.view", "creatives.create", "creatives.update",
+  // Creatives — view + create + edit + archive (2026-09-15); no restore
+  "creatives.view", "creatives.create", "creatives.update", "creatives.archive",
   // Segments — view + create/edit, counts only
   "segments.view", "segments.create", "segments.update",
   "segment_rules.view", "segment_rules.create", "segment_rules.update",

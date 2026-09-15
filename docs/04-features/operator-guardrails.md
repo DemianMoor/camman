@@ -1,6 +1,6 @@
 # Feature — Operator guardrails
 
-_Last updated: 2026-09-11_
+_Last updated: 2026-09-15_
 
 ClickUp 869et3vm1 Phase 3. Volume caps, link policy, creative versioning, a
 deletion approval queue, and three warnings. No migration — `deletion_requests`
@@ -26,7 +26,7 @@ reversible, explainable, and costs the send path nothing.
 | ~~Aggregate 60,000/hour, org-wide~~ | approve-send, retry-failed | **WARN ONLY, PERMANENTLY** (2026-09-04 decision) — see §2.1 |
 | **URL allowlist** | creative create, bulk create, update | 400 `raw_url_in_body` |
 | **Creative versioning** | creative update | 200 with a **new** creative id |
-| **Deletion requests** | creative archive, segment archive/delete | 202 with a queued request |
+| **Deletion requests** | segment archive/delete | 202 with a queued request |
 
 ### 2.1 The aggregate cap no longer blocks (2026-09-04)
 
@@ -113,7 +113,7 @@ first. A 403 would say the opposite, and the status code is what lets the UI say
 *requested* rather than *forbidden*.
 
 ⚠️ **The intercept must run BEFORE the `can()` check.** The operator deliberately
-lacks `creatives.archive` / `segments.archive` / `segments.delete`, so a
+lacks `segments.archive` / `segments.delete`, so a
 permission check placed first returns 403 and the request is never created —
 which is exactly what the first verification run caught. Correct order is
 **auth → parse id → intercept → `can()`**. The intercept only diverts a role
@@ -124,9 +124,17 @@ the delete. Each entity type has its own cascade rules and its own route; firing
 a generic delete from the queue would re-implement all of them somewhere none of
 their tests reach.
 
-Only two surfaces need interception, and that follows from the matrix: campaigns
-archive and stage delete are granted outright, and the registry is view-only so
-an operator cannot archive it at all.
+Only segments need interception now, and that follows from the matrix: campaign
+archive, stage delete and **creative archive** are granted outright, and the
+registry is view-only so an operator cannot archive it at all.
+
+**Creative archive left the queue on 2026-09-15** (Dmytro): the operator holds
+`creatives.archive` and archives directly, from the row action or bulk edit on
+`/creatives`. Archive is a soft status change, and the operator does **not** hold
+`creatives.restore` — undoing an archive stays with an Owner. The intercept was
+deleted from `app/api/creatives/[id]/archive/route.ts` rather than left in place:
+the operator was the only role holding `deletion.request`, so it could never fire
+there again.
 
 ## 3. WARNs — the action proceeds
 

@@ -126,6 +126,8 @@ type Creative = {
     // the 30-day EPC — see the column comment below.
     clean_clicks_lifetime: number;
     epc_lifetime: number | null;
+    // All-time sales: per stage max(manual tally, Keitaro conversions), summed.
+    sales_lifetime: number;
   };
   // Spam scoring fields. spam_score is 0-100 (or null when unscored).
   // spam_label is the binary verdict mirrored from the cache; the list
@@ -945,6 +947,19 @@ export default function CreativesPage() {
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">
             {numberFmt.format(row.original.metrics.clean_clicks_lifetime)}
+          </span>
+        ),
+      },
+      {
+        id: "sales_lifetime",
+        header: "Sales, qty (all time)",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span
+            className="tabular-nums text-muted-foreground"
+            title="Sales across all of this creative's stages (all time): Keitaro conversions, or the manual tally where it is larger"
+          >
+            {numberFmt.format(row.original.metrics.sales_lifetime)}
           </span>
         ),
       },

@@ -140,7 +140,7 @@ export async function GET(req: NextRequest) {
     SELECT * FROM jsonb_to_recordset(${JSON.stringify(metricsRows)}::jsonb)
       AS m(creative_id int, delivered int, checkouts int, sales int,
            payout numeric, manual_clean int, tracked_clean int,
-           lifetime_payout numeric, lifetime_clean int,
+           lifetime_payout numeric, lifetime_clean int, lifetime_sales int,
            ctr_sent_7d int, ctr_clicks_7d int, ctr_sent_30d int, ctr_clicks_30d int,
            ctr_sent_lifetime int, ctr_clicks_lifetime int)
   ) AS metrics_agg`;
@@ -154,6 +154,9 @@ export async function GET(req: NextRequest) {
     checkout_rate: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.checkouts, 0)::numeric / ${cleanExpr} END`,
     sales_cr: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.sales, 0)::numeric / ${cleanExpr} END`,
     epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.payout, 0)::numeric / ${cleanExpr} END`,
+    // Not a ratio — the all-time sales count — but it sorts the same way: from the
+    // cached metrics, so only when they are joined in.
+    sales_lifetime: drizzleSql`coalesce(metrics_agg.lifetime_sales, 0)`,
   } as const;
 
   // All-time count of distinct campaigns with a SENT stage using this creative —
@@ -245,6 +248,7 @@ export async function GET(req: NextRequest) {
           m_tracked_clean: drizzleSql<number>`metrics_agg.tracked_clean`.as("m_tracked_clean"),
           m_lifetime_payout: drizzleSql<number>`metrics_agg.lifetime_payout`.as("m_lifetime_payout"),
           m_lifetime_clean: drizzleSql<number>`metrics_agg.lifetime_clean`.as("m_lifetime_clean"),
+          m_lifetime_sales: drizzleSql<number>`metrics_agg.lifetime_sales`.as("m_lifetime_sales"),
           m_ctr_sent_7d: drizzleSql<number>`metrics_agg.ctr_sent_7d`.as("m_ctr_sent_7d"),
           m_ctr_clicks_7d: drizzleSql<number>`metrics_agg.ctr_clicks_7d`.as("m_ctr_clicks_7d"),
           m_ctr_sent_30d: drizzleSql<number>`metrics_agg.ctr_sent_30d`.as("m_ctr_sent_30d"),
@@ -382,6 +386,7 @@ export async function GET(req: NextRequest) {
             m_tracked_clean: number | null;
             m_lifetime_payout: number | null;
             m_lifetime_clean: number | null;
+            m_lifetime_sales: number | null;
             m_ctr_sent_7d: number | null;
             m_ctr_clicks_7d: number | null;
             m_ctr_sent_30d: number | null;
@@ -431,6 +436,8 @@ export async function GET(req: NextRequest) {
               // 4.17 in send behaviour must not arrive as a side effect of a
               // display fix. This column exists so an operator can SEE the full
               // history and override deliberately.
+              // All-time sales: per stage max(manual tally, Keitaro conversions).
+              sales_lifetime: Number(row.m_lifetime_sales ?? 0),
               clean_clicks_lifetime: Number(row.m_lifetime_clean ?? 0),
               epc_lifetime:
                 Number(row.m_lifetime_clean ?? 0) > 0

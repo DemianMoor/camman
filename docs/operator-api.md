@@ -626,6 +626,9 @@ Both are counts only. There is no endpoint on this list that returns a contact.
   send count. `used_campaigns` (on every row, even with `include_metrics=false`)
   is the number of distinct campaigns with a sent stage using the creative, all
   time — the campaigns `/usage` lists. Sortable with `sortBy=used_campaigns`.
+  `metrics.sales` (30 days) and `metrics.sales_lifetime` (all time) count a
+  stage's sales as max(manual tally, Keitaro conversions); `sales_cr` = `sales`
+  ÷ counted clickers. Sort by all-time sales with `sortBy=sales_lifetime`.
 - **`GET /api/creatives/{id}`** — one creative.
 - **`GET /api/creatives/{id}/usage`** — every campaign, sending number and day it
   has already run on (see Creative usage, §3).

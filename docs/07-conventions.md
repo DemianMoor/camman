@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-15_
 
 ## Stage status: the system moves draft ⇄ pending, a person always wins (2026-09-14)
 
@@ -1418,6 +1418,21 @@ await db.insert(notification_settings).values({ org_id: orgId, active_weekdays: 
 **`tsc`, `eslint` and `next build` are all green while this bug is live** — the value is a `number[]` and the column is declared `.array()`, so nothing static disagrees. It only appears when the statement executes, which is why any write path touching an array column needs a test that actually runs it. This is the same shape as the older `ANY(${jsArray})` trap (`ERR_INVALID_ARG_TYPE` from postgres-js, 2026-08-19) — same cause, different symptom.
 
 Found 2026-08-26 on `PUT /api/settings/notifications` (migration 0173), before it shipped. `scripts/test-notification-settings-persistence.ts` is the guard: it calls the real exported `saveNotificationSettings()` inside a transaction that always rolls back, rather than re-typing the query into the test.
+
+## A column interpolated into a correlated subquery can bind to the INNER table
+
+In a **single-table** select, Drizzle renders a column interpolated into a `sql` expression in the SELECT list **unqualified**: `${creatives.id}` becomes a bare `"id"`. Inside a correlated subquery that name resolves to the innermost table with an `id` column, not to the outer row.
+
+```ts
+// BROKEN in db.select({ n: sub.as("n") }).from(creatives) — renders `cs.creative_id = "id"`, i.e. cs.id
+const sub = sql<number>`(SELECT count(*) FROM campaign_stages cs WHERE cs.creative_id = ${creatives.id})`;
+// FIXED — name the outer table literally
+const sub = sql<number>`(SELECT count(*) FROM campaign_stages cs WHERE cs.creative_id = creatives.id)`;
+```
+
+The same expression renders **qualified** (`"creatives"."id"`) in ORDER BY and in any select that has a join. So one query path returns wrong values while its own sort, and the joined path, are right. Nothing errors: the subquery is valid SQL that has quietly stopped being correlated, and `tsc`, `eslint` and the build are all green. Check what Drizzle emits with `new QueryBuilder().select(...).from(...).toSQL().sql` from `drizzle-orm/pg-core` (no database needed).
+
+Found 2026-09-15 on `/api/creatives/list` `used_campaigns`, before it shipped: the `include_metrics=false` path returned 0 for all 475 creatives while the metrics path (which LEFT JOINs the cache relation) was correct. `scripts/verify-creatives-used-campaigns.ts` is the guard — it compares every row on both paths against an independent count.
 
 ## Recon reads `origin/main`, never whatever branch happens to be checked out
 

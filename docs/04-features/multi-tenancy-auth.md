@@ -366,6 +366,22 @@ preview resolve a different link host and footer than the send path uses.
 Switching the form to the already-open `provider-phones/list` was rejected for
 that reason: it returns none of the three.
 
+### Offer landing pages are open to the operator for stage forms (2026-09-16)
+
+The stage form's Destination picker loads landing pages from
+`GET /api/offers/[offerId]/landing-pages`, which the route map denied. The 403
+was swallowed by the form's `if (r.ok)`, so an operator saw only the offer's
+sales pages and could never choose a landing page.
+
+The route map now opens **GET only**. The handler still requires `offers.view`,
+which the operator holds. Creating a page (`POST`, needs `offers.update`) and
+the single-page route `offers/[offerId]/landing-pages/[pageId]` stay denied.
+
+Rows are returned **whole**, unlike the provider-phones picker: the stage
+preview builds the destination URL from `slug` and `external_url`, and a blanked
+field would show the operator a different URL than the send uses. The operator
+already sees sales-page URLs on the same form.
+
 ### Operator stage saves and sending (2026-09-16)
 
 **Stage saves.** The stage drawer's save body (`buildStageCreateBody`) always

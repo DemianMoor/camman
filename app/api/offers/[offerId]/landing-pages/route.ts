@@ -22,7 +22,14 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ offerId: string }> },
 ) {
-  const auth = await requireApiMembership();
+  // Reachable by the operator: the stage form's landing page picker and its
+  // destination preview read this list. Rows go out whole — the preview builds
+  // the URL from slug / external_url, so blanking them would show a different
+  // destination than the send uses. POST below stays operator-denied.
+  const auth = await requireApiMembership({
+    route: "offers/[offerId]/landing-pages",
+    method: "GET",
+  });
   if ("error" in auth) return auth.error;
   const { orgId, role } = auth;
   if (!can(role, "offers.view")) {

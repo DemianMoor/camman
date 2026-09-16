@@ -1804,4 +1804,6 @@ still computes and reports, it just never refuses. **No migration.**
 
 - 2026-09-15 — Operators can edit creatives (text, quality, sequence, funnel stage): the Creatives page's edit save always sent the Owner-only `allow_multi_segment` field, which the PATCH refuses from operators, so every operator edit 403'd. The field is now omitted and its switch locked without `compliance.manage`; the server gate is unchanged. Also: the stage form's "New creative" dialog dropped the chosen Funnel stage (saved as "unknown") for every role — now sent. No permission change, no migration. — docs updated: docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
 
+- 2026-09-16 — Operator can choose landing pages on stages: `offers/[offerId]/landing-pages` opened to the operator for GET only (POST and the single-page route stay denied); rows returned whole because the stage preview builds the URL from them. No permission change, no migration. — docs updated: docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

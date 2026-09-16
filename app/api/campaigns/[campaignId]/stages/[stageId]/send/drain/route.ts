@@ -73,7 +73,12 @@ export async function POST(
 
   // Only resolve the session when the Bearer didn't already authorize (cron).
   // Capture the acting user for the activity log; a cron-driven drain has none.
-  const session = bearerMatches ? null : await requireApiMembership();
+  const session = bearerMatches
+    ? null
+    : await requireApiMembership({
+        route: "campaigns/[campaignId]/stages/[stageId]/send/drain",
+        method: "POST",
+      });
   const sessionOk = session != null && !("error" in session);
   const sessionRole = sessionOk ? session.role : null;
   const actorUserId = sessionOk ? session.user.id : null;

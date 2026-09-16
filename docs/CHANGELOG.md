@@ -1804,4 +1804,6 @@ still computes and reports, it just never refuses. **No migration.**
 
 - 2026-09-15 — Operators can edit creatives (text, quality, sequence, funnel stage): the Creatives page's edit save always sent the Owner-only `allow_multi_segment` field, which the PATCH refuses from operators, so every operator edit 403'd. The field is now omitted and its switch locked without `compliance.manage`; the server gate is unchanged. Also: the stage form's "New creative" dialog dropped the chosen Funnel stage (saved as "unknown") for every role — now sent. No permission change, no migration. — docs updated: docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
 
+- 2026-09-16 — Operators can save stages and send approved stages: the stage save body no longer sends the Owner-only `stop_text` for roles without `compliance.manage` (every operator stage edit 403'd; input now locked); `send/drain` opened to the operator (route map POST, keyed route, `decideDrainAuth` carve-out, send panel checks `canSendNow`) — every send-time gate in `runStageDrain` unchanged. No permission change, no migration. — docs updated: docs/04-features/multi-tenancy-auth.md, docs/CHANGELOG.md
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).

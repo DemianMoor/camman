@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { toastApiError } from "@/lib/api/toast-error";
 import { utcToCampaignLocalInput } from "@/lib/campaign-timezone";
+import { useAuth } from "@/components/protected/auth-context";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 // =============== Types ===============
@@ -128,6 +129,10 @@ export function StageInlineEditor({
   onManualResults,
   onViewImportHistory,
 }: StageInlineEditorProps) {
+  // stop_text is Owner-only; omit it from the save body for other roles (see
+  // buildStageCreateBody) so an operator's stage create/edit is not refused.
+  const { can } = useAuth();
+  const includeStopText = can("compliance.manage");
   const createApi = useApiCall<{ id: number; stage_number: number }>();
   const updateApi = useApiCall<{ id: number }>();
   const defaultPhoneApi = useApiCall<{ data: ActivePhone[] }>();
@@ -198,7 +203,7 @@ export function StageInlineEditor({
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildStageCreateBody(values)),
+          body: JSON.stringify(buildStageCreateBody(values, { includeStopText })),
         },
       );
       if (!result.ok) {
@@ -212,7 +217,7 @@ export function StageInlineEditor({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildStageCreateBody(values)),
+          body: JSON.stringify(buildStageCreateBody(values, { includeStopText })),
         },
       );
       if (!result.ok) {

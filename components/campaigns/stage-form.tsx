@@ -55,6 +55,7 @@ import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { isEntityAvailable } from "@/lib/feature-flags";
 import { isOutsideSendWindow } from "@/lib/quiet-hours";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
+import { useAuth } from "@/components/protected/auth-context";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { buildLandingPageUrl } from "@/lib/landing-page-url";
 import { formatPhoneInternational } from "@/lib/phone-validation";
@@ -325,6 +326,12 @@ const NONE = "__none__";
 // inline creator and edit drawer.
 export function buildStageCreateBody(
   values: StageFormValues,
+  // `stop_text` is an Owner-only compliance field: the stage PATCH refuses it
+  // (403) from any role without compliance.manage whenever it is PRESENT, even
+  // unchanged. Callers pass can("compliance.manage") so an operator's save
+  // omits it — on create the server default ("Stop to END") applies, on edit
+  // the stored value is left alone.
+  opts: { includeStopText?: boolean } = {},
 ): Record<string, unknown> {
   return {
     label: values.label.trim() ? values.label.trim() : undefined,
@@ -345,7 +352,7 @@ export function buildStageCreateBody(
     full_url: values.full_url.trim() || undefined,
     utm_tag_ids: values.utm_tag_ids,
     full_url_auto: values.full_url_auto,
-    stop_text: values.stop_text,
+    ...(opts.includeStopText === false ? {} : { stop_text: values.stop_text }),
     include_no_status: values.include_no_status,
     include_clickers: values.include_clickers,
     exclude_clickers: values.exclude_clickers,
@@ -415,6 +422,8 @@ export function StageForm({
   const isEdit = mode === "edit";
 
   // Reference data
+  const { can } = useAuth();
+  const canEditCompliance = can("compliance.manage");
   const creativesApi = useApiCall<{ data: Creative[] }>();
   // Single-creative fetch — fallback for the edit-load case where the saved
   // creative belongs to an offer outside this campaign's (picked via the
@@ -1124,7 +1133,9 @@ export function StageForm({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildStageCreateBody(form.getValues())),
+          body: JSON.stringify(
+            buildStageCreateBody(form.getValues(), { includeStopText: canEditCompliance }),
+          ),
         },
       );
       if (!createRes.ok) {
@@ -1556,8 +1567,11 @@ export function StageForm({
                   <FormItem>
                     <FormLabel required>Stop text</FormLabel>
                     <FormControl>
-                      <Input disabled={isSubmitting} {...field} />
+                      <Input disabled={isSubmitting || !canEditCompliance} {...field} />
                     </FormControl>
+                    {canEditCompliance ? null : (
+                      <FormDescription>Only an Owner can change the stop text.</FormDescription>
+                    )}
                     {/* ⚠️ Q3: this field is the STAGE level of the opt-out
                         footer chain, and the sending number and provider
                         account both out-rank it. When one of them wins, say so

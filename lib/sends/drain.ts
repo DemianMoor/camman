@@ -50,7 +50,13 @@ export function decideDrainAuth(opts: {
 }): DrainAuthDecision {
   if (opts.bearerMatches) return { allow: true, via: "cron" };
   if (!opts.sessionRole) return { allow: false, status: 401 };
-  if (!can(opts.sessionRole, "campaigns.drain")) return { allow: false, status: 403 };
+  // The operator may send (Dmytro, 2026-09-16) — the same carve-out as
+  // approve-send and retry-failed. This is the AUTH decision only: every
+  // send-time gate in runStageDrain (SEND_ENABLED, send_approved, credentials,
+  // breakers, send window) still applies to whoever passes here.
+  if (!can(opts.sessionRole, "campaigns.drain") && opts.sessionRole !== "operator") {
+    return { allow: false, status: 403 };
+  }
   return { allow: true, via: "session" };
 }
 

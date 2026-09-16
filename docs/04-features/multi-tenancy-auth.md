@@ -1,6 +1,6 @@
 # Feature — Multi-tenancy, Auth & Permissions
 
-_Last updated: 2026-09-15_
+_Last updated: 2026-09-16_
 
 ## 1. Purpose
 Isolate every org's data behind an `org_id`, authenticate users via Supabase Auth, and enforce a five-role permission model on both server and client. A missing `org_id` filter is a data-leak bug — this is the most safety-critical convention in the codebase.
@@ -365,6 +365,32 @@ preview resolve a different link host and footer than the send path uses.
 
 Switching the form to the already-open `provider-phones/list` was rejected for
 that reason: it returns none of the three.
+
+### Operator stage saves and sending (2026-09-16)
+
+**Stage saves.** The stage drawer's save body (`buildStageCreateBody`) always
+carried `stop_text`, and the stage PATCH refuses that Owner-only field whenever
+it is *present* from a role without `compliance.manage`. Every operator stage
+edit therefore failed with "The opt-out footer text (stop_text) is an owner-only
+compliance setting" — the same presence-gate shape as `allow_multi_segment` on
+creatives (#188). The helper now takes `{ includeStopText }`; the stage creator
+and the split dialog pass `can("compliance.manage")`, and the Stop text input is
+locked for other roles. On create the server default ("Stop to END") applies; on
+edit the stored value is left alone. The server gate is unchanged. These two
+fields are the only `compliance_field_locked` gates in the API.
+
+**Sending an approved stage.** `POST …/send/drain` is now open to the operator,
+the same carve-out already on approve-send and retry-failed: route map `POST`,
+the route passes its key to `requireApiMembership`, and `decideDrainAuth`
+allows `operator` alongside `campaigns.drain`. The send panel's Send button now
+checks `canSendNow` instead of `canDrain`. This changes **who may ask** — every
+send-time gate inside `runStageDrain` (SEND_ENABLED, `send_approved`,
+credentials, provider/campaign breakers, send window) still applies.
+`scripts/verify-drain.ts` asserts the operator is allowed.
+
+Still denied on the campaign and stage screens, by design: drip config, contact
+exports/imports and uploads, per-contact message rows, the escalation export,
+and resuming a tripped breaker (`send-circuit`).
 
 ### Identity linking
 

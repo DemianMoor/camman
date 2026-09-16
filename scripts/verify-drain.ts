@@ -85,7 +85,10 @@ async function main() {
   const noAuth = decideDrainAuth({ bearerMatches: false, sessionRole: null });
   assert(!noAuth.allow && noAuth.status === 401, "no Bearer + no session → 401 (no gap)");
   const operator = decideDrainAuth({ bearerMatches: false, sessionRole: "operator" });
-  assert(!operator.allow && operator.status === 403, "operator session (no campaigns.drain) → 403");
+  assert(
+    operator.allow,
+    "operator session → allowed (sending is the operator's job; same carve-out as approve-send/retry-failed)",
+  );
   assert(
     decideDrainAuth({ bearerMatches: false, sessionRole: "manager" }).allow,
     "manager session → allowed (session)",

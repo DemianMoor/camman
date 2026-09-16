@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-15_
+_Last updated: 2026-09-16_
 
 ## Stage status: the system moves draft ⇄ pending, a person always wins (2026-09-14)
 
@@ -2669,3 +2669,21 @@ Safe to date a fixture stage even on prod **only because** the fixture campaign 
 `link_mode='manual'` and both cron phases require `'tracked'`, so it can never be
 picked up by a live send. Check that property before adding a schedule to any
 fixture.
+
+## Zod 4 keeps `.default()` through `.partial()` — an update schema must re-declare defaulted fields
+
+`stageUpdateSchema` was `stageBaseSchema.partial()`. In Zod 4 (4.4.3 here) a
+field declared `.default(x)` still yields `x` when the key is absent, even after
+`.partial()`. A PATCH of just `{ label }` therefore parsed to
+`stop_text: "Stop to END"`, `include_clickers: false`, `exclude_clickers: false`,
+`include_no_status: true`, and the handler writes every parsed key.
+
+Two failures from one cause: the Owner-only `stop_text` gate (which refuses the
+field whenever it is present) fired on **every** operator stage save, and any
+partial PATCH silently reset those four fields for every role. It hid because
+the stage drawer always sends a full body.
+
+Rule: when deriving an update schema from a create schema with `.partial()`,
+re-declare each defaulted field as plain `.optional()`. Check with
+`schema.safeParse({ oneField })` — the output must contain only that field.
+

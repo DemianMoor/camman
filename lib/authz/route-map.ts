@@ -127,7 +127,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // the handler. Phase 2 denied it only because no caps existed yet; denying it
   // permanently would mean the hire cannot send, which is the job.
   "campaigns/[campaignId]/stages/[stageId]/send/approve-send": { methods: ["POST"] },
-  "campaigns/[campaignId]/stages/[stageId]/send/drain": null, // fires real SMS immediately -- campaigns.drain is manager+ and Phase 3 owns
+  "campaigns/[campaignId]/stages/[stageId]/send/drain": { methods: ["POST"] }, // operator may send (Dmytro, 2026-09-16); runStageDrain still enforces SEND_ENABLED, send_approved, credentials, breakers, send window
   // the volume caps
   "campaigns/[campaignId]/stages/[stageId]/send/escalation": null, // contact-level rows or CSV export/import
   "campaigns/[campaignId]/stages/[stageId]/send/kickoff": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },

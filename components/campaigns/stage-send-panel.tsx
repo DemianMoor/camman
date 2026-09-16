@@ -200,7 +200,8 @@ export function StageSendPanel({
     : !status.env_send_enabled
       ? "Sending is blocked at the deploy level (SEND_ENABLED is off)"
       : null;
-  const drainBlockedReason = !canDrain
+  // canSendNow, not canDrain: the drain route carves the operator out too.
+  const drainBlockedReason = !canSendNow
     ? "Requires manager+ to send"
     : sendOffReason
       ? sendOffReason

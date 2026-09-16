@@ -379,6 +379,14 @@ locked for other roles. On create the server default ("Stop to END") applies; on
 edit the stored value is left alone. The server gate is unchanged. These two
 fields are the only `compliance_field_locked` gates in the API.
 
+The client change alone was **not** enough, and the operator probe showed it:
+`stageUpdateSchema` was `stageBaseSchema.partial()`, and Zod 4 keeps `.default()`
+through `.partial()`, so the server re-injected `stop_text: "Stop to END"` into
+every PATCH before the gate looked. The update schema now re-declares
+`stop_text`, `include_clickers`, `exclude_clickers` and `include_no_status` as
+plain optional. That also ends a silent reset of those four fields on any
+partial PATCH, for every role (see docs/07-conventions.md).
+
 **Sending an approved stage.** `POST …/send/drain` is now open to the operator,
 the same carve-out already on approve-send and retry-failed: route map `POST`,
 the route passes its key to `requireApiMembership`, and `decideDrainAuth`

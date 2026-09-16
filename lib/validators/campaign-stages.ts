@@ -91,6 +91,20 @@ export const stageCreateSchema = stageBaseSchema.refine(
 
 export const stageUpdateSchema = stageBaseSchema
   .partial()
+  // ⚠️ ZOD 4 KEEPS .default() THROUGH .partial(). Without these overrides a
+  // PATCH of just { label } parsed to stop_text "Stop to END",
+  // include_clickers false, exclude_clickers false, include_no_status true —
+  // and the handler writes every parsed key. That (a) tripped the Owner-only
+  // stop_text gate on EVERY operator stage save, and (b) silently reset those
+  // four fields on any partial PATCH (the drip follow-up children panel sends
+  // one). An update must only carry what the caller sent, so the defaulted
+  // fields are re-declared as plain optional here. Create keeps its defaults.
+  .extend({
+    stop_text: z.string().trim().min(1).max(80).optional(),
+    include_clickers: z.boolean().optional(),
+    exclude_clickers: z.boolean().optional(),
+    include_no_status: z.boolean().optional(),
+  })
   // Same pattern as campaignUpdateSchema: accept tracking_id only to
   // explicitly reject it with a TRACKING_ID_IMMUTABLE code instead of
   // silently stripping. The route inspects issue.params.code.

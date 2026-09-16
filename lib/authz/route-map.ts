@@ -288,7 +288,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "offers": { methods: ["GET"] },
   "offers/[offerId]": { methods: ["GET"] },
   "offers/[offerId]/archive": null, // not granted by the access matrix
-  "offers/[offerId]/landing-pages": null, // offer destination URLs -- hidden by the matrix
+  "offers/[offerId]/landing-pages": { methods: ["GET"] }, // stage form landing page picker + URL preview; POST (create) stays denied (Dmytro, 2026-09-16)
   "offers/[offerId]/landing-pages/[pageId]": null, // offer destination URLs -- hidden by the matrix
   "offers/[offerId]/report": { methods: ["GET"], token: ["GET"] },
   "offers/[offerId]/restore": null, // not granted by the access matrix

@@ -23,7 +23,7 @@ Flags, not keys, carry meaning. A future `deposit` is a new `event_types` row wi
 
 `lib/conversions/ingest.ts` → `ingestKeitaroConversions(db, { range })`:
 
-1. `fetchKeitaroConversionLedger` pulls **all** conversion types. It fails on a truncated page (`rows < total`).
+1. `fetchKeitaroConversionLedger` pulls **all** conversion types. It fails (`ok:false`, nothing handed back) on a malformed response — a 200 that isn't JSON with a `rows` array **and** a numeric `total`, e.g. an HTML bot challenge — and on a truncated page (`rows < total`).
 2. `parseKeitaroLedgerRow` (pure) normalises the row. The mapping key is the lowercased **conversion type** name, not the raw status. `occurred_at` is the earliest `status_history` stamp.
 3. `buildConversionEventRows` (pure) attributes it:
    - `sub_id_1` = `stage_sends.id` → recipient
@@ -36,12 +36,14 @@ Flags, not keys, carry meaning. A future `deposit` is a new `event_types` row wi
    - event type is locked and attribution is sticky (`COALESCE`)
    - status/revenue and the raw Keitaro status/type take the newest values
    - no-op writes are skipped
+   - `org_id` is fixed at insert. A row whose stored org differs from the org this run resolved is **not written** (its sticky fills would mix orgs): it is skipped and counted in `orgMismatch`, with up to 5 samples `event_id existing_org→new_org`. `setWhere` also requires the same org, so a row a concurrent run inserted under another org is left untouched
+   - rows are sorted by `keitaro_event_id` before chunking, so concurrent runs lock rows in the same order
 
 ## Event-type conflicts
 
 A conversion's event type is **locked** once set, so a declined registration stays a registration. If Keitaro later reports a type whose mapping names a *different* event type — e.g. Registration → Sale because the advertiser reused a `tid` — the row keeps its locked type and stores the new raw type. It also records `conflicting_event_type_id` (the event the new type maps to) and `event_type_conflict_at` (first seen). The conflict is never silent:
-- the ingest result counts it
-- the backfill exits 1
+- the ingest result counts it (`typeConflicts`, rows written this run)
+- `backfill-conversion-events.ts --apply` exits 1: its post-apply table check counts every conflicted row. That check runs only with `--apply`; a dry run reports per-run counts only
 - `verify-conversion-events.ts` fails V5
 - Phase 2 alerts on it
 
@@ -104,12 +106,20 @@ npx tsx scripts/verify-conversion-events.ts              # read-only
 - **26 conversions / $1,463** known at stage level but with no recipient (blank `sub_id_1`)
 - **−$100** stage-day: one conversion `keitaro_stage_results` counted on two days after a re-post
 
+`verify-conversion-events.ts` dedupes the live pull by `event_id` (last wins) before its checks — a conversion re-posted while the pull walks the windows can appear twice — and prints how many duplicates it collapsed.
+
 **Fail-loud rules.**
-- **Truncated fetch:** a page with fewer rows than its own `total` is refused. The window writes nothing and the backfill exits 1; re-run with a smaller `BACKFILL_WINDOW_DAYS`.
+- **Truncated or malformed fetch:** a page with fewer rows than its own `total`, or a 200 whose body isn't JSON with a `rows` array and a numeric `total`, is refused. The window writes nothing and the backfill exits 1; re-run (with a smaller `BACKFILL_WINDOW_DAYS` if truncated).
 - **Unparseable rows** (missing event_id / conversion_type / revenue, malformed datetime): counted and sampled in the ingest result. The backfill prints them and exits 1.
+- **Unresolved** (no stage, no `offers.keitaro_offer_id`): printed with `sub_id_1`/`sub_id_3`/Keitaro offer; the backfill exits 1.
+- **Unmapped and event-type conflicts:** a non-zero per-run `unmappedInBatch` (status NULL in this run's rows) fails the run; `typeConflicts` (rows written this run) is printed. After `--apply` the backfill also checks the **table** (any row with NULL `event_type_id` or `status`, any `conflicting_event_type_id`) and exits 1 on either. That table check runs **only with `--apply`**; a dry run reports per-run counts only.
+- **Status-only rows** (`statusOnlyInBatch`: resolved through a status-only mapping such as PsychoBook `rejected`, so no event type): not unmapped if the row already exists with a type; a brand-new one is unmapped. A dry run prints a **WARNING** (not a failure), because only `--apply`'s table check can tell.
+- **Org mismatch** (`orgMismatch`, `--apply` only — a dry run doesn't upsert): an existing row resolved in a different org this run is not written. The backfill prints the samples and exits 1.
 - **Currency:** `revenue` is USD. Every conversion to date carries `params.currency` USD or none, and `revenue` equals the postback payout. `currency` stores the postback's claim; a non-USD one fails verify V6.
 
-Checks: `scripts/test-conversion-ledger-rows.ts` (pure, 34), `scripts/test-conversion-events-upsert.ts` (camman-v2 only, rolled back, 15).
+Checks: `scripts/test-conversion-ledger-rows.ts` (pure, 38), `scripts/test-conversion-events-upsert.ts` (camman-v2 only, rolled back, 17), `scripts/test-conversion-lookups.ts` (camman-v2 only, rolled back, 7: `loadLookups` recipient chain, archived and other-org rules excluded, Keitaro offer id / tracking id in two orgs dropped).
+
+Migration 0181 starts with `SET LOCAL lock_timeout = '5s'` and takes the `offers` lock before any foreign-key lock: Drizzle applies every pending migration in one transaction, so a blocked lock fails the migration (retry) instead of queueing the drain behind it.
 
 ## Not built yet
 

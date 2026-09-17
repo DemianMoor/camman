@@ -21,7 +21,7 @@ A dry-run-by-default backfill script drives it over 7-day windows. A read-only v
 - Built from `origin/main` (`39f2b4d` at planning time). Branch `feat/conversion-events-p1` off `origin/main`, never local `main`.
 - **Migration is additive only and stays behind the manual prod gate.** Commit the file → push → the preview deploy migrates camman-v2 → the user approves → `npm run db:migrate` on prod → `npx tsx scripts/verify-migration-integrity.ts`. Merge ≠ apply.
 - **The backfill writes prod data:** dry-run first, `--apply` only after explicit user approval.
-- **DB tests run against camman-v2 (`.env.demo` `DATABASE_URL`), never prod.** The DB test script refuses the prod project ref `rtdarhkkjwcetlmruftl`.
+- **DB tests run against camman-v2 (`.env.demo` `DATABASE_URL`), never prod.** Each DB test script refuses the prod project ref `rtdarhkkjwcetlmruftl`.
 - Every domain table has `org_id` + RLS enabled + a `SELECT … USING (org_id = public.current_org_id())` policy (pattern: `0178_operator_rollups.sql`).
 - Timestamps are `TIMESTAMPTZ`. Keitaro datetimes are ET wall-clock strings, converted in SQL as `(text || ' ' || 'America/New_York')::timestamptz` with the text bound as `::text` (pattern: `lib/keitaro/poll-conversions.ts:235`).
 - Money is `NUMERIC(12,4)`.
@@ -2521,16 +2521,30 @@ No new code. Each **GATE** needs the user's explicit go-ahead in the conversatio
 ```bash
 git fetch origin && git rev-list --count HEAD..origin/main   # if >0: rebase, re-run everything
 npx tsc --noEmit -p .
-npx eslint lib/keitaro/client.ts lib/conversions/*.ts scripts/test-conversion-ledger-rows.ts scripts/test-conversion-events-upsert.ts scripts/backfill-conversion-events.ts scripts/verify-conversion-events.ts
+npx eslint lib/keitaro/client.ts lib/conversions/*.ts scripts/test-conversion-ledger-rows.ts scripts/test-conversion-events-upsert.ts scripts/test-conversion-lookups.ts scripts/backfill-conversion-events.ts scripts/verify-conversion-events.ts
 npx tsx scripts/test-conversion-ledger-rows.ts
 DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx scripts/test-conversion-events-upsert.ts
+DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx scripts/test-conversion-lookups.ts
+DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx scripts/verify-migration-integrity.ts
 npm run check:docs
 git push
 ```
 
-Expected: tsc 0; eslint no problems; 34/0; 15/0; docs 0. Then run the whole-branch code review (`superpowers:requesting-code-review`), fix findings, re-run this step, and mark the PR ready.
+Expected: tsc 0; eslint no problems; ledger-rows 38/0; upsert 17/0; lookups 7/0; camman-v2 integrity shows 0181 `hash ✓` (0167–0169 carry a pre-existing, unrelated rotated-hash mismatch on the preview DB); docs 0. Then run the whole-branch code review (`superpowers:requesting-code-review`), fix findings, re-run this step, and mark the PR ready.
+
+Fix wave 2 (after the final review) reordered 0181 — `SET LOCAL lock_timeout = '5s'` first, the `offers` column + index before any FK lock, a seed guard against a mistyped event key. That changed the file hash, so camman-v2's recorded 0181 hash was repaired in `drizzle.__drizzle_migrations` (the SQL was not re-applied; the schema is unchanged). 0181 is not applied on prod yet (GATE A below), so prod records the new hash when it applies.
 
 - [ ] **Step 2: GATE A — apply migration 0181 to prod** (user approval required)
+
+First re-run the read-only network-code check on prod (Supabase MCP, project `rtdarhkkjwcetlmruftl`). The mapping seed resolves networks by code, and a missing code seeds nothing:
+
+```sql
+SELECT id, network_id, name FROM affiliate_networks WHERE network_id IN ('swp', 'scc', 'pl', 'psb') ORDER BY network_id;
+```
+
+Expected: 4 rows, names as recorded at recon (verified on prod 2026-09-17): `pl` Property Leads (id 42), `psb` PsychoBook AstroAff (43), `scc` Secco (38), `swp` Sweeply (1). A missing code, or a name pointing at a different network, is a stop.
+
+Then apply. 0181 runs under `lock_timeout = 5s`: a lock-timeout failure (`55P03`) rolls the whole migration back, so just retry (ideally while the drain is idle).
 
 ```bash
 npm run db:migrate
@@ -2552,17 +2566,25 @@ Expected: `event_types = 2`, and mappings:
 
 - [ ] **Step 3: Merge the PR** (ship-on-green policy; the code is inert, since no route calls it). Confirm the prod deployment is READY.
 
-- [ ] **Step 4: Backfill dry run on prod (read-only)**
+- [ ] **Step 4: Map Psycho Book (prod data write, user approval required), then backfill dry run on prod (read-only)**
 
-**Expected:** PsychoBook's `status=lead` registrations (recon 2026-09-17: `01a0af9b-d2e0-702b-a7c1-2f50d2c35c46`, `01a0afa8-9098-7017-a108-ca0262ced958`, plus any since) enter the ledger correctly as **registration/approved** via the `psb` `lead` mapping. No Keitaro-side fix is needed for the ledger. `01a0af9b…` has no sub_id_1/sub_id_3, so it counts as unresolved unless offer 134 ↔ Keitaro 41 is mapped first. Ask the user whether to set `offers.keitaro_offer_id = 41` before the dry run (decision 8c). The old pollers still count these as sales until Phase 3; that correction is separate.
+**First, map Psycho Book — BEFORE the dry run, with the user's explicit approval (a prod data write, decision 8c):**
+
+```sql
+UPDATE offers SET keitaro_offer_id = 41 WHERE id = 134;
+```
+
+Why first: conversion `01a0af9b-d2e0-702b-a7c1-2f50d2c35c46` has no `sub_id_1`/`sub_id_3`. Without the Keitaro offer link it is **unresolved**, which fails the dry run and verify V1. The column exists only after GATE A.
+
+**Expected:** PsychoBook's `status=lead` registrations (recon 2026-09-17: `01a0af9b-d2e0-702b-a7c1-2f50d2c35c46`, `01a0afa8-9098-7017-a108-ca0262ced958`, plus any since) enter the ledger correctly as **registration/approved** via the `psb` `lead` mapping. No Keitaro-side fix is needed for the ledger. The old pollers still count these as sales until Phase 3; that correction is separate.
 
 Run: `npx tsx scripts/backfill-conversion-events.ts`
-Expected: `fetched` totals the Keitaro history (1,460 at recon, more now), with `unresolved 0`, `unmapped 0`, `invalid 0`, exit 0. Paste the totals line to the user. Any unresolved or unmapped conversion stops here for a decision.
+Expected: `fetched` totals the Keitaro history (1,460 at recon, more now), with `unresolved 0`, `unmapped 0`, `invalid 0`, no window ERROR (truncated or malformed page), exit 0. Paste the totals line to the user. Any unresolved or unmapped conversion stops here for a decision. A `status-only` WARNING is not a stop on its own: those rows are unmapped only if brand-new, and only the `--apply` table check can tell (Step 5). A dry run doesn't upsert, so it can't report org mismatches.
 
 - [ ] **Step 5: GATE B — backfill apply** (user approval required, on the dry-run output)
 
 Run: `npx tsx scripts/backfill-conversion-events.ts --apply`
-Expected: `inserted` = dry-run `rows`, `updated 0`, exit 0. Re-run once more with `--apply`; expected `inserted 0 updated 0 unchanged N`, which is idempotence on real data.
+Expected: `inserted` = dry-run `rows`, `updated 0`, `org-mismatch 0`, and `Table after apply: N rows · 0 unmapped · 0 event-type conflict(s)`, exit 0. Re-run once more with `--apply`; expected `inserted 0 updated 0 unchanged N org-mismatch 0`, which is idempotence on real data.
 
 - [ ] **Step 6: Verify**
 
@@ -2576,7 +2598,7 @@ Paste the output to the user. A delta that recon didn't explain is a stop, not a
 
 - [ ] **Step 7: Close out**
 
-Map Psycho Book (`UPDATE offers SET keitaro_offer_id = 41 WHERE id = 134` — decision 8c, go-live data write; ask first if it hasn't been approved in-conversation). Post the verify output on the card, and update memory (`project_multi_event_conversions_recon.md` → Phase 1 LIVE). Unlink the worktree junction with `cmd //c "rmdir node_modules"`.
+(Psycho Book's `keitaro_offer_id = 41` was already set in Step 4, before the dry run.) Post the verify output on the card, and update memory (`project_multi_event_conversions_recon.md` → Phase 1 LIVE). Unlink the worktree junction with `cmd //c "rmdir node_modules"`.
 
 ---
 

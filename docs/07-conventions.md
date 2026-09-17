@@ -2713,3 +2713,10 @@ Sweeply's postback template hardcodes `status=lead` for **paid** conversions. Ke
 
 `conversion_event_mappings` classifies per network or offer, keyed on Keitaro's canonical conversion **type** (many raw statuses — `approved`, `confirmed`, `paid` — resolve to the one `Sale` type). An unknown network/type is stored with NULL event type and status and is never counted as a purchase. Guessing "it's probably a sale" is exactly how a $0 registration would have become a buyer.
 
+## A migration that touches hot tables: `SET LOCAL lock_timeout` first, strongest lock first (2026-09-17)
+
+Drizzle applies **every pending migration in one transaction**, and each lock is held until that transaction commits. `CREATE TABLE … REFERENCES stage_sends/contacts` takes a lock that conflicts with the drain's inserts and updates. `ALTER TABLE … ADD COLUMN` takes ACCESS EXCLUSIVE. A migration stuck waiting for one of those locks makes every later writer queue behind it.
+
+- Make the first statement `SET LOCAL lock_timeout = '5s';` so a blocked lock fails the migration and you retry, instead of stalling the app.
+- Take the strongest lock first. In `0181_conversion_events.sql`, the `offers` `ADD COLUMN` + index run before any `CREATE TABLE` with a foreign key, so `offers` never needs a lock upgrade while the FK locks on `stage_sends`/`contacts` are held.
+- A seed that `LEFT JOIN`s a lookup by name (e.g. an event-type key) needs `WHERE v.key IS NULL OR lookup.id IS NOT NULL`. Without it, a typo silently seeds a NULL reference, which for conversion mappings means a status-only rule.

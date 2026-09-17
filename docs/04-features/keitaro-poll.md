@@ -50,6 +50,17 @@ only when that ingest window was complete — see
 [conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3)
 for the exact scope/ordering.
 
+⚠️ **A re-derivation is only as safe as the ledger's coverage.** The same statement
+that fixes a stale-high day would REDUCE a real day to a partial sum if the ledger
+held only part of it, so the projection refuses outright when the ledger does not
+reach back as far as the conversions `keitaro_stage_results` still reports
+(`refused: "ledger_behind_history"`, both dates in the response and in the page).
+What it cannot see is a coverage GAP *inside* the covered range — "no conversion that
+day" and "the ingest lost that day" read identically — so the gap is the BACKFILL's
+problem, proven by `scripts/verify-conversion-events.ts` against a fresh Keitaro
+pull, not the projection's. And a stage whose ledger rows were all deleted is never
+corrected at all: no floor, no write, its numbers stay as they were.
+
 > **History.** `report/build` used to attribute a conversion to the **originating
 > click's day**, not the conversion day (fixed 2026-06-29 by re-sourcing from
 > `conversions/log`, dated by its own `datetime`). That fix is superseded by the
@@ -86,9 +97,13 @@ deleted in Keitaro). So the projection calls the mirror with
 DECREASES, 0 included. Under the old positive-only guard a downward correction could
 never reach the stage, leaving a stale higher number on the campaign page and in the
 creatives metrics cache forever. Consequence, accepted: on a stage the projection has
-in scope, a hand-entered Checkout Clicks value is overwritten by the tracker's sum —
-the field belongs to the projection. `sales_count` is still never touched by either
-mode. The mirror also THROWS on failure now; the "non-fatal, re-syncs next poll"
+in scope, a hand-entered Checkout Clicks value is overwritten by the tracker's sum
+**within 5 minutes**, and set to **0** when that stage has no ledger conversions at
+all — the field belongs to the projection. `scripts/resync-stage-day-conversions.ts
+--apply` does this for every stage that has any `keitaro_stage_results` row, in one
+run. If a stage's Checkout Clicks must be operator-owned, it cannot also be in the
+projection's scope; there is no per-stage opt-out today. `sales_count` is still never
+touched by either mode. The mirror also THROWS on failure now; the "non-fatal, re-syncs next poll"
 swallow lives at `pollKeitaro`'s own call site, because swallowing inside the mirror
 would poison a caller-supplied transaction (the resync's `--apply`, the DB tests).
 
@@ -261,8 +276,8 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   - `stage_ids`: the stages this window's CLICK rows touched (`pollKeitaro`'s own aggregate keys) — the seed for the stage-day projection's scope.
   - `conversion_events`: the ledger ingest's `IngestResult`, or `null` when the ingest threw. Fields: `ok`, `dryRun`, `range`, `fetched`, `invalid`/`invalidSamples`, `unresolved`/`unresolvedSamples` (samples include `sub_id_1`), `rows`, `unmappedInBatch`, `statusOnlyInBatch`, `inserted`/`updated`/`unchanged`, `typeConflicts`, `orgMismatch`/`orgMismatchSamples`, `error`. `ok:false` with `error` means the window was refused (Keitaro HTTP error, timeout, a malformed 200 that isn't JSON with a `rows` array and a numeric `total`, or a truncated page) and nothing was written.
   - `conversion_events_error`: the thrown message when the ingest threw; `monitor: …` when the cron path's alert evaluation or heartbeat stamp threw (appended after `; ` if the ingest also threw); `null` otherwise. On the cron path a thrown ingest also counts as a failed tick for the debounced `conversion_events:fetch_failed` alert.
-  - `stage_day_conversions` (Phase 3 Task 3): what `runStageDayProjection` returned, or `null` when it was skipped (the ledger ingest wasn't `ok`) or threw. `{ stagesInScope, rowsWritten, rowsZeroed, coverageFloor, refused, watermarkTo, discovery }` — `stagesInScope` is the scope it was GIVEN (`"all"` for the unscoped resync), `coverageFloor` the earliest ET day the ledger covers across that scope (nothing older was zeroed), `refused: "empty_ledger"` when the ledger holds no stage-attributed row and the run therefore wrote nothing, and `discovery` the `updated_at` window it scanned (`watermarkFrom`, `windowFrom`, `windowTo`, `stageIds`, `truncated`, `resumeTo`). See [conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3).
-  - On the cron path the projection also drives the latched `conversion_events:projection_failed` alert (a throw or a refusal fires it; a successful run clears it). A SKIPPED projection gets no decision.
+  - `stage_day_conversions` (Phase 3 Task 3): what `runStageDayProjection` returned, or `null` when it was skipped (the ledger ingest wasn't `ok`) or threw. `{ stagesInScope, rowsWritten, rowsZeroed, ledgerHasRows, ledgerFloor, reportedHistoryFloor, coverageFloor, refused, watermarkTo, watermarkHeld, discovery }` — `stagesInScope` is the scope it was GIVEN (`"all"` for the unscoped resync), `coverageFloor` the earliest ET day the ledger covers across that scope (nothing older was zeroed), `ledgerFloor` the global one, `reportedHistoryFloor` the earliest reported conversion day the ledger does NOT cover (non-null ⇒ the run refused), `refused` either `"empty_ledger"` or `"ledger_behind_history"` (both mean nothing was written and nothing zeroed), `watermarkHeld: true` when the cursor was deliberately left where it was (a refusal, or a truncated discovery), and `discovery` the `updated_at` window it scanned (`watermarkFrom`, `windowFrom`, `windowTo`, `stageIds`, `truncated`, `resumeTo` — `resumeTo` is the window end and is only meaningful when `truncated` is false). See [conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3).
+  - On the cron path the projection also drives the latched `conversion_events:projection_failed` alert: a throw, either refusal, or a truncated discovery window fires it; a run that finished its window clears it. A SKIPPED projection gets no decision.
   - `stage_day_conversions_error`: the thrown message when the projection threw, with `monitor: …` appended when the cron path's projection-alert evaluation threw; `null` otherwise (including when it was simply skipped).
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
   date) rows plus per-stage and campaign rollups with the Clickers → Offer

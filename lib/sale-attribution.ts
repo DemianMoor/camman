@@ -86,14 +86,18 @@ export function registeredClause(alias = "ce"): SQL {
 
 /**
  * The recipient rows that carry a counted purchase, as a set to JOIN against.
- * For readers that scan stage_sends wholesale (operator pools, the by-group
- * weights, the rollup): a hash join against ~1.5K ledger rows, instead of an
- * EXISTS probe per send row.
+ * For a reader that scans stage_sends wholesale: a hash join against ~1.5K
+ * ledger rows, instead of an EXISTS probe per send row.
  *
- * `orgId = null` drops the org filter, for the CROSS-ORG cache rebuilds
- * (lib/reporting/rollup.ts, lib/reporting/counted-clickers.ts) that write every
- * org's rows in one statement and carry org_id from the send row. Anything
- * serving a request passes a real org id.
+ * CONSUMER (exactly one, today): lib/audience/pools.ts — the operator audience
+ * pools. The by-group `sale` weights and the rollup do NOT use this; they need a
+ * per-send COUNT and revenue, which is purchasesBySendSelect below. Do not
+ * describe this helper by the readers it might have.
+ *
+ * `orgId = null` drops the org filter, for a CROSS-ORG cache rebuild that writes
+ * every org's rows in one statement and carries org_id from the send row (see
+ * rescueSendIds's caller, lib/reporting/counted-clickers.ts). Anything serving a
+ * request passes a real org id.
  */
 export function purchasedSendIds(orgId: string | null): SQL {
   const org = orgId === null ? sql`` : sql`AND ce.org_id = ${orgId}::uuid`;
@@ -112,6 +116,10 @@ export function purchasedSendIds(orgId: string | null): SQL {
  * rejected. `first_event_at` is the fallback first-click stamp for a rescued row.
  * `window` narrows the scan on the incremental pass. `orgId = null` is cross-org
  * — see purchasedSendIds.
+ *
+ * CONSUMERS: lib/reporting/counted-clickers.ts (the rebuild) and
+ * scripts/verify-counted-clickers.ts (its guard, which must assert the rescue
+ * rule the cache actually uses — not a retyped copy of the pre-ledger one).
  */
 export function rescueSendIds(orgId: string | null, window: SQL = sql``): SQL {
   const org = orgId === null ? sql`` : sql`AND ce.org_id = ${orgId}::uuid`;
@@ -125,6 +133,76 @@ export function rescueSendIds(orgId: string | null, window: SQL = sql``): SQL {
       ${org}
       ${window}
     GROUP BY 1`;
+}
+
+/**
+ * Counted purchases and APPROVED revenue per RECIPIENT ROW, as a SELECT to join
+ * on `stage_send_id`. ONE definition for the two readers that need the pair:
+ * the partner report's `purchases` CTE (lib/reporting/partner-report.ts) and the
+ * dormant rollup's `conv_sends` CTE (lib/reporting/rollup.ts). They used to
+ * carry the same six lines literally, which is how a shape drifts.
+ *
+ * Counting ledger EVENTS, not send rows that carry a status: a recipient with
+ * two conversions is two sales and both payouts, where
+ * stage_sends.sale_status/sale_revenue kept only the latest (measured 2026-09-17:
+ * 14 recipients, $715 of purchases dropped). Revenue is APPROVED only — a held
+ * payout is not revenue. A row that is neither (a rejected conversion, an
+ * UNMAPPED row with a NULL event_type_id) contributes 0 purchases and $0: it is
+ * present in the group and counts as nothing, which is the point.
+ *
+ * `restrict` is an extra AND on `ce`, and it is how a caller BOUNDS the scan —
+ * without it this aggregates the WHOLE ledger on every call, which is ~1.5K rows
+ * today and unbounded growth later. Pass a predicate that can only drop rows the
+ * caller's own join would discard anyway, so the bound cannot change a number.
+ *
+ * `orgId = null` is cross-org — see purchasedSendIds.
+ */
+export function purchasesBySendSelect(orgId: string | null, restrict: SQL = sql``): SQL {
+  const org = orgId === null ? sql`` : sql`AND ce.org_id = ${orgId}::uuid`;
+  return sql`
+    SELECT ce.stage_send_id,
+           count(*) FILTER (WHERE ${purchasedClause()})::int AS purchases,
+           coalesce(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause()}), 0)::numeric(12, 4) AS revenue
+    FROM conversion_events ce
+    WHERE ce.stage_send_id IS NOT NULL
+      ${org}
+      ${restrict}
+    GROUP BY 1`;
+}
+
+/**
+ * The recipient's LATEST ledger conversion — the body of a `LEFT JOIN LATERAL`
+ * over a `stage_sends` alias. Used by the campaign-activity badge
+ * (app/api/campaigns/[campaignId]/activity/messages/route.ts) and by its proof
+ * (scripts/test-p3-task4-reader-switch-db.ts), which is why it lives here rather
+ * than inline in a route file: a Next.js route may only export route fields, so
+ * a fragment a test needs to execute cannot live there.
+ *
+ * A recipient can carry SEVERAL conversions (a $0 registration and a paid
+ * purchase); the badge shows the most recent, with its lifecycle status, where
+ * the old sale_status/sale_revenue pair rendered a registration as "lead ·
+ * $0.00". `is_purchase` travels with it because status alone cannot tell an
+ * approved $0 registration from an approved sale — the badge colours on both.
+ * NULL `is_purchase` means the event type is unmapped (no event_types row): it
+ * is neither a purchase nor revenue anywhere, and the badge says "unmapped".
+ *
+ * `ce.org_id = <send>.org_id` is redundant given stage_send_id is a UUID primary
+ * key, and deliberate: every ledger read in the app is org-filtered, and the
+ * pair is what the (org_id, …) indexes are built for.
+ */
+export function latestConversionForSend(sendAlias = "ss"): SQL {
+  const s = sql.raw(sendAlias);
+  return sql`
+    SELECT coalesce(et.label, ce.keitaro_type) AS event_label,
+           ce.status AS status,
+           ce.revenue::text AS revenue,
+           et.is_purchase AS is_purchase
+    FROM conversion_events ce
+    LEFT JOIN event_types et ON et.id = ce.event_type_id
+    WHERE ce.stage_send_id = ${s}.id
+      AND ce.org_id = ${s}.org_id
+    ORDER BY ce.occurred_at DESC, ce.id DESC
+    LIMIT 1`;
 }
 
 // ── legacy, frozen ──────────────────────────────────────────────────────────

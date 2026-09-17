@@ -1,7 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
-import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
+import { purchasesBySendSelect } from "@/lib/sale-attribution";
 
 // Accept either the top-level `db` or a transaction handle.
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -62,13 +62,22 @@ function sentCte(since: SQL, preSnapshot = false): SQL {
       FROM opt_out_attributions oa
       WHERE oa.stage_send_id IS NOT NULL
     ),
+    -- The shared per-recipient purchase/revenue aggregation (the partner report
+    -- uses the same one), BOUNDED to the sends this run actually recomputes: the
+    -- EXISTS drops only ledger rows whose send is outside the window, which the
+    -- LEFT JOIN below would discard anyway, so it cannot change a bucket. Without
+    -- it every run aggregates the whole ledger — fine at ~1.5K rows, not fine
+    -- once the ledger is years deep. Bounded on the SEND's time, never on
+    -- occurred_at: a conversion arrives days after its send, so bounding the
+    -- conversion side would drop real revenue from a bucket it belongs to.
     conv_sends AS (
-      SELECT ce.stage_send_id,
-             count(*) FILTER (WHERE ${purchasedClause()})::int AS purchases,
-             coalesce(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause()}), 0)::numeric(12, 4) AS revenue
-      FROM conversion_events ce
-      WHERE ce.stage_send_id IS NOT NULL
-      GROUP BY 1
+      ${purchasesBySendSelect(
+        null,
+        sql`AND EXISTS (
+        SELECT 1 FROM stage_sends ss2
+        WHERE ss2.id = ce.stage_send_id AND ss2.sent_at >= ${since}
+      )`,
+      )}
     ),
     sent AS (
       SELECT

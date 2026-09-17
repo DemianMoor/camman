@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import { conversionAmount, conversionBadgeClass } from "@/lib/conversion-badge";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 // ---- Wire types (mirror app/api/campaigns/[id]/activity/*). ----
@@ -75,6 +76,7 @@ interface MessageRow {
   conversion_event: string | null;
   conversion_status: string | null;
   conversion_revenue: string | null;
+  conversion_is_purchase: boolean | null;
   reply_result: string | null;
   reply_received_at: string | null;
 }
@@ -107,14 +109,10 @@ const STATUS_STYLES: Record<string, string> = {
   sending: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
 };
 
-// conversion_events.status → badge colour. The LIFECYCLE status, not the
-// network's raw Keitaro status: pending = a held payout (counted as a sale, NOT
-// in revenue), approved = counted in Revenue/EPC, rejected = taken back.
-const CONVERSION_STATUS_STYLES: Record<string, string> = {
-  approved: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-  pending: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
-  rejected: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400",
-};
+// The conversion badge's colour + amount live in lib/conversion-badge.ts, so the
+// proof script can assert the real rendering decisions (an approved $0
+// registration is not purchase-green, and prints no money) without importing a
+// client component. Do not re-implement them here.
 
 // Event type → a short human label + an accent dot color for the timeline.
 const EVENT_META: Record<string, { label: string; dot: string }> = {
@@ -496,18 +494,18 @@ function MessagesPanel({
                         {r.conversion_event ? (
                           <Badge
                             variant="secondary"
-                            className={CONVERSION_STATUS_STYLES[r.conversion_status ?? ""] ?? ""}
-                            title={
-                              r.conversion_revenue
-                                ? `${r.conversion_event} · ${r.conversion_status ?? "unmapped"} · $${Number(r.conversion_revenue).toFixed(2)}`
-                                : undefined
-                            }
+                            className={conversionBadgeClass(r)}
+                            title={`${r.conversion_event} · ${r.conversion_status ?? "unmapped"}${
+                              conversionAmount(r) == null
+                                ? ""
+                                : ` · $${conversionAmount(r)!.toFixed(2)}`
+                            }`}
                           >
                             {r.conversion_event}
                             {r.conversion_status ? ` · ${r.conversion_status}` : " · unmapped"}
-                            {r.conversion_status !== "rejected" && Number(r.conversion_revenue ?? 0) > 0
-                              ? ` · $${Number(r.conversion_revenue).toFixed(2)}`
-                              : ""}
+                            {conversionAmount(r) == null
+                              ? ""
+                              : ` · $${conversionAmount(r)!.toFixed(2)}`}
                           </Badge>
                         ) : (
                           <span className="text-muted-foreground">—</span>

@@ -3,7 +3,7 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
+import { purchasesBySendSelect } from "@/lib/sale-attribution";
 import { getCalibratedLookupRate, lookupCostUsd, type LookupRate } from "./lookup-rate";
 
 // Partner reporting (Drip Phase 7) — partner key x interest tag x ET-day range.
@@ -137,25 +137,25 @@ export async function getPartnerReport(
         AND (ss.created_at AT TIME ZONE 'America/New_York')::date >= b.from_day
         AND (ss.created_at AT TIME ZONE 'America/New_York')::date <= b.to_day
     ),
-    -- Sales and revenue per RECIPIENT ROW, from the conversion_events ledger.
-    -- Counting ledger EVENTS, not send rows that carry a status: a recipient with
-    -- two conversions is two sales and both payouts, where
-    -- stage_sends.sale_status/sale_revenue kept only the latest (measured: 14
-    -- recipients, $715 of purchases dropped). Revenue is APPROVED only
-    -- (lib/sale-attribution.ts) — a held payout is not partner revenue.
-    purchases AS (
-      SELECT ce.stage_send_id,
-             count(*) FILTER (WHERE ${purchasedClause()})::int AS purchases,
-             coalesce(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause()}), 0)::float8 AS revenue_usd
-      FROM conversion_events ce
-      WHERE ce.org_id = ${orgId}::uuid AND ce.stage_send_id IS NOT NULL
-      GROUP BY 1
-    ),
+    -- Sales and revenue per RECIPIENT ROW, from the conversion_events ledger —
+    -- the shared aggregation (lib/sale-attribution.ts), which the dormant rollup
+    -- also uses, so the two cannot drift. Revenue is APPROVED only: a held payout
+    -- is not partner revenue.
+    --
+    -- BOUNDED BY THIS REPORT'S OWN SEND SET, not by the range. Restricting to the
+    -- ids in the attributed CTE can only drop rows the LEFT JOIN below would
+    -- discard, so no number moves — where an occurred_at range filter WOULD move
+    -- one: a conversion trickles in days after its send, so an upper bound at the
+    -- range end would silently drop real payouts from a completed range's report.
+    purchases AS (${purchasesBySendSelect(
+      orgId,
+      sql`AND ce.stage_send_id IN (SELECT a.id FROM attributed a)`,
+    )}),
     sends AS (
       SELECT a.partner_key_id, a.interest_tag,
              count(*) FILTER (WHERE a.status = 'sent')::int AS sent,
              coalesce(sum(p.purchases), 0)::int AS sales,
-             coalesce(sum(p.revenue_usd), 0)::float8 AS revenue_usd
+             coalesce(sum(p.revenue), 0)::float8 AS revenue_usd
       FROM attributed a
       LEFT JOIN purchases p ON p.stage_send_id = a.id
       GROUP BY 1, 2

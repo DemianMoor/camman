@@ -6,6 +6,7 @@ import { campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { latestConversionForSend } from "@/lib/sale-attribution";
 
 export const dynamic = "force-dynamic";
 
@@ -112,24 +113,15 @@ export async function GET(
       conv.event_label        AS conversion_event,
       conv.status              AS conversion_status,
       conv.revenue             AS conversion_revenue,
+      conv.is_purchase         AS conversion_is_purchase,
       reply.result            AS reply_result,
       reply.received_at       AS reply_received_at
     FROM stage_sends ss
     JOIN campaign_stages cs ON cs.id = ss.stage_id
-    -- The recipient's LATEST conversion, from the ledger. A recipient can carry
-    -- several (a $0 registration and a paid purchase); the badge shows the most
-    -- recent one with its lifecycle status, where the old
-    -- sale_status/sale_revenue pair rendered a registration as "lead · $0.00".
-    LEFT JOIN LATERAL (
-      SELECT coalesce(et.label, ce.keitaro_type) AS event_label,
-             ce.status AS status,
-             ce.revenue::text AS revenue
-      FROM conversion_events ce
-      LEFT JOIN event_types et ON et.id = ce.event_type_id
-      WHERE ce.stage_send_id = ss.id
-      ORDER BY ce.occurred_at DESC, ce.id DESC
-      LIMIT 1
-    ) conv ON true
+    -- The recipient's LATEST conversion, from the ledger — the shared fragment in
+    -- lib/sale-attribution.ts (a route file cannot export it, and its proof has
+    -- to execute the real text).
+    LEFT JOIN LATERAL (${latestConversionForSend("ss")}) conv ON true
     LEFT JOIN LATERAL (
       SELECT ie.result, ie.received_at
       FROM texthub_inbound_events ie
@@ -156,6 +148,9 @@ export async function GET(
     conversion_event: string | null;
     conversion_status: string | null;
     conversion_revenue: string | null;
+    // NULL = the event type is unmapped. The badge colours on this, not on the
+    // status alone: an approved $0 registration is not an approved sale.
+    conversion_is_purchase: boolean | null;
     reply_result: string | null;
     reply_received_at: string | null;
   }[];

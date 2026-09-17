@@ -108,6 +108,18 @@ function main() {
     "P12 COUNTED_CONVERSION_STATUSES is exactly pending + approved",
     JSON.stringify(COUNTED_CONVERSION_STATUSES) === '["pending","approved"]',
   );
+  check(
+    "P13 purchasedSendIds(null) is cross-org — no org filter, still recipient-scoped",
+    !render(purchasedSendIds(null)).includes("ce.org_id") &&
+      render(purchasedSendIds(null)).includes("ce.stage_send_id IS NOT NULL"),
+    render(purchasedSendIds(null)),
+  );
+  check(
+    "P14 rescueSendIds(null) is cross-org and still excludes rejected",
+    !render(rescueSendIds(null)).includes("ce.org_id") &&
+      render(rescueSendIds(null)).includes("ce.status IN ('pending', 'approved')"),
+    render(rescueSendIds(null)),
+  );
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

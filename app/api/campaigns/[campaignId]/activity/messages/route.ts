@@ -109,12 +109,27 @@ export async function GET(
       ss.texthub_message_id   AS texthub_message_id,
       ss.attempts             AS attempts,
       ss.last_error           AS last_error,
-      ss.sale_status          AS sale_status,
-      ss.sale_revenue         AS sale_revenue,
+      conv.event_label        AS conversion_event,
+      conv.status              AS conversion_status,
+      conv.revenue             AS conversion_revenue,
       reply.result            AS reply_result,
       reply.received_at       AS reply_received_at
     FROM stage_sends ss
     JOIN campaign_stages cs ON cs.id = ss.stage_id
+    -- The recipient's LATEST conversion, from the ledger. A recipient can carry
+    -- several (a $0 registration and a paid purchase); the badge shows the most
+    -- recent one with its lifecycle status, where the old
+    -- sale_status/sale_revenue pair rendered a registration as "lead · $0.00".
+    LEFT JOIN LATERAL (
+      SELECT coalesce(et.label, ce.keitaro_type) AS event_label,
+             ce.status AS status,
+             ce.revenue::text AS revenue
+      FROM conversion_events ce
+      LEFT JOIN event_types et ON et.id = ce.event_type_id
+      WHERE ce.stage_send_id = ss.id
+      ORDER BY ce.occurred_at DESC, ce.id DESC
+      LIMIT 1
+    ) conv ON true
     LEFT JOIN LATERAL (
       SELECT ie.result, ie.received_at
       FROM texthub_inbound_events ie
@@ -138,8 +153,9 @@ export async function GET(
     texthub_message_id: string | null;
     attempts: number;
     last_error: string | null;
-    sale_status: string | null;
-    sale_revenue: string | null;
+    conversion_event: string | null;
+    conversion_status: string | null;
+    conversion_revenue: string | null;
     reply_result: string | null;
     reply_received_at: string | null;
   }[];

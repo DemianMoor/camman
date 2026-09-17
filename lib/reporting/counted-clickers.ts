@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { rescueSendIds } from "@/lib/sale-attribution";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -151,10 +152,13 @@ export async function refreshCountedClickers(
       mode === "full"
         ? sql``
         : sql`AND ck.clicked_at >= now() - ${INCREMENTAL_LOOKBACK}`;
+    // Rule F's window moves from the conversion's EVENT time to the ledger row's
+    // updated_at — when WE learned of it. Strictly better than before: a
+    // conversion whose event time is older than the lookback but which arrived on
+    // this tick is now inside the window instead of waiting for the daily full
+    // pass. Served by conversion_events_updated_at_idx (migration 0182).
     const convWindow =
-      mode === "full"
-        ? sql``
-        : sql`AND ss.converted_at >= now() - ${INCREMENTAL_LOOKBACK}`;
+      mode === "full" ? sql`` : sql`AND ce.updated_at >= now() - ${INCREMENTAL_LOOKBACK}`;
 
     if (mode === "full") {
       await tx.execute(sql`DELETE FROM counted_clickers`);
@@ -174,18 +178,26 @@ export async function refreshCountedClickers(
       ON CONFLICT (stage_id, contact_id) DO NOTHING
     `);
 
+    // RULE F — rescue. Every recipient whose conversion could put revenue in the
+    // EPC numerator is in the denominator, even when no click of theirs scored
+    // human. Read off the conversion_events ledger (purchase OR revenue-bearing,
+    // not rejected — lib/sale-attribution.ts), not stage_sends.converted_at,
+    // which also rescued a REJECTED conversion and would rescue a $0
+    // REGISTRATION once registrations arrive — inflating the denominator of
+    // every EPC on the platform with people who never bought anything.
+    // Cross-org like the rest of this rebuild: org_id comes from the send row.
     await tx.execute(sql`
       INSERT INTO counted_clickers
         (org_id, campaign_id, stage_id, creative_id, contact_id, first_click_at, rescued_by_conversion)
       SELECT ss.org_id, ss.campaign_id, ss.stage_id, l.creative_id, ss.contact_id,
              coalesce(
                (SELECT min(ck.clicked_at) FROM clicks ck WHERE ck.link_id = ss.link_id),
-               ss.converted_at
+               r.first_event_at
              ),
              true
       FROM stage_sends ss
+      JOIN (${rescueSendIds(null, convWindow)}) r ON r.stage_send_id = ss.id
       LEFT JOIN links l ON l.id = ss.link_id
-      WHERE ss.converted_at IS NOT NULL ${convWindow}
       ON CONFLICT (stage_id, contact_id) DO NOTHING
     `);
 

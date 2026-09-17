@@ -89,13 +89,19 @@ export function registeredClause(alias = "ce"): SQL {
  * For readers that scan stage_sends wholesale (operator pools, the by-group
  * weights, the rollup): a hash join against ~1.5K ledger rows, instead of an
  * EXISTS probe per send row.
+ *
+ * `orgId = null` drops the org filter, for the CROSS-ORG cache rebuilds
+ * (lib/reporting/rollup.ts, lib/reporting/counted-clickers.ts) that write every
+ * org's rows in one statement and carry org_id from the send row. Anything
+ * serving a request passes a real org id.
  */
-export function purchasedSendIds(orgId: string): SQL {
+export function purchasedSendIds(orgId: string | null): SQL {
+  const org = orgId === null ? sql`` : sql`AND ce.org_id = ${orgId}::uuid`;
   return sql`
     SELECT DISTINCT ce.stage_send_id
     FROM conversion_events ce
-    WHERE ce.org_id = ${orgId}::uuid
-      AND ce.stage_send_id IS NOT NULL
+    WHERE ce.stage_send_id IS NOT NULL
+      ${org}
       AND ${purchasedClause()}`;
 }
 
@@ -104,18 +110,20 @@ export function purchasedSendIds(orgId: string): SQL {
  * whose conversion could put revenue in the EPC numerator, so the numerator can
  * never sit outside the click denominator. Purchase OR revenue-bearing, not
  * rejected. `first_event_at` is the fallback first-click stamp for a rescued row.
- * `sinceWindow` narrows the scan on the incremental pass.
+ * `window` narrows the scan on the incremental pass. `orgId = null` is cross-org
+ * — see purchasedSendIds.
  */
-export function rescueSendIds(orgId: string, sinceWindow: SQL = sql``): SQL {
+export function rescueSendIds(orgId: string | null, window: SQL = sql``): SQL {
+  const org = orgId === null ? sql`` : sql`AND ce.org_id = ${orgId}::uuid`;
   return sql`
     SELECT ce.stage_send_id, min(ce.occurred_at) AS first_event_at
     FROM conversion_events ce
-    WHERE ce.org_id = ${orgId}::uuid
-      AND ce.stage_send_id IS NOT NULL
+    WHERE ce.stage_send_id IS NOT NULL
       AND ce.status IN ('pending', 'approved')
       AND (ce.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS}
            OR ce.event_type_id IN ${REVENUE_EVENT_TYPE_IDS})
-      ${sinceWindow}
+      ${org}
+      ${window}
     GROUP BY 1`;
 }
 

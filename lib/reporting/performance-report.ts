@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
@@ -20,6 +20,7 @@ import {
 } from "@/lib/reporting/grading-rates";
 import { sendDaysOf } from "@/lib/reporting/creative-rows";
 import type { AttributionBasis, PerformanceDimension } from "@/lib/reporting/report-dimensions";
+import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
 import {
   getStageMetricsInRange,
   type ClickerDenominators,
@@ -678,10 +679,16 @@ async function trackedWeights(
         WHERE ss.org_id = ${orgId}::uuid AND ss.stage_id IN (${inList(stageIds)})`
         : basis === "sale"
           ? sql`
-        SELECT ss.stage_id, ss.contact_id, cs.campaign_id
-        FROM stage_sends ss
+        -- Who converted, from the ledger. DISTINCT keeps one row per
+        -- (stage, contact) so the weights stay per-CONTACT exactly as before
+        -- (the 1/k normalisation below would cancel duplicates anyway, but an
+        -- explicit DISTINCT states the intended grain).
+        SELECT DISTINCT ss.stage_id, ss.contact_id, cs.campaign_id
+        FROM conversion_events ce
+        JOIN stage_sends ss ON ss.id = ce.stage_send_id
         JOIN campaign_stages cs ON cs.id = ss.stage_id
-        WHERE ss.org_id = ${orgId}::uuid AND ss.converted_at IS NOT NULL
+        WHERE ce.org_id = ${orgId}::uuid
+          AND ${purchasedClause()}
           AND ss.stage_id IN (${inList(stageIds)})`
           : basis === "reach"
             ? sql`
@@ -774,6 +781,26 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[];
 
+  // Sales and revenue by the CONVERSION's own ET hour, straight from the ledger.
+  // NOT eventAgg: that walks stage_sends, where a row could hold only ONE
+  // conversion — so a recipient's second conversion was invisible, and a
+  // stage-attributable conversion whose recipient never resolved (26 of them,
+  // $1,463) could not be counted at all. The INNER JOIN to campaign_stages is
+  // what scopes the rows to this org's stages and carries the provider filter; a
+  // ledger row with no stage cannot be placed in an hour.
+  const ledgerHourAgg = async (where: SQL, valueExpr: SQL) =>
+    (await db.execute(sql`
+      SELECT EXTRACT(HOUR FROM ce.occurred_at AT TIME ZONE 'America/New_York')::int AS hour,
+             ${valueExpr} AS v
+      FROM conversion_events ce
+      JOIN campaign_stages cs ON cs.id = ce.stage_id
+        ${provFilter ? sql`AND cs.provider_phone_id = ${b.providerPhoneId}` : sql``}
+      WHERE ce.org_id = ${orgId}::uuid
+        AND ce.occurred_at >= ${rangeStart} AND ce.occurred_at < ${rangeEnd}
+        AND ${where}
+      GROUP BY 1
+    `)) as unknown as { hour: number; v: number }[];
+
   const [sentRows, clicks, redirects, sales, revenue, optouts, clickerRows] = await Promise.all([
     // Sent messages by SEND hour (tracked stage_sends; manual-campaign sends have
     // no per-message time and roll up into the Manual row). This is the one column
@@ -796,8 +823,8 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[],
     eventAgg("ss.offer_reached_at", provJoin, sql`ss.offer_reached_at IS NOT NULL`, sql`count(*)::int`),
-    eventAgg("ss.converted_at", provJoin, sql`ss.converted_at IS NOT NULL`, sql`count(*)::int`),
-    eventAgg("ss.converted_at", provJoin, sql`ss.converted_at IS NOT NULL`, sql`coalesce(sum(ss.sale_revenue),0)::float8`),
+    ledgerHourAgg(purchasedClause(), sql`count(*)::int`),
+    ledgerHourAgg(approvedRevenueClause(), sql`coalesce(sum(ce.revenue), 0)::float8`),
     // opt-outs by receipt time, for TRACKED stages
     (await db.execute(sql`
       SELECT ${hourExpr("oa.created_at")} AS hour, count(*)::int AS v

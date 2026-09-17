@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
 
 // Accept either the top-level `db` or a transaction handle.
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -19,10 +20,12 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 // (`settled = true`) and never re-scanned. The horizon (14d) safely covers every
 // trickle window: opt-out attribution 72h, offer-reach / Keitaro conversion 7d.
 //
-// SALES/REVENUE are the PER-RECIPIENT attribution on stage_sends (sale_status /
-// converted_at / sale_revenue), which is send-hour- and group-attributable.
-// It recovers ~93% of the authoritative Keitaro daily aggregate — the read layer
-// surfaces that reconciliation delta (approved Open Question #2).
+// SALES/REVENUE are the PER-RECIPIENT attribution from the conversion_events
+// ledger (lib/sale-attribution.ts), joined on stage_send_id, which is
+// send-hour- and group-attributable. `sale` is the COUNT of counted purchase
+// events on that send row, not a 0/1 flag on stage_sends.converted_at — a
+// recipient with two conversions is two sales (+14 corpus-wide at the switch) —
+// and revenue is APPROVED only. Cross-org, like every statement in this module.
 export const UNSETTLED_WINDOW_DAYS = 14;
 export const REPORT_ROLLUP_JOB_NAME = "report-rollup";
 
@@ -59,6 +62,14 @@ function sentCte(since: SQL, preSnapshot = false): SQL {
       FROM opt_out_attributions oa
       WHERE oa.stage_send_id IS NOT NULL
     ),
+    conv_sends AS (
+      SELECT ce.stage_send_id,
+             count(*) FILTER (WHERE ${purchasedClause()})::int AS purchases,
+             coalesce(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause()}), 0)::numeric(12, 4) AS revenue
+      FROM conversion_events ce
+      WHERE ce.stage_send_id IS NOT NULL
+      GROUP BY 1
+    ),
     sent AS (
       SELECT
         ss.id                                                                       AS send_id,
@@ -73,8 +84,8 @@ function sentCte(since: SQL, preSnapshot = false): SQL {
         COALESCE(${snapPhone}, cs.provider_phone_id)                               AS resolved_phone_id,
         COALESCE(${snapCost}, pp.cost_per_sms, 0)::numeric(12, 4)                   AS cost_per_sms,
         (ss.offer_reached_at IS NOT NULL)::int                                      AS redirect,
-        (ss.converted_at IS NOT NULL)::int                                          AS sale,
-        COALESCE(ss.sale_revenue, 0)::numeric(12, 4)                                AS revenue,
+        COALESCE(cv.purchases, 0)                                                   AS sale,
+        COALESCE(cv.revenue, 0)::numeric(12, 4)                                     AS revenue,
         (ss.link_id IS NOT NULL AND cl.link_id IS NOT NULL)::int                    AS clicked,
         (os.stage_send_id IS NOT NULL)::int                                         AS opted_out
       FROM stage_sends ss
@@ -82,6 +93,7 @@ function sentCte(since: SQL, preSnapshot = false): SQL {
       LEFT JOIN provider_phones pp ON pp.id = COALESCE(${snapPhone}, cs.provider_phone_id)
       LEFT JOIN clicked_links cl ON cl.link_id = ss.link_id
       LEFT JOIN optout_sends os ON os.stage_send_id = ss.id
+      LEFT JOIN conv_sends cv ON cv.stage_send_id = ss.id
       WHERE ss.status = 'sent'
         AND ss.sent_at IS NOT NULL
         AND ss.sent_at >= ${since}

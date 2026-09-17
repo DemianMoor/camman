@@ -72,8 +72,9 @@ interface MessageRow {
   texthub_message_id: string | null;
   attempts: number;
   last_error: string | null;
-  sale_status: string | null;
-  sale_revenue: string | null;
+  conversion_event: string | null;
+  conversion_status: string | null;
+  conversion_revenue: string | null;
   reply_result: string | null;
   reply_received_at: string | null;
 }
@@ -106,12 +107,12 @@ const STATUS_STYLES: Record<string, string> = {
   sending: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
 };
 
-// Keitaro conversion status → badge color. Stamped per recipient by the
-// conversions poll (sub_id_1 = stage_sends.id). sale = green (the win), lead =
-// amber (checkout, payout unconfirmed), rejected = muted red (payout cancelled).
-const SALE_STATUS_STYLES: Record<string, string> = {
-  sale: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-  lead: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
+// conversion_events.status → badge colour. The LIFECYCLE status, not the
+// network's raw Keitaro status: pending = a held payout (counted as a sale, NOT
+// in revenue), approved = counted in Revenue/EPC, rejected = taken back.
+const CONVERSION_STATUS_STYLES: Record<string, string> = {
+  approved: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
+  pending: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   rejected: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400",
 };
 
@@ -466,7 +467,7 @@ function MessagesPanel({
                     <th className="px-3 py-2 font-medium">Stage</th>
                     <th className="px-3 py-2 font-medium">Phone</th>
                     <th className="px-3 py-2 font-medium">Status</th>
-                    <th className="px-3 py-2 font-medium">Sale</th>
+                    <th className="px-3 py-2 font-medium">Conversion</th>
                     <th className="px-3 py-2 font-medium">Sent</th>
                     <th className="px-3 py-2 font-medium">Reply</th>
                     <th className="px-3 py-2 font-medium">Message ID</th>
@@ -492,19 +493,20 @@ function MessagesPanel({
                         </Badge>
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">
-                        {r.sale_status ? (
+                        {r.conversion_event ? (
                           <Badge
                             variant="secondary"
-                            className={SALE_STATUS_STYLES[r.sale_status] ?? ""}
+                            className={CONVERSION_STATUS_STYLES[r.conversion_status ?? ""] ?? ""}
                             title={
-                              r.sale_revenue
-                                ? `Revenue $${Number(r.sale_revenue).toFixed(2)}`
+                              r.conversion_revenue
+                                ? `${r.conversion_event} · ${r.conversion_status ?? "unmapped"} · $${Number(r.conversion_revenue).toFixed(2)}`
                                 : undefined
                             }
                           >
-                            {r.sale_status}
-                            {r.sale_status !== "rejected" && r.sale_revenue
-                              ? ` · $${Number(r.sale_revenue).toFixed(2)}`
+                            {r.conversion_event}
+                            {r.conversion_status ? ` · ${r.conversion_status}` : " · unmapped"}
+                            {r.conversion_status !== "rejected" && Number(r.conversion_revenue ?? 0) > 0
+                              ? ` · $${Number(r.conversion_revenue).toFixed(2)}`
                               : ""}
                           </Badge>
                         ) : (

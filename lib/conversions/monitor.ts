@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 
 import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
@@ -18,8 +18,8 @@ import {
 //
 // /api/keitaro/poll ingests the last 7 ET days of Keitaro conversions into
 // conversion_events on every */5 tick. Each way that can go wrong pages Telegram
-// ONCE: latched on a FIXED alert_state key via notifyOnTransition, and re-armed
-// with clearAlert once the condition is gone.
+// ONCE, latched in alert_state via notifyOnTransition, and re-armed once the
+// condition is gone.
 //
 //   conversion_events:fetch_failed      failed ticks — the window was refused
 //                                       (Keitaro HTTP error, timeout, MALFORMED
@@ -31,9 +31,10 @@ import {
 //   conversion_events:org_mismatch      existing ledger rows this run resolved to
 //                                       ANOTHER org — not written (no debounce:
 //                                       a data-integrity signal)
-//   conversion_events:unmapped          any ledger row, all-time, with a NULL
+//   conversion_events:unmapped:<id>     any ledger row, all-time, with a NULL
 //                                       event type or status
-//   conversion_events:type_conflicts    any ledger row whose Keitaro type now
+//   conversion_events:type_conflicts:<id>
+//                                       any ledger row whose Keitaro type now
 //                                       maps to a different event than its locked one
 //   heartbeat:conversion-events-ingest  no complete ingest for over an hour
 //                                       (checked by /api/cron/tracking-monitors)
@@ -43,7 +44,20 @@ import {
 // Nor statusOnlyInBatch: a brand-new status-only row has a NULL event type, so
 // the table-level unmapped alert already reports it.
 //
-// Keys are fixed (not per row, not per hour): one standing condition = one page.
+// fetch_failed, invalid_rows, org_mismatch and the heartbeat are FIXED keys
+// (not per row, not per hour): one standing condition = one page.
+//
+// unmapped and type_conflicts read the whole table, all-time. On a fixed key one
+// old unfixed row would keep the alert firing and hide every LATER problem, so
+// they are keyed on the newest problem row's id (<id>) instead:
+//   - a NEW problem row (higher id) pages again, and the older firing key under
+//     the same prefix is set to ok (superseded);
+//   - the same newest row never pages twice (notifyOnTransition's latch);
+//   - fixing the newest row while older ones remain neither pages nor steps back
+//     to a lower id: the firing key stays, so a superseded key never re-fires;
+//   - no problem rows left sets every key under the prefix to ok (re-armed).
+// See decideLedgerAlerts and clearAlertsByPrefix.
+//
 // The poll is cross-org, so these alerts are too — alert_state.org_id stays NULL
 // (nullable because "some alerts are global rather than per-org").
 //
@@ -55,9 +69,20 @@ export const CONVERSION_ALERT_KEYS = {
   fetchFailed: "conversion_events:fetch_failed",
   invalidRows: "conversion_events:invalid_rows",
   orgMismatch: "conversion_events:org_mismatch",
-  unmapped: "conversion_events:unmapped",
-  typeConflicts: "conversion_events:type_conflicts",
 } as const;
+
+// Per-newest-row keys: prefix + conversion_events.id (ledgerAlertKey).
+export const CONVERSION_ALERT_KEY_PREFIXES = {
+  unmapped: "conversion_events:unmapped:",
+  typeConflicts: "conversion_events:type_conflicts:",
+} as const;
+
+export type LedgerAlertKind = keyof typeof CONVERSION_ALERT_KEY_PREFIXES;
+export type LedgerAlertPrefix = (typeof CONVERSION_ALERT_KEY_PREFIXES)[LedgerAlertKind];
+
+export function ledgerAlertKey(prefix: LedgerAlertPrefix, rowId: number): string {
+  return `${prefix}${rowId}`;
+}
 
 export const INGEST_HEARTBEAT_ALERT_KEY = "heartbeat:conversion-events-ingest";
 
@@ -89,14 +114,29 @@ export interface ConflictSample {
 export interface LedgerHealth {
   unmapped_total: number;
   unmapped_last_24h: number;
+  unmapped_newest_id: number | null; // max(id) of the unmapped rows; null when there are none
   unmapped_samples: UnmappedSample[];
   conflict_total: number;
+  conflict_newest_id: number | null; // max(id) of the conflicting rows; null when there are none
   conflict_samples: ConflictSample[];
 }
 
+// Fixed-key decisions (fetch_failed, invalid_rows, org_mismatch).
 export type ConversionAlertDecision =
   | { alertKey: string; state: "firing"; text: string }
   | { alertKey: string; state: "ok" };
+
+// Per-newest-row decisions (unmapped, type_conflicts).
+//   firing → notifyOnTransition on alertKey, then every OTHER firing key under
+//            prefix → ok (superseded)
+//   ok     → every firing key under prefix → ok
+export type LedgerAlertDecision =
+  | { prefix: LedgerAlertPrefix; alertKey: string; state: "firing"; text: string }
+  | { prefix: LedgerAlertPrefix; state: "ok" };
+
+// The highest row id among the FIRING keys under each prefix (null = none):
+// the row the standing page was sent for, or is still pending for.
+export type FiringLedgerIds = Record<LedgerAlertKind, number | null>;
 
 // What one cron tick's ingest produced: a result (complete, or a refused window
 // with ok:false), or a throw caught by the poll route.
@@ -119,6 +159,11 @@ function windowLine(range: KeitaroReportRange): string {
   return `Window: ${range.from} → ${range.to} ${range.timezone}`;
 }
 
+// "18 min ago" under two hours; "3.1 h ago" from there.
+function formatAgo(minutes: number): string {
+  return minutes < 120 ? `${Math.round(minutes)} min ago` : `${(minutes / 60).toFixed(1)} h ago`;
+}
+
 function formatFetchFailedAlert(outcome: IngestOutcome, lastSuccessAgeMinutes: number | null): string {
   const range = outcome.kind === "threw" ? outcome.range : outcome.result.range;
   const error =
@@ -127,7 +172,7 @@ function formatFetchFailedAlert(outcome: IngestOutcome, lastSuccessAgeMinutes: n
     `${PREFIX} the conversion ledger ingest keeps failing. Nothing from the failed windows was written.`,
     windowLine(range),
     `Error: ${clip(error)}`,
-    `Last complete ingest: ${lastSuccessAgeMinutes === null ? "never recorded" : `${Math.round(lastSuccessAgeMinutes)} min ago`}.`,
+    `Last complete ingest: ${lastSuccessAgeMinutes === null ? "never recorded" : formatAgo(lastSuccessAgeMinutes)}.`,
     "The conversion_events ledger is not updated while this lasts. Repeated timeouts or HTTP errors: Keitaro or the network is down. A malformed response (a 200 that is not JSON with a rows array and a numeric total, e.g. an HTML bot challenge): something other than the Keitaro API answered. A truncated page: 7 days of conversions no longer fit one Keitaro page and the window needs splitting. A thrown error is also in the poll's conversion_events_error and the Vercel logs.",
   ].join("\n");
 }
@@ -225,15 +270,33 @@ export function decideIngestAlerts(
   ];
 }
 
-// Decisions from the whole-ledger health read (all-time, all orgs).
-export function decideLedgerAlerts(h: LedgerHealth): ConversionAlertDecision[] {
+function decideLedgerAlert(
+  prefix: LedgerAlertPrefix,
+  newestId: number | null,
+  firingId: number | null,
+  text: () => string,
+): LedgerAlertDecision {
+  // newestId is null exactly when the count is 0 (same statement).
+  if (newestId === null) return { prefix, state: "ok" };
+  // Never step back to a lower id: when the newest problem row is fixed while
+  // older ones remain, the standing page's key stays firing and nothing pages.
+  const rowId = Math.max(newestId, firingId ?? newestId);
+  return { prefix, alertKey: ledgerAlertKey(prefix, rowId), state: "firing", text: text() };
+}
+
+// Decisions from the whole-ledger health read (all-time, all orgs) and the
+// currently firing per-row keys.
+export function decideLedgerAlerts(h: LedgerHealth, firing: FiringLedgerIds): LedgerAlertDecision[] {
   return [
-    h.unmapped_total > 0
-      ? { alertKey: CONVERSION_ALERT_KEYS.unmapped, state: "firing", text: formatUnmappedAlert(h) }
-      : { alertKey: CONVERSION_ALERT_KEYS.unmapped, state: "ok" },
-    h.conflict_total > 0
-      ? { alertKey: CONVERSION_ALERT_KEYS.typeConflicts, state: "firing", text: formatTypeConflictsAlert(h) }
-      : { alertKey: CONVERSION_ALERT_KEYS.typeConflicts, state: "ok" },
+    decideLedgerAlert(CONVERSION_ALERT_KEY_PREFIXES.unmapped, h.unmapped_newest_id, firing.unmapped, () =>
+      formatUnmappedAlert(h),
+    ),
+    decideLedgerAlert(
+      CONVERSION_ALERT_KEY_PREFIXES.typeConflicts,
+      h.conflict_newest_id,
+      firing.typeConflicts,
+      () => formatTypeConflictsAlert(h),
+    ),
   ];
 }
 
@@ -243,24 +306,36 @@ type Send = (text: string) => Promise<boolean>;
 
 // Each count's WHERE is written EXACTLY as its partial index's predicate
 // (migration 0181), so the planner can answer it from that small index however
-// large the ledger grows. Exported so scripts/test-conversion-monitor-db.ts can
-// EXPLAIN the very statements this module runs.
+// large the ledger grows. max(id) (the newest problem row, for the alert key)
+// rides the same statement: next to count(*) the planner cannot use its
+// min/max-via-primary-key rewrite, so it stays on the partial index instead of
+// walking the pkey backwards past every healthy row. Exported so
+// scripts/test-conversion-monitor-db.ts can EXPLAIN the very statements this
+// module runs.
 export const UNMAPPED_COUNT_SQL = sql`
   SELECT count(*)::int AS total,
-         count(*) FILTER (WHERE created_at >= now() - interval '24 hours')::int AS last_24h
+         count(*) FILTER (WHERE created_at >= now() - interval '24 hours')::int AS last_24h,
+         max(id) AS newest_id
   FROM conversion_events
   WHERE event_type_id IS NULL OR status IS NULL`;
 
 export const CONFLICT_COUNT_SQL = sql`
-  SELECT count(*)::int AS total
+  SELECT count(*)::int AS total,
+         max(id) AS newest_id
   FROM conversion_events
   WHERE conflicting_event_type_id IS NOT NULL`;
+
+// bigint arrives as a string; ledger ids stay far below 2^53.
+function toId(v: string | number | null): number | null {
+  return v === null ? null : Number(v);
+}
 
 // Whole ledger, all orgs (the alerts are global). Four small reads per cron tick.
 export async function readLedgerHealth(dbc: DbOrTx): Promise<LedgerHealth> {
   const [unmapped] = (await dbc.execute(UNMAPPED_COUNT_SQL)) as unknown as {
     total: number;
     last_24h: number;
+    newest_id: string | number | null;
   }[];
   const unmappedSamples = (await dbc.execute(sql`
     SELECT ce.keitaro_event_id, ce.keitaro_type, ce.keitaro_offer_id, o.name AS offer_name
@@ -270,7 +345,10 @@ export async function readLedgerHealth(dbc: DbOrTx): Promise<LedgerHealth> {
     ORDER BY ce.created_at DESC, ce.id DESC
     LIMIT ${MAX_SAMPLES}
   `)) as unknown as UnmappedSample[];
-  const [conflicts] = (await dbc.execute(CONFLICT_COUNT_SQL)) as unknown as { total: number }[];
+  const [conflicts] = (await dbc.execute(CONFLICT_COUNT_SQL)) as unknown as {
+    total: number;
+    newest_id: string | number | null;
+  }[];
   const conflictSamples = (await dbc.execute(sql`
     SELECT ce.keitaro_event_id,
            lt.key AS locked_event_key,
@@ -287,6 +365,7 @@ export async function readLedgerHealth(dbc: DbOrTx): Promise<LedgerHealth> {
   return {
     unmapped_total: Number(unmapped.total),
     unmapped_last_24h: Number(unmapped.last_24h),
+    unmapped_newest_id: toId(unmapped.newest_id),
     unmapped_samples: unmappedSamples.map((s) => ({
       keitaro_event_id: s.keitaro_event_id,
       keitaro_type: s.keitaro_type,
@@ -294,6 +373,7 @@ export async function readLedgerHealth(dbc: DbOrTx): Promise<LedgerHealth> {
       offer_name: s.offer_name,
     })),
     conflict_total: Number(conflicts.total),
+    conflict_newest_id: toId(conflicts.newest_id),
     conflict_samples: conflictSamples.map((s) => ({
       keitaro_event_id: s.keitaro_event_id,
       locked_event_key: s.locked_event_key,
@@ -311,11 +391,81 @@ async function applyDecisions(
 ): Promise<void> {
   for (const d of decisions) {
     // Both helpers are best-effort and never throw; org-less because the
-    // ledger alerts are global.
+    // conversion alerts are global.
     if (d.state === "firing") {
       await notifyOnTransition(dbc, { alertKey: d.alertKey, text: d.text, send });
     } else {
       await clearAlert(dbc, { alertKey: d.alertKey });
+    }
+  }
+}
+
+// `alert_key` starts with `prefix`, as `alert_key LIKE <prefix> || '%'` with the
+// prefix bound as a parameter. LIKE treats `%` and `_` as wildcards, and BOTH
+// fixed prefixes contain `_` (conversion_events, type_conflicts): unescaped, it
+// would match any character. So `\`, `%` and `_` are escaped before binding,
+// with ESCAPE '\' spelled out.
+function keyHasPrefix(prefix: LedgerAlertPrefix): SQL {
+  const escaped = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+  return sql`alert_key LIKE ${escaped}::text || '%' ESCAPE '\\'`;
+}
+
+// Set every non-ok key under `prefix` (except `except`) to ok. The same write as
+// clearAlert → transitionAlert(state: "ok") in lib/alerts/alert-state.ts, which
+// on an existing row runs `SET state = 'ok', since = now(), org_id =
+// COALESCE(EXCLUDED.org_id, alert_state.org_id) WHERE alert_state.state <> 'ok'`:
+// without an orgId that org_id assignment is a no-op, and last_notified_at is left
+// alone. It only updates: a prefix names no single key to insert, and a key that
+// never fired has nothing to clear. Best-effort like clearAlert: never throws.
+async function clearAlertsByPrefix(
+  dbc: DbOrTx,
+  prefix: LedgerAlertPrefix,
+  { except }: { except?: string } = {},
+): Promise<void> {
+  try {
+    await dbc.execute(sql`
+      UPDATE alert_state
+      SET state = 'ok', since = now()
+      WHERE ${keyHasPrefix(prefix)}
+        AND state <> 'ok'
+        ${except === undefined ? sql.empty() : sql`AND alert_key <> ${except}`}
+    `);
+  } catch (err) {
+    console.error(`[conversions/monitor] clear failed for ${prefix}* (swallowed):`, err);
+  }
+}
+
+// The highest row id among the firing keys under each ledger prefix.
+async function readFiringLedgerIds(dbc: DbOrTx): Promise<FiringLedgerIds> {
+  const P = CONVERSION_ALERT_KEY_PREFIXES;
+  const rows = (await dbc.execute(sql`
+    SELECT alert_key FROM alert_state
+    WHERE state = 'firing'
+      AND (${keyHasPrefix(P.unmapped)} OR ${keyHasPrefix(P.typeConflicts)})
+  `)) as unknown as { alert_key: string }[];
+  const highest = (prefix: LedgerAlertPrefix): number | null => {
+    const ids = rows
+      .filter((r) => r.alert_key.startsWith(prefix))
+      .map((r) => Number(r.alert_key.slice(prefix.length)))
+      .filter((n) => Number.isSafeInteger(n));
+    return ids.length === 0 ? null : Math.max(...ids);
+  };
+  return { unmapped: highest(P.unmapped), typeConflicts: highest(P.typeConflicts) };
+}
+
+async function applyLedgerDecisions(
+  dbc: DbOrTx,
+  decisions: readonly LedgerAlertDecision[],
+  send: Send | undefined,
+): Promise<void> {
+  for (const d of decisions) {
+    if (d.state === "firing") {
+      // Page (latched) first, then supersede: if the transition fails, the next
+      // tick still finds no firing key above the newest row and pages.
+      await notifyOnTransition(dbc, { alertKey: d.alertKey, text: d.text, send });
+      await clearAlertsByPrefix(dbc, d.prefix, { except: d.alertKey });
+    } else {
+      await clearAlertsByPrefix(dbc, d.prefix);
     }
   }
 }
@@ -330,23 +480,35 @@ async function readLastSuccessAgeMinutes(dbc: DbOrTx): Promise<number | null> {
 }
 
 // Cron path of /api/keitaro/poll, right after the ingest — including an ingest
-// that THREW (the route passes { kind: "threw" }). The heartbeat age is read
-// only for a failed tick (the fetch_failed debounce). The ingest decisions are
-// applied FIRST, so a failed tick past the debounce still pages even if the
-// health read then fails — that failure propagates to the caller, which reports
-// it and does not stamp the heartbeat. `send` is injectable only for the DB test.
+// that THREW (the route passes { kind: "threw" }). The ledger alerts are
+// evaluated on EVERY tick, failed ones included: they read the table, not the
+// batch. `send` is injectable only for the DB test.
+//
+// Failure contract — the READS are not best-effort and propagate; the caller
+// must catch (the poll route reports `monitor: …` and does not stamp the
+// heartbeat). The alert writes are best-effort and never throw.
+//   - Heartbeat-age read (failed ticks only, for the fetch_failed debounce): it
+//     runs before any decision, so if it throws NOTHING pages and the ledger
+//     alerts are skipped for that tick.
+//   - The ingest decisions are applied next, so a failed tick past the debounce
+//     still pages even if the ledger health or firing-key read then throws; only
+//     the ledger alerts are skipped for that tick.
 export async function evaluateConversionAlerts(
   dbc: DbOrTx,
   outcome: IngestOutcome,
   opts: { send?: Send } = {},
-): Promise<{ health: LedgerHealth; decisions: ConversionAlertDecision[] }> {
+): Promise<{
+  health: LedgerHealth;
+  ingestDecisions: ConversionAlertDecision[];
+  ledgerDecisions: LedgerAlertDecision[];
+}> {
   const lastSuccessAgeMinutes = ingestFailed(outcome) ? await readLastSuccessAgeMinutes(dbc) : null;
   const ingestDecisions = decideIngestAlerts(outcome, lastSuccessAgeMinutes);
   await applyDecisions(dbc, ingestDecisions, opts.send);
   const health = await readLedgerHealth(dbc);
-  const ledgerDecisions = decideLedgerAlerts(health);
-  await applyDecisions(dbc, ledgerDecisions, opts.send);
-  return { health, decisions: [...ingestDecisions, ...ledgerDecisions] };
+  const ledgerDecisions = decideLedgerAlerts(health, await readFiringLedgerIds(dbc));
+  await applyLedgerDecisions(dbc, ledgerDecisions, opts.send);
+  return { health, ingestDecisions, ledgerDecisions };
 }
 
 // Dead-man for the ingest, called by /api/cron/tracking-monitors (hourly) — a

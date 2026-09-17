@@ -5,14 +5,18 @@ import type { IngestResult } from "../lib/conversions/ingest";
 import { liveIngestRange } from "../lib/conversions/keitaro-row";
 import {
   CONVERSION_ALERT_KEYS,
+  CONVERSION_ALERT_KEY_PREFIXES,
   FETCH_FAILED_DEBOUNCE_MINUTES,
   INGEST_HEARTBEAT_ALERT_KEY,
   decideIngestAlerts,
   decideLedgerAlerts,
   formatIngestHeartbeatAlert,
   ingestFailed,
+  ledgerAlertKey,
   type ConversionAlertDecision,
+  type FiringLedgerIds,
   type IngestOutcome,
+  type LedgerAlertDecision,
   type LedgerHealth,
 } from "../lib/conversions/monitor";
 
@@ -158,6 +162,20 @@ check(
   hugeText.length > 0 && hugeText.length < 1500,
   `length ${hugeText.length}`,
 );
+const ageText = (minutes: number) => firingText(decideIngestAlerts(refused, minutes), K.fetchFailed);
+check(
+  "A6 last-success age under 120 min reads as whole minutes (114 → 114 min ago, 17.6 → 18 min ago)",
+  ageText(114).includes("Last complete ingest: 114 min ago.") &&
+    ageText(17.6).includes("Last complete ingest: 18 min ago."),
+  ageText(114),
+);
+check(
+  "A7 last-success age of 120 min or more reads as hours with one decimal (120 → 2.0 h ago, 186 → 3.1 h ago)",
+  ageText(120).includes("Last complete ingest: 2.0 h ago.") &&
+    ageText(186).includes("Last complete ingest: 3.1 h ago.") &&
+    !ageText(120).includes("min ago"),
+  ageText(186),
+);
 
 console.log("\nfetch_failed debounce");
 const freshDs = decideIngestAlerts(refused, 5);
@@ -239,23 +257,40 @@ check(
 );
 
 console.log("\nledger alerts");
+const P = CONVERSION_ALERT_KEY_PREFIXES;
+type LedgerFiring = Extract<LedgerAlertDecision, { state: "firing" }>;
+const ledgerDecision = (ds: LedgerAlertDecision[], prefix: string) => ds.find((d) => d.prefix === prefix);
+const ledgerKey = (ds: LedgerAlertDecision[], prefix: string) =>
+  ds.find((d): d is LedgerFiring => d.prefix === prefix && d.state === "firing")?.alertKey;
+const ledgerText = (ds: LedgerAlertDecision[], prefix: string): string =>
+  ds.find((d): d is LedgerFiring => d.prefix === prefix && d.state === "firing")?.text ?? "";
+const firing = (unmapped: number | null, typeConflicts: number | null): FiringLedgerIds => ({
+  unmapped,
+  typeConflicts,
+});
+
 const clean: LedgerHealth = {
   unmapped_total: 0,
   unmapped_last_24h: 0,
+  unmapped_newest_id: null,
   unmapped_samples: [],
   conflict_total: 0,
+  conflict_newest_id: null,
   conflict_samples: [],
 };
-const cleanDs = decideLedgerAlerts(clean);
+const cleanDs = decideLedgerAlerts(clean, firing(null, null));
 check(
   "L1 clean ledger → unmapped ok, type_conflicts ok",
-  cleanDs.length === 2 && stateOf(cleanDs, K.unmapped) === "ok" && stateOf(cleanDs, K.typeConflicts) === "ok",
+  cleanDs.length === 2 &&
+    ledgerDecision(cleanDs, P.unmapped)?.state === "ok" &&
+    ledgerDecision(cleanDs, P.typeConflicts)?.state === "ok",
   JSON.stringify(cleanDs),
 );
 
 const sick: LedgerHealth = {
   unmapped_total: 5,
   unmapped_last_24h: 2,
+  unmapped_newest_id: 120,
   unmapped_samples: [
     { keitaro_event_id: "ev-offer", keitaro_type: "trash", keitaro_offer_id: 41, offer_name: "Psycho Book" },
     { keitaro_event_id: "ev-keitaro", keitaro_type: "deposit", keitaro_offer_id: 41, offer_name: null },
@@ -263,6 +298,7 @@ const sick: LedgerHealth = {
     { keitaro_event_id: "ev-fourth", keitaro_type: "lead", keitaro_offer_id: null, offer_name: null },
   ],
   conflict_total: 1,
+  conflict_newest_id: 77,
   conflict_samples: [
     {
       keitaro_event_id: "ev-conflict",
@@ -273,8 +309,8 @@ const sick: LedgerHealth = {
     },
   ],
 };
-const sickDs = decideLedgerAlerts(sick);
-const unmappedText = firingText(sickDs, K.unmapped);
+const sickDs = decideLedgerAlerts(sick, firing(null, null));
+const unmappedText = ledgerText(sickDs, P.unmapped);
 check(
   "L2 unmapped firing: total, last-24h count, offer name / Keitaro offer id / no offer, at most 3 samples",
   unmappedText.startsWith(PREFIX) &&
@@ -285,7 +321,7 @@ check(
     !unmappedText.includes("ev-fourth"),
   unmappedText,
 );
-const conflictText = firingText(sickDs, K.typeConflicts);
+const conflictText = ledgerText(sickDs, P.typeConflicts);
 check(
   "L3 type_conflicts firing: count, event id, locked key, Keitaro type → mapped key, since in ET",
   conflictText.startsWith(PREFIX) &&
@@ -296,13 +332,61 @@ check(
   conflictText,
 );
 
+console.log("\nledger alert keys (newest problem row)");
+check(
+  "L4 nothing firing → each kind fires on its newest problem row's key",
+  ledgerKey(sickDs, P.unmapped) === "conversion_events:unmapped:120" &&
+    ledgerKey(sickDs, P.typeConflicts) === "conversion_events:type_conflicts:77",
+  JSON.stringify(sickDs.map((d) => ({ ...d, text: undefined }))),
+);
+const sameDs = decideLedgerAlerts(sick, firing(120, 77));
+check(
+  "L5 the same newest row already firing → the same key again (notifyOnTransition's latch keeps it one page)",
+  ledgerKey(sameDs, P.unmapped) === "conversion_events:unmapped:120" &&
+    ledgerKey(sameDs, P.typeConflicts) === "conversion_events:type_conflicts:77",
+  JSON.stringify(sameDs.map((d) => ({ ...d, text: undefined }))),
+);
+const newerDs = decideLedgerAlerts(sick, firing(100, 77));
+check(
+  "L6 a NEWER unmapped row (id above the firing key) → firing on the new key, under the prefix whose older keys it supersedes",
+  ledgerKey(newerDs, P.unmapped) === "conversion_events:unmapped:120" &&
+    ledgerDecision(newerDs, P.unmapped)?.prefix === "conversion_events:unmapped:" &&
+    ledgerText(newerDs, P.unmapped) === unmappedText,
+  JSON.stringify(newerDs.map((d) => ({ ...d, text: undefined }))),
+);
+const newestFixedDs = decideLedgerAlerts({ ...sick, unmapped_total: 4, unmapped_newest_id: 90 }, firing(120, 77));
+check(
+  "L7 newest unmapped row fixed, older ones remain (newest 90 < firing 120) → stays on :120, never steps back to a superseded lower key",
+  ledgerKey(newestFixedDs, P.unmapped) === "conversion_events:unmapped:120",
+  JSON.stringify(newestFixedDs.map((d) => ({ ...d, text: undefined }))),
+);
+const healedDs = decideLedgerAlerts(clean, firing(120, 77));
+check(
+  "L8 no problem rows left → ok for each whole prefix, whatever key is firing",
+  healedDs.length === 2 &&
+    ledgerDecision(healedDs, P.unmapped)?.state === "ok" &&
+    ledgerDecision(healedDs, P.typeConflicts)?.state === "ok",
+  JSON.stringify(healedDs),
+);
+const conflictNewer = decideLedgerAlerts({ ...sick, conflict_newest_id: 80 }, firing(null, 77));
+const conflictFixed = decideLedgerAlerts({ ...sick, conflict_newest_id: 60 }, firing(null, 77));
+const conflictHealed = decideLedgerAlerts({ ...sick, conflict_total: 0, conflict_newest_id: null }, firing(120, 77));
+check(
+  "L9 type_conflicts follows the same rules: newer row → new key, newest fixed → stays, none left → ok",
+  ledgerKey(conflictNewer, P.typeConflicts) === "conversion_events:type_conflicts:80" &&
+    ledgerKey(conflictFixed, P.typeConflicts) === "conversion_events:type_conflicts:77" &&
+    ledgerDecision(conflictHealed, P.typeConflicts)?.state === "ok" &&
+    ledgerKey(conflictHealed, P.unmapped) === "conversion_events:unmapped:120",
+  JSON.stringify([conflictNewer, conflictFixed, conflictHealed].map((ds) => ds.map((d) => ({ ...d, text: undefined })))),
+);
+
 console.log("\nheartbeat alert");
 const breach =
   "Conversion events ingest (Keitaro poll tick) last ran 3h ago (tolerance 1h). Its silence cannot be read as healthy.";
 const hbText = formatIngestHeartbeatAlert(breach);
 check("H1 heartbeat text: prefix + the breach line", hbText.startsWith(PREFIX) && hbText.includes(breach), hbText);
 
-console.log("\nplain text + fixed keys");
+console.log("\nplain text + keys");
 const texts = [fetchText, invalidText, hugeText, threwText, orgText, unmappedText, conflictText, hbText];
 const MARKUP = /<\/?[a-z][^>]*>|\*[^*\n]+\*|__[^_\n]+__|`/i;
 check(
@@ -311,12 +395,15 @@ check(
   texts.filter((t) => t.length === 0 || MARKUP.test(t)).join("\n---\n"),
 );
 check(
-  "K1 the alert keys are the fixed strings the docs and alert_state rows name",
+  "K1 the fixed keys, the per-row key prefixes and the key builder are the strings the docs and alert_state rows name",
   K.fetchFailed === "conversion_events:fetch_failed" &&
     K.invalidRows === "conversion_events:invalid_rows" &&
     K.orgMismatch === "conversion_events:org_mismatch" &&
-    K.unmapped === "conversion_events:unmapped" &&
-    K.typeConflicts === "conversion_events:type_conflicts" &&
+    Object.keys(K).length === 3 &&
+    P.unmapped === "conversion_events:unmapped:" &&
+    P.typeConflicts === "conversion_events:type_conflicts:" &&
+    ledgerAlertKey(P.unmapped, 42) === "conversion_events:unmapped:42" &&
+    ledgerAlertKey(P.typeConflicts, 7) === "conversion_events:type_conflicts:7" &&
     INGEST_HEARTBEAT_ALERT_KEY === "heartbeat:conversion-events-ingest",
 );
 

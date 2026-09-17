@@ -1282,6 +1282,13 @@
       "when": 1792108800000,
       "tag": "0182_conversion_reader_switch",
       "breakpoints": true
+    },
+    {
+      "idx": 183,
+      "version": "7",
+      "when": 1792195200000,
+      "tag": "0183_report_views_from_ledger",
+      "breakpoints": true
     }
   ]
 }

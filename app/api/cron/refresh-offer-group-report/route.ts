@@ -6,12 +6,19 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat"
 import { refreshOfferGroupReport } from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
-// Measured 2026-08-13 across the first three matviews (summary + group + the
-// 0132 offer-totals matview): ~40.5s total against this 300s ceiling. 60s left
-// no cold-start headroom, so this cron gets a larger budget. It is a background
-// job (not user-facing), so a longer ceiling costs nothing. Migration 0180 added
-// a fourth (Audience Stats group totals, defining SELECT ~5s); its time is
-// logged as audienceTotalsMs.
+// Last measured on prod data 2026-08-13 (pre-ledger structure): ~104s across the
+// four matviews against this 300s ceiling (org summary + group + the 0132
+// offer-totals matview + 0180's audience group totals) — see git history for the
+// breakdown. Migration 0183 (Phase 3) restructured the group + offer-totals +
+// audience-totals matviews to read per-recipient conversions from the
+// conversion_events ledger instead of stage_sends columns; conversion_events does
+// not exist on production yet (0181-0183 apply together at Task 8 Step 5 of the
+// conversion-events-phase3 plan), so the new structure cannot be re-measured
+// against real prod data until then. Capture the real number from that run's
+// response (`durations`) and update this comment — do not carry the stale
+// pre-ledger figure past that apply. 60s left no cold-start headroom, so this
+// cron gets a larger budget. It is a background job (not user-facing), so a
+// longer ceiling costs nothing; per-view durations are logged every run.
 export const maxDuration = 300;
 
 async function handle(req: NextRequest): Promise<NextResponse> {

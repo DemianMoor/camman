@@ -39,7 +39,7 @@ type ReportResponse = {
 };
 
 type SortKey =
-  | "group_name" | "sends" | "rpm" | "net_rpm" | "epc" | "sales"
+  | "group_name" | "sends" | "rpm" | "net_rpm" | "epc" | "sales" | "pending_revenue"
   | "oo_pct" | "net_profit" | "sent_7d" | "sent_30d" | "sent_90d" | "fresh_pool";
 
 const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
@@ -62,6 +62,7 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "net_rpm", label: "Net RPM (all time)", numeric: true },
   { key: "epc", label: "EPC (all time)", numeric: true },
   { key: "sales", label: "Sales (all time)", numeric: true },
+  { key: "pending_revenue", label: "Pending $ (all time)", numeric: true },
   { key: "oo_pct", label: "Opt-out % (all time)", numeric: true },
   { key: "net_profit", label: "Net profit (all time)", numeric: true },
   { key: "sent_7d", label: "Sent 7d (this offer)", numeric: true },
@@ -83,7 +84,7 @@ function coverageWord(pct: number): string {
   return "match exactly";
 }
 
-function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived; isGroup: boolean; breakEven: number | null }) {
+function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived & { pending_revenue?: number }; isGroup: boolean; breakEven: number | null }) {
   return (
     <>
       <td className="px-3 py-2 text-right tabular-nums">{fmtInt(m.sends)}</td>
@@ -91,6 +92,13 @@ function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived; isGro
       <td className={`px-3 py-2 text-right tabular-nums ${netRpmClass(m.net_rpm, breakEven)}`}>{fmtUsd(m.net_rpm)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.epc)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtInt(m.sales)}</td>
+      {/* Pending is approved revenue's sibling: a held payout, shown so it is
+          visible without ever being added into Revenue / RPM / EPC / net profit.
+          The org benchmark row has no pending figure of its own (its matview is
+          the Keitaro stage-day aggregate), so it renders "—". */}
+      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+        {m.pending_revenue == null ? "—" : fmtUsd(m.pending_revenue)}
+      </td>
       <td className={`px-3 py-2 text-right tabular-nums ${ooClass(m.oo_pct)}`}>{fmtPct(m.oo_pct)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.net_profit)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_7d) : "—"}</td>
@@ -145,7 +153,13 @@ export default function OfferGroupReportPage() {
   }, [viewRows, sortBy, sortDir]);
 
   const breakEven = data?.breakEvenPer1k ?? null;
-  const offerTotal = data ? { ...data.offerTotals, ...derive(data.offerTotals) } : null;
+  const offerTotal = data
+    ? {
+        ...data.offerTotals,
+        ...derive(data.offerTotals),
+        pending_revenue: data.offerTotals.attributable_pending_revenue,
+      }
+    : null;
   const benchmark = data ? { ...data.orgBenchmark, ...derive(data.orgBenchmark) } : null;
 
   // Group rows compute revenue/sales per recipient (stage_sends.sale_revenue /
@@ -186,6 +200,7 @@ export default function OfferGroupReportPage() {
     const header = COLUMNS.map((c) => c.label);
     const line = (label: string, m: RawMetrics & Derived) => [
       label, m.sends, fmtNum(m.rpm), fmtNum(m.net_rpm), fmtNum(m.epc), m.sales,
+      "pending_revenue" in m ? fmtNum((m as { pending_revenue: number }).pending_revenue) : "",
       fmtNum(m.oo_pct), m.net_profit.toFixed(2),
       "sent_7d" in m ? (m as ViewRow).sent_7d : "",
       "sent_30d" in m ? (m as ViewRow).sent_30d : "",

@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-08-24 (Drip Phase 7, migrations 0171 / 0172)_
+_Last updated: 2026-09-18 (Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -63,9 +63,9 @@ be flipped out of sandbox after leads have arrived under it). A sandbox key is
 | Delivered % | **`null`** when the provider reports no delivery receipts — see below |
 | Clicks, CTR | clean clicks only (not bot/prefetch/suspect); CTR is `null` over zero sends |
 | Opt-outs | via `opt_out_attributions` |
-| Sales | `purchasedClause()` = `sale_status IN ('lead','sale')`, never `= 'sale'` |
+| Sales | counted PURCHASE events in `conversion_events` for the row's recipients — `purchasesBySendSelect()` in [lib/sale-attribution.ts](../../lib/sale-attribution.ts), i.e. `is_purchase` event types in status `pending`/`approved`. A recipient with two conversions is **two** sales (the old `sale_status IN ('lead','sale')` column kept only the latest); a rejected or unmapped conversion is **not** a sale |
 | Lookup cost | see §3 |
-| Revenue | **off by default**, per-key toggle `partner_keys.report_show_revenue` |
+| Revenue | **off by default**, per-key toggle `partner_keys.report_show_revenue`. **APPROVED conversions only** — a held (`pending`) payout is not partner revenue, and a rejected one was taken back |
 
 ### ⚠️ null is not zero
 

@@ -1,6 +1,6 @@
 # Feature — EPC denominator (counted clickers)
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-18_
 
 ## 1. Purpose
 
@@ -13,9 +13,29 @@ Before 2026-08-11 the same campaign read differently depending on which page you
 A **counted clicker** is a contact who, within the grain being displayed, has:
 
 - at least one **scored** click with `classification = 'human'`, **OR**
-- a conversion (**Rule F**)
+- a `conversion_events` row that is a counted **purchase** *or* carries **revenue**, in status `pending`/`approved` (**Rule F**)
 
 deduplicated at the grain of the row displayed.
+
+> **Rule F narrowed at the ledger switch (2026-09-17).** It used to read “a
+> conversion” literally — `stage_sends.converted_at IS NOT NULL` — which also
+> rescued a **rejected** conversion and would have rescued a $0 **registration**
+> once registrations arrive, inflating every EPC denominator on the platform with
+> people who never bought anything. The predicate is now `rescueSendIds()` in
+> [lib/sale-attribution.ts](../../lib/sale-attribution.ts); an **unmapped** ledger
+> row (no `event_types` match, so neither a purchase nor revenue anywhere) is not
+> rescued either.
+>
+> ⚠️ **Open until Phase 3 Task 6:** the EPC *numerator* is still wider than this
+> rescue. It comes from the stage-day projection
+> ([lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts)),
+> whose sales/revenue filters are still TYPE-based (`keitaro_type IN
+> ('lead','sale','rejected')`), so a rejected or unmapped conversion would put
+> revenue in the numerator while its recipient is deliberately outside the
+> denominator — the one thing Rule F exists to prevent. Zero impact today: 0
+> rejected and 0 unmapped rows in the whole corpus. Task 6 closes it by flipping
+> those filters to the shared `purchasedClause()` / `approvedRevenueClause()`. The
+> fix belongs on the numerator; do **not** widen the rescue to match it.
 
 > **`scored_at IS NOT NULL` is part of the predicate, not a tidiness filter.**
 > `clicks.classification` carries a *first-pass* verdict written inline by the
@@ -116,7 +136,7 @@ Storing membership rather than counts is what lets one table serve every grain a
 | lifetime | no date filter |
 | period | filter `first_click_at` — which is also the click-date basis for period revenue |
 
-`rescued_by_conversion` marks a row that exists only because the contact converted (Rule F).
+`rescued_by_conversion` marks a row that exists only because the contact has a **rescue-eligible** conversion (Rule F — a counted purchase or a revenue-bearing event, never a rejected or unmapped one).
 
 ## 5. Refresh — tied to the Keitaro poll
 
@@ -209,7 +229,7 @@ A NULL watermark counts as stale: never-run and stopped-running need the same at
 
 | Script | Proves |
 |---|---|
-| [`verify-counted-clickers.ts`](../../scripts/verify-counted-clickers.ts) | the cache matches a **freshly recomputed** direct query (not a hardcoded constant, which goes stale within hours), Rule F invariant, non-additivity, idempotency |
+| [`verify-counted-clickers.ts`](../../scripts/verify-counted-clickers.ts) | the cache matches a **freshly recomputed** direct query (not a hardcoded constant, which goes stale within hours), Rule F invariant, non-additivity, idempotency. Both halves of the recomputation take their predicate from the module that defines it — `HUMAN_CLICK` and `rescueSendIds()` — never a retyped copy: the query stays independent, the definition stays single |
 | [`verify-epc-convergence.ts`](../../scripts/verify-epc-convergence.ts) | the old denominators disagreed on 12/12 top campaigns; the new one is single-valued across both screens |
 | [`verify-epc-denominator.ts`](../../scripts/verify-epc-denominator.ts) | the reporting path end to end |
 | [`verify-counted-clickers-refresh.ts`](../../scripts/verify-counted-clickers-refresh.ts) | incremental vs full semantics, including the self-healing guarantee |

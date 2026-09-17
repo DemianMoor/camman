@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-18_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -405,7 +405,7 @@ sequenceDiagram
   Note over Poll,DB: dedup on event_id (skip unchanged) + latest-wins ⇒ idempotent;<br/>blank/non-UUID sub_id_1 counted unmatched (clicks predating the sub_id1 rollout)
 ```
 
-> `sub_id_1` = the recipient's `stage_sends.id` (injected at redirect time, flow D). One sale per recipient, **latest wins** (not cumulative). The **Sale** badge on the Activity → Messages list reads `sale_status`/`sale_revenue`. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md) §8.
+> `sub_id_1` = the recipient's `stage_sends.id` (injected at redirect time, flow D). One sale per recipient, **latest wins** (not cumulative). The Activity → Messages list no longer reads these columns: its **Conversion** badge (renamed from **Sale**, 2026-09-17) shows the recipient's LATEST `conversion_events` row — event label + lifecycle status + approved amount, via `latestConversionForSend()` in [lib/sale-attribution.ts](../lib/sale-attribution.ts) — so a $0 registration renders as a registration in its own colour instead of as “lead · $0.00”. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md) §8.
 
 ## I. Keitaro offer-reach poll → per-recipient offer-page reach (every 15 min, engagement Level 2)
 

@@ -30,6 +30,10 @@ import { sql, type SQL } from "drizzle-orm";
 // counted — it is a refund / chargeback / fraud screen. `pending` IS counted for
 // PURCHASE (a held purchase is still a purchase for targeting and for the Sales
 // count) but NOT for revenue (see approvedRevenueClause).
+// No consumer outside the pure test (scripts/test-ledger-predicates.ts P12) reads
+// this constant — every clause below embeds 'pending'/'approved' as a literal, not
+// a reference to this array, because the two report matviews need literal SQL.
+// Changing this constant changes nothing at runtime; the clauses are the truth.
 export const COUNTED_CONVERSION_STATUSES = ["pending", "approved"] as const;
 
 // The event-type flag sets, as SQL. Deliberately NOT a cached id set in TS:
@@ -48,15 +52,15 @@ export function purchasedClause(alias = "ce"): SQL {
   return sql`${a}.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS} AND ${a}.status IN ('pending', 'approved')`;
 }
 
-/** Revenue that counts toward Revenue / EPC: approved only. */
+/** Revenue that counts toward Revenue / EPC: approved only, on the aliased conversion_events row. */
 export function approvedRevenueClause(alias = "ce"): SQL {
   const a = sql.raw(alias);
   return sql`${a}.event_type_id IN ${REVENUE_EVENT_TYPE_IDS} AND ${a}.status = 'approved'`;
 }
 
 /**
- * Revenue that is NOT yet approved. A SEPARATE figure — never added into
- * revenue, never in EPC, never in profit/ROI.
+ * Revenue that is NOT yet approved, on the aliased conversion_events row. A
+ * SEPARATE figure — never added into revenue, never in EPC, never in profit/ROI.
  */
 export function pendingRevenueClause(alias = "ce"): SQL {
   const a = sql.raw(alias);
@@ -64,8 +68,9 @@ export function pendingRevenueClause(alias = "ce"): SQL {
 }
 
 /**
- * A retarget signal (today: Registration). Feeds the Phase 4 "Registered — not
- * purchased" lane and the registration columns Phase 5 adds. Zero rows today.
+ * A retarget signal (today: Registration), on the aliased conversion_events row.
+ * Feeds the Phase 4 "Registered — not purchased" lane and the registration
+ * columns Phase 5 adds. Zero rows today.
  */
 export function registeredClause(alias = "ce"): SQL {
   const a = sql.raw(alias);
@@ -92,9 +97,9 @@ export function purchasedSendIds(orgId: string): SQL {
  * whose conversion could put revenue in the EPC numerator, so the numerator can
  * never sit outside the click denominator. Purchase OR revenue-bearing, not
  * rejected. `first_event_at` is the fallback first-click stamp for a rescued row.
- * `window` narrows the scan on the incremental pass.
+ * `sinceWindow` narrows the scan on the incremental pass.
  */
-export function rescueSendIds(orgId: string, window: SQL = sql``): SQL {
+export function rescueSendIds(orgId: string, sinceWindow: SQL = sql``): SQL {
   return sql`
     SELECT ce.stage_send_id, min(ce.occurred_at) AS first_event_at
     FROM conversion_events ce
@@ -103,15 +108,21 @@ export function rescueSendIds(orgId: string, window: SQL = sql``): SQL {
       AND ce.status IN ('pending', 'approved')
       AND (ce.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS}
            OR ce.event_type_id IN ${REVENUE_EVENT_TYPE_IDS})
-      ${window}
+      ${sinceWindow}
     GROUP BY 1`;
 }
 
 // ── legacy, frozen ──────────────────────────────────────────────────────────
 // The pre-ledger definition, kept for ONE purpose: the proof script computes the
-// OLD number next to the new one (scripts/verify-conversion-reader-switch.ts),
-// and the compat scripts that still assert on the projection columns
-// (verify-keitaro-batch-update, smoke-prod-purchase-rule) read it.
+// OLD number next to the new one (scripts/verify-conversion-reader-switch.ts).
+//
+// Neither verify-keitaro-batch-update.ts nor smoke-prod-purchase-rule.ts imports
+// this module. verify-keitaro-batch-update.ts only asserts raw stage_sends column
+// values after an UPSERT (sale_status/sale_revenue/converted_at round-trip),
+// unrelated to purchase semantics. smoke-prod-purchase-rule.ts inlines
+// `ss.sale_status IN ('lead','sale')` as its own literal — a second, uncoupled
+// copy of this definition that will keep existing, and can silently drift, until
+// Phase 3 retires it.
 //
 // DO NOT use it in app code. `stage_sends.sale_status` holds the affiliate
 // network's raw Keitaro status for the LATEST conversion only; this account's
@@ -119,6 +130,10 @@ export function rescueSendIds(orgId: string, window: SQL = sql``): SQL {
 // test is a status list and not `= 'sale'` (that found 2 buyers where the truth
 // was ~835). The columns keep being written by lib/keitaro/poll-conversions.ts
 // until a later card drops them.
+//
+// This constant itself has NO consumer anywhere, not even legacySaleStatusPurchasedClause
+// below (which hardcodes 'lead','sale' directly) or the pure test — it documents
+// the value, it does not drive it. Changing it changes nothing at runtime.
 export const PURCHASE_SALE_STATUSES = ["lead", "sale"] as const;
 
 export function legacySaleStatusPurchasedClause(alias = "ss"): SQL {

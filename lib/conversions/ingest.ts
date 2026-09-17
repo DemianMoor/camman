@@ -198,6 +198,11 @@ const EVENT_TYPE_CONFLICT_AT = sql`CASE
 //   - status, revenue, version and the raw keitaro_status/keitaro_type take the
 //     newest values.
 //   - setWhere skips no-op writes, so a re-poll of unchanged data touches nothing.
+//   - org_id is fixed at insert. A row whose incoming org differs from the stored
+//     one is NOT written (its attribution and event type would COALESCE-fill from
+//     another org's resolution): it is skipped, counted in `orgMismatch` and
+//     sampled. setWhere also requires the same org, so a row a concurrent run
+//     inserted under another org after the pre-select is left untouched.
 // Counts come from comparing the returned ids with the ids that already existed;
 // `conflicts` = rows written this call that carry a type conflict.
 // Column references in SET/WHERE are written literally (conversion_events.col) —
@@ -205,25 +210,47 @@ const EVENT_TYPE_CONFLICT_AT = sql`CASE
 export async function upsertConversionEvents(
   ex: Executor,
   rows: readonly ConversionEventInsert[],
-): Promise<{ inserted: number; updated: number; conflicts: number }> {
+): Promise<{
+  inserted: number;
+  updated: number;
+  conflicts: number;
+  orgMismatch: number;
+  orgMismatchSamples: string[];
+}> {
   // Same event_id twice in one call would hit Postgres 21000 ("ON CONFLICT DO
   // UPDATE command cannot affect row a second time"); last occurrence wins.
-  const deduped = [...new Map(rows.map((r) => [r.keitaroEventId, r])).values()];
+  // Sorted by event id so concurrent runs take row locks in the same order.
+  const deduped = [...new Map(rows.map((r) => [r.keitaroEventId, r])).values()].sort((a, b) =>
+    a.keitaroEventId < b.keitaroEventId ? -1 : a.keitaroEventId > b.keitaroEventId ? 1 : 0,
+  );
   let inserted = 0;
   let updated = 0;
   let conflicts = 0;
+  let orgMismatch = 0;
+  const orgMismatchSamples: string[] = [];
   for (const chunk of chunks(deduped, UPSERT_CHUNK)) {
-    const existing = new Set(
+    const existing = new Map(
       (
         await ex
-          .select({ id: conversion_events.keitaro_event_id })
+          .select({ id: conversion_events.keitaro_event_id, orgId: conversion_events.org_id })
           .from(conversion_events)
           .where(inArray(conversion_events.keitaro_event_id, chunk.map((r) => r.keitaroEventId)))
-      ).map((r) => r.id),
+      ).map((r) => [r.id, r.orgId]),
     );
+    const writable: ConversionEventInsert[] = [];
+    for (const r of chunk) {
+      const existingOrg = existing.get(r.keitaroEventId);
+      if (existingOrg !== undefined && existingOrg !== r.orgId) {
+        orgMismatch++;
+        if (orgMismatchSamples.length < 5) orgMismatchSamples.push(`${r.keitaroEventId} ${existingOrg}→${r.orgId}`);
+      } else {
+        writable.push(r);
+      }
+    }
+    if (writable.length === 0) continue;
     const written = await ex
       .insert(conversion_events)
-      .values(chunk.map(toInsertValues))
+      .values(writable.map(toInsertValues))
       .onConflictDoUpdate({
         target: conversion_events.keitaro_event_id,
         set: {
@@ -268,7 +295,8 @@ export async function upsertConversionEvents(
           COALESCE(conversion_events.stage_send_id, excluded.stage_send_id),
           COALESCE(conversion_events.contact_id, excluded.contact_id),
           COALESCE(conversion_events.campaign_id, excluded.campaign_id)
-        )`,
+        )
+        AND conversion_events.org_id = excluded.org_id`,
       })
       .returning({
         id: conversion_events.keitaro_event_id,
@@ -280,7 +308,7 @@ export async function upsertConversionEvents(
       if (w.conflict !== null) conflicts++;
     }
   }
-  return { inserted, updated, conflicts };
+  return { inserted, updated, conflicts, orgMismatch, orgMismatchSamples };
 }
 
 export interface IngestResult {
@@ -304,10 +332,21 @@ export interface IngestResult {
   // table-level checks (the backfill and verify scripts query the table), not
   // by this batch count.
   unmappedInBatch: number;
+  // Rows in this batch resolved through a status-only mapping (event type NULL,
+  // status set). Not unmapped if the row already exists with a type; a brand-new
+  // one is unmapped — the post-apply table check catches it.
+  statusOnlyInBatch: number;
   inserted: number;
   updated: number;
+  // Rows neither inserted, updated nor skipped for an org mismatch (no-op writes).
   unchanged: number;
   typeConflicts: number; // rows written this run whose Keitaro type now maps to a different event type
+  // Rows NOT written because the stored row belongs to a different org than this
+  // run resolved (org_id is fixed at insert; filling attribution/event type from
+  // another org's resolution would mix orgs). Always 0 on a dry run (no upsert).
+  orgMismatch: number;
+  // Up to 5 of them, as `keitaro_event_id existing_org→new_org`.
+  orgMismatchSamples: string[];
   error: string | null;
 }
 
@@ -329,10 +368,13 @@ export async function ingestKeitaroConversions(
     unresolvedSamples: [],
     rows: 0,
     unmappedInBatch: 0,
+    statusOnlyInBatch: 0,
     inserted: 0,
     updated: 0,
     unchanged: 0,
     typeConflicts: 0,
+    orgMismatch: 0,
+    orgMismatchSamples: [],
     error: null,
   };
 
@@ -365,20 +407,23 @@ export async function ingestKeitaroConversions(
     unresolved: built.unresolved.length,
     unresolvedSamples: built.unresolved
       .slice(0, 10)
-      .map((s) => `${s.eventId} sub_id_3=${s.subId3 ?? "∅"} keitaro_offer=${s.keitaroOfferId ?? "∅"} type=${s.keitaroType}`),
+      .map((s) => `${s.eventId} sub_id_1=${s.subId1 ?? "∅"} sub_id_3=${s.subId3 ?? "∅"} keitaro_offer=${s.keitaroOfferId ?? "∅"} type=${s.keitaroType}`),
     rows: rows.length,
     unmappedInBatch: rows.filter((r) => r.status === null).length,
+    statusOnlyInBatch: rows.filter((r) => r.eventTypeId === null && r.status !== null).length,
   };
   if (dryRun || rows.length === 0) return result;
 
-  const { inserted, updated, conflicts } = await database.transaction((tx) =>
+  const { inserted, updated, conflicts, orgMismatch, orgMismatchSamples } = await database.transaction((tx) =>
     upsertConversionEvents(tx, rows),
   );
   return {
     ...result,
     inserted,
     updated,
-    unchanged: rows.length - inserted - updated,
+    unchanged: rows.length - inserted - updated - orgMismatch,
     typeConflicts: conflicts,
+    orgMismatch,
+    orgMismatchSamples,
   };
 }

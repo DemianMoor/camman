@@ -33,6 +33,9 @@ const RUN = `test-ce-${Date.now()}`;
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 interface Row {
+  org_id: string;
+  revenue: string;
+  offer_id: number | null;
   event_type_id: number | null;
   status: string | null;
   keitaro_type: string;
@@ -43,7 +46,8 @@ interface Row {
 }
 async function rowOf(tx: Tx, id: string): Promise<Row | undefined> {
   const rows = (await tx.execute(sql`
-    SELECT event_type_id, status, keitaro_type, conflicting_event_type_id,
+    SELECT org_id::text AS org_id, revenue::text AS revenue, offer_id,
+           event_type_id, status, keitaro_type, conflicting_event_type_id,
            event_type_conflict_at IS NOT NULL AS has_conflict_at,
            to_char(occurred_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD HH24:MI:SS') AS occurred_et,
            to_char(last_postback_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD HH24:MI:SS') AS last_postback_et
@@ -160,16 +164,58 @@ async function main() {
       const d = await tx.execute(sql`SELECT revenue::text AS revenue, keitaro_version FROM conversion_events WHERE keitaro_event_id = ${buy.keitaroEventId}`) as unknown as { revenue: string; keitaro_version: number }[];
       check("U14 duplicate event ids in one call are collapsed (last wins), no 21000", r.updated === 1 && d[0]?.keitaro_version === 10 && d[0]?.revenue === "112.0000", JSON.stringify({ r, d }));
 
+      // Org drift: org_id is fixed at insert, so the same event resolved in another
+      // org must not COALESCE-fill this row. A second org is created in this tx.
+      const [orgB] = (await tx.execute(
+        sql`INSERT INTO organizations (name) VALUES (${`${RUN}-org-b`}) RETURNING id::text AS id`,
+      )) as unknown as { id: string }[];
+      const [purchaseB] = (await tx.execute(
+        sql`INSERT INTO event_types (org_id, key, label) VALUES (${orgB.id}::uuid, 'purchase', 'Purchase') RETURNING id`,
+      )) as unknown as { id: number }[];
+      const inA = base({ keitaroEventId: `${RUN}-org`, eventTypeId: purchase, status: "approved", revenue: "110.0000" });
+      await upsertConversionEvents(tx, [inA]);
+      r = await upsertConversionEvents(tx, [
+        { ...inA, orgId: orgB.id, eventTypeId: purchaseB.id, keitaroVersion: 2, status: "rejected", revenue: "999.0000", offerId: null },
+        base({ keitaroEventId: `${RUN}-org-companion`, orgId: orgB.id, eventTypeId: purchaseB.id }),
+      ]);
+      const o = await rowOf(tx, inA.keitaroEventId);
+      check(
+        "U15 same event id resolved in another org → skipped and counted, row unchanged; the rest of the batch still writes",
+        r.orgMismatch === 1 && r.updated === 0 && r.inserted === 1 &&
+          r.orgMismatchSamples.length === 1 && r.orgMismatchSamples[0] === `${inA.keitaroEventId} ${org.id}→${orgB.id}` &&
+          o?.org_id === org.id && o.event_type_id === purchase && o.revenue === "110.0000" && o.status === "approved",
+        JSON.stringify({ r, o }),
+      );
+
+      // Sticky attribution fill: a NULL offer is filled once, then never replaced.
+      const offerIds = (
+        (await tx.execute(sql`SELECT id FROM offers WHERE org_id = ${org.id}::uuid ORDER BY id LIMIT 2`)) as unknown as { id: number }[]
+      ).map((x) => x.id);
+      const fill = base({ keitaroEventId: `${RUN}-fill`, offerId: null });
+      const r0 = await upsertConversionEvents(tx, [fill]);
+      const r1 = await upsertConversionEvents(tx, [{ ...fill, offerId: offerIds[0] }]);
+      const f1 = await rowOf(tx, fill.keitaroEventId);
+      const r2 = await upsertConversionEvents(tx, [{ ...fill, offerId: offerIds[1] }]);
+      const f2 = await rowOf(tx, fill.keitaroEventId);
+      check(
+        "U16 NULL offer_id is filled by a later ingest (updated 1); a different offer id afterwards changes nothing (not counted)",
+        offerIds.length === 2 && r0.inserted === 1 &&
+          r1.updated === 1 && f1?.offer_id === offerIds[0] &&
+          r2.updated === 0 && r2.inserted === 0 && f2?.offer_id === offerIds[0],
+        JSON.stringify({ offerIds, r0, r1, f1: f1?.offer_id, r2, f2: f2?.offer_id }),
+      );
+
       throw new Rollback();
     });
   } catch (e) {
     if (!(e instanceof Rollback)) throw e;
   }
 
-  const [left] = (await db.execute(
-    sql`SELECT count(*)::int AS n FROM conversion_events WHERE keitaro_event_id LIKE ${`${RUN}%`}`,
-  )) as unknown as { n: number }[];
-  check("U10 rolled back — no residue", left.n === 0, `${left.n} rows left`);
+  const [left] = (await db.execute(sql`
+    SELECT (SELECT count(*) FROM conversion_events WHERE keitaro_event_id LIKE ${`${RUN}%`})::int AS events,
+           (SELECT count(*) FROM organizations WHERE name LIKE ${`${RUN}%`})::int AS orgs
+  `)) as unknown as { events: number; orgs: number }[];
+  check("U10 rolled back — no residue", left.events === 0 && left.orgs === 0, JSON.stringify(left));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);

@@ -43,7 +43,7 @@ async function main() {
   const nowEt = formatInCampaignTimezone(new Date(), "yyyy-MM-dd HH:mm:ss");
   const windows = etDayWindows(FROM, nowEt, 7);
 
-  const live: LedgerSourceRow[] = [];
+  const pulled: LedgerSourceRow[] = [];
   let invalid = 0;
   for (const w of windows) {
     const res = await fetchKeitaroConversionLedger(w);
@@ -53,10 +53,14 @@ async function main() {
     }
     for (const raw of res.rows) {
       const p = parseKeitaroLedgerRow(raw);
-      if (p) live.push(p);
+      if (p) pulled.push(p);
       else invalid++;
     }
   }
+  // A conversion re-posted while the pull walks the windows can appear in two of
+  // them; one event_id is one ledger row, so keep the last occurrence.
+  const live = [...new Map(pulled.map((r) => [r.eventId, r])).values()];
+  const duplicates = pulled.length - live.length;
   const ledger = (await db.execute(sql`
     SELECT keitaro_event_id AS id, keitaro_type AS type, revenue::text AS revenue, org_id::text AS org,
            to_char(occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE}, 'YYYY-MM-DD HH24:MI:SS') AS occurred_et,
@@ -65,7 +69,7 @@ async function main() {
   `)) as unknown as LedgerRow[];
 
   console.log(`Scope: Keitaro conversions/log ${FROM} 00:00:00 → ${nowEt} ${CAMPAIGN_TIMEZONE} (${windows.length} windows)`);
-  console.log(`       Keitaro rows ${live.length} (+${invalid} unparseable) · ledger rows ${ledger.length} · orgs ${[...new Set(ledger.map((r) => r.org))].join(", ") || "none"}\n`);
+  console.log(`       Keitaro rows ${live.length} (+${invalid} unparseable, ${duplicates} duplicate event_id(s) collapsed) · ledger rows ${ledger.length} · orgs ${[...new Set(ledger.map((r) => r.org))].join(", ") || "none"}\n`);
 
   check("V0 scope is not empty (Keitaro and ledger both have rows)", live.length > 0 && ledger.length > 0);
   check("V0b every Keitaro row parses", invalid === 0, `${invalid} unparseable`);

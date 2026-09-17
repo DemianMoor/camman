@@ -7,6 +7,7 @@ import { liveIngestRange } from "@/lib/conversions/keitaro-row";
 import {
   evaluateConversionAlerts,
   evaluateProjectionAlert,
+  projectionOutcomeFor,
   type IngestOutcome,
   type ProjectionOutcome,
 } from "@/lib/conversions/monitor";
@@ -121,18 +122,22 @@ async function pollAndRefresh(windowDays: number | undefined, isCron: boolean) {
   // LEDGER_CHANGE_LOOKBACK_MINUTES). The second half is what repairs a re-posted
   // OLD conversion: occurred_at doesn't move, so its stage-day is outside the
   // click window and only `updated_at` finds it. runStageDayProjection advances
-  // that watermark ONLY after the projection succeeds, so a failed or killed tick
-  // strands nothing — and the projection_failed alert says a run is failing or
-  // refusing (cron only; a skipped projection gets no decision, the ingest's own
-  // fetch_failed alert covers that).
+  // that watermark ONLY after a run that finished its discovery window, so a
+  // failed, killed, refused or capped tick strands nothing — and the
+  // projection_failed alert says a run is failing, refusing (empty ledger, or a
+  // ledger that doesn't reach the reported history) or capped (cron only; a
+  // skipped projection gets no decision, the ingest's own fetch_failed alert
+  // covers that).
   let stageDays: StageDayProjectionRun | null = null;
   let stageDaysError: string | null = null;
   if (ledger.result?.ok) {
     let outcome: ProjectionOutcome;
     try {
       stageDays = await runStageDayProjection(db, { extraStageIds: poll.stage_ids });
-      outcome =
-        stageDays.refused === null ? { kind: "ok" } : { kind: "refused", reason: stageDays.refused };
+      // The refusal reasons and the truncated-window case all map to the one
+      // latched alert; projectionOutcomeFor owns that mapping so a new reason
+      // cannot reach this route without an alert text.
+      outcome = projectionOutcomeFor(stageDays);
     } catch (err) {
       stageDaysError = err instanceof Error ? err.message : String(err);
       console.error("[keitaro/poll] stage-day conversion sync failed", err);

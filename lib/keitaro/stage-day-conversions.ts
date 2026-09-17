@@ -21,14 +21,24 @@ import { mirrorStageCountersFromResults } from "@/lib/keitaro/poll";
 // count structurally impossible: the row is recomputed, and a day the ledger no
 // longer explains is zeroed.
 //
-// ⚠️ ZEROING IS BOUNDED BY THE LEDGER'S OWN COVERAGE (review fix C1). A full
-// re-derivation is only safe where the ledger actually knows something. Two
-// bounds, both enforced in SQL below:
+// ⚠️ ZEROING AND REDUCING ARE BOUNDED BY THE LEDGER'S OWN COVERAGE (review fixes
+// C1, A2). A full re-derivation is only safe where the ledger actually knows
+// something. Three bounds, all enforced below:
 //   1. EMPTY-LEDGER REFUSAL — no stage-attributed ledger row anywhere ⇒ do
 //      nothing and report `refused: "empty_ledger"`. Same refusal
 //      scripts/resync-stage-day-conversions.ts already carried, moved into the
 //      function so the */5 route can't outrun it.
-//   2. PER-STAGE COVERAGE FLOOR — a stage-day is only zeroable when the ledger
+//   2. GLOBAL COVERAGE GUARD — keitaro_stage_results still REPORTS conversions
+//      from a day the ledger does not reach back to ⇒ refuse the whole
+//      projection, `refused: "ledger_behind_history"`. The zeroing bound (3) only
+//      protects a day the ledger has no floor for; it cannot protect a day the
+//      ledger covers PARTIALLY, where `ON CONFLICT DO UPDATE SET … = EXCLUDED`
+//      would REDUCE a real total to the partial sum. An interrupted backfill, or
+//      one old re-posted conversion dragging a single stage's floor back months,
+//      is exactly that state — and it is the state prod is in today (no ledger at
+//      all). So coverage is checked once per run, before any write, against the
+//      earliest conversion day still reported anywhere in keitaro_stage_results.
+//   3. PER-STAGE COVERAGE FLOOR — a stage-day is only zeroable when the ledger
 //      holds a conversion for THAT STAGE on or before that day. A stage with no
 //      ledger rows at all is therefore never zeroed, and no stage-day older than
 //      that stage's earliest ledger conversion is either.
@@ -39,6 +49,14 @@ import { mirrorStageCountersFromResults } from "@/lib/keitaro/poll";
 // filters count — coverage means "the ingest reached this day for this stage", so
 // a registration-only day IS covered and a stale sale on it is genuinely
 // unexplained.
+//
+// ⚠️ WHAT BOUND 2 DOES NOT COVER, DELIBERATELY. A coverage GAP *inside*
+// [per-stage floor, now] — the ledger reaches back far enough but is missing rows
+// in the middle — still reduces or zeroes the days in the hole. Nothing the
+// projection can read distinguishes "no conversion happened that day" from "the
+// ingest lost that day", so the guard against a gap is the backfill's own verify
+// (scripts/verify-conversion-events.ts: every Keitaro conversion present), not
+// this function. See docs/04-features/keitaro-poll.md.
 //
 // ⚠️ NEVER RUN THIS WHEN THE INGEST FAILED. Even with the bounds above, a
 // truncated or partially-fetched window makes real conversions look unexplained
@@ -78,13 +96,22 @@ export const PROJECTION_JOB_NAME = "conversion-stage-day-projection";
 // committed after it would otherwise never be seen again.
 export const PROJECTION_WATERMARK_OVERLAP_MINUTES = 5;
 
-// Stage ids one discovery may return. Each id is a bind parameter in three
-// statements below, so an unbounded change set (a backfill re-touching the whole
-// ledger) would blow Postgres's 65535-parameter ceiling and fail the tick. Past
-// the cap the OLDEST changes are taken first and the watermark advances only as
-// far as they reach, so the rest are picked up by the following ticks rather than
-// stranded — and `truncated` says so.
-export const MAX_CHANGED_STAGE_IDS = 2000;
+// Stage ids one discovery may return. Each id is a bind parameter in the
+// statements below — the zeroing UPDATE binds every id TWICE — so an unbounded
+// change set (a backfill re-touching the whole ledger) would blow Postgres's
+// 65535-parameter ceiling and fail the tick. 20000 ⇒ 40000 params in the worst
+// statement, and comfortably more stages than this dataset holds in total, so
+// only a full-ledger re-touch can reach it.
+//
+// ⚠️ THE CAP CANNOT CLAIM PARTIAL PROGRESS (review fix A5). The earlier version
+// ordered oldest-first and advanced the watermark to the last id it KEPT, which
+// only works if the kept ids reach a LATER `max(updated_at)` than the window
+// start. When more stages share one `max(updated_at)` than the cap allows — a
+// backfill's single-statement re-touch is exactly that: every stage carries the
+// same timestamp — the resume point equals the window start, the tick claims
+// progress it did not make, and the remainder is never projected. So a truncated
+// discovery now HOLDS the watermark and pages instead: see runStageDayProjection.
+export const MAX_CHANGED_STAGE_IDS = 20000;
 
 // Stage ids per counter-mirror statement — same reason, and the resync's
 // unscoped run names every stage in the org.
@@ -101,21 +128,113 @@ const SALES_FILTER: SQL = sql`ce.keitaro_type IN ('lead', 'sale', 'rejected')`;
 const CHECKOUT_FILTER: SQL = sql`ce.keitaro_type = 'lead'`;
 const REVENUE_FILTER: SQL = sql`ce.keitaro_type IN ('lead', 'sale', 'rejected')`;
 
-export interface StageDayConversionSync {
+/**
+ * Why a run wrote nothing on purpose.
+ *   `empty_ledger`         — no stage-attributed ledger row anywhere.
+ *   `ledger_behind_history`— keitaro_stage_results reports a conversion day older
+ *                            than the ledger's earliest, so a re-derivation would
+ *                            reduce real totals to partial sums.
+ */
+export type ProjectionRefusal = "empty_ledger" | "ledger_behind_history" | null;
+
+export interface ProjectionCoverage {
+  /** Any stage-attributed ledger row at all (global, whatever the scope). */
+  ledgerHasRows: boolean;
+  /** Earliest stage-attributed ledger ET day, GLOBAL — the guard's coverage side. */
+  ledgerFloor: string | null;
+  /**
+   * Earliest ET day keitaro_stage_results still reports a non-zero conversion
+   * column on that the ledger does NOT reach — i.e. `min(stat_date)` over the
+   * reported-conversion rows older than `ledgerFloor`. Null when the ledger
+   * reaches the whole reported history (the healthy state). Non-null ⇒ it is
+   * also the earliest reported conversion day overall, since any row at or after
+   * the floor is later than one before it.
+   */
+  reportedHistoryFloor: string | null;
+  /**
+   * Earliest ET day the ledger covers across this run's SCOPE (null when the
+   * scope has no stage-attributed ledger rows). Reported, not enforced: nothing
+   * older than this was zeroed anywhere, but the bound actually applied is per
+   * stage.
+   */
+  coverageFloor: string | null;
+  /** Non-null ⇒ the caller must not write or zero anything. */
+  refused: ProjectionRefusal;
+}
+
+export interface StageDayConversionSync extends ProjectionCoverage {
   /** The scope this run was GIVEN — `"all"` for the unscoped resync. */
   stagesInScope: number | "all";
   /** (stage, day) rows inserted or updated with ledger-derived values. */
   rowsWritten: number;
   /** Existing rows whose conversion columns the ledger no longer explains. */
   rowsZeroed: number;
-  /**
-   * Earliest ET day the ledger covers across this run's scope (null when the
-   * scope has no stage-attributed ledger rows). Nothing older than this was
-   * zeroed anywhere; the bound actually applied is per stage.
-   */
-  coverageFloor: string | null;
-  /** Set when the run wrote nothing on purpose. */
-  refused: "empty_ledger" | null;
+}
+
+/**
+ * The two coverage bounds that gate every write, read in ONE statement so the
+ * projection and the resync's pre-flight cannot drift apart (review fix A2).
+ * `stageIds` only narrows the REPORTED `coverageFloor`; both refusals are global,
+ * because a partially-backfilled ledger is a whole-table condition and a scoped
+ * run would otherwise happily reduce the stages it happens to name.
+ */
+export async function readProjectionCoverage(
+  dbc: DbOrTx,
+  opts: { stageIds?: number[] } = {},
+): Promise<ProjectionCoverage> {
+  const ids = opts.stageIds;
+  // An empty scope covers nothing, and `IN ()` is a syntax error: `IS NULL` is
+  // the honest fragment (no stage-attributed row matches it).
+  const scope: SQL = !ids
+    ? sql`IS NOT NULL`
+    : ids.length === 0
+      ? sql`IS NULL`
+      : sql`IN (${sql.join(
+          ids.map((id) => sql`${id}::int`),
+          sql`, `,
+        )})`;
+  // `reported_history_floor` is deliberately written as a `stat_date <
+  // ledger_floor` probe rather than a bare `min(stat_date)` over the non-zero
+  // rows: the healthy case matches no rows and the range is served by
+  // keitaro_stage_results_campaign_date_idx, so the guard costs an index probe
+  // per run instead of a full scan of the largest table on the tick.
+  const [row] = (await dbc.execute(sql`
+    WITH cov AS (
+      SELECT EXISTS (SELECT 1 FROM conversion_events WHERE stage_id IS NOT NULL) AS ledger_has_rows,
+             (SELECT min((ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date)
+                FROM conversion_events ce WHERE ce.stage_id IS NOT NULL) AS ledger_floor,
+             (SELECT min((ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date)
+                FROM conversion_events ce WHERE ce.stage_id ${scope}) AS coverage_floor
+    )
+    SELECT cov.ledger_has_rows,
+           cov.ledger_floor::text AS ledger_floor,
+           cov.coverage_floor::text AS coverage_floor,
+           (SELECT min(k.stat_date)::text
+              FROM keitaro_stage_results k
+             WHERE k.stat_date < cov.ledger_floor
+               AND (k.checkouts <> 0 OR k.sales <> 0 OR k.revenue <> 0 OR k.pending_revenue <> 0)
+           ) AS reported_history_floor
+    FROM cov
+  `)) as unknown as {
+    ledger_has_rows: boolean;
+    ledger_floor: string | null;
+    coverage_floor: string | null;
+    reported_history_floor: string | null;
+  }[];
+  const coverage = {
+    ledgerHasRows: row.ledger_has_rows,
+    ledgerFloor: row.ledger_floor,
+    coverageFloor: row.coverage_floor,
+    reportedHistoryFloor: row.reported_history_floor,
+  };
+  if (!coverage.ledgerHasRows) {
+    // coverageFloor / ledgerFloor are necessarily null here — nothing to report.
+    return { ...coverage, refused: "empty_ledger" };
+  }
+  if (coverage.reportedHistoryFloor !== null) {
+    return { ...coverage, refused: "ledger_behind_history" };
+  }
+  return { ...coverage, refused: null };
 }
 
 /**
@@ -130,9 +249,19 @@ export async function syncStageDayConversions(
 ): Promise<StageDayConversionSync> {
   const ids = opts.stageIds;
   const stagesInScope: number | "all" = ids ? ids.length : "all";
-  const nothing = { rowsWritten: 0, rowsZeroed: 0, coverageFloor: null, refused: null } as const;
+  const nothing = { rowsWritten: 0, rowsZeroed: 0 } as const;
   if (ids && ids.length === 0) {
-    return { stagesInScope, ...nothing };
+    // A no-op BEFORE any read, so the coverage fields are unconsulted rather
+    // than measured: nothing can be written, so nothing needs a bound.
+    return {
+      stagesInScope,
+      ...nothing,
+      ledgerHasRows: false,
+      ledgerFloor: null,
+      reportedHistoryFloor: null,
+      coverageFloor: null,
+      refused: null,
+    };
   }
   // sql.join over per-id fragments — never interpolate the array itself.
   const scope: SQL = ids
@@ -142,19 +271,13 @@ export async function syncStageDayConversions(
       )})`
     : sql`IS NOT NULL`;
 
-  // COVERAGE, before any write. The EXISTS is the empty-ledger refusal (global:
-  // an empty ledger means the Phase 1 backfill has not run, whatever the scope).
-  // coverage_floor is over the SCOPE and is reported, not enforced — the enforced
-  // bound is the per-stage floor joined into the zeroing UPDATE below.
-  const [coverage] = (await dbc.execute(sql`
-    SELECT EXISTS (SELECT 1 FROM conversion_events WHERE stage_id IS NOT NULL) AS ledger_has_rows,
-           (SELECT min((ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date)::text
-              FROM conversion_events ce WHERE ce.stage_id ${scope}) AS coverage_floor
-  `)) as unknown as { ledger_has_rows: boolean; coverage_floor: string | null }[];
-  if (!coverage.ledger_has_rows) {
-    return { stagesInScope, ...nothing, refused: "empty_ledger" };
+  // COVERAGE, ONCE, BEFORE ANY WRITE. Both refusals are global; `coverageFloor`
+  // is over the SCOPE and is reported, not enforced — the enforced per-day bound
+  // is the per-stage floor joined into the zeroing UPDATE below.
+  const coverage = await readProjectionCoverage(dbc, { stageIds: ids });
+  if (coverage.refused !== null) {
+    return { stagesInScope, ...nothing, ...coverage };
   }
-  const coverageFloor = coverage.coverage_floor;
 
   const written = (await dbc.execute(sql`
     WITH ledger AS (
@@ -175,7 +298,12 @@ export async function syncStageDayConversions(
            l.checkouts, l.sales, l.revenue,
            CASE WHEN l.sales > 0 THEN (l.revenue / l.sales)::numeric(12, 4) ELSE NULL END
     FROM ledger l
-    JOIN campaign_stages cs ON cs.id = l.stage_id
+    -- BOTH keys (review fix A3). The row is written with the LEDGER's org_id, so
+    -- joining on the stage id alone would let one bad ledger row create a
+    -- keitaro_stage_results row under the wrong org — mirroring another org's
+    -- stage counters into it. A mismatched row now joins to nothing and is
+    -- skipped; the ingest's own org_mismatch alert is what reports it.
+    JOIN campaign_stages cs ON cs.id = l.stage_id AND cs.org_id = l.org_id
     ON CONFLICT (org_id, stage_id, stat_date) DO UPDATE SET
       checkouts            = EXCLUDED.checkouts,
       sales                = EXCLUDED.sales,
@@ -207,19 +335,23 @@ export async function syncStageDayConversions(
     SET checkouts = 0, sales = 0, revenue = 0, pending_revenue = 0,
         payout_at_conversion = NULL, synced_at = now()
     FROM (
-      SELECT ce.stage_id,
+      SELECT ce.org_id, ce.stage_id,
              min((ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date) AS floor_date
       FROM conversion_events ce
       WHERE ce.stage_id ${scope}
-      GROUP BY 1
+      GROUP BY 1, 2
     ) cov
     WHERE k.stage_id ${scope}
       AND k.stage_id = cov.stage_id
+      -- org too (review fix A3): the floor that authorises zeroing a row must come
+      -- from the ledger of the row's OWN org, exactly like the write above.
+      AND k.org_id = cov.org_id
       AND k.stat_date >= cov.floor_date
       AND (k.checkouts <> 0 OR k.sales <> 0 OR k.revenue <> 0 OR k.pending_revenue <> 0)
       AND NOT EXISTS (
         SELECT 1 FROM conversion_events ce
         WHERE ce.stage_id = k.stage_id
+          AND ce.org_id = k.org_id
           AND (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date = k.stat_date
           AND (${SALES_FILTER} OR ${REVENUE_FILTER})
       )
@@ -241,8 +373,7 @@ export async function syncStageDayConversions(
     stagesInScope,
     rowsWritten: written.length,
     rowsZeroed: zeroed.length,
-    coverageFloor,
-    refused: null,
+    ...coverage,
   };
 }
 
@@ -261,11 +392,19 @@ export interface ProjectionDiscovery {
   windowFrom: string;
   /** Upper bound — the database's now() when discovery ran. */
   windowTo: string;
-  /** Stage ids whose ledger rows changed in the window, at most MAX_CHANGED_STAGE_IDS. */
+  /** Stage ids whose ledger rows changed in the window, at most `limit`. */
   stageIds: number[];
-  /** More stages changed in the window than the cap; the rest come next tick. */
+  /**
+   * More stages changed in the window than the cap allowed. The kept ids ARE
+   * projected, but the window is not finished, so the cursor must not move and
+   * the run pages (review fix A5).
+   */
   truncated: boolean;
-  /** What the watermark advances to once the projection succeeds. */
+  /**
+   * What the watermark advances to once the projection succeeds = the window's
+   * own end. Only meaningful when `truncated` is false; a truncated window has
+   * no prefix it can honestly claim (see MAX_CHANGED_STAGE_IDS).
+   */
   resumeTo: string;
 }
 
@@ -302,8 +441,9 @@ export async function discoverChangedLedgerStages(
     FROM wm
   `)) as unknown as { watermark_from: string | null; window_from: string; window_to: string }[];
 
-  // Oldest change first, so a capped run still makes forward progress: the
-  // watermark advances to the last id it KEPT, not past the ones it dropped.
+  // Oldest change first: when the cap bites, the ids kept are the ones that have
+  // waited longest (and `limit + 1` is what detects the cap biting at all). It is
+  // NOT a progress claim — a truncated window holds the cursor.
   const rows = (await dbc.execute(sql`
     SELECT ce.stage_id, max(ce.updated_at)::text AS last_changed
     FROM conversion_events ce
@@ -323,7 +463,7 @@ export async function discoverChangedLedgerStages(
     windowTo: win.window_to,
     stageIds: kept.map((r) => Number(r.stage_id)),
     truncated,
-    resumeTo: truncated ? (kept[kept.length - 1]?.last_changed ?? win.window_from) : win.window_to,
+    resumeTo: win.window_to,
   };
 }
 
@@ -340,15 +480,22 @@ export async function advanceProjectionWatermark(dbc: DbOrTx, to: string): Promi
 
 export interface StageDayProjectionRun extends StageDayConversionSync {
   discovery: ProjectionDiscovery;
-  /** cron_locks.watermark after the run — unchanged when the run refused. */
+  /** cron_locks.watermark after the run — unchanged when the cursor was held. */
   watermarkTo: string | null;
+  /**
+   * The cursor was deliberately left where it was: the run refused, or discovery
+   * was truncated so the window is unfinished. Either way the next tick re-reads
+   * the same window, and the caller must page (see projectionOutcomeFor).
+   */
+  watermarkHeld: boolean;
 }
 
 /**
  * One scheduled projection: discover the changed stages, project them together
  * with `extraStageIds` (the poll's click-window stages), then advance the
- * watermark — ONLY on success. A throw leaves the cursor where it was, so the
- * next tick re-reads the same window; a refusal likewise.
+ * watermark — ONLY when the window was finished. A throw leaves the cursor where
+ * it was (the UPDATE is simply never reached), and so do a refusal and a
+ * truncated discovery.
  */
 export async function runStageDayProjection(
   dbc: DbOrTx,
@@ -357,8 +504,16 @@ export async function runStageDayProjection(
   const discovery = await discoverChangedLedgerStages(dbc, opts);
   const scope = [...new Set([...(opts.extraStageIds ?? []), ...discovery.stageIds])];
   const sync = await syncStageDayConversions(dbc, { stageIds: scope });
-  if (sync.refused !== null) {
-    return { ...sync, discovery, watermarkTo: discovery.watermarkFrom };
+  // Truncated: the kept stages were projected, but the window still holds
+  // stages this run never named, and their `updated_at` is inside it — so
+  // advancing past it would strand them for good.
+  if (sync.refused !== null || discovery.truncated) {
+    return { ...sync, discovery, watermarkTo: discovery.watermarkFrom, watermarkHeld: true };
   }
-  return { ...sync, discovery, watermarkTo: await advanceProjectionWatermark(dbc, discovery.resumeTo) };
+  return {
+    ...sync,
+    discovery,
+    watermarkTo: await advanceProjectionWatermark(dbc, discovery.resumeTo),
+    watermarkHeld: false,
+  };
 }

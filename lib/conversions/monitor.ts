@@ -46,8 +46,13 @@ import {
 //                                       problem combos
 //   conversion_events:projection_failed the stage-day projection
 //                                       (lib/keitaro/stage-day-conversions.ts)
-//                                       threw, or refused because the ledger holds
-//                                       no stage-attributed rows. Cron path only.
+//                                       threw; refused (the ledger holds no
+//                                       stage-attributed rows, or does not reach
+//                                       back as far as the conversions
+//                                       keitaro_stage_results still reports); or
+//                                       left its discovery window unfinished
+//                                       because more stages changed at once than
+//                                       the cap allows. Cron path only.
 //   heartbeat:conversion-events-ingest  no complete ingest for over an hour
 //                                       (checked by /api/cron/tracking-monitors)
 //
@@ -90,8 +95,9 @@ export const CONVERSION_ALERT_KEYS = {
   fetchFailed: "conversion_events:fetch_failed",
   invalidRows: "conversion_events:invalid_rows",
   orgMismatch: "conversion_events:org_mismatch",
-  // The stage-day projection (Phase 3 Task 3). Fixed key: a standing failure
-  // pages once and clears on the next successful projection.
+  // The stage-day projection (Phase 3 Task 3). Fixed key: a standing failure,
+  // refusal or truncated window pages once and clears on the next run that
+  // projected a finished window.
   projectionFailed: "conversion_events:projection_failed",
   // One per combo kind. Deliberately NOT under either combo prefix below
   // ("conversion_events:unmapped:" / "conversion_events:type_conflicts:"), so
@@ -308,13 +314,62 @@ function formatTypeConflictAlert(c: ConflictCombo, pastCap: string[]): string {
 }
 
 // What one cron tick's stage-day projection did (Phase 3 Task 3).
-// `refused` carries syncStageDayConversions' own refusal reason.
+// `refused` carries syncStageDayConversions' own refusal reason; `truncated` is a
+// run that projected the stages it could but left the discovery window
+// unfinished, so its cursor was held (review fix A5).
 export type ProjectionOutcome =
   | { kind: "ok" }
   | { kind: "threw"; error: string }
-  | { kind: "refused"; reason: "empty_ledger" };
+  | { kind: "refused"; reason: "empty_ledger" }
+  | { kind: "refused"; reason: "ledger_behind_history"; reportedFrom: string; coverageFrom: string }
+  | { kind: "truncated"; projected: number };
 
-function formatProjectionAlert(outcome: ProjectionOutcome & { kind: "threw" | "refused" }): string {
+/**
+ * The outcome of one `runStageDayProjection` call. Lives here, next to the
+ * texts, so the cron route can't invent a different mapping — and so a new
+ * refusal reason is a type error until it has an alert (structural param: no
+ * import cycle with lib/keitaro/stage-day-conversions.ts).
+ */
+export function projectionOutcomeFor(run: {
+  refused: "empty_ledger" | "ledger_behind_history" | null;
+  ledgerFloor: string | null;
+  reportedHistoryFloor: string | null;
+  discovery: { truncated: boolean; stageIds: number[] };
+}): ProjectionOutcome {
+  if (run.refused === "ledger_behind_history") {
+    return {
+      kind: "refused",
+      reason: "ledger_behind_history",
+      // "unknown" can only appear if the refusal were raised without its dates,
+      // which the reader cannot act on — say so rather than print "null".
+      reportedFrom: run.reportedHistoryFloor ?? "unknown",
+      coverageFrom: run.ledgerFloor ?? "unknown",
+    };
+  }
+  if (run.refused === "empty_ledger") return { kind: "refused", reason: "empty_ledger" };
+  // Truncated ⇒ the kept ids ARE the cap, so one number says both.
+  if (run.discovery.truncated) return { kind: "truncated", projected: run.discovery.stageIds.length };
+  return { kind: "ok" };
+}
+
+function formatProjectionAlert(
+  outcome: ProjectionOutcome & { kind: "threw" | "refused" | "truncated" },
+): string {
+  if (outcome.kind === "truncated") {
+    return [
+      `${PREFIX} the stage-day conversion projection could not finish its discovery window: more stages changed in the ledger at once than the ${outcome.projected}-stage cap allows.`,
+      `Those ${outcome.projected} (the oldest changes) WERE projected; the rest were not. The conversion-stage-day-projection watermark in cron_locks was deliberately NOT advanced, so nothing is stranded — but every following tick hits the same cap, and this alert is latched, so it will not page again until it clears.`,
+      "Fix: run scripts/resync-stage-day-conversions.ts --apply (it projects every stage, ignoring the cursor), then set that cron_locks watermark to now() so discovery starts from a finished window. A change set this size normally means a backfill just re-touched the whole ledger.",
+    ].join("\n");
+  }
+  if (outcome.kind === "refused" && outcome.reason === "ledger_behind_history") {
+    return [
+      `${PREFIX} the stage-day conversion projection refused to run: the ledger does not reach back as far as the conversions keitaro_stage_results still reports.`,
+      `Reported conversions start ${outcome.reportedFrom} (ET); conversion_events only covers from ${outcome.coverageFrom} (ET).`,
+      "Nothing was written and nothing was zeroed. Re-deriving on a ledger that holds only part of the history REDUCES each reported day to whatever partial sum the ledger can explain — the same damage as zeroing it.",
+      "Fix: run the Phase 1 backfill (scripts/backfill-conversion-events.ts --apply) until the ledger covers the reported history, then scripts/resync-stage-day-conversions.ts --apply. Once coverage reaches it, the next poll tick projects on its own.",
+    ].join("\n");
+  }
   if (outcome.kind === "refused") {
     return [
       `${PREFIX} the stage-day conversion projection refused to run: conversion_events holds no stage-attributed rows.`,
@@ -330,8 +385,11 @@ function formatProjectionAlert(outcome: ProjectionOutcome & { kind: "threw" | "r
   ].join("\n");
 }
 
-// Fixed key: firing while the projection is failing or refusing, ok after a run
-// that projected. Evaluated on the CRON path only, and only when the projection
+// Fixed key: firing while the projection is failing, refusing or leaving its
+// discovery window unfinished; ok after a run that finished one. Truncation
+// shares the key on purpose — it is another way a tick cannot claim the
+// stage-days are current, and one latched page per condition is the contract.
+// Evaluated on the CRON path only, and only when the projection
 // actually ran — a tick whose ledger ingest was not `ok` skips the projection by
 // design and gets NO decision here (its own fetch_failed alert covers that).
 export function decideProjectionAlert(outcome: ProjectionOutcome): ConversionAlertDecision {

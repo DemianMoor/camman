@@ -21,8 +21,9 @@ import { sql, type SQL } from "drizzle-orm";
 //     from a handful of rows, where an EXISTS per recipient would probe once per
 //     send row of a campaign;
 //   • the two report matviews cannot import TypeScript, so they carry the same
-//     predicate text literally — one definition, copied, and
-//     scripts/verify-conversion-reader-switch.ts asserts the copies agree.
+//     predicate text literally — one definition, copied. Phase 3 Task 7's
+//     scripts/verify-conversion-reader-switch.ts will assert the copies agree;
+//     it does not exist yet.
 //
 // docs/04-features/conversion-events.md · docs/04-features/epc-denominator.md
 

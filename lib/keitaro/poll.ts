@@ -318,7 +318,8 @@ export async function pollKeitaro(
   // must match the INSERT column list exactly.
   const rowVals: SQL[] = [...aggregates.values()].map((agg) => {
     // NOTE: `epc` is no longer written (it stored a THIRD EPC definition and
-    // nothing read it; the column drop must follow this code, not lead it).
+    // nothing read it). The column itself is already gone — migration 0127
+    // dropped it.
     // NOTE: checkouts / sales / revenue / payout_at_conversion are no longer
     // written HERE either. They are the ledger's projection
     // (lib/keitaro/stage-day-conversions.ts). A brand-new row gets their column
@@ -366,7 +367,17 @@ export async function pollKeitaro(
   }
 
   const syncStageIds = [...new Set([...aggregates.values()].map((a) => a.stageId))];
-  await mirrorStageCountersFromResults(database, syncStageIds);
+  try {
+    await mirrorStageCountersFromResults(database, syncStageIds);
+  } catch (err) {
+    // Non-fatal HERE, and only here: `database` is the module-level pool, so a
+    // failed mirror has poisoned nothing and the counters re-sync on the next
+    // poll. The swallow lives at this call site rather than inside the mirror
+    // because the other caller passes a TRANSACTION (the resync's --apply and
+    // the DB tests) — swallowing there would leave a poisoned tx whose later
+    // statements all fail with "current transaction is aborted".
+    console.error("[keitaro/poll] stage counter mirror failed", err);
+  }
 
   return {
     ok: true,
@@ -399,40 +410,58 @@ export async function pollKeitaro(
 // Per-field guard: a counter is only overwritten when the tracker reports a
 // POSITIVE value for that field, so a 0 leaves a manual/CSV value intact.
 //
+// ⚠️ EXCEPT `checkout_click_count` UNDER `exactCheckoutClicks` (review fix I2).
+// The positive-only guard was right while every source was monotonic (Keitaro
+// click sums only grow). `checkouts` is no longer one: it is the ledger
+// projection's column (lib/keitaro/stage-day-conversions.ts), which DELIBERATELY
+// zeroes a day the ledger no longer explains. Guarded, a correction downwards
+// could never reach the stage counter, so the campaign page and the creatives
+// metrics cache would keep a stale higher number forever. So the projection calls
+// this with `exactCheckoutClicks: true` and that ONE field takes the recomputed
+// sum even when it decreases, 0 included. `click_count` (Keitaro visits, still
+// monotonic) and `sales_payout_each` (COALESCEd snapshot) keep the guard, and
+// `sales_count` is never touched by either mode. Consequence, accepted: on a
+// stage the projection has in scope, a hand-entered Checkout Clicks value is
+// overwritten by the tracker's sum — the field is the projection's.
+//
+// FAILURE: this THROWS. The caller decides, because it knows whether `database`
+// is the pool or a transaction — see the call in pollKeitaro (swallows) versus
+// syncStageDayConversions (propagates, so the resync's --apply rolls back).
+//
 // Exported because the conversion columns are now written after the poll, by
 // lib/keitaro/stage-day-conversions.ts, which re-mirrors its own scope.
 export async function mirrorStageCountersFromResults(
   database: Database,
   stageIds: number[],
+  opts: { exactCheckoutClicks?: boolean } = {},
 ): Promise<void> {
   if (stageIds.length === 0) return;
-  try {
-    await database.execute(sql`
-      UPDATE campaign_stages cs SET
-        click_count = CASE WHEN k.clickers > 0 THEN k.clickers ELSE cs.click_count END,
-        checkout_click_count = CASE WHEN k.checkouts > 0 THEN k.checkouts ELSE cs.checkout_click_count END,
-        sales_payout_each = CASE
-          WHEN k.sales > 0 THEN COALESCE(cs.sales_payout_each, o.payout_cpa)
-          ELSE cs.sales_payout_each
-        END
-      FROM (
-        SELECT stage_id,
-               max(campaign_id) AS campaign_id,
-               coalesce(sum(visit_clicks_clean), 0)::int AS clickers,
-               coalesce(sum(checkouts), 0)::int          AS checkouts,
-               coalesce(sum(sales), 0)::int              AS sales
-        FROM keitaro_stage_results
-        WHERE stage_id IN (${sql.join(
-          stageIds.map((id) => sql`${id}::int`),
-          sql`, `,
-        )})
-        GROUP BY stage_id
-      ) k
-      LEFT JOIN campaigns c ON c.id = k.campaign_id
-      LEFT JOIN offers o    ON o.id = c.offer_id
-      WHERE cs.id = k.stage_id
-    `);
-  } catch {
-    // Non-fatal — the counters re-sync on the next poll.
-  }
+  const checkoutClicks: SQL = opts.exactCheckoutClicks
+    ? sql`k.checkouts`
+    : sql`CASE WHEN k.checkouts > 0 THEN k.checkouts ELSE cs.checkout_click_count END`;
+  await database.execute(sql`
+    UPDATE campaign_stages cs SET
+      click_count = CASE WHEN k.clickers > 0 THEN k.clickers ELSE cs.click_count END,
+      checkout_click_count = ${checkoutClicks},
+      sales_payout_each = CASE
+        WHEN k.sales > 0 THEN COALESCE(cs.sales_payout_each, o.payout_cpa)
+        ELSE cs.sales_payout_each
+      END
+    FROM (
+      SELECT stage_id,
+             max(campaign_id) AS campaign_id,
+             coalesce(sum(visit_clicks_clean), 0)::int AS clickers,
+             coalesce(sum(checkouts), 0)::int          AS checkouts,
+             coalesce(sum(sales), 0)::int              AS sales
+      FROM keitaro_stage_results
+      WHERE stage_id IN (${sql.join(
+        stageIds.map((id) => sql`${id}::int`),
+        sql`, `,
+      )})
+      GROUP BY stage_id
+    ) k
+    LEFT JOIN campaigns c ON c.id = k.campaign_id
+    LEFT JOIN offers o    ON o.id = c.offer_id
+    WHERE cs.id = k.stage_id
+  `);
 }

@@ -43,10 +43,20 @@ async function main() {
   }[];
   console.log("=== INPUT SCOPE ===");
   console.table(scope);
+  // Kept here as well as inside syncStageDayConversions (which now refuses on the
+  // same condition — review fix C1): this one refuses BEFORE printing a diff that
+  // would read as "every row must be zeroed".
   if (scope[0].ledger_rows === 0 || scope[0].stage_attributed === 0) {
     console.log("REFUSING: the ledger is empty, so every stage-day would be zeroed. Run the Phase 1 backfill first.");
     process.exit(1);
   }
+  const [floor] = (await db.execute(sql`
+    SELECT min((ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date)::text AS coverage_floor
+    FROM conversion_events ce WHERE ce.stage_id IS NOT NULL
+  `)) as unknown as { coverage_floor: string | null }[];
+  console.log(
+    `Ledger coverage starts ${floor.coverage_floor} (ET). The diff below applies the same per-stage coverage floor --apply does: a stage-day the ledger does not explain is listed only when it sits on or after that stage's OWN earliest ledger conversion.`,
+  );
 
   const diffs = (await db.execute(sql`
     WITH ledger AS (
@@ -58,6 +68,12 @@ async function main() {
       FROM conversion_events ce
       WHERE ce.stage_id IS NOT NULL
       GROUP BY 1, 2
+    ), stage_floor AS (
+      SELECT ce.stage_id,
+             min((ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date) AS floor_date
+      FROM conversion_events ce
+      WHERE ce.stage_id IS NOT NULL
+      GROUP BY 1
     )
     SELECT coalesce(k.stage_id, l.stage_id) AS stage_id,
            coalesce(k.stat_date, l.stat_date)::text AS stat_date,
@@ -66,9 +82,14 @@ async function main() {
            coalesce(k.checkouts, 0) AS old_checkouts, coalesce(l.checkouts, 0) AS new_checkouts
     FROM keitaro_stage_results k
     FULL OUTER JOIN ledger l ON l.stage_id = k.stage_id AND l.stat_date = k.stat_date
-    WHERE coalesce(k.sales, 0) <> coalesce(l.sales, 0)
-       OR coalesce(k.revenue, 0) <> coalesce(l.revenue, 0)
-       OR coalesce(k.checkouts, 0) <> coalesce(l.checkouts, 0)
+    LEFT JOIN stage_floor f ON f.stage_id = k.stage_id
+    WHERE (coalesce(k.sales, 0) <> coalesce(l.sales, 0)
+        OR coalesce(k.revenue, 0) <> coalesce(l.revenue, 0)
+        OR coalesce(k.checkouts, 0) <> coalesce(l.checkouts, 0))
+      -- The ledger explains this day (it gets written), or the day is inside that
+      -- stage's coverage (it gets zeroed). Outside coverage nothing happens, so
+      -- the row is not a diff — same bound as syncStageDayConversions.
+      AND (l.stage_id IS NOT NULL OR (f.floor_date IS NOT NULL AND k.stat_date >= f.floor_date))
     ORDER BY 1, 2
   `)) as unknown as Diff[];
 

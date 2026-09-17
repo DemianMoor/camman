@@ -121,7 +121,7 @@ async function pollAndRefresh(windowDays: number | undefined, isCron: boolean) {
   if (ledger.result?.ok) {
     try {
       const changed = await changedLedgerStageIds(db);
-      const scope = [...new Set([...poll.stage_ids, ...changed])];
+      const scope = [...new Set([...poll.stage_ids, ...changed.stageIds])];
       stageDays = await syncStageDayConversions(db, { stageIds: scope });
     } catch (err) {
       stageDaysError = err instanceof Error ? err.message : String(err);

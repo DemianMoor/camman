@@ -90,6 +90,7 @@ The controller's brief fixed the scope. These are the calls it did not settle:
     - **Alert text per combo (plain text):** the combo's count, then the offer (`<name> (offer <id>)`, `Keitaro offer <id> (no CamMan offer)` or `no offer`) and the Keitaro type or the locked → conflicting event pair. Then the count created in the last 24h (for a conflict: first seen in the last 24h, by `event_type_conflict_at`), the first-seen time in ET for a conflict, up to 3 sample `keitaro_event_id`s, and the fix hint (add a mapping rule / resolve the conflict). Every line is clipped to 300 characters.
     - **Removed with fix wave 1's design:** `ledgerAlertKey`, `FiringLedgerIds`, `readFiringLedgerIds`, `LedgerAlertDecision`, `clearAlertsByPrefix` and its LIKE escaping, `applyLedgerDecisions`, the step-back guard, the `*_newest_id` fields and the per-row samples. `lib/alerts/alert-state.ts` is unchanged. `evaluateConversionAlerts` still returns `{ health, ingestDecisions, ledgerDecisions }` (both arrays are `ConversionAlertDecision[]`), and no caller reads it.
     - **Kept from fix wave 1:** the `fetch_failed` age reads `N min ago` under 120 minutes and `X.Y h ago` from 120 on (`never recorded` is unchanged). M0b neutralises pre-existing problem rows inside the rolled-back transaction instead of requiring an empty preview ledger. Failed ticks still re-read the ledger (decision 3).
+    - **Not org-scoped (fix wave 4 finding; follow-up, before a second org sends Keitaro traffic):** `offer_id` is a global serial, so combos keyed by it are implicitly org-unique — but `none:<type>` and `k<keitaro_offer_id>:<type>` are not, and `event_types.key` is per-org, so two orgs' problems on the same combo merge into one alert: one page with a summed count and mixed samples, clearing only once **every** org's rows for that combo are gone. Inert today (one real org sends Keitaro traffic). Fix: add `ce.org_id` to both combo `GROUP BY`s and as the leading key part, and clear the existing firing rows under both prefixes in the same deploy.
 
 ## File Structure
 
@@ -2351,6 +2352,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ### Task 3: Wire the poll tick and the heartbeat watcher
 
+> **cd4fa85 (2026-09-17) changed `maxDuration` on `app/api/keitaro/poll/route.ts` after this task's block was written** — `230` (below the 240s `CRON_LEASE_MS` cron lease), not the `300` the block below originally shipped; the block has been updated to match the committed file.
+
 **Files:**
 - Modify: `app/api/keitaro/poll/route.ts` (whole file below)
 - Modify: `app/api/cron/tracking-monitors/route.ts` (whole file below)
@@ -2390,8 +2393,11 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat"
 // aggregate poll only. Each tick also keeps the conversion_events ledger live
 // over its own 7-day window — see ingestConversionLedger below.
 export const dynamic = "force-dynamic";
-// Seatbelt only — the batched upsert makes a full run low single-digit seconds.
-export const maxDuration = 300;
+// Must die before the cron lease (CRON_LEASE_MS, lib/cron/lease.ts) expires at
+// 240s, or two ticks could overlap. Typical runs are low single-digit seconds;
+// if a tick is killed at 230s, the ledger ingest's transaction rolls back and
+// retries on the next tick.
+export const maxDuration = 230;
 // Pin to Frankfurt (eu-central-1), co-located with Supabase, so this job's DB
 // round-trips don't cross the Atlantic (~90ms each). Per-route only — do NOT set
 // a global region; US-facing routes such as the /r/[code] redirect stay in the US.
@@ -3100,11 +3106,14 @@ ORDER BY alert_key;
 SELECT max(synced_at) AS aggregate_synced FROM keitaro_stage_results;
 ```
 
+Also run once, read-only (controller): `EXPLAIN (ANALYZE, BUFFERS)` of both exported combo statements — `UNMAPPED_COMBOS_SQL` and `CONFLICT_COMBOS_SQL` (`lib/conversions/monitor.ts`) — against prod, and record the chosen plan and the timings. Also run `SELECT count(*) FROM conversion_events;` and, from the Vercel logs, the poll tick's wall time for the first few ticks. Rationale: both statements are all-time aggregates and run on **every** `*/5` cron tick (288×/day); the `EXPLAIN` checks in `scripts/test-conversion-monitor-db.ts` only prove the partial index CAN serve them — they force `enable_seqscan = off` — on a near-empty preview table, and `array_agg` materialises every row of a combo before slicing to `MAX_SAMPLES`. Prod, at real row counts, is the first honest read of plan choice and cost.
+
 Expected:
 - **Heartbeat:** `watermark` age is under 10 minutes on both readings, and later on the second.
 - **Ledger rows:** `rows` / `last_update` / `last_insert` advance only when Keitaro has new or changed conversions. In a quiet 10 minutes they may not, and the watermark is the liveness proof.
+- **Combo statement cost:** record the `EXPLAIN` plan and timings for both statements, the `conversion_events` row count, and the first few ticks' wall time on the card (Step 11). No seqscan should appear without the `enable_seqscan = off` hack; escalate before Step 11 if one does.
 - **Alert keys:**
-  - Five fixed `conversion_events:*` rows (`fetch_failed`, `invalid_rows`, `org_mismatch`, `combo_cap_exceeded:unmapped`, `combo_cap_exceeded:type_conflicts`), state `ok` — the two cap keys only if the ledger has 10 or fewer combos of that kind.
+  - Five fixed `conversion_events:*` rows (`fetch_failed`, `invalid_rows`, `org_mismatch`, `combo_cap_exceeded:unmapped`, `combo_cap_exceeded:type_conflicts`), state `ok` — the two cap keys only if the ledger has 10 or fewer combos of that kind. (This holds after the first COMPLETE tick. If the first tick after merge fails and lands inside the `fetch_failed` debounce window, it makes no ingest decision at all — no fire, no clear — so these rows don't exist yet until a tick completes.)
   - `conversion_events:unmapped:<offer>:<keitaro_type>` and `conversion_events:type_conflicts:<offer>:<locked_key>><conflicting_key>` rows exist only for problem combos that have existed. A clean ledger inserts no row for them, because a combo key is only cleared once it is firing.
   - Each `firing` combo row is one problem combo that is (or was, while capped) among its kind's 10 most recently changed; its message is in Telegram, and the controller decides. More combo rows can be `firing` than a kind currently lists: nothing clears while that kind is past the cap.
   - The first tick after merge pages at most the combos it lists — up to 10 per kind of the backfilled ledger, the most recently changed — plus each kind's `combo_cap_exceeded` page when that kind has more. It does NOT page every backfilled combo. A firing `combo_cap_exceeded` row is the signal to list the whole kind with the SQL in its message.
@@ -3119,3 +3128,4 @@ After the first `:37` following READY, re-run the `alert_state` query. Expected:
 - Post the Step 9/10 readings on the card.
 - Update memory: a Phase 2 LIVE note with the keys, the heartbeat and the merge-timing gotcha.
 - Unlink the junction if this plan created one: `cmd //c "rmdir node_modules"`. Never `rm -rf` it.
+- **If this phase is ever reverted:** a revert leaves `conversion_events:*` rows in `alert_state` (some possibly `firing`) with nothing left to clear them — `notifyOnTransition` only pages on an `ok`→`firing` transition, so a later re-merge will NOT re-page combos that are still standing. A revert must therefore be followed by an approval-gated `UPDATE alert_state SET state='ok' WHERE alert_key LIKE 'conversion_events:%' OR alert_key = 'heartbeat:conversion-events-ingest'`. Also, a revert restores `maxDuration = 300` on `/api/keitaro/poll` (> the 240s `CRON_LEASE_MS` cron lease TTL) — cd4fa85 should be cherry-picked back onto `main` so the route still dies before its own lease.

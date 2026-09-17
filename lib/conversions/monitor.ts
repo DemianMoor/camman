@@ -190,7 +190,13 @@ function offerKeyPart(c: ComboOffer): string {
 }
 
 // Built from the combo only — never its counts or samples — so more rows of
-// the same combo keep the same key.
+// the same combo keep the same key. NOT org-scoped: offer_id is a global serial
+// so an <offer> keyed by it is implicitly org-unique, but "none" and
+// "k<keitaro_offer_id>" are not, and event_types.key is per-org — two orgs'
+// problems on the same combo merge into one alert (summed count, mixed
+// samples) that only clears once every org's rows for that combo are gone.
+// Inert today (one real org sends Keitaro traffic); see
+// docs/04-features/conversion-events.md.
 export function unmappedAlertKey(c: UnmappedCombo): string {
   return `${CONVERSION_ALERT_KEY_PREFIXES.unmapped}${offerKeyPart(c)}:${keyPart(c.keitaro_type)}`;
 }

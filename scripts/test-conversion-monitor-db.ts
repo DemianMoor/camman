@@ -53,6 +53,10 @@ const K = CONVERSION_ALERT_KEYS;
 // Written out, not imported: the keys the docs and alert_state rows name.
 const UNM = "conversion_events:unmapped:";
 const CONF = "conversion_events:type_conflicts:";
+// The per-kind cap keys. Neither is under a combo prefix, so the stale-combo
+// clear never sees them.
+const CAP_UNM = "conversion_events:combo_cap_exceeded:unmapped";
+const CAP_CONF = "conversion_events:combo_cap_exceeded:type_conflicts";
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 async function alertRow(tx: Tx, key: string) {
@@ -244,15 +248,24 @@ async function main() {
         mappedRow("old-r1", registration, "6 days"),
       ]);
       await insertRows([
-        // one combo (Keitaro offer 41, no CamMan offer; trash) with 4 rows, newest first by name
+        // one combo (Keitaro offer 41, no CamMan offer; trash) with 4 rows, newest
+        // first by name, each last changed when it was created
         ...[1, 2, 3, 4].map((n) =>
-          unmappedRow(`trash-${n}`, "trash", { keitaro_offer_id: 41, created_at: sql`now() - ${`${n} minutes`}::interval` }),
+          unmappedRow(`trash-${n}`, "trash", {
+            keitaro_offer_id: 41,
+            created_at: sql`now() - ${`${n} minutes`}::interval`,
+            updated_at: sql`now() - ${`${n} minutes`}::interval`,
+          }),
         ),
-        // unmapped via NULL status only (event type set); CamMan offer + Keitaro offer 41; created 3 days ago
-        unmappedRow("dep", "deposit", {
+        // What ingest INSERTS for a row first seen through a status-only mapping
+        // (the seeded PsychoBook "rejected" rule): a status, but NO event type. It
+        // is unmapped through the event_type_id arm, not the status arm. CamMan
+        // offer + Keitaro offer 41, created 3 days ago and re-posted just now, so
+        // it is the most recently changed combo while being the smallest.
+        unmappedRow("rej", "rejected", {
           offer_id: offer.id,
           keitaro_offer_id: 41,
-          event_type_id: registration,
+          status: "rejected",
           created_at: sql`now() - interval '3 days'`,
         }),
         // fully mapped — never counted
@@ -264,33 +277,48 @@ async function main() {
       )) as unknown as { now_utc: string }[];
 
       const h = await readLedgerHealth(tx);
-      const [trash, dep] = h.unmapped_combos;
+      const [rej, trash] = h.unmapped_combos;
       check(
-        "M1 unmapped = event type NULL OR status NULL (both arms), one group per combo (offer, Keitaro type), largest first; mapped rows excluded",
+        "M1 unmapped = event type NULL OR status NULL, one group per combo (offer, Keitaro type), MOST RECENTLY CHANGED first — the 1-row rejected combo, re-posted now, ahead of the 4-row trash combo; mapped rows excluded",
         h.unmapped_total === 5 &&
           h.unmapped_combo_count === 2 &&
           h.unmapped_combos.length === 2 &&
+          rej?.keitaro_type === "rejected" &&
+          rej.total === 1 &&
           trash?.keitaro_type === "trash" &&
-          trash.total === 4 &&
-          dep?.keitaro_type === "deposit" &&
-          dep.total === 1,
+          trash.total === 4,
         JSON.stringify(h.unmapped_combos),
       );
-      check("M2 each combo's last-24h count is by created_at", trash?.last_24h === 4 && dep?.last_24h === 0, JSON.stringify(h.unmapped_combos));
+      const [rejRow] = (await tx.execute(sql`
+        SELECT event_type_id, status FROM conversion_events WHERE keitaro_event_id = ${id("rej")}
+      `)) as unknown as { event_type_id: number | null; status: string | null }[];
+      check(
+        "M1b a first-seen status-only row, exactly as ingest inserts one (event_type_id NULL, status 'rejected'), counts as unmapped — through the event_type_id arm of the predicate, which a 'status IS NULL' read would miss",
+        rejRow?.event_type_id === null &&
+          rejRow.status === "rejected" &&
+          rej?.total === 1 &&
+          JSON.stringify(rej.sample_event_ids) === JSON.stringify([id("rej")]),
+        JSON.stringify({ rejRow, rej }),
+      );
+      check(
+        "M2 each combo's last-24h count is by created_at, not updated_at (the rejected row was changed just now but created 3 days ago)",
+        trash?.last_24h === 4 && rej?.last_24h === 0,
+        JSON.stringify(h.unmapped_combos),
+      );
       check(
         "M3 combo offer: no CamMan offer → keitaro_offer_id, no name; a CamMan offer → offer_id + name, and its keitaro_offer_id is dropped (offer_id wins)",
         trash?.offer_id === null &&
           trash.keitaro_offer_id === 41 &&
           trash.offer_name === null &&
-          dep?.offer_id === offer.id &&
-          dep.offer_name === offer.name &&
-          dep.keitaro_offer_id === null,
+          rej?.offer_id === offer.id &&
+          rej.offer_name === offer.name &&
+          rej.keitaro_offer_id === null,
         JSON.stringify(h.unmapped_combos),
       );
       check(
         "M4 combo samples: newest created first, at most 3",
         JSON.stringify(trash?.sample_event_ids) === JSON.stringify([id("trash-1"), id("trash-2"), id("trash-3")]) &&
-          JSON.stringify(dep?.sample_event_ids) === JSON.stringify([id("dep")]),
+          JSON.stringify(rej?.sample_event_ids) === JSON.stringify([id("rej")]),
         JSON.stringify(h.unmapped_combos.map((c) => c.sample_event_ids)),
       );
       const [c1] = h.conflict_combos;
@@ -320,9 +348,15 @@ async function main() {
       let capped: LedgerHealth | undefined;
       try {
         await tx.transaction(async (sp) => {
-          await sp
-            .insert(conversion_events)
-            .values(Array.from({ length: 11 }, (_, i) => unmappedRow(`cap-${i}`, `cap-${String(i).padStart(2, "0")}`)));
+          await sp.insert(conversion_events).values(
+            Array.from({ length: 11 }, (_, i) =>
+              [1, 2].map((n) =>
+                unmappedRow(`cap-${i}-${n}`, `cap-${String(i).padStart(2, "0")}`, {
+                  updated_at: sql`now() - ${`${i + 1} hours`}::interval`,
+                }),
+              ),
+            ).flat(),
+          );
           capped = await readLedgerHealth(sp);
           throw new Rollback();
         });
@@ -331,12 +365,12 @@ async function main() {
       }
       const afterCap = await readLedgerHealth(tx);
       check(
-        "M8 over the cap (11 more combos, in a savepoint): 10 largest combos listed, while the combo count and row total still cover all 13 combos / 16 rows; the savepoint rolled back",
+        "M8 over the cap (11 more combos of 2 rows, changed 1–11h ago, in a savepoint): the 10 MOST RECENTLY CHANGED are listed — the 1-row rejected combo and the 4-row trash combo ahead of the bigger but older cap-* ones, whose oldest three drop out — while the combo count and row total still cover all 13 combos / 27 rows; the savepoint rolled back",
         LEDGER_MAX_COMBOS === 10 &&
-          capped?.unmapped_combos.length === 10 &&
-          capped.unmapped_combo_count === 13 &&
-          capped.unmapped_total === 16 &&
-          capped.unmapped_combos[0]?.keitaro_type === "trash" &&
+          JSON.stringify(capped?.unmapped_combos.map((c) => c.keitaro_type)) ===
+            JSON.stringify(["rejected", "trash", ...Array.from({ length: 8 }, (_, i) => `cap-0${i}`)]) &&
+          capped?.unmapped_combo_count === 13 &&
+          capped.unmapped_total === 27 &&
           afterCap.unmapped_combo_count === 2 &&
           afterCap.unmapped_total === 5,
         JSON.stringify({
@@ -396,36 +430,44 @@ async function main() {
         `);
 
       const keyTrash = `${UNM}k41:trash`;
-      const keyDep = `${UNM}${offer.id}:deposit`;
+      const keyRej = `${UNM}${offer.id}:rejected`;
       const keyRegPurchase = `${CONF}${offer.id}:registration>purchase`;
       const a1 = await tick();
       check(
-        "A1 first tick → one page per problem combo: trash (Keitaro offer 41), deposit (the CamMan offer), registration → purchase",
+        "A1 first tick → one page per problem combo, most recently changed first: rejected (the CamMan offer), trash (Keitaro offer 41), registration → purchase",
         a1.length === 3 &&
-          a1[0].includes("4 conversion(s) for Keitaro offer 41 (no CamMan offer) with Keitaro type trash") &&
-          a1[0].includes(id("trash-1")) &&
-          a1[1].includes(`1 conversion(s) for ${offer.name} (offer ${offer.id}) with Keitaro type deposit`) &&
+          a1[0].includes(`1 conversion(s) for ${offer.name} (offer ${offer.id}) with Keitaro type rejected`) &&
+          a1[1].includes("4 conversion(s) for Keitaro offer 41 (no CamMan offer) with Keitaro type trash") &&
+          a1[1].includes(id("trash-1")) &&
           a1[2].includes("locked registration → now purchase") &&
           a1[2].includes(id("old-r1")),
         JSON.stringify(a1),
       );
-      const [aTrash, aDep, aConf, aFetch, aInv, aOrg, aLeft1, aLeft2] = await Promise.all(
-        [keyTrash, keyDep, keyRegPurchase, K.fetchFailed, K.invalidRows, K.orgMismatch, ...leftovers].map((k) =>
-          alertRow(tx, k),
-        ),
+      const [aTrash, aRej, aConf, aFetch, aInv, aOrg, aCapU, aCapC, aLeft1, aLeft2] = await Promise.all(
+        [
+          keyTrash,
+          keyRej,
+          keyRegPurchase,
+          K.fetchFailed,
+          K.invalidRows,
+          K.orgMismatch,
+          CAP_UNM,
+          CAP_CONF,
+          ...leftovers,
+        ].map((k) => alertRow(tx, k)),
       );
       check(
-        "A2 alert_state: exactly the three combo keys firing under the prefixes, delivered and org-less; the fixed keys ok; the leftover in-prefix keys cleared without a page (as clearAlert leaves a row)",
-        sameKeys(await firingKeys(tx), [keyTrash, keyDep, keyRegPurchase]) &&
-          [aTrash, aDep, aConf].every((r) => r?.state === "firing" && r.notified && r.global) &&
-          [aFetch, aInv, aOrg].every((r) => r?.state === "ok") &&
+        "A2 alert_state: exactly the three combo keys firing under the prefixes, delivered and org-less; the five fixed keys (both cap keys included, the ledger being far under the cap) ok; the leftover in-prefix keys cleared without a page (as clearAlert leaves a row)",
+        sameKeys(await firingKeys(tx), [keyTrash, keyRej, keyRegPurchase]) &&
+          [aTrash, aRej, aConf].every((r) => r?.state === "firing" && r.notified && r.global) &&
+          [aFetch, aInv, aOrg, aCapU, aCapC].every((r) => r?.state === "ok") &&
           [aLeft1, aLeft2].every((r) => r?.state === "ok" && r.notified && r.global),
-        JSON.stringify({ firing: await firingKeys(tx), aTrash, aDep, aConf, aFetch, aInv, aOrg, aLeft1, aLeft2 }),
+        JSON.stringify({ firing: await firingKeys(tx), aTrash, aRej, aConf, aFetch, aInv, aOrg, aCapU, aCapC, aLeft1, aLeft2 }),
       );
       const a3 = await tick();
       check(
         "A3 next tick, nothing changed → no page, the same firing keys",
-        a3.length === 0 && sameKeys(await firingKeys(tx), [keyTrash, keyDep, keyRegPurchase]),
+        a3.length === 0 && sameKeys(await firingKeys(tx), [keyTrash, keyRej, keyRegPurchase]),
         JSON.stringify(a3),
       );
 
@@ -504,7 +546,7 @@ async function main() {
           clearedLead.notified &&
           clearedLead.global &&
           clearedConflict?.state === "ok" &&
-          sameKeys(await firingKeys(tx), [keyTrash, keyDep, keyRegPurchase, keyLeadK41, keyChargeback]),
+          sameKeys(await firingKeys(tx), [keyTrash, keyRej, keyRegPurchase, keyLeadK41, keyChargeback]),
         JSON.stringify({ s5a, firing: await firingKeys(tx), clearedLead, clearedConflict }),
       );
       await unmapOnUpdate(["lead-2"], "lead");
@@ -532,6 +574,72 @@ async function main() {
           (await firingKeys(tx)).length === 0 &&
           decoyRows.every((r) => r?.state === "firing"),
         JSON.stringify({ s6, firing: await firingKeys(tx), decoyRows }),
+      );
+
+      // The cap (LEDGER_MAX_COMBOS per kind): ten unmapped combos of 2 rows each,
+      // last changed 1–10 hours ago, then a brand-new combo of ONE row.
+      const tenType = (i: number) => `ten-${String(i).padStart(2, "0")}`;
+      const tenNames = Array.from({ length: LEDGER_MAX_COMBOS }, (_, i) => [`${tenType(i)}-1`, `${tenType(i)}-2`]).flat();
+      const tenKeys = Array.from({ length: LEDGER_MAX_COMBOS }, (_, i) => `${UNM}none:${tenType(i)}`);
+      await insertRows(
+        Array.from({ length: LEDGER_MAX_COMBOS }, (_, i) =>
+          [1, 2].map((n) =>
+            unmappedRow(`${tenType(i)}-${n}`, tenType(i), { updated_at: sql`now() - ${`${i + 1} hours`}::interval` }),
+          ),
+        ).flat(),
+      );
+      const p1 = await tick();
+      check(
+        "P1 ten unmapped combos (2 rows each) → one page each; AT the cap, not past it, so the combo_cap_exceeded key stays ok and no cap page is sent",
+        p1.length === LEDGER_MAX_COMBOS &&
+          sameKeys(await firingKeys(tx), tenKeys) &&
+          (await alertRow(tx, CAP_UNM))?.state === "ok" &&
+          !p1.some((t) => t.includes("unmapped combos exist")),
+        JSON.stringify({ pages: p1.length, firing: await firingKeys(tx) }),
+      );
+      const keyEleventh = `${UNM}none:eleventh`;
+      await insertRows([unmappedRow("eleventh", "eleventh")]);
+      const p2 = await tick();
+      check(
+        "P2a a NEW 11th combo of one row, against ten bigger ones already firing → it is listed and pages exactly once, because the listing ranks by recency, not by size; none of the ten re-pages",
+        p2.filter((t) => t.includes("with Keitaro type eleventh")).length === 1 &&
+          (await alertRow(tx, keyEleventh))?.state === "firing" &&
+          p2.filter((t) => /with Keitaro type ten-/.test(t)).length === 0,
+        JSON.stringify(p2),
+      );
+      const capRow = await alertRow(tx, CAP_UNM);
+      check(
+        "P2b crossing the cap → exactly one more page, on the fixed combo_cap_exceeded key (11 combos, cap 10), delivered; and the least recently changed combo, now unlisted, is NOT cleared",
+        p2.length === 2 &&
+          p2.filter((t) => t.includes("11 unmapped combos exist, more than the 10")).length === 1 &&
+          capRow?.state === "firing" &&
+          capRow.notified &&
+          capRow.global &&
+          (await alertRow(tx, tenKeys[LEDGER_MAX_COMBOS - 1]))?.state === "firing",
+        JSON.stringify({ p2, capRow }),
+      );
+      const p3 = await tick();
+      check(
+        "P3 still past the cap, nothing changed → no page (the cap key is latched like any other)",
+        p3.length === 0 && (await alertRow(tx, CAP_UNM))?.state === "firing",
+        JSON.stringify(p3),
+      );
+      await heal([`${tenType(LEDGER_MAX_COMBOS - 1)}-1`, `${tenType(LEDGER_MAX_COMBOS - 1)}-2`]);
+      const p4 = await tick();
+      check(
+        "P4 back to ten combos (at the cap) → the cap key clears without a page, and combo clears resume: the healed combo's key goes ok while the other ten stay firing",
+        p4.length === 0 &&
+          (await alertRow(tx, CAP_UNM))?.state === "ok" &&
+          (await alertRow(tx, tenKeys[LEDGER_MAX_COMBOS - 1]))?.state === "ok" &&
+          sameKeys(await firingKeys(tx), [...tenKeys.slice(0, LEDGER_MAX_COMBOS - 1), keyEleventh]),
+        JSON.stringify({ p4, firing: await firingKeys(tx) }),
+      );
+      await heal([...tenNames, "eleventh"]);
+      const p5 = await tick();
+      check(
+        "P5 every cap-scenario row healed → no page, and nothing firing under either prefix (the fixed-key checks below start clean)",
+        p5.length === 0 && (await firingKeys(tx)).length === 0,
+        JSON.stringify({ p5, firing: await firingKeys(tx) }),
       );
 
       // fetch_failed: debounced on the last COMPLETE ingest (the heartbeat), and

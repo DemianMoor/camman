@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { sql } from "drizzle-orm";
 
 import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
@@ -38,6 +40,10 @@ import {
 //                                       ledger rows whose Keitaro type now maps to
 //                                       a different event than their locked one —
 //                                       one key per combo
+//   conversion_events:combo_cap_exceeded:unmapped
+//   conversion_events:combo_cap_exceeded:type_conflicts
+//                                       that kind has more than LEDGER_MAX_COMBOS
+//                                       problem combos
 //   heartbeat:conversion-events-ingest  no complete ingest for over an hour
 //                                       (checked by /api/cron/tracking-monitors)
 //
@@ -46,8 +52,8 @@ import {
 // Nor statusOnlyInBatch: a brand-new status-only row has a NULL event type, so
 // the table-level unmapped alert already reports it.
 //
-// fetch_failed, invalid_rows, org_mismatch and the heartbeat are FIXED keys:
-// one standing condition = one page.
+// fetch_failed, invalid_rows, org_mismatch, the two combo_cap_exceeded keys and
+// the heartbeat are FIXED keys: one standing condition = one page.
 //
 // unmapped and type_conflicts read the whole table, all-time, and are keyed per
 // PROBLEM COMBO. <offer> is the CamMan offer id, else k<Keitaro offer id>, else
@@ -57,11 +63,15 @@ import {
 //     of one unmapped type doesn't flood, and a row that turns into a problem by
 //     UPDATE (a conflict, or an existing row turning unmapped) pages whenever its
 //     combo is new;
-//   - a firing key whose combo is gone is cleared (re-armed);
-//   - at most LEDGER_MAX_COMBOS combos per kind are listed and paged (the
-//     largest). Past the cap the rest are named as a count in each page, and no
-//     key of that kind clears (a combo past the cap can't be told from a
-//     resolved one).
+//   - a firing key whose combo is gone is cleared (re-armed) — unless its kind
+//     is past the cap (below);
+//   - at most LEDGER_MAX_COMBOS combos per kind are listed and paged: the most
+//     recently changed, by max(updated_at). updated_at is set on insert and on
+//     every ingest UPDATE, so a combo an UPDATE creates ranks first too. Past the
+//     cap the rest are named as a count in each page, that kind's
+//     combo_cap_exceeded key pages once (and clears once the kind is back to
+//     LEDGER_MAX_COMBOS or fewer), and no combo key of that kind clears (a combo
+//     past the cap can't be told from a resolved one).
 // See decideLedgerAlerts.
 //
 // The poll is cross-org, so these alerts are too — alert_state.org_id stays NULL
@@ -75,6 +85,11 @@ export const CONVERSION_ALERT_KEYS = {
   fetchFailed: "conversion_events:fetch_failed",
   invalidRows: "conversion_events:invalid_rows",
   orgMismatch: "conversion_events:org_mismatch",
+  // One per combo kind. Deliberately NOT under either combo prefix below
+  // ("conversion_events:unmapped:" / "conversion_events:type_conflicts:"), so
+  // the stale-combo read never sees them and never clears them.
+  unmappedComboCap: "conversion_events:combo_cap_exceeded:unmapped",
+  typeConflictComboCap: "conversion_events:combo_cap_exceeded:type_conflicts",
 } as const;
 
 // Per-combo keys: prefix + combo (unmappedAlertKey, typeConflictAlertKey).
@@ -85,9 +100,10 @@ export const CONVERSION_ALERT_KEY_PREFIXES = {
 
 export const INGEST_HEARTBEAT_ALERT_KEY = "heartbeat:conversion-events-ingest";
 
-// Combos listed — and so paged — per kind per tick, largest first. Telegram
-// allows a bot about 20 messages a minute in a group, and both kinds can page on
-// the same tick. A send it refuses stays pending and retries on the next tick.
+// Combos listed — and so paged — per kind per tick, most recently changed
+// first. Telegram allows a bot about 20 messages a minute in a group, and both
+// kinds can page on the same tick. A send it refuses stays pending and retries
+// on the next tick.
 export const LEDGER_MAX_COMBOS = 10;
 
 const PREFIX = "🟠 Tier-2 conversions:";
@@ -126,7 +142,7 @@ export interface ConflictCombo extends ComboOffer {
 export interface LedgerHealth {
   unmapped_total: number; // rows, across every combo
   unmapped_combo_count: number; // every combo, including any past the cap
-  unmapped_combos: UnmappedCombo[]; // the LEDGER_MAX_COMBOS largest
+  unmapped_combos: UnmappedCombo[]; // the LEDGER_MAX_COMBOS most recently changed
   conflict_total: number;
   conflict_combo_count: number;
   conflict_combos: ConflictCombo[];
@@ -155,12 +171,17 @@ export function ingestFailed(outcome: IngestOutcome): boolean {
 
 // One key part: lowercased, anything outside [a-z0-9_-] → "_", at most
 // MAX_KEY_PART characters. ":" and ">" separate the parts, so a part never
-// contains them. Parts that sanitise alike share one key (decideLedgerAlerts).
+// contains them. When that changed the raw part (case, a replaced character,
+// truncation), "~" + the first 6 hex characters of the raw part's sha256 are
+// appended, so raw parts that sanitise alike still get different keys. An
+// already-clean part is used as is, and can't meet a suffixed one: "~" is never
+// in a clean part. Deterministic, and at most MAX_KEY_PART + 7 characters.
 function keyPart(s: string): string {
-  return s
+  const clean = s
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "_")
     .slice(0, MAX_KEY_PART);
+  return clean === s ? clean : `${clean}~${createHash("sha256").update(s).digest("hex").slice(0, 6)}`;
 }
 
 function offerKeyPart(c: ComboOffer): string {
@@ -229,13 +250,27 @@ function samplesLine(ids: readonly string[]): string {
 }
 
 // Appended to every page of a kind whose combos exceed the cap; [] otherwise.
-function pastCapLine(kind: string, comboCount: number, listed: number): string[] {
-  const more = comboCount - listed;
-  return more > 0
+function pastCapLine(kind: string, comboCount: number): string[] {
+  return comboCount > LEDGER_MAX_COMBOS
     ? [
-        `${more} more ${kind} combo(s) are not listed or paged (cap: ${LEDGER_MAX_COMBOS} combos per kind). No ${kind} alert clears while the cap is exceeded.`,
+        `${comboCount - LEDGER_MAX_COMBOS} more ${kind} combo(s) are not listed or paged (cap: ${LEDGER_MAX_COMBOS} combos per kind, the most recently changed listed). No ${kind} combo alert clears while the cap is exceeded.`,
       ]
     : [];
+}
+
+// The kind's combo_cap_exceeded key: firing while the kind has more combos than
+// the cap, ok at or below it.
+function comboCapDecision(alertKey: string, kind: string, comboCount: number, fix: string): ConversionAlertDecision {
+  if (comboCount <= LEDGER_MAX_COMBOS) return { alertKey, state: "ok" };
+  return {
+    alertKey,
+    state: "firing",
+    text: [
+      `${PREFIX} ${comboCount} ${kind} combos exist, more than the ${LEDGER_MAX_COMBOS} per kind that are listed and paged.`,
+      `Only the ${LEDGER_MAX_COMBOS} most recently changed ${kind} combos page. The rest are not paged, and no ${kind} combo alert clears until ${LEDGER_MAX_COMBOS} or fewer combos remain; this alert clears then too.`,
+      fix,
+    ].join("\n"),
+  };
 }
 
 function formatUnmappedAlert(c: UnmappedCombo, pastCap: string[]): string {
@@ -306,30 +341,38 @@ export function decideIngestAlerts(
 
 // Decisions from the whole-ledger combo read (all-time, all orgs) and the keys
 // currently firing under the two combo prefixes.
+//   each kind's combo_cap_exceeded key → firing while that kind has more than
+//     LEDGER_MAX_COMBOS combos, ok at or below it.
 //   every listed combo → firing on its key. notifyOnTransition pages only on the
 //     transition, so a combo already firing sends nothing.
 //   a firing key under a prefix that no listed combo builds → ok (cleared, so
 //     the combo pages again if it comes back) — unless that kind is past the
-//     cap, where nothing of that kind is cleared.
-// Combos whose keys sanitise alike get one decision, with the first (largest)
-// combo's text. Keys outside both prefixes get no decision.
+//     cap, where no combo key of that kind is cleared.
+// Keys outside both prefixes, the cap keys included, get no stale-key decision.
 export function decideLedgerAlerts(h: LedgerHealth, firingKeys: readonly string[]): ConversionAlertDecision[] {
   const P = CONVERSION_ALERT_KEY_PREFIXES;
-  const unmappedPastCap = pastCapLine("unmapped", h.unmapped_combo_count, h.unmapped_combos.length);
-  const conflictPastCap = pastCapLine("type-conflict", h.conflict_combo_count, h.conflict_combos.length);
+  const K = CONVERSION_ALERT_KEYS;
+  const unmappedPastCap = pastCapLine("unmapped", h.unmapped_combo_count);
+  const conflictPastCap = pastCapLine("type-conflict", h.conflict_combo_count);
   const present = new Map<string, string>(); // key → page text
-  for (const c of h.unmapped_combos) {
-    const key = unmappedAlertKey(c);
-    if (!present.has(key)) present.set(key, formatUnmappedAlert(c, unmappedPastCap));
-  }
-  for (const c of h.conflict_combos) {
-    const key = typeConflictAlertKey(c);
-    if (!present.has(key)) present.set(key, formatTypeConflictAlert(c, conflictPastCap));
-  }
+  for (const c of h.unmapped_combos) present.set(unmappedAlertKey(c), formatUnmappedAlert(c, unmappedPastCap));
+  for (const c of h.conflict_combos) present.set(typeConflictAlertKey(c), formatTypeConflictAlert(c, conflictPastCap));
   const clearable = (key: string) =>
     (key.startsWith(P.unmapped) && unmappedPastCap.length === 0) ||
     (key.startsWith(P.typeConflicts) && conflictPastCap.length === 0);
   return [
+    comboCapDecision(
+      K.unmappedComboCap,
+      "unmapped",
+      h.unmapped_combo_count,
+      "Fix: list every combo (conversion_events rows WHERE event_type_id IS NULL OR status IS NULL, grouped by offer_id, keitaro_offer_id and keitaro_type) and add the missing conversion_event_mappings rows. See docs/04-features/conversion-events.md.",
+    ),
+    comboCapDecision(
+      K.typeConflictComboCap,
+      "type-conflict",
+      h.conflict_combo_count,
+      'Fix: list every combo (conversion_events rows WHERE conflicting_event_type_id IS NOT NULL, grouped by offer_id, keitaro_offer_id, event_type_id and conflicting_event_type_id) and decide each: see "Event-type conflicts" in docs/04-features/conversion-events.md.',
+    ),
     ...[...present].map(([alertKey, text]): ConversionAlertDecision => ({ alertKey, state: "firing", text })),
     ...firingKeys
       .filter((key) => !present.has(key) && clearable(key))
@@ -337,20 +380,22 @@ export function decideLedgerAlerts(h: LedgerHealth, firingKeys: readonly string[
   ];
 }
 
-// ── DB: ledger health, alert application, ingest heartbeat ──────────────────
+// ── Combo statements (pure values, run by readLedgerHealth) ─────────────────
 
-type Send = (text: string) => Promise<boolean>;
-
-// One statement per kind: the LEDGER_MAX_COMBOS largest combos with their
-// counts and samples, plus the combo count and row total over EVERY combo
-// (window aggregates over the groups, computed before the LIMIT). Each WHERE is
+// One statement per kind: the LEDGER_MAX_COMBOS most recently changed combos
+// with their counts and samples, plus the combo count and row total over EVERY
+// combo (window aggregates over the groups, computed before the LIMIT). Ranked
+// by max(updated_at) DESC — set on insert and on every ingest UPDATE, so a new
+// combo ranks first even when it is the smallest, including one an UPDATE
+// creates — then by every GROUP BY column, so the order is total. Each WHERE is
 // written EXACTLY as its partial index's predicate (migration 0181), so the
 // planner can read only that small index's rows however large the ledger grows.
 // The per-combo sample array aggregates every row of its combo before slicing:
 // fine for problem rows, which the partial index keeps few. <offer> is offer_id,
 // else keitaro_offer_id (the CASE drops the Keitaro id when a CamMan offer is
 // set), matching offerKeyPart. Exported so scripts/test-conversion-monitor-db.ts
-// can EXPLAIN the very statements this module runs.
+// can EXPLAIN the very statements readLedgerHealth runs, and
+// scripts/test-conversion-monitor.ts can check their ranking.
 export const UNMAPPED_COMBOS_SQL = sql`
   SELECT ce.offer_id,
          CASE WHEN ce.offer_id IS NULL THEN ce.keitaro_offer_id END AS keitaro_offer_id,
@@ -365,7 +410,7 @@ export const UNMAPPED_COMBOS_SQL = sql`
   LEFT JOIN offers o ON o.id = ce.offer_id
   WHERE ce.event_type_id IS NULL OR ce.status IS NULL
   GROUP BY 1, 2, 3
-  ORDER BY total DESC, 1 NULLS LAST, 2 NULLS LAST, 3
+  ORDER BY max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3
   LIMIT ${LEDGER_MAX_COMBOS}`;
 
 export const CONFLICT_COMBOS_SQL = sql`
@@ -386,8 +431,12 @@ export const CONFLICT_COMBOS_SQL = sql`
   LEFT JOIN event_types mt ON mt.id = ce.conflicting_event_type_id
   WHERE ce.conflicting_event_type_id IS NOT NULL
   GROUP BY 1, 2, 3, 4
-  ORDER BY total DESC, 1 NULLS LAST, 2 NULLS LAST, 3, 4
+  ORDER BY max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3, 4
   LIMIT ${LEDGER_MAX_COMBOS}`;
+
+// ── DB: ledger health, alert application, ingest heartbeat ──────────────────
+
+type Send = (text: string) => Promise<boolean>;
 
 type ComboTotals = { combo_count: number; row_total: number };
 

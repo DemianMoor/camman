@@ -1,14 +1,19 @@
 // Pure checks for the Phase 2 live-ingest window and the conversion ledger alert
 // decisions. No DB, no network, no Telegram.
 // Run: npx tsx scripts/test-conversion-monitor.ts
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+
 import type { IngestResult } from "../lib/conversions/ingest";
 import { liveIngestRange } from "../lib/conversions/keitaro-row";
 import {
+  CONFLICT_COMBOS_SQL,
   CONVERSION_ALERT_KEYS,
   CONVERSION_ALERT_KEY_PREFIXES,
   FETCH_FAILED_DEBOUNCE_MINUTES,
   INGEST_HEARTBEAT_ALERT_KEY,
   LEDGER_MAX_COMBOS,
+  UNMAPPED_COMBOS_SQL,
   decideIngestAlerts,
   decideLedgerAlerts,
   formatIngestHeartbeatAlert,
@@ -338,12 +343,15 @@ check(
 const oddKey = unmappedAlertKey(unm({ keitaro_type: "First Deposit: 2>1 ✓" }));
 const longKey = unmappedAlertKey(unm({ keitaro_type: "x".repeat(200) }));
 const oddConflictKey = typeConflictAlertKey(conf({ locked_event_key: "Reg:A>B", conflicting_event_key: null }));
+// The suffixes are the first 6 hex characters of sha256 of the raw part, written
+// out: sha256("First Deposit: 2>1 ✓") = 1239dd…, sha256("x"×200) = aa20c2…,
+// sha256("Reg:A>B") = 34b636…, sha256("?") (a NULL event key) = 8a8de8….
 check(
-  "C2 key parts are sanitised (lowercase; anything outside [a-z0-9_-] → _, so ':' and '>' can't forge a separator) and clipped to 40 chars",
-  oddKey === "conversion_events:unmapped:none:first_deposit__2_1__" &&
-    longKey === `conversion_events:unmapped:none:${"x".repeat(40)}` &&
-    oddConflictKey === "conversion_events:type_conflicts:134:reg_a_b>_" &&
-    [...builtKeys, oddKey, longKey, oddConflictKey].every((k) => /^[a-z0-9_:>-]+$/.test(k)),
+  "C2 key parts are sanitised (lowercase; anything outside [a-z0-9_-] → _, so ':' and '>' can't forge a separator), clipped to 40 chars, and a part sanitising changed carries ~<6 hex of sha256(raw)>",
+  oddKey === "conversion_events:unmapped:none:first_deposit__2_1__~1239dd" &&
+    longKey === `conversion_events:unmapped:none:${"x".repeat(40)}~aa20c2` &&
+    oddConflictKey === "conversion_events:type_conflicts:134:reg_a_b~34b636>_~8a8de8" &&
+    [...builtKeys, oddKey, longKey, oddConflictKey].every((k) => /^[a-z0-9_:>~-]+$/.test(k)),
   JSON.stringify({ oddKey, longKey, oddConflictKey }),
 );
 check(
@@ -353,10 +361,44 @@ check(
     typeConflictAlertKey(regToPurchase) ===
       typeConflictAlertKey({ ...regToPurchase, total: 50, since: "2026-09-18T01:00:00Z", sample_event_ids: [] }),
 );
+const typeKeys = ["first deposit", "first:deposit", "first>deposit", "first_deposit", "First_Deposit"].map((t) =>
+  unmappedAlertKey(unm({ keitaro_type: t })),
+);
+const longKeys = [`${"x".repeat(40)}y`, `${"x".repeat(40)}z`].map((t) => unmappedAlertKey(unm({ keitaro_type: t })));
+const pairKeys = [
+  conf({ locked_event_key: "reg a", conflicting_event_key: "purchase" }),
+  conf({ locked_event_key: "reg:a", conflicting_event_key: "purchase" }),
+  conf({ locked_event_key: "reg_a", conflicting_event_key: "purchase" }),
+].map(typeConflictAlertKey);
+check(
+  "C4 raw parts that sanitise alike get DIFFERENT keys: types differing only in a replaced character or in case, types differing only past the 40-char clip, event keys differing only in a replaced character; and a key is deterministic",
+  new Set(typeKeys).size === typeKeys.length &&
+    new Set(longKeys).size === longKeys.length &&
+    longKeys[0] === `conversion_events:unmapped:none:${"x".repeat(40)}~3c9486` &&
+    new Set(pairKeys).size === pairKeys.length &&
+    unmappedAlertKey(unm({ keitaro_type: "first deposit" })) === typeKeys[0],
+  JSON.stringify({ typeKeys, longKeys, pairKeys }),
+);
+const clean40 = "a".repeat(40);
+check(
+  "C5 an already-clean part (lowercase [a-z0-9_-], at most 40 chars) gets no suffix, byte-identical to the pre-hash keys; every key stays bounded",
+  unmappedAlertKey(unm({ keitaro_type: "trash" })) === "conversion_events:unmapped:none:trash" &&
+    unmappedAlertKey(unm({ keitaro_type: "first_deposit-2" })) === "conversion_events:unmapped:none:first_deposit-2" &&
+    unmappedAlertKey(unm({ keitaro_type: clean40 })) === `conversion_events:unmapped:none:${clean40}` &&
+    typeConflictAlertKey(conf({})) === "conversion_events:type_conflicts:134:registration>purchase" &&
+    builtKeys.every((k) => !k.includes("~")) &&
+    [...builtKeys, oddKey, longKey, ...typeKeys, ...longKeys].every((k) => k.length <= "conversion_events:unmapped:".length + 11 + 1 + 47),
+  JSON.stringify(builtKeys),
+);
 
 console.log("\nledger alerts (per problem combo)");
+const capKeys = [K.unmappedComboCap, K.typeConflictComboCap];
 const cleanDs = decideLedgerAlerts(ledger([], []), []);
-check("L1 clean ledger, nothing firing → no ledger decisions", cleanDs.length === 0, keysOnly(cleanDs));
+check(
+  "L1 clean ledger, nothing firing → no combo decision; both cap keys ok (under the cap)",
+  cleanDs.length === 2 && sameKeys(okKeysOf(cleanDs), capKeys),
+  keysOnly(cleanDs),
+);
 
 const sickDs = decideLedgerAlerts(ledger([psycho, k41, noOffer], [regToPurchase]), []);
 const unmappedText = firingText(sickDs, unmappedAlertKey(psycho));
@@ -396,9 +438,9 @@ check(
   `${unmappedText}\n---\n${conflictText}`,
 );
 check(
-  "L6 new combos, nothing firing → one firing decision per combo on its own key, no clears",
-  sickDs.length === 4 &&
-    okKeysOf(sickDs).length === 0 &&
+  "L6 new combos, nothing firing → one firing decision per combo on its own key, no clears beyond the two under-cap cap keys",
+  sickDs.length === 6 &&
+    sameKeys(okKeysOf(sickDs), capKeys) &&
     sameKeys(firingKeysOf(sickDs), [
       unmappedAlertKey(psycho),
       unmappedAlertKey(k41),
@@ -410,8 +452,9 @@ check(
 const grownK41 = { ...k41, total: 7, last_24h: 7, sample_event_ids: ["ev-7", "ev-6", "ev-5"] };
 const latchedDs = decideLedgerAlerts(ledger([grownK41], []), [unmappedAlertKey(k41)]);
 check(
-  "L7 the same combo already firing, with more rows since → 'firing' on the SAME key again and nothing cleared (notifyOnTransition's latch makes it no new page — DB S1b)",
-  keysOnly(latchedDs) === JSON.stringify([`firing ${unmappedAlertKey(k41)}`]),
+  "L7 the same combo already firing, with more rows since → 'firing' on the SAME key again and no combo key cleared (notifyOnTransition's latch makes it no new page — DB S1b)",
+  keysOnly(latchedDs) ===
+    JSON.stringify([`ok ${K.unmappedComboCap}`, `ok ${K.typeConflictComboCap}`, `firing ${unmappedAlertKey(k41)}`]),
   keysOnly(latchedDs),
 );
 const staleDs = decideLedgerAlerts(ledger([k41], []), [
@@ -423,9 +466,9 @@ const staleDs = decideLedgerAlerts(ledger([k41], []), [
   K.fetchFailed,
 ]);
 check(
-  "L8 firing keys whose combo is gone → ok, under both prefixes; a present combo stays firing; keys outside the prefixes get no decision",
-  staleDs.length === 3 &&
-    sameKeys(okKeysOf(staleDs), [unmappedAlertKey(psycho), typeConflictAlertKey(regToPurchase)]) &&
+  "L8 firing keys whose combo is gone → ok, under both prefixes; a present combo stays firing; keys outside the prefixes get no stale decision (only the two cap keys, from the cap rule)",
+  staleDs.length === 5 &&
+    sameKeys(okKeysOf(staleDs), [unmappedAlertKey(psycho), typeConflictAlertKey(regToPurchase), ...capKeys]) &&
     sameKeys(firingKeysOf(staleDs), [unmappedAlertKey(k41)]),
   keysOnly(staleDs),
 );
@@ -433,10 +476,11 @@ const spaced = unm({ keitaro_type: "first deposit", total: 9 });
 const underscored = unm({ keitaro_type: "first_deposit", total: 2 });
 const collideDs = decideLedgerAlerts(ledger([spaced, underscored], []), []);
 check(
-  "L9 two combos that sanitise to one key → one decision, carrying the first (larger) combo's page",
-  unmappedAlertKey(spaced) === unmappedAlertKey(underscored) &&
-    collideDs.length === 1 &&
-    firingText(collideDs, unmappedAlertKey(spaced)).includes("9 conversion(s)"),
+  "L9 two combos whose Keitaro types sanitise alike → two keys and two pages, each with its own count (the hash suffix keeps them apart)",
+  unmappedAlertKey(spaced) !== unmappedAlertKey(underscored) &&
+    collideDs.length === 4 &&
+    firingText(collideDs, unmappedAlertKey(spaced)).includes("9 conversion(s)") &&
+    firingText(collideDs, unmappedAlertKey(underscored)).includes("2 conversion(s)"),
   keysOnly(collideDs),
 );
 const listed = Array.from({ length: LEDGER_MAX_COMBOS }, (_, i) => unm({ keitaro_type: `type-${i}`, total: 20 - i }));
@@ -444,19 +488,55 @@ const pastCapKey = unmappedAlertKey(unm({ keitaro_type: "past-the-cap" }));
 const staleConflictKey = typeConflictAlertKey(conf({ conflicting_event_key: "lead" }));
 const cappedDs = decideLedgerAlerts(
   ledger(listed, [regToPurchase], { unmapped_combo_count: LEDGER_MAX_COMBOS + 4 }),
-  [pastCapKey, staleConflictKey],
+  [pastCapKey, staleConflictKey, K.unmappedComboCap],
 );
 const cappedTexts = firingKeysOf(cappedDs)
   .filter((k) => k.startsWith(P.unmapped))
   .map((k) => firingText(cappedDs, k));
 check(
-  "L10 over the cap (10 combos per kind): the 10 listed combos page and every unmapped page names the 4 more; no unmapped key clears (past the cap is not resolved), while type_conflicts, under its cap, still clears",
+  "L10 over the cap (10 combos per kind): the 10 listed combos page and every unmapped page names the 4 more; no unmapped combo key clears (past the cap is not resolved), while type_conflicts, under its cap, still clears",
   LEDGER_MAX_COMBOS === 10 &&
     cappedTexts.length === 10 &&
     cappedTexts.every((t) => t.includes("4 more unmapped combo(s) are not listed or paged")) &&
     !firingText(cappedDs, typeConflictAlertKey(regToPurchase)).includes("not listed or paged") &&
-    sameKeys(okKeysOf(cappedDs), [staleConflictKey]),
+    sameKeys(okKeysOf(cappedDs), [staleConflictKey, K.typeConflictComboCap]),
   `${keysOnly(cappedDs)}\n${cappedTexts[0]}`,
+);
+const capText = firingText(cappedDs, K.unmappedComboCap);
+check(
+  "L11 the cap key fires while the kind is over the cap — one decision on the fixed key (it is not a stale combo key), naming the kind, the combo count, the cap and what to do",
+  cappedDs.filter((d) => d.alertKey === K.unmappedComboCap).length === 1 &&
+    capText.startsWith(PREFIX) &&
+    capText.includes("14 unmapped combos exist, more than the 10 per kind that are listed and paged.") &&
+    capText.includes("Only the 10 most recently changed unmapped combos page.") &&
+    capText.includes("WHERE event_type_id IS NULL OR status IS NULL") &&
+    firingText(
+      decideLedgerAlerts(ledger([], listed.map(() => regToPurchase), { conflict_combo_count: 11 }), []),
+      K.typeConflictComboCap,
+    ).includes("11 type-conflict combos exist, more than the 10 per kind"),
+  capText,
+);
+const atCapDs = decideLedgerAlerts(ledger(listed, [], { unmapped_combo_count: LEDGER_MAX_COMBOS }), [
+  pastCapKey,
+  K.unmappedComboCap,
+]);
+check(
+  "L12 back at the cap (exactly 10): the cap key clears, no page names more combos, and stale combo keys clear again",
+  sameKeys(okKeysOf(atCapDs), [pastCapKey, ...capKeys]) &&
+    firingKeysOf(atCapDs).length === LEDGER_MAX_COMBOS &&
+    !firingText(atCapDs, unmappedAlertKey(listed[0])).includes("not listed or paged"),
+  keysOnly(atCapDs),
+);
+// The statement's own ORDER BY: the last one, since array_agg has its own.
+const orderBy = (q: SQL) => {
+  const text = new PgDialect().sqlToQuery(q).sql.replace(/\s+/g, " ");
+  return text.slice(text.lastIndexOf("ORDER BY") + "ORDER BY ".length).split(" LIMIT")[0];
+};
+check(
+  "L13 both combo statements rank by RECENCY, not by size: ORDER BY max(ce.updated_at) DESC first, then every GROUP BY column (so a new 1-row combo is listed and paged even when 10 bigger ones exist — DB P2)",
+  orderBy(UNMAPPED_COMBOS_SQL) === "max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3" &&
+    orderBy(CONFLICT_COMBOS_SQL) === "max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3, 4",
+  JSON.stringify([orderBy(UNMAPPED_COMBOS_SQL), orderBy(CONFLICT_COMBOS_SQL)]),
 );
 
 console.log("\nheartbeat alert");
@@ -477,6 +557,7 @@ const texts = [
   noOfferText,
   conflictText,
   cappedTexts[0] ?? "",
+  capText,
   hbText,
 ];
 const MARKUP = /<\/?[a-z][^>]*>|\*[^*\n]+\*|__[^_\n]+__|`/i;
@@ -486,14 +567,17 @@ check(
   texts.filter((t) => t.length === 0 || MARKUP.test(t)).join("\n---\n"),
 );
 check(
-  "K1 the fixed keys, the combo key prefixes and the heartbeat key are the strings the docs and alert_state rows name",
+  "K1 the fixed keys, the combo key prefixes and the heartbeat key are the strings the docs and alert_state rows name; neither cap key starts with a combo prefix, so the stale-combo clear can never touch one",
   K.fetchFailed === "conversion_events:fetch_failed" &&
     K.invalidRows === "conversion_events:invalid_rows" &&
     K.orgMismatch === "conversion_events:org_mismatch" &&
-    Object.keys(K).length === 3 &&
+    K.unmappedComboCap === "conversion_events:combo_cap_exceeded:unmapped" &&
+    K.typeConflictComboCap === "conversion_events:combo_cap_exceeded:type_conflicts" &&
+    Object.keys(K).length === 5 &&
     P.unmapped === "conversion_events:unmapped:" &&
     P.typeConflicts === "conversion_events:type_conflicts:" &&
     Object.keys(P).length === 2 &&
+    capKeys.every((k) => !k.startsWith(P.unmapped) && !k.startsWith(P.typeConflicts)) &&
     INGEST_HEARTBEAT_ALERT_KEY === "heartbeat:conversion-events-ingest",
 );
 

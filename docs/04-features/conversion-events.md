@@ -2,7 +2,7 @@
 
 _Last updated: 2026-09-17_
 
-**Status:** Phase 2 — the ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. **Nothing reads the ledger yet.** Revenue, EPC, the purchased tier, segment purchase rules, drip and reports still read `stage_sends.sale_*` and `keitaro_stage_results` until Phase 3.
+**Status:** Phase 3 in progress — the ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. **Semantics unchanged at this step** (sales = lead+sale+rejected, checkouts = lead) — the only numeric delta is bug 2's −$100 double count. Approved-only revenue + pending revenue (Task 6) are next.
 
 ## Why
 
@@ -135,7 +135,7 @@ Migration 0181 starts with `SET LOCAL lock_timeout = '5s'` and takes the `offers
 
 **Multi-tenancy note.** The manual sync's raw JSON response is not org-scoped the way the UI toast is: `conversion_events.orgMismatchSamples` (raw org UUIDs) and `unresolvedSamples` (`sub_id_1`/`sub_id_3`) come back to whichever manager/admin/owner triggered `POST /api/keitaro/poll`, for whatever org they belong to (the route checks `result_imports.create`, which the operator role does not hold). This mirrors the pre-existing `unmatched_samples` field the aggregate poll's own response already exposes the same way.
 
-The poll response gains `conversion_events` (the `IngestResult`, or `null` when the ingest threw) and `conversion_events_error`. See [keitaro-poll.md §5](keitaro-poll.md).
+The poll response gains `conversion_events` (the `IngestResult`, or `null` when the ingest threw) and `conversion_events_error`, plus (Phase 3 Task 3) `stage_day_conversions` (the `StageDayConversionSync` the projection wrote, or `null` when it was skipped/threw) and `stage_day_conversions_error`. See [keitaro-poll.md §5](keitaro-poll.md).
 
 **Route budget.** `/api/keitaro/poll`'s `maxDuration` is 230s — below the 240s `CRON_LEASE_MS` cron lease ([lib/cron/lease.ts](../../lib/cron/lease.ts)) so a slow tick dies before the next one could overlap it. Typical runs are single-digit seconds; a killed tick's ledger transaction rolls back and retries next tick.
 
@@ -211,11 +211,21 @@ Don't flip a key to `ok` by hand; that hides a real condition. Fix the cause, an
   - a failed tick still pages a new combo
   - the debounce against a real `cron_locks` watermark (5 min / 20 min / NULL; a debounced failure never clears; a throw pages)
 
+## Stage-day projection (Phase 3 Task 3)
+
+`keitaro_stage_results` holds two kinds of column on one row: CLICK columns (dated by click day, written by `pollKeitaro`'s `report/build` fold) and CONVERSION columns (dated by conversion day, written by [`lib/keitaro/stage-day-conversions.ts`](../../lib/keitaro/stage-day-conversions.ts) from this ledger). The aggregate poll no longer fetches `conversions/log` at all — the ledger ingest above is the tick's only conversion fetch.
+
+- `syncStageDayConversions(dbc, { stageIds })` re-derives every (stage, ET day) in scope from a fresh `GROUP BY conversion_events` (today's semantics: sales = `keitaro_type IN (lead, sale, rejected)`, checkouts = `keitaro_type = 'lead'`, revenue = the same set summed), INSERT/UPDATEs the rows that differ, then **zeroes** any existing row's conversion columns (not its click columns) for a day the ledger no longer explains. `stageIds: []` is a no-op; omitted = every stage (the one-shot resync).
+- `changedLedgerStageIds(dbc, sinceMinutes)` finds stages whose ledger rows were touched in the last `LEDGER_CHANGE_LOOKBACK_MINUTES` (30, stateless — no cursor) via `conversion_events.updated_at` (migration 0182's `conversion_events_updated_at_idx`). `occurred_at` never moves, so this is the only way to find a re-posted OLD conversion whose stage-day sits outside the current click window.
+- **Order in the `*/5` tick** ([app/api/keitaro/poll/route.ts](../../app/api/keitaro/poll/route.ts) `pollAndRefresh`): `pollKeitaro` (clicks) → counted-clicker refresh → `ingestConversionLedger` → **only if that ingest was `ok`**, `syncStageDayConversions` over `pollKeitaro`'s `stage_ids` (this tick's click-touched stages) ∪ `changedLedgerStageIds()`. A refused or thrown ingest skips the projection entirely for that tick — re-deriving against an incomplete ledger would zero real revenue — and the stage-days keep their previous values until the next good tick.
+- A stage-day with conversions but no click row: `syncStageDayConversions`'s INSERT creates the row (click columns default 0 — a conversion with no matching click is legitimate, e.g. `sub_id_1`/`sub_id_3` resolved via `offers.keitaro_offer_id` with no click).
+- One-shot repair for stage-days frozen before this shipped: `npx tsx scripts/resync-stage-day-conversions.ts` (dry-run by default, prints every diff; `--apply` writes inside one transaction, prod needs approval). Refuses to run if the ledger is empty (would zero every row).
+- `mirrorStageCountersFromResults` (exported from `lib/keitaro/poll.ts`) runs after BOTH the click upsert and the conversion projection, so `campaign_stages.checkout_click_count` never lags a tick.
+
+Checks: `scripts/test-stage-day-conversions.ts` (camman-v2 only, rolled back, 15).
+
 ## Not built yet
 
-- **Bug-2 PR:** `keitaro_stage_results` conversion side aggregated from the ledger by `occurred_at`, not Keitaro's moving `datetime`.
-- **Phase 3:** readers switch.
-  - `purchasedClause` → purchase events in `pending`/`approved`
-  - revenue and EPC → `counts_revenue` and `approved` only, with pending revenue as its own column
+- **Phase 3 remaining:** revenue and EPC → `counts_revenue` and `approved` only, with pending revenue as its own column (Task 6).
 - **Phase 4:** Registered lane (tier 3; converted becomes 4; CHECK widened then).
 - **Phase 5:** per-event report columns.

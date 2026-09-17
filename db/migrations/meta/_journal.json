@@ -1275,6 +1275,13 @@
       "when": 1792022400000,
       "tag": "0181_conversion_events",
       "breakpoints": true
+    },
+    {
+      "idx": 182,
+      "version": "7",
+      "when": 1792108800000,
+      "tag": "0182_conversion_reader_switch",
+      "breakpoints": true
     }
   ]
 }

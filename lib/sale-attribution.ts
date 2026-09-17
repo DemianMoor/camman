@@ -1,31 +1,127 @@
 import { sql, type SQL } from "drizzle-orm";
 
-// SINGLE SOURCE OF TRUTH for "this recipient bought" as read off a stage_sends
-// row. Every consumer that asks "is this contact a buyer?" MUST go through
-// `purchasedClause` so the answer can't drift between reporting and targeting.
+// SINGLE SOURCE OF TRUTH for "this recipient bought", "this revenue counts",
+// "this revenue is still pending" and "this is a retarget signal (registration)".
+// Every consumer MUST come through here so the answer cannot drift between
+// targeting and reporting.
 //
-// WHY THIS ISN'T `sale_status = 'sale'`:
-// `stage_sends.sale_status` stores the affiliate network's RAW Keitaro postback
-// status, verbatim. This account's network fires `lead`-status postbacks for
-// PAID conversions — it effectively never sends `sale` (confirmed via a direct
-// probe 2026-06-19; the only two `sale` rows org-wide came from a single stage
-// on 2026-06-24). So a `= 'sale'` test finds essentially nobody, even though
-// every one of those `lead` rows carries real payout revenue.
+// THE SOURCE IS THE LEDGER, NOT stage_sends (Phase 3, 2026-09-17).
+// `conversion_events` (migration 0181) holds ONE ROW PER KEITARO CONVERSION, so
+// a click can carry a $0 registration and a paid purchase at the same time.
+// `stage_sends.sale_status` could only ever hold ONE conversion per recipient —
+// latest `datetime` wins — which meant a registration arriving after a purchase
+// overwrote the purchase (measured: 14 recipients, $715 lost) and a registration
+// arriving as `lead` made the contact read as a BUYER: tier 3, a buyer in the
+// segment rules, its drip journey closed as purchased, dropped from every lane.
 //
-// Both reporting surfaces already count any non-rejected conversion as a sale:
-//   lib/keitaro/poll.ts       → `agg.sales += 1` for EVERY conversion row
-//   lib/reporting/rollup.ts   → `(ss.converted_at IS NOT NULL)::int AS sale`
-// The segment rules and the campaign-tier converted lane used `= 'sale'` and so
-// disagreed with the Sales figure on every report (835 buyers vs 2). This clause
-// is the reconciliation.
+// The alias these predicates take is a `conversion_events` row (default "ce"),
+// NOT a `stage_sends` row. Call sites select FROM the ledger. That is deliberate:
+//   • the ledger's indexes (contact_id, event_type_id) and
+//     (campaign_id, event_type_id, contact_id) answer the targeting questions
+//     from a handful of rows, where an EXISTS per recipient would probe once per
+//     send row of a campaign;
+//   • the two report matviews cannot import TypeScript, so they carry the same
+//     predicate text literally — one definition, copied, and
+//     scripts/verify-conversion-reader-switch.ts asserts the copies agree.
 //
-// `rejected` is deliberately NOT a purchase — it's a refund / chargeback /
-// fraud screen, i.e. a conversion that was taken back.
+// docs/04-features/conversion-events.md · docs/04-features/epc-denominator.md
+
+// A conversion that has not been taken back. `rejected` is deliberately NOT
+// counted — it is a refund / chargeback / fraud screen. `pending` IS counted for
+// PURCHASE (a held purchase is still a purchase for targeting and for the Sales
+// count) but NOT for revenue (see approvedRevenueClause).
+export const COUNTED_CONVERSION_STATUSES = ["pending", "approved"] as const;
+
+// The event-type flag sets, as SQL. Deliberately NOT a cached id set in TS:
+// the matviews need the predicate as pure SQL, event_types holds 2 rows per org
+// (the subplan is hashed once), a cache would need an org context the cross-org
+// readers don't have, and turning the set into a JS array is the forbidden
+// interpolation pattern. There is no `status = 'active'` filter — archiving an
+// event type must never retroactively erase its history from revenue.
+export const PURCHASE_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types et WHERE et.is_purchase)`;
+export const REVENUE_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types et WHERE et.counts_revenue)`;
+export const RETARGET_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types et WHERE et.is_retarget_signal)`;
+
+/** A counted PURCHASE event on the aliased conversion_events row. */
+export function purchasedClause(alias = "ce"): SQL {
+  const a = sql.raw(alias);
+  return sql`${a}.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS} AND ${a}.status IN ('pending', 'approved')`;
+}
+
+/** Revenue that counts toward Revenue / EPC: approved only. */
+export function approvedRevenueClause(alias = "ce"): SQL {
+  const a = sql.raw(alias);
+  return sql`${a}.event_type_id IN ${REVENUE_EVENT_TYPE_IDS} AND ${a}.status = 'approved'`;
+}
+
+/**
+ * Revenue that is NOT yet approved. A SEPARATE figure — never added into
+ * revenue, never in EPC, never in profit/ROI.
+ */
+export function pendingRevenueClause(alias = "ce"): SQL {
+  const a = sql.raw(alias);
+  return sql`${a}.event_type_id IN ${REVENUE_EVENT_TYPE_IDS} AND ${a}.status = 'pending'`;
+}
+
+/**
+ * A retarget signal (today: Registration). Feeds the Phase 4 "Registered — not
+ * purchased" lane and the registration columns Phase 5 adds. Zero rows today.
+ */
+export function registeredClause(alias = "ce"): SQL {
+  const a = sql.raw(alias);
+  return sql`${a}.event_type_id IN ${RETARGET_EVENT_TYPE_IDS} AND ${a}.status IN ('pending', 'approved')`;
+}
+
+/**
+ * The recipient rows that carry a counted purchase, as a set to JOIN against.
+ * For readers that scan stage_sends wholesale (operator pools, the by-group
+ * weights, the rollup): a hash join against ~1.5K ledger rows, instead of an
+ * EXISTS probe per send row.
+ */
+export function purchasedSendIds(orgId: string): SQL {
+  return sql`
+    SELECT DISTINCT ce.stage_send_id
+    FROM conversion_events ce
+    WHERE ce.org_id = ${orgId}::uuid
+      AND ce.stage_send_id IS NOT NULL
+      AND ${purchasedClause()}`;
+}
+
+/**
+ * The Rule F rescue set (lib/reporting/counted-clickers.ts): every recipient
+ * whose conversion could put revenue in the EPC numerator, so the numerator can
+ * never sit outside the click denominator. Purchase OR revenue-bearing, not
+ * rejected. `first_event_at` is the fallback first-click stamp for a rescued row.
+ * `window` narrows the scan on the incremental pass.
+ */
+export function rescueSendIds(orgId: string, window: SQL = sql``): SQL {
+  return sql`
+    SELECT ce.stage_send_id, min(ce.occurred_at) AS first_event_at
+    FROM conversion_events ce
+    WHERE ce.org_id = ${orgId}::uuid
+      AND ce.stage_send_id IS NOT NULL
+      AND ce.status IN ('pending', 'approved')
+      AND (ce.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS}
+           OR ce.event_type_id IN ${REVENUE_EVENT_TYPE_IDS})
+      ${window}
+    GROUP BY 1`;
+}
+
+// ── legacy, frozen ──────────────────────────────────────────────────────────
+// The pre-ledger definition, kept for ONE purpose: the proof script computes the
+// OLD number next to the new one (scripts/verify-conversion-reader-switch.ts),
+// and the compat scripts that still assert on the projection columns
+// (verify-keitaro-batch-update, smoke-prod-purchase-rule) read it.
+//
+// DO NOT use it in app code. `stage_sends.sale_status` holds the affiliate
+// network's raw Keitaro status for the LATEST conversion only; this account's
+// networks fire `lead`-status postbacks for paid conversions, which is why the
+// test is a status list and not `= 'sale'` (that found 2 buyers where the truth
+// was ~835). The columns keep being written by lib/keitaro/poll-conversions.ts
+// until a later card drops them.
 export const PURCHASE_SALE_STATUSES = ["lead", "sale"] as const;
 
-// Predicate for ONE stage_sends row, qualified by its table alias. Stays
-// sargable against the partial index `stage_sends_sale_status_idx`
-// (WHERE sale_status IS NOT NULL), so no migration is needed.
-export function purchasedClause(alias = "ss"): SQL {
-  return sql`${sql.raw(alias)}.sale_status IN ('lead', 'sale')`;
+export function legacySaleStatusPurchasedClause(alias = "ss"): SQL {
+  const a = sql.raw(alias);
+  return sql`${a}.sale_status IN ('lead', 'sale')`;
 }

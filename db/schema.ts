@@ -2582,6 +2582,13 @@ export const keitaro_stage_results = pgTable(
       precision: 12,
       scale: 4,
     }),
+    // Migration 0182. Revenue above is APPROVED-only; this is the same money in
+    // lifecycle status `pending` (a held conversion). A SEPARATE figure: never
+    // summed into revenue, never in EPC, ROI or profit. Written by
+    // lib/keitaro/stage-day-conversions.ts from the conversion_events ledger.
+    pending_revenue: numeric("pending_revenue", { precision: 12, scale: 4 })
+      .notNull()
+      .default("0"),
     // ALWAYS 0 — DO NOT USE for ROI/EPC/profit. This is Keitaro ad-platform
     // spend, which is meaningless here: we don't buy traffic through Keitaro,
     // so every synced row carries cost 0. The real cost of a stage is the SMS

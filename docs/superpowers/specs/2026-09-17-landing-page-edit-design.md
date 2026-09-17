@@ -123,9 +123,10 @@ Inside the existing transaction, after loading `existing`:
 3. Write: `title` if supplied; `kind`, `slug`, `external_url` from the
    resolver; `is_default` / `status` as today; `updated_at = now()`.
 
-`API_ERROR_CODES` gains `LANDING_PAGE_IN_USE = "landing_page_in_use"` (reuse
-`LANDING_PAGE_INVALID_CODE` from `lib/api/landing-page-guard.ts` for the brand
-refusal).
+`LANDING_PAGE_IN_USE_CODE = "landing_page_in_use"` lives in the pure
+`lib/landing-page-edit.ts` so the client panel can import it without pulling in
+drizzle (the sibling `LANDING_PAGE_INVALID_CODE` in
+`lib/api/landing-page-guard.ts` is reused for the brand refusal).
 
 ### Impact helper — `lib/api/landing-page-impact.ts`
 

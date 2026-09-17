@@ -34,8 +34,14 @@ export const offerLandingPageCreateSchema = z
     z.object({ kind: z.literal("external_url"), external_url: externalUrlSchema, slug: z.undefined().optional(), ...base }),
   ]);
 
+// `kind` is editable. Which value the target kind needs (and that the other is
+// absent) is a cross-field rule against the EXISTING row, so it lives in
+// lib/landing-page-edit.ts, not here. `confirm` acknowledges that a destination
+// edit reaches stages still using the page (409 landing_page_in_use otherwise).
 export const offerLandingPageUpdateSchema = z.object({
   title: z.string().trim().min(1).max(160).optional(),
+  kind: z.enum(["slug", "external_url"]).optional(),
+  confirm: z.boolean().optional(),
   slug: slugSchema.optional(),
   external_url: externalUrlSchema.optional(),
   is_default: z.boolean().optional(),

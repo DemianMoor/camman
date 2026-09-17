@@ -182,11 +182,11 @@ const b7 = buildConversionEventRows(
 );
 check("B7 two conversions on one click → two rows", b7.rows.length === 2 && b7.rows[0].keitaroEventId !== b7.rows[1].keitaroEventId);
 
-// Truncation guard (user requirement 2026-09-17): a page carrying fewer rows than
-// its own `total` must never be handed back as a complete window. fetch is
-// stubbed — no network.
+// Fetch guard (user requirement 2026-09-17): a page carrying fewer rows than
+// its own `total`, or a 200 that isn't JSON with a rows array + numeric total,
+// must never be handed back as a complete window. fetch is stubbed — no network.
 async function fetchGuardChecks() {
-  console.log("\nfetch truncation guard");
+  console.log("\nfetch guard (truncated / malformed)");
   const realFetch = globalThis.fetch;
   const realKey = process.env.KEITARO_API_KEY;
   process.env.KEITARO_API_KEY = "test-key";
@@ -209,6 +209,21 @@ async function fetchGuardChecks() {
     stub({ rows: [{ event_id: "a" }, { event_id: "b" }], total: 2 });
     const whole = await fetchKeitaroConversionLedger(range);
     check("F2 complete page (rows = total) → ok with every row", whole.ok && whole.rows.length === 2 && whole.total === 2, JSON.stringify(whole));
+
+    // A 200 that isn't a well-formed page must not pass as an empty window.
+    stub({ rows: [] });
+    const noTotal = await fetchKeitaroConversionLedger(range);
+    check("F3 body without a total → not ok, 0 rows", !noTotal.ok && noTotal.rows.length === 0, JSON.stringify(noTotal));
+    globalThis.fetch = (async () =>
+      new Response("<html>challenge</html>", { status: 200, headers: { "Content-Type": "text/html" } })) as typeof fetch;
+    const html = await fetchKeitaroConversionLedger(range);
+    check("F4 200 HTML body (bot challenge) → not ok, 0 rows", !html.ok && html.rows.length === 0 && (html.error ?? "").includes("malformed"), JSON.stringify(html));
+    stub({ rows: "x", total: 0 });
+    const notArray = await fetchKeitaroConversionLedger(range);
+    check("F5 rows is not an array → not ok, 0 rows", !notArray.ok && notArray.rows.length === 0, JSON.stringify(notArray));
+    stub({ rows: [], total: 0 });
+    const empty = await fetchKeitaroConversionLedger(range);
+    check("F6 complete empty window (rows [], total 0) → ok with 0 rows", empty.ok && empty.rows.length === 0 && empty.total === 0 && empty.error === null, JSON.stringify(empty));
 
     // Ingest must refuse a truncated window before touching the database.
     stub({ rows: [{ event_id: "a" }], total: 2 });

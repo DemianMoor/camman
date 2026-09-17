@@ -271,7 +271,9 @@ export interface KeitaroLedgerResult {
   error: string | null;
 }
 
-// Same never-throw contract as fetchKeitaroConversions. Fails (ok:false) when the
+// Same never-throw contract as fetchKeitaroConversions. Fails (ok:false) unless the
+// body is JSON with a `rows` array AND a numeric `total` (a 200 HTML bot challenge,
+// a missing total or a non-array rows is not an empty window), and when the
 // response carries fewer rows than its own `total` — a truncated page must never
 // be ingested as if it were the whole window.
 export async function fetchKeitaroConversionLedger(
@@ -302,12 +304,25 @@ export async function fetchKeitaroConversionLedger(
       };
     }
 
-    const body = (await res.json().catch(() => null)) as
-      | { rows?: unknown; total?: unknown }
-      | null;
-    const rows = Array.isArray(body?.rows) ? (body.rows as KeitaroReportRow[]) : [];
-    const total = typeof body?.total === "number" ? body.total : null;
-    if (total !== null && rows.length < total) {
+    const text = await res.text().catch(() => "");
+    let body: { rows?: unknown; total?: unknown } | null = null;
+    try {
+      body = JSON.parse(text) as { rows?: unknown; total?: unknown } | null;
+    } catch {
+      body = null;
+    }
+    if (!body || !Array.isArray(body.rows) || typeof body.total !== "number") {
+      return {
+        ok: false,
+        status: res.status,
+        rows: [],
+        total: null,
+        error: `Keitaro conversions/log malformed response (expected JSON with a rows array and a numeric total): ${text.slice(0, 200)}`,
+      };
+    }
+    const rows = body.rows as KeitaroReportRow[];
+    const total = body.total;
+    if (rows.length < total) {
       return {
         ok: false,
         status: res.status,

@@ -12,6 +12,7 @@ import {
   type MappingRule,
 } from "../lib/conversions/build-rows";
 import type { LedgerSourceRow } from "../lib/conversions/keitaro-row";
+import { ingestKeitaroConversions } from "../lib/conversions/ingest";
 import { fetchKeitaroConversionLedger } from "../lib/keitaro/client";
 
 let passed = 0;
@@ -208,6 +209,32 @@ async function fetchGuardChecks() {
     stub({ rows: [{ event_id: "a" }, { event_id: "b" }], total: 2 });
     const whole = await fetchKeitaroConversionLedger(range);
     check("F2 complete page (rows = total) → ok with every row", whole.ok && whole.rows.length === 2 && whole.total === 2, JSON.stringify(whole));
+
+    // Ingest must refuse a truncated window before touching the database.
+    stub({ rows: [{ event_id: "a" }], total: 2 });
+    const ingTrunc = await ingestKeitaroConversions({} as never, { range });
+    check(
+      "I1 truncated window → ingest not ok, nothing parsed or written, error names the truncation",
+      !ingTrunc.ok && ingTrunc.rows === 0 && ingTrunc.inserted === 0 && ingTrunc.updated === 0 && (ingTrunc.error ?? "").includes("truncated"),
+      JSON.stringify(ingTrunc),
+    );
+
+    // Unparseable rows are counted and sampled.
+    stub({
+      rows: [
+        { event_id: "", datetime: "2026-09-01 10:00:00", status: "lead", conversion_type: "Lead", revenue: 0 },
+        { event_id: "bad-dt", datetime: "2026-09-01T10:00:00Z", status: "lead", conversion_type: "Lead", revenue: 0 },
+        { event_id: "no-type", datetime: "2026-09-01 10:00:00", status: "lead", revenue: 0 },
+      ],
+      total: 3,
+    });
+    const ingInvalid = await ingestKeitaroConversions({} as never, { range });
+    check(
+      "I2 unparseable rows are counted and sampled, never silently dropped",
+      ingInvalid.ok && ingInvalid.invalid === 3 && ingInvalid.invalidSamples.length === 3 && ingInvalid.rows === 0 &&
+        ingInvalid.invalidSamples.some((s) => s.includes("event_id=bad-dt")),
+      JSON.stringify(ingInvalid),
+    );
   } finally {
     globalThis.fetch = realFetch;
     if (realKey === undefined) delete process.env.KEITARO_API_KEY;
@@ -215,7 +242,12 @@ async function fetchGuardChecks() {
   }
 }
 
-fetchGuardChecks().then(() => {
-  console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
-});
+fetchGuardChecks()
+  .then(() => {
+    console.log(`\n${passed} passed, ${failed} failed`);
+    process.exit(failed > 0 ? 1 : 0);
+  })
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });

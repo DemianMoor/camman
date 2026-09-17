@@ -144,13 +144,21 @@ async function main() {
         { ...reg, keitaroVersion: 4, keitaroStatus: "rejected", keitaroType: "rejected", eventTypeId: null, status: "rejected" },
       ]);
       const c2 = await rowOf(tx, reg.keitaroEventId);
-      check("U12 a later status-only update does NOT clear the conflict", c2?.conflicting_event_type_id === purchase && c2?.has_conflict_at === true, JSON.stringify(c2));
+      check("U12 a later status-only update does NOT clear the conflict", r.updated === 1 && c2?.status === "rejected" && c2?.conflicting_event_type_id === purchase && c2?.has_conflict_at === true, JSON.stringify({ r, c2 }));
 
       r = await upsertConversionEvents(tx, [
         { ...reg, keitaroVersion: 5, keitaroStatus: "registration", keitaroType: "registration", eventTypeId: registration, status: "approved" },
       ]);
       const c3 = await rowOf(tx, reg.keitaroEventId);
       check("U13 an agreeing mapping clears the conflict", r.conflicts === 0 && c3?.conflicting_event_type_id === null && c3?.has_conflict_at === false, JSON.stringify({ r, c3 }));
+
+      // Fix 1: a direct caller passing the same event twice must not hit Postgres 21000.
+      r = await upsertConversionEvents(tx, [
+        { ...buy, keitaroVersion: 9, revenue: "111.0000" },
+        { ...buy, keitaroVersion: 10, revenue: "112.0000" },
+      ]);
+      const d = await tx.execute(sql`SELECT revenue::text AS revenue, keitaro_version FROM conversion_events WHERE keitaro_event_id = ${buy.keitaroEventId}`) as unknown as { revenue: string; keitaro_version: number }[];
+      check("U14 duplicate event ids in one call are collapsed (last wins), no 21000", r.updated === 1 && d[0]?.keitaro_version === 10 && d[0]?.revenue === "112.0000", JSON.stringify({ r, d }));
 
       throw new Rollback();
     });

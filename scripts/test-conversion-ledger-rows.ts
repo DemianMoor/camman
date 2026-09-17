@@ -235,6 +235,8 @@ async function fetchGuardChecks() {
         ingInvalid.invalidSamples.some((s) => s.includes("event_id=bad-dt")),
       JSON.stringify(ingInvalid),
     );
+
+    check("I3 empty event_id renders as ∅ in samples", ingInvalid.invalidSamples.some((s) => s.startsWith("event_id=∅ ")), JSON.stringify(ingInvalid.invalidSamples));
   } finally {
     globalThis.fetch = realFetch;
     if (realKey === undefined) delete process.env.KEITARO_API_KEY;

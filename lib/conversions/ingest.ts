@@ -25,7 +25,8 @@ export type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LOOKUP_CHUNK = 1000;
-// 21 bound columns per row ⇒ 500 rows ≈ 10.5K params, far under Postgres's 65,535.
+// 23 bound columns per row (the two timestamps each bind the ET string plus
+// CAMPAIGN_TIMEZONE) ⇒ 500 rows ≈ 11.5K params, far under Postgres's 65,535.
 const UPSERT_CHUNK = 500;
 
 function chunks<T>(xs: readonly T[], n: number): T[][] {
@@ -205,10 +206,13 @@ export async function upsertConversionEvents(
   ex: Executor,
   rows: readonly ConversionEventInsert[],
 ): Promise<{ inserted: number; updated: number; conflicts: number }> {
+  // Same event_id twice in one call would hit Postgres 21000 ("ON CONFLICT DO
+  // UPDATE command cannot affect row a second time"); last occurrence wins.
+  const deduped = [...new Map(rows.map((r) => [r.keitaroEventId, r])).values()];
   let inserted = 0;
   let updated = 0;
   let conflicts = 0;
-  for (const chunk of chunks(rows, UPSERT_CHUNK)) {
+  for (const chunk of chunks(deduped, UPSERT_CHUNK)) {
     const existing = new Set(
       (
         await ex
@@ -250,7 +254,8 @@ export async function upsertConversionEvents(
           conversion_events.keitaro_type, conversion_events.status,
           conversion_events.revenue, conversion_events.event_type_id,
           conversion_events.conflicting_event_type_id, conversion_events.offer_id,
-          conversion_events.stage_id, conversion_events.last_postback_at
+          conversion_events.stage_id, conversion_events.last_postback_at,
+          conversion_events.stage_send_id, conversion_events.contact_id, conversion_events.campaign_id
         ) IS DISTINCT FROM (
           excluded.keitaro_version, excluded.keitaro_status,
           excluded.keitaro_type, excluded.status,
@@ -259,7 +264,10 @@ export async function upsertConversionEvents(
           ${CONFLICTING_EVENT_TYPE},
           COALESCE(conversion_events.offer_id, excluded.offer_id),
           COALESCE(conversion_events.stage_id, excluded.stage_id),
-          excluded.last_postback_at
+          excluded.last_postback_at,
+          COALESCE(conversion_events.stage_send_id, excluded.stage_send_id),
+          COALESCE(conversion_events.contact_id, excluded.contact_id),
+          COALESCE(conversion_events.campaign_id, excluded.campaign_id)
         )`,
       })
       .returning({
@@ -287,6 +295,14 @@ export interface IngestResult {
   unresolved: number;
   unresolvedSamples: string[];
   rows: number;
+  // Rows in this batch whose `status` is NULL — no mapping matched the
+  // incoming Keitaro type at all. A status-only mapping (event type NULL,
+  // status set — e.g. the seeded PsychoBook `rejected` rule) is NOT counted:
+  // on an update it inherits the row's already-locked event type via
+  // COALESCE, so the row isn't unmapped. A brand-new row first seen through a
+  // status-only mapping IS unmapped in the table, but that case is caught by
+  // table-level checks (the backfill and verify scripts query the table), not
+  // by this batch count.
   unmappedInBatch: number;
   inserted: number;
   updated: number;
@@ -345,13 +361,13 @@ export async function ingestKeitaroConversions(
     invalid: invalidRows.length,
     invalidSamples: invalidRows
       .slice(0, 10)
-      .map((r) => `event_id=${String(r.event_id ?? "∅")} conversion_type=${String(r.conversion_type ?? "∅")} datetime=${String(r.datetime ?? "∅")} revenue=${String(r.revenue ?? "∅")}`),
+      .map((r) => `event_id=${String(r.event_id || "∅")} conversion_type=${String(r.conversion_type || "∅")} datetime=${String(r.datetime || "∅")} revenue=${String(r.revenue ?? "∅")}`),
     unresolved: built.unresolved.length,
     unresolvedSamples: built.unresolved
       .slice(0, 10)
       .map((s) => `${s.eventId} sub_id_3=${s.subId3 ?? "∅"} keitaro_offer=${s.keitaroOfferId ?? "∅"} type=${s.keitaroType}`),
     rows: rows.length,
-    unmappedInBatch: rows.filter((r) => r.eventTypeId === null || r.status === null).length,
+    unmappedInBatch: rows.filter((r) => r.status === null).length,
   };
   if (dryRun || rows.length === 0) return result;
 

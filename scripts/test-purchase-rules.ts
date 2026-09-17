@@ -10,17 +10,32 @@ import postgres from "postgres";
 import { contacts, segments } from "../db/schema";
 import { seedConversionEvent } from "./_conversion-fixture";
 
-// Purchase-rule test suite (segment engagement Level 3).
+// Purchase-rule test suite (segment engagement Level 3) — over the HTTP API.
 //
-// Exercises the three made_purchase_* rule types against directly-seeded
-// stage_sends rows. Two things this suite is specifically here to prove:
-//   1. EMPTY-DATA CASE — with zero sales, a made_purchase rule resolves to
+// ⚠️ NEEDS A RUNNING APP AND A SUPABASE ANON KEY FOR THE TARGET PROJECT. The
+// preview project (camman-v2) has no NEXT_PUBLIC_SUPABASE_ANON_KEY available
+// locally, so this suite cannot be run there; the same rules are exercised with
+// no HTTP by scripts/test-segment-purchase-rules-db.ts, which is the script to
+// run and to extend for rule semantics.
+//
+// Exercises the three made_purchase_* rule types against directly-seeded rows.
+// Two things this suite is specifically here to prove:
+//   1. EMPTY-DATA CASE — with no conversions, a made_purchase rule resolves to
 //      manual membership only (preview = manual_count). An empty preview is
 //      "no buyers yet", NOT a bug.
-//   2. A PAID conversion counts — 'lead' AND 'sale' both do, because the
-//      network pays out on 'lead' postbacks (lib/sale-attribution.ts).
-//      'rejected' (refund/chargeback) and NULL never do.
+//   2. ⭐ A BUYER IS A COUNTED PURCHASE EVENT IN THE conversion_events LEDGER,
+//      not a stage_sends.sale_status value. The old "'lead' AND 'sale' both
+//      count" guarantee now lives in `conversion_event_mappings`, which maps a
+//      Keitaro conversion type to (event type, status); lib/sale-attribution.ts
+//      then decides which of those count. A 'rejected' conversion and a
+//      registration never do.
 // Plus brand/offer scoping mirrors the clicker rules.
+//
+// ⭐ THE FIXTURES WRITE ONE SIDE AT A TIME. Seeding sale_status and the ledger
+// row together on the same contact makes every bar pass under the old reader
+// too, so the suite would say nothing about the switch. ext0 is ledger-only,
+// ext3 is legacy-only, ext6 is a rejected ledger purchase and ext7 is a
+// registration; see the PHASE 2 table below for the arithmetic.
 
 async function main() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -94,7 +109,7 @@ async function main() {
   const manualPhones = [0, 1, 2, 3, 4].map(
     (i) => `+1213710${String(base + i).padStart(4, "0")}`,
   );
-  const externalPhones = [0, 1, 2, 3, 4, 5].map(
+  const externalPhones = [0, 1, 2, 3, 4, 5, 6, 7].map(
     (i) => `+1213810${String(base + i).padStart(4, "0")}`,
   );
 
@@ -296,14 +311,24 @@ async function main() {
     await deleteRule(seg.id, e3);
 
     // ====================================================================
-    // PHASE 2 — SEED SALES. Two campaigns (brand A / offer A, brand B /
-    // offer B), one stage each, and stage_sends rows with mixed statuses:
-    //   Brand A / Offer A:
-    //     ext0 = 'sale', ext1 = 'sale', man0 = 'sale'  (3 buyers, 1 manual)
-    //     ext2 = 'lead'  (a PAID conversion — MUST count)
-    //     ext3 = 'rejected', ext4 = NULL (must NOT count)
+    // PHASE 2 — SEED CONVERSIONS. Two campaigns (brand A / offer A, brand B /
+    // offer B), one stage each. Each row writes the LEDGER, the LEGACY column,
+    // or both — never "both" for a control:
+    //   Brand A / Offer A:                                     buyer?  why
+    //     ext0  ledger purchase approved, sale_status NULL       YES  ⭐ ledger-only
+    //     ext1  'sale'   + ledger purchase approved              YES   realistic pair
+    //     ext2  'lead'   + ledger purchase approved              YES   realistic pair
+    //     man0  'sale'   + ledger purchase approved              YES   also a manual member
+    //     ext3  'lead' + converted_at, NO ledger row             no   ⭐ legacy-only
+    //     ext4  nothing at all                                   no    baseline
+    //     ext6  ledger purchase status 'rejected'                no   ⭐ refund
+    //     ext7  ledger REGISTRATION + a legacy 'lead' row        no   ⭐ $0 signup
     //   Brand B / Offer B:
-    //     ext5 = 'sale'  (scoping check)
+    //     ext5  'sale'   + ledger purchase approved              YES   scoping check
+    //
+    // Buyers = {ext0, ext1, ext2, man0, ext5}. Under the PRE-SWITCH reader
+    // (sale_status IN ('lead','sale')) they would be {ext1, ext2, ext3, ext7,
+    // man0, ext5} — so P1 below reads 9 now and would read 10 then.
     // ====================================================================
     async function seedCampaignStage(
       brandId: number,
@@ -326,65 +351,93 @@ async function main() {
       return { campaignId, stageId: stageRows[0].id };
     }
 
+    type LedgerSpec = {
+      eventKey: "purchase" | "registration";
+      status: "pending" | "approved" | "rejected";
+    } | null;
     async function seedSend(
       campaignId: number,
       stageId: number,
       phone: string,
       saleStatus: string | null,
+      // ⭐ SEPARATE from saleStatus on purpose. `undefined` keeps the realistic
+      // pairing (a paid 'lead'/'sale' postback also lands an approved purchase
+      // in the ledger); passing it explicitly lets a control write ONE side.
+      ledger?: LedgerSpec,
     ) {
+      const legacyPaid = saleStatus === "lead" || saleStatus === "sale";
       const sendRows = (await db.execute(drizzleSql`
         INSERT INTO stage_sends
           (org_id, campaign_id, stage_id, contact_id, phone,
-           rendered_text, status, sale_status)
+           rendered_text, status, sale_status, sale_revenue, converted_at)
         VALUES
           (${orgId}::uuid, ${campaignId}::int, ${stageId}::int,
            ${idByPhone.get(phone)!}::uuid, ${phone}, ${"test body"}, 'sent',
-           ${saleStatus})
+           ${saleStatus},
+           ${saleStatus === null ? null : "100.0000"}::numeric,
+           ${saleStatus === null ? drizzleSql`NULL` : drizzleSql`now()`})
         RETURNING id::text AS id
       `)) as unknown as { id: string }[];
-      if (saleStatus === "lead" || saleStatus === "sale") {
+      const spec: LedgerSpec =
+        ledger === undefined
+          ? legacyPaid
+            ? { eventKey: "purchase", status: "approved" }
+            : null
+          : ledger;
+      if (spec) {
         await seedConversionEvent(db, {
           orgId,
           stageSendId: sendRows[0].id,
           contactId: idByPhone.get(phone)!,
           campaignId,
           stageId,
-          eventKey: "purchase",
-          status: "approved",
-          revenue: 100,
-          keitaroType: saleStatus,
+          eventKey: spec.eventKey,
+          status: spec.status,
+          revenue: spec.eventKey === "registration" ? 0 : 100,
+          keitaroType: legacyPaid ? (saleStatus as string) : undefined,
         });
       }
     }
 
     const campA = await seedCampaignStage(brandAId, offerAId, "a");
-    await seedSend(campA.campaignId, campA.stageId, externalPhones[0], "sale");
+    // ⭐ ledger-only: no sale_status at all, an approved purchase in the ledger.
+    await seedSend(campA.campaignId, campA.stageId, externalPhones[0], null, {
+      eventKey: "purchase",
+      status: "approved",
+    });
     await seedSend(campA.campaignId, campA.stageId, externalPhones[1], "sale");
     await seedSend(campA.campaignId, campA.stageId, manualPhones[0], "sale");
     await seedSend(campA.campaignId, campA.stageId, externalPhones[2], "lead");
-    await seedSend(
-      campA.campaignId,
-      campA.stageId,
-      externalPhones[3],
-      "rejected",
-    );
+    // ⭐ legacy-only: the projection column says 'lead', the ledger says nothing.
+    await seedSend(campA.campaignId, campA.stageId, externalPhones[3], "lead", null);
     await seedSend(campA.campaignId, campA.stageId, externalPhones[4], null);
+    // ⭐ a refund and a $0 signup — neither is a purchase.
+    await seedSend(campA.campaignId, campA.stageId, externalPhones[6], null, {
+      eventKey: "purchase",
+      status: "rejected",
+    });
+    await seedSend(campA.campaignId, campA.stageId, externalPhones[7], "lead", {
+      eventKey: "registration",
+      status: "approved",
+    });
 
     const campB = await seedCampaignStage(brandBId, offerBId, "b");
     await seedSend(campB.campaignId, campB.stageId, externalPhones[5], "sale");
 
-    // Buyers across the org: ext0, ext1, man0 (brand A) + ext5 (brand B) = 4
-    // distinct, 1 of which (man0) is already a manual member.
+    // Buyers across the org: ext0, ext1, ext2, man0 (brand A) + ext5 (brand B)
+    // = 5 distinct, 1 of which (man0) is already a manual member.
     console.log(
       "\n[P1] made_purchase (any): manual(5) ∪ buyers{ext0,ext1,ext2,man0,ext5} = 9",
     );
     const p1 = await createRule(seg.id, "made_purchase", null);
     const p1Count = await previewCount(seg.id);
-    // If 'rejected'/NULL leaked in, ext3/ext4 would push this to 11.
+    // ⭐ 9 only if the LEDGER is the source. The pre-switch reader counts ext3
+    // (legacy-only) and ext7 (a registration that arrived as a 'lead') and
+    // misses ext0 (ledger-only), which gives 10.
     check(
-      "[P1] count = 9 (lead+sale both count — rejected/NULL excluded)",
+      "[P1] count = 9 (a counted ledger purchase; legacy-only, rejected and registration excluded)",
       p1Count === 9,
-      `got ${p1Count}`,
+      `got ${p1Count} — 10 means the rule is still reading stage_sends.sale_status`,
     );
 
     // Inversion invariant for is_not: |is| + |is_not| = totalOrg + manual.

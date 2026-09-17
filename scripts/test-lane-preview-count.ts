@@ -21,7 +21,7 @@ const ORG_MARKER = "__LANE_PREVIEW_TEST__";
 const COUNTED_TABLES = [
   "organizations", "brands", "contacts", "campaigns", "campaign_stages",
   "campaign_audience_pool", "stage_sends", "links", "clicks", "opt_outs",
-  "short_domains", "link_destinations",
+  "short_domains", "link_destinations", "conversion_events", "event_types",
 ] as const;
 
 async function main() {

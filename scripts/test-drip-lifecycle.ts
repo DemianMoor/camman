@@ -14,11 +14,20 @@ import { seedConversionEvent } from "./_conversion-fixture";
 
 // Drip journey lifecycle (Drip Phase 6) — the check Phase 5 failed.
 //
-// ⭐ THE CONVERTED CASE USES sale_status = 'lead', NOT 'sale', AND THAT IS THE
-// WHOLE POINT. This account's network fires `lead`-status postbacks for paid
-// conversions and effectively never sends `sale`; an `= 'sale'` test once found
-// 2 buyers where the truth was ~835. A lifecycle test that closed on 'sale'
-// would pass here and close almost nothing in production.
+// ⭐ THE CONVERTED CASE CLOSES ON A COUNTED PURCHASE EVENT IN THE
+// conversion_events LEDGER, NOT ON stage_sends.sale_status, AND THAT IS THE
+// WHOLE POINT. Which Keitaro status carried the conversion is now irrelevant to
+// the close: the mapping in `conversion_event_mappings` decides what a 'lead'
+// postback means, and lib/sale-attribution.ts decides which event types and
+// statuses count. (That mapping is where the old "'lead' AND 'sale' both count"
+// rule went — this account's network pays out on `lead` postbacks, and an
+// `= 'sale'` test once found 2 buyers where the truth was ~835.)
+//
+// ⭐ SO SECTION 2 CARRIES TWO ONE-SIDED CONTROLS. A fixture that writes the
+// ledger row AND sale_status together closes under either source and proves
+// nothing about the switch:
+//   ledger-only (purchase pending, sale_status NULL)   ⇒ MUST close
+//   legacy-only (sale_status 'lead', no ledger row)    ⇒ MUST NOT close
 //
 // ⭐ AND THE REAL ASSERTION IS THAT THE SLOT IS FREED, not that a string
 // changed. drip_journeys_one_live_per_contact_uniq keys on
@@ -185,6 +194,45 @@ async function main() {
       check("⭐ a 'rejected' conversion is NOT a purchase",
             (await closeJourneysOnPurchase(tx, { orgId, campaignId: campId })).closed, 0);
       check("...and that journey is still live", (await state(c.jid)).state, "active");
+
+      // ── 2b. ⭐ the two ONE-SIDED source controls ───────────────────────────
+      // h: the ledger alone says "bought" — sale_status stays NULL. Under the
+      // old stage_sends reader this journey never closes.
+      console.log("\n2b. ⭐ ledger vs legacy source controls:");
+      const hLedger = await newJourney("+19987" + sfx);
+      const hSend = (await tx.execute(sql`
+        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                 rendered_text, status, sale_status, sent_at, created_at)
+        VALUES (${orgId}, ${campId}, ${parentId}, ${hLedger.cid}, ${"+19987" + sfx},
+                'probe', 'sent', NULL, now(), now())
+        RETURNING id::text AS id`)) as unknown as { id: string }[];
+      await seedConversionEvent(tx, {
+        orgId,
+        stageSendId: hSend[0].id,
+        contactId: hLedger.cid,
+        campaignId: campId,
+        stageId: parentId,
+        eventKey: "purchase",
+        status: "pending",
+        revenue: 40,
+      });
+      check("⭐ a LEDGER-ONLY purchase (pending, sale_status NULL) closes the journey",
+            (await closeJourneysOnPurchase(tx, { orgId, campaignId: campId })).closed, 1);
+      check("...its state is converted", (await state(hLedger.jid)).state, "converted");
+      check("...⭐ slot freed", await slotFree(hLedger.cid), true);
+
+      // i: the legacy column alone says "bought" — there is NO ledger row. Under
+      // the switched reader this journey must stay live.
+      const iLegacy = await newJourney("+19988" + sfx);
+      await tx.execute(sql`
+        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                 rendered_text, status, sale_status, sale_revenue,
+                                 converted_at, sent_at, created_at)
+        VALUES (${orgId}, ${campId}, ${parentId}, ${iLegacy.cid}, ${"+19988" + sfx},
+                'probe', 'sent', 'lead', 100.0000, now(), now(), now())`);
+      check("⭐ a LEGACY-ONLY row (sale_status 'lead', no ledger) does NOT close it",
+            (await closeJourneysOnPurchase(tx, { orgId, campaignId: campId })).closed, 0);
+      check("...that journey is still live", (await state(iLegacy.jid)).state, "active");
 
       // ── 3. completed ──────────────────────────────────────────────────────
       console.log("\n3. all enabled children sent ⇒ completed:");

@@ -28,6 +28,7 @@ const COUNTED_TABLES = [
   "organizations", "brands", "contacts", "campaigns", "campaign_stages",
   "campaign_audience_pool", "stage_sends", "links", "clicks", "opt_outs",
   "short_domains", "link_destinations", "creatives", "send_attempts",
+  "conversion_events", "event_types",
 ] as const;
 
 async function main() {

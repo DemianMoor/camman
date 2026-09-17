@@ -10,8 +10,30 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 //
 // A counted clicker is a contact who, within the grain being displayed, has:
 //     at least one SCORED click with classification = 'human'
-//  OR a conversion                                            (Rule F)
+//  OR a conversion_events row that is a counted PURCHASE or carries REVENUE,
+//     in status pending/approved                               (Rule F)
 // deduplicated at the grain of the row displayed.
+//
+// Rule F narrowed at the Phase 3 switch (2026-09-17). It used to read "a
+// conversion" literally — stage_sends.converted_at IS NOT NULL — which also
+// rescued a REJECTED conversion and would have rescued a $0 REGISTRATION once
+// registrations arrive, inflating the denominator of every EPC on the platform
+// with people who never bought anything. The predicate is now rescueSendIds in
+// lib/sale-attribution.ts; an UNMAPPED ledger row (no event_types match, so
+// neither a purchase nor revenue anywhere) is not rescued either.
+//
+// ⚠️ OPEN WINDOW UNTIL PHASE 3 TASK 6 — the numerator is still WIDER than this
+// rescue. Rule F exists so revenue can never sit outside the denominator that
+// divides it, but the EPC numerator comes from the stage-day projection
+// (lib/keitaro/stage-day-conversions.ts), whose SALES/REVENUE filters are still
+// TYPE-based: `keitaro_type IN ('lead','sale','rejected')`. So a REJECTED or
+// UNMAPPED conversion would contribute revenue to a stage-day while its
+// recipient is deliberately NOT in counted_clickers — exactly the invariant this
+// header promises. Zero impact today: the corpus holds 0 rejected and 0 unmapped
+// rows. Task 6 closes it by flipping those filters to purchasedClause() /
+// approvedRevenueClause(), the same definitions the rescue reads; it is recorded
+// there as a named precondition. Do not widen the rescue back to match the
+// numerator — the numerator is the side that is wrong.
 //
 // SCORED is load-bearing — see the HUMAN_CLICK predicate below. An unscored row
 // carries the redirect's provisional UA-only guess, not a verdict.

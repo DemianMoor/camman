@@ -85,6 +85,15 @@
 -- column exists so the two matviews stay additive (audience totals SUM the
 -- cells) and so adding the screen column later is a reader change only.
 --
+-- JOURNAL TIMESTAMP BUMPED ONCE, BEFORE RELEASE (1792195200000 -> 1792281600000,
+-- 2026-09-18). NOT drift. Drizzle selects pending migrations by the journal's
+-- `when`, never by the file hash (drizzle-orm/pg-core/dialect.js:44-71 — the
+-- hash is written and never compared), so amending this already-applied-on-
+-- preview file would otherwise have left camman-v2 on the pre-org_id
+-- definition forever. Legitimate only because 0183 is unreleased (prod is at
+-- 0180 and applies this file exactly once, at the Task 8 gate) and because
+-- every statement below is re-runnable. See docs/07-conventions.md.
+--
 -- Recon: docs/superpowers/specs/2026-09-17-multi-event-conversions-recon.md
 -- Plan:  docs/superpowers/plans/2026-09-17-conversion-events-phase3.md
 

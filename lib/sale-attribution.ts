@@ -46,10 +46,16 @@ export const PURCHASE_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types e
 export const REVENUE_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types et WHERE et.counts_revenue)`;
 export const RETARGET_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types et WHERE et.is_retarget_signal)`;
 
-/** A counted PURCHASE event on the aliased conversion_events row. */
+/**
+ * A counted PURCHASE event on the aliased conversion_events row.
+ *
+ * PARENTHESISED: this is an `A AND B` conjunction, and a call site that drops it
+ * into an `OR` (`... OR ${purchasedClause()}`) would otherwise bind as
+ * `(x OR A) AND B` and silently mean something else.
+ */
 export function purchasedClause(alias = "ce"): SQL {
   const a = sql.raw(alias);
-  return sql`${a}.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS} AND ${a}.status IN ('pending', 'approved')`;
+  return sql`(${a}.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS} AND ${a}.status IN ('pending', 'approved'))`;
 }
 
 /** Revenue that counts toward Revenue / EPC: approved only, on the aliased conversion_events row. */

@@ -37,10 +37,12 @@ const DIRTY_CLICK_CLASSIFICATIONS = ["bot", "prefetch", "suspect"] as const;
 // tier)` table is a one-line change at the single call site — the (contact_id,
 // tier) shape callers depend on stays identical.
 //
-// TRACKED-mode signals only for now (clicks via links⋈clicks, offer/sale via
-// stage_sends). A manual-mode source (e.g. CSV-derived clicked/reached/converted)
-// slots in later as ANOTHER `SELECT contact_id, <tier>` UNION branch below
-// WITHOUT reshaping the output or touching any caller.
+// TRACKED-mode signals only for now: clicks via links⋈clicks, offer reach via
+// stage_sends.offer_reached_at, and the purchase via the conversion_events
+// ledger (NOT stage_sends.sale_status — see the tier-3 branch below). A
+// manual-mode source (e.g. CSV-derived clicked/reached/converted) slots in later
+// as ANOTHER `SELECT contact_id, <tier>` UNION branch below WITHOUT reshaping
+// the output or touching any caller.
 export function campaignTierExpr(campaignId: number, orgId: string): SQL {
   const dirty = sql.join(
     DIRTY_CLICK_CLASSIFICATIONS.map((c) => sql`${c}`),

@@ -36,7 +36,7 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 export const POOLS_ROLLUP_KEY = "audience_pools";
 
 export const POOLS_DEFINITION =
-  "eligible = not archived and not opted out; received = at least one sent message of this offer; rested = the contact's last sent message of ANY offer was at least rest_days before computed_at, or never messaged; human click = a counted human clicker on this offer; converted = a tracker conversion on this offer's messages";
+  "eligible = not archived and not opted out; received = at least one sent message of this offer; rested = the contact's last sent message of ANY offer was at least rest_days before computed_at, or never messaged; human click = a counted human clicker on this offer; converted = a purchase-type conversion event in status pending or approved on this offer's messages — a rejected conversion or a registration does NOT count as converted";
 
 export interface PoolsSnapshot {
   version: 1;
@@ -70,9 +70,11 @@ function addTo(map: HistogramsByGroup, key: string, bucket: number, n: number) {
  * verification can run it inside a REPEATABLE READ transaction next to an
  * independent recount.
  *
- * ⚠️ `MATERIALIZED` is load-bearing: `last_pair`, `eligible`, `memb` and
- * `offer_rows` are each read by two branches, and inlined the planner would
- * repeat the stage_sends scan per branch.
+ * ⚠️ `MATERIALIZED` is load-bearing: `purchased`, `last_pair`, `eligible`,
+ * `memb` and `offer_rows` are each read by more than one place, and inlined the
+ * planner would repeat the work per branch — for `last_pair` the org-wide
+ * stage_sends scan, and for `purchased` the conversion_events scan once per
+ * `last_pair` row instead of once as a hash-join build side.
  */
 export async function computeAudiencePools(
   dbc: DbOrTx,

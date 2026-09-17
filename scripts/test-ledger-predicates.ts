@@ -44,7 +44,12 @@ function main() {
     purchased.includes("ce.status IN ('pending', 'approved')") && !purchased.includes("rejected"),
     purchased,
   );
-  check("P3 the alias is honoured", render(purchasedClause("x")).startsWith("x.event_type_id IN"));
+  check("P3 the alias is honoured", render(purchasedClause("x")).startsWith("(x.event_type_id IN"));
+  check(
+    "P3b ⭐ purchasedClause is parenthesised, so an OR call site can't rebind its AND",
+    purchased.startsWith("(") && purchased.endsWith(")"),
+    purchased,
+  );
   check(
     "P4 approvedRevenueClause is counts_revenue AND approved only",
     render(approvedRevenueClause()) ===

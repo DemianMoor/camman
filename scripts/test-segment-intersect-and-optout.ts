@@ -23,6 +23,9 @@
 import { config } from "dotenv";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
+
+import { purchasedClause } from "../lib/sale-attribution";
+
 config({ path: resolve(process.cwd(), ".env.local") });
 const req = createRequire(import.meta.url);
 try {
@@ -100,8 +103,8 @@ async function main() {
           union
           ((select contact_id from clickers where org_id = ${orgId}::uuid)
            except
-           (select distinct contact_id from stage_sends
-              where org_id = ${orgId}::uuid and sale_status in ('lead','sale')))
+           (select distinct ce.contact_id from conversion_events ce
+              where org_id = ${orgId}::uuid and contact_id is not null and ${purchasedClause()}))
         ) combined
       ) elig_s
       inner join contacts elig_c on elig_c.id = elig_s.contact_id
@@ -178,8 +181,8 @@ async function main() {
           union
           ((select contact_id from clickers where org_id = ${orgId}::uuid)
            except
-           (select distinct contact_id from stage_sends
-              where org_id = ${orgId}::uuid and sale_status in ('lead','sale')))
+           (select distinct ce.contact_id from conversion_events ce
+              where org_id = ${orgId}::uuid and contact_id is not null and ${purchasedClause()}))
         ) combined
       ) elig_s
       inner join contacts elig_c on elig_c.id = elig_s.contact_id
@@ -289,8 +292,8 @@ async function main() {
           union
           ((select contact_id from clickers where org_id = ${orgId}::uuid)
            except
-           (select distinct contact_id from stage_sends
-              where org_id = ${orgId}::uuid and sale_status in ('lead','sale')))
+           (select distinct ce.contact_id from conversion_events ce
+              where org_id = ${orgId}::uuid and contact_id is not null and ${purchasedClause()}))
         ) combined
       ) elig_s
       inner join contacts elig_c on elig_c.id = elig_s.contact_id

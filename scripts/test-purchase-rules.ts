@@ -8,6 +8,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import { contacts, segments } from "../db/schema";
+import { seedConversionEvent } from "./_conversion-fixture";
 
 // Purchase-rule test suite (segment engagement Level 3).
 //
@@ -331,7 +332,7 @@ async function main() {
       phone: string,
       saleStatus: string | null,
     ) {
-      await db.execute(drizzleSql`
+      const sendRows = (await db.execute(drizzleSql`
         INSERT INTO stage_sends
           (org_id, campaign_id, stage_id, contact_id, phone,
            rendered_text, status, sale_status)
@@ -339,7 +340,21 @@ async function main() {
           (${orgId}::uuid, ${campaignId}::int, ${stageId}::int,
            ${idByPhone.get(phone)!}::uuid, ${phone}, ${"test body"}, 'sent',
            ${saleStatus})
-      `);
+        RETURNING id::text AS id
+      `)) as unknown as { id: string }[];
+      if (saleStatus === "lead" || saleStatus === "sale") {
+        await seedConversionEvent(db, {
+          orgId,
+          stageSendId: sendRows[0].id,
+          contactId: idByPhone.get(phone)!,
+          campaignId,
+          stageId,
+          eventKey: "purchase",
+          status: "approved",
+          revenue: 100,
+          keitaroType: saleStatus,
+        });
+      }
     }
 
     const campA = await seedCampaignStage(brandAId, offerAId, "a");
@@ -420,6 +435,20 @@ async function main() {
   } finally {
     console.log("\nCleanup");
     try {
+      // conversion_events.campaign_id is ON DELETE SET NULL, not CASCADE, so the
+      // fixture rows must be deleted BEFORE the campaigns.
+      if (createdCampaignIds.length > 0) {
+        const campaignArray = drizzleSql`ARRAY[${drizzleSql.join(
+          createdCampaignIds.map((c) => drizzleSql`${c}`),
+          drizzleSql`, `,
+        )}]::int[]`;
+        await db.execute(drizzleSql`
+          DELETE FROM conversion_events
+          WHERE org_id = ${orgId}::uuid
+            AND keitaro_event_id LIKE 'fixture-%'
+            AND campaign_id = ANY(${campaignArray})
+        `);
+      }
       // Campaigns cascade to stages and stage_sends.
       for (const cid of createdCampaignIds) {
         await db.execute(drizzleSql`DELETE FROM campaigns WHERE id = ${cid}`);

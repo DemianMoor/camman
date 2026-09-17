@@ -9,6 +9,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import { campaignTierExpr } from "../lib/campaign-tier";
+import { seedConversionEvent } from "./_conversion-fixture";
 
 // Unit test for campaignTierExpr() against SEEDED synthetic data — the live
 // click/send tables are empty, so every signal here is created by this script
@@ -173,7 +174,7 @@ async function main() {
       reached: boolean,
       saleStatus: string | null,
     ) {
-      await db.execute(drizzleSql`
+      const sendRows = (await db.execute(drizzleSql`
         INSERT INTO stage_sends
           (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status,
            sale_status, offer_reached_at, offer_reach_event_id)
@@ -182,7 +183,24 @@ async function main() {
            ${"x"}, ${"test body"}, ${"sent"}, ${saleStatus},
            ${reached ? drizzleSql`now()` : drizzleSql`NULL`},
            ${reached ? `evt-${contactId}` : null})
-      `);
+        RETURNING id::text AS id
+      `)) as unknown as { id: string }[];
+      // Tier 3 is read off the conversion_events ledger now, so a purchase has
+      // to be seeded there. The legacy column is still written above because the
+      // projection keeps it (lib/keitaro/poll-conversions.ts).
+      if (saleStatus === "lead" || saleStatus === "sale") {
+        await seedConversionEvent(db, {
+          orgId,
+          stageSendId: sendRows[0].id,
+          contactId,
+          campaignId,
+          stageId,
+          eventKey: "purchase",
+          status: "approved",
+          revenue: 100,
+          keitaroType: saleStatus,
+        });
+      }
     }
 
     // --- Apply signals. ---
@@ -251,6 +269,21 @@ async function main() {
   } finally {
     console.log("\nCleanup");
     try {
+      // conversion_events.campaign_id is ON DELETE SET NULL, not CASCADE, so the
+      // fixture rows must be deleted BEFORE the campaigns — otherwise the
+      // campaign_id scoping below can no longer find them.
+      if (createdCampaignIds.length > 0) {
+        const campaignArray = drizzleSql`ARRAY[${drizzleSql.join(
+          createdCampaignIds.map((c) => drizzleSql`${c}`),
+          drizzleSql`, `,
+        )}]::int[]`;
+        await db.execute(drizzleSql`
+          DELETE FROM conversion_events
+          WHERE org_id = ${orgId}::uuid
+            AND keitaro_event_id LIKE 'fixture-%'
+            AND campaign_id = ANY(${campaignArray})
+        `);
+      }
       // Deleting campaigns cascades campaign_stages, stage_sends, links (and
       // clicks via links) — clearing the RESTRICT refs to short_domain/dest.
       for (const c of createdCampaignIds) {

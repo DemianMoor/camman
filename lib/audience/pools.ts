@@ -10,6 +10,7 @@ import {
   type OfferHistograms,
   type PoolCounts,
 } from "@/lib/audience/pool-math";
+import { purchasedSendIds } from "@/lib/sale-attribution";
 
 // "How many contacts could still be sent offer X?" — the rollup behind
 // GET /api/audience/pools. Spec:
@@ -84,11 +85,22 @@ export async function computeAudiencePools(
   `)) as unknown as { id: number; name: string }[];
 
   const rows = (await dbc.execute(sql`
-    WITH last_pair AS MATERIALIZED (
+    WITH purchased AS MATERIALIZED (
+      ${purchasedSendIds(orgId)}
+    ),
+    last_pair AS MATERIALIZED (
+      -- 'converted' is a COUNTED PURCHASE on that recipient row
+      -- (lib/sale-attribution.ts), not 'converted_at IS NOT NULL'. The old test
+      -- counted a rejected conversion as converted, and — once registrations
+      -- arrive — would have counted a $0 registration too, dropping those
+      -- contacts out of the non-buyer pools they belong in.
+      -- LEFT JOIN a ~1.5K-row set, not an EXISTS per send row: this CTE scans
+      -- every sent row of the org.
       SELECT ss.contact_id, c.offer_id, max(ss.sent_at) AS last_sent,
-             bool_or(ss.converted_at IS NOT NULL) AS converted
+             bool_or(pe.stage_send_id IS NOT NULL) AS converted
       FROM stage_sends ss
       JOIN campaigns c ON c.id = ss.campaign_id
+      LEFT JOIN purchased pe ON pe.stage_send_id = ss.id
       WHERE ss.org_id = ${orgId}::uuid AND ss.status = 'sent'
       GROUP BY 1, 2
     ),

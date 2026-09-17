@@ -10,6 +10,8 @@ import postgres from "postgres";
 
 import { stageRecipientsSql, type StageRecipientFilters } from "../lib/sends/recipients";
 
+import { seedConversionEvent } from "./_conversion-fixture";
+
 // Integration test for the behavioral-lane overlays in stageRecipientsSql().
 //
 // TEST-DATA SAFETY: every row is seeded under a DEDICATED throwaway organization
@@ -103,6 +105,17 @@ async function main() {
       RETURNING id::text AS id
     `)) as unknown as { id: string }[];
     testOrgId = orgRows[0].id;
+    // migration 0181's event_types seed is a one-time backfill over orgs that
+    // existed at migration time — a brand-new org (like this throwaway one)
+    // gets none automatically, so seedConversionEvent's key lookup would throw.
+    // Mirror that backfill for this org; it cascades away with it on teardown.
+    await db.execute(drizzleSql`
+      INSERT INTO event_types (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal)
+      VALUES
+        (${testOrgId}::uuid, 'purchase', 'Purchase', 10, true, true, false),
+        (${testOrgId}::uuid, 'registration', 'Registration', 20, false, false, true)
+      ON CONFLICT (org_id, key) DO NOTHING
+    `);
 
     // --- FK deps for links: brand → short_domain, + link_destination. ---
     const brandRows = (await db.execute(drizzleSql`
@@ -164,7 +177,7 @@ async function main() {
 
     // --- Seed helpers. ---
     async function received(role: string, reached: boolean, sale: boolean) {
-      await db.execute(drizzleSql`
+      const sendRows = (await db.execute(drizzleSql`
         INSERT INTO stage_sends
           (org_id, campaign_id, stage_id, contact_id, phone, rendered_text,
            status, sale_status, offer_reached_at, offer_reach_event_id)
@@ -174,7 +187,21 @@ async function main() {
            ${sale ? "sale" : null},
            ${reached ? drizzleSql`now()` : drizzleSql`NULL`},
            ${reached ? `evt-${role}` : null})
-      `);
+        RETURNING id::text AS id
+      `)) as unknown as { id: string }[];
+      if (sale) {
+        await seedConversionEvent(db, {
+          orgId: testOrgId,
+          stageSendId: sendRows[0].id,
+          contactId: cid[role],
+          campaignId,
+          stageId: parentStageId,
+          eventKey: "purchase",
+          status: "approved",
+          revenue: 100,
+          keitaroType: "sale",
+        });
+      }
     }
     let codeSeq = 0;
     async function cleanClick(role: string) {

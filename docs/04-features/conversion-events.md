@@ -98,16 +98,16 @@ npx tsx scripts/backfill-conversion-events.ts --apply    # write (prod needs app
 npx tsx scripts/verify-conversion-events.ts              # read-only
 ```
 
-`verify-conversion-events.ts` asserts the ledger against a fresh Keitaro pull: every conversion present, per-type count and revenue to 4dp, no unmapped rows, no event-type conflicts, every currency USD, `occurred_at` = original time. It then prints the deltas against the old sources.
-
-**Fail-loud rules.**
-- **Truncated fetch:** a page with fewer rows than its own `total` is refused. The window writes nothing and the backfill exits 1; re-run with a smaller `BACKFILL_WINDOW_DAYS`.
-- **Unparseable rows** (missing event_id / conversion_type / revenue, malformed datetime): counted and sampled in the ingest result. The backfill prints them and exits 1.
-- **Currency:** `revenue` is USD. Every conversion to date carries `params.currency` USD or none, and `revenue` equals the postback payout. `currency` stores the postback's claim; a non-USD one fails verify V6. Recorded at recon, all accepted as corrections:
+`verify-conversion-events.ts` asserts the ledger against a fresh Keitaro pull: every conversion present, per-type count and revenue to 4dp, no unmapped rows, no event-type conflicts, every currency USD, `occurred_at` = original time. It then prints the deltas against the old sources. The following three deltas were recorded at recon and are accepted as corrections:
 
 - **+$715** per recipient: 14 recipients' second conversions that latest-wins dropped
 - **26 conversions / $1,463** known at stage level but with no recipient (blank `sub_id_1`)
 - **−$100** stage-day: one conversion `keitaro_stage_results` counted on two days after a re-post
+
+**Fail-loud rules.**
+- **Truncated fetch:** a page with fewer rows than its own `total` is refused. The window writes nothing and the backfill exits 1; re-run with a smaller `BACKFILL_WINDOW_DAYS`.
+- **Unparseable rows** (missing event_id / conversion_type / revenue, malformed datetime): counted and sampled in the ingest result. The backfill prints them and exits 1.
+- **Currency:** `revenue` is USD. Every conversion to date carries `params.currency` USD or none, and `revenue` equals the postback payout. `currency` stores the postback's claim; a non-USD one fails verify V6.
 
 Checks: `scripts/test-conversion-ledger-rows.ts` (pure, 34), `scripts/test-conversion-events-upsert.ts` (camman-v2 only, rolled back, 15).
 

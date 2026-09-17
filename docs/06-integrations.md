@@ -56,6 +56,7 @@ External services CamMan talks to, their contracts, and every environment variab
 > - `version` — bumps on an in-place update
 > - `status_history` — `"N. Type (YYYY-MM-DD HH:MM:SS)"` in the report timezone
 > - `params` — the postback query as JSON
+> - `offer_id` — Keitaro's offer id (0 = none); used to attribute a conversion with no resolvable click via `offers.keitaro_offer_id`
 >
 > Gotchas:
 > - A bad column's 400 body lists the entire `events` definition. `original_status`/`previous_status`/`conversion_id`/`postback_datetime` return 200 but are silently omitted.

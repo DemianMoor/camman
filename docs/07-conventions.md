@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-16_
+_Last updated: 2026-09-17_
 
 ## Stage status: the system moves draft ⇄ pending, a person always wins (2026-09-14)
 
@@ -1134,8 +1134,19 @@ collapses the duplication operators maintain by hand today: offer 58 carries `gd
 - **No DELETE on a landing page.** Deleting one would `SET NULL` and silently drop its stages back to
   the legacy path. Disable instead — the slug stays reserved (the unique index is NOT filtered on
   status), so links already in the wild keep meaning what they meant.
-- **A page's `kind` is immutable.** Flipping a live page between slug and external_url would change
-  where every stage already pointing at it sends, including approved ones.
+- **A page's title, kind, slug and URL are editable — a destination edit needs confirmation**
+  (2026-09-17; `kind` was immutable before). Because the URL is built at mint time, changing
+  `kind` / `slug` / `external_url` reaches every stage that **hasn't materialized yet** plus every
+  **dripping** stage (`drip_active`), including approved ones; links already minted keep their old
+  destination. `PATCH /api/offers/[offerId]/landing-pages/[pageId]` answers `409
+  landing_page_in_use` with `details: { affected, committed }` until resent with `confirm: true`.
+  The count is ONE query ([`lib/api/landing-page-impact.ts`](../lib/api/landing-page-impact.ts))
+  used both to warn and to gate: non-archived stages on `draft`/`active`/`paused` campaigns with
+  `materialized_at IS NULL OR drip_active`. Switching a page **to** `slug` is refused outright
+  (`landing_page_invalid`, confirm can't override) while any affected stage's brand has no
+  `landing_host` — those stages would hard-fail at mint. Switching kind clears the other column
+  ([`lib/landing-page-edit.ts`](../lib/landing-page-edit.ts)). Renaming a slug frees the old one
+  for reuse on that offer; nothing resolves a page by slug, so that is allowed.
 
 ### UTM tags never reach an `/lp/` destination
 

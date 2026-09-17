@@ -2,6 +2,15 @@
 
 _Last updated: 2026-09-18_
 
+## A source-grep check must not be able to pass by accident (2026-09-18)
+
+Several guards assert things about a FILE's text (`readFileSync(...).includes(...)`) because the real call site cannot be executed from a rolled-back proof. Two rules, both learned the hard way in `scripts/test-p3-task4-reader-switch-db.ts`:
+
+1. **A needle must never span a line break.** Git checks this repo out with `core.autocrlf=true` and `.gitattributes` pins only `db/migrations/**`, so most files on disk are CRLF while files written by tooling are LF — a literal containing `\n` may match nothing. In a NEGATED assertion (`!src(f).includes(x)`) that is a check which can never fail: it looks green forever, including after the very regression it was written to catch is reintroduced. Collapse whitespace first (`src(f).replace(/\s+/g, " ")`) or use a regex.
+2. **Pick a needle only the thing you are forbidding would contain.** The opposite mistake is just as bad: a blanket Tailwind-colour regex over `components/campaigns/campaign-activity-section.tsx` matches its SEND-status map, so negating it would be permanently RED for correct code. And a negated needle is only meaningful if the code being forbidden really contained that exact string — verify it against the pre-change file in git, not from memory.
+
+Whenever a source guard is added or changed, prove it red: reintroduce the code it forbids, watch the check fail, restore the file and verify `cmp` is silent.
+
 ## Stage status: the system moves draft ⇄ pending, a person always wins (2026-09-14)
 
 `campaign_stages.status` is the operator's record of a stage, but two send-pipeline events now write it ([lib/stages/auto-status.ts](../lib/stages/auto-status.ts), migration 0179, ClickUp 869evxbgb):

@@ -70,15 +70,29 @@ async function main() {
   // conversion_events ledger, so the first REJECTED or UNMAPPED conversion to
   // arrive would have turned this check red for correct behaviour.
   //
-  // WHICH SIDE IS THE INDEPENDENT ONE: this query. It re-derives the membership
-  // from the BASE tables in a single pass (one UNION, GROUP BY, count(DISTINCT)),
-  // while the cache above was built by the real refreshCountedClickers — two
-  // INSERTs, a DISTINCT ON with a window function, an ON CONFLICT DO NOTHING, a
-  // rescue joined per send row, and (in incremental mode) a lookback window. The
-  // comparison is not vacuous because nothing about THAT machinery is repeated
-  // here; what is deliberately shared is only the two DEFINITIONS, which is the
-  // whole point of exporting them. A guard that retypes a definition stops
-  // testing the code and starts testing the typist.
+  // WHAT IS INDEPENDENT HERE AND WHAT IS NOT. The comparison is PARTIAL, and
+  // reading it as total is how a guard comes to be trusted for more than it
+  // proves:
+  //   • The CLICK half IS re-derived independently: one pass over the base tables
+  //     (JOIN + GROUP BY) against the cache's DISTINCT ON with a min() window
+  //     function and an ON CONFLICT DO NOTHING, and the dedup here is a
+  //     count(DISTINCT campaign:contact) against the table's own
+  //     (stage_id, contact_id) unique constraint. Different machinery, same
+  //     answer — that is a real cross-check.
+  //   • The RESCUE half is NOT independent: `FROM stage_sends ss JOIN
+  //     (rescueSendIds(…)) r ON r.stage_send_id = ss.id` below is the SAME join
+  //     shape the cache's own rescue INSERT runs (lib/reporting/counted-clickers.ts,
+  //     which additionally LEFT JOINs links for the creative and coalesces a click
+  //     time). What it does still catch is the asymmetry that matters
+  //     operationally: this query passes NO `window`, so it sees EVERY
+  //     rescue-eligible recipient, while the incremental pass only sees those
+  //     whose ce.updated_at falls inside the lookback. A rescue the incremental
+  //     pass missed and never wrote shows up here as a gap — and as an orphan in
+  //     the invariant below, which compares the rescue set against the table's
+  //     CONTENTS rather than against a second copy of the rule.
+  //   • The two DEFINITIONS (HUMAN_CLICK, rescueSendIds) are shared on purpose,
+  //     which is the whole point of exporting them: a guard that retypes a
+  //     definition stops testing the code and starts testing the typist.
   const direct = (await d.execute(sql`
     WITH counted AS (
       SELECT l.campaign_id, l.stage_id, l.contact_id
@@ -120,8 +134,10 @@ async function main() {
   // The invariant is about the RESCUE-ELIGIBLE set, not "anyone with a
   // conversion": a rejected conversion is a refund and an unmapped row counts as
   // nothing, so neither belongs in the denominator and neither is a violation.
-  // rescueSendIds is the same definition the cache rescues on — see the note
-  // above on why sharing the definition keeps this meaningful.
+  // rescueSendIds is the same definition the cache rescues on, so this asserts
+  // the rule against the table's CONTENTS (did every eligible recipient actually
+  // get written?), not against a second copy of the rule — see the note above on
+  // which halves of this script are independent and which are not.
   const orphan = (await d.execute(sql`
     SELECT count(*)::int AS n FROM stage_sends ss
     JOIN (${rescueSendIds(null)}) r ON r.stage_send_id = ss.id

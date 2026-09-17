@@ -9,8 +9,10 @@ import { db, sql as pgConn } from "@/db/client";
 import {
   CONVERSION_SIGNAL_STYLE,
   CONVERSION_STATUS_STYLES,
+  CONVERSION_STATUS_UNKNOWN_STYLE,
   CONVERSION_UNMAPPED_STYLE,
   conversionAmount,
+  conversionAmountLabel,
   conversionBadgeClass,
 } from "@/lib/conversion-badge";
 import { refreshCountedClickers } from "@/lib/reporting/counted-clickers";
@@ -19,6 +21,7 @@ import { stageHourAggregate } from "@/lib/reporting/rollup";
 import {
   approvedRevenueClause,
   latestConversionForSend,
+  pendingRevenueClause,
   purchasedClause,
   purchasesBySendSelect,
   rescueSendIds,
@@ -64,7 +67,18 @@ import {
 // code no longer exists to import, and the whole point is to show the numbers it
 // would have produced for these exact rows.
 //
-// FIXTURES — six recipients on one stage, each isolating one class. Every one
+// ⭐ SOURCE-GREP NEEDLES MUST NEVER SPAN A LINE BREAK. This checkout is CRLF
+// (core.autocrlf=true; .gitattributes pins only db/migrations/**), so a needle
+// containing "\n" cannot match the file on disk — which made the F5 negative
+// ALWAYS TRUE and its check permanently green: restoring the .tsx's old inline
+// style map verbatim would not have failed it. A negative source assertion is
+// exactly where that defect hides, because it looks like it is working. Use
+// `flat()` (whitespace-collapsed) and/or a regex, never a multi-line literal.
+// Note also that /bg-(emerald|amber|sky|slate)-\d00/ over that .tsx matches its
+// SEND-status map, so negating it would be permanently RED — the discriminating
+// string has to be one only the conversion copy carried.
+//
+// FIXTURES — eight recipients on one stage, each isolating one class. Every one
 // writes the ledger row and the legacy stage_sends columns SEPARATELY, so a
 // check can only pass against the switched code:
 //   ledger_only      approved $42 purchase; sale_status/sale_revenue/converted_at
@@ -77,9 +91,27 @@ import {
 //                     legacy columns hold only the LATEST ($12), and its
 //                     converted_at is a NEXT-DAY re-post: the old stamp moved out
 //                     of the ET day, which is correction class D.
-//   unmapped         a ledger row with event_type_id NULL and status NULL (Keitaro
-//                     type 'upsell', $55) — the ONLY class that SHRINKS a number:
-//                     the legacy columns counted it as a $55 sale.
+//   unmapped         UNMAPPED SHAPE (a) — no mapping rule matched at all, so
+//                     event_type_id AND status are both NULL (Keitaro type
+//                     'upsell', $55). A class that SHRINKS a number: the legacy
+//                     columns counted it as a $55 sale.
+//   unmapped_status_only
+//                    ⭐ UNMAPPED SHAPE (b) — a STATUS-ONLY mapping rule
+//                     (MappingRule.eventTypeId null, lib/conversions/build-rows.ts):
+//                     event_type_id NULL but status 'approved', $66. THE DANGEROUS
+//                     ONE, and the reason shape (a) alone is not enough: (a) is
+//                     over-determined, so a reader keyed on `status IS NOT NULL`
+//                     alone passes it by accident while counting THIS row as real
+//                     money. Nothing may count it: not a purchase, no revenue, no
+//                     pending revenue, not rescued.
+//   mapped_status_null
+//                    ⭐ a MAPPED purchase type with a NULL status ($88). Reachable:
+//                     build-rows sets `status: mapping?.status ?? null` while the
+//                     upsert keeps event_type_id sticky via COALESCE
+//                     (lib/conversions/ingest.ts), so an unrecognised Keitaro
+//                     status on an already-mapped event leaves the type set and
+//                     nulls the status. Counts nowhere (every clause needs a
+//                     non-NULL status) and must not render as a purchase.
 //   registration_0   an approved $0 Registration (is_purchase=false,
 //                     counts_revenue=false) — not a purchase, not revenue, not
 //                     rescued, and rendered with NO money.
@@ -213,6 +245,8 @@ async function main() {
         "rejected_ledger",
         "two_conversions",
         "unmapped",
+        "unmapped_status_only",
+        "mapped_status_null",
         "registration_0",
       ] as const;
       type Role = (typeof roles)[number];
@@ -239,6 +273,11 @@ async function main() {
         // stamp into the NEXT ET day.
         two_conversions: { status: "lead", revenue: "12.0000", converted: "2027-06-16 02:00:00-04" },
         unmapped: { status: "lead", revenue: "55.0000", converted: et("09:25:00") },
+        unmapped_status_only: { status: "lead", revenue: "66.0000", converted: et("09:40:00") },
+        // The old writer stamped Keitaro's raw status; the ledger's NULL status
+        // has no legacy counterpart, so the column still read it as a paid lead
+        // ('held' would not even satisfy stage_sends_sale_status_check).
+        mapped_status_null: { status: "lead", revenue: "88.0000", converted: et("09:50:00") },
         registration_0: { status: "lead", revenue: "0.0000", converted: et("10:00:00") },
       };
 
@@ -267,12 +306,13 @@ async function main() {
         revenue: string;
         occurredAt: string;
         keitaroType?: string;
+        keitaroStatus?: string;
       }) => {
         await tx.execute(sql`
           INSERT INTO conversion_events
             (org_id, keitaro_event_id, keitaro_status, keitaro_type, event_type_id, status,
              revenue, occurred_at, stage_send_id, contact_id, campaign_id, stage_id)
-          VALUES (${orgId}::uuid, ${`${tag}-${args.key}`}, 'lead', ${args.keitaroType ?? "lead"},
+          VALUES (${orgId}::uuid, ${`${tag}-${args.key}`}, ${args.keitaroStatus ?? "lead"}, ${args.keitaroType ?? "lead"},
                   ${args.typeId}, ${args.status},
                   ${args.revenue}::numeric, ${args.occurredAt}::timestamptz,
                   ${args.sendId}::uuid, NULL, ${campId}::int, ${stageId}::int)
@@ -282,8 +322,14 @@ async function main() {
       await mkEvent({ key: "b", sendId: send.rejected_ledger, typeId: purchaseTypeId, status: "rejected", revenue: "77.0000", occurredAt: et("09:20:00") });
       await mkEvent({ key: "c1", sendId: send.two_conversions, typeId: purchaseTypeId, status: "approved", revenue: "30.0000", occurredAt: et("09:30:00") });
       await mkEvent({ key: "c2", sendId: send.two_conversions, typeId: purchaseTypeId, status: "approved", revenue: "12.0000", occurredAt: et("21:45:00") });
-      // UNMAPPED: no mapping rule matched, so event_type_id AND status are NULL.
+      // UNMAPPED shape (a): no mapping rule matched, so event_type_id AND status are NULL.
       await mkEvent({ key: "d", sendId: send.unmapped, typeId: null, status: null, revenue: "55.0000", occurredAt: et("09:25:00"), keitaroType: "upsell" });
+      // UNMAPPED shape (b): a STATUS-ONLY rule — event_type_id NULL, status SET.
+      // Real money with a real lifecycle status and no event type to place it.
+      await mkEvent({ key: "d2", sendId: send.unmapped_status_only, typeId: null, status: "approved", revenue: "66.0000", occurredAt: et("09:40:00"), keitaroType: "upsell" });
+      // A MAPPED purchase whose status did not map (unrecognised Keitaro status
+      // on an already-mapped event; event_type_id is sticky, status is not).
+      await mkEvent({ key: "d3", sendId: send.mapped_status_null, typeId: purchaseTypeId, status: null, revenue: "88.0000", occurredAt: et("09:50:00"), keitaroType: "sale", keitaroStatus: "held" });
       await mkEvent({ key: "e", sendId: send.registration_0, typeId: registrationTypeId, status: "approved", revenue: "0.0000", occurredAt: et("10:00:00"), keitaroType: "registration" });
 
       const ids = roles.map((r) => send[r]);
@@ -311,8 +357,65 @@ async function main() {
         );
       expectAgg("A1 NEW: ledger_only = 1 purchase / $42", "ledger_only", 1, 42);
       expectAgg("A2 ⭐ NEW: two_conversions = 2 purchases / $42 — BOTH count (+$715 class)", "two_conversions", 2, 42);
-      expectAgg("A3 NEW: rejected_ledger = 0 purchases / $0", "rejected_ledger", 0, 0);
-      expectAgg("A4 ⭐ NEW: unmapped = 0 purchases / $0 (the only class that SHRINKS a number)", "unmapped", 0, 0);
+      // A3 is NOT the bare "0 purchases / $0" it used to be: the OLD reader read
+      // 0/0 here too (sale_status is NULL on this fixture), so that assertion
+      // discriminated nothing — it would have passed before and after the switch.
+      // What IS new-code-specific: the rejected row is PRESENT in the group and
+      // contributes nothing, i.e. it is dropped by its STATUS and not by absence.
+      const rejRow = (
+        (await tx.execute(sql`
+          SELECT ce.status, ce.revenue::text AS revenue FROM conversion_events ce
+          WHERE ce.org_id = ${orgId}::uuid AND ce.stage_send_id = ${send.rejected_ledger}::uuid
+        `)) as unknown as { status: string | null; revenue: string }[]
+      )[0];
+      check(
+        "A3 NEW: the $77 REJECTED row is in the group and contributes 0 purchases / $0 — dropped by status, not by absence",
+        rejRow?.status === "rejected" &&
+          money(rejRow.revenue) === 77 &&
+          byId.has(send.rejected_ledger) &&
+          byId.get(send.rejected_ledger)?.purchases === 0 &&
+          money(byId.get(send.rejected_ledger)?.revenue) === 0,
+        `${JSON.stringify(rejRow ?? null)} | ${JSON.stringify(byId.get(send.rejected_ledger) ?? null)}`,
+      );
+      expectAgg("A4 ⭐ NEW: unmapped shape (a), both columns NULL = 0 purchases / $0 (a class that SHRINKS a number)", "unmapped", 0, 0);
+      expectAgg(
+        "A4b ⭐ NEW: unmapped shape (b), status-only rule (event_type_id NULL, status='approved') = 0 purchases / $0",
+        "unmapped_status_only",
+        0,
+        0,
+      );
+      expectAgg(
+        "A4c ⭐ NEW: a MAPPED purchase type with a NULL status = 0 purchases / $0 (every clause needs a status)",
+        "mapped_status_null",
+        0,
+        0,
+      );
+      // Revenue AND pending revenue, at the same grain, from the real clauses.
+      // WORLD STATE: no fixture is pending, so the pending set is expected EMPTY
+      // — which alone would be vacuous, so the identical query with
+      // approvedRevenueClause is the positive control: it must return the two
+      // revenue-bearing sends.
+      const revenueBySend = async (clause: ReturnType<typeof sql>) =>
+        (await tx.execute(sql`
+          SELECT ce.stage_send_id::text AS stage_send_id, sum(ce.revenue)::text AS revenue
+          FROM conversion_events ce
+          WHERE ce.org_id = ${orgId}::uuid AND ce.stage_send_id = ANY(${idsArr}) AND ${clause}
+          GROUP BY 1
+        `)) as unknown as { stage_send_id: string; revenue: string }[];
+      const approvedRev = await revenueBySend(approvedRevenueClause());
+      const pendingRev = await revenueBySend(pendingRevenueClause());
+      const approvedIds = new Set(approvedRev.map((r) => r.stage_send_id));
+      check(
+        "A4d ⭐ NEW: neither unmapped shape nor the NULL-status purchase is in APPROVED or PENDING revenue (control: approved = the 2 real payouts, pending = none)",
+        approvedRev.length === 2 &&
+          approvedIds.has(send.ledger_only) &&
+          approvedIds.has(send.two_conversions) &&
+          pendingRev.length === 0 &&
+          !approvedIds.has(send.unmapped) &&
+          !approvedIds.has(send.unmapped_status_only) &&
+          !approvedIds.has(send.mapped_status_null),
+        `approved=${JSON.stringify(approvedRev)} pending=${JSON.stringify(pendingRev)}`,
+      );
       expectAgg("A5 ⭐ NEW: registration_0 = 0 purchases / $0", "registration_0", 0, 0);
       check("A6 NEW: legacy_only has no ledger row — absent from the aggregate", !byId.has(send.legacy_only));
 
@@ -346,8 +449,8 @@ async function main() {
         WHERE agg.stage_id = ${stageId}::int
       `)) as unknown as { sent_count: number; sales_count: number; revenue: string }[];
       check(
-        "A8 ⭐ NEW: the REAL rollup aggregate reads sent=6, sales=3, revenue=$84 for the fixture stage",
-        Number(rollupRows[0]?.sent_count) === 6 &&
+        "A8 ⭐ NEW: the REAL rollup aggregate reads sent=8, sales=3, revenue=$84 for the fixture stage",
+        Number(rollupRows[0]?.sent_count) === 8 &&
           Number(rollupRows[0]?.sales_count) === 3 &&
           money(rollupRows[0]?.revenue) === 84,
         JSON.stringify(rollupRows[0] ?? null),
@@ -380,6 +483,19 @@ async function main() {
         JSON.stringify(oldById.get(send.unmapped)),
       );
       check(
+        "A11b ⭐ RED PROOF — OLD counted the STATUS-ONLY unmapped row as a $66 sale, and its status column looked perfectly normal ('lead')",
+        oldById.get(send.unmapped_status_only)?.purchased === 1 &&
+          money(oldById.get(send.unmapped_status_only)?.revenue) === 66,
+        JSON.stringify(oldById.get(send.unmapped_status_only)),
+      );
+      check(
+        "A11c ⭐ RED PROOF — OLD read the NULL-status purchase as a $88 sale and stamped converted_at (so the old ROLLUP counted it too — see A14)",
+        oldById.get(send.mapped_status_null)?.purchased === 1 &&
+          oldById.get(send.mapped_status_null)?.converted === 1 &&
+          money(oldById.get(send.mapped_status_null)?.revenue) === 88,
+        JSON.stringify(oldById.get(send.mapped_status_null)),
+      );
+      check(
         "A12 ⭐ RED PROOF — OLD counted the $0 REGISTRATION as a sale (a registrant read as a buyer)",
         oldById.get(send.registration_0)?.purchased === 1,
         JSON.stringify(oldById.get(send.registration_0)),
@@ -395,8 +511,8 @@ async function main() {
         FROM stage_sends ss WHERE ss.id = ANY(${idsArr})
       `)) as unknown as { sales_count: number; revenue: string }[];
       check(
-        "A14 RED PROOF — the OLD rollup expressions read sales=5, revenue=$167 over the same six sends",
-        Number(oldRollup[0].sales_count) === 5 && money(oldRollup[0].revenue) === 167,
+        "A14 RED PROOF — the OLD rollup expressions read sales=7, revenue=$321 over the same eight sends (truth: 3 / $84)",
+        Number(oldRollup[0].sales_count) === 7 && money(oldRollup[0].revenue) === 321,
         JSON.stringify(oldRollup[0]),
       );
 
@@ -416,7 +532,16 @@ async function main() {
       );
       check("B3 NEW: legacy_only is not a candidate", !candByContact.has(cid.legacy_only));
       check("B4 NEW: rejected_ledger is not a candidate", !candByContact.has(cid.rejected_ledger));
-      check("B5 ⭐ NEW: unmapped is not a candidate", !candByContact.has(cid.unmapped));
+      check("B5 ⭐ NEW: unmapped shape (a) is not a candidate", !candByContact.has(cid.unmapped));
+      check(
+        "B5b ⭐ NEW: unmapped shape (b) — status 'approved', no event type — is NOT a sale-weight candidate",
+        !candByContact.has(cid.unmapped_status_only),
+        JSON.stringify([...candByContact.entries()]),
+      );
+      check(
+        "B5c ⭐ NEW: the NULL-status purchase is NOT a candidate",
+        !candByContact.has(cid.mapped_status_null),
+      );
       check("B6 ⭐ NEW: registration_0 is not a candidate", !candByContact.has(cid.registration_0));
       const oldCand = new Set(
         (
@@ -428,11 +553,13 @@ async function main() {
         ).map((r) => r.contact_id),
       );
       check(
-        "B7 RED PROOF — the OLD basis (ss.converted_at) missed ledger_only and included all four non-buyers",
+        "B7 RED PROOF — the OLD basis (ss.converted_at) missed ledger_only and included all six non-buyers",
         !oldCand.has(cid.ledger_only) &&
           oldCand.has(cid.legacy_only) &&
           oldCand.has(cid.rejected_ledger) &&
           oldCand.has(cid.unmapped) &&
+          oldCand.has(cid.unmapped_status_only) &&
+          oldCand.has(cid.mapped_status_null) &&
           oldCand.has(cid.registration_0),
         JSON.stringify([...oldCand]),
       );
@@ -456,7 +583,16 @@ async function main() {
       );
       check("C3 NEW: legacy_only is NOT rescued (no ledger row)", !rescuedById.has(send.legacy_only));
       check("C4 NEW: rejected_ledger is NOT rescued", !rescuedById.has(send.rejected_ledger));
-      check("C5 ⭐ NEW: the UNMAPPED row is NOT rescued", !rescuedById.has(send.unmapped));
+      check("C5 ⭐ NEW: the UNMAPPED row (shape a) is NOT rescued", !rescuedById.has(send.unmapped));
+      check(
+        "C5b ⭐ NEW: the STATUS-ONLY unmapped row (shape b) is NOT rescued — 'approved' alone does not earn a denominator seat",
+        !rescuedById.has(send.unmapped_status_only),
+        JSON.stringify(rescued.map((r) => r.stage_send_id)),
+      );
+      check(
+        "C5c ⭐ NEW: the NULL-status purchase is NOT rescued",
+        !rescuedById.has(send.mapped_status_null),
+      );
       check(
         "C6 ⭐ NEW: the $0 registration is NOT rescued (neither a purchase nor revenue)",
         !rescuedById.has(send.registration_0),
@@ -480,9 +616,11 @@ async function main() {
         `${refresh.mode} rows=${refresh.rows} rescued=${refresh.rescuedByConversion}: ${JSON.stringify(cc)}`,
       );
       check(
-        "C8 ⭐ NEW: no row for rejected / unmapped / registration / legacy-only — the denominator is not inflated",
+        "C8 ⭐ NEW: no row for rejected / either unmapped shape / NULL-status / registration / legacy-only — the denominator is not inflated",
         !ccByContact.has(cid.rejected_ledger) &&
           !ccByContact.has(cid.unmapped) &&
+          !ccByContact.has(cid.unmapped_status_only) &&
+          !ccByContact.has(cid.mapped_status_null) &&
           !ccByContact.has(cid.registration_0) &&
           !ccByContact.has(cid.legacy_only),
         JSON.stringify(cc),
@@ -501,10 +639,12 @@ async function main() {
         ).map((r) => r.id),
       );
       check(
-        "C10 ⭐ RED PROOF — the OLD rescue (ss.converted_at) missed ledger_only and rescued rejected + unmapped + the $0 registration",
+        "C10 ⭐ RED PROOF — the OLD rescue (ss.converted_at) missed ledger_only and rescued rejected + both unmapped shapes + the NULL-status row + the $0 registration",
         !oldRescue.has(send.ledger_only) &&
           oldRescue.has(send.rejected_ledger) &&
           oldRescue.has(send.unmapped) &&
+          oldRescue.has(send.unmapped_status_only) &&
+          oldRescue.has(send.mapped_status_null) &&
           oldRescue.has(send.registration_0),
         JSON.stringify([...oldRescue]),
       );
@@ -589,9 +729,9 @@ async function main() {
       `)) as unknown as { hour: number; sales: number; revenue: number }[];
       const oldByHour = Object.fromEntries(oldHours.map((r) => [Number(r.hour), money(r.revenue)]));
       check(
-        "D7 ⭐ RED PROOF — the OLD hourly placed $155 in hour 9 + $0 in hour 10 and LOST two_conversions' $42 to the next day (correction class D)",
-        JSON.stringify(oldByHour) === JSON.stringify({ 9: 155, 10: 0 }) &&
-          oldHours.reduce((a, r) => a + Number(r.sales), 0) === 4,
+        "D7 ⭐ RED PROOF — the OLD hourly placed $309 in hour 9 + $0 in hour 10 and LOST two_conversions' $42 to the next day (correction class D)",
+        JSON.stringify(oldByHour) === JSON.stringify({ 9: 309, 10: 0 }) &&
+          oldHours.reduce((a, r) => a + Number(r.sales), 0) === 6,
         JSON.stringify(oldHours),
       );
       check(
@@ -649,6 +789,20 @@ async function main() {
         JSON.stringify(row("unmapped")),
       );
       check(
+        "E5b ⭐ NEW: unmapped shape (b) shows its raw Keitaro type with status 'approved' and a NULL is_purchase",
+        row("unmapped_status_only").conversion_event === "upsell" &&
+          row("unmapped_status_only").conversion_status === "approved" &&
+          row("unmapped_status_only").conversion_is_purchase == null,
+        JSON.stringify(row("unmapped_status_only")),
+      );
+      check(
+        "E5c ⭐ NEW: the NULL-status purchase shows its MAPPED label with a NULL status and is_purchase=true",
+        row("mapped_status_null").conversion_event === "Purchase" &&
+          row("mapped_status_null").conversion_status == null &&
+          row("mapped_status_null").conversion_is_purchase === true,
+        JSON.stringify(row("mapped_status_null")),
+      );
+      check(
         "E6 ⭐ NEW: the $0 registration shows Registration · approved with is_purchase=false",
         row("registration_0").conversion_event === "Registration" &&
           row("registration_0").conversion_status === "approved" &&
@@ -689,18 +843,46 @@ async function main() {
       // An unmapped row DOES print its amount, deliberately: it is real money
       // Keitaro reported that no report counts, and the neutral badge + the word
       // "unmapped" is what says so. Suppressing it would hide the thing the
-      // Phase 2 unmapped alert exists to chase.
+      // Phase 2 unmapped alert exists to chase. It is LABELLED "uncounted",
+      // because a bare "· $55.00" next to a neutral badge still reads as revenue.
       check(
-        "E11 ⭐ NEW: the unmapped row gets the NEUTRAL badge (not a purchase colour) and still shows its uncounted $55",
+        "E11 ⭐ NEW: the unmapped row gets the NEUTRAL badge and prints '· $55.00 uncounted', not a bare amount",
         conversionBadgeClass(row("unmapped")) === CONVERSION_UNMAPPED_STYLE &&
           conversionBadgeClass(row("unmapped")) !== CONVERSION_STATUS_STYLES.approved &&
-          conversionAmount(row("unmapped")) === 55,
-        `${conversionBadgeClass(row("unmapped"))} | ${conversionAmount(row("unmapped"))}`,
+          conversionAmount(row("unmapped")) === 55 &&
+          conversionAmountLabel(row("unmapped")) === " · $55.00 uncounted",
+        `${conversionBadgeClass(row("unmapped"))} | ${conversionAmountLabel(row("unmapped"))}`,
       );
       check(
-        "E12 NEW: a real approved purchase keeps the approved colour and its amount",
+        "E11b ⭐ NEW: shape (b) says 'approved' but has no event type — NEUTRAL badge, '· $66.00 uncounted'",
+        conversionBadgeClass(row("unmapped_status_only")) === CONVERSION_UNMAPPED_STYLE &&
+          conversionBadgeClass(row("unmapped_status_only")) !== CONVERSION_STATUS_STYLES.approved &&
+          conversionAmountLabel(row("unmapped_status_only")) === " · $66.00 uncounted",
+        `${conversionBadgeClass(row("unmapped_status_only"))} | ${conversionAmountLabel(row("unmapped_status_only"))}`,
+      );
+      check(
+        "E11c ⭐ RED PROOF — the OLD cell painted shape (b) the SAME emerald as a paid sale and printed a bare '$66.00'",
+        oldClass(row("unmapped_status_only")) === oldClass(row("ledger_only")) &&
+          oldMoney(row("unmapped_status_only")) === "$66.00" &&
+          conversionBadgeClass(row("unmapped_status_only")) !== conversionBadgeClass(row("ledger_only")),
+        `${oldClass(row("unmapped_status_only"))} | ${oldMoney(row("unmapped_status_only"))}`,
+      );
+      check(
+        "E11d ⭐ NEW: a MAPPED purchase with a NULL status gets a DEFINED distinct badge (not '', not a purchase/pending colour) and '· $88.00 uncounted'",
+        conversionBadgeClass(row("mapped_status_null")) === CONVERSION_STATUS_UNKNOWN_STYLE &&
+          conversionBadgeClass(row("mapped_status_null")) !== "" &&
+          conversionBadgeClass(row("mapped_status_null")) !== CONVERSION_STATUS_STYLES.approved &&
+          conversionBadgeClass(row("mapped_status_null")) !== CONVERSION_STATUS_STYLES.pending &&
+          conversionBadgeClass(row("mapped_status_null")) !== CONVERSION_UNMAPPED_STYLE &&
+          conversionAmountLabel(row("mapped_status_null")) === " · $88.00 uncounted",
+        `${conversionBadgeClass(row("mapped_status_null"))} | ${conversionAmountLabel(row("mapped_status_null"))}`,
+      );
+      check(
+        "E12 NEW: a real approved purchase keeps the approved colour and prints '· $42.00' with NO 'uncounted'",
         conversionBadgeClass(row("ledger_only")) === CONVERSION_STATUS_STYLES.approved &&
-          conversionAmount(row("ledger_only")) === 42,
+          conversionAmount(row("ledger_only")) === 42 &&
+          conversionAmountLabel(row("ledger_only")) === " · $42.00",
+        conversionAmountLabel(row("ledger_only")),
       );
       check(
         "E13 NEW: a rejected purchase is red and prints no money (it was taken back)",
@@ -720,8 +902,20 @@ async function main() {
   // the module-level `db`). These name a FILE, not a screen: they prove the call
   // site still goes through the fragment the blocks above proved, and nothing
   // more.
+  //
+  // AUDITED 2026-09-18 for the "can never fail" defect class: every needle below
+  // is single-line (F5's was not — see the header), and each NEGATED needle is a
+  // string the PRE-switch code really contained, so restoring that code turns the
+  // check red. F6's `ss.converted_at IS NOT NULL` was line 188 of the old
+  // counted-clickers.ts, and the module's surviving comments say
+  // "stage_sends.converted_at IS NOT NULL", which this needle does not match.
   console.log("\nF. call-site guards (weak by construction — see the header)");
   const src = (p: string) => readFileSync(p, "utf8");
+  // Whitespace-collapsed source. EVERY needle below must be single-line, or it
+  // must go through this: the checkout is CRLF, so a literal containing "\n"
+  // matches nothing — and in a NEGATED assertion that is a check which can never
+  // fail. See the header.
+  const flat = (p: string) => src(p).replace(/\s+/g, " ");
   check(
     "F1 partner-report.ts builds its `purchases` CTE from purchasesBySendSelect",
     src("lib/reporting/partner-report.ts").includes("purchases AS (${purchasesBySendSelect("),
@@ -741,11 +935,22 @@ async function main() {
       "LEFT JOIN LATERAL (${latestConversionForSend(\"ss\")}) conv ON true",
     ),
   );
+  // The negative half is a REGEX over the flattened source, not a multi-line
+  // literal (which could never match a CRLF file, so restoring the old inline map
+  // verbatim kept this check green). Two independent tells of a re-inlined copy:
+  //   • a CONVERSION_* style constant declared in the .tsx, and
+  //   • "bg-red-100 text-red-700" — the conversion map's own rejected colour. The
+  //     SEND-status map right above it uses text-red-800, so this pair belongs to
+  //     the conversion copy alone. (A bare /bg-(emerald|amber|sky|slate)-\d00/
+  //     would match that send-status map and be permanently RED — checked.)
+  const activityTsx = "components/campaigns/campaign-activity-section.tsx";
   check(
     "F5 the activity cell renders through lib/conversion-badge (no second copy in the .tsx)",
-    src("components/campaigns/campaign-activity-section.tsx").includes('from "@/lib/conversion-badge"') &&
-      src("components/campaigns/campaign-activity-section.tsx").includes("conversionBadgeClass(r)") &&
-      !src("components/campaigns/campaign-activity-section.tsx").includes("bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300\",\n  pending"),
+    src(activityTsx).includes('from "@/lib/conversion-badge"') &&
+      src(activityTsx).includes("conversionBadgeClass(r)") &&
+      !/const\s+CONVERSION_[A-Z_]+\s*(:|=)/.test(flat(activityTsx)) &&
+      !/bg-red-100 text-red-700/.test(flat(activityTsx)),
+    flat(activityTsx).match(/const CONVERSION_[A-Z_]+|bg-red-100 text-red-700/g)?.join(" | ") ?? "",
   );
   check(
     "F6 counted-clickers.ts rescues through rescueSendIds, not a converted_at predicate",

@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
-import { conversionAmount, conversionBadgeClass } from "@/lib/conversion-badge";
+import { conversionAmountLabel, conversionBadgeClass } from "@/lib/conversion-badge";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 // ---- Wire types (mirror app/api/campaigns/[id]/activity/*). ----
@@ -495,17 +495,11 @@ function MessagesPanel({
                           <Badge
                             variant="secondary"
                             className={conversionBadgeClass(r)}
-                            title={`${r.conversion_event} · ${r.conversion_status ?? "unmapped"}${
-                              conversionAmount(r) == null
-                                ? ""
-                                : ` · $${conversionAmount(r)!.toFixed(2)}`
-                            }`}
+                            title={`${r.conversion_event} · ${r.conversion_status ?? "unmapped"}${conversionAmountLabel(r)}`}
                           >
                             {r.conversion_event}
                             {r.conversion_status ? ` · ${r.conversion_status}` : " · unmapped"}
-                            {conversionAmount(r) == null
-                              ? ""
-                              : ` · $${conversionAmount(r)!.toFixed(2)}`}
+                            {conversionAmountLabel(r)}
                           </Badge>
                         ) : (
                           <span className="text-muted-foreground">—</span>

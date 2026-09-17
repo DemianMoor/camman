@@ -779,6 +779,10 @@ async function manualAllocationWeights(
 
 // The hourly tab's ET range, shared by every query on the tab so they cannot
 // disagree about what "in range" means.
+// NAME IS NARROWER THAN THE USE: callers are ledgerHourQuery + getHourlyReport
+// (the hourly tab) AND manualRangeRow, which is not hourly at all — it is an ET
+// DATE-RANGE bound, and the manual row must use the same one as the tab it is
+// pinned to.
 function hourlyEtRange(from: string, to: string): { start: SQL; end: SQL } {
   return {
     start: sql`(${from} || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`,

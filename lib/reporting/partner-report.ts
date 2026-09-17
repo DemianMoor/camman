@@ -142,6 +142,13 @@ export async function getPartnerReport(
     -- also uses, so the two cannot drift. Revenue is APPROVED only: a held payout
     -- is not partner revenue.
     --
+    -- ⚠️ UNEXERCISED BY ANY TEST: getPartnerReport runs against the module-level
+    -- db handle, which cannot see a rolled-back proof's fixtures, so this bound is
+    -- inert by construction and never executed by
+    -- scripts/test-p3-task4-reader-switch-db.ts (the rollup's equivalent bound IS
+    -- executed, via its check A8; A7 proves a bound of this shape changes no
+    -- number). A test that cannot fail would be worse than saying so here.
+    --
     -- BOUNDED BY THIS REPORT'S OWN SEND SET, not by the range. Restricting to the
     -- ids in the attributed CTE can only drop rows the LEFT JOIN below would
     -- discard, so no number moves — where an occurred_at range filter WOULD move

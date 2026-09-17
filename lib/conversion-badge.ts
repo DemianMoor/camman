@@ -41,16 +41,31 @@ export const CONVERSION_SIGNAL_STYLE =
 export const CONVERSION_UNMAPPED_STYLE =
   "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
 
+// An event type we DID map, carrying a lifecycle status we did NOT — and that
+// shape is REACHABLE, not theoretical: lib/conversions/build-rows.ts sets
+// `status: mapping?.status ?? null` while the ingest's upsert keeps the type
+// sticky (`event_type_id = COALESCE(conversion_events.event_type_id,
+// excluded.event_type_id)`, lib/conversions/ingest.ts), so an unrecognised
+// Keitaro status arriving on an already-mapped event leaves the type set and
+// nulls the status. Every ledger predicate requires a NON-NULL status, so such a
+// row counts nowhere — it must not borrow a purchase colour. Neutral like an
+// unmapped row, ringed so the two stay distinguishable on screen. It is also the
+// fallback for a status this map has not been taught (a future 'held'), which
+// used to render as NO colour at all — a badge that looked like a plain default.
+export const CONVERSION_STATUS_UNKNOWN_STYLE =
+  "bg-slate-100 text-slate-700 ring-1 ring-slate-400 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-500";
+
 /**
  * Badge colour. Needs BOTH facts — the lifecycle status AND whether the event is
  * a purchase. A rejected anything is red; an unmapped row is neutral; a
- * non-purchase signal is sky; only a real purchase gets the status colours.
+ * non-purchase signal is sky; only a real purchase gets the status colours, and
+ * a purchase whose status is NULL or unknown gets the ringed neutral one.
  */
 export function conversionBadgeClass(r: ConversionBadgeInput): string {
   if (r.conversion_status === "rejected") return CONVERSION_STATUS_STYLES.rejected;
   if (r.conversion_is_purchase == null) return CONVERSION_UNMAPPED_STYLE;
   if (!r.conversion_is_purchase) return CONVERSION_SIGNAL_STYLE;
-  return CONVERSION_STATUS_STYLES[r.conversion_status ?? ""] ?? "";
+  return CONVERSION_STATUS_STYLES[r.conversion_status ?? ""] ?? CONVERSION_STATUS_UNKNOWN_STYLE;
 }
 
 /**
@@ -65,4 +80,28 @@ export function conversionAmount(r: ConversionBadgeInput): number | null {
   if (r.conversion_status === "rejected") return null;
   const n = Number(r.conversion_revenue ?? 0);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Is the amount on this row counted by any report? NO for a row the ledger
+ * cannot place: an unmapped event type (`is_purchase` NULL) or a NULL lifecycle
+ * status — purchasedClause / approvedRevenueClause / pendingRevenueClause all
+ * require both (lib/sale-attribution.ts). Keitaro reported real money and no
+ * report counts a cent of it; that is the Phase 2 unmapped alert's whole job.
+ */
+export function conversionAmountUncounted(r: ConversionBadgeInput): boolean {
+  return r.conversion_is_purchase == null || r.conversion_status == null;
+}
+
+/**
+ * The amount fragment the badge appends, "" when there is none.
+ *
+ * ONE definition for the cell's label AND its tooltip, so the two cannot say
+ * different things. An uncounted amount is labelled in words: a bare "· $55.00"
+ * beside a neutral badge reads as revenue, which is exactly what it is not.
+ */
+export function conversionAmountLabel(r: ConversionBadgeInput): string {
+  const n = conversionAmount(r);
+  if (n === null) return "";
+  return ` · $${n.toFixed(2)}${conversionAmountUncounted(r) ? " uncounted" : ""}`;
 }

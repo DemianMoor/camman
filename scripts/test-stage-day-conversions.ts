@@ -7,7 +7,14 @@ import { sql } from "drizzle-orm";
 
 import { db } from "../db/client";
 import { seedConversionEvent } from "./_conversion-fixture";
-import { changedLedgerStageIds, syncStageDayConversions } from "../lib/keitaro/stage-day-conversions";
+import {
+  PROJECTION_JOB_NAME,
+  PROJECTION_WATERMARK_OVERLAP_MINUTES,
+  advanceProjectionWatermark,
+  discoverChangedLedgerStages,
+  runStageDayProjection,
+  syncStageDayConversions,
+} from "../lib/keitaro/stage-day-conversions";
 
 // The stage-day projection, run through the REAL exported functions inside a
 // transaction that ALWAYS rolls back. PREVIEW DB ONLY:
@@ -32,9 +39,9 @@ function check(label: string, ok: boolean, detail = "") {
 }
 class Rollback extends Error {}
 
-// The route's guard lives in a branch no DB fixture can reach (the projection only
-// runs after an `ok` Keitaro ingest), so it is asserted on the SOURCE of the route
-// that owns it.
+// The route's two guards live in a branch no DB fixture can reach (the projection
+// only runs after an `ok` Keitaro ingest, and the alert only on the cron path), so
+// they are asserted on the SOURCE of the route that owns them.
 function routeGuards() {
   const src = readFileSync("app/api/keitaro/poll/route.ts", "utf8");
   const start = src.indexOf("if (ledger.result?.ok) {");
@@ -42,13 +49,19 @@ function routeGuards() {
   const guarded = start > 0 && end > start ? src.slice(start, end) : "";
   check(
     "G1 the projection runs ONLY inside the ingest-ok branch (an incomplete window skips it)",
-    guarded.includes("syncStageDayConversions(db, { stageIds: scope })") &&
-      src.split("syncStageDayConversions(").length === 2,
+    guarded.includes("runStageDayProjection(db, { extraStageIds: poll.stage_ids })") &&
+      src.split("runStageDayProjection(").length === 2,
     `start=${start} end=${end}`,
   );
   check(
     "G2 the composed scope is the poll's click-window stages + whatever discovery found",
-    guarded.includes("...poll.stage_ids, ...changed.stageIds"),
+    guarded.includes("extraStageIds: poll.stage_ids"),
+  );
+  check(
+    "G3 the projection alert is evaluated on the CRON path only",
+    /if \(isCron\) \{\s*\n\s*try \{\s*\n\s*await evaluateProjectionAlert\(db, outcome\);/.test(guarded) &&
+      src.split("evaluateProjectionAlert(").length === 2,
+    guarded.slice(-400),
   );
 }
 
@@ -71,6 +84,9 @@ async function main() {
           id: string;
         }[]
       )[0].id;
+
+      // Start from "the projection has never run" (the row is self-creating).
+      await tx.execute(sql`DELETE FROM cron_locks WHERE job_name = ${PROJECTION_JOB_NAME}`);
 
       // One campaign, four stages:
       //   A — the stage under test (ledger rows + a stale conversion day)
@@ -139,6 +155,13 @@ async function main() {
             FROM campaign_stages WHERE id = ${stageId}::int
           `)) as unknown as { click_count: number; checkout_click_count: number; sales_count: number }[]
         )[0];
+      const watermark = async () =>
+        (
+          (await tx.execute(sql`
+            SELECT watermark::text AS watermark FROM cron_locks WHERE job_name = ${PROJECTION_JOB_NAME}
+          `)) as unknown as { watermark: string | null }[]
+        )[0]?.watermark ?? null;
+
       // A clicks row that also carries the STALE conversion values a re-dated
       // conversion left behind (bug 2), plus the real conversion day.
       await ksr(stageA, "2026-09-17", { visits: 40, checkouts: 1, sales: 1, revenue: 100, pending: 50, payout: 100 });
@@ -264,27 +287,82 @@ async function main() {
         JSON.stringify({ stageDRow, third }),
       );
 
-      console.log("\nchanged-ledger discovery");
-      const d1 = await changedLedgerStageIds(tx, 30);
+      console.log("\nI3 — resumable discovery (cron_locks watermark)");
+      const d1 = await discoverChangedLedgerStages(tx);
       check(
-        "D1 the stage touched inside the window is found, uncapped",
-        d1.stageIds.includes(stageA) && !d1.truncated,
+        "D1 a first run has no cursor and looks back LEDGER_CHANGE_LOOKBACK_MINUTES",
+        d1.watermarkFrom === null && d1.stageIds.includes(stageA) && !d1.truncated,
         JSON.stringify(d1),
-      );
-      const capped = await changedLedgerStageIds(tx, 30, 1);
-      check(
-        "D2 a change set past the cap is truncated, oldest change first",
-        capped.truncated && capped.stageIds.length === 1,
-        JSON.stringify(capped),
       );
       await tx.execute(sql`
         UPDATE conversion_events SET updated_at = now() - interval '3 hours' WHERE stage_id = ${stageA}::int
       `);
-      const d3 = await changedLedgerStageIds(tx, 30);
-      check("D3 and not a stage whose rows are older than the window", !d3.stageIds.includes(stageA), JSON.stringify(d3));
+      const d2 = await discoverChangedLedgerStages(tx);
+      check(
+        "D2 and not a stage whose rows are older than the window",
+        !d2.stageIds.includes(stageA),
+        JSON.stringify(d2),
+      );
+      // The stranding case: the projection last succeeded 3h ago (6+ failed
+      // ticks). A fixed 30-min lookback would never see these rows again.
+      await tx.execute(sql`
+        UPDATE conversion_events SET updated_at = now() - interval '2 hours' WHERE stage_id = ${stageA}::int
+      `);
+      await advanceProjectionWatermark(tx, new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString());
+      const d3 = await discoverChangedLedgerStages(tx);
+      check(
+        "D3 ⭐ an old watermark EXTENDS the window back, so a stage stranded by failed ticks is still found",
+        d3.stageIds.includes(stageA) && d3.watermarkFrom !== null,
+        JSON.stringify(d3),
+      );
+      const overlapOk =
+        new Date(d3.windowFrom).getTime() <=
+        new Date(d3.watermarkFrom!).getTime() - (PROJECTION_WATERMARK_OVERLAP_MINUTES - 1) * 60_000;
+      check("D3b the window starts at least the overlap before the watermark", overlapOk, JSON.stringify(d3));
+
+      // Back to a fresh cursor, with two stages changed at different times.
+      await tx.execute(sql`UPDATE cron_locks SET watermark = NULL WHERE job_name = ${PROJECTION_JOB_NAME}`);
+      await tx.execute(sql`
+        UPDATE conversion_events SET updated_at = now() - interval '10 minutes' WHERE stage_id = ${stageA}::int
+      `);
+      await tx.execute(sql`
+        UPDATE conversion_events SET updated_at = now() - interval '4 minutes' WHERE stage_id = ${stageD}::int
+      `);
+      const capped = await discoverChangedLedgerStages(tx, { limit: 1 });
+      check(
+        "D4 a change set past the cap is truncated, oldest first, and the cursor stops at what it kept",
+        capped.truncated &&
+          capped.stageIds.length === 1 &&
+          capped.stageIds[0] === stageA &&
+          capped.resumeTo !== capped.windowTo,
+        JSON.stringify(capped),
+      );
+
+      const projected = await runStageDayProjection(tx, { extraStageIds: [stageB] });
+      check(
+        "D5 the scope is extraStageIds ∪ discovered",
+        projected.stagesInScope === 3 &&
+          projected.discovery.stageIds.includes(stageA) &&
+          projected.discovery.stageIds.includes(stageD),
+        JSON.stringify(projected),
+      );
+      check(
+        "D6 the watermark advances only after the projection — to the window it covered",
+        projected.discovery.watermarkFrom === null &&
+          projected.watermarkTo === projected.discovery.resumeTo &&
+          (await watermark()) !== null,
+        JSON.stringify({ projected, stored: await watermark() }),
+      );
+      const projectedAgain = await runStageDayProjection(tx, {});
+      check(
+        "D7 the next run starts from the stored cursor",
+        projectedAgain.discovery.watermarkFrom === projected.watermarkTo,
+        JSON.stringify(projectedAgain.discovery),
+      );
 
       console.log("\nC1 (c) — the empty-ledger refusal");
       const beforeRefusal = JSON.stringify(await read(stageA));
+      const wmBefore = await watermark();
       try {
         // A savepoint so the outer transaction's fixtures survive.
         await tx.transaction(async (tx2) => {
@@ -307,6 +385,19 @@ async function main() {
             `)) as unknown as unknown[],
           );
           check("C1c2 ⭐ every stored stage-day is byte-identical after the refusal", afterRefusal === beforeRefusal, afterRefusal);
+          const refusedRun = await runStageDayProjection(tx2, { extraStageIds: [stageB] });
+          const wmAfter = (
+            (await tx2.execute(sql`
+              SELECT watermark::text AS watermark FROM cron_locks WHERE job_name = ${PROJECTION_JOB_NAME}
+            `)) as unknown as { watermark: string | null }[]
+          )[0]?.watermark ?? null;
+          check(
+            "C1c3 a refusal does NOT advance the watermark",
+            refusedRun.refused === "empty_ledger" &&
+              refusedRun.watermarkTo === refusedRun.discovery.watermarkFrom &&
+              wmAfter === wmBefore,
+            JSON.stringify({ refusedRun, wmBefore, wmAfter }),
+          );
           throw new Rollback();
         });
       } catch (err) {

@@ -14,6 +14,7 @@ import {
   LEDGER_MAX_COMBOS,
   UNMAPPED_COMBOS_SQL,
   evaluateConversionAlerts,
+  evaluateProjectionAlert,
   readLedgerHealth,
   watchIngestHeartbeat,
   type IngestOutcome,
@@ -711,6 +712,48 @@ async function main() {
         "A14 clean complete window → invalid_rows cleared, no page",
         a14.length === 0 && (await alertRow(tx, K.invalidRows))?.state === "ok",
         JSON.stringify(a14),
+      );
+
+      // The stage-day projection's own latched key (Phase 3 Task 3).
+      await clearAlert(tx, { alertKey: K.projectionFailed });
+      const pf1 = await pagesDuring(() =>
+        evaluateProjectionAlert(tx, { kind: "threw", error: "statement timeout" }, { send }),
+      );
+      check(
+        "C1 a thrown projection pages once and latches firing",
+        pf1.length === 1 &&
+          pf1[0].includes("stage-day conversion projection failed") &&
+          pf1[0].includes("statement timeout") &&
+          (await alertRow(tx, K.projectionFailed))?.state === "firing",
+        JSON.stringify(pf1),
+      );
+      const pf2 = await pagesDuring(() =>
+        evaluateProjectionAlert(tx, { kind: "threw", error: "statement timeout" }, { send }),
+      );
+      check("C2 still failing → no second page", pf2.length === 0, JSON.stringify(pf2));
+      const pf3 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "ok" }, { send }));
+      check(
+        "C3 a successful projection clears it, silently",
+        pf3.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "ok",
+        JSON.stringify(pf3),
+      );
+      const pf4 = await pagesDuring(() =>
+        evaluateProjectionAlert(tx, { kind: "refused", reason: "empty_ledger" }, { send }),
+      );
+      check(
+        "C4 the empty-ledger refusal re-arms the same key and pages, pointing at the backfill",
+        pf4.length === 1 &&
+          pf4[0].includes("no stage-attributed rows") &&
+          pf4[0].includes("backfill-conversion-events.ts --apply") &&
+          (await alertRow(tx, K.projectionFailed))?.state === "firing" &&
+          (await alertRow(tx, K.projectionFailed))?.global === true,
+        JSON.stringify(pf4),
+      );
+      const pf5 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "ok" }, { send }));
+      check(
+        "C5 and clears again",
+        pf5.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "ok",
+        JSON.stringify(pf5),
       );
 
       await setLastSuccess(sql`now() - interval '3 hours'`);

@@ -4,13 +4,17 @@ import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { ingestKeitaroConversions, type IngestResult } from "@/lib/conversions/ingest";
 import { liveIngestRange } from "@/lib/conversions/keitaro-row";
-import { evaluateConversionAlerts, type IngestOutcome } from "@/lib/conversions/monitor";
+import {
+  evaluateConversionAlerts,
+  evaluateProjectionAlert,
+  type IngestOutcome,
+  type ProjectionOutcome,
+} from "@/lib/conversions/monitor";
 import { withCronLease } from "@/lib/cron/lease";
 import { pollKeitaro } from "@/lib/keitaro/poll";
 import {
-  changedLedgerStageIds,
-  syncStageDayConversions,
-  type StageDayConversionSync,
+  runStageDayProjection,
+  type StageDayProjectionRun,
 } from "@/lib/keitaro/stage-day-conversions";
 import { can } from "@/lib/permissions";
 import { refreshCountedClickers } from "@/lib/reporting/counted-clickers";
@@ -26,7 +30,7 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat"
 // aggregate poll only. Each tick also keeps the conversion_events ledger live
 // over its own 7-day window (ingestConversionLedger) and then re-derives the
 // stage-day conversion columns of keitaro_stage_results from that ledger
-// (syncStageDayConversions) — skipped when the ingest window was not complete.
+// (runStageDayProjection) — skipped when the ingest window was not complete.
 export const dynamic = "force-dynamic";
 // Must die before the cron lease (CRON_LEASE_MS, lib/cron/lease.ts) expires at
 // 240s, or two ticks could overlap. Typical runs are low single-digit seconds;
@@ -113,19 +117,35 @@ async function pollAndRefresh(windowDays: number | undefined, isCron: boolean) {
   // next good tick.
   //
   // Scope = the stages this tick's CLICK window touched, plus every stage whose
-  // LEDGER ROWS changed in the last LEDGER_CHANGE_LOOKBACK_MINUTES. The second
-  // half is what repairs a re-posted OLD conversion: occurred_at doesn't move, so
-  // its stage-day is outside the click window and only `updated_at` finds it.
-  let stageDays: StageDayConversionSync | null = null;
+  // LEDGER ROWS changed since the projection's watermark (floor: the last
+  // LEDGER_CHANGE_LOOKBACK_MINUTES). The second half is what repairs a re-posted
+  // OLD conversion: occurred_at doesn't move, so its stage-day is outside the
+  // click window and only `updated_at` finds it. runStageDayProjection advances
+  // that watermark ONLY after the projection succeeds, so a failed or killed tick
+  // strands nothing — and the projection_failed alert says a run is failing or
+  // refusing (cron only; a skipped projection gets no decision, the ingest's own
+  // fetch_failed alert covers that).
+  let stageDays: StageDayProjectionRun | null = null;
   let stageDaysError: string | null = null;
   if (ledger.result?.ok) {
+    let outcome: ProjectionOutcome;
     try {
-      const changed = await changedLedgerStageIds(db);
-      const scope = [...new Set([...poll.stage_ids, ...changed.stageIds])];
-      stageDays = await syncStageDayConversions(db, { stageIds: scope });
+      stageDays = await runStageDayProjection(db, { extraStageIds: poll.stage_ids });
+      outcome =
+        stageDays.refused === null ? { kind: "ok" } : { kind: "refused", reason: stageDays.refused };
     } catch (err) {
       stageDaysError = err instanceof Error ? err.message : String(err);
       console.error("[keitaro/poll] stage-day conversion sync failed", err);
+      outcome = { kind: "threw", error: stageDaysError };
+    }
+    if (isCron) {
+      try {
+        await evaluateProjectionAlert(db, outcome);
+      } catch (err) {
+        console.error("[keitaro/poll] stage-day projection monitor failed", err);
+        const monitorError = `monitor: ${err instanceof Error ? err.message : String(err)}`;
+        stageDaysError = stageDaysError ? `${stageDaysError}; ${monitorError}` : monitorError;
+      }
     }
   }
   return {

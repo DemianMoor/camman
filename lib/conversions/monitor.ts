@@ -44,6 +44,10 @@ import {
 //   conversion_events:combo_cap_exceeded:type_conflicts
 //                                       that kind has more than LEDGER_MAX_COMBOS
 //                                       problem combos
+//   conversion_events:projection_failed the stage-day projection
+//                                       (lib/keitaro/stage-day-conversions.ts)
+//                                       threw, or refused because the ledger holds
+//                                       no stage-attributed rows. Cron path only.
 //   heartbeat:conversion-events-ingest  no complete ingest for over an hour
 //                                       (checked by /api/cron/tracking-monitors)
 //
@@ -52,8 +56,9 @@ import {
 // Nor statusOnlyInBatch: a brand-new status-only row has a NULL event type, so
 // the table-level unmapped alert already reports it.
 //
-// fetch_failed, invalid_rows, org_mismatch, the two combo_cap_exceeded keys and
-// the heartbeat are FIXED keys: one standing condition = one page.
+// fetch_failed, invalid_rows, org_mismatch, projection_failed, the two
+// combo_cap_exceeded keys and the heartbeat are FIXED keys: one standing
+// condition = one page.
 //
 // unmapped and type_conflicts read the whole table, all-time, and are keyed per
 // PROBLEM COMBO. <offer> is the CamMan offer id, else k<Keitaro offer id>, else
@@ -85,6 +90,9 @@ export const CONVERSION_ALERT_KEYS = {
   fetchFailed: "conversion_events:fetch_failed",
   invalidRows: "conversion_events:invalid_rows",
   orgMismatch: "conversion_events:org_mismatch",
+  // The stage-day projection (Phase 3 Task 3). Fixed key: a standing failure
+  // pages once and clears on the next successful projection.
+  projectionFailed: "conversion_events:projection_failed",
   // One per combo kind. Deliberately NOT under either combo prefix below
   // ("conversion_events:unmapped:" / "conversion_events:type_conflicts:"), so
   // the stale-combo read never sees them and never clears them.
@@ -297,6 +305,39 @@ function formatTypeConflictAlert(c: ConflictCombo, pastCap: string[]): string {
     'Decide which event is right: see "Event-type conflicts" in docs/04-features/conversion-events.md.',
     ...pastCap,
   ].join("\n");
+}
+
+// What one cron tick's stage-day projection did (Phase 3 Task 3).
+// `refused` carries syncStageDayConversions' own refusal reason.
+export type ProjectionOutcome =
+  | { kind: "ok" }
+  | { kind: "threw"; error: string }
+  | { kind: "refused"; reason: "empty_ledger" };
+
+function formatProjectionAlert(outcome: ProjectionOutcome & { kind: "threw" | "refused" }): string {
+  if (outcome.kind === "refused") {
+    return [
+      `${PREFIX} the stage-day conversion projection refused to run: conversion_events holds no stage-attributed rows.`,
+      "Nothing was written. Re-deriving against an empty ledger would zero every stage-day in scope, so it stops instead.",
+      "Fix: run the Phase 1 backfill (scripts/backfill-conversion-events.ts --apply) and check the row count, then let the next poll tick project. If the ledger is genuinely empty because the ingest has never succeeded, the conversion_events:fetch_failed alert and the ingest heartbeat say so too.",
+    ].join("\n");
+  }
+  return [
+    `${PREFIX} the stage-day conversion projection failed.`,
+    `Error: ${clip(outcome.error)}`,
+    "keitaro_stage_results' conversion columns (checkouts/sales/revenue) are the ledger's projection, and every sales and revenue surface reads them. While this lasts they keep their last good values — stale, never zeroed by a failure.",
+    "The projection is resumable: the conversion-stage-day-projection watermark in cron_locks only advances after a successful run, so no changed stage-day is stranded by the failure — but it stays uncorrected until a run succeeds. Check stage_day_conversions_error in the /api/keitaro/poll response and the Vercel logs.",
+  ].join("\n");
+}
+
+// Fixed key: firing while the projection is failing or refusing, ok after a run
+// that projected. Evaluated on the CRON path only, and only when the projection
+// actually ran — a tick whose ledger ingest was not `ok` skips the projection by
+// design and gets NO decision here (its own fetch_failed alert covers that).
+export function decideProjectionAlert(outcome: ProjectionOutcome): ConversionAlertDecision {
+  const alertKey = CONVERSION_ALERT_KEYS.projectionFailed;
+  if (outcome.kind === "ok") return { alertKey, state: "ok" };
+  return { alertKey, state: "firing", text: formatProjectionAlert(outcome) };
 }
 
 export function formatIngestHeartbeatAlert(breach: string): string {
@@ -545,6 +586,19 @@ export async function evaluateConversionAlerts(
   const ledgerDecisions = decideLedgerAlerts(health, await readFiringLedgerKeys(dbc));
   await applyDecisions(dbc, ledgerDecisions, opts.send);
   return { health, ingestDecisions, ledgerDecisions };
+}
+
+// Cron path of /api/keitaro/poll, right after the stage-day projection ran (and
+// only then — see decideProjectionAlert). The alert write is best-effort:
+// notifyOnTransition / clearAlert never throw.
+export async function evaluateProjectionAlert(
+  dbc: DbOrTx,
+  outcome: ProjectionOutcome,
+  opts: { send?: Send } = {},
+): Promise<ConversionAlertDecision> {
+  const decision = decideProjectionAlert(outcome);
+  await applyDecisions(dbc, [decision], opts.send);
+  return decision;
 }
 
 // Dead-man for the ingest, called by /api/cron/tracking-monitors (hourly) — a

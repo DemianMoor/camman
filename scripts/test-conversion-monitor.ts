@@ -16,6 +16,7 @@ import {
   UNMAPPED_COMBOS_SQL,
   decideIngestAlerts,
   decideLedgerAlerts,
+  decideProjectionAlert,
   formatIngestHeartbeatAlert,
   ingestFailed,
   typeConflictAlertKey,
@@ -539,6 +540,49 @@ check(
   JSON.stringify([orderBy(UNMAPPED_COMBOS_SQL), orderBy(CONFLICT_COMBOS_SQL)]),
 );
 
+console.log("\nstage-day projection alert (Phase 3 Task 3)");
+const projOk = decideProjectionAlert({ kind: "ok" });
+check(
+  "J1 a successful projection clears the fixed key",
+  projOk.alertKey === K.projectionFailed && projOk.state === "ok",
+  JSON.stringify(projOk),
+);
+const projThrew = decideProjectionAlert({
+  kind: "threw",
+  error: "canceling statement due to statement timeout",
+});
+const projThrewText = projThrew.state === "firing" ? projThrew.text : "";
+check(
+  "J2 a throw fires it, names the error, and says the columns are stale rather than zeroed",
+  projThrew.state === "firing" &&
+    projThrewText.startsWith(PREFIX) &&
+    projThrewText.includes("canceling statement due to statement timeout") &&
+    projThrewText.includes("stale, never zeroed by a failure"),
+  projThrewText,
+);
+check(
+  "J3 the throw page names the watermark, so the reader knows nothing is stranded",
+  projThrewText.includes("conversion-stage-day-projection") && projThrewText.includes("cron_locks"),
+  projThrewText,
+);
+const projRefused = decideProjectionAlert({ kind: "refused", reason: "empty_ledger" });
+const projRefusedText = projRefused.state === "firing" ? projRefused.text : "";
+check(
+  "J4 the empty-ledger refusal fires the SAME key and points at the Phase 1 backfill",
+  projRefused.alertKey === K.projectionFailed &&
+    projRefused.state === "firing" &&
+    projRefusedText.includes("no stage-attributed rows") &&
+    projRefusedText.includes("backfill-conversion-events.ts --apply") &&
+    projRefusedText.includes("Nothing was written"),
+  projRefusedText,
+);
+const clipped = decideProjectionAlert({ kind: "threw", error: "x".repeat(600) });
+check(
+  "J5 an unbounded error message is clipped like every other external text",
+  clipped.state === "firing" && clipped.text.split("\n")[1].length <= 307,
+  clipped.state === "firing" ? String(clipped.text.split("\n")[1].length) : "",
+);
+
 console.log("\nheartbeat alert");
 const breach =
   "Conversion events ingest (Keitaro poll tick) last ran 3h ago (tolerance 1h). Its silence cannot be read as healthy.";
@@ -559,6 +603,8 @@ const texts = [
   cappedTexts[0] ?? "",
   capText,
   hbText,
+  projThrewText,
+  projRefusedText,
 ];
 const MARKUP = /<\/?[a-z][^>]*>|\*[^*\n]+\*|__[^_\n]+__|`/i;
 check(
@@ -571,9 +617,10 @@ check(
   K.fetchFailed === "conversion_events:fetch_failed" &&
     K.invalidRows === "conversion_events:invalid_rows" &&
     K.orgMismatch === "conversion_events:org_mismatch" &&
+    K.projectionFailed === "conversion_events:projection_failed" &&
     K.unmappedComboCap === "conversion_events:combo_cap_exceeded:unmapped" &&
     K.typeConflictComboCap === "conversion_events:combo_cap_exceeded:type_conflicts" &&
-    Object.keys(K).length === 5 &&
+    Object.keys(K).length === 6 &&
     P.unmapped === "conversion_events:unmapped:" &&
     P.typeConflicts === "conversion_events:type_conflicts:" &&
     Object.keys(P).length === 2 &&

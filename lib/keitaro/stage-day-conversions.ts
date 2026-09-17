@@ -45,6 +45,13 @@ import { mirrorStageCountersFromResults } from "@/lib/keitaro/poll";
 // INSIDE the covered range. The caller (app/api/keitaro/poll/route.ts) runs it
 // only after an `ok` ingest window.
 //
+// RESUMABLE DISCOVERY (review fix I3). `occurred_at` never moves, so a re-posted
+// OLD conversion is only findable by `updated_at`. That lookback used to be a
+// fixed 30 minutes with no cursor, so ~6 consecutive failed ticks stranded
+// changed stage-days forever. Discovery now carries a watermark in
+// cron_locks.watermark under PROJECTION_JOB_NAME, advanced ONLY after a
+// successful projection — see discoverChangedLedgerStages / runStageDayProjection.
+//
 // No `"server-only"`: scripts/resync-stage-day-conversions.ts and
 // scripts/test-stage-day-conversions.ts import it directly (same convention as
 // lib/reporting/offer-group-report.ts). It holds no secrets.
@@ -54,14 +61,29 @@ import { mirrorStageCountersFromResults } from "@/lib/keitaro/poll";
 export type Database = typeof db;
 export type DbOrTx = Database | Parameters<Parameters<Database["transaction"]>[0]>[0];
 
-// How far back to look for ledger rows that CHANGED, when the caller doesn't
-// name a stage set. 30 min covers six missed */5 ticks. Served by
-// conversion_events_updated_at_idx (migration 0182).
+// The FLOOR of the discovery window, and the whole window on a first run (no
+// stored watermark). 30 min covers six missed */5 ticks; past that the watermark
+// extends the window back instead. Served by conversion_events_updated_at_idx
+// (migration 0182).
 export const LEDGER_CHANGE_LOOKBACK_MINUTES = 30;
+
+// cron_locks row that carries the discovery watermark. NOT a lease — the poll
+// route's own `keitaro-poll` lease is the single-runner guard; this row only
+// stores the cursor, exactly like `propagate-clickers` does
+// (lib/links/propagate-clickers.ts).
+export const PROJECTION_JOB_NAME = "conversion-stage-day-projection";
+
+// Re-read this much either side of the watermark. Covers commit skew: a row
+// whose updated_at was assigned before the previous window's end but which
+// committed after it would otherwise never be seen again.
+export const PROJECTION_WATERMARK_OVERLAP_MINUTES = 5;
 
 // Stage ids one discovery may return. Each id is a bind parameter in three
 // statements below, so an unbounded change set (a backfill re-touching the whole
-// ledger) would blow Postgres's 65535-parameter ceiling and fail the tick.
+// ledger) would blow Postgres's 65535-parameter ceiling and fail the tick. Past
+// the cap the OLDEST changes are taken first and the watermark advances only as
+// far as they reach, so the rest are picked up by the following ticks rather than
+// stranded — and `truncated` says so.
 export const MAX_CHANGED_STAGE_IDS = 2000;
 
 // Stage ids per counter-mirror statement — same reason, and the resync's
@@ -232,30 +254,111 @@ async function stageIdsWithRows(dbc: DbOrTx): Promise<number[]> {
   return rows.map((r) => Number(r.stage_id));
 }
 
+export interface ProjectionDiscovery {
+  /** cron_locks.watermark before this run; null = never ran. */
+  watermarkFrom: string | null;
+  /** Lower bound of the `updated_at` window scanned. */
+  windowFrom: string;
+  /** Upper bound — the database's now() when discovery ran. */
+  windowTo: string;
+  /** Stage ids whose ledger rows changed in the window, at most MAX_CHANGED_STAGE_IDS. */
+  stageIds: number[];
+  /** More stages changed in the window than the cap; the rest come next tick. */
+  truncated: boolean;
+  /** What the watermark advances to once the projection succeeds. */
+  resumeTo: string;
+}
+
 /**
- * Stage ids whose ledger rows were inserted or updated within the lookback.
+ * Stage ids whose ledger rows were inserted or updated since the watermark.
  * `occurred_at` never moves, so a re-posted OLD conversion can only be found by
- * `updated_at`. Cross-org, like the poll itself. Capped at
- * MAX_CHANGED_STAGE_IDS, oldest change first; `truncated` says the rest were
- * dropped for this run.
+ * `updated_at`. Cross-org, like the poll itself.
+ *
+ * The window is [min(watermark − overlap, now − lookback), now]: the lookback is
+ * a FLOOR on how far back to look (and the whole window on a first run), and the
+ * watermark extends it further back after failed or killed ticks — the opposite
+ * choice (clamping to the lookback) is what stranded changed rows. The row is
+ * self-creating so a first run has a cursor to advance.
  */
-export async function changedLedgerStageIds(
+export async function discoverChangedLedgerStages(
   dbc: DbOrTx,
-  sinceMinutes: number = LEDGER_CHANGE_LOOKBACK_MINUTES,
-  limit: number = MAX_CHANGED_STAGE_IDS,
-): Promise<{ stageIds: number[]; truncated: boolean }> {
+  opts: { lookbackMinutes?: number; limit?: number } = {},
+): Promise<ProjectionDiscovery> {
+  const lookback = opts.lookbackMinutes ?? LEDGER_CHANGE_LOOKBACK_MINUTES;
+  const limit = opts.limit ?? MAX_CHANGED_STAGE_IDS;
+  const [win] = (await dbc.execute(sql`
+    WITH wm AS (
+      INSERT INTO cron_locks (job_name) VALUES (${PROJECTION_JOB_NAME})
+      ON CONFLICT (job_name) DO UPDATE SET job_name = cron_locks.job_name
+      RETURNING watermark
+    )
+    SELECT wm.watermark::text AS watermark_from,
+           LEAST(
+             coalesce(wm.watermark - make_interval(mins => ${PROJECTION_WATERMARK_OVERLAP_MINUTES}::int),
+                      now() - make_interval(mins => ${lookback}::int)),
+             now() - make_interval(mins => ${lookback}::int)
+           )::text AS window_from,
+           now()::text AS window_to
+    FROM wm
+  `)) as unknown as { watermark_from: string | null; window_from: string; window_to: string }[];
+
+  // Oldest change first, so a capped run still makes forward progress: the
+  // watermark advances to the last id it KEPT, not past the ones it dropped.
   const rows = (await dbc.execute(sql`
-    SELECT ce.stage_id, max(ce.updated_at) AS last_changed
+    SELECT ce.stage_id, max(ce.updated_at)::text AS last_changed
     FROM conversion_events ce
-    WHERE ce.updated_at >= now() - make_interval(mins => ${sinceMinutes}::int)
-      AND ce.stage_id IS NOT NULL
+    WHERE ce.stage_id IS NOT NULL
+      AND ce.updated_at >= ${win.window_from}::timestamptz
+      AND ce.updated_at <= ${win.window_to}::timestamptz
     GROUP BY 1
     ORDER BY max(ce.updated_at), ce.stage_id
     LIMIT ${limit + 1}::int
-  `)) as unknown as { stage_id: number }[];
+  `)) as unknown as { stage_id: number; last_changed: string }[];
   const truncated = rows.length > limit;
+  const kept = truncated ? rows.slice(0, limit) : rows;
+
   return {
-    stageIds: (truncated ? rows.slice(0, limit) : rows).map((r) => Number(r.stage_id)),
+    watermarkFrom: win.watermark_from,
+    windowFrom: win.window_from,
+    windowTo: win.window_to,
+    stageIds: kept.map((r) => Number(r.stage_id)),
     truncated,
+    resumeTo: truncated ? (kept[kept.length - 1]?.last_changed ?? win.window_from) : win.window_to,
   };
+}
+
+/** Move the discovery cursor forward. Never backwards, whoever ran last. */
+export async function advanceProjectionWatermark(dbc: DbOrTx, to: string): Promise<string | null> {
+  const rows = (await dbc.execute(sql`
+    UPDATE cron_locks
+    SET watermark = GREATEST(coalesce(watermark, ${to}::timestamptz), ${to}::timestamptz)
+    WHERE job_name = ${PROJECTION_JOB_NAME}
+    RETURNING watermark::text AS watermark
+  `)) as unknown as { watermark: string | null }[];
+  return rows[0]?.watermark ?? null;
+}
+
+export interface StageDayProjectionRun extends StageDayConversionSync {
+  discovery: ProjectionDiscovery;
+  /** cron_locks.watermark after the run — unchanged when the run refused. */
+  watermarkTo: string | null;
+}
+
+/**
+ * One scheduled projection: discover the changed stages, project them together
+ * with `extraStageIds` (the poll's click-window stages), then advance the
+ * watermark — ONLY on success. A throw leaves the cursor where it was, so the
+ * next tick re-reads the same window; a refusal likewise.
+ */
+export async function runStageDayProjection(
+  dbc: DbOrTx,
+  opts: { extraStageIds?: number[]; lookbackMinutes?: number; limit?: number } = {},
+): Promise<StageDayProjectionRun> {
+  const discovery = await discoverChangedLedgerStages(dbc, opts);
+  const scope = [...new Set([...(opts.extraStageIds ?? []), ...discovery.stageIds])];
+  const sync = await syncStageDayConversions(dbc, { stageIds: scope });
+  if (sync.refused !== null) {
+    return { ...sync, discovery, watermarkTo: discovery.watermarkFrom };
+  }
+  return { ...sync, discovery, watermarkTo: await advanceProjectionWatermark(dbc, discovery.resumeTo) };
 }

@@ -209,7 +209,7 @@ for each stage is the **clean** (bot/prefetch-filtered) count.
    and overwrites in place — never appends, never double-counts. (The fold is
    required: multiple campaign rows now share one `(stage, date)` key, so a
    per-row last-write-wins would drop all but the last campaign.) The route then
-   runs `syncStageDayConversions` (§2c) to fill/refresh the CONVERSION columns on
+   runs `runStageDayProjection` (§2c) to fill/refresh the CONVERSION columns on
    the same rows (or insert a new row for a conversion-only stage-day with no
    clicks).
 
@@ -261,8 +261,9 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   - `stage_ids`: the stages this window's CLICK rows touched (`pollKeitaro`'s own aggregate keys) — the seed for the stage-day projection's scope.
   - `conversion_events`: the ledger ingest's `IngestResult`, or `null` when the ingest threw. Fields: `ok`, `dryRun`, `range`, `fetched`, `invalid`/`invalidSamples`, `unresolved`/`unresolvedSamples` (samples include `sub_id_1`), `rows`, `unmappedInBatch`, `statusOnlyInBatch`, `inserted`/`updated`/`unchanged`, `typeConflicts`, `orgMismatch`/`orgMismatchSamples`, `error`. `ok:false` with `error` means the window was refused (Keitaro HTTP error, timeout, a malformed 200 that isn't JSON with a `rows` array and a numeric `total`, or a truncated page) and nothing was written.
   - `conversion_events_error`: the thrown message when the ingest threw; `monitor: …` when the cron path's alert evaluation or heartbeat stamp threw (appended after `; ` if the ingest also threw); `null` otherwise. On the cron path a thrown ingest also counts as a failed tick for the debounced `conversion_events:fetch_failed` alert.
-  - `stage_day_conversions` (Phase 3 Task 3): the `StageDayConversionSync` (`{ stagesInScope, rowsWritten, rowsZeroed, coverageFloor, refused }`) `syncStageDayConversions` returned, or `null` when it was skipped (the ledger ingest wasn't `ok`) or threw. `stagesInScope` is the scope it was GIVEN (`"all"` for the unscoped resync), `coverageFloor` the earliest ET day the ledger covers across that scope (nothing older was zeroed), and `refused: "empty_ledger"` means the ledger holds no stage-attributed row and the run wrote nothing. See [conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3).
-  - `stage_day_conversions_error`: the thrown message when the projection threw; `null` otherwise (including when it was simply skipped).
+  - `stage_day_conversions` (Phase 3 Task 3): what `runStageDayProjection` returned, or `null` when it was skipped (the ledger ingest wasn't `ok`) or threw. `{ stagesInScope, rowsWritten, rowsZeroed, coverageFloor, refused, watermarkTo, discovery }` — `stagesInScope` is the scope it was GIVEN (`"all"` for the unscoped resync), `coverageFloor` the earliest ET day the ledger covers across that scope (nothing older was zeroed), `refused: "empty_ledger"` when the ledger holds no stage-attributed row and the run therefore wrote nothing, and `discovery` the `updated_at` window it scanned (`watermarkFrom`, `windowFrom`, `windowTo`, `stageIds`, `truncated`, `resumeTo`). See [conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3).
+  - On the cron path the projection also drives the latched `conversion_events:projection_failed` alert (a throw or a refusal fires it; a successful run clears it). A SKIPPED projection gets no decision.
+  - `stage_day_conversions_error`: the thrown message when the projection threw, with `monitor: …` appended when the cron path's projection-alert evaluation threw; `null` otherwise (including when it was simply skipped).
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
   date) rows plus per-stage and campaign rollups with the Clickers → Offer
   Redirect → Sales funnel + derived rates. Requires `campaigns.view`.

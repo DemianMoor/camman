@@ -1,6 +1,6 @@
 import "./_env-preload";
 
-import { inArray, sql, type SQL } from "drizzle-orm";
+import { inArray, like, sql, type SQL } from "drizzle-orm";
 import type { PgInsertValue } from "drizzle-orm/pg-core";
 
 import { db } from "../db/client";
@@ -8,16 +8,16 @@ import { conversion_events } from "../db/schema";
 import { clearAlert } from "../lib/alerts/alert-state";
 import type { IngestResult } from "../lib/conversions/ingest";
 import {
-  CONFLICT_COUNT_SQL,
+  CONFLICT_COMBOS_SQL,
   CONVERSION_ALERT_KEYS,
-  CONVERSION_ALERT_KEY_PREFIXES,
   INGEST_HEARTBEAT_ALERT_KEY,
-  UNMAPPED_COUNT_SQL,
+  LEDGER_MAX_COMBOS,
+  UNMAPPED_COMBOS_SQL,
   evaluateConversionAlerts,
-  ledgerAlertKey,
   readLedgerHealth,
   watchIngestHeartbeat,
   type IngestOutcome,
+  type LedgerHealth,
 } from "../lib/conversions/monitor";
 import { HEARTBEAT_JOBS, recordHeartbeat } from "../lib/reporting/cron-heartbeat";
 
@@ -50,7 +50,9 @@ function check(label: string, ok: boolean, detail = "") {
 class Rollback extends Error {}
 const RUN = `test-cm-${Date.now()}`;
 const K = CONVERSION_ALERT_KEYS;
-const P = CONVERSION_ALERT_KEY_PREFIXES;
+// Written out, not imported: the keys the docs and alert_state rows name.
+const UNM = "conversion_events:unmapped:";
+const CONF = "conversion_events:type_conflicts:";
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 async function alertRow(tx: Tx, key: string) {
@@ -61,16 +63,19 @@ async function alertRow(tx: Tx, key: string) {
   return rows[0];
 }
 
-// Every non-ok key under a prefix. starts_with, not LIKE, so the test does not
-// share the monitor's LIKE escaping.
-async function firingKeys(tx: Tx, prefix: string): Promise<string[]> {
-  const rows = (await tx.execute(sql`
-    SELECT alert_key FROM alert_state
-    WHERE starts_with(alert_key, ${prefix}::text) AND state <> 'ok'
-    ORDER BY alert_key
-  `)) as unknown as { alert_key: string }[];
-  return rows.map((r) => r.alert_key);
+// Every non-ok key under the combo prefixes, sorted in JS.
+async function firingKeys(tx: Tx, prefixes: string[] = [UNM, CONF]): Promise<string[]> {
+  const keys: string[] = [];
+  for (const prefix of prefixes) {
+    const rows = (await tx.execute(sql`
+      SELECT alert_key FROM alert_state
+      WHERE starts_with(alert_key, ${prefix}::text) AND state <> 'ok'
+    `)) as unknown as { alert_key: string }[];
+    keys.push(...rows.map((r) => r.alert_key));
+  }
+  return keys.sort();
 }
+const sameKeys = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
 // Proves the statement CAN be answered from the named index: with seq scans
 // disabled, a predicate that doesn't match the partial index's predicate falls
@@ -94,6 +99,12 @@ async function main() {
   const send = async (text: string) => {
     sent.push(text);
     return true;
+  };
+  // The pages a step sent.
+  const pagesDuring = async (step: () => Promise<unknown>): Promise<string[]> => {
+    const n = sent.length;
+    await step();
+    return sent.slice(n);
   };
   const preexisting = await readLedgerHealth(db);
 
@@ -131,11 +142,13 @@ async function main() {
       `);
       const before = await readLedgerHealth(tx);
       check(
-        `M0b pre-existing problem rows neutralised in the tx (${preexisting.unmapped_total} unmapped, ${preexisting.conflict_total} conflicting) → counts 0, newest ids null`,
+        `M0b pre-existing problem rows neutralised in the tx (${preexisting.unmapped_total} unmapped, ${preexisting.conflict_total} conflicting) → no problem rows, no combos`,
         before.unmapped_total === 0 &&
           before.conflict_total === 0 &&
-          before.unmapped_newest_id === null &&
-          before.conflict_newest_id === null,
+          before.unmapped_combo_count === 0 &&
+          before.conflict_combo_count === 0 &&
+          before.unmapped_combos.length === 0 &&
+          before.conflict_combos.length === 0,
         JSON.stringify(before),
       );
       if (before.unmapped_total !== 0 || before.conflict_total !== 0) throw new Rollback();
@@ -145,18 +158,21 @@ async function main() {
       }
       await tx.execute(sql`
         UPDATE alert_state SET state = 'ok'
-        WHERE starts_with(alert_key, ${P.unmapped}::text) OR starts_with(alert_key, ${P.typeConflicts}::text)
+        WHERE starts_with(alert_key, ${UNM}::text) OR starts_with(alert_key, ${CONF}::text)
       `);
-      // Decoys that an unescaped LIKE would match (`_` is a LIKE wildcard): a
-      // prefix clear must leave them firing.
-      const decoys = ["conversionXevents:unmapped:1", "conversion_events:typeXconflicts:1"];
-      for (const key of decoys) {
-        await tx.execute(sql`
+      const seedFiring = (key: string) =>
+        tx.execute(sql`
           INSERT INTO alert_state (alert_key, state, since, last_notified_at)
           VALUES (${key}, 'firing', now(), now())
-          ON CONFLICT (alert_key) DO UPDATE SET state = 'firing'
+          ON CONFLICT (alert_key) DO UPDATE SET state = 'firing', last_notified_at = now()
         `);
-      }
+      // Firing keys OUTSIDE both prefixes (the pre-combo fixed key has no trailing
+      // colon; the others differ by one character): never touched (g).
+      const decoys = ["conversion_events:unmapped", "conversionXevents:unmapped:1", "conversion_events:typeXconflicts:1"];
+      // Firing keys INSIDE the prefixes that no combo builds (fix wave 1's per-row
+      // format): stale, so the first tick clears them without a page.
+      const leftovers = [`${UNM}1`, `${CONF}1`];
+      for (const key of [...decoys, ...leftovers]) await seedFiring(key);
 
       const id = (s: string) => `${RUN}-${s}`;
       const rowIds = new Map<string, number>();
@@ -169,100 +185,165 @@ async function main() {
         for (const r of inserted) rowIds.set(r.keitaro_event_id.slice(RUN.length + 1), r.id);
       };
       const rowId = (name: string) => rowIds.get(name) ?? -1;
-      const unmKey = (name: string) => ledgerAlertKey(P.unmapped, rowId(name));
-      const confKey = (name: string) => ledgerAlertKey(P.typeConflicts, rowId(name));
-      const unmappedRow = (name: string) => ({
+      const mappedRow = (name: string, eventTypeId: number, age: string): PgInsertValue<typeof conversion_events> => ({
         keitaro_event_id: id(name),
         org_id: org.id,
-        keitaro_status: "trash",
-        keitaro_type: "trash",
-        occurred_at: new Date("2026-09-16T12:00:00Z"),
+        keitaro_status: "sale",
+        keitaro_type: "sale",
+        offer_id: offer.id,
+        event_type_id: eventTypeId,
+        status: "approved",
+        occurred_at: new Date("2026-09-05T12:00:00Z"),
+        created_at: sql`now() - ${age}::interval`,
       });
+      // NULL event type and NULL status, no attribution unless `over` adds it.
+      const unmappedRow = (
+        name: string,
+        keitaroType: string,
+        over: Partial<PgInsertValue<typeof conversion_events>> = {},
+      ): PgInsertValue<typeof conversion_events> => ({
+        keitaro_event_id: id(name),
+        org_id: org.id,
+        keitaro_status: keitaroType,
+        keitaro_type: keitaroType,
+        occurred_at: new Date("2026-09-16T12:00:00Z"),
+        ...over,
+      });
+      const byName = (names: string[]) => inArray(conversion_events.keitaro_event_id, names.map(id));
+      // What upsertConversionEvents writes on an EXISTING row whose re-posted
+      // Keitaro type maps to a different event than the locked one: the raw type
+      // moves, the event type stays, and the conflict is recorded (conflict_at is
+      // COALESCE(existing, now())). Conflicts never arise at insert.
+      const conflictOnUpdate = (names: string[], keitaroType: string, mapsTo: number) =>
+        tx
+          .update(conversion_events)
+          .set({
+            keitaro_type: keitaroType,
+            keitaro_status: keitaroType,
+            conflicting_event_type_id: mapsTo,
+            event_type_conflict_at: sql`COALESCE(conversion_events.event_type_conflict_at, now())`,
+            updated_at: sql`now()`,
+          })
+          .where(byName(names));
+      // …and when the new Keitaro type maps to nothing (or its rule was archived):
+      // status becomes NULL, the locked event type stays.
+      const unmapOnUpdate = (names: string[], keitaroType: string) =>
+        tx
+          .update(conversion_events)
+          .set({ keitaro_type: keitaroType, keitaro_status: keitaroType, status: null, updated_at: sql`now()` })
+          .where(byName(names));
+      const healSet = { event_type_id: purchase, status: "approved", conflicting_event_type_id: null, event_type_conflict_at: null };
+      const heal = (names: string[]) => tx.update(conversion_events).set(healSet).where(byName(names));
 
+      // EXISTING, healthy rows first — the lowest ids, created days ago. They
+      // become problems later only through UPDATE, as the live ingest makes them.
       await insertRows([
-        // unmapped via NULL event type (and NULL status); no CamMan offer, Keitaro offer 41
-        { ...unmappedRow("unm-new"), keitaro_offer_id: 41 },
-        // unmapped via NULL status only (event type set); created 3 days ago
-        {
-          keitaro_event_id: id("unm-old"),
-          org_id: org.id,
-          keitaro_status: "deposit",
-          keitaro_type: "deposit",
-          offer_id: offer.id,
-          event_type_id: registration,
-          status: null,
-          occurred_at: new Date("2026-09-10T12:00:00Z"),
-          created_at: sql`now() - interval '3 days'`,
-        },
-        // type conflict: locked registration, Keitaro type now maps to purchase
-        {
-          keitaro_event_id: id("conflict"),
-          org_id: org.id,
-          keitaro_status: "sale",
-          keitaro_type: "sale",
-          offer_id: offer.id,
-          event_type_id: registration,
-          status: "approved",
-          conflicting_event_type_id: purchase,
-          event_type_conflict_at: new Date("2026-09-17T14:00:00Z"),
-          occurred_at: new Date("2026-09-15T12:00:00Z"),
-        },
-        // fully mapped — must not be counted anywhere
-        {
-          keitaro_event_id: id("clean"),
-          org_id: org.id,
-          keitaro_status: "sale",
-          keitaro_type: "sale",
-          offer_id: offer.id,
-          event_type_id: purchase,
-          status: "approved",
-          occurred_at: new Date("2026-09-15T12:00:00Z"),
-        },
+        mappedRow("old-mapped", purchase, "10 days"),
+        mappedRow("old-p1", purchase, "5 days"),
+        mappedRow("old-p2", purchase, "4 days"),
+        mappedRow("old-r1", registration, "6 days"),
       ]);
+      await insertRows([
+        // one combo (Keitaro offer 41, no CamMan offer; trash) with 4 rows, newest first by name
+        ...[1, 2, 3, 4].map((n) =>
+          unmappedRow(`trash-${n}`, "trash", { keitaro_offer_id: 41, created_at: sql`now() - ${`${n} minutes`}::interval` }),
+        ),
+        // unmapped via NULL status only (event type set); CamMan offer + Keitaro offer 41; created 3 days ago
+        unmappedRow("dep", "deposit", {
+          offer_id: offer.id,
+          keitaro_offer_id: 41,
+          event_type_id: registration,
+          created_at: sql`now() - interval '3 days'`,
+        }),
+        // fully mapped — never counted
+        mappedRow("clean", purchase, "0 days"),
+      ]);
+      await conflictOnUpdate(["old-r1"], "sale", purchase);
+      const [{ now_utc }] = (await tx.execute(
+        sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS now_utc`,
+      )) as unknown as { now_utc: string }[];
 
       const h = await readLedgerHealth(tx);
-      check("M1 unmapped = event type NULL OR status NULL (both arms); mapped rows excluded", h.unmapped_total === 2, JSON.stringify(h));
-      check("M2 last-24h unmapped count is by created_at", h.unmapped_last_24h === 1, JSON.stringify(h));
-      const [s1, s2] = h.unmapped_samples;
+      const [trash, dep] = h.unmapped_combos;
       check(
-        "M3 unmapped samples newest first; Keitaro offer id when no CamMan offer",
-        h.unmapped_samples.length === 2 &&
-          s1.keitaro_event_id === id("unm-new") &&
-          s1.offer_name === null &&
-          s1.keitaro_offer_id === 41 &&
-          s1.keitaro_type === "trash",
-        JSON.stringify(h.unmapped_samples),
+        "M1 unmapped = event type NULL OR status NULL (both arms), one group per combo (offer, Keitaro type), largest first; mapped rows excluded",
+        h.unmapped_total === 5 &&
+          h.unmapped_combo_count === 2 &&
+          h.unmapped_combos.length === 2 &&
+          trash?.keitaro_type === "trash" &&
+          trash.total === 4 &&
+          dep?.keitaro_type === "deposit" &&
+          dep.total === 1,
+        JSON.stringify(h.unmapped_combos),
+      );
+      check("M2 each combo's last-24h count is by created_at", trash?.last_24h === 4 && dep?.last_24h === 0, JSON.stringify(h.unmapped_combos));
+      check(
+        "M3 combo offer: no CamMan offer → keitaro_offer_id, no name; a CamMan offer → offer_id + name, and its keitaro_offer_id is dropped (offer_id wins)",
+        trash?.offer_id === null &&
+          trash.keitaro_offer_id === 41 &&
+          trash.offer_name === null &&
+          dep?.offer_id === offer.id &&
+          dep.offer_name === offer.name &&
+          dep.keitaro_offer_id === null,
+        JSON.stringify(h.unmapped_combos),
       );
       check(
-        "M4 unmapped sample carries the CamMan offer name when attributed",
-        s2?.keitaro_event_id === id("unm-old") && s2.offer_name === offer.name && s2.keitaro_type === "deposit",
-        JSON.stringify(s2),
+        "M4 combo samples: newest created first, at most 3",
+        JSON.stringify(trash?.sample_event_ids) === JSON.stringify([id("trash-1"), id("trash-2"), id("trash-3")]) &&
+          JSON.stringify(dep?.sample_event_ids) === JSON.stringify([id("dep")]),
+        JSON.stringify(h.unmapped_combos.map((c) => c.sample_event_ids)),
       );
-      const [c1] = h.conflict_samples;
+      const [c1] = h.conflict_combos;
       check(
-        "M5 conflicts: count, locked + conflicting event keys, Keitaro type, since as UTC ISO",
+        "M5 a conflict set by UPDATE on an existing row, grouped per combo (offer, locked event, conflicting event): count, first-seen-in-24h count, first seen as UTC ISO, samples",
         h.conflict_total === 1 &&
-          c1?.keitaro_event_id === id("conflict") &&
+          h.conflict_combo_count === 1 &&
+          c1?.offer_id === offer.id &&
+          c1.offer_name === offer.name &&
+          c1.keitaro_offer_id === null &&
           c1.locked_event_key === "registration" &&
           c1.conflicting_event_key === "purchase" &&
-          c1.keitaro_type === "sale" &&
-          c1.since === "2026-09-17T14:00:00Z",
-        JSON.stringify(h.conflict_samples),
+          c1.total === 1 &&
+          c1.last_24h === 1 &&
+          c1.since === now_utc &&
+          JSON.stringify(c1.sample_event_ids) === JSON.stringify([id("old-r1")]),
+        JSON.stringify({ combos: h.conflict_combos, now_utc }),
       );
       check(
-        "M6 the unmapped count (with max(id)) is answerable from conversion_events_unmapped_idx",
-        await usesIndex(tx, UNMAPPED_COUNT_SQL, "conversion_events_unmapped_idx"),
+        "M6 the unmapped combo statement is answerable from conversion_events_unmapped_idx",
+        await usesIndex(tx, UNMAPPED_COMBOS_SQL, "conversion_events_unmapped_idx"),
       );
       check(
-        "M7 the conflict count (with max(id)) is answerable from conversion_events_type_conflict_idx",
-        await usesIndex(tx, CONFLICT_COUNT_SQL, "conversion_events_type_conflict_idx"),
+        "M7 the conflict combo statement is answerable from conversion_events_type_conflict_idx",
+        await usesIndex(tx, CONFLICT_COMBOS_SQL, "conversion_events_type_conflict_idx"),
       );
+      let capped: LedgerHealth | undefined;
+      try {
+        await tx.transaction(async (sp) => {
+          await sp
+            .insert(conversion_events)
+            .values(Array.from({ length: 11 }, (_, i) => unmappedRow(`cap-${i}`, `cap-${String(i).padStart(2, "0")}`)));
+          capped = await readLedgerHealth(sp);
+          throw new Rollback();
+        });
+      } catch (e) {
+        if (!(e instanceof Rollback)) throw e;
+      }
+      const afterCap = await readLedgerHealth(tx);
       check(
-        "M8 newest problem row ids are max(id), not the newest created_at (unm-old was created 3 days earlier but inserted later)",
-        h.unmapped_newest_id === rowId("unm-old") &&
-          rowId("unm-old") > rowId("unm-new") &&
-          h.conflict_newest_id === rowId("conflict"),
-        JSON.stringify({ h_unm: h.unmapped_newest_id, h_conf: h.conflict_newest_id, ids: [...rowIds] }),
+        "M8 over the cap (11 more combos, in a savepoint): 10 largest combos listed, while the combo count and row total still cover all 13 combos / 16 rows; the savepoint rolled back",
+        LEDGER_MAX_COMBOS === 10 &&
+          capped?.unmapped_combos.length === 10 &&
+          capped.unmapped_combo_count === 13 &&
+          capped.unmapped_total === 16 &&
+          capped.unmapped_combos[0]?.keitaro_type === "trash" &&
+          afterCap.unmapped_combo_count === 2 &&
+          afterCap.unmapped_total === 5,
+        JSON.stringify({
+          count: capped?.unmapped_combo_count,
+          total: capped?.unmapped_total,
+          listed: capped?.unmapped_combos.map((c) => `${c.keitaro_type}:${c.total}`),
+        }),
       );
 
       const okRun: IngestResult = {
@@ -305,6 +386,7 @@ async function main() {
       const refused: IngestOutcome = { kind: "result", result: failedRun };
       const invalid: IngestOutcome = { kind: "result", result: invalidRun };
       const threw: IngestOutcome = { kind: "threw", range: okRun.range, error: "connect ECONNREFUSED 10.0.0.1:6543" };
+      const tick = (outcome: IngestOutcome = ok) => pagesDuring(() => evaluateConversionAlerts(tx, outcome, { send }));
       // The ingest heartbeat (last COMPLETE ingest) that the fetch_failed debounce reads.
       const setLastSuccess = (watermark: SQL) =>
         tx.execute(sql`
@@ -312,237 +394,237 @@ async function main() {
           VALUES (${HEARTBEAT_JOBS.conversionEventsIngest.job_name}, ${watermark})
           ON CONFLICT (job_name) DO UPDATE SET watermark = excluded.watermark
         `);
-      const heal = (names: string[]) =>
-        tx
-          .update(conversion_events)
-          .set({ event_type_id: purchase, status: "approved", conflicting_event_type_id: null, event_type_conflict_at: null })
-          .where(inArray(conversion_events.keitaro_event_id, names.map(id)));
 
-      await evaluateConversionAlerts(tx, ok, { send });
+      const keyTrash = `${UNM}k41:trash`;
+      const keyDep = `${UNM}${offer.id}:deposit`;
+      const keyRegPurchase = `${CONF}${offer.id}:registration>purchase`;
+      const a1 = await tick();
       check(
-        "A1 first tick with a standing unmapped + conflict condition → exactly two pages",
-        sent.length === 2 && sent[0].includes("have no event-type mapping") && sent[1].includes("locked registration"),
-        JSON.stringify(sent),
+        "A1 first tick → one page per problem combo: trash (Keitaro offer 41), deposit (the CamMan offer), registration → purchase",
+        a1.length === 3 &&
+          a1[0].includes("4 conversion(s) for Keitaro offer 41 (no CamMan offer) with Keitaro type trash") &&
+          a1[0].includes(id("trash-1")) &&
+          a1[1].includes(`1 conversion(s) for ${offer.name} (offer ${offer.id}) with Keitaro type deposit`) &&
+          a1[2].includes("locked registration → now purchase") &&
+          a1[2].includes(id("old-r1")),
+        JSON.stringify(a1),
       );
-      const [aUnm, aConf, aFetch, aInv, aOrg] = [
-        await alertRow(tx, unmKey("unm-old")),
-        await alertRow(tx, confKey("conflict")),
-        await alertRow(tx, K.fetchFailed),
-        await alertRow(tx, K.invalidRows),
-        await alertRow(tx, K.orgMismatch),
-      ];
-      check(
-        "A2 alert_state: unmapped:<newest unmapped id> + type_conflicts:<newest conflict id> firing and delivered (the only firing keys under their prefixes), fetch_failed + invalid_rows + org_mismatch ok, all org-less",
-        aUnm?.state === "firing" &&
-          aUnm.notified &&
-          aConf?.state === "firing" &&
-          aConf.notified &&
-          aFetch?.state === "ok" &&
-          aInv?.state === "ok" &&
-          aOrg?.state === "ok" &&
-          [aUnm, aConf, aFetch, aInv, aOrg].every((r) => r?.global === true) &&
-          JSON.stringify(await firingKeys(tx, P.unmapped)) === JSON.stringify([unmKey("unm-old")]) &&
-          JSON.stringify(await firingKeys(tx, P.typeConflicts)) === JSON.stringify([confKey("conflict")]),
-        JSON.stringify({ aUnm, aConf, aFetch, aInv, aOrg }),
+      const [aTrash, aDep, aConf, aFetch, aInv, aOrg, aLeft1, aLeft2] = await Promise.all(
+        [keyTrash, keyDep, keyRegPurchase, K.fetchFailed, K.invalidRows, K.orgMismatch, ...leftovers].map((k) =>
+          alertRow(tx, k),
+        ),
       );
-
-      await evaluateConversionAlerts(tx, ok, { send });
       check(
-        "A3 next tick, same newest rows → no second page (latched on the same keys)",
-        sent.length === 2 &&
-          JSON.stringify(await firingKeys(tx, P.unmapped)) === JSON.stringify([unmKey("unm-old")]),
-        `${sent.length} sent`,
+        "A2 alert_state: exactly the three combo keys firing under the prefixes, delivered and org-less; the fixed keys ok; the leftover in-prefix keys cleared without a page (as clearAlert leaves a row)",
+        sameKeys(await firingKeys(tx), [keyTrash, keyDep, keyRegPurchase]) &&
+          [aTrash, aDep, aConf].every((r) => r?.state === "firing" && r.notified && r.global) &&
+          [aFetch, aInv, aOrg].every((r) => r?.state === "ok") &&
+          [aLeft1, aLeft2].every((r) => r?.state === "ok" && r.notified && r.global),
+        JSON.stringify({ firing: await firingKeys(tx), aTrash, aDep, aConf, aFetch, aInv, aOrg, aLeft1, aLeft2 }),
+      );
+      const a3 = await tick();
+      check(
+        "A3 next tick, nothing changed → no page, the same firing keys",
+        a3.length === 0 && sameKeys(await firingKeys(tx), [keyTrash, keyDep, keyRegPurchase]),
+        JSON.stringify(a3),
       );
 
-      // A NEW problem row pages again and supersedes the older key.
-      await insertRows([unmappedRow("unm-2")]);
-      await evaluateConversionAlerts(tx, ok, { send });
-      await evaluateConversionAlerts(tx, ok, { send });
-      const superseded = await alertRow(tx, unmKey("unm-old"));
+      const keyLead = `${UNM}none:lead`;
+      await insertRows([unmappedRow("lead-1", "lead")]);
+      const s1a = await tick();
       check(
-        "S1 a newer unmapped row (older one still unfixed) → pages once over two ticks on unmapped:<new id>; the old key → ok, exactly as clearAlert leaves a row (last_notified_at kept, org-less)",
-        sent.length === 3 &&
-          sent[2].includes("3 conversion(s) have no event-type mapping") &&
-          sent[2].includes(id("unm-2")) &&
-          JSON.stringify(await firingKeys(tx, P.unmapped)) === JSON.stringify([unmKey("unm-2")]) &&
-          (await alertRow(tx, unmKey("unm-2")))?.notified === true &&
-          superseded?.state === "ok" &&
-          superseded.notified &&
-          superseded.global,
-        JSON.stringify({ sent: sent.slice(2), superseded, firing: await firingKeys(tx, P.unmapped) }),
+        "S1a (a) a row of a NEW combo (no offer, lead) → exactly one page, on unmapped:none:lead",
+        s1a.length === 1 &&
+          s1a[0].includes("1 conversion(s) for no offer with Keitaro type lead") &&
+          (await alertRow(tx, keyLead))?.notified === true,
+        JSON.stringify(s1a),
+      );
+      await insertRows([unmappedRow("lead-2", "lead")]);
+      const s1b = await tick();
+      const s1c = await tick();
+      check(
+        "S1b (a) another row of the SAME combo, then one more tick → no page on either (a stream doesn't flood); the key stays firing",
+        s1b.length === 0 && s1c.length === 0 && (await alertRow(tx, keyLead))?.state === "firing",
+        JSON.stringify([...s1b, ...s1c]),
       );
 
-      await heal(["unm-2"]);
-      await evaluateConversionAlerts(tx, ok, { send });
+      const keyLeadK41 = `${UNM}k41:lead`;
+      await insertRows([unmappedRow("lead-k41", "lead", { keitaro_offer_id: 41 })]);
+      const s2 = await tick();
       check(
-        "S2 the newest unmapped row fixed, older ones remain → no page; unmapped:<unm-2> stays firing and the superseded unmapped:<unm-old> does not re-fire",
-        sent.length === 3 &&
-          JSON.stringify(await firingKeys(tx, P.unmapped)) === JSON.stringify([unmKey("unm-2")]) &&
-          (await alertRow(tx, unmKey("unm-old")))?.state === "ok",
-        JSON.stringify({ sent: sent.length, firing: await firingKeys(tx, P.unmapped) }),
+        "S2 (b) a row of another NEW combo (same type, Keitaro offer 41) → one more page, on unmapped:k41:lead",
+        s2.length === 1 &&
+          s2[0].includes("1 conversion(s) for Keitaro offer 41 (no CamMan offer) with Keitaro type lead") &&
+          (await alertRow(tx, keyLeadK41))?.state === "firing",
+        JSON.stringify(s2),
       );
 
-      await insertRows([
-        {
-          keitaro_event_id: id("conflict-2"),
-          org_id: org.id,
-          keitaro_status: "sale",
-          keitaro_type: "sale",
-          offer_id: offer.id,
-          event_type_id: registration,
-          status: "approved",
-          conflicting_event_type_id: purchase,
-          event_type_conflict_at: new Date("2026-09-17T15:00:00Z"),
-          occurred_at: new Date("2026-09-16T12:00:00Z"),
-        },
-      ]);
-      await evaluateConversionAlerts(tx, ok, { send });
-      await evaluateConversionAlerts(tx, ok, { send });
+      const keyChargeback = `${UNM}${offer.id}:chargeback`;
+      await unmapOnUpdate(["old-mapped"], "chargeback");
+      const s3 = await tick();
       check(
-        "S3 type_conflicts: a newer conflicting row → pages once over two ticks on type_conflicts:<new id>; the old key → ok",
-        sent.length === 4 &&
-          sent[3].includes("2 conversion(s) changed Keitaro type") &&
-          sent[3].includes(id("conflict-2")) &&
-          JSON.stringify(await firingKeys(tx, P.typeConflicts)) === JSON.stringify([confKey("conflict-2")]) &&
-          (await alertRow(tx, confKey("conflict")))?.state === "ok",
-        JSON.stringify({ sent: sent.slice(3), firing: await firingKeys(tx, P.typeConflicts) }),
+        "S3 (c) an EXISTING mapped row (lowest id, created 10 days ago) turned unmapped by UPDATE — its Keitaro type changed to an unmapped one → pages for its new combo",
+        s3.length === 1 &&
+          s3[0].includes(`1 conversion(s) for ${offer.name} (offer ${offer.id}) with Keitaro type chargeback`) &&
+          s3[0].includes("(0 created in the last 24h)") &&
+          s3[0].includes(id("old-mapped")) &&
+          (await alertRow(tx, keyChargeback))?.state === "firing" &&
+          rowId("old-mapped") < rowId("trash-1"),
+        JSON.stringify(s3),
       );
 
-      await heal(["conflict-2"]);
-      await evaluateConversionAlerts(tx, ok, { send });
+      const keyPurchaseReg = `${CONF}${offer.id}:purchase>registration`;
+      await conflictOnUpdate(["old-p1"], "lead", registration);
+      const s4a = await tick();
       check(
-        "S4 type_conflicts: the newest conflict fixed, the older one remains → no page, no step back to the superseded key",
-        sent.length === 4 &&
-          JSON.stringify(await firingKeys(tx, P.typeConflicts)) === JSON.stringify([confKey("conflict-2")]) &&
-          (await alertRow(tx, confKey("conflict")))?.state === "ok",
-        JSON.stringify({ sent: sent.length, firing: await firingKeys(tx, P.typeConflicts) }),
+        "S4a (d) a type conflict set on an EXISTING row by UPDATE (conflicting_event_type_id + event_type_conflict_at = now(), as ingest writes it) → pages for its combo",
+        s4a.length === 1 &&
+          s4a[0].includes(`1 conversion(s) for ${offer.name} (offer ${offer.id}) changed Keitaro type`) &&
+          s4a[0].includes("locked purchase → now registration") &&
+          s4a[0].includes(id("old-p1")) &&
+          (await alertRow(tx, keyPurchaseReg))?.state === "firing",
+        JSON.stringify(s4a),
+      );
+      await conflictOnUpdate(["old-p2"], "lead", registration);
+      const s4b = await tick();
+      const s4bCombo = (await readLedgerHealth(tx)).conflict_combos.find((c) => c.locked_event_key === "purchase");
+      check(
+        "S4b (d) a second conflict of the SAME combo on another existing row → no page; the key stays firing and the combo now counts 2",
+        s4b.length === 0 && (await alertRow(tx, keyPurchaseReg))?.state === "firing" && s4bCombo?.total === 2,
+        JSON.stringify({ s4b, s4bCombo }),
       );
 
-      // A leftover second firing key under the prefix (e.g. a swallowed clear):
-      // count 0 must clear it too.
-      const leftover = ledgerAlertKey(P.unmapped, 1);
-      await tx.execute(sql`
-        INSERT INTO alert_state (alert_key, state, since, last_notified_at)
-        VALUES (${leftover}, 'firing', now(), now())
-        ON CONFLICT (alert_key) DO UPDATE SET state = 'firing'
-      `);
-      await heal(["unm-new", "unm-old", "conflict"]);
-      await evaluateConversionAlerts(tx, ok, { send });
-      const decoyStates = await Promise.all(decoys.map((k) => alertRow(tx, k)));
+      await heal(["lead-1", "lead-2", "old-p1", "old-p2"]);
+      const s5a = await tick();
+      const [clearedLead, clearedConflict] = [await alertRow(tx, keyLead), await alertRow(tx, keyPurchaseReg)];
       check(
-        "A4 rows healed + conflicts resolved → every key under both prefixes cleared (incl. a leftover second key), no page; LIKE-wildcard decoys untouched",
-        sent.length === 4 &&
-          (await firingKeys(tx, P.unmapped)).length === 0 &&
-          (await firingKeys(tx, P.typeConflicts)).length === 0 &&
-          (await alertRow(tx, leftover))?.state === "ok" &&
-          (await alertRow(tx, unmKey("unm-2")))?.state === "ok" &&
-          (await alertRow(tx, confKey("conflict-2")))?.state === "ok" &&
-          decoyStates.every((r) => r?.state === "firing"),
-        JSON.stringify({ sent: sent.length, decoyStates }),
+        "S5a (e) combos resolved (the lead rows healed, the purchase → registration conflicts cleared) → their keys cleared as clearAlert leaves a row (delivered stamp kept, org-less), no page; the other combos stay firing",
+        s5a.length === 0 &&
+          clearedLead?.state === "ok" &&
+          clearedLead.notified &&
+          clearedLead.global &&
+          clearedConflict?.state === "ok" &&
+          sameKeys(await firingKeys(tx), [keyTrash, keyDep, keyRegPurchase, keyLeadK41, keyChargeback]),
+        JSON.stringify({ s5a, firing: await firingKeys(tx), clearedLead, clearedConflict }),
+      );
+      await unmapOnUpdate(["lead-2"], "lead");
+      await conflictOnUpdate(["old-p1"], "lead", registration);
+      const s5b = await tick();
+      check(
+        "S5b (e) the same two combos reappear → each pages again (re-armed), on the same keys",
+        s5b.length === 2 &&
+          s5b.some((t) => t.includes("for no offer with Keitaro type lead")) &&
+          s5b.some((t) => t.includes("locked purchase → now registration")) &&
+          (await alertRow(tx, keyLead))?.state === "firing" &&
+          (await alertRow(tx, keyPurchaseReg))?.state === "firing",
+        JSON.stringify(s5b),
       );
 
       await tx
         .update(conversion_events)
-        .set({ status: null })
-        .where(inArray(conversion_events.keitaro_event_id, [id("clean")]));
-      await evaluateConversionAlerts(tx, ok, { send });
+        .set(healSet)
+        .where(like(conversion_events.keitaro_event_id, `${RUN}-%`));
+      const s6 = await tick();
+      const decoyRows = await Promise.all(decoys.map((k) => alertRow(tx, k)));
       check(
-        "A5 a new unmapped row after the clear → pages again (re-armed) on unmapped:<its id>, though that id is below the cleared keys",
-        sent.length === 5 &&
-          sent[4].includes("1 conversion(s) have no event-type mapping (1 new in the last 24h)") &&
-          rowId("clean") < rowId("unm-2") &&
-          JSON.stringify(await firingKeys(tx, P.unmapped)) === JSON.stringify([unmKey("clean")]),
-        JSON.stringify(sent[4]),
+        "S6 every problem row healed → every key under both prefixes cleared, no page; (g) the firing decoy keys outside the prefixes are untouched",
+        s6.length === 0 &&
+          (await firingKeys(tx)).length === 0 &&
+          decoyRows.every((r) => r?.state === "firing"),
+        JSON.stringify({ s6, firing: await firingKeys(tx), decoyRows }),
       );
 
       // fetch_failed: debounced on the last COMPLETE ingest (the heartbeat), and
       // a throw is a failed tick exactly like a refused window.
       await setLastSuccess(sql`now() - interval '5 minutes'`);
-      await evaluateConversionAlerts(tx, refused, { send });
+      const a6 = await tick(refused);
       check(
         "A6 refused window, last complete ingest 5 min ago → debounced: no page, fetch_failed untouched (ok)",
-        sent.length === 5 && (await alertRow(tx, K.fetchFailed))?.state === "ok",
-        `${sent.length} sent`,
+        a6.length === 0 && (await alertRow(tx, K.fetchFailed))?.state === "ok",
+        JSON.stringify(a6),
       );
       await setLastSuccess(sql`now() - interval '20 minutes'`);
-      await evaluateConversionAlerts(tx, refused, { send });
+      const a7 = await tick(refused);
       check(
         "A7 refused window, last complete ingest 20 min ago → fetch_failed pages with the error",
-        sent.length === 6 && sent[5].includes("truncated: 1000 of 1200 rows"),
-        JSON.stringify(sent[5]),
+        a7.length === 1 && a7[0].includes("truncated: 1000 of 1200 rows"),
+        JSON.stringify(a7),
       );
-      await evaluateConversionAlerts(tx, refused, { send });
-      check("A8 still refused and stale → no second page (latched)", sent.length === 6, `${sent.length} sent`);
+      const a8 = await tick(refused);
+      check("A8 still refused and stale → no second page (latched)", a8.length === 0, JSON.stringify(a8));
 
-      // A failed tick must still re-read the ledger (design decision 3).
-      await insertRows([unmappedRow("unm-3")]);
-      await evaluateConversionAlerts(tx, refused, { send });
+      // (f) A failed tick must still re-read the ledger (design decision 3).
+      const keyUpsell = `${UNM}${offer.id}:upsell`;
+      await insertRows([unmappedRow("upsell", "upsell", { offer_id: offer.id })]);
+      const a8b = await tick(refused);
       check(
-        "A8b a failed tick still re-reads the ledger: a new unmapped row → the refused tick pages it on unmapped:<new id> (old key ok), and fetch_failed does not page twice",
-        sent.length === 7 &&
-          sent[6].includes("2 conversion(s) have no event-type mapping") &&
-          sent[6].includes(id("unm-3")) &&
-          JSON.stringify(await firingKeys(tx, P.unmapped)) === JSON.stringify([unmKey("unm-3")]) &&
-          (await alertRow(tx, unmKey("clean")))?.state === "ok" &&
+        "A8b (f) a refused tick still re-reads the ledger: a row of a new combo → that tick pages it on unmapped:<offer>:upsell, and fetch_failed stays firing without a second page",
+        a8b.length === 1 &&
+          a8b[0].includes(`for ${offer.name} (offer ${offer.id}) with Keitaro type upsell`) &&
+          (await alertRow(tx, keyUpsell))?.state === "firing" &&
           (await alertRow(tx, K.fetchFailed))?.state === "firing",
-        JSON.stringify({ sent: sent.slice(6), firing: await firingKeys(tx, P.unmapped) }),
+        JSON.stringify(a8b),
       );
 
       await setLastSuccess(sql`now() - interval '5 minutes'`);
-      await evaluateConversionAlerts(tx, refused, { send });
+      const a9 = await tick(refused);
       check(
         "A9 a debounced failure never clears: fresh heartbeat + refused → no page, fetch_failed still firing",
-        sent.length === 7 && (await alertRow(tx, K.fetchFailed))?.state === "firing",
-        `${sent.length} sent`,
+        a9.length === 0 && (await alertRow(tx, K.fetchFailed))?.state === "firing",
+        JSON.stringify(a9),
       );
-      await evaluateConversionAlerts(tx, ok, { send });
+      const a10 = await tick();
       check(
         "A10 complete window → fetch_failed cleared, no page",
-        sent.length === 7 && (await alertRow(tx, K.fetchFailed))?.state === "ok",
-        `${sent.length} sent`,
+        a10.length === 0 && (await alertRow(tx, K.fetchFailed))?.state === "ok",
+        JSON.stringify(a10),
       );
       await setLastSuccess(sql`NULL::timestamptz`);
-      await evaluateConversionAlerts(tx, threw, { send });
+      const a11 = await tick(threw);
       check(
         "A11 an ingest that THREW, no complete ingest ever recorded → fetch_failed pages again with the thrown message",
-        sent.length === 8 &&
-          sent[7].includes("connect ECONNREFUSED 10.0.0.1:6543") &&
-          sent[7].includes("never recorded"),
-        JSON.stringify(sent[7]),
+        a11.length === 1 && a11[0].includes("connect ECONNREFUSED 10.0.0.1:6543") && a11[0].includes("never recorded"),
+        JSON.stringify(a11),
       );
 
-      await evaluateConversionAlerts(tx, invalid, { send });
+      const a12 = await tick(invalid);
       check(
         "A12 unparseable rows → invalid_rows pages with the count and a sample (and the complete window clears fetch_failed silently)",
-        sent.length === 9 &&
-          sent[8].includes("2 Keitaro conversion row(s)") &&
-          sent[8].includes("event_id=bad") &&
+        a12.length === 1 &&
+          a12[0].includes("2 Keitaro conversion row(s)") &&
+          a12[0].includes("event_id=bad") &&
           (await alertRow(tx, K.fetchFailed))?.state === "ok",
-        JSON.stringify(sent[8]),
+        JSON.stringify(a12),
       );
-      await evaluateConversionAlerts(tx, invalid, { send });
-      check("A13 still unparseable → no second page", sent.length === 9, `${sent.length} sent`);
-      await evaluateConversionAlerts(tx, ok, { send });
+      const a13 = await tick(invalid);
+      check("A13 still unparseable → no second page", a13.length === 0, JSON.stringify(a13));
+      const a14 = await tick();
       check(
         "A14 clean complete window → invalid_rows cleared, no page",
-        sent.length === 9 && (await alertRow(tx, K.invalidRows))?.state === "ok",
-        `${sent.length} sent`,
+        a14.length === 0 && (await alertRow(tx, K.invalidRows))?.state === "ok",
+        JSON.stringify(a14),
       );
 
       await setLastSuccess(sql`now() - interval '3 hours'`);
-      const stale = await watchIngestHeartbeat(tx, { send });
+      let stale: Awaited<ReturnType<typeof watchIngestHeartbeat>> | undefined;
+      const b1 = await pagesDuring(async () => {
+        stale = await watchIngestHeartbeat(tx, { send });
+      });
       check(
         "B1 stale ingest heartbeat → one page naming the job",
-        stale.stale && sent.length === 10 && sent[9].includes("Conversion events ingest (Keitaro poll tick)"),
-        JSON.stringify({ stale, text: sent[9] }),
+        stale?.stale === true && b1.length === 1 && b1[0].includes("Conversion events ingest (Keitaro poll tick)"),
+        JSON.stringify({ stale, b1 }),
       );
-      await watchIngestHeartbeat(tx, { send });
-      check("B2 still stale → no second page", sent.length === 10, `${sent.length} sent`);
+      const b2 = await pagesDuring(() => watchIngestHeartbeat(tx, { send }));
+      check("B2 still stale → no second page", b2.length === 0, JSON.stringify(b2));
       await recordHeartbeat(tx, HEARTBEAT_JOBS.conversionEventsIngest.job_name);
-      const fresh = await watchIngestHeartbeat(tx, { send });
+      let fresh: Awaited<ReturnType<typeof watchIngestHeartbeat>> | undefined;
+      const b3 = await pagesDuring(async () => {
+        fresh = await watchIngestHeartbeat(tx, { send });
+      });
       check(
         "B3 fresh heartbeat → cleared, no page",
-        !fresh.stale && sent.length === 10 && (await alertRow(tx, INGEST_HEARTBEAT_ALERT_KEY))?.state === "ok",
+        fresh?.stale === false && b3.length === 0 && (await alertRow(tx, INGEST_HEARTBEAT_ALERT_KEY))?.state === "ok",
         JSON.stringify(fresh),
       );
 
@@ -557,11 +639,17 @@ async function main() {
   )) as unknown as { n: number }[];
   const after = await readLedgerHealth(db);
   check(
-    "Z1 rolled back — no test rows left, pre-existing unmapped/conflict counts unchanged",
+    "Z1 rolled back — no test rows left, pre-existing unmapped/conflict row and combo counts unchanged",
     left.n === 0 &&
       after.unmapped_total === preexisting.unmapped_total &&
-      after.conflict_total === preexisting.conflict_total,
-    JSON.stringify({ left: left.n, before: [preexisting.unmapped_total, preexisting.conflict_total], after: [after.unmapped_total, after.conflict_total] }),
+      after.conflict_total === preexisting.conflict_total &&
+      after.unmapped_combo_count === preexisting.unmapped_combo_count &&
+      after.conflict_combo_count === preexisting.conflict_combo_count,
+    JSON.stringify({
+      left: left.n,
+      before: [preexisting.unmapped_total, preexisting.conflict_total],
+      after: [after.unmapped_total, after.conflict_total],
+    }),
   );
 
   console.log(`\n${passed} passed, ${failed} failed`);

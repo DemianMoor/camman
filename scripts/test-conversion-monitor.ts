@@ -8,16 +8,18 @@ import {
   CONVERSION_ALERT_KEY_PREFIXES,
   FETCH_FAILED_DEBOUNCE_MINUTES,
   INGEST_HEARTBEAT_ALERT_KEY,
+  LEDGER_MAX_COMBOS,
   decideIngestAlerts,
   decideLedgerAlerts,
   formatIngestHeartbeatAlert,
   ingestFailed,
-  ledgerAlertKey,
+  typeConflictAlertKey,
+  unmappedAlertKey,
+  type ConflictCombo,
   type ConversionAlertDecision,
-  type FiringLedgerIds,
   type IngestOutcome,
-  type LedgerAlertDecision,
   type LedgerHealth,
+  type UnmappedCombo,
 } from "../lib/conversions/monitor";
 
 let passed = 0;
@@ -256,128 +258,205 @@ check(
   JSON.stringify(orgClearDs),
 );
 
-console.log("\nledger alerts");
-const P = CONVERSION_ALERT_KEY_PREFIXES;
-type LedgerFiring = Extract<LedgerAlertDecision, { state: "firing" }>;
-const ledgerDecision = (ds: LedgerAlertDecision[], prefix: string) => ds.find((d) => d.prefix === prefix);
-const ledgerKey = (ds: LedgerAlertDecision[], prefix: string) =>
-  ds.find((d): d is LedgerFiring => d.prefix === prefix && d.state === "firing")?.alertKey;
-const ledgerText = (ds: LedgerAlertDecision[], prefix: string): string =>
-  ds.find((d): d is LedgerFiring => d.prefix === prefix && d.state === "firing")?.text ?? "";
-const firing = (unmapped: number | null, typeConflicts: number | null): FiringLedgerIds => ({
-  unmapped,
-  typeConflicts,
-});
 
-const clean: LedgerHealth = {
-  unmapped_total: 0,
-  unmapped_last_24h: 0,
-  unmapped_newest_id: null,
-  unmapped_samples: [],
-  conflict_total: 0,
-  conflict_newest_id: null,
-  conflict_samples: [],
-};
-const cleanDs = decideLedgerAlerts(clean, firing(null, null));
+console.log("\nledger combo keys");
+const P = CONVERSION_ALERT_KEY_PREFIXES;
+const unm = (over: Partial<UnmappedCombo>): UnmappedCombo => ({
+  offer_id: null,
+  keitaro_offer_id: null,
+  offer_name: null,
+  keitaro_type: "trash",
+  total: 1,
+  last_24h: 0,
+  sample_event_ids: ["ev-1"],
+  ...over,
+});
+const conf = (over: Partial<ConflictCombo>): ConflictCombo => ({
+  offer_id: 134,
+  keitaro_offer_id: null,
+  offer_name: "Psycho Book",
+  locked_event_key: "registration",
+  conflicting_event_key: "purchase",
+  total: 1,
+  last_24h: 1,
+  since: "2026-09-17T14:00:00Z",
+  sample_event_ids: ["ev-conflict"],
+  ...over,
+});
+// A ledger read that lists every combo (under the cap) unless `over` says otherwise.
+const ledger = (
+  unmapped: UnmappedCombo[],
+  conflicts: ConflictCombo[],
+  over: Partial<LedgerHealth> = {},
+): LedgerHealth => ({
+  unmapped_total: unmapped.reduce((n, c) => n + c.total, 0),
+  unmapped_combo_count: unmapped.length,
+  unmapped_combos: unmapped,
+  conflict_total: conflicts.reduce((n, c) => n + c.total, 0),
+  conflict_combo_count: conflicts.length,
+  conflict_combos: conflicts,
+  ...over,
+});
+const firingKeysOf = (ds: ConversionAlertDecision[]) => ds.filter((d) => d.state === "firing").map((d) => d.alertKey);
+const okKeysOf = (ds: ConversionAlertDecision[]) => ds.filter((d) => d.state === "ok").map((d) => d.alertKey);
+const sameKeys = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+const keysOnly = (ds: ConversionAlertDecision[]) => JSON.stringify(ds.map((d) => `${d.state} ${d.alertKey}`));
+
+const psycho = unm({
+  offer_id: 134,
+  offer_name: "Psycho Book",
+  keitaro_type: "deposit",
+  total: 5,
+  last_24h: 2,
+  sample_event_ids: ["ev-a", "ev-b", "ev-c", "ev-d"],
+});
+const k41 = unm({ keitaro_offer_id: 41, keitaro_type: "trash" });
+const noOffer = unm({ keitaro_type: "lead" });
+const regToPurchase = conf({ total: 3, sample_event_ids: ["ev-x", "ev-y", "ev-z", "ev-w"] });
+
+const builtKeys = [
+  unmappedAlertKey(psycho),
+  unmappedAlertKey(k41),
+  unmappedAlertKey(noOffer),
+  unmappedAlertKey(unm({ offer_id: 134, keitaro_offer_id: 41 })),
+  typeConflictAlertKey(regToPurchase),
+  typeConflictAlertKey(conf({ offer_id: null, keitaro_offer_id: 41, offer_name: null })),
+];
 check(
-  "L1 clean ledger → unmapped ok, type_conflicts ok",
-  cleanDs.length === 2 &&
-    ledgerDecision(cleanDs, P.unmapped)?.state === "ok" &&
-    ledgerDecision(cleanDs, P.typeConflicts)?.state === "ok",
-  JSON.stringify(cleanDs),
+  "C1 combo keys: unmapped:<offer>:<keitaro type>, type_conflicts:<offer>:<locked>><conflicting>; offer = offer_id, else k<keitaro offer id>, else none",
+  JSON.stringify(builtKeys) ===
+    JSON.stringify([
+      "conversion_events:unmapped:134:deposit",
+      "conversion_events:unmapped:k41:trash",
+      "conversion_events:unmapped:none:lead",
+      "conversion_events:unmapped:134:trash",
+      "conversion_events:type_conflicts:134:registration>purchase",
+      "conversion_events:type_conflicts:k41:registration>purchase",
+    ]),
+  JSON.stringify(builtKeys),
+);
+const oddKey = unmappedAlertKey(unm({ keitaro_type: "First Deposit: 2>1 ✓" }));
+const longKey = unmappedAlertKey(unm({ keitaro_type: "x".repeat(200) }));
+const oddConflictKey = typeConflictAlertKey(conf({ locked_event_key: "Reg:A>B", conflicting_event_key: null }));
+check(
+  "C2 key parts are sanitised (lowercase; anything outside [a-z0-9_-] → _, so ':' and '>' can't forge a separator) and clipped to 40 chars",
+  oddKey === "conversion_events:unmapped:none:first_deposit__2_1__" &&
+    longKey === `conversion_events:unmapped:none:${"x".repeat(40)}` &&
+    oddConflictKey === "conversion_events:type_conflicts:134:reg_a_b>_" &&
+    [...builtKeys, oddKey, longKey, oddConflictKey].every((k) => /^[a-z0-9_:>-]+$/.test(k)),
+  JSON.stringify({ oddKey, longKey, oddConflictKey }),
+);
+check(
+  "C3 a combo's key ignores its counts, samples, since and offer name — a growing stream keeps one key",
+  unmappedAlertKey(k41) ===
+    unmappedAlertKey({ ...k41, total: 900, last_24h: 300, sample_event_ids: ["ev-new"], offer_name: "Renamed" }) &&
+    typeConflictAlertKey(regToPurchase) ===
+      typeConflictAlertKey({ ...regToPurchase, total: 50, since: "2026-09-18T01:00:00Z", sample_event_ids: [] }),
 );
 
-const sick: LedgerHealth = {
-  unmapped_total: 5,
-  unmapped_last_24h: 2,
-  unmapped_newest_id: 120,
-  unmapped_samples: [
-    { keitaro_event_id: "ev-offer", keitaro_type: "trash", keitaro_offer_id: 41, offer_name: "Psycho Book" },
-    { keitaro_event_id: "ev-keitaro", keitaro_type: "deposit", keitaro_offer_id: 41, offer_name: null },
-    { keitaro_event_id: "ev-none", keitaro_type: "lead", keitaro_offer_id: null, offer_name: null },
-    { keitaro_event_id: "ev-fourth", keitaro_type: "lead", keitaro_offer_id: null, offer_name: null },
-  ],
-  conflict_total: 1,
-  conflict_newest_id: 77,
-  conflict_samples: [
-    {
-      keitaro_event_id: "ev-conflict",
-      locked_event_key: "registration",
-      keitaro_type: "sale",
-      conflicting_event_key: "purchase",
-      since: "2026-09-17T14:00:00Z",
-    },
-  ],
-};
-const sickDs = decideLedgerAlerts(sick, firing(null, null));
-const unmappedText = ledgerText(sickDs, P.unmapped);
+console.log("\nledger alerts (per problem combo)");
+const cleanDs = decideLedgerAlerts(ledger([], []), []);
+check("L1 clean ledger, nothing firing → no ledger decisions", cleanDs.length === 0, keysOnly(cleanDs));
+
+const sickDs = decideLedgerAlerts(ledger([psycho, k41, noOffer], [regToPurchase]), []);
+const unmappedText = firingText(sickDs, unmappedAlertKey(psycho));
 check(
-  "L2 unmapped firing: total, last-24h count, offer name / Keitaro offer id / no offer, at most 3 samples",
+  "L2 unmapped page for one combo: its count, offer name + id, Keitaro type, created-in-24h count, samples, the fix",
   unmappedText.startsWith(PREFIX) &&
-    unmappedText.includes("5 conversion(s) have no event-type mapping (2 new in the last 24h)") &&
-    unmappedText.includes("ev-offer · Psycho Book · type trash") &&
-    unmappedText.includes("ev-keitaro · Keitaro offer 41 · type deposit") &&
-    unmappedText.includes("ev-none · no offer · type lead") &&
-    !unmappedText.includes("ev-fourth"),
+    unmappedText.includes(
+      "5 conversion(s) for Psycho Book (offer 134) with Keitaro type deposit have no event-type mapping (2 created in the last 24h).",
+    ) &&
+    unmappedText.includes("Sample Keitaro event ids: ev-a, ev-b, ev-c") &&
+    unmappedText.includes("Fix: add a conversion_event_mappings row"),
   unmappedText,
 );
-const conflictText = ledgerText(sickDs, P.typeConflicts);
+const k41Text = firingText(sickDs, unmappedAlertKey(k41));
+const noOfferText = firingText(sickDs, unmappedAlertKey(noOffer));
 check(
-  "L3 type_conflicts firing: count, event id, locked key, Keitaro type → mapped key, since in ET",
+  "L3 offer label: the Keitaro offer id when no CamMan offer, else 'no offer'",
+  k41Text.includes("1 conversion(s) for Keitaro offer 41 (no CamMan offer) with Keitaro type trash") &&
+    noOfferText.includes("1 conversion(s) for no offer with Keitaro type lead"),
+  `${k41Text}\n---\n${noOfferText}`,
+);
+const conflictText = firingText(sickDs, typeConflictAlertKey(regToPurchase));
+check(
+  "L4 type_conflicts page for one combo: its count, offer, locked → now-mapped event pair, first-seen-in-24h count, first seen in ET, samples, the doc",
   conflictText.startsWith(PREFIX) &&
-    conflictText.includes("1 conversion(s)") &&
     conflictText.includes(
-      "ev-conflict · locked registration · Keitaro type sale → purchase · since Sep 17, 2026 10:00 AM ET",
-    ),
+      "3 conversion(s) for Psycho Book (offer 134) changed Keitaro type to one that maps to a different event: locked registration → now purchase (1 first seen in the last 24h).",
+    ) &&
+    conflictText.includes("First seen: Sep 17, 2026 10:00 AM ET") &&
+    conflictText.includes("Sample Keitaro event ids: ev-x, ev-y, ev-z") &&
+    conflictText.includes('"Event-type conflicts"'),
   conflictText,
 );
-
-console.log("\nledger alert keys (newest problem row)");
 check(
-  "L4 nothing firing → each kind fires on its newest problem row's key",
-  ledgerKey(sickDs, P.unmapped) === "conversion_events:unmapped:120" &&
-    ledgerKey(sickDs, P.typeConflicts) === "conversion_events:type_conflicts:77",
-  JSON.stringify(sickDs.map((d) => ({ ...d, text: undefined }))),
+  "L5 samples are capped at 3 per page (the 4th sample id never appears)",
+  !unmappedText.includes("ev-d") && !conflictText.includes("ev-w"),
+  `${unmappedText}\n---\n${conflictText}`,
 );
-const sameDs = decideLedgerAlerts(sick, firing(120, 77));
 check(
-  "L5 the same newest row already firing → the same key again (notifyOnTransition's latch keeps it one page)",
-  ledgerKey(sameDs, P.unmapped) === "conversion_events:unmapped:120" &&
-    ledgerKey(sameDs, P.typeConflicts) === "conversion_events:type_conflicts:77",
-  JSON.stringify(sameDs.map((d) => ({ ...d, text: undefined }))),
+  "L6 new combos, nothing firing → one firing decision per combo on its own key, no clears",
+  sickDs.length === 4 &&
+    okKeysOf(sickDs).length === 0 &&
+    sameKeys(firingKeysOf(sickDs), [
+      unmappedAlertKey(psycho),
+      unmappedAlertKey(k41),
+      unmappedAlertKey(noOffer),
+      typeConflictAlertKey(regToPurchase),
+    ]),
+  keysOnly(sickDs),
 );
-const newerDs = decideLedgerAlerts(sick, firing(100, 77));
+const grownK41 = { ...k41, total: 7, last_24h: 7, sample_event_ids: ["ev-7", "ev-6", "ev-5"] };
+const latchedDs = decideLedgerAlerts(ledger([grownK41], []), [unmappedAlertKey(k41)]);
 check(
-  "L6 a NEWER unmapped row (id above the firing key) → firing on the new key, under the prefix whose older keys it supersedes",
-  ledgerKey(newerDs, P.unmapped) === "conversion_events:unmapped:120" &&
-    ledgerDecision(newerDs, P.unmapped)?.prefix === "conversion_events:unmapped:" &&
-    ledgerText(newerDs, P.unmapped) === unmappedText,
-  JSON.stringify(newerDs.map((d) => ({ ...d, text: undefined }))),
+  "L7 the same combo already firing, with more rows since → 'firing' on the SAME key again and nothing cleared (notifyOnTransition's latch makes it no new page — DB S1b)",
+  keysOnly(latchedDs) === JSON.stringify([`firing ${unmappedAlertKey(k41)}`]),
+  keysOnly(latchedDs),
 );
-const newestFixedDs = decideLedgerAlerts({ ...sick, unmapped_total: 4, unmapped_newest_id: 90 }, firing(120, 77));
+const staleDs = decideLedgerAlerts(ledger([k41], []), [
+  unmappedAlertKey(k41),
+  unmappedAlertKey(psycho),
+  typeConflictAlertKey(regToPurchase),
+  "conversion_events:unmapped", // no trailing colon: outside the prefix
+  "conversionXevents:unmapped:1",
+  K.fetchFailed,
+]);
 check(
-  "L7 newest unmapped row fixed, older ones remain (newest 90 < firing 120) → stays on :120, never steps back to a superseded lower key",
-  ledgerKey(newestFixedDs, P.unmapped) === "conversion_events:unmapped:120",
-  JSON.stringify(newestFixedDs.map((d) => ({ ...d, text: undefined }))),
+  "L8 firing keys whose combo is gone → ok, under both prefixes; a present combo stays firing; keys outside the prefixes get no decision",
+  staleDs.length === 3 &&
+    sameKeys(okKeysOf(staleDs), [unmappedAlertKey(psycho), typeConflictAlertKey(regToPurchase)]) &&
+    sameKeys(firingKeysOf(staleDs), [unmappedAlertKey(k41)]),
+  keysOnly(staleDs),
 );
-const healedDs = decideLedgerAlerts(clean, firing(120, 77));
+const spaced = unm({ keitaro_type: "first deposit", total: 9 });
+const underscored = unm({ keitaro_type: "first_deposit", total: 2 });
+const collideDs = decideLedgerAlerts(ledger([spaced, underscored], []), []);
 check(
-  "L8 no problem rows left → ok for each whole prefix, whatever key is firing",
-  healedDs.length === 2 &&
-    ledgerDecision(healedDs, P.unmapped)?.state === "ok" &&
-    ledgerDecision(healedDs, P.typeConflicts)?.state === "ok",
-  JSON.stringify(healedDs),
+  "L9 two combos that sanitise to one key → one decision, carrying the first (larger) combo's page",
+  unmappedAlertKey(spaced) === unmappedAlertKey(underscored) &&
+    collideDs.length === 1 &&
+    firingText(collideDs, unmappedAlertKey(spaced)).includes("9 conversion(s)"),
+  keysOnly(collideDs),
 );
-const conflictNewer = decideLedgerAlerts({ ...sick, conflict_newest_id: 80 }, firing(null, 77));
-const conflictFixed = decideLedgerAlerts({ ...sick, conflict_newest_id: 60 }, firing(null, 77));
-const conflictHealed = decideLedgerAlerts({ ...sick, conflict_total: 0, conflict_newest_id: null }, firing(120, 77));
+const listed = Array.from({ length: LEDGER_MAX_COMBOS }, (_, i) => unm({ keitaro_type: `type-${i}`, total: 20 - i }));
+const pastCapKey = unmappedAlertKey(unm({ keitaro_type: "past-the-cap" }));
+const staleConflictKey = typeConflictAlertKey(conf({ conflicting_event_key: "lead" }));
+const cappedDs = decideLedgerAlerts(
+  ledger(listed, [regToPurchase], { unmapped_combo_count: LEDGER_MAX_COMBOS + 4 }),
+  [pastCapKey, staleConflictKey],
+);
+const cappedTexts = firingKeysOf(cappedDs)
+  .filter((k) => k.startsWith(P.unmapped))
+  .map((k) => firingText(cappedDs, k));
 check(
-  "L9 type_conflicts follows the same rules: newer row → new key, newest fixed → stays, none left → ok",
-  ledgerKey(conflictNewer, P.typeConflicts) === "conversion_events:type_conflicts:80" &&
-    ledgerKey(conflictFixed, P.typeConflicts) === "conversion_events:type_conflicts:77" &&
-    ledgerDecision(conflictHealed, P.typeConflicts)?.state === "ok" &&
-    ledgerKey(conflictHealed, P.unmapped) === "conversion_events:unmapped:120",
-  JSON.stringify([conflictNewer, conflictFixed, conflictHealed].map((ds) => ds.map((d) => ({ ...d, text: undefined })))),
+  "L10 over the cap (10 combos per kind): the 10 listed combos page and every unmapped page names the 4 more; no unmapped key clears (past the cap is not resolved), while type_conflicts, under its cap, still clears",
+  LEDGER_MAX_COMBOS === 10 &&
+    cappedTexts.length === 10 &&
+    cappedTexts.every((t) => t.includes("4 more unmapped combo(s) are not listed or paged")) &&
+    !firingText(cappedDs, typeConflictAlertKey(regToPurchase)).includes("not listed or paged") &&
+    sameKeys(okKeysOf(cappedDs), [staleConflictKey]),
+  `${keysOnly(cappedDs)}\n${cappedTexts[0]}`,
 );
 
 console.log("\nheartbeat alert");
@@ -387,7 +466,19 @@ const hbText = formatIngestHeartbeatAlert(breach);
 check("H1 heartbeat text: prefix + the breach line", hbText.startsWith(PREFIX) && hbText.includes(breach), hbText);
 
 console.log("\nplain text + keys");
-const texts = [fetchText, invalidText, hugeText, threwText, orgText, unmappedText, conflictText, hbText];
+const texts = [
+  fetchText,
+  invalidText,
+  hugeText,
+  threwText,
+  orgText,
+  unmappedText,
+  k41Text,
+  noOfferText,
+  conflictText,
+  cappedTexts[0] ?? "",
+  hbText,
+];
 const MARKUP = /<\/?[a-z][^>]*>|\*[^*\n]+\*|__[^_\n]+__|`/i;
 check(
   "X1 no HTML or Markdown in any alert (notifyTelegram sends without parse_mode)",
@@ -395,15 +486,14 @@ check(
   texts.filter((t) => t.length === 0 || MARKUP.test(t)).join("\n---\n"),
 );
 check(
-  "K1 the fixed keys, the per-row key prefixes and the key builder are the strings the docs and alert_state rows name",
+  "K1 the fixed keys, the combo key prefixes and the heartbeat key are the strings the docs and alert_state rows name",
   K.fetchFailed === "conversion_events:fetch_failed" &&
     K.invalidRows === "conversion_events:invalid_rows" &&
     K.orgMismatch === "conversion_events:org_mismatch" &&
     Object.keys(K).length === 3 &&
     P.unmapped === "conversion_events:unmapped:" &&
     P.typeConflicts === "conversion_events:type_conflicts:" &&
-    ledgerAlertKey(P.unmapped, 42) === "conversion_events:unmapped:42" &&
-    ledgerAlertKey(P.typeConflicts, 7) === "conversion_events:type_conflicts:7" &&
+    Object.keys(P).length === 2 &&
     INGEST_HEARTBEAT_ALERT_KEY === "heartbeat:conversion-events-ingest",
 );
 

@@ -21,8 +21,11 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat"
 // aggregate poll only. Each tick also keeps the conversion_events ledger live
 // over its own 7-day window — see ingestConversionLedger below.
 export const dynamic = "force-dynamic";
-// Seatbelt only — the batched upsert makes a full run low single-digit seconds.
-export const maxDuration = 300;
+// Must die before the cron lease (CRON_LEASE_MS, lib/cron/lease.ts) expires at
+// 240s, or two ticks could overlap. Typical runs are low single-digit seconds;
+// if a tick is killed at 230s, the ledger ingest's transaction rolls back and
+// retries on the next tick.
+export const maxDuration = 230;
 // Pin to Frankfurt (eu-central-1), co-located with Supabase, so this job's DB
 // round-trips don't cross the Atlantic (~90ms each). Per-route only — do NOT set
 // a global region; US-facing routes such as the /r/[code] redirect stay in the US.

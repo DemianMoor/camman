@@ -6,6 +6,24 @@
 -- Recon: docs/superpowers/specs/2026-09-17-multi-event-conversions-recon.md
 -- Plan:  docs/superpowers/plans/2026-09-17-conversion-events-phase1.md
 
+-- Drizzle applies every pending migration in ONE transaction, and every lock taken
+-- below is held until it commits. A blocked lock fails the migration instead of
+-- queueing everything behind it (the drain's stage_sends writes, offers reads);
+-- just retry.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
+-- Take ACCESS EXCLUSIVE on offers first, before the CREATE TABLEs below acquire
+-- their FK locks on stage_sends/contacts/campaigns/offers — no lock upgrade on
+-- offers while those are held.
+-- Keitaro's offer id (e.g. Psycho Book = 41), so a conversion with no resolvable
+-- click can still be attributed to a CamMan offer. offers.offer_id is a short
+-- code ('psb'), not Keitaro's id.
+ALTER TABLE public.offers ADD COLUMN IF NOT EXISTS keitaro_offer_id integer;
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS offers_org_keitaro_offer_id_uniq
+  ON public.offers (org_id, keitaro_offer_id)
+  WHERE keitaro_offer_id IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS public.event_types (
   id serial PRIMARY KEY,
   org_id uuid NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
@@ -156,15 +174,6 @@ CREATE POLICY "conversion_events_select_own_org"
   ON public.conversion_events FOR SELECT
   USING (org_id = public.current_org_id());
 --> statement-breakpoint
--- Keitaro's offer id (e.g. Psycho Book = 41), so a conversion with no resolvable
--- click can still be attributed to a CamMan offer. offers.offer_id is a short
--- code ('psb'), not Keitaro's id.
-ALTER TABLE public.offers ADD COLUMN IF NOT EXISTS keitaro_offer_id integer;
---> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS offers_org_keitaro_offer_id_uniq
-  ON public.offers (org_id, keitaro_offer_id)
-  WHERE keitaro_offer_id IS NOT NULL;
---> statement-breakpoint
 -- Seed: every org gets purchase + registration.
 INSERT INTO public.event_types
   (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal)
@@ -207,4 +216,7 @@ FROM (VALUES
 ) AS v(network_code, keitaro_type, event_key, conversion_status)
 JOIN public.affiliate_networks n ON n.network_id = v.network_code
 LEFT JOIN public.event_types et ON et.org_id = n.org_id AND et.key = v.event_key
+-- A named event key that doesn't resolve (a typo) seeds nothing, instead of
+-- silently becoming a status-only rule.
+WHERE v.event_key IS NULL OR et.id IS NOT NULL
 ON CONFLICT DO NOTHING;

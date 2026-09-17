@@ -19,6 +19,7 @@ import {
   decideProjectionAlert,
   formatIngestHeartbeatAlert,
   ingestFailed,
+  projectionOutcomeFor,
   typeConflictAlertKey,
   unmappedAlertKey,
   type ConflictCombo,
@@ -575,6 +576,75 @@ check(
     projRefusedText.includes("backfill-conversion-events.ts --apply") &&
     projRefusedText.includes("Nothing was written"),
   projRefusedText,
+);
+const projBehind = decideProjectionAlert({
+  kind: "refused",
+  reason: "ledger_behind_history",
+  reportedFrom: "2026-04-01",
+  coverageFrom: "2026-09-14",
+});
+const projBehindText = projBehind.state === "firing" ? projBehind.text : "";
+check(
+  "J4b ⭐ the coverage refusal names BOTH dates, says nothing was written OR zeroed, and orders backfill → resync",
+  projBehind.alertKey === K.projectionFailed &&
+    projBehind.state === "firing" &&
+    projBehindText.includes("2026-04-01") &&
+    projBehindText.includes("2026-09-14") &&
+    projBehindText.includes("nothing was zeroed") &&
+    projBehindText.indexOf("backfill-conversion-events.ts --apply") <
+      projBehindText.indexOf("resync-stage-day-conversions.ts --apply"),
+  projBehindText,
+);
+const projTruncated = decideProjectionAlert({ kind: "truncated", projected: 20000 });
+const projTruncatedText = projTruncated.state === "firing" ? projTruncated.text : "";
+check(
+  "J4c ⭐ a truncated discovery window fires the same key: the cursor was held and the resync is the way out",
+  projTruncated.alertKey === K.projectionFailed &&
+    projTruncated.state === "firing" &&
+    projTruncatedText.includes("20000") &&
+    projTruncatedText.includes("NOT advanced") &&
+    projTruncatedText.includes("resync-stage-day-conversions.ts --apply"),
+  projTruncatedText,
+);
+
+// The route's mapping from a projection RUN to an outcome — the one place that
+// decides which of these texts a tick gets.
+const mapped = [
+  projectionOutcomeFor({
+    refused: null,
+    ledgerFloor: "2026-05-01",
+    reportedHistoryFloor: null,
+    discovery: { truncated: false, stageIds: [1, 2] },
+  }),
+  projectionOutcomeFor({
+    refused: null,
+    ledgerFloor: "2026-05-01",
+    reportedHistoryFloor: null,
+    discovery: { truncated: true, stageIds: [1, 2] },
+  }),
+  projectionOutcomeFor({
+    refused: "empty_ledger",
+    ledgerFloor: null,
+    reportedHistoryFloor: null,
+    discovery: { truncated: true, stageIds: [1] },
+  }),
+  projectionOutcomeFor({
+    refused: "ledger_behind_history",
+    ledgerFloor: "2026-05-01",
+    reportedHistoryFloor: "2026-04-01",
+    discovery: { truncated: false, stageIds: [] },
+  }),
+];
+check(
+  "J4d the run → outcome mapping: ok · truncated · refusal WINS over truncation · the dated refusal",
+  JSON.stringify(mapped) ===
+    JSON.stringify([
+      { kind: "ok" },
+      { kind: "truncated", projected: 2 },
+      { kind: "refused", reason: "empty_ledger" },
+      { kind: "refused", reason: "ledger_behind_history", reportedFrom: "2026-04-01", coverageFrom: "2026-05-01" },
+    ]),
+  JSON.stringify(mapped),
 );
 const clipped = decideProjectionAlert({ kind: "threw", error: "x".repeat(600) });
 check(

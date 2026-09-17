@@ -755,6 +755,47 @@ async function main() {
         pf5.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "ok",
         JSON.stringify(pf5),
       );
+      // The coverage refusal (review fix A2) and the capped discovery window
+      // (A5) ride the SAME latched key: each pages once when it appears.
+      const pf6 = await pagesDuring(() =>
+        evaluateProjectionAlert(
+          tx,
+          { kind: "refused", reason: "ledger_behind_history", reportedFrom: "2026-04-01", coverageFrom: "2026-09-14" },
+          { send },
+        ),
+      );
+      check(
+        "C6 ⭐ the coverage refusal pages with both dates and latches firing",
+        pf6.length === 1 &&
+          pf6[0].includes("2026-04-01") &&
+          pf6[0].includes("2026-09-14") &&
+          pf6[0].includes("nothing was zeroed") &&
+          (await alertRow(tx, K.projectionFailed))?.state === "firing",
+        JSON.stringify(pf6),
+      );
+      const pf6b = await pagesDuring(() =>
+        evaluateProjectionAlert(tx, { kind: "truncated", projected: 20000 }, { send }),
+      );
+      check(
+        "C6b sharing the key means a SECOND condition does not re-page while the first is firing (accepted trade)",
+        pf6b.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "firing",
+        JSON.stringify(pf6b),
+      );
+      await clearAlert(tx, { alertKey: K.projectionFailed });
+      const pf7 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "truncated", projected: 20000 }, { send }));
+      check(
+        "C7 ⭐ from a clear key, a truncated window pages on its own: the cursor was held and it says so",
+        pf7.length === 1 && pf7[0].includes("NOT advanced") && pf7[0].includes("20000"),
+        JSON.stringify(pf7),
+      );
+      const pf8 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "truncated", projected: 20000 }, { send }));
+      check("C8 still truncated → no second page", pf8.length === 0, JSON.stringify(pf8));
+      const pf9 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "ok" }, { send }));
+      check(
+        "C9 a finished window clears it",
+        pf9.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "ok",
+        JSON.stringify(pf9),
+      );
 
       await setLastSuccess(sql`now() - interval '3 hours'`);
       let stale: Awaited<ReturnType<typeof watchIngestHeartbeat>> | undefined;

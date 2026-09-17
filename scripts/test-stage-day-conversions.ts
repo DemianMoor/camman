@@ -3,17 +3,22 @@ import "./_env-preload";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 import { db } from "../db/client";
 import { seedConversionEvent } from "./_conversion-fixture";
+import { decideProjectionAlert, projectionOutcomeFor } from "../lib/conversions/monitor";
 import {
+  MAX_CHANGED_STAGE_IDS,
   PROJECTION_JOB_NAME,
   PROJECTION_WATERMARK_OVERLAP_MINUTES,
   advanceProjectionWatermark,
   discoverChangedLedgerStages,
+  readProjectionCoverage,
   runStageDayProjection,
   syncStageDayConversions,
+  type DbOrTx,
 } from "../lib/keitaro/stage-day-conversions";
 
 // The stage-day projection, run through the REAL exported functions inside a
@@ -39,9 +44,12 @@ function check(label: string, ok: boolean, detail = "") {
 }
 class Rollback extends Error {}
 
-// The route's two guards live in a branch no DB fixture can reach (the projection
-// only runs after an `ok` Keitaro ingest, and the alert only on the cron path), so
-// they are asserted on the SOURCE of the route that owns them.
+// ⚠️ SOURCE ASSERTIONS, not behaviour. The route's guards live in a branch no DB
+// fixture can reach (the projection only runs after an `ok` Keitaro ingest, and
+// the alert only on the cron path), so they are asserted by reading the text of
+// the route that owns them. They go red on a rename or a reformat and they cannot
+// see what the branch actually does at runtime — every other check in this file
+// runs the real exported functions.
 function routeGuards() {
   const src = readFileSync("app/api/keitaro/poll/route.ts", "utf8");
   const start = src.indexOf("if (ledger.result?.ok) {");
@@ -65,6 +73,69 @@ function routeGuards() {
   );
 }
 
+// THE NO-ADVANCE-ON-THROW PATH, as behaviour (review fix A7). A throw inside the
+// projection must leave the cursor alone, and in production `dbc` is the POOL —
+// every statement autocommits, so "the transaction rolled it back" is NOT the
+// reason nothing moved. A rolled-back savepoint could therefore never prove this:
+// it would pass even if the advance ran. So the real exported function is driven
+// against a recording fake `dbc` that answers each statement and throws on the
+// write, and the proof is that the sequence it issued contains no watermark
+// UPDATE.
+async function throwPathIssuesNoAdvance() {
+  const dialect = new PgDialect();
+  const seen: string[] = [];
+  const fake = {
+    execute: async (q: SQL) => {
+      const text = dialect.sqlToQuery(q).sql;
+      seen.push(text);
+      if (/INSERT INTO cron_locks/.test(text)) {
+        return [
+          {
+            watermark_from: "2026-09-17 10:00:00+00",
+            window_from: "2026-09-17 09:55:00+00",
+            window_to: "2026-09-17 10:30:00+00",
+          },
+        ];
+      }
+      if (/max\(ce\.updated_at\)/.test(text)) return [{ stage_id: 4242, last_changed: "2026-09-17 10:05:00+00" }];
+      if (/ledger_has_rows/.test(text)) {
+        return [
+          {
+            ledger_has_rows: true,
+            ledger_floor: "2026-05-01",
+            coverage_floor: "2026-09-14",
+            reported_history_floor: null,
+          },
+        ];
+      }
+      if (/INSERT INTO keitaro_stage_results/.test(text)) throw new Error("simulated write failure");
+      throw new Error(`unexpected statement: ${text.slice(0, 120)}`);
+    },
+  } as unknown as DbOrTx;
+
+  let message = "";
+  try {
+    await runStageDayProjection(fake, {});
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err);
+  }
+  check(
+    "T1 the projection propagates the write failure (it does not swallow it)",
+    message === "simulated write failure",
+    message,
+  );
+  check(
+    "T2 ⭐ and issued NO watermark UPDATE — the cursor cannot move on a throw",
+    seen.length > 0 && !seen.some((s) => /UPDATE cron_locks/.test(s)),
+    JSON.stringify(seen.map((s) => s.slice(0, 40))),
+  );
+  check(
+    "T3 the sequence really reached the write (so T2 is about the throw, not an early exit)",
+    seen.some((s) => /INSERT INTO keitaro_stage_results/.test(s)),
+    String(seen.length),
+  );
+}
+
 async function main() {
   const host = process.env.DATABASE_URL?.includes("fdzxzxayhknywvmrhjcj") ? "camman-v2 (preview)" : "UNKNOWN";
   console.log(`Target DB: ${host}\n`);
@@ -73,12 +144,15 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("route guards (source)");
+  console.log("route guards (source assertions)");
   routeGuards();
+
+  console.log("\nthe cursor on a THROW (no DB — a recording fake dbc)");
+  await throwPathIssuesNoAdvance();
 
   try {
     await db.transaction(async (tx) => {
-      console.log("\nprojection");
+      console.log("\nfixture");
       const orgId = (
         (await tx.execute(sql`SELECT id::text AS id FROM organizations ORDER BY created_at LIMIT 1`)) as unknown as {
           id: string;
@@ -88,8 +162,14 @@ async function main() {
       // Start from "the projection has never run" (the row is self-creating).
       await tx.execute(sql`DELETE FROM cron_locks WHERE job_name = ${PROJECTION_JOB_NAME}`);
 
-      // One campaign, four stages:
-      //   A — the stage under test (ledger rows + a stale conversion day)
+      // One campaign, five stages. A and Y are the reviewer's X/Y pair, and the
+      // point of the shape is that a GLOBAL coverage floor would pass the naive
+      // version of these checks (review fix A6):
+      //   A — covered EARLY (a ledger conversion on 2026-05-01) and again LATE,
+      //       plus a stale conversion day inside its coverage
+      //   Y — covered only LATE (2026-09-14), with a stale non-zero row on
+      //       2026-06-01 — AFTER the global floor (A's 2026-05-01) but BEFORE
+      //       Y's own. A global floor zeroes it; the per-stage floor must not.
       //   B — the control OUTSIDE every scope
       //   C — in scope with NO ledger rows at all (C1 a)
       //   D — a ledger row but no clicks (the mirror's positive-only fields)
@@ -116,6 +196,7 @@ async function main() {
       const stageB = await stage(2, `p3_${run}_b`);
       const stageC = await stage(3, `p3_${run}_c`);
       const stageD = await stage(4, `p3_${run}_d`);
+      const stageY = await stage(5, `p3_${run}_y`);
       // D's manually-owned counters: the mirror must leave these alone.
       await tx.execute(sql`
         UPDATE campaign_stages SET click_count = 77, sales_count = 5 WHERE id = ${stageD}::int
@@ -148,6 +229,15 @@ async function main() {
           payout: string | null;
           stage_tracking_id: string;
         }[];
+      // EVERY stored stage-day, for byte-identity assertions. camman-v2 holds no
+      // keitaro_stage_results rows of its own, so this is the fixture exactly.
+      const readAll = async (dbc: DbOrTx) =>
+        (await dbc.execute(sql`
+          SELECT stage_id, stat_date::text AS stat_date, visit_clicks_clean, checkouts, sales,
+                 revenue::text AS revenue, pending_revenue::text AS pending,
+                 payout_at_conversion::text AS payout
+          FROM keitaro_stage_results ORDER BY stage_id, stat_date
+        `)) as unknown as unknown[];
       const stageRow = async (stageId: number) =>
         (
           (await tx.execute(sql`
@@ -162,11 +252,19 @@ async function main() {
           `)) as unknown as { watermark: string | null }[]
         )[0]?.watermark ?? null;
 
+      // The three fixture days. EARLY is A's coverage start and therefore the
+      // GLOBAL ledger floor; MID sits between the global floor and Y's own floor;
+      // LATE is Y's coverage start.
+      const EARLY = "2026-05-01";
+      const MID = "2026-06-01";
+      const LATE = "2026-09-14";
+
       // A clicks row that also carries the STALE conversion values a re-dated
       // conversion left behind (bug 2), plus the real conversion day.
       await ksr(stageA, "2026-09-17", { visits: 40, checkouts: 1, sales: 1, revenue: 100, pending: 50, payout: 100 });
-      // MONTHS before the ledger's earliest conversion for this stage (C1 b).
-      await ksr(stageA, "2026-05-01", { sales: 2, revenue: 200, payout: 100 });
+      // ⭐ THE PER-STAGE FLOOR ROW. Inside the GLOBAL coverage (EARLY), outside
+      // stage Y's own (LATE) — so only a per-stage floor protects it.
+      await ksr(stageY, MID, { sales: 2, revenue: 200, payout: 100 });
       await ksr(stageB, "2026-09-17", { visits: 7, checkouts: 3, sales: 3, revenue: 300 });
       // In scope, but this stage has NO ledger row anywhere (C1 a).
       await ksr(stageC, "2026-08-01", { sales: 4, revenue: 400, payout: 100 });
@@ -191,15 +289,102 @@ async function main() {
           return id;
         });
 
-      const leadA = await evt(stageA, "2026-09-14", "lead", 100);
-      await evt(stageA, "2026-09-14", "sale", 250);
-      await evt(stageA, "2026-09-14", "rejected", 0);
+      const leadA = await evt(stageA, LATE, "lead", 100);
+      await evt(stageA, LATE, "sale", 250);
+      await evt(stageA, LATE, "rejected", 0);
       await evt(stageD, "2026-09-15", "lead", 60);
+      // A is covered from EARLY — this row is what makes the GLOBAL floor older
+      // than Y's stale MID row.
+      await evt(stageA, EARLY, "sale", 400);
+      // Y is covered ONLY from LATE.
+      await evt(stageY, LATE, "sale", 150);
 
-      const first = await syncStageDayConversions(tx, { stageIds: [stageA, stageC] });
+      const scope = [stageA, stageC, stageY];
+
+      console.log("\nA2 — the coverage guard: the ledger must reach the reported history");
+      // The world-state the per-stage checks below depend on, measured rather
+      // than assumed: if these two floors ever coincide, B1 stops proving
+      // anything and this check says so instead of passing quietly.
+      const covAll = await readProjectionCoverage(tx, { stageIds: scope });
+      const covY = await readProjectionCoverage(tx, { stageIds: [stageY] });
+      check(
+        "A2a the fixture's floors are the ones the per-stage proof needs: global EARLY < MID < Y's own LATE",
+        covAll.ledgerFloor === EARLY && covY.coverageFloor === LATE && EARLY < MID && MID < LATE,
+        JSON.stringify({ covAll, covY }),
+      );
+      check(
+        "A2b (case ii) coverage reaches the whole reported history, so the run is allowed",
+        covAll.refused === null && covAll.reportedHistoryFloor === null,
+        JSON.stringify(covAll),
+      );
+      // CASE (i): one reported conversion day OLDER than anything the ledger
+      // knows — an interrupted backfill, or prod today. In a savepoint, so the
+      // fixture survives it.
+      const beforeGuard = JSON.stringify(await readAll(tx));
+      const wmBeforeGuard = await watermark();
+      try {
+        await tx.transaction(async (tx2) => {
+          await tx2.execute(sql`
+            INSERT INTO keitaro_stage_results
+              (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, sales, revenue)
+            VALUES (${orgId}::uuid, ${camp}::int, ${stageC}::int, 'seed', '2026-04-01'::date, 9::int, 900::numeric)
+          `);
+          const refused = await syncStageDayConversions(tx2, { stageIds: scope });
+          check(
+            "A2c ⭐ (case i) reported history older than the ledger's coverage refuses the WHOLE projection",
+            refused.refused === "ledger_behind_history" &&
+              refused.rowsWritten === 0 &&
+              refused.rowsZeroed === 0,
+            JSON.stringify(refused),
+          );
+          check(
+            "A2d it names both dates: the reported history's start and the ledger's",
+            refused.reportedHistoryFloor === "2026-04-01" && refused.ledgerFloor === EARLY,
+            JSON.stringify(refused),
+          );
+          const staleStillThere = (await tx2.execute(sql`
+            SELECT sales, revenue::text AS revenue FROM keitaro_stage_results
+            WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-17'::date
+          `)) as unknown as { sales: number; revenue: string }[];
+          check(
+            "A2e ⭐ nothing was written AND nothing zeroed — the bug-2 correction is refused too, by design",
+            staleStillThere[0].sales === 1 && Number(staleStillThere[0].revenue) === 100,
+            JSON.stringify(staleStillThere),
+          );
+          const guardRun = await runStageDayProjection(tx2, { extraStageIds: [stageB] });
+          check(
+            "A2f the scheduled run holds its cursor on this refusal",
+            guardRun.refused === "ledger_behind_history" &&
+              guardRun.watermarkHeld === true &&
+              guardRun.watermarkTo === guardRun.discovery.watermarkFrom,
+            JSON.stringify({ refused: guardRun.refused, held: guardRun.watermarkHeld }),
+          );
+          const decision = decideProjectionAlert(projectionOutcomeFor(guardRun));
+          const text = decision.state === "firing" ? decision.text : "";
+          check(
+            "A2g ⭐ and it pages, naming both dates and the fix (backfill, then the resync)",
+            decision.state === "firing" &&
+              text.includes("2026-04-01") &&
+              text.includes(EARLY) &&
+              text.includes("backfill-conversion-events.ts --apply") &&
+              text.includes("resync-stage-day-conversions.ts --apply"),
+            text,
+          );
+          throw new Rollback();
+        });
+      } catch (err) {
+        if (!(err instanceof Rollback)) throw err;
+      }
+      check(
+        "A2h the savepoint rolled back and the guard left no trace",
+        JSON.stringify(await readAll(tx)) === beforeGuard && (await watermark()) === wmBeforeGuard,
+      );
+
+      console.log("\nprojection (case ii — inside coverage)");
+      const first = await syncStageDayConversions(tx, { stageIds: scope });
       const rowsA = await read(stageA);
-      check("S1 the conversion day gets a row of its own", rowsA.some((r) => r.stat_date === "2026-09-14"));
-      const d14 = rowsA.find((r) => r.stat_date === "2026-09-14")!;
+      check("S1 the conversion day gets a row of its own", rowsA.some((r) => r.stat_date === LATE));
+      const d14 = rowsA.find((r) => r.stat_date === LATE)!;
       check("S2 sales counts lead + sale + rejected (today's semantics)", d14.sales === 3, JSON.stringify(d14));
       check("S3 checkouts counts the lead only", d14.checkouts === 1, JSON.stringify(d14));
       check("S4 revenue is the ledger sum", Number(d14.revenue) === 350, d14.revenue);
@@ -221,7 +406,7 @@ async function main() {
       check("S9 the run reports what it wrote", first.rowsWritten >= 1 && first.rowsZeroed === 1, JSON.stringify(first));
       check(
         "S9b it reports the scope it was GIVEN, not the stages that happen to have rows",
-        first.stagesInScope === 2,
+        first.stagesInScope === 3,
         JSON.stringify(first),
       );
 
@@ -231,19 +416,25 @@ async function main() {
         (await read(stageC))[0].sales === 4 && Number((await read(stageC))[0].revenue) === 400,
         JSON.stringify(await read(stageC)),
       );
-      const may = rowsA.find((r) => r.stat_date === "2026-05-01")!;
+      const yMid = (await read(stageY)).find((r) => r.stat_date === MID)!;
       check(
-        "C1b ⭐ a stage-day months older than the ledger's earliest conversion for that stage is never zeroed",
-        may.sales === 2 && Number(may.revenue) === 200 && Number(may.payout) === 100,
-        JSON.stringify(may),
+        "C1b ⭐⭐ THE PER-STAGE FLOOR: Y's stale MID row survives although it is INSIDE the global coverage (a global floor would zero it)",
+        yMid.sales === 2 && Number(yMid.revenue) === 200 && Number(yMid.payout) === 100,
+        JSON.stringify(yMid),
+      );
+      const early = rowsA.find((r) => r.stat_date === EARLY)!;
+      check(
+        "C1b1 A's EARLY day is projected from its own ledger row (this is what makes the global floor older than MID)",
+        early !== undefined && early.sales === 1 && Number(early.revenue) === 400,
+        JSON.stringify(early),
       );
       check(
-        "C1b2 the run reports the coverage floor it applied",
-        first.coverageFloor === "2026-09-14" && first.refused === null,
+        "C1b2 the run reports the coverage floor it applied, and the global bound it passed",
+        first.coverageFloor === EARLY && first.ledgerFloor === EARLY && first.refused === null,
         JSON.stringify(first),
       );
 
-      const second = await syncStageDayConversions(tx, { stageIds: [stageA, stageC] });
+      const second = await syncStageDayConversions(tx, { stageIds: scope });
       check("S10 re-running writes nothing", second.rowsWritten === 0 && second.rowsZeroed === 0, JSON.stringify(second));
 
       const rowsB = await read(stageB);
@@ -253,6 +444,63 @@ async function main() {
       check(
         "S12 an empty scope writes nothing at all",
         empty.rowsWritten === 0 && empty.rowsZeroed === 0 && empty.stagesInScope === 0 && empty.refused === null,
+      );
+
+      console.log("\nA9 — the payout_at_conversion distinctness clause");
+      // An older path (or a row predating the column) leaves payout NULL while
+      // checkouts/sales/revenue already match the ledger. Without payout in the
+      // upsert's WHERE, that row can never be repaired — so a row differing ONLY
+      // in payout must be rewritten.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET payout_at_conversion = NULL
+        WHERE stage_id = ${stageA}::int AND stat_date = ${LATE}::date
+      `);
+      const payoutRun = await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const d14Payout = (await read(stageA)).find((r) => r.stat_date === LATE)!;
+      check(
+        "P1 ⭐ a row that differs only in payout IS rewritten, and nothing else about it moves",
+        payoutRun.rowsWritten === 1 &&
+          payoutRun.rowsZeroed === 0 &&
+          Math.abs(Number(d14Payout.payout) - 350 / 3) < 0.001 &&
+          d14Payout.sales === 3 &&
+          d14Payout.checkouts === 1 &&
+          Number(d14Payout.revenue) === 350,
+        JSON.stringify({ payoutRun, d14Payout }),
+      );
+
+      console.log("\nA3 — the projected row's org");
+      // A ledger row carrying another org's id for a real stage. The INSERT takes
+      // org_id from the LEDGER row, so joining campaign_stages on the id alone
+      // would create a keitaro_stage_results row under the WRONG org, mirroring
+      // this org's stage counters into it.
+      const otherOrg = (
+        (await tx.execute(sql`
+          INSERT INTO organizations (name) VALUES (${`p3-other-${run}`}) RETURNING id::text AS id
+        `)) as unknown as { id: string }[]
+      )[0].id;
+      await seedConversionEvent(tx, {
+        orgId: otherOrg,
+        campaignId: camp,
+        stageId: stageA,
+        revenue: 999,
+        keitaroType: "sale",
+      });
+      const beforeOrg = JSON.stringify(await readAll(tx));
+      const orgRun = await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const wrongOrg = (
+        (await tx.execute(sql`
+          SELECT count(*)::int AS n FROM keitaro_stage_results WHERE org_id = ${otherOrg}::uuid
+        `)) as unknown as { n: number }[]
+      )[0].n;
+      check(
+        "O1 ⭐ a ledger row whose org does not match its stage writes NO row under that org",
+        wrongOrg === 0,
+        JSON.stringify({ wrongOrg, orgRun }),
+      );
+      check(
+        "O2 and it cannot reach the stage's real rows either — every stored row is byte-identical",
+        JSON.stringify(await readAll(tx)) === beforeOrg && orgRun.rowsWritten === 0 && orgRun.rowsZeroed === 0,
+        JSON.stringify(orgRun),
       );
 
       console.log("\nI2 — the mirror must be able to correct DOWNWARDS");
@@ -330,26 +578,60 @@ async function main() {
       `);
       const capped = await discoverChangedLedgerStages(tx, { limit: 1 });
       check(
-        "D4 a change set past the cap is truncated, oldest first, and the cursor stops at what it kept",
-        capped.truncated &&
-          capped.stageIds.length === 1 &&
-          capped.stageIds[0] === stageA &&
-          capped.resumeTo !== capped.windowTo,
+        "D4 a change set past the cap is truncated, and the ids kept are the oldest changes",
+        capped.truncated && capped.stageIds.length === 1 && capped.stageIds[0] === stageA,
         JSON.stringify(capped),
+      );
+
+      // A5 — THE CAP MUST NOT CLAIM PROGRESS. The window still holds stages this
+      // run never named, so the cursor stays put and the run pages; the previous
+      // version advanced to the last id it kept, which strands the remainder
+      // whenever the change set shares one updated_at.
+      const wmBeforeCap = await watermark();
+      const cappedRun = await runStageDayProjection(tx, { limit: 1 });
+      check(
+        "D4b ⭐ a truncated discovery HOLDS the watermark (it projected a prefix, not the window)",
+        cappedRun.discovery.truncated &&
+          cappedRun.watermarkHeld === true &&
+          cappedRun.watermarkTo === cappedRun.discovery.watermarkFrom &&
+          (await watermark()) === wmBeforeCap,
+        JSON.stringify({ held: cappedRun.watermarkHeld, before: wmBeforeCap, stored: await watermark() }),
+      );
+      check(
+        "D4c it still PROJECTED the stages it kept (the cap costs freshness, not the write)",
+        cappedRun.refused === null && cappedRun.stagesInScope === 1,
+        JSON.stringify(cappedRun),
+      );
+      const cappedDecision = decideProjectionAlert(projectionOutcomeFor(cappedRun));
+      const cappedText = cappedDecision.state === "firing" ? cappedDecision.text : "";
+      check(
+        "D4d ⭐ and it pages — a capped tick cannot pass silently — naming the resync as the way out",
+        cappedDecision.state === "firing" &&
+          cappedText.includes("watermark") &&
+          cappedText.includes("resync-stage-day-conversions.ts --apply"),
+        cappedText,
+      );
+      check(
+        "D4e the cap is a real ceiling, not a stub: MAX_CHANGED_STAGE_IDS is larger than this dataset's stage count",
+        MAX_CHANGED_STAGE_IDS >= 20000,
+        String(MAX_CHANGED_STAGE_IDS),
       );
 
       const projected = await runStageDayProjection(tx, { extraStageIds: [stageB] });
       check(
         "D5 the scope is extraStageIds ∪ discovered",
-        projected.stagesInScope === 3 &&
+        projected.stagesInScope === 4 &&
           projected.discovery.stageIds.includes(stageA) &&
-          projected.discovery.stageIds.includes(stageD),
+          projected.discovery.stageIds.includes(stageD) &&
+          projected.discovery.stageIds.includes(stageY),
         JSON.stringify(projected),
       );
       check(
-        "D6 the watermark advances only after the projection — to the window it covered",
-        projected.discovery.watermarkFrom === null &&
+        "D6 an UNtruncated run advances the watermark to the window it covered",
+        projected.discovery.truncated === false &&
+          projected.watermarkHeld === false &&
           projected.watermarkTo === projected.discovery.resumeTo &&
+          projected.discovery.resumeTo === projected.discovery.windowTo &&
           (await watermark()) !== null,
         JSON.stringify({ projected, stored: await watermark() }),
       );
@@ -363,6 +645,11 @@ async function main() {
       console.log("\nC1 (c) — the empty-ledger refusal");
       const beforeRefusal = JSON.stringify(await read(stageA));
       const wmBefore = await watermark();
+      const ledgerRowsBefore = (
+        (await tx.execute(sql`
+          SELECT count(*)::int AS n FROM conversion_events WHERE stage_id = ${stageA}::int
+        `)) as unknown as { n: number }[]
+      )[0].n;
       try {
         // A savepoint so the outer transaction's fixtures survive.
         await tx.transaction(async (tx2) => {
@@ -373,7 +660,8 @@ async function main() {
             refused.refused === "empty_ledger" &&
               refused.rowsWritten === 0 &&
               refused.rowsZeroed === 0 &&
-              refused.coverageFloor === null,
+              refused.coverageFloor === null &&
+              refused.ledgerHasRows === false,
             JSON.stringify(refused),
           );
           const afterRefusal = JSON.stringify(
@@ -394,6 +682,7 @@ async function main() {
           check(
             "C1c3 a refusal does NOT advance the watermark",
             refusedRun.refused === "empty_ledger" &&
+              refusedRun.watermarkHeld === true &&
               refusedRun.watermarkTo === refusedRun.discovery.watermarkFrom &&
               wmAfter === wmBefore,
             JSON.stringify({ refusedRun, wmBefore, wmAfter }),
@@ -403,11 +692,15 @@ async function main() {
       } catch (err) {
         if (!(err instanceof Rollback)) throw err;
       }
+      const ledgerRowsAfter = (
+        (await tx.execute(sql`
+          SELECT count(*)::int AS n FROM conversion_events WHERE stage_id = ${stageA}::int
+        `)) as unknown as { n: number }[]
+      )[0].n;
       check(
         "C1c4 the savepoint rolled back — the ledger is back",
-        ((await tx.execute(sql`SELECT count(*)::int AS n FROM conversion_events WHERE stage_id = ${stageA}::int`)) as unknown as {
-          n: number;
-        }[])[0].n === 2,
+        ledgerRowsAfter === ledgerRowsBefore && ledgerRowsBefore > 0,
+        JSON.stringify({ ledgerRowsBefore, ledgerRowsAfter }),
       );
 
       throw new Rollback();

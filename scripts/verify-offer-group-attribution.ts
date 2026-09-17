@@ -682,6 +682,47 @@ async function main() {
   assert(viewDef.includes("offer_exposures"),
     "offer_group_report_mv's definition still references offer_exposures (the per-offer exposure anti-join)");
 
+  // --------------------------------------------------------------- criterion 7d
+  // The same shape of guard, for what migration 0183 changed: both matviews now
+  // read per-recipient conversions out of the conversion_events ledger, and the
+  // predicates that decide what a purchase is and what revenue counts are
+  // COPIES of lib/sale-attribution.ts — a matview cannot import TypeScript.
+  //
+  // This is deliberately structural, for the same reason 7c is: it runs against
+  // ANY database including production, needs no ledger rows, and catches the
+  // whole class "a later migration recreated these and quietly dropped a
+  // source" the moment it lands. What it cannot do is prove the predicates mean
+  // the same thing as the TypeScript — for that,
+  // scripts/test-report-matviews-from-ledger-db.ts evaluates the migration's
+  // predicates and the exported clauses over the same seeded ledger rows and
+  // requires them to agree row for row. The two together are what 0183's header
+  // claims; neither alone is.
+  console.log("\n=== 7d. the ledger sources and the org_id join survived (migration 0183) ===");
+  const ledgerViews = ["offer_group_report_mv", "offer_report_offer_totals_mv"] as const;
+  for (const name of ledgerViews) {
+    const def = String((await q(sql`
+      SELECT pg_get_viewdef(${`public.${name}`}::regclass, true) AS def
+    `))[0]?.def ?? "");
+    // Guard the guard, as in 7c: an empty definition must not pass vacuously.
+    assert(def.length > 0, `pg_get_viewdef returned a non-empty definition for ${name} (${def.length} chars)`);
+    if (def.length === 0) continue;
+    assert(def.includes("conversion_events"),
+      `${name} still aggregates conversion_events (not stage_sends.sale_revenue / converted_at)`);
+    assert(def.includes("is_purchase"),
+      `${name} still selects purchases by event_types.is_purchase`);
+    assert(def.includes("counts_revenue"),
+      `${name} still selects revenue by event_types.counts_revenue`);
+    // Pending is a SEPARATE column and must never be folded into revenue: the
+    // definition has to carry BOTH status literals, on their own.
+    assert(/status\s*=\s*'approved'/.test(def) && /status\s*=\s*'pending'/.test(def),
+      `${name} keeps approved revenue and pending revenue as separate predicates`);
+    // CLAUDE.md §3. The ledger join is the one join in this family that shipped
+    // without an org_id predicate (finding I1 on Task 5); it is cheap to assert
+    // and it is exactly the kind of thing a drop-and-recreate loses again.
+    assert(/cv\.org_id\s*=\s*camp\.org_id/.test(def),
+      `${name}'s ledger join is org-scoped (cv.org_id = camp.org_id)`);
+  }
+
   const summaryLine = `${passed} checks passed, ${failed} failed, ${skipped} SKIPPED`;
   if (failed > 0) {
     console.log(`\n${summaryLine}.`);

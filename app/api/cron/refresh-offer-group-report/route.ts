@@ -6,19 +6,40 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat"
 import { refreshOfferGroupReport } from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
-// Last measured on prod data 2026-08-13 (pre-ledger structure): ~104s across the
-// four matviews against this 300s ceiling (org summary + group + the 0132
-// offer-totals matview + 0180's audience group totals) — see git history for the
-// breakdown. Migration 0183 (Phase 3) restructured the group + offer-totals +
-// audience-totals matviews to read per-recipient conversions from the
-// conversion_events ledger instead of stage_sends columns; conversion_events does
-// not exist on production yet (0181-0183 apply together at Task 8 Step 5 of the
-// conversion-events-phase3 plan), so the new structure cannot be re-measured
-// against real prod data until then. Capture the real number from that run's
-// response (`durations`) and update this comment — do not carry the stale
-// pre-ledger figure past that apply. 60s left no cold-start headroom, so this
-// cron gets a larger budget. It is a background job (not user-facing), so a
-// longer ceiling costs nothing; per-view durations are logged every run.
+// COST. Two measurements exist, of two different things. Neither is "~104s on
+// 2026-08-13" — that conflation is what this comment used to say; ~104s came
+// from the Task 5 brief with no date and no breakdown behind it.
+//
+//  1. 2026-08-13, REFRESH durations logged by this route, PRE-ledger structure:
+//     summary ~11s, group ~25s, offer-totals ~4.5s ≈ ~40.5s (the same figures
+//     still at lib/reporting/offer-group-report.ts, plus 0180's audience totals).
+//  2. 2026-09-18, read-only `EXPLAIN ANALYZE` on PROD of the three defining
+//     SELECTs migration 0183 introduces, with the `conv` CTE stubbed from the
+//     legacy columns because conversion_events does not exist on prod yet:
+//     offer-totals 43.4s · group 116.7s · audience-totals 1.2s ≈ 161s.
+//
+// The two are NOT comparable and (2) is not a ceiling:
+//   • (2) times the SELECT. A REFRESH also writes the new heap and rebuilds the
+//     unique index, and this route refreshes CONCURRENTLY, which additionally
+//     builds a transient table and diffs it. The real refresh costs MORE.
+//   • EXPLAIN ANALYZE adds per-node timing overhead on a row-heavy plan.
+//   • The stub scans all ~5M stage_sends rows for the 1,436 carrying a
+//     converted_at; the real `conv` CTE aggregates ~1.5K indexed
+//     conversion_events rows. So ~10s per matview is stub overhead the real
+//     thing will not pay.
+//   • (2) excludes offer_report_org_summary_mv, which 0183 does not touch.
+//   • Prod data grew between the two dates (stage_sends is ~5M rows now).
+//
+// Nothing individually approaches the 300s ceiling, but the group matview's
+// sort spills (`external merge  Disk: ~169MB`), so work_mem is the first knob
+// if this grows. **Capture the real post-ledger number from the first prod run
+// after 0181-0183 apply and the backfill completes** (Task 8's ⛔ block, step
+// 2b — that refresh has to happen there anyway, because the matviews are built
+// from an empty ledger at apply time) and add it here as measurement 3.
+//
+// 60s left no cold-start headroom, so this cron gets a larger budget. It is a
+// background job (not user-facing), so a longer ceiling costs nothing;
+// per-view durations are logged every run.
 export const maxDuration = 300;
 
 async function handle(req: NextRequest): Promise<NextResponse> {

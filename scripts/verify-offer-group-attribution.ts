@@ -698,7 +698,13 @@ async function main() {
   // requires them to agree row for row. The two together are what 0183's header
   // claims; neither alone is.
   console.log("\n=== 7d. the ledger sources and the org_id join survived (migration 0183) ===");
-  const ledgerViews = ["offer_group_report_mv", "offer_report_offer_totals_mv"] as const;
+  // offer_report_offer_totals_mv is 0132's and may be absent on a database that
+  // predates it — the same condition every totals-dependent criterion above
+  // already skips on. pg_get_viewdef would throw rather than return empty.
+  const ledgerViews = (hasTotals
+    ? ["offer_group_report_mv", "offer_report_offer_totals_mv"]
+    : ["offer_group_report_mv"]) as readonly string[];
+  if (!hasTotals) skip("7d(totals)", "offer_report_offer_totals_mv does not exist on this database (pre-0132)");
   for (const name of ledgerViews) {
     const def = String((await q(sql`
       SELECT pg_get_viewdef(${`public.${name}`}::regclass, true) AS def

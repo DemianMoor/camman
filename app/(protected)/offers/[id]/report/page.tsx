@@ -162,11 +162,13 @@ export default function OfferGroupReportPage() {
     : null;
   const benchmark = data ? { ...data.orgBenchmark, ...derive(data.orgBenchmark) } : null;
 
-  // Group rows compute revenue/sales per recipient (stage_sends.sale_revenue /
-  // converted_at); the footer and benchmark use Keitaro's per-stage aggregate
-  // instead (see attributable_revenue/attributable_sales on offer_report_offer_totals_mv,
-  // migration 0132), so coverage is usually <100% and a group row's RPM/EPC/
-  // Net RPM usually reads a little low next to the footer/benchmark beside it
+  // Group rows compute revenue/sales per recipient from the conversion_events
+  // ledger (migration 0183: an is_purchase event type for Sales, counts_revenue
+  // + status 'approved' for Revenue); the footer and benchmark use Keitaro's
+  // per-stage aggregate instead (see attributable_revenue/attributable_sales on
+  // offer_report_offer_totals_mv, migration 0132), so coverage is usually <100%
+  // and a group row's RPM/EPC/Net RPM usually reads a little low next to the
+  // footer/benchmark beside it
   // — this makes that gap visible instead of silent. Revenue and sales are
   // guarded against a zero denominator independently (each can be zero while
   // the other is not), and each is rendered as its own conditional clause

@@ -11,6 +11,14 @@ import { db } from "@/db/client";
 export type RawMetrics = {
   sends: number;
   revenue: number;
+  // PER EVENT, not per recipient (migration 0183). One ledger row with an
+  // is_purchase event type and status pending|approved is one sale, so a
+  // recipient who bought twice is two sales and a row's `sales` can legitimately
+  // EXCEED its `sends`. It no longer means "buyers" — nothing asserts
+  // sales <= sends, and the coverage wording on the offer report already handles
+  // a ratio over 100%. Before 0183 this counted stage_sends rows carrying a
+  // converted_at, which could only ever be one per recipient (latest wins) and
+  // silently dropped the second conversion.
   sales: number;
   clicks: number;
   cost: number;
@@ -202,7 +210,12 @@ export type RefreshDurations = {
 // code-before-migration deploy would freeze ALL THREE reports at their last
 // snapshot (twice-daily cron, so potentially days) instead of just one.
 // Measured 2026-08-13: summary ~11s, group ~25s, totals ~4.5s -- ~40.5s
-// against a 300s ceiling.
+// against a 300s ceiling. That is the PRE-ledger structure; migration 0183
+// rebuilt group + offer-totals + audience-totals over conversion_events. The
+// post-0183 numbers, how they were taken and why they are not comparable to
+// these are in app/api/cron/refresh-offer-group-report/route.ts -- one place,
+// so the two comments cannot drift into two different "last measured" figures
+// again.
 //
 // audience_report_group_totals_mv (migration 0180, Audience Stats) refreshes
 // LAST, for two reasons that agree: it sums offer_group_report_mv, so it must

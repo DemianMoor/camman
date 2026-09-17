@@ -66,7 +66,11 @@
 --
 -- REFRESH: refreshOfferGroupReport() still refreshes summary -> group -> totals
 -- -> audience totals, each CONCURRENTLY, which needs the unique indexes
--- recreated below. Cost is re-measured in this task's Step 5.
+-- recreated below. Cost: measured read-only on prod 2026-09-18 with the ledger
+-- CTE stubbed (conversion_events does not exist there yet) at
+-- 43.4s / 116.7s / 1.2s for the three SELECTs below; the caveats and the two
+-- earlier figures are in app/api/cron/refresh-offer-group-report/route.ts. The
+-- real post-ledger number comes from the first refresh after the backfill.
 --
 -- SALES IS NOW PER-EVENT, NOT PER-RECIPIENT. `sales` / `attributable_sales`
 -- count ledger ROWS, so a recipient with two purchases is two sales and a cell's

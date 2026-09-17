@@ -76,6 +76,7 @@ async function main() {
     WITH s AS (
       SELECT org_id, group_id,
              SUM(sends) AS sends, SUM(revenue) AS revenue, SUM(sales) AS sales, SUM(cost) AS cost,
+             SUM(pending_revenue) AS pending_revenue,
              SUM(sent_7d) AS sent_7d, SUM(sent_30d) AS sent_30d, SUM(sent_90d) AS sent_90d
       FROM offer_group_report_mv
       GROUP BY org_id, group_id
@@ -83,13 +84,14 @@ async function main() {
     SELECT count(*)::int AS groups,
       count(*) FILTER (WHERE t.org_id IS NULL OR s.org_id IS NULL
         OR t.sends <> s.sends OR t.revenue <> s.revenue OR t.sales <> s.sales
-        OR t.cost <> s.cost OR t.sent_7d <> s.sent_7d OR t.sent_30d <> s.sent_30d
+        OR t.cost <> s.cost OR t.pending_revenue <> s.pending_revenue
+        OR t.sent_7d <> s.sent_7d OR t.sent_30d <> s.sent_30d
         OR t.sent_90d <> s.sent_90d)::int AS mismatched
     FROM audience_report_group_totals_mv t
     FULL JOIN s ON s.org_id = t.org_id AND s.group_id = t.group_id
   `);
   if (n(sums.mismatched) === 0) {
-    assert(true, `all ${sums.groups} groups: sends/revenue/sales/cost/sent_7d/30d/90d equal the cell sums, and the group sets match`);
+    assert(true, `all ${sums.groups} groups: sends/revenue/sales/cost/pending_revenue/sent_7d/30d/90d equal the cell sums, and the group sets match`);
   } else if (outOfOrder) {
     skip("a", `${sums.mismatched} of ${sums.groups} groups differ — ${orderNote}`);
   } else {

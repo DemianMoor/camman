@@ -21,8 +21,19 @@ export interface SeedConversionEvent {
   campaignId?: number | null;
   stageId?: number | null;
   offerId?: number | null;
-  /** 0181's seeded keys. Omit for an unmapped row (NULL type + NULL status). */
+  /**
+   * 0181's seeded keys. Omit for an UNMAPPED row (NULL event_type_id). Unmapped
+   * comes in two shapes and both must be seedable, because both count as
+   * NOTHING everywhere and only one of them is obvious:
+   *   omit `status` too   -> NULL type + NULL status (no mapping rule matched)
+   *   pass `status`       -> NULL type + a real status, which is what a
+   *                          "status transition only" mapping rule produces
+   *                          (lib/conversions/build-rows.ts:5-7,140 — the rule
+   *                          carries eventTypeId null and keeps the row's
+   *                          existing event type, which may be none).
+   */
   eventKey?: "purchase" | "registration";
+  /** Defaults to "approved" for a mapped row, and to NULL for an unmapped one. */
   status?: "pending" | "approved" | "rejected";
   revenue?: number;
   /** The raw Keitaro conversion type, for the stage-day projection's filters. */
@@ -51,7 +62,7 @@ export async function seedConversionEvent(
       (org_id, keitaro_event_id, keitaro_status, keitaro_type, event_type_id, status, revenue,
        occurred_at, last_postback_at, stage_send_id, contact_id, campaign_id, stage_id, offer_id)
     VALUES (${e.orgId}::uuid, ${`fixture-${randomUUID()}`}, ${type}, ${type},
-            ${eventTypeId}, ${e.eventKey ? (e.status ?? "approved") : null},
+            ${eventTypeId}, ${e.eventKey ? (e.status ?? "approved") : (e.status ?? null)},
             ${(e.revenue ?? 0).toFixed(4)}::numeric,
             now(), now(), ${e.stageSendId ?? null}::uuid, ${e.contactId ?? null}::uuid,
             ${e.campaignId ?? null}::int, ${e.stageId ?? null}::int, ${e.offerId ?? null}::int)

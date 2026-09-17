@@ -61,7 +61,9 @@ export function parseKeitaroLedgerRow(row: KeitaroReportRow): LedgerSourceRow | 
   if (!eventId || !datetime || !ET_DATETIME_RE.test(datetime) || !keitaroStatus || !keitaroType) {
     return null;
   }
-  const revenue = typeof row.revenue === "number" ? row.revenue : Number(row.revenue ?? 0);
+  // Missing revenue is a malformed row, not $0 — a real $0 conversion carries 0.
+  if (row.revenue === undefined || row.revenue === null || row.revenue === "") return null;
+  const revenue = typeof row.revenue === "number" ? row.revenue : Number(row.revenue);
   if (!Number.isFinite(revenue)) return null;
   const params =
     row.params !== null && typeof row.params === "object" && !Array.isArray(row.params)

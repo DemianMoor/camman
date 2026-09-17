@@ -231,6 +231,10 @@ export const offers = pgTable(
     // history); this column just mirrors the current/latest rate for display.
     payout_cpa: numeric("payout_cpa", { precision: 12, scale: 4 }),
     payout_revshare: numeric("payout_revshare", { precision: 5, scale: 2 }),
+    // Migration 0181: Keitaro's offer id (Psycho Book = 41). offer_id above is
+    // CamMan's short code ('psb'), not Keitaro's. Lets a conversion with no
+    // resolvable click still land on a CamMan offer.
+    keitaro_offer_id: integer("keitaro_offer_id"),
     sales_pages: jsonb("sales_pages")
       .$type<{ label: string; url: string }[]>()
       .notNull()
@@ -246,6 +250,9 @@ export const offers = pgTable(
   (table) => [
     index("offers_org_id_idx").on(table.org_id),
     index("offers_network_id_idx").on(table.network_id),
+    uniqueIndex("offers_org_keitaro_offer_id_uniq")
+      .on(table.org_id, table.keitaro_offer_id)
+      .where(sql`keitaro_offer_id IS NOT NULL`),
     check(
       "offers_status_check",
       sql`${table.status} IN ('active', 'archived')`,
@@ -5041,3 +5048,175 @@ export const operator_rollups = pgTable(
 );
 
 export type OperatorRollup = typeof operator_rollups.$inferSelect;
+
+// ============ Conversion events (migration 0181) ============
+// docs/04-features/conversion-events.md. One row per Keitaro conversion; the
+// event-type registry and the network/offer mapping that classifies it.
+export const event_types = pgTable(
+  "event_types",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    label: text("label").notNull(),
+    display_order: integer("display_order").notNull().default(0),
+    is_purchase: boolean("is_purchase").notNull().default(false),
+    counts_revenue: boolean("counts_revenue").notNull().default(false),
+    is_retarget_signal: boolean("is_retarget_signal").notNull().default(false),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("event_types_org_key_uniq").on(table.org_id, table.key),
+    check("event_types_status_check", sql`${table.status} IN ('active', 'archived')`),
+    check("event_types_key_format_check", sql`${table.key} ~ '^[a-z][a-z0-9_]*$'`),
+  ],
+);
+
+export type EventType = typeof event_types.$inferSelect;
+
+export const conversion_event_mappings = pgTable(
+  "conversion_event_mappings",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    affiliate_network_id: integer("affiliate_network_id").references(
+      () => affiliate_networks.id,
+      { onDelete: "cascade" },
+    ),
+    offer_id: integer("offer_id").references(() => offers.id, {
+      onDelete: "cascade",
+    }),
+    // Lowercased Keitaro conversion_type name: lead/sale/rejected/trash/registration/deposit.
+    keitaro_type: text("keitaro_type").notNull(),
+    // NULL = status transition only; the conversion keeps its existing event type.
+    event_type_id: integer("event_type_id").references(() => event_types.id, {
+      onDelete: "restrict",
+    }),
+    conversion_status: text("conversion_status").notNull(),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("conversion_event_mappings_org_idx").on(table.org_id),
+    uniqueIndex("conversion_event_mappings_network_type_uniq")
+      .on(table.affiliate_network_id, table.keitaro_type)
+      .where(sql`affiliate_network_id IS NOT NULL AND status = 'active'`),
+    uniqueIndex("conversion_event_mappings_offer_type_uniq")
+      .on(table.offer_id, table.keitaro_type)
+      .where(sql`offer_id IS NOT NULL AND status = 'active'`),
+    check(
+      "conversion_event_mappings_scope_check",
+      sql`num_nonnulls(${table.affiliate_network_id}, ${table.offer_id}) = 1`,
+    ),
+    check(
+      "conversion_event_mappings_conversion_status_check",
+      sql`${table.conversion_status} IN ('pending', 'approved', 'rejected')`,
+    ),
+    check(
+      "conversion_event_mappings_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+  ],
+);
+
+export type ConversionEventMapping = typeof conversion_event_mappings.$inferSelect;
+
+export const conversion_events = pgTable(
+  "conversion_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // Stable across Keitaro in-place updates; a new tid is a new id.
+    keitaro_event_id: text("keitaro_event_id").notNull(),
+    tid: text("tid"),
+    keitaro_click_subid: text("keitaro_click_subid"),
+    keitaro_status: text("keitaro_status").notNull(),
+    keitaro_type: text("keitaro_type").notNull(),
+    keitaro_version: integer("keitaro_version"),
+    keitaro_offer_id: integer("keitaro_offer_id"),
+    // SET NULL, not cascade: deleting a contact/campaign never erases revenue.
+    stage_send_id: uuid("stage_send_id").references(() => stage_sends.id, {
+      onDelete: "set null",
+    }),
+    contact_id: uuid("contact_id").references(() => contacts.id, {
+      onDelete: "set null",
+    }),
+    campaign_id: integer("campaign_id").references(() => campaigns.id, {
+      onDelete: "set null",
+    }),
+    stage_id: integer("stage_id").references(() => campaign_stages.id, {
+      onDelete: "set null",
+    }),
+    offer_id: integer("offer_id").references(() => offers.id, {
+      onDelete: "set null",
+    }),
+    // NULL event_type_id or NULL status = unmapped: stored, alerted, never counted.
+    // event_type_id is LOCKED once set; an update never changes it.
+    event_type_id: integer("event_type_id").references(() => event_types.id, {
+      onDelete: "restrict",
+    }),
+    status: text("status"),
+    // A later Keitaro type mapped to a DIFFERENT event type than the locked one
+    // (e.g. Registration → Sale on a reused tid). Cleared when a mapping agrees.
+    conflicting_event_type_id: integer("conflicting_event_type_id").references(
+      () => event_types.id,
+      { onDelete: "restrict" },
+    ),
+    event_type_conflict_at: timestamp("event_type_conflict_at", { withTimezone: true }),
+    revenue: numeric("revenue", { precision: 12, scale: 4 }).notNull().default("0"),
+    currency: text("currency"),
+    // ORIGINAL conversion time (earliest status_history entry); never moved.
+    occurred_at: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    last_postback_at: timestamp("last_postback_at", { withTimezone: true }),
+    status_history: text("status_history"),
+    raw_params: jsonb("raw_params").$type<Record<string, unknown>>(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("conversion_events_keitaro_event_id_uniq").on(table.keitaro_event_id),
+    index("conversion_events_org_idx").on(table.org_id),
+    index("conversion_events_campaign_event_idx").on(
+      table.campaign_id,
+      table.event_type_id,
+      table.contact_id,
+    ),
+    index("conversion_events_contact_event_idx").on(table.contact_id, table.event_type_id),
+    index("conversion_events_offer_event_occurred_idx").on(
+      table.offer_id,
+      table.event_type_id,
+      table.occurred_at,
+    ),
+    index("conversion_events_stage_occurred_idx").on(table.stage_id, table.occurred_at),
+    index("conversion_events_stage_send_idx").on(table.stage_send_id),
+    index("conversion_events_unmapped_idx")
+      .on(table.org_id, table.created_at)
+      .where(sql`event_type_id IS NULL OR status IS NULL`),
+    index("conversion_events_type_conflict_idx")
+      .on(table.org_id, table.event_type_conflict_at)
+      .where(sql`conflicting_event_type_id IS NOT NULL`),
+    check(
+      "conversion_events_status_check",
+      sql`${table.status} IS NULL OR ${table.status} IN ('pending', 'approved', 'rejected')`,
+    ),
+  ],
+);
+
+export type ConversionEvent = typeof conversion_events.$inferSelect;

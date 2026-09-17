@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-07-10_
+_Last updated: 2026-09-17_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -206,6 +206,16 @@ The poll also mirrors the redirect totals into the legacy `raw_clicks` /
 consistent. Derived rates (Redirect %, Sales CR, EPC, Profit) are computed at read
 time in [`lib/keitaro/funnel.ts`](../../lib/keitaro/funnel.ts), not stored.
 
+**Then, in the route — the conversion ledger (Phase 2, 2026-09-17).** After
+`pollKeitaro` and the counted-clicker refresh, `/api/keitaro/poll` calls
+`ingestKeitaroConversions(db, { range: liveIngestRange(now) })`. That is a separate
+`conversions/log` fetch of **all** conversion types over the last **7 ET calendar
+days** (it ignores `?windowDays`), upserted into `conversion_events` keyed on Keitaro
+`event_id`. It never touches `keitaro_stage_results`, so this section's numbers are
+unchanged, and its own try/catch means a failure never fails the poll. On the cron
+path it then evaluates the Tier-2 ledger alerts and stamps the
+`conversion-events-ingest` heartbeat. See [conversion-events.md](conversion-events.md).
+
 ## 4. Storage (`keitaro_stage_results`, migrations 0061 + 0062)
 One row per (org, stage, ET date). `UNIQUE(org_id, stage_id, stat_date)`. RLS:
 org-scoped SELECT; writes go through the app's privileged cron connection (no
@@ -218,8 +228,10 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
 
 ## 5. Endpoints
 - `GET|POST /api/keitaro/poll` — cron (CRON_SECRET) or manual (operator+,
-  `result_imports.create`). `?windowDays=N`. Returns
-  `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, classification_degraded, visit_campaigns_matched, unmatched_samples, error }`.
+  `result_imports.create`). `?windowDays=N` (aggregate poll only). Returns
+  `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, classification_degraded, visit_campaigns_matched, unmatched_samples, error, counted_clickers, counted_clickers_error, conversion_events, conversion_events_error }`.
+  - `conversion_events`: the ledger ingest's `IngestResult`, or `null` when the ingest threw. Fields: `ok`, `dryRun`, `range`, `fetched`, `invalid`/`invalidSamples`, `unresolved`/`unresolvedSamples` (samples include `sub_id_1`), `rows`, `unmappedInBatch`, `statusOnlyInBatch`, `inserted`/`updated`/`unchanged`, `typeConflicts`, `orgMismatch`/`orgMismatchSamples`, `error`. `ok:false` with `error` means the window was refused (Keitaro HTTP error, timeout, a malformed 200 that isn't JSON with a `rows` array and a numeric `total`, or a truncated page) and nothing was written.
+  - `conversion_events_error`: the thrown message when the ingest threw; `monitor: …` when the cron path's alert evaluation or heartbeat stamp threw (appended after `; ` if the ingest also threw); `null` otherwise. On the cron path a thrown ingest also counts as a failed tick for the debounced `conversion_events:fetch_failed` alert.
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
   date) rows plus per-stage and campaign rollups with the Clickers → Offer
   Redirect → Sales funnel + derived rates. Requires `campaigns.view`.

@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-17_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -359,8 +359,10 @@ See [04-features/audience-segments.md](04-features/audience-segments.md) — `bu
 sequenceDiagram
   participant Cron as */5 keitaro/poll
   participant Poll as pollKeitaro
+  participant Ledger as ingestKeitaroConversions
   participant K as Keitaro Admin API
   participant DB
+  participant TG as Telegram
   participant CRM as /api/keitaro/results
   Cron->>Poll: GET /api/keitaro/poll (Bearer CRON_SECRET)
   Poll->>K: POST /report/build (3-day ET window, group day+sub_id_3)
@@ -370,10 +372,19 @@ sequenceDiagram
     Poll->>DB: UPSERT keitaro_stage_results (org_id, stage_id, stat_date)
   end
   Note over Poll,DB: idempotent (last-write-wins) — re-poll overwrites, never double-counts;<br/>unmatched/blank sub_id_3 counted + sampled, not written
+  Cron->>Ledger: then the conversion ledger (rolling 7-day ET window, own try/catch)
+  Ledger->>K: POST /conversions/log (all conversion types, refused if malformed or truncated)
+  K-->>Ledger: rows[{event_id, tid, sub_id_1, sub_id_3, conversion_type, revenue, status_history…}]
+  Ledger->>DB: UPSERT conversion_events ON keitaro_event_id (one transaction)
+  opt cron path only
+    Cron->>DB: read ledger problem combos (unmapped, type conflicts) + firing combo keys + heartbeat age on a failed or thrown tick (fetch_failed 15-min debounce)
+    Cron->>TG: page on a transition into firing (alert_state latch, one page per new unmapped/conflict combo, most recently changed first, plus a per-kind combo_cap_exceeded page past the 10-combo cap), clear keys whose condition or combo is gone
+    Cron->>DB: stamp conversion-events-ingest heartbeat (complete windows only)
+  end
   CRM->>DB: GET results?campaign_id → per-stage + campaign rollup (derived rates)
 ```
 
-> `sub_id_3` carries the **stage** tracking id, so rows are per-stage; campaign totals = SUM across stages. Per-recipient SALE detail is a **separate** poll keyed on `sub_id_1` (flow H).
+> `sub_id_3` carries the **stage** tracking id, so rows are per-stage; campaign totals = SUM across stages. Per-recipient SALE detail is a **separate** poll keyed on `sub_id_1` (flow H). The ledger step writes only `conversion_events` (plus `alert_state` / `cron_locks` on the cron path); `/api/cron/tracking-monitors` watches its heartbeat. See [04-features/conversion-events.md](04-features/conversion-events.md).
 
 ## H. Keitaro conversions poll → per-recipient sale (every 15 min)
 

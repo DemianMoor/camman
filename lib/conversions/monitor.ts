@@ -1,6 +1,16 @@
+import { sql } from "drizzle-orm";
+
+import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import type { IngestResult } from "@/lib/conversions/ingest";
 import type { KeitaroReportRange } from "@/lib/keitaro/client";
+import {
+  HEARTBEAT_JOBS,
+  checkHeartbeats,
+  heartbeatBreaches,
+  type DbOrTx,
+  type HeartbeatStatus,
+} from "@/lib/reporting/cron-heartbeat";
 
 // =============================================================================
 // CONVERSION LEDGER MONITOR — Phase 2 of multi-event conversions.
@@ -225,4 +235,137 @@ export function decideLedgerAlerts(h: LedgerHealth): ConversionAlertDecision[] {
       ? { alertKey: CONVERSION_ALERT_KEYS.typeConflicts, state: "firing", text: formatTypeConflictsAlert(h) }
       : { alertKey: CONVERSION_ALERT_KEYS.typeConflicts, state: "ok" },
   ];
+}
+
+// ── DB: ledger health, alert application, ingest heartbeat ──────────────────
+
+type Send = (text: string) => Promise<boolean>;
+
+// Each count's WHERE is written EXACTLY as its partial index's predicate
+// (migration 0181), so the planner can answer it from that small index however
+// large the ledger grows. Exported so scripts/test-conversion-monitor-db.ts can
+// EXPLAIN the very statements this module runs.
+export const UNMAPPED_COUNT_SQL = sql`
+  SELECT count(*)::int AS total,
+         count(*) FILTER (WHERE created_at >= now() - interval '24 hours')::int AS last_24h
+  FROM conversion_events
+  WHERE event_type_id IS NULL OR status IS NULL`;
+
+export const CONFLICT_COUNT_SQL = sql`
+  SELECT count(*)::int AS total
+  FROM conversion_events
+  WHERE conflicting_event_type_id IS NOT NULL`;
+
+// Whole ledger, all orgs (the alerts are global). Four small reads per cron tick.
+export async function readLedgerHealth(dbc: DbOrTx): Promise<LedgerHealth> {
+  const [unmapped] = (await dbc.execute(UNMAPPED_COUNT_SQL)) as unknown as {
+    total: number;
+    last_24h: number;
+  }[];
+  const unmappedSamples = (await dbc.execute(sql`
+    SELECT ce.keitaro_event_id, ce.keitaro_type, ce.keitaro_offer_id, o.name AS offer_name
+    FROM conversion_events ce
+    LEFT JOIN offers o ON o.id = ce.offer_id
+    WHERE ce.event_type_id IS NULL OR ce.status IS NULL
+    ORDER BY ce.created_at DESC, ce.id DESC
+    LIMIT ${MAX_SAMPLES}
+  `)) as unknown as UnmappedSample[];
+  const [conflicts] = (await dbc.execute(CONFLICT_COUNT_SQL)) as unknown as { total: number }[];
+  const conflictSamples = (await dbc.execute(sql`
+    SELECT ce.keitaro_event_id,
+           lt.key AS locked_event_key,
+           ce.keitaro_type,
+           mt.key AS conflicting_event_key,
+           to_char(ce.event_type_conflict_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS since
+    FROM conversion_events ce
+    LEFT JOIN event_types lt ON lt.id = ce.event_type_id
+    LEFT JOIN event_types mt ON mt.id = ce.conflicting_event_type_id
+    WHERE ce.conflicting_event_type_id IS NOT NULL
+    ORDER BY ce.event_type_conflict_at DESC NULLS LAST, ce.id DESC
+    LIMIT ${MAX_SAMPLES}
+  `)) as unknown as ConflictSample[];
+  return {
+    unmapped_total: Number(unmapped.total),
+    unmapped_last_24h: Number(unmapped.last_24h),
+    unmapped_samples: unmappedSamples.map((s) => ({
+      keitaro_event_id: s.keitaro_event_id,
+      keitaro_type: s.keitaro_type,
+      keitaro_offer_id: s.keitaro_offer_id === null ? null : Number(s.keitaro_offer_id),
+      offer_name: s.offer_name,
+    })),
+    conflict_total: Number(conflicts.total),
+    conflict_samples: conflictSamples.map((s) => ({
+      keitaro_event_id: s.keitaro_event_id,
+      locked_event_key: s.locked_event_key,
+      keitaro_type: s.keitaro_type,
+      conflicting_event_key: s.conflicting_event_key,
+      since: s.since,
+    })),
+  };
+}
+
+async function applyDecisions(
+  dbc: DbOrTx,
+  decisions: readonly ConversionAlertDecision[],
+  send: Send | undefined,
+): Promise<void> {
+  for (const d of decisions) {
+    // Both helpers are best-effort and never throw; org-less because the
+    // ledger alerts are global.
+    if (d.state === "firing") {
+      await notifyOnTransition(dbc, { alertKey: d.alertKey, text: d.text, send });
+    } else {
+      await clearAlert(dbc, { alertKey: d.alertKey });
+    }
+  }
+}
+
+// Minutes since the last COMPLETE ingest (the conversion-events-ingest
+// heartbeat), or null when none was ever recorded. Read through checkHeartbeats,
+// which rounds the age to 0.1h, so the debounce resolves in 6-minute steps: a
+// last success under 15 min old reads as ≤ 12, one 15 min or older as ≥ 18.
+async function readLastSuccessAgeMinutes(dbc: DbOrTx): Promise<number | null> {
+  const [status] = await checkHeartbeats(dbc, [HEARTBEAT_JOBS.conversionEventsIngest]);
+  return status.age_hours === null ? null : status.age_hours * 60;
+}
+
+// Cron path of /api/keitaro/poll, right after the ingest — including an ingest
+// that THREW (the route passes { kind: "threw" }). The heartbeat age is read
+// only for a failed tick (the fetch_failed debounce). The ingest decisions are
+// applied FIRST, so a failed tick past the debounce still pages even if the
+// health read then fails — that failure propagates to the caller, which reports
+// it and does not stamp the heartbeat. `send` is injectable only for the DB test.
+export async function evaluateConversionAlerts(
+  dbc: DbOrTx,
+  outcome: IngestOutcome,
+  opts: { send?: Send } = {},
+): Promise<{ health: LedgerHealth; decisions: ConversionAlertDecision[] }> {
+  const lastSuccessAgeMinutes = ingestFailed(outcome) ? await readLastSuccessAgeMinutes(dbc) : null;
+  const ingestDecisions = decideIngestAlerts(outcome, lastSuccessAgeMinutes);
+  await applyDecisions(dbc, ingestDecisions, opts.send);
+  const health = await readLedgerHealth(dbc);
+  const ledgerDecisions = decideLedgerAlerts(health);
+  await applyDecisions(dbc, ledgerDecisions, opts.send);
+  return { health, decisions: [...ingestDecisions, ...ledgerDecisions] };
+}
+
+// Dead-man for the ingest, called by /api/cron/tracking-monitors (hourly) — a
+// job that is dead cannot report itself dead, so the poll never calls this.
+// A NULL watermark (never ran) counts as stale, as everywhere else.
+export async function watchIngestHeartbeat(
+  dbc: DbOrTx,
+  opts: { send?: Send } = {},
+): Promise<HeartbeatStatus> {
+  const [status] = await checkHeartbeats(dbc, [HEARTBEAT_JOBS.conversionEventsIngest]);
+  const [breach] = heartbeatBreaches([status]);
+  if (breach !== undefined) {
+    await notifyOnTransition(dbc, {
+      alertKey: INGEST_HEARTBEAT_ALERT_KEY,
+      text: formatIngestHeartbeatAlert(breach),
+      send: opts.send,
+    });
+  } else {
+    await clearAlert(dbc, { alertKey: INGEST_HEARTBEAT_ALERT_KEY });
+  }
+  return status;
 }

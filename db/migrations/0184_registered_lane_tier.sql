@@ -27,7 +27,23 @@
 -- A CHECK constraint cannot be altered in place, so it is dropped and re-added
 -- under the same name. The re-add validates against 2,100 rows that already
 -- satisfy the wider set, inside the migration's single transaction.
+--
+-- Every statement below is re-runnable: the DROP is IF EXISTS and the ADD is
+-- PRECEDED BY THAT DROP (`ADD CONSTRAINT` has no IF NOT EXISTS form), and SET
+-- LOCAL is scoped to the apply transaction. See docs/07-conventions.md.
 
+-- Drizzle applies every pending migration in ONE transaction, so a combined
+-- 0182–0185 apply already runs under 0182's lock_timeout. This re-asserts it for
+-- a SOLO apply or roll-forward of 0184 alone: BOTH statements below take ACCESS
+-- EXCLUSIVE on campaign_stages — the hottest table on the send path — and would
+-- otherwise wait behind a drain or a stages read with no bound. The risk is
+-- QUEUEING, not duration: the re-add validates 2,100 rows in milliseconds, but an
+-- unbounded wait stalls every reader and writer of campaign_stages behind it. A
+-- blocked lock fails the migration instead; just retry. SET LOCAL is scoped to
+-- the apply transaction either way, so on a combined apply this is a harmless
+-- re-set of the same value.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
 ALTER TABLE public.campaign_stages
   DROP CONSTRAINT IF EXISTS campaign_stages_behavioral_lane_check;
 --> statement-breakpoint

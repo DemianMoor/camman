@@ -1,3 +1,9 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { QueryBuilder } from "drizzle-orm/pg-core";
+
+import { keitaro_stage_results } from "@/db/schema";
 import {
   addEventMaps,
   buildEventColumns,
@@ -397,6 +403,49 @@ check(
     one.n = 9;
     return one !== two && two.n === 0 && one !== (EMPTY_TALLY as EventTally) && EMPTY_TALLY.n === 0;
   })(),
+);
+
+// ── N: the schema mirror leads the database, so a BARE select is a hidden
+// dependency ────────────────────────────────────────────────────────────────
+//
+// db/schema.ts names `events` and `unmapped_conversions` (0185) from the commit
+// that adds them, while the DATABASE gets them only when the migration is
+// applied — additive leads the code, CLAUDE.md §14. Drizzle's `db.select()` with
+// no projection expands to every column the MIRROR names, so a handler that
+// reads none of them still asks for them and answers 42703 (undefined_column)
+// against a database that is one migration behind. N1 pins that premise against
+// the real drizzle version; N2 is the bar: nothing selects this table without
+// saying which columns it wants.
+const bareSelectSql = new QueryBuilder().select().from(keitaro_stage_results).toSQL().sql;
+check(
+  "N1 ⭐ PREMISE: a bare db.select() over keitaro_stage_results really does expand to the mirror, `events` and `unmapped_conversions` included — this is what makes a projection-less read a dependency on migration 0185",
+  bareSelectSql.includes('"events"') && bareSelectSql.includes('"unmapped_conversions"'),
+  bareSelectSql,
+);
+
+/** Every .ts/.tsx under a shipped source root, so the scan cannot miss a new caller. */
+function sourceFiles(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith(".ts") || e.name.endsWith(".tsx")) out.push(p);
+    }
+  };
+  walk(root);
+  return out;
+}
+// `.select()` — empty parens — reaching a `.from(keitaro_stage_results)` through
+// any chain of intervening calls. `.select({...})` does not match: the parens are
+// not empty.
+const BARE_SELECT_ON_TABLE = /\.select\(\s*\)[\s\S]{0,400}?\.from\(\s*keitaro_stage_results\s*\)/;
+const scanned = [...sourceFiles("app"), ...sourceFiles("lib")];
+const bareCallers = scanned.filter((f) => BARE_SELECT_ON_TABLE.test(readFileSync(f, "utf8")));
+check(
+  `N2 ⭐ no shipped module selects keitaro_stage_results without a projection (scanned ${scanned.length} files under app/ and lib/) — a bare select there depends on every column the mirror has, not the ones it reads`,
+  scanned.length > 100 && bareCallers.length === 0,
+  `scanned=${scanned.length} bare=${bareCallers.join(", ") || "none"}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

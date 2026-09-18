@@ -7,6 +7,13 @@
 -- Both are IF NOT EXISTS, so the migration is re-runnable: a timestamp bump can
 -- re-apply it on preview without a second thought.
 --
+-- ⚠️ RE-RUNNABLE IS NOT SHAPE-REPAIRING. `ADD COLUMN IF NOT EXISTS` matches on
+-- the column NAME ALONE: a re-apply over a column of the wrong type, the wrong
+-- nullability or the wrong default is a silent no-op, not a repair. Re-runnable
+-- means "applying it twice raises nothing and changes nothing", and that is the
+-- only thing bar S8b of scripts/test-stage-event-columns-db.ts asserts. A shape
+-- that has drifted has to be fixed by a NEW migration that names the difference.
+--
 --   events               the SAME numbers as sales / revenue / pending_revenue,
 --                        split per event_types.key. Written by the same
 --                        INSERT ... ON CONFLICT in
@@ -61,9 +68,24 @@
 -- had, and the projection's watermark + coverage floor
 -- (lib/keitaro/stage-day-conversions.ts) is what fills them.
 --
--- Inert on arrival: nothing reads or writes either column until a later Phase 5
--- task. Additive leads the code (CLAUDE.md §14).
+-- THE MIGRATION is inert on arrival: it changes no stored value and no query
+-- plan. THE SCHEMA MIRROR IS NOT. The moment db/schema.ts names these columns,
+-- every `db.select()` with no projection over keitaro_stage_results expands to
+-- include them, so the CODE requires this migration even where no feature reads
+-- the columns. Additive leads the code (CLAUDE.md §14) — that is the rule this
+-- is an instance of, not an exemption from it.
 
+-- Drizzle applies every pending migration in ONE transaction, so a combined
+-- 0182–0185 apply already runs under 0182's lock_timeout. This re-asserts it for
+-- a SOLO apply or roll-forward of 0185 alone. The risk is QUEUEING, not duration:
+-- the two ALTERs are milliseconds (catalog-stored defaults, no rewrite), but
+-- ACCESS EXCLUSIVE on keitaro_stage_results with no bound stalls every reader and
+-- writer of it — /api/keitaro/poll alone allows maxDuration = 230. A blocked lock
+-- fails the migration instead; just retry. SET LOCAL is scoped to the apply
+-- transaction either way, so on a combined apply this is a harmless re-set of the
+-- same value.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
 ALTER TABLE public.keitaro_stage_results
   ADD COLUMN IF NOT EXISTS events jsonb NOT NULL DEFAULT '{}'::jsonb;
 --> statement-breakpoint

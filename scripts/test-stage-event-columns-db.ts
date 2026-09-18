@@ -103,8 +103,11 @@ async function main() {
         check("S1 ⭐ keitaro_stage_results.events exists", !!ev, JSON.stringify(cols));
         check("S2 events is jsonb", ev?.data_type === "jsonb", ev?.data_type ?? "-");
         check("S3 ⭐ events is NOT NULL", ev?.is_nullable === "NO", ev?.is_nullable ?? "-");
+        // Named for what it asserts: the DEFAULT clause, and nothing else. The
+        // NOT NULL half of the same column is S3's bar — the two are separate
+        // catalog facts and a migration can get either one wrong on its own.
         check(
-          "S4 ⭐ events defaults to an empty object, not NULL",
+          "S4 ⭐ events' DEFAULT is the empty object (a row that does not name the column reads '{}')",
           (ev?.column_default ?? "").includes("'{}'"),
           ev?.column_default ?? "-",
         );
@@ -140,58 +143,93 @@ async function main() {
         );
 
         const migrationSql = readFileSync(join(process.cwd(), MIGRATION_FILE), "utf8");
+        // ⭐ THE REWRITE IS TOTAL, AND ITS TOTALITY IS ASSERTED BEFORE A SINGLE
+        // STATEMENT RUNS. It used to rewrite only `public.keitaro_stage_results`,
+        // which is every reference THIS file happens to make — so it was correct
+        // by coincidence. An unqualified `ALTER TABLE keitaro_stage_results` in a
+        // future migration would have passed through the rewrite untouched and
+        // ALTERED THE REAL TABLE (inside the rolled-back transaction, but holding
+        // ACCESS EXCLUSIVE on it against live traffic meanwhile). `public.` is
+        // optional in the pattern now, and S8a refuses to replay ANYTHING if one
+        // occurrence survives — the probe cannot become the thing that alters the
+        // table it is standing in for. Comment text is rewritten too; harmless,
+        // and it is what lets "no occurrence survives" be a total check.
         const statements = migrationSql
           .split("--> statement-breakpoint")
-          .map((s) => s.replace(/public\.keitaro_stage_results/g, PROBE_TABLE))
+          .map((s) => s.replace(/(?:public\.)?\bkeitaro_stage_results\b/g, PROBE_TABLE))
           .filter((s) => s.trim().length > 0);
+        const leaked = statements.filter((s) => /keitaro_stage_results/.test(s));
+        check(
+          "S8a ⭐ every reference to the real table was rewritten to the probe fixture — nothing below runs if one survives",
+          leaked.length === 0,
+          leaked.join(" | ").slice(0, 300),
+        );
+        const safeToReplay = leaked.length === 0;
+
         // ⚠️ TEMP … ON COMMIT DROP, not a plain table. Measured the hard way:
         // while red-proving S16/S17 (the mutation that lets the probe COMMIT) an
         // ordinary CREATE TABLE committed too and had to be dropped off camman-v2
         // by hand. A temp table with ON COMMIT DROP cannot survive either exit.
         // The migration's statements are rewritten to the unqualified name, so
         // they resolve to the temp schema ahead of public.
-        await tx.execute(
-          sql.raw(`CREATE TEMP TABLE ${PROBE_TABLE} (id int primary key, note text) ON COMMIT DROP`),
-        );
-        await tx.execute(sql.raw(`INSERT INTO ${PROBE_TABLE} (id, note) VALUES (1,'a'),(2,'b'),(3,'c')`));
-        for (const s of statements) await tx.execute(sql.raw(s));
-        const pre = (await tx.execute(sql.raw(`
-          SELECT count(*)::int AS total,
-                 count(*) FILTER (WHERE events IS NULL OR unmapped_conversions IS NULL)::int AS nulls,
-                 count(*) FILTER (WHERE events::text = '{}' AND unmapped_conversions = 0)::int AS defaulted
-          FROM ${PROBE_TABLE}
-        `))) as unknown as { total: number; nulls: number; defaulted: number }[];
+        let pre: { total: number; nulls: number; defaulted: number }[] = [];
+        let again: { defaulted: number }[] = [];
+        let reapplyError: string | null = null;
+        if (safeToReplay) {
+          await tx.execute(
+            sql.raw(`CREATE TEMP TABLE ${PROBE_TABLE} (id int primary key, note text) ON COMMIT DROP`),
+          );
+          await tx.execute(sql.raw(`INSERT INTO ${PROBE_TABLE} (id, note) VALUES (1,'a'),(2,'b'),(3,'c')`));
+          for (const s of statements) await tx.execute(sql.raw(s));
+          pre = (await tx.execute(sql.raw(`
+            SELECT count(*)::int AS total,
+                   count(*) FILTER (WHERE events IS NULL OR unmapped_conversions IS NULL)::int AS nulls,
+                   count(*) FILTER (WHERE events::text = '{}' AND unmapped_conversions = 0)::int AS defaulted
+            FROM ${PROBE_TABLE}
+          `))) as unknown as { total: number; nulls: number; defaulted: number }[];
+        }
         check(
-          `S8 ⭐ the migration's OWN two statements, replayed over 3 rows that PREDATE them, leave every one reading '{}' and 0 — never NULL`,
-          statements.length === 2 &&
+          `S8 ⭐ the migration's OWN statements, replayed over 3 rows that PREDATE them, leave every one reading '{}' and 0 — never NULL`,
+          safeToReplay &&
+            statements.length === 3 &&
             migrationSql.includes("public.keitaro_stage_results") &&
             Number(pre[0]?.total) === 3 &&
             Number(pre[0]?.nulls) === 0 &&
             Number(pre[0]?.defaulted) === 3,
-          `statements=${statements.length} total=${pre[0]?.total} nulls=${pre[0]?.nulls} defaulted=${pre[0]?.defaulted}`,
+          `safe=${safeToReplay} statements=${statements.length} total=${pre[0]?.total} nulls=${pre[0]?.nulls} defaulted=${pre[0]?.defaulted}`,
         );
         // Re-runnable, so a `when` bump could re-apply it on preview without a
-        // second thought: both statements are ADD COLUMN IF NOT EXISTS.
+        // second thought: both ALTERs are ADD COLUMN IF NOT EXISTS and the
+        // leading SET LOCAL is scoped to the apply transaction.
+        //
+        // ⚠️ RE-RUNNABLE IS NOT SHAPE-REPAIRING, AND THIS BAR DOES NOT CLAIM IT
+        // IS. `IF NOT EXISTS` matches on the column NAME ALONE: re-applied over a
+        // column of the wrong TYPE, nullability or default it is a silent no-op,
+        // not a repair. All this asserts is "a second apply raises nothing and
+        // changes nothing" — which is what a `when` bump needs, and all it needs.
+        // The shape itself is S1–S7's job, against the catalog.
+        //
         // ⚠️ INSIDE A SAVEPOINT (a nested drizzle transaction). A statement that
         // errors POISONS its transaction — every later query returns 25P02 — so
         // catching the error without one would turn "0185 is not re-runnable"
         // into a cascade of crashes in the bars below instead of one red line.
-        let reapplyError: string | null = null;
-        try {
-          await tx.transaction(async (tx2) => {
-            for (const s of statements) await tx2.execute(sql.raw(s));
-          });
-        } catch (e) {
-          reapplyError = e instanceof Error ? (e.cause instanceof Error ? e.cause.message : e.message) : String(e);
+        if (safeToReplay) {
+          try {
+            await tx.transaction(async (tx2) => {
+              for (const s of statements) await tx2.execute(sql.raw(s));
+            });
+          } catch (e) {
+            reapplyError = e instanceof Error ? (e.cause instanceof Error ? e.cause.message : e.message) : String(e);
+          }
+          again = (await tx.execute(sql.raw(`
+            SELECT count(*) FILTER (WHERE events::text = '{}' AND unmapped_conversions = 0)::int AS defaulted
+            FROM ${PROBE_TABLE}
+          `))) as unknown as { defaulted: number }[];
         }
-        const again = (await tx.execute(sql.raw(`
-          SELECT count(*) FILTER (WHERE events::text = '{}' AND unmapped_conversions = 0)::int AS defaulted
-          FROM ${PROBE_TABLE}
-        `))) as unknown as { defaulted: number }[];
         check(
-          "S8b ⭐ and applying the same file a SECOND time raises nothing and changes nothing (re-runnable)",
-          reapplyError === null && Number(again[0]?.defaulted) === 3,
-          `error=${reapplyError ?? "none"} defaulted=${again[0]?.defaulted}`,
+          "S8b ⭐ and applying the same file a SECOND time raises nothing and changes nothing (re-runnable — NOT shape-repairing: IF NOT EXISTS matches on name alone)",
+          safeToReplay && reapplyError === null && Number(again[0]?.defaulted) === 3,
+          `safe=${safeToReplay} error=${reapplyError ?? "none"} defaulted=${again[0]?.defaulted}`,
         );
 
         // A row written WITHOUT naming the columns gets the defaults.

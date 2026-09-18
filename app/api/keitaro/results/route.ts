@@ -41,8 +41,34 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // ⭐ AN EXPLICIT PROJECTION, NOT `db.select()`. A bare select expands to every
+  // column the SCHEMA MIRROR names, which is not the same set as the columns this
+  // handler uses — and not necessarily the same set the DEPLOYED DATABASE has.
+  // db/schema.ts leads the migrations by design (CLAUDE.md §14: additive leads the
+  // code), so between a deploy and its migration a bare select names columns that
+  // do not exist yet and the endpoint answers 42703 for a column nothing here
+  // reads. This list is exactly the funnel's input (KeitaroResultRowLike,
+  // lib/keitaro/funnel.ts) plus the four fields the response body echoes, so the
+  // handler's schema dependency is the one it actually has: `pending_revenue`
+  // (0182) is named because addRowToFunnel reads it, while `events` and
+  // `unmapped_conversions` (0185) are not named because nothing here reads them.
   const rows = await db
-    .select()
+    .select({
+      stage_id: keitaro_stage_results.stage_id,
+      stage_tracking_id: keitaro_stage_results.stage_tracking_id,
+      stat_date: keitaro_stage_results.stat_date,
+      synced_at: keitaro_stage_results.synced_at,
+      visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
+      visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
+      redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
+      redirect_clicks_clean: keitaro_stage_results.redirect_clicks_clean,
+      raw_clicks: keitaro_stage_results.raw_clicks,
+      clean_clicks: keitaro_stage_results.clean_clicks,
+      sales: keitaro_stage_results.sales,
+      revenue: keitaro_stage_results.revenue,
+      pending_revenue: keitaro_stage_results.pending_revenue,
+      cost: keitaro_stage_results.cost,
+    })
     .from(keitaro_stage_results)
     .where(
       and(

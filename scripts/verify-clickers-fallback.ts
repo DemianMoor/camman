@@ -67,6 +67,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
+import { requirePendingRevenueColumn } from "./_require-migration";
 import {
   shouldSubstituteClickers,
   substitutionDominates,
@@ -113,6 +114,12 @@ function expectedFallback(
 }
 
 async function main() {
+  // ⚠️ NEEDS MIGRATION 0182. getStageMetricsInRange selects
+  // keitaro_stage_results.pending_revenue, which prod does not have until Task 8
+  // applies it — without this the script dies on a raw 42703 that reads like a
+  // broken report rather than a missing column.
+  await requirePendingRevenueColumn(db, "verify-clickers-fallback");
+
   // ── PART 1 — the live picture. Reported, never asserted. ──────────────────
   console.log("\nPART 1 — live findings (informational)\n");
 

@@ -2565,19 +2565,33 @@ export const keitaro_stage_results = pgTable(
     raw_clicks: integer("raw_clicks").notNull().default(0),
     clean_clicks: integer("clean_clicks").notNull().default(0),
     checkouts: integer("checkouts").notNull().default(0),
-    // Count of Keitaro conversions (the lead/sale/rejected statuses that make up
-    // its `conversions` metric, = leads + sales) attributed to this stage on this
-    // conversion day — NOT the bare `sales` metric, since this account's network
-    // fires only `lead`-status postbacks. Sourced per-event from conversions/log so
-    // each sale lands on the day it happened. See lib/keitaro/poll.ts.
+    // Count of counted PURCHASE conversions attributed to this stage on this
+    // conversion day: an `is_purchase` event type in lifecycle status `pending`
+    // or `approved` (lib/sale-attribution.ts purchasedClause — a `rejected`
+    // conversion is a refund, not a sale, and a $0 registration is not a purchase
+    // at all). Re-derived per event from the conversion_events ledger by
+    // lib/keitaro/stage-day-conversions.ts, so each sale lands on the day it
+    // happened and cannot be double-counted when Keitaro re-dates it. Phase 3,
+    // 2026-09-17; before that it was the raw `keitaro_type IN (lead, sale,
+    // rejected)` count, which counted refunds.
     sales: integer("sales").notNull().default(0),
     revenue: numeric("revenue", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
-    // Per-conversion payout stamped at sync time (= revenue / sales for the row).
-    // Frozen against later CPA edits so historical revenue can never be retro-
-    // changed. NULL when the row has 0 sales (no conversion to price). Revenue
-    // itself remains the source-of-truth aggregate; this is the per-unit rate.
+    // Per-conversion payout stamped at sync time. Frozen against later CPA edits
+    // so historical revenue can never be retro-changed. NULL when the row has 0
+    // sales (no conversion to price). Revenue itself remains the source-of-truth
+    // aggregate; this is the per-unit rate.
+    //
+    // ⚠️ MIXED BASIS since Phase 3 (2026-09-17), deliberately not "fixed": the
+    // numerator is APPROVED revenue while the denominator is `sales` above, which
+    // counts PENDING purchases too. So on a row with a held purchase the rate
+    // UNDERSTATES the per-unit payout (revenue 350 / 3 sales, where only 2 of the
+    // 3 contributed any of the 350). Left as is because the column has NO reader
+    // anywhere in app/, lib/ or components/ — changing the divisor would rewrite
+    // stored values on the next tick to satisfy nobody. Any future consumer must
+    // read this note first and decide which basis it wants, rather than assume
+    // `revenue / sales` of the same conversion set.
     payout_at_conversion: numeric("payout_at_conversion", {
       precision: 12,
       scale: 4,

@@ -7,6 +7,7 @@ import { drizzle } from "drizzle-orm/postgres-js"; import postgres from "postgre
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 import { withFunnelDerived } from "@/lib/keitaro/funnel";
 import { denominatorFor } from "@/lib/reporting/counted-clickers";
+import { requirePendingRevenueColumn } from "./_require-migration";
 
 // Exercises the real reporting path end to end: the shared stage-funnel now
 // carries the counted-clicker denominators, and withFunnelDerived divides by
@@ -16,6 +17,10 @@ function assert(c: boolean, m: string) { if (!c) throw new Error(`ASSERTION FAIL
 async function main() {
   const c = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
   const d = drizzle(c);
+  // ⚠️ NEEDS MIGRATION 0182 — getStageMetricsInRange selects
+  // keitaro_stage_results.pending_revenue, absent on prod until Task 8 applies
+  // it. Without this the run ends in a raw 42703 that looks like a broken EPC.
+  await requirePendingRevenueColumn(d, "verify-epc-denominator");
   const org = (await d.execute(sql`SELECT id FROM organizations LIMIT 1`)) as unknown as {id:string}[];
   const orgId = org[0].id;
   const r = await getStageMetricsInRange(orgId, "2026-06-01", "2026-08-11");

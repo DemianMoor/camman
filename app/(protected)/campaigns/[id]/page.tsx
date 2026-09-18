@@ -1294,7 +1294,9 @@ export default function CampaignDetailPage() {
           const pending = Number(s.keitaro_pending_revenue);
           if (!(revenue > 0) && !(pending > 0))
             return <span className="text-muted-foreground">—</span>;
-          const roi = stageRoi(revenue, Number(s.total_cost));
+          // Pending is passed so a stage with ONLY held money reads
+          // "$0.00 · — · pending $X" rather than "$0.00 · -100% · pending $X".
+          const roi = stageRoi(revenue, Number(s.total_cost), pending);
           return (
             <span className="font-mono text-xs tabular-nums">
               {formatRevenue(revenue)} · {formatRoi(roi)}
@@ -1562,7 +1564,12 @@ export default function CampaignDetailPage() {
       sales,
       cost,
       revenue: revenueKnown ? revenue : null,
-      pendingRevenue,
+      // Same "—, not $0.00" rule as revenue above, for the same reason: a
+      // manual campaign has no held money to report, and a tile reading
+      // "$0.00" beside a Revenue tile reading "—" asserts a fact about money
+      // this screen does not have. Non-zero only when some stage actually
+      // carries a pending payout.
+      pendingRevenue: pendingRevenue > 0 ? pendingRevenue : null,
     };
   }, [stages, inboundStopContacts]);
   const hasResults =
@@ -1885,11 +1892,21 @@ export default function CampaignDetailPage() {
               <TotalsMetric
                 label="Pending revenue"
                 value={formatRevenue(campaignTotals.pendingRevenue)}
+                title="Money a conversion has earned that the network has not approved yet. Never counted in Revenue, ROI or EPC — it may still be rejected."
                 raw
               />
               <TotalsMetric
                 label="ROI"
-                value={formatRoi(stageRoi(campaignTotals.revenue, campaignTotals.cost))}
+                // Pending is passed only so a campaign with held money and no
+                // approved revenue reads "—" instead of "-100%" — it is never
+                // IN the ratio (lib/stage-results.ts).
+                value={formatRoi(
+                  stageRoi(
+                    campaignTotals.revenue,
+                    campaignTotals.cost,
+                    campaignTotals.pendingRevenue ?? 0,
+                  ),
+                )}
                 raw
               />
               <TotalsMetric

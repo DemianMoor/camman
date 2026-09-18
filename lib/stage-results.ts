@@ -38,12 +38,22 @@ export function stageRevenue(
 
 // ROI as a ratio (0.5 = +50%). Null when revenue is unknown or there's no
 // cost to divide by.
+//
+// `pendingRevenue` (Phase 3, 2026-09-17) is money a conversion earned that the
+// network has not approved yet. It is NEVER in the ratio — ROI counts approved
+// revenue only, like EPC and profit. But when approved revenue is 0 and held
+// money exists, the honest answer is "not decided yet", not `-100%`: the ratio
+// would read as a total loss on a campaign whose payout is merely in flight, and
+// -100% is the one number that makes someone kill a campaign. Null in that case,
+// which every caller already renders as "—" beside the visible pending figure.
 export function stageRoi(
   revenue: number | null,
   cost: number,
+  pendingRevenue = 0,
 ): number | null {
   if (revenue == null) return null;
   if (!(cost > 0)) return null;
+  if (revenue === 0 && pendingRevenue > 0) return null;
   return (revenue - cost) / cost;
 }
 

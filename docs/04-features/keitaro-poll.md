@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-18_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -106,6 +106,19 @@ projection's scope; there is no per-stage opt-out today. `sales_count` is still 
 touched by either mode. The mirror also THROWS on failure now; the "non-fatal, re-syncs next poll"
 swallow lives at `pollKeitaro`'s own call site, because swallowing inside the mirror
 would poison a caller-supplied transaction (the resync's `--apply`, the DB tests).
+
+⚠️ **A drop must be EXPLAINED, and the "explained" test names all four projected
+columns (fixed 2026-09-18).** The zeroing UPDATE asks "does the ledger explain any
+of the values on this row?" — and that test has to cover every column the INSERT
+writes: `SALES ∨ CHECKOUT ∨ REVENUE ∨ PENDING`. Task 6 briefly left `CHECKOUT` out,
+which was harmless only while `SALES_FILTER` happened to be a superset of it
+(`keitaro_type IN ('lead','sale','rejected')` ⊇ `keitaro_type = 'lead'`). Once sales
+became `purchasedClause()`, a stage-day whose only ledger rows are lead-TYPE
+non-purchases — a $0 registration posted as `lead`, an unmapped row — had its
+`checkouts` written and then zeroed **inside the same run**, and `checkout_click_count`
+mirrored the flap: write, zero, write, zero, every `*/5` tick, forever. Guarded by
+PB1–PB4 in `scripts/test-stage-day-conversions.ts`, which run the projection TWICE
+and require the second run to change nothing.
 
 **Sales = max(manual, Keitaro), NOT the sum (changed 2026-06-21).** `campaign_stages.sales_count`
 holds the operator's **manual** sale tally; the poll does **not** touch it. At read

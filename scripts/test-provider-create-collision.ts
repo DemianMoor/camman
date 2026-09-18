@@ -6,6 +6,7 @@
 // Real authenticated HTTP requests. Every case that WOULD create a row is either
 // expected to fail, or is cleaned up immediately afterwards.
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { createServerClient } from "@supabase/ssr";
 import { sql } from "drizzle-orm";

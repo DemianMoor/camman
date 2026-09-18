@@ -1,5 +1,6 @@
 // RUN WITH: npx tsx --conditions=react-server scripts/test-creative-versioning.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { eq, sql } from "drizzle-orm";
 

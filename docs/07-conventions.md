@@ -1,6 +1,29 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-18_
+
+## A script that writes to a database must refuse production, by import (2026-09-18)
+
+`.env.local` is **PRODUCTION**, and `scripts/_env-preload.ts` loads it whenever `DATABASE_URL` is not already set. On 2026-09-18 a test-fixture script ran that way and created live campaign rows in production before tearing them down. Nothing was damaged; nothing had stopped it either.
+
+[scripts/_require-preview-db.ts](../scripts/_require-preview-db.ts) is now the single refusal, and [scripts/test-preview-db-guard.ts](../scripts/test-preview-db-guard.ts) (`npm run check:guards`) enforces that every write-capable script carries it.
+
+- **It is an ALLOWLIST, not a denylist.** The obvious guard — and the one 14 scripts had hand-copied — asks "does `DATABASE_URL` contain the production project ref?" and runs if it does not. A raw IP, a custom hostname, a CNAME'd pooler alias, a second connection string for the same cluster, or a future prod project with a new ref all pass straight through. The helper asks the opposite question: **is this one of the databases I am allowed to write to?** Adding a preview database is one line in `PREVIEW_PROJECT_REFS`; adding a production one is impossible by construction.
+- **An empty or missing `DATABASE_URL` is refused, not permitted.** `postgres()` falls back to the libpq `PG*` variables when handed no connection string, so `DATABASE_URL= npx tsx …` is not "no database", it is "whatever `PGHOST` and `~/.pgpass` say". The denylist form read that case as safe (`""` contains no prod ref).
+- **Import it for its side effect, ordered ahead of every app module** — second after `./_env-preload`, or first in a script that calls `dotenv`'s `config()` itself (that statement runs *after* all imports, so the guard beats it and a bare invocation can no longer pick up `.env.local`):
+
+  ```ts
+  import "./_env-preload";
+  import "./_require-preview-db"; // MUST be second
+  import { db } from "../db/client";
+  ```
+
+  **Position is a checked property, not a style note.** A refusal written as a statement in the module body runs only after every import has been evaluated; it works today purely because postgres-js connects lazily. A module-scope query — in the script or in anything it imports — would outrun it.
+- **Enrolment is the default.** The bar's population is derived from the source tree: any script that reaches a database *and* carries a write signal (an ORM `.insert/.update/.delete`, a raw-SQL write verb, or `.unsafe(`) must import the helper. A new fixture script is covered the moment it writes, with nobody editing a list.
+- **Opting out is a review decision with a reason.** Prod-facing tooling — the `apply-*` index builders, the one-shot `backfill-*` repairs, the conversion backfill/verify, the deliberate `verify-*-production` proofs, and read-only diagnostics — is named in `EXCLUSIONS` in the bar **with a one-line reason**. An entry naming a file that no longer exists fails the bar rather than rotting.
+- **`check:guards` is deliberately NOT in `vercel-build`.** It is a source scan; a false positive would block a production deploy.
+
+⚠️ **The known hole: a script whose writes happen only inside an app library it calls** (`ingestKeitaroConversions(db, …)`, say) carries no write token of its own and the scan cannot see it. Those are handled by being named in `EXCLUSIONS` anyway, but if you add one, **add the guard import yourself**. Transitive import analysis would close it and was measured: it flags ~39 more scripts, nearly all read-only diagnostics that merely import a write-capable module, which trades a crisp signal for a noisy one.
 
 ## Stage status: the system moves draft ⇄ pending, a person always wins (2026-09-14)
 

@@ -18,6 +18,7 @@
 //
 // FAULT INJECTION proves each bar can fail.
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { promises as fs } from "node:fs";
 import path from "node:path";

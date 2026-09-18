@@ -8,6 +8,7 @@
 //
 // Run: npx tsx scripts/test-textrequest-optout.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql } from "drizzle-orm";
 

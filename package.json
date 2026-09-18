@@ -12,7 +12,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "check:docs": "tsx scripts/generate-partner-docs.ts --check && tsx scripts/test-partner-docs-drift.ts && tsx scripts/test-public-route-scope.ts && tsx scripts/test-partner-host.ts",
-    "check:authz": "tsx scripts/test-operator-permission-matrix.ts && tsx scripts/test-route-map-coverage.ts"
+    "check:authz": "tsx scripts/test-operator-permission-matrix.ts && tsx scripts/test-route-map-coverage.ts",
+    "check:guards": "tsx scripts/test-preview-db-guard.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

@@ -300,7 +300,42 @@ Checks:
 - `scripts/test-stage-day-conversions.ts` (camman-v2 only, rolled back) — S2/S3/S4/S5 assert the new sales/checkouts/revenue/payout semantics on a fixture carrying a lead, a sale and a rejected purchase on one stage-day; S5b/S5c/S5d add a `pending`-status purchase to the same day and assert it counts as a sale, is excluded from revenue, and lands in `pending_revenue` alone. **PB1–PB4** hold the zeroing fix: a stage-day whose only ledger rows are a lead-typed $0 registration and an unmapped lead-typed row keeps its `checkouts` across TWO consecutive projection runs (byte-identical, non-zero, second run writes 0 / zeroes 0) and `campaign_stages.checkout_click_count` holds at the same value. Proven RED against the pre-fix filter (4 failed, `rowsWritten: 1, rowsZeroed: 1` on every run).
 - `scripts/test-funnel-pending-exclusion.ts` — PURE, no DB. Held money is carried and never spent: a pending-only tally must produce the same `epc`, `sales_cr` and `profit` as a tally with no money at all, and the check is a whole-object diff (every derived field but `pending_revenue`), so a metric added later cannot quietly start spending it. F5/F6 anchor it — the same $500 APPROVED does move EPC and profit — so "nothing changed" cannot pass by the derivation having stopped reading revenue. Proven RED against a `funnel.ts` mutated to fold pending into all three (6 failed), restored `cmp`-identical.
 
+## Who reads `registeredClause()` (Phase 4)
+
+`registeredClause()` ([`lib/sale-attribution.ts`](../../lib/sale-attribution.ts)) is
+`event_type_id IN <retarget-signal types> AND status IN ('pending','approved')` —
+a counted registration. It had no consumer until Phase 4. It now has three, and
+**all three are behavioural; none is a reporting reader.** A registration is not a
+sale, not revenue and not a counted clicker, so nothing in
+[reports-rollup.md](reports-rollup.md) or [epc-denominator.md](epc-denominator.md)
+reads it.
+
+| Consumer | File | What it does with it |
+|---|---|---|
+| Behavioural tier 3 (the Registered lane) | [`lib/campaign-tier.ts`](../../lib/campaign-tier.ts) — the tier-3 branch of `campaignTierExpr` | The one definition of a Registered lane's audience. **Paired with a `NOT EXISTS` over `PURCHASE_EVENT_TYPE_IDS` at any KNOWN status** (`pending`/`approved`/`rejected`) |
+| Drip journey completion | [`lib/drip/lifecycle.ts`](../../lib/drip/lifecycle.ts) — `closeCompletedJourneys()` | Same shape, inlined: the reachability ladder must reach 3 or a registrant's journey never completes |
+| Drip end-date expiry | [`lib/drip/lifecycle.ts`](../../lib/drip/lifecycle.ts) — `expireJourneysPastEndDate()` | The second inline copy of the same ladder |
+
+⚠️ **The clause is HALF of a definition, never the whole of one.** "Registered" as
+a tier means *registered **and** has not bought* — and a `rejected` purchase
+yields no tier row of its own, so `MAX(tier)` alone would read a registrant whose
+purchase was rejected as 3. Each consumer therefore carries the explicit
+`NOT EXISTS`; see [behavioral-lanes.md](behavioral-lanes.md) and
+[07-conventions.md](../07-conventions.md). A future consumer that wants only "a
+registration happened" is asserting something different and should say so at the
+call site.
+
+⚠️ **An UNMAPPED purchase row does NOT evict a registrant.** The `NOT EXISTS`
+requires `pe.status IS NOT NULL`, matching the rule everywhere else in this
+codebase — an unmapped row is *stored, alerted, never counted*.
+
+The two `lib/drip/lifecycle.ts` copies exist because they need the tier
+**correlated per journey row** (`j.campaign_id` / `j.contact_id`) while
+`campaignTierExpr` takes a literal campaign id. They are inline copies, not
+imports, and the coupling is pinned by bars `P20`–`P26` in
+[`scripts/test-campaign-tier-scale.ts`](../../scripts/test-campaign-tier-scale.ts).
+
 ## Not built yet
 
-- **Phase 4:** Registered lane (tier 3; converted becomes 4; CHECK widened then).
-- **Phase 5:** per-event report columns.
+- **Phase 5:** per-event report columns (registrations will get their own, and
+  will be `registeredClause()`'s fourth consumer — the first reporting one).

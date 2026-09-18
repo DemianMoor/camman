@@ -29,6 +29,19 @@ import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
 import { stageRecipientsSql, type StageRecipientFilters } from "@/lib/sends/recipients";
 
+// ⚠️ This script SEEDS FIXTURES (a throwaway org, campaigns, stages, split
+// groups, contacts, links, clicks) and deletes them again — it is NOT
+// transaction-wrapped. `./_env-preload` loads `.env.local`, which is
+// PRODUCTION, whenever DATABASE_URL is not already set, so the refusal is not
+// optional. Run it as:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx scripts/test-lane-sibling-exclusion.ts
+const PROD_REF = "rtdarhkkjwcetlmruftl";
+if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
+  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
+  process.exit(1);
+}
+
 const ORG_MARKER = "__LANE_SIBLING_TEST__";
 const COUNTED_TABLES = [
   "organizations", "campaigns", "campaign_stages", "contacts",

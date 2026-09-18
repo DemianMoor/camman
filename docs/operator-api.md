@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-15_
+_Last updated: 2026-09-18_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -443,6 +443,14 @@ Real entry (campaign and offer redacted):
 
 - `stage_seq` is the stage number. A/B splits and behavioural lanes share it, so
   use `split_index` and `behavioral_tier` to tell siblings apart.
+- ⚠️ **`behavioral_tier` may now carry `3` (Registered), as well as `0` (Ignored),
+  `1` (Clicked), `2` (Reached offer) and `null` (not a lane).** Migration 0184
+  widened the stored set on 2026-09-18. This is **additive** — no existing value
+  changed meaning and no stage was rewritten — but a consumer that enumerated the
+  old `{0,1,2,null}` set should be widened rather than left to fall through a
+  `switch`. It **never** carries `4`: tier 4 is *purchased*, which exits the
+  sequence, is not a lane, and is refused by both the API and the database CHECK.
+  See [behavioral-lanes.md](04-features/behavioral-lanes.md).
 - `sent`, `reached` and `conversions` are the stage's whole life; `conversions` and
   `revenue` come from the tracker. `reached` is `null` for manual-mode stages.
 - A campaign whose stages are all archived still appears, with `stages: []`.

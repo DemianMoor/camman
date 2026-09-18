@@ -25,6 +25,21 @@ import {
 // timer would turn a safety rule into a cause of sends. Both directions are
 // asserted: it lifts a 1-minute timer, and it leaves 24h untouched.
 
+// ⚠️ PURE TODAY — this script opens no connection and issues no query; its only
+// I/O is `readFileSync` over source files, to pin the FOLLOWUP_TIERS coupling.
+// The refusal is defence-in-depth, not a description of what it does now:
+// `./_env-preload` above loads `.env.local`, which is PRODUCTION, whenever
+// DATABASE_URL is not already set, so the FIRST query anyone adds here would
+// land on the live database with nothing in the way. Keep the refusal even
+// while the script stays pure.
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx scripts/test-drip-followup-timing.ts
+const PROD_REF = "rtdarhkkjwcetlmruftl";
+if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
+  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
+  process.exit(1);
+}
+
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);

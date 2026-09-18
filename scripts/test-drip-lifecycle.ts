@@ -22,6 +22,19 @@ import {
 
 import { seedConversionEvent } from "./_conversion-fixture";
 
+// ⚠️ This script SEEDS FIXTURES (throwaway orgs, campaigns, stages, contacts,
+// partner keys, drip journeys and conversion_events rows) and deletes them
+// again — it is NOT transaction-wrapped. `./_env-preload` loads `.env.local`,
+// which is PRODUCTION, whenever DATABASE_URL is not already set, so the refusal
+// is not optional. Run it as:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/test-drip-lifecycle.ts
+const PROD_REF = "rtdarhkkjwcetlmruftl";
+if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
+  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
+  process.exit(1);
+}
+
 // Drip journey lifecycle (Drip Phase 6) — the check Phase 5 failed.
 //
 // ⭐ THE CONVERTED CASE CLOSES ON A COUNTED PURCHASE EVENT IN THE

@@ -22,6 +22,20 @@ import {
   markLaneSkippedEmpty,
 } from "@/lib/stages/split-group";
 
+// ⚠️ This script SEEDS FIXTURES (a throwaway org, brand, creative, campaign,
+// stages, a behavioural split) and deletes them again — it is NOT
+// transaction-wrapped, and it calls `markLaneSkippedEmpty`, which UPDATEs a
+// real `campaign_stages` row. `./_env-preload` loads `.env.local`, which is
+// PRODUCTION, whenever DATABASE_URL is not already set, so the refusal is not
+// optional. Run it as:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/test-split-manual-prepare.ts
+const PROD_REF = "rtdarhkkjwcetlmruftl";
+if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
+  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
+  process.exit(1);
+}
+
 const ORG_MARKER = "__SPLIT_PREPARE_TEST__";
 
 let passed = 0;

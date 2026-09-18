@@ -19,6 +19,56 @@ campaign. **Zero sends** — a journey is an assignment, not a message. The sche
 > `tier >= 3` to `tier >= 4`, so a $0 registration is no longer a conversion. See
 > [drip-partner-reporting.md](drip-partner-reporting.md) and
 > [behavioral-lanes.md](behavioral-lanes.md).
+>
+> Three consequences for drip specifically, none of which changes who receives a
+> message:
+>
+> 1. **There is NO Registered drip follow-up, and that is a decision, not a
+>    gap.** `FOLLOWUP_TIERS` ([`lib/drip/children.ts`](../../lib/drip/children.ts))
+>    stays `[0, 1, 2]` and `FollowupTier` stays `0 | 1 | 2`, so no tier-3 child
+>    can be created. `runDripFollowups` matches a contact to a child on **exact**
+>    tier, so a registrant (tier 3) falls into `tierMismatch` for every 0/1/2
+>    child and nothing sends — the intended no-op. The detection ladder in
+>    [`lib/drip/followups.ts`](../../lib/drip/followups.ts) has no `WHEN 3` arm
+>    for the same reason, and its `ELSE NULL` **fails closed**: `followupDueAt`
+>    answers `no_detection`, so an unarmed tier can never send. ⚠️ Adding a
+>    `WHEN 3` "to be safe" is not a safety fix — it is precisely how a Registered
+>    follow-up would SEND — and a tier-3 child armed only there would hang for
+>    ever, because the reachability predicate below waits on it (`3 >= 3`) while
+>    nothing can send it. Both halves are pinned by
+>    [`scripts/test-drip-followup-timing.ts`](../../scripts/test-drip-followup-timing.ts).
+>
+> 2. **A registrant's journey now COMPLETES.** `closeCompletedJourneys()` and
+>    `expireJourneysPastEndDate()` ([`lib/drip/lifecycle.ts`](../../lib/drip/lifecycle.ts))
+>    ask "is an active behavioural child still owed a send?", and a child BELOW
+>    the contact's tier can never be owed. Each carries an **inline copy** of the
+>    tier ladder rather than importing `campaignTierExpr` — they need the tier
+>    correlated per journey row (`j.campaign_id` / `j.contact_id`) while the
+>    shared fragment takes a literal campaign id. While those copies topped out
+>    at 2, a registrant matched no child (0/1/2) yet the tier-2 child was still
+>    judged reachable, so the journey never completed — and because
+>    `drip_journeys_one_live_per_contact_uniq` keys on `state IN ('routed','active')`
+>    it held that contact's **only** live-journey slot against every future
+>    journey too. A buyer has the identical shape and survives only because
+>    `closeJourneysOnPurchase` closes those separately; **there is no registration
+>    analogue and none is being built.** Both copies now span tiers 1–4 and are
+>    pinned byte-identical to the original by bars `P20`–`P26` in
+>    [`scripts/test-campaign-tier-scale.ts`](../../scripts/test-campaign-tier-scale.ts).
+>
+> 3. ⚠️ **Tier 3 is the one NON-MONOTONIC value on the scale, and drip is where
+>    that bites.** Every other branch only adds a signal, so a tier can only
+>    rise; tier 3 can be **revoked**, because a later *rejected* purchase drops
+>    that contact back to their click / offer-reach tier (see
+>    [behavioral-lanes.md](behavioral-lanes.md)). A journey already CLOSED at
+>    tier 3 is never reopened — `close()` guards `state IN ('routed','active')`
+>    and `runDripFollowups` filters `j.state = 'active'` — so that contact
+>    silently loses the 0/1/2 follow-ups they would now qualify for. **The same
+>    final ledger state therefore produces two different outcomes depending on
+>    postback order versus sweep timing.** This is accepted (owner's ruling: the
+>    rule that a rejected buyer is not a registrant is worth more than the edge),
+>    not a bug to be fixed by dropping the `NOT EXISTS` — dropping it re-admits a
+>    rejected buyer to the Registered lane, which is the thing the rule exists to
+>    prevent.
 
 Card `869endku0` · migrations **0159–0163** · recon:
 [2026-08-23-drip-phase-4-routing-recon.md](../superpowers/specs/2026-08-23-drip-phase-4-routing-recon.md)

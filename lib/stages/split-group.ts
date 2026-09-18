@@ -118,8 +118,21 @@ export async function ensureGroupSourceResolved(
 
 // A lane resolved to zero recipients. Terminal + benign: it does NOT burn as
 // `schedule_missed_at` (which renders Red "needs attention") and it SATISFIES the
-// group so its two siblings can still release. Tier-3 severity — an informational
-// note, not an alert.
+// group so its siblings can still release. Tier-3 ALERT severity — an
+// informational note, not an alert. (Unrelated to a behavioural tier 3.)
+//
+// ⚠️ NO `org_id` PREDICATE, DELIBERATELY — do not add one to satisfy CLAUDE.md
+// §3, even though the sibling `notifyLaneSkippedEmpty` below has one. The only
+// production caller (lib/sends/scheduled.ts) holds `campaigns.org_id`, NOT this
+// `campaign_stages` row's own org_id, and no composite FK or trigger ties the
+// two — so the filter would hold by application invariant only. A miss costs
+// `notifyLaneSkippedEmpty` an alert that says "(unknown)"; here it means the
+// UPDATE stamps nothing, `settleSplitGroup` then runs against a lane still
+// counted as outstanding, the group never settles and every sibling is held —
+// the 2026-09-05 freeze, reintroduced by the safety predicate meant to prevent
+// leakage. Add the filter only together with a composite FK (or an equivalently
+// enforced invariant) AND a row-count check on this UPDATE.
+// Full reasoning: docs/07-conventions.md.
 export async function markLaneSkippedEmpty(
   dbc: DbOrTx,
   stageId: number,

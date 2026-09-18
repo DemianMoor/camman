@@ -3170,3 +3170,40 @@ check("⭐ the pin is still the legacy trio [0,1,2]", JSON.stringify(PINNED_TIER
 Now widening the pin has to come here and argue with the literal first. The same shape applies anywhere a guard compares a result against the constant that produced it.
 
 **And an unreachable `throw` is not a working one.** The total-lookup helpers added in Task 5 (`expectedFor` / `expectLane`) throw when a tier in `LANE_TIER_VALUES` has no seeded expectation — which cannot happen today, so nothing proved the throw fires. Each is now pinned with a call on an unmapped tier inside `try`/`catch`, so the safety net is tested before the day it is needed.
+
+## A shared zero constant that is spread is a shared MUTABLE object (2026-09-19)
+
+`PerfMetrics.ZERO` ([lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts)) was only ever numbers, so `{ ...ZERO }` was a complete copy and eight accumulators in that module relied on it. Phase 5 Task 4 added `events: EventMap` — an object — and a spread is **shallow**: every `{ ...ZERO }` that is later mutated would then have handed two requests the SAME map, `addEventMaps` would mutate it in place, and one org's breakdown would appear inside another org's response. Nothing would have failed; the numbers would just have been wrong, and only for whoever asked second.
+
+Two things fix it, and only one of them is a guard:
+
+```ts
+Object.freeze(ZERO.events);                                        // the guard
+export const zeroMetrics = (): PerfMetrics => ({ ...ZERO, events: {} });   // the fix
+```
+
+Every mutated accumulator calls `zeroMetrics()`. The freeze is what makes a *missed* one a `TypeError` at the mistake (all ES modules are strict) instead of a wrong number somewhere else later — the same lesson `EMPTY_TALLY` taught in Task 1, where `Readonly<T>` was measured NOT to prevent aliasing and only the freeze did. `ZERO` itself is still handed out directly (`app/api/reports/performance/route.ts` does `offer_totals[id] ?? ZERO` straight into a response body), which the freeze makes safe to share rather than something to "fix" by unfreezing.
+
+The general rule: **the moment a spread-and-mutate constant gains a non-primitive field, the spread stops being a copy.** Add the factory and freeze the field in the same commit as the field.
+
+## A breakdown must travel with the residual that explains it (2026-09-19)
+
+`keitaro_stage_results.events` does not add up to `sales`, and it is not supposed to. `sales` resolves `is_purchase` through the non-org-scoped `PURCHASE_EVENT_TYPE_IDS` while the breakdown comes from an org-scoped join, so a ledger row carrying another org's `event_type_id` is counted by the scalar and placed under no key; and a stage's `sales` also carries the manual tally, which the tracker knows nothing about. What holds is:
+
+```
+sales  =  Σ (is_purchase) events[t].n   +   manual_topup   +   cross-org strays
+```
+
+So the read layer carries **all three** together, on every dimension and on the totals: `events`, `unmapped` (where the strays land) and `manual_topup` — the last one previously computed in `getStageMetricsInRange` and thrown away. A path that carries `events` alone presents the breakdown as a complete explanation of Sales when it is short by two terms, and that is silent. If you add a surface that renders `events`, render `unmapped` and `manual_topup` beside it or state the gap.
+
+**The corollary for a new aggregation:** `unmapped` and `manual_topup` have no finer weight by construction — an unmapped conversion resolved to no recipient, and a manual tally is a stage-level number — so the By-Group split spreads both on SENT weights while the map itself splits on SALE weights, the same basis as the `sales` it breaks down. Only the page total is exact; the per-group unmapped figure means "share of this stage's audience".
+
+## The unmapped bucket keys on the JOIN RESULT, in every query that computes it (2026-09-19)
+
+Recorded once for the stage-day projection; it now has a second implementation and the rule travels with it. `ledgerHourEventQuery()` ([lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts)) is the hourly tab's own per-event pass over `conversion_events`, and its unmapped count is
+
+```sql
+count(*) FILTER (WHERE et.key IS NULL OR ce.status IS NULL)
+```
+
+— **never** `ce.event_type_id IS NULL`, which is the shape `conversion_events_unmapped_idx`'s predicate uses and the obvious thing to copy. The raw-column form leaves a hole exactly the width of the cross-org stray: that row has a non-null `event_type_id` and a real status, so it is counted by the scalar `sales` series beside it, placed under no key by the org-scoped `LEFT JOIN event_types … AND et.org_id = ce.org_id`, and counted unmapped by neither. Keyed on `et.key` the two buckets are a **partition**. Bar R10b of [scripts/test-report-event-columns-db.ts](../scripts/test-report-event-columns-db.ts) seeds a second org, points one ledger row of the first org at its `purchase` type, and fails on the raw-column form.

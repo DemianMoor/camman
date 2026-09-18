@@ -676,7 +676,13 @@ status rule cannot separate into two copies.
 
 ## Not built yet
 
-- **Phase 5 beyond Tasks 1–3 — proposed, not built.** The generator exists, the
-  `events` / `unmapped_conversions` columns exist, and the projection now writes
-  them — but **no reader, endpoint, matview column or UI consumes either yet**.
+- **Phase 5 beyond Tasks 1–4 — proposed, not built.** The generator exists, the
+  `events` / `unmapped_conversions` columns exist, the projection writes them, and
+  as of Task 4 the **read layer carries them through every report dimension and the
+  hourly tab** (`FunnelTally.events` / `.unmapped`, `PerfMetrics.events` /
+  `.unmapped` / `.manual_topup` — see
+  [reports-rollup.md](reports-rollup.md) "Per-event figures ride the shared
+  metrics"). They ride out of `/api/reports/performance` as additive fields on
+  every row and on `totals`, because the row objects spread the metrics — but
+  **no component reads any of them and no column is generated on any screen yet**.
   Nothing downstream should be relied on as decided.

@@ -9,6 +9,7 @@ import {
   type PerfMetrics,
   type PerfRow,
 } from "@/lib/reporting/performance-report";
+import { parseEventMap } from "@/lib/reporting/event-columns";
 import { ATTRIBUTION_BASES, type AttributionBasis } from "@/lib/reporting/report-dimensions";
 
 // All-time creative × offer rows behind GET /api/reports/performance
@@ -101,6 +102,32 @@ export async function refreshCreativeLifetime(orgId: string): Promise<{ duration
   return { durationMs };
 }
 
+/**
+ * Normalise ONE stored metrics object on the way out of the blob.
+ *
+ * ⭐ THE STORED BLOB IS NOT PARSED, IT IS CAST. readCreativeLifetime below casts
+ * `data->'bases'->$basis` straight to CreativeLifetimeBasis, so the type says
+ * nothing about what is actually in there — and a blob written before migration
+ * 0185 has no `events` key at all. Untouched, `undefined` would reach
+ * eventCellValue() and every generated column would render as a confident 0 (or
+ * throw on `Object.entries(undefined)`), indistinguishable from a configured
+ * event type with no conversions.
+ *
+ * ⚠️ AFTER A DEPLOY THE STORED BLOB IS STILL THE OLD SHAPE FOR UP TO AN HOUR.
+ * The refresh is the hourly cron (/api/cron/refresh-creative-lifetime), so
+ * dimension=creative&range=lifetime reads an empty breakdown until it next runs
+ * — trigger it right after the deploy, and read `stale_seconds` on the response
+ * to tell a pre-deploy blob from a genuinely empty one.
+ */
+export function normaliseLifetimeRow<T extends PerfMetrics>(r: T): T {
+  return {
+    ...r,
+    events: parseEventMap((r as { events?: unknown }).events),
+    unmapped: r.unmapped ?? 0,
+    manual_topup: r.manual_topup ?? 0,
+  };
+}
+
 /** One basis of the stored snapshot; null until the first refresh. */
 export async function readCreativeLifetime(
   orgId: string,
@@ -114,5 +141,17 @@ export async function readCreativeLifetime(
       AND data IS NOT NULL AND computed_at IS NOT NULL
   `)) as unknown as { basis: CreativeLifetimeBasis | null; computed_at: string }[];
   const row = rows[0];
-  return row?.basis ? { basis: row.basis, computedAt: row.computed_at } : null;
+  if (!row?.basis) return null;
+  const b = row.basis;
+  return {
+    basis: {
+      ...b,
+      rows: b.rows.map(normaliseLifetimeRow),
+      totals: normaliseLifetimeRow(b.totals),
+      offer_totals: Object.fromEntries(
+        Object.entries(b.offer_totals).map(([k, m]) => [k, normaliseLifetimeRow(m)]),
+      ),
+    },
+    computedAt: row.computed_at,
+  };
 }

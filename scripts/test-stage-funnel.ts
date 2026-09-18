@@ -37,8 +37,8 @@ async function main() {
   // selects keitaro_stage_results.pending_revenue. Say so, instead of dying on a
   // raw 42703 that reads like a broken report.
   await requirePendingRevenueColumn(db, "test-stage-funnel");
-  const orgRows = (await db.execute(sql`select org_id from campaigns limit 1`)) as any[];
-  const orgId = orgRows[0].org_id as string;
+  const orgRows = (await db.execute(sql`select org_id from campaigns limit 1`)) as unknown as { org_id: string }[];
+  const orgId = orgRows[0].org_id;
 
   const { stages, grand, grandOptOuts, grandTotalSent } = await getStageMetricsInRange(orgId, "2026-07-18", "2026-07-19");
   const clickers = grand.visit_clicks_clean, redirect = grand.redirect_clicks_clean;
@@ -96,6 +96,26 @@ async function main() {
   const eqMoney = (n: string, a: number, b: number) => { const ok = Math.abs(a-b) < 0.005; console.log(`  ${ok?"✓":"✗"} sum ${n} ${a.toFixed(4)} == grand ${b.toFixed(4)}`); if(!ok) fail++; };
   eqMoney("revenue", sumRevenue, grand.revenue);
   eqMoney("pending_revenue", sumPending, grand.pending_revenue);
+
+  // Phase 5: the per-event breakdown and the unmapped count foot the same way —
+  // mergeFunnel must carry them from the stages to the grand tally, per KEY.
+  //
+  // ⚠️ STRUCTURAL AND DIRECTION-FREE, AND VACUOUS ON AN EMPTY WINDOW — exactly
+  // like the sales/revenue footing above it, and for the same reason: this is a
+  // PROD script. The non-vacuous proof, on a world it builds itself, is
+  // scripts/test-report-event-columns-db.ts (bars R1-R4b) on camman-v2. This bar
+  // is here so a prod run cannot silently lose a key between the two levels.
+  const sumUnmapped = stages.reduce((a, s) => a + s.tally.unmapped, 0);
+  const sumEvents: Record<string, number> = {};
+  for (const s of stages) {
+    for (const [k, t] of Object.entries(s.tally.events)) sumEvents[k] = (sumEvents[k] ?? 0) + t.n;
+  }
+  const grandKeys = Object.keys(grand.events);
+  console.log(`EVENTS(grand): ${JSON.stringify(Object.fromEntries(grandKeys.map((k) => [k, grand.events[k].n])))} unmapped=${grand.unmapped}`);
+  eq("unmapped", sumUnmapped, grand.unmapped);
+  const keys = [...new Set([...grandKeys, ...Object.keys(sumEvents)])];
+  eq("event keys", keys.length, grandKeys.length);
+  for (const k of keys) eq(`events[${k}].n`, sumEvents[k] ?? 0, grand.events[k]?.n ?? 0);
 
   if (emptyWindow) { console.log(`\nNOT A VERIFICATION — the window is empty on this database (${fail} structural check(s) failed).`); process.exit(1); }
   console.log(fail===0 ? "\nAll checks passed." : `\nFAILED: ${fail}`);

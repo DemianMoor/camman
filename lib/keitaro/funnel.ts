@@ -10,6 +10,8 @@
 // rows we treat the legacy columns as the redirect side and visits as unknown (0)
 // — pre-visit-tracking history had no landing-page visit data.
 
+import { addEventMaps, parseEventMap, type EventMap } from "@/lib/reporting/event-columns";
+
 // Structural shape of the columns we read. Accepts a raw Drizzle row (revenue /
 // cost arrive as NUMERIC strings) or an aggregated SQL result.
 export interface KeitaroResultRowLike {
@@ -21,6 +23,9 @@ export interface KeitaroResultRowLike {
   clean_clicks: number;
   sales: number;
   revenue: number | string;
+  /** keitaro_stage_results.events — jsonb, so the driver hands back parsed JS. */
+  events?: unknown;
+  unmapped_conversions?: number;
   pending_revenue: number | string;
   cost: number | string;
 }
@@ -32,6 +37,19 @@ export interface FunnelTally {
   redirect_clicks_clean: number; // Offer Redirect (headline)
   sales: number;
   revenue: number;
+  /**
+   * The SAME sales / revenue / pending_revenue numbers, split per
+   * event_types.key (migration 0185). `sales` is the sum of the is_purchase
+   * entries' `n` PLUS the manual top-up; `revenue` is the sum of every entry's
+   * `revenue`, exactly. Keyed by `key`, never by id.
+   */
+  events: EventMap;
+  /**
+   * Conversions on these stage-days with no event type or no status. They are in
+   * NO other field of this tally — not in sales, not in revenue, not in `events`.
+   * Carried so a screen can say they exist; that is their only purpose.
+   */
+  unmapped: number;
   pending_revenue: number;
   cost: number;
 }
@@ -44,6 +62,11 @@ export function emptyFunnel(): FunnelTally {
     redirect_clicks_clean: 0,
     sales: 0,
     revenue: 0,
+    // A FRESH object literal every call. Do NOT hoist this to a module constant:
+    // two tallies would then share one map and merging into either would corrupt
+    // the other (the EMPTY_TALLY aliasing bug, lib/reporting/event-columns.ts).
+    events: {},
+    unmapped: 0,
     pending_revenue: 0,
     cost: 0,
   };
@@ -77,6 +100,8 @@ export function addRowToFunnel(
   t.redirect_clicks_clean += split ? r.redirect_clicks_clean : r.clean_clicks;
   t.sales += r.sales;
   t.revenue += num(r.revenue);
+  addEventMaps(t.events, parseEventMap(r.events));
+  t.unmapped += r.unmapped_conversions ?? 0;
   t.pending_revenue += num(r.pending_revenue);
   t.cost += num(r.cost);
   return t;
@@ -92,6 +117,8 @@ export function mergeFunnel(into: FunnelTally, from: FunnelTally): FunnelTally {
   into.redirect_clicks_clean += from.redirect_clicks_clean;
   into.sales += from.sales;
   into.revenue += from.revenue;
+  addEventMaps(into.events, from.events);
+  into.unmapped += from.unmapped;
   into.pending_revenue += from.pending_revenue;
   into.cost += from.cost;
   return into;
@@ -119,6 +146,11 @@ function rate(numerator: number, denominator: number): number {
 // profit. Revenue is approved-only (lib/sale-attribution.ts) and pending is the
 // same money still held, so adding it anywhere would count a payout that may yet
 // be rejected.
+//
+// `events` and `unmapped` ride along untouched: no derived rate is computed
+// here. Per-event rates and EPCs are built at render time by eventCellValue()
+// (lib/reporting/event-columns.ts), which divides by the SAME countedClickers
+// this function takes — there is no second denominator.
 export function withFunnelDerived(t: FunnelTally, countedClickers: number) {
   return {
     ...t,

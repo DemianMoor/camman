@@ -22,6 +22,7 @@
 //   BASE_URL=https://camman-<hash>-demian-moors-projects.vercel.app \
 //   npx tsx --conditions=react-server --env-file=C:/AFF/camman/.env.demo scripts/test-stage-auto-status.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";

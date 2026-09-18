@@ -1,4 +1,5 @@
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";

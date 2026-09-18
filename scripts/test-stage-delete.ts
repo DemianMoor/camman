@@ -2,6 +2,7 @@
 // TEST-DATA SAFETY: same marker/teardown/drift pattern as test-behavioral-split.ts.
 // Run: npx tsx scripts/test-stage-delete.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";

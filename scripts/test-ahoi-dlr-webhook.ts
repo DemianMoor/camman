@@ -7,6 +7,7 @@
 // in a finally block. Never touches contacts/opt_outs/campaigns.
 // Run: npx tsx scripts/test-ahoi-dlr-webhook.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import postgres from "postgres";
 import { NextRequest } from "next/server";
 

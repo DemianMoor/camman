@@ -5,6 +5,7 @@
 // Mirrors scripts/test-kickoff-fullurl.ts's fixture recipe. Rolled-back tx.
 // Run: npx tsx scripts/test-kickoff-segments.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";

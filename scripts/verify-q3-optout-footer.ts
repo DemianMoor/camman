@@ -22,6 +22,7 @@
 // FAULT INJECTION throughout: a green run is only evidence if the harness can
 // go red, so each bar is accompanied by a deliberately broken input.
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { promises as fs } from "node:fs";
 import path from "node:path";

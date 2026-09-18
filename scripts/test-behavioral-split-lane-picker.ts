@@ -18,6 +18,7 @@
 //
 // Run: npx tsx scripts/test-behavioral-split-lane-picker.ts
 import "./_env-preload"; // MUST be first — loads .env.local before db/client init
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";

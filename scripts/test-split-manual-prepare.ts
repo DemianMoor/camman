@@ -11,6 +11,7 @@
 //
 // Run: npx tsx --conditions=react-server scripts/test-split-manual-prepare.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql } from "drizzle-orm";
 

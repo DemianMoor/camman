@@ -9,6 +9,7 @@
 //     left NULL), then a SELECT back to assert: api_key IS NULL,
 //     decryptSecret(api_key_encrypted) recovers the original key, and
 //     api_key_last4 matches. Rolled back — no row survives.
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import assert from "node:assert";
 import { db } from "@/db/client";
 import { sql } from "drizzle-orm";

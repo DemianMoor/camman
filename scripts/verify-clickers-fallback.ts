@@ -62,6 +62,7 @@
 // (no transaction handle), so it cannot see Part 2's synthesized fixtures
 // either; Part 2 queries those same raw numbers directly via SQL against `tx`.
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql } from "drizzle-orm";
 

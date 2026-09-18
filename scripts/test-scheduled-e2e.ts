@@ -4,6 +4,7 @@
 // REAL stage 146's config but in a ROLLED-BACK tx with an injected fake sender
 // (no TextHub, nothing persisted).
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
 import { runScheduledSends } from "@/lib/sends/scheduled";

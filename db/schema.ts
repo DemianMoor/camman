@@ -2607,6 +2607,42 @@ export const keitaro_stage_results = pgTable(
     pending_revenue: numeric("pending_revenue", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
+    // Migration 0185. The SAME numbers as sales / revenue / pending_revenue,
+    // split per event_types.key — written by the same statement in
+    // lib/keitaro/stage-day-conversions.ts, from the same single pass over
+    // conversion_events, so the scalars above are the SUM of this object's
+    // entries and the two cannot drift.
+    //
+    //   {"purchase": {"n": 12, "pending_n": 1,
+    //                 "revenue": 540.0000, "pending_revenue": 60.0000}}
+    //
+    // Keyed by `key`, never `id`: event_types.id is a global serial while the
+    // natural key is (org_id, key), and the scheduled Telegram report reads
+    // across organizations. Read through parseEventMap()
+    // (lib/reporting/event-columns.ts) and nothing else.
+    events: jsonb("events")
+      // `number | string`, not `string`: `jsonb_build_object('revenue', <numeric>)`
+      // stores a JSON NUMBER that keeps the numeric's scale, and postgres-js
+      // JSON.parses the column — so the DRIVER returns a number (measured exact
+      // at 1234567.8901 and 0.0001, bar S14 of
+      // scripts/test-stage-event-columns-db.ts), while a `#>> '{k,revenue}'` text
+      // extraction and a hand-written fixture return a string. Both reach
+      // parseEventMap, which is the only thing that should read this shape.
+      .$type<
+        Record<
+          string,
+          { n: number; pending_n: number; revenue: number | string; pending_revenue: number | string }
+        >
+      >()
+      .notNull()
+      .default({}),
+    // Migration 0185. Rows on this stage-day with no event type or no status —
+    // conversion_events_unmapped_idx's own predicate. They count as NOTHING
+    // anywhere (not a sale, not revenue, not in `events`); this column exists so
+    // a screen can say they exist at all, which is otherwise only visible in a
+    // Telegram alert. DELIBERATELY NOT inside `events`: in there, a loop over the
+    // object would eventually sum it into a total.
+    unmapped_conversions: integer("unmapped_conversions").notNull().default(0),
     // ALWAYS 0 — DO NOT USE for ROI/EPC/profit. This is Keitaro ad-platform
     // spend, which is meaningless here: we don't buy traffic through Keitaro,
     // so every synced row carries cost 0. The real cost of a stage is the SMS

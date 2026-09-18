@@ -272,12 +272,14 @@ check(
     return src.purchase.n === 1;
   })(),
 );
-// ⚠️ M5 is asserted against a HAND-BUILT object: `keitaro_stage_results.events`
-// does not exist yet (a later Phase 5 task's migration adds it). RE-ASSERT IT
-// AGAINST THE REAL COLUMN when that lands. What was measured, 2026-09-18:
-// postgres-js `JSON.parse`s a jsonb column, so a numeric INSIDE the json arrives
-// as a JS number (exact at 1234567.8901 and 0.0001) — while a top-level `numeric`
-// column arrives as a string. The parser takes both; neither branch is dead.
+// M5 is the PURE half: it fixes the contract with hand-built values, so it runs
+// with no database. The same claim is now asserted against the REAL column too —
+// `keitaro_stage_results.events` landed in migration 0185 — by bars S13–S15 of
+// scripts/test-stage-event-columns-db.ts, which read one row through the driver.
+// What was measured, 2026-09-18 and re-measured against the column: postgres-js
+// `JSON.parse`s a jsonb column, so a numeric INSIDE the json arrives as a JS
+// number (exact at 1234567.8901 and 0.0001) — while a top-level `numeric` column
+// arrives as a string. The parser takes both; neither branch is dead.
 check(
   "M5 parse takes both shapes: a number from jsonb, a string from a top-level numeric column",
   JSON.stringify(

@@ -1,0 +1,71 @@
+-- Migration 0185: the per-event-type breakdown on the stage-day projection
+-- (Conversion Events Phase 5).
+--
+-- TWO ADDITIVE COLUMNS. Nothing is dropped, no column changes type, no row is
+-- rewritten: Postgres 11+ stores an ADD COLUMN ... DEFAULT in the catalog, so
+-- neither statement takes more than a brief ACCESS EXCLUSIVE lock on the table.
+-- Both are IF NOT EXISTS, so the migration is re-runnable: a timestamp bump can
+-- re-apply it on preview without a second thought.
+--
+--   events               the SAME numbers as sales / revenue / pending_revenue,
+--                        split per event_types.key. Written by the same
+--                        INSERT ... ON CONFLICT in
+--                        lib/keitaro/stage-day-conversions.ts, from the same
+--                        single pass over conversion_events, so the scalars are
+--                        literally the SUM of this object's entries and the two
+--                        cannot drift.
+--
+--     {"purchase":     {"n": 12, "pending_n": 1,
+--                       "revenue": 540.0000, "pending_revenue": 60.0000},
+--      "registration": {"n": 40, "pending_n": 0,
+--                       "revenue": 0.0000,   "pending_revenue": 0.0000}}
+--
+--     n                 counted events: status IN ('pending','approved')
+--     pending_n         a SUBSET of n: status = 'pending'
+--     revenue           counts_revenue types only, status = 'approved'
+--     pending_revenue   counts_revenue types only, status = 'pending'
+--
+--   unmapped_conversions  rows on this stage-day with NO event type or NO status
+--                        (conversion_events_unmapped_idx's own predicate). They
+--                        count as NOTHING anywhere; this column exists so a
+--                        screen can say they exist at all.
+--
+-- ⚠️ THE MONEY INSIDE THE OBJECT IS A JSON NUMBER, NOT A STRING.
+-- `jsonb_build_object('revenue', <numeric(12,4)>)` stores a jsonb NUMBER that
+-- keeps the numeric's scale (`540.0000`), and postgres-js JSON.parses the column,
+-- so the driver hands the reader a JS number — measured exact at 1234567.8901 and
+-- 0.0001 (bars S13/S14, scripts/test-stage-event-columns-db.ts). A TOP-LEVEL
+-- numeric column on the same row still arrives as a STRING, which is why
+-- parseEventMap (lib/reporting/event-columns.ts) accepts both and neither of its
+-- branches is dead.
+--
+-- ⚠️ KEYED BY event_types.key, NOT event_types.id. `id` is a global serial but
+-- the natural key is (org_id, key) — event_types_org_key_uniq, migration 0181 —
+-- and the one cross-org reader on the platform (the scheduled Telegram report,
+-- lib/reporting/report-snapshot.ts) needs a key that means the same thing in two
+-- organizations. A duplicate key inside one object is impossible: the aggregate
+-- groups by (org_id, stage_id, stat_date) and keys are unique within an org.
+--
+-- ⚠️ unmapped_conversions IS DELIBERATELY NOT INSIDE `events`. Inside it, some
+-- future loop over the object would sum it into a total. An unmapped conversion
+-- must count as nothing, everywhere; keeping it a scalar is what makes that
+-- structural rather than a convention.
+--
+-- ⚠️ NO INDEX. The table is read by (org_id, stage_id, stat_date) and by
+-- (campaign_id, stat_date), both already indexed; neither new column is ever a
+-- predicate. A GIN index on `events` would cost writes on every 5-minute
+-- projection tick and buy nothing.
+--
+-- Existing rows get '{}' / 0 and stay wrong-but-empty until the projection next
+-- covers their stage. That is the same catch-up the pending_revenue column (0182)
+-- had, and the projection's watermark + coverage floor
+-- (lib/keitaro/stage-day-conversions.ts) is what fills them.
+--
+-- Inert on arrival: nothing reads or writes either column until a later Phase 5
+-- task. Additive leads the code (CLAUDE.md §14).
+
+ALTER TABLE public.keitaro_stage_results
+  ADD COLUMN IF NOT EXISTS events jsonb NOT NULL DEFAULT '{}'::jsonb;
+--> statement-breakpoint
+ALTER TABLE public.keitaro_stage_results
+  ADD COLUMN IF NOT EXISTS unmapped_conversions integer NOT NULL DEFAULT 0;

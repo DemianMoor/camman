@@ -96,10 +96,12 @@ const num = (v: unknown): number => {
  * branch is dead. Never throws: a NULL column, a pre-events row and a hand-edited
  * value all become an empty map.
  *
- * ⚠️ The jsonb half is still measured against a hand-built round-trip, not against
- * the real column: `keitaro_stage_results.events` does not exist yet — it arrives
- * in a later Phase 5 task's migration. RE-ASSERT bar M5 against the real column
- * the moment that migration lands.
+ * ⭐ BOTH HALVES ARE NOW MEASURED AGAINST THE REAL COLUMN.
+ * `keitaro_stage_results.events` landed in migration 0185, and bars S13–S15 of
+ * scripts/test-stage-event-columns-db.ts read ONE row through the driver: the
+ * jsonb hands this function numbers (exact at 1234567.8901 and 0.0001), while
+ * `pending_revenue` — a top-level numeric(12,4) on that same row, holding the
+ * same value — hands it a string.
  */
 export function parseEventMap(v: unknown): EventMap {
   if (v == null || typeof v !== "object" || Array.isArray(v)) return {};

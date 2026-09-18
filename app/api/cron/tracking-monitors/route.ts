@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { requireApiMembership } from "@/lib/api/helpers";
+import { watchIngestHeartbeat } from "@/lib/conversions/monitor";
 import { can } from "@/lib/permissions";
 import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 import {
@@ -25,6 +26,10 @@ import {
 // lib/reporting/tracking-gap.ts rather than here — they're shared with
 // app/api/keitaro/reports/route.ts and the verify scripts, so they belong in
 // lib/, not duplicated into this route module.
+//
+// Also the dead-man for the conversion_events ledger ingest, which rides the */5
+// Keitaro poll (app/api/keitaro/poll/route.ts) and so cannot watch itself — see
+// watchIngestHeartbeat in lib/conversions/monitor.ts.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
@@ -65,6 +70,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     for (const { stage_id, org_id } of report.clean_stages) {
       await clearAlert(db, { alertKey: trackingGapAlertKey(stage_id), orgId: org_id });
     }
+    // Conversion ledger ingest dead-man (HEARTBEAT_JOBS.conversionEventsIngest),
+    // latched on a fixed key: a stale ingest pages once and re-arms when a
+    // complete window is ingested again. Deliberately NOT try/caught — if its
+    // read throws, the stamp below is skipped and tells-monitors reports THIS
+    // job stale, instead of the watch silently stopping.
+    await watchIngestHeartbeat(db);
     // Stamp AFTER the work, so a run that threw does not look healthy.
     await recordHeartbeat(db, HEARTBEAT_JOBS.trackingMonitors.job_name);
   }

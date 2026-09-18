@@ -1,4 +1,4 @@
-import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
+import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import type { KeitaroReportRange, KeitaroReportRow } from "@/lib/keitaro/client";
 
 // One Keitaro conversion normalised for the conversion_events ledger. Pure — no
@@ -111,4 +111,22 @@ export function etDayWindows(
     });
   }
   return out;
+}
+
+// The live ingest's window (Phase 2, /api/keitaro/poll): ET "today − 6 days"
+// 00:00:00 through now = 7 ET calendar days. Calendar arithmetic on the ET DATE
+// string, not now − 6×24h: across a DST fall-back week the 24h arithmetic starts
+// a day late (scripts/test-conversion-monitor.ts R3). Keitaro filters
+// conversions/log by a conversion's CURRENT datetime, and a re-post moves that
+// forward, so an in-place update of an older conversion re-enters this window.
+export const LIVE_INGEST_DAYS = 7;
+
+export function liveIngestRange(now: Date): KeitaroReportRange {
+  const nowEt = formatInCampaignTimezone(now, "yyyy-MM-dd HH:mm:ss");
+  const fromDay = new Date(
+    Date.parse(`${nowEt.slice(0, 10)}T00:00:00Z`) - (LIVE_INGEST_DAYS - 1) * 86_400_000,
+  )
+    .toISOString()
+    .slice(0, 10);
+  return { from: `${fromDay} 00:00:00`, to: nowEt, timezone: CAMPAIGN_TIMEZONE };
 }

@@ -2736,6 +2736,31 @@ Sweeply's postback template hardcodes `status=lead` for **paid** conversions. Ke
 
 `conversion_event_mappings` classifies per network or offer, keyed on Keitaro's canonical conversion **type** (many raw statuses — `approved`, `confirmed`, `paid` — resolve to the one `Sale` type). An unknown network/type is stored with NULL event type and status and is never counted as a purchase. Guessing "it's probably a sale" is exactly how a $0 registration would have become a buyer.
 
+## A "keep the existing value" rule has nothing to keep on a first sighting (2026-09-18)
+
+A `conversion_event_mappings` row with `event_type_id` NULL is a **status-only rule**: "keep this conversion's existing event type and only move its status". PsychoBook's seeded `rejected` is one, and it is right — for the rejection of a conversion already in the ledger.
+
+If that postback is the **first** one for its `keitaro_event_id`, there is no row and no type to keep. The conversion lands with a status and `event_type_id` NULL, which is the same shape as "no mapping matched at all" and counts as nothing everywhere. Two ways that stayed invisible:
+
+- the batch counter `unmappedInBatch` tests `status === null`, and this row HAS a status;
+- the table-level `unmapped` alert did catch it (it read `event_type_id IS NULL OR status IS NULL`) but reported it as an ordinary unmapped combo, whose advice — "add a mapping row for this Keitaro type" — does not fix it. **Nothing heals it**: the sticky `COALESCE(existing, incoming)` only fills a NULL from a mapping that names a type, and the rule that classified the row has none.
+
+Two lessons, neither specific to conversions:
+
+1. **A rule defined relative to prior state needs a defined behaviour for "no prior state."** Write down what happens on the first sighting when you write the rule, not when the first one arrives.
+2. **Two problems that produce the same shape but need different fixes must be two alerts.** Merging them means the page tells the operator to do something that cannot work. The split here is `conversion_events:unmapped:` (`status IS NULL`) vs `conversion_events:status_only_unmapped:` (`event_type_id IS NULL AND status IS NOT NULL`) — disjoint and together exactly the old predicate, so nothing is double-paged and nothing is dropped. Both halves still imply the partial index's predicate, so splitting needed no migration.
+
+Detected before the write by `findStatusOnlyFirstSeen` ([lib/conversions/ingest.ts](../lib/conversions/ingest.ts)), so a dry run reports it too. See [04-features/conversion-events.md](04-features/conversion-events.md).
+
+## A planner assertion on a near-empty table asserts nothing (2026-09-18)
+
+`scripts/test-conversion-monitor-db.ts` proves each combo statement can be read from its partial index: `SET LOCAL enable_seqscan = off`, `EXPLAIN`, look for the index name. On the preview project that check was quietly meaningless, and then flaky:
+
+- `conversion_events` is **empty** there. Against an un-analysed 0-page relation the planner takes the seq scan whatever `enable_seqscan` says — measured 25/25 misses for every predicate, including the one already on `main`. The check only ever passed because the transaction's own inserts happened to move `relpages`.
+- Once ANALYZEd, ten rows are still not a decision. With seq scans off, a FULL scan of `conversion_events_offer_event_occurred_idx` beat the partial index for one predicate and lost for another, flipping run to run on identical code.
+
+A planner check must be asked in the regime whose answer you care about. The fix is to build that regime: a savepoint inserts 2,000 healthy rows — production's shape, a large ledger where problem rows are rare — `ANALYZE`s, EXPLAINs, and rolls back. Then the partial index is decisively cheapest and the answer is stable. Report the index actually chosen in the failure detail; "false" tells you nothing.
+
 ## A migration that touches hot tables: `SET LOCAL lock_timeout` first, strongest lock first (2026-09-17)
 
 Drizzle applies **every pending migration in one transaction**, and each lock is held until that transaction commits. `CREATE TABLE … REFERENCES stage_sends/contacts` takes a lock that conflicts with the drain's inserts and updates. `ALTER TABLE … ADD COLUMN` takes ACCESS EXCLUSIVE. A migration stuck waiting for one of those locks makes every later writer queue behind it.

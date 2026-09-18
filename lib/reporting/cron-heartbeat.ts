@@ -79,6 +79,17 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 3, // hourly cadence, ~2 missed runs
     label: "Keitaro tracking-gap monitor (hourly)",
   },
+  // The conversion_events ledger ingest (Phase 2), which rides the */5 Keitaro
+  // poll tick (app/api/keitaro/poll/route.ts). Stamped LAST, and only after a
+  // COMPLETE window was ingested and the ledger alerts were evaluated. Watched
+  // by /api/cron/tracking-monitors via watchIngestHeartbeat
+  // (lib/conversions/monitor.ts) — never by the poll itself. 1h is ~12 missed
+  // ticks.
+  conversionEventsIngest: {
+    job_name: "conversion-events-ingest",
+    max_age_hours: 1,
+    label: "Conversion events ingest (Keitaro poll tick)",
+  },
   // The weekly clickers rebuild — the repair path for the watermark-stranding
   // failure. It gets the same heartbeat treatment as everything else: if it
   // stops running, that must surface rather than being read as healthy.

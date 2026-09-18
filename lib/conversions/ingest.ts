@@ -170,6 +170,37 @@ function toInsertValues(r: ConversionEventInsert): PgInsertValue<typeof conversi
   };
 }
 
+// A status-only mapping rule (event type NULL, status set — e.g. the seeded
+// PsychoBook `rejected`) means "keep the row's existing event type and only move
+// its status". When the conversion has NEVER been seen before there is no
+// existing row and so no type to keep: the row lands with a status and a NULL
+// event type, which is the unmapped shape — counted as nothing, everywhere.
+//
+// Returns exactly those rows: resolved through a status-only rule AND with no
+// ledger row for their keitaro_event_id. Read-only, so it runs on a dry run too
+// (the backfill's default), and only when the batch actually holds status-only
+// rows. The page itself comes from the table-level status_only_unmapped alert
+// (lib/conversions/monitor.ts) — this is the per-run count and samples.
+export async function findStatusOnlyFirstSeen(
+  ex: Executor,
+  rows: readonly ConversionEventInsert[],
+): Promise<ConversionEventInsert[]> {
+  const statusOnly = rows.filter((r) => r.eventTypeId === null && r.status !== null);
+  if (statusOnly.length === 0) return [];
+  const known = new Set<string>();
+  for (const chunk of chunks(
+    [...new Set(statusOnly.map((r) => r.keitaroEventId))],
+    LOOKUP_CHUNK,
+  )) {
+    const found = await ex
+      .select({ id: conversion_events.keitaro_event_id })
+      .from(conversion_events)
+      .where(inArray(conversion_events.keitaro_event_id, chunk));
+    for (const r of found) known.add(r.id);
+  }
+  return statusOnly.filter((r) => !known.has(r.keitaroEventId));
+}
+
 // The incoming mapping names a DIFFERENT event type than the row's locked one
 // (e.g. Registration → Sale on a reused tid). The locked type stays; the
 // disagreement is recorded for the monitor instead of being kept silently. A
@@ -325,17 +356,24 @@ export interface IngestResult {
   rows: number;
   // Rows in this batch whose `status` is NULL — no mapping matched the
   // incoming Keitaro type at all. A status-only mapping (event type NULL,
-  // status set — e.g. the seeded PsychoBook `rejected` rule) is NOT counted:
-  // on an update it inherits the row's already-locked event type via
-  // COALESCE, so the row isn't unmapped. A brand-new row first seen through a
-  // status-only mapping IS unmapped in the table, but that case is caught by
-  // table-level checks (the backfill and verify scripts query the table), not
-  // by this batch count.
+  // status set — e.g. the seeded PsychoBook `rejected` rule) is NOT counted
+  // here: on an update it inherits the row's already-locked event type via
+  // COALESCE, so the row isn't unmapped. The first-sighting subset, which has
+  // no type to inherit, is statusOnlyFirstSeenInBatch below.
   unmappedInBatch: number;
   // Rows in this batch resolved through a status-only mapping (event type NULL,
-  // status set). Not unmapped if the row already exists with a type; a brand-new
-  // one is unmapped — the post-apply table check catches it.
+  // status set). Normal and correct when the row already exists with a type.
   statusOnlyInBatch: number;
+  // The subset of statusOnlyInBatch with NO existing ledger row for their
+  // keitaro_event_id: a status-only rule classified a conversion we have never
+  // seen, so there is no event type to keep and the row lands with a status and
+  // a NULL event type — the unmapped shape. Stored, never dropped, but counted
+  // as nothing until its event type is set. findStatusOnlyFirstSeen computes it
+  // on the dry-run path too; the Telegram page is the table-level
+  // conversion_events:status_only_unmapped:<offer>:<keitaro_type> alert.
+  statusOnlyFirstSeenInBatch: number;
+  // Up to 10 of them, as `keitaro_event_id offer=… type=… status=…`.
+  statusOnlyFirstSeenSamples: string[];
   inserted: number;
   updated: number;
   // Rows neither inserted, updated nor skipped for an org mismatch (no-op writes).
@@ -369,6 +407,8 @@ export async function ingestKeitaroConversions(
     rows: 0,
     unmappedInBatch: 0,
     statusOnlyInBatch: 0,
+    statusOnlyFirstSeenInBatch: 0,
+    statusOnlyFirstSeenSamples: [],
     inserted: 0,
     updated: 0,
     unchanged: 0,
@@ -395,6 +435,12 @@ export async function ingestKeitaroConversions(
   const built = buildConversionEventRows(sources, lookups);
   // One row per event_id: ON CONFLICT cannot touch the same row twice in one statement.
   const rows = [...new Map(built.rows.map((r) => [r.keitaroEventId, r])).values()];
+  // Before the write, so a row that this very run is about to insert still
+  // counts as first-seen. A concurrent run inserting the same event id between
+  // this read and the upsert would make it read as first-seen here while landing
+  // as an update — the table-level alert is keyed on the stored rows, so the
+  // page stays correct either way.
+  const statusOnlyFirstSeen = await findStatusOnlyFirstSeen(database, rows);
 
   const result: IngestResult = {
     ...base,
@@ -411,6 +457,13 @@ export async function ingestKeitaroConversions(
     rows: rows.length,
     unmappedInBatch: rows.filter((r) => r.status === null).length,
     statusOnlyInBatch: rows.filter((r) => r.eventTypeId === null && r.status !== null).length,
+    statusOnlyFirstSeenInBatch: statusOnlyFirstSeen.length,
+    statusOnlyFirstSeenSamples: statusOnlyFirstSeen
+      .slice(0, 10)
+      .map(
+        (r) =>
+          `${r.keitaroEventId} offer=${r.offerId ?? (r.keitaroOfferId !== null ? `k${r.keitaroOfferId}` : "∅")} type=${r.keitaroType} status=${r.status}`,
+      ),
   };
   if (dryRun || rows.length === 0) return result;
 

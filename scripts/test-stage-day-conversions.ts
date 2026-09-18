@@ -867,6 +867,66 @@ async function main() {
         JSON.stringify(oldViolations),
       );
 
+      console.log("\nPB — a lead-typed NON-PURCHASE day must not oscillate (the registration case)");
+      // ⚠️ THE ZEROING'S "EXPLAINED" TEST MUST COVER EVERY COLUMN IT ZEROES.
+      // Until Task 6, SALES_FILTER was `keitaro_type IN ('lead','sale','rejected')`
+      // — a strict SUPERSET of CHECKOUT_FILTER (`keitaro_type = 'lead'`) — so
+      // `SALES ∨ REVENUE ∨ PENDING` implied the checkout side and nothing had to
+      // say so. Task 6 flipped SALES_FILTER to the ledger's purchase predicate and
+      // broke that containment. A stage-day whose ONLY ledger rows are lead-TYPE
+      // non-purchases — a $0 REGISTRATION arriving with keitaro_type 'lead' (what
+      // this account's registration postbacks look like), or an UNMAPPED row —
+      // then has `checkouts` written by the INSERT and zeroed by the UPDATE in the
+      // SAME run: the projection writes and zeroes on every */5 tick forever, and
+      // campaign_stages.checkout_click_count flaps with it. Zero impact while no
+      // registration is mapped; it fires the day one lands.
+      const stageG = await stage(7, `p3_${run}_g`);
+      const PB_DAY = "2026-09-16";
+      const pbEvt = async (args: Parameters<typeof seedConversionEvent>[1]) => {
+        const id = await seedConversionEvent(tx, { ...args, stageId: stageG, campaignId: camp });
+        await tx.execute(sql`
+          UPDATE conversion_events
+          SET occurred_at = (${`${PB_DAY} 12:00:00`}::text || ' ' || 'America/New_York')::timestamptz
+          WHERE id = ${id}::bigint
+        `);
+        return id;
+      };
+      // Both shapes that reach `checkouts` without reaching sales/revenue/pending.
+      await pbEvt({ orgId, eventKey: "registration", status: "approved", revenue: 0, keitaroType: "lead" });
+      await pbEvt({ orgId, keitaroType: "lead" }); // UNMAPPED: NULL type, NULL status
+
+      const pb1 = await syncStageDayConversions(tx, { stageIds: [stageG] });
+      const g1 = (await read(stageG)).find((r) => r.stat_date === PB_DAY)!;
+      const gMirror1 = await stageRow(stageG);
+      const pb2 = await syncStageDayConversions(tx, { stageIds: [stageG] });
+      const g2 = (await read(stageG)).find((r) => r.stat_date === PB_DAY)!;
+      const gMirror2 = await stageRow(stageG);
+      check(
+        "PB1 ⭐ the day's `checkouts` SURVIVES the same run's zeroing UPDATE (2 lead-type rows, no purchase, no revenue)",
+        g1 !== undefined &&
+          g1.checkouts === 2 &&
+          g1.sales === 0 &&
+          Number(g1.revenue) === 0 &&
+          Number(g1.pending_revenue) === 0 &&
+          pb1.rowsZeroed === 0,
+        JSON.stringify({ pb1, g1 }),
+      );
+      check(
+        "PB2 ⭐⭐ IDEMPOTENCE: a second consecutive run leaves the row byte-identical, and still NON-ZERO",
+        g2 !== undefined && g2.checkouts === 2 && JSON.stringify(g1) === JSON.stringify(g2),
+        JSON.stringify({ g1, g2 }),
+      );
+      check(
+        "PB3 ⭐ and the second run writes nothing and zeroes nothing — the oscillation is 1 written + 1 zeroed EVERY tick",
+        pb2.rowsWritten === 0 && pb2.rowsZeroed === 0,
+        JSON.stringify(pb2),
+      );
+      check(
+        "PB4 ⭐ campaign_stages.checkout_click_count follows, and holds across both runs",
+        gMirror1.checkout_click_count === 2 && gMirror2.checkout_click_count === 2,
+        JSON.stringify({ gMirror1, gMirror2 }),
+      );
+
       throw new Rollback();
     });
   } catch (err) {

@@ -336,6 +336,18 @@ export async function syncStageDayConversions(
   // ledger read, and a column that is projected but never zeroed is exactly the
   // stale-higher-value bug this fix is about.
   //
+  // ⚠️ "EXPLAINED" MUST NAME EVERY COLUMN THIS ZEROES — ALL FOUR (review fix,
+  // 2026-09-18). Until Task 6, SALES_FILTER was `keitaro_type IN ('lead','sale',
+  // 'rejected')`, a strict SUPERSET of CHECKOUT_FILTER, so `SALES ∨ REVENUE ∨
+  // PENDING` implied the checkout side for free. Task 6 flipped SALES_FILTER to
+  // the ledger's purchase predicate and broke that containment: a day whose only
+  // ledger rows are lead-TYPE NON-purchases — a $0 registration posted as `lead`,
+  // or an UNMAPPED row — had `checkouts` written by the INSERT above and zeroed
+  // here in the SAME run, then rewritten and re-zeroed on every */5 tick forever,
+  // dragging campaign_stages.checkout_click_count with it. The four filters are
+  // now the exact set the INSERT writes from, so the UPDATE is the complement of
+  // the INSERT and the projection is idempotent (test PB1–PB4).
+  //
   // The join to `cov` is the C1 bound: a stage absent from it (no ledger rows
   // at all) has NO row to zero, and `k.stat_date >= cov.floor_date` keeps
   // everything before that stage's earliest ledger conversion untouched.
@@ -362,7 +374,7 @@ export async function syncStageDayConversions(
         WHERE ce.stage_id = k.stage_id
           AND ce.org_id = k.org_id
           AND (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date = k.stat_date
-          AND (${SALES_FILTER} OR ${REVENUE_FILTER} OR ${PENDING_REVENUE_FILTER})
+          AND (${SALES_FILTER} OR ${CHECKOUT_FILTER} OR ${REVENUE_FILTER} OR ${PENDING_REVENUE_FILTER})
       )
     RETURNING k.id AS id
   `)) as unknown as { id: number }[];

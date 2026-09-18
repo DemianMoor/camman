@@ -18,9 +18,11 @@ import {
   advanceProjectionWatermark,
   discoverChangedLedgerStages,
   readProjectionCoverage,
+  readStageDayResyncDiff,
   runStageDayProjection,
   syncStageDayConversions,
   type DbOrTx,
+  type StageDayResyncDiff,
 } from "../lib/keitaro/stage-day-conversions";
 import { parseEventMap } from "../lib/reporting/event-columns";
 import {
@@ -46,9 +48,16 @@ const REVENUE_FILTER = approvedRevenueClause();
 const PENDING_REVENUE_FILTER = pendingRevenueClause();
 const CHECKOUT_FILTER = sql`ce.keitaro_type = 'lead'`;
 
-// Read from the REGISTRY, not written down — the same rule the columns follow.
-// Resolved once, inside the transaction, after the `deposit` type is seeded.
-let PURCHASE_KEYS = new Set<string>();
+// Read from the REGISTRY, not written down — the same rule the columns follow,
+// and the whole reason the `deposit` fixture exists. Re-read at each call site
+// rather than cached once: `deposit` is seeded mid-transaction, so one snapshot
+// would be right for the bar before it and stale for the bar after.
+async function purchaseKeys(dbc: DbOrTx, orgId: string): Promise<Set<string>> {
+  const rows = (await dbc.execute(sql`
+    SELECT key FROM event_types WHERE org_id = ${orgId}::uuid AND is_purchase
+  `)) as unknown as { key: string }[];
+  return new Set(rows.map((r) => r.key));
+}
 
 /** One event type's entry inside `keitaro_stage_results.events`, as it arrives through `::text`. */
 type Tally = { n: number; pending_n: number; revenue: number | string; pending_revenue: number | string };
@@ -497,7 +506,9 @@ async function main() {
       const payoutRun = await syncStageDayConversions(tx, { stageIds: [stageA] });
       const d14Payout = (await read(stageA)).find((r) => r.stat_date === LATE)!;
       check(
-        "P1 ⭐ a row that differs only in payout IS rewritten, and nothing else about it moves",
+        // Renumbered from P1: Phase 5 opened a second P-series in this file and
+        // "FAIL P1" no longer named one bar. A9a belongs to the A9 section above it.
+        "A9a ⭐ a row that differs only in payout IS rewritten, and nothing else about it moves",
         payoutRun.rowsWritten === 1 &&
           payoutRun.rowsZeroed === 0 &&
           Math.abs(Number(d14Payout.payout) - 350 / 3) < 0.001 &&
@@ -1059,7 +1070,17 @@ async function main() {
       // shared clauses that does not reach the per-event side goes RED here.
       const sumN = (e: EvMap, pred: (k: string) => boolean) =>
         Object.entries(e).filter(([k]) => pred(k)).reduce((s, [, v]) => s + (v?.n ?? 0), 0);
-      check("P12 ⭐ sales = Σ n over is_purchase types", pur?.sales === sumN(purEv, (k) => k === "purchase"), `${pur?.sales} vs ${sumN(purEv, (k) => k === "purchase")}`);
+      // ⭐ THE KEY SET COMES FROM THE REGISTRY, NOT FROM THIS FILE. It used to read
+      // `k === "purchase"`, which is the one thing the deposit3 fixture exists to
+      // forbid: a footing bar that only foots for the key the author happened to
+      // seed. An empty set would make this red rather than vacuous (the day's
+      // sales is 2), and `size > 0` says so out loud.
+      const purKeys = await purchaseKeys(tx, orgId);
+      check(
+        "P12 ⭐ sales = Σ n over is_purchase types, the set read from the REGISTRY",
+        purKeys.size > 0 && pur?.sales === sumN(purEv, (k) => purKeys.has(k)),
+        `${pur?.sales} vs ${sumN(purEv, (k) => purKeys.has(k))} over keys [${[...purKeys].join(",")}]`,
+      );
       check(
         "P13 ⭐ revenue = Σ per-event revenue",
         Math.abs(Number(pur?.revenue) - sumField(purEv, "revenue")) < 1e-6,
@@ -1208,6 +1229,12 @@ async function main() {
       check(
         "P23 ⭐ the recomputation covered every stored day the ledger explains — and each day it does not is fully ZEROED",
         indep.length > 0 &&
+          // ⭐ THE SECOND HALF NAMES ITS OWN WORLD-STATE. `every` over an empty
+          // array is TRUE, so without this the bar would pass on a corpus where
+          // no stored day is unexplained — i.e. it would stop testing zeroing the
+          // moment a fixture changed, silently. S7's stale 2026-09-17 is the day
+          // that must be here, and it is named rather than counted.
+          uncovered.some((r) => r.stat_date === "2026-09-17") &&
           uncovered.every(
             (r) =>
               r.sales === 0 &&
@@ -1252,11 +1279,8 @@ async function main() {
       // counts — today only the cross-org shape can do that. On a healthy corpus
       // it is 0; fixture `foreign_type` makes it 1, which is why this bar asserts
       // the identity WITH the term rather than asserting the term is zero.
-      PURCHASE_KEYS = new Set(
-        ((await tx.execute(sql`
-           SELECT key FROM event_types WHERE org_id = ${orgId}::uuid AND is_purchase
-         `)) as unknown as { key: string }[]).map((r) => r.key),
-      );
+      // Re-read AFTER `deposit` was seeded, so the set covers all three types.
+      const corpusPurchaseKeys = await purchaseKeys(tx, orgId);
       const strays = (await tx.execute(sql`
         SELECT count(*)::int AS n
         FROM conversion_events ce
@@ -1265,13 +1289,13 @@ async function main() {
       `)) as unknown as { n: number }[];
       const totalSales = [...stored.values()].reduce((s, r) => s + r.sales, 0);
       const totalPurchaseN = [...stored.values()].reduce(
-        (s, r) => s + sumN(evOf(r), (k) => PURCHASE_KEYS.has(k)),
+        (s, r) => s + sumN(evOf(r), (k) => corpusPurchaseKeys.has(k)),
         0,
       );
       check(
         "P23c ⭐ sales = Σ (is_purchase) n + strays — the identity WITH its residual, not a hopeful equality",
-        totalSales === totalPurchaseN + Number(strays[0].n),
-        `${totalSales} vs ${totalPurchaseN} + ${strays[0].n}`,
+        corpusPurchaseKeys.size > 1 && totalSales === totalPurchaseN + Number(strays[0].n),
+        `${totalSales} vs ${totalPurchaseN} + ${strays[0].n} over keys [${[...corpusPurchaseKeys].join(",")}]`,
       );
       check(
         "P23d ⭐ the residual is exactly the cross-org fixture — 1, not 0, so this bar is exercised and not a countdown",
@@ -1320,6 +1344,162 @@ async function main() {
         "P24 ⭐ parseEventMap reads a REAL jsonb row (numeric form, not the text form)",
         parsed.purchase?.revenue === 80 && parsed.purchase?.n === 2,
         JSON.stringify(live[0]?.events),
+      );
+
+      // ── The resync's dry run IS the predicate --apply uses ─────────────────
+      // scripts/resync-stage-day-conversions.ts is the manual PRODUCTION repair
+      // path: an operator reads its diff and then says yes to --apply. Its header
+      // has claimed the two agree since review fix A4, and twice they did not —
+      // the script carried RETYPED copies of the upsert's change test and the
+      // zeroing UPDATE's content test, and both fell behind (Task 6 changed what a
+      // sale is; Phase 5 added `events` / `unmapped_conversions`). Both sides now
+      // come out of the same builders in lib/keitaro/stage-day-conversions.ts, and
+      // these bars EXECUTE the diff and the write against ONE world rather than
+      // trusting the comment. A column that reaches only one side is caught by
+      // R1/R2 whatever it is called.
+      console.log("\nR — the resync dry run predicts exactly what --apply does");
+      const RZERO_EVENTS = "2026-09-24"; // covered, no ledger row, breakdown only
+      const RZERO_UNMAPPED = "2026-09-19"; // covered, no ledger row, unmapped only
+      const cleanDiff = await readStageDayResyncDiff(tx, { stageIds: [stageA] });
+      check(
+        "R0 ⭐ with the scope already projected the diff is EMPTY — every bar below is about a row this test breaks on purpose",
+        cleanDiff.length === 0,
+        JSON.stringify(cleanDiff),
+      );
+
+      // SIX one-sided breakages. Four isolate a single column the hand-written
+      // diff never tested; one isolates the sale DEFINITION; one is the zero
+      // branch's blind spot, twice.
+      // (a) a row written before migration 0185: scalars right, breakdown missing.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET events = '{}'::jsonb
+        WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-27'::date
+      `);
+      // (b) unmapped_conversions alone.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET unmapped_conversions = 0
+        WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-22'::date
+      `);
+      // (c) pending_revenue alone — in NEITHER branch of the old hand-written diff.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET pending_revenue = 0
+        WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-25'::date
+      `);
+      // (d) the REJECTED-only day, made to carry the pre-Task-6 count. That diff
+      // derived sales from keitaro_type IN ('lead','sale','rejected'), so it would
+      // have called this row already correct; purchasedClause says 0 sales.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET sales = 1, revenue = 99, payout_at_conversion = 99
+        WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-26'::date
+      `);
+      // (e, f) two COVERED stage-days the ledger does not explain at all, whose
+      // only content is one of the two new columns.
+      const orphan = async (statDate: string, events: string, unmapped: number) => {
+        await tx.execute(sql`
+          INSERT INTO keitaro_stage_results
+            (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, events, unmapped_conversions)
+          VALUES (${orgId}::uuid, ${camp}::int, ${stageA}::int, 'seed', ${statDate}::date,
+                  ${events}::jsonb, ${unmapped}::int)
+        `);
+      };
+      await orphan(
+        RZERO_EVENTS,
+        '{"registration": {"n": 1, "pending_n": 0, "revenue": 0, "pending_revenue": 0}}',
+        0,
+      );
+      await orphan(RZERO_UNMAPPED, "{}", 4);
+
+      // Every projected column of every stored row, keyed by (stage, day).
+      // `synced_at` is deliberately absent: it only moves on a row one of the two
+      // statements touched, so including it would make the comparison trivially
+      // true instead of a test of the predicates.
+      const snapshot = async () => {
+        const rows = (await tx.execute(sql`
+          SELECT stage_id, stat_date::text AS stat_date, checkouts, sales,
+                 revenue::text AS revenue, pending_revenue::text AS pending_revenue,
+                 events::text AS events, unmapped_conversions,
+                 coalesce(payout_at_conversion::text, 'null') AS payout
+          FROM keitaro_stage_results ORDER BY stage_id, stat_date
+        `)) as unknown as Record<string, unknown>[];
+        return new Map(rows.map((r) => [`${r.stage_id}|${r.stat_date}`, JSON.stringify(r)]));
+      };
+      const beforeApply = await snapshot();
+      const predictedDiff = await readStageDayResyncDiff(tx, { stageIds: [stageA] });
+      const applyRun = await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const afterApply = await snapshot();
+      const dayKey = (d: StageDayResyncDiff) => `${d.stage_id}|${d.stat_date}`;
+      const predicted = new Set(predictedDiff.map(dayKey));
+      const changed = new Set<string>();
+      for (const [k, v] of afterApply) if (beforeApply.get(k) !== v) changed.add(k);
+      for (const k of beforeApply.keys()) if (!afterApply.has(k)) changed.add(k);
+      const unpredicted = [...changed].filter((k) => !predicted.has(k));
+      const phantom = [...predicted].filter((k) => !changed.has(k));
+      check(
+        "R1 ⭐⭐ every row --apply actually changed WAS in the dry run — the direction that broke silently twice",
+        unpredicted.length === 0,
+        `changed but not listed: ${JSON.stringify(unpredicted)}`,
+      );
+      check(
+        "R2 ⭐ and every row the dry run listed really changed — the operator approves no phantoms either",
+        phantom.length === 0,
+        `listed but unchanged: ${JSON.stringify(phantom)}`,
+      );
+      check(
+        "R3 ⭐ six rows on both sides — so R1/R2 are exercised and not two empty sets agreeing",
+        predicted.size === 6 && changed.size === 6,
+        `predicted=${JSON.stringify([...predicted])} changed=${JSON.stringify([...changed])}`,
+      );
+      const dOf = (d: string) => predictedDiff.find((x) => x.stat_date === d);
+      const rowOf = async (d: string) => (await read(stageA)).find((r) => r.stat_date === d);
+      check(
+        "R4 ⭐ a pre-0185 row — scalars right, breakdown empty — is listed as a rewrite",
+        dOf("2026-09-27")?.action === "rewrite" &&
+          dOf("2026-09-27")?.old_events === "{}" &&
+          dOf("2026-09-27")?.new_events !== "{}" &&
+          dOf("2026-09-27")?.old_sales === dOf("2026-09-27")?.new_sales,
+        JSON.stringify(dOf("2026-09-27")),
+      );
+      check(
+        "R5 ⭐ an unmapped_conversions-only difference is listed",
+        dOf("2026-09-22")?.action === "rewrite" &&
+          dOf("2026-09-22")?.old_unmapped === 0 &&
+          dOf("2026-09-22")?.new_unmapped === 1,
+        JSON.stringify(dOf("2026-09-22")),
+      );
+      check(
+        "R6 ⭐ a pending_revenue-only difference is listed",
+        dOf("2026-09-25")?.action === "rewrite" &&
+          Number(dOf("2026-09-25")?.old_pending_revenue) === 0 &&
+          Number(dOf("2026-09-25")?.new_pending_revenue) === 60,
+        JSON.stringify(dOf("2026-09-25")),
+      );
+      check(
+        "R7 ⭐⭐ the diff counts a REJECTED purchase as NO sale — the SHARED predicate, where the pre-Task-6 keitaro_type list called this very row correct",
+        dOf("2026-09-26")?.old_sales === 1 &&
+          dOf("2026-09-26")?.new_sales === 0 &&
+          Number(dOf("2026-09-26")?.new_revenue) === 0 &&
+          dOf("2026-09-26")?.new_payout === null,
+        JSON.stringify(dOf("2026-09-26")),
+      );
+      check(
+        "R8 ⭐ a covered day the ledger cannot explain whose ONLY content is the breakdown is listed as a zero, and IS zeroed",
+        dOf(RZERO_EVENTS)?.action === "zero" &&
+          dOf(RZERO_EVENTS)?.old_events !== "{}" &&
+          (await rowOf(RZERO_EVENTS))?.events === "{}",
+        JSON.stringify([dOf(RZERO_EVENTS), await rowOf(RZERO_EVENTS)]),
+      );
+      check(
+        "R9 ⭐ …and one whose only content is unmapped_conversions likewise",
+        dOf(RZERO_UNMAPPED)?.action === "zero" &&
+          dOf(RZERO_UNMAPPED)?.old_unmapped === 4 &&
+          (await rowOf(RZERO_UNMAPPED))?.unmapped_conversions === 0,
+        JSON.stringify([dOf(RZERO_UNMAPPED), await rowOf(RZERO_UNMAPPED)]),
+      );
+      check(
+        "R10 the run's own counters foot with the diff's action tally",
+        applyRun.rowsWritten === predictedDiff.filter((d) => d.action !== "zero").length &&
+          applyRun.rowsZeroed === predictedDiff.filter((d) => d.action === "zero").length,
+        JSON.stringify({ applyRun, tally: predictedDiff.map((d) => d.action) }),
       );
 
       // ── Step 3b: the ledger_behind_history probe knows the two new columns ──

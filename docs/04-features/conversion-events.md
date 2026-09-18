@@ -268,7 +268,7 @@ Don't flip a key to `ok` by hand; that hides a real condition. Fix the cause, an
 - **Order in the `*/5` tick** ([app/api/keitaro/poll/route.ts](../../app/api/keitaro/poll/route.ts) `pollAndRefresh`): `pollKeitaro` (clicks) → counted-clicker refresh → `ingestConversionLedger` → **only if that ingest was `ok`**, `runStageDayProjection` over `pollKeitaro`'s `stage_ids` (this tick's click-touched stages) ∪ the discovered stages. A refused or thrown ingest skips the projection entirely for that tick — re-deriving against an incomplete ledger would zero real revenue inside the covered range — and the stage-days keep their previous values until the next good tick.
 - **Alert:** `conversion_events:projection_failed` (fixed key, latched, plain text) fires when the projection throws, refuses (`empty_ledger` or `ledger_behind_history`, which names both dates) or leaves its discovery window unfinished (`truncated`, which says the cursor was held and points at the resync), and clears on the next run that finished a window. `projectionOutcomeFor(run)` in [lib/conversions/monitor.ts](../../lib/conversions/monitor.ts) owns the run → outcome mapping, so a new refusal reason cannot reach the route without an alert text; a refusal outranks a truncation. Because it is ONE key, a second condition appearing while the first is firing does not re-page (accepted: one standing page per condition is the contract). Evaluated on the CRON path only, and only when the projection actually ran — a skipped projection gets no decision, because the ingest's own `fetch_failed` alert already covers that tick.
 - A stage-day with conversions but no click row: `syncStageDayConversions`'s INSERT creates the row (click columns default 0 — a conversion with no matching click is legitimate, e.g. `sub_id_1`/`sub_id_3` resolved via `offers.keitaro_offer_id` with no click).
-- One-shot repair for stage-days frozen before this shipped: `npx tsx scripts/resync-stage-day-conversions.ts` (dry-run by default, prints the coverage floor and every diff; `--apply` writes inside one transaction, prod needs approval). Both paths pre-flight `readProjectionCoverage` and refuse on `empty_ledger` / `ledger_behind_history` before printing anything. The dry run lists exactly the rows `--apply` would change, each tagged `insert` / `rewrite` / `zero`: it applies the same per-stage coverage floor and the same org join, and its diff predicate includes `payout_at_conversion` (a row whose payout ALONE is stale is rewritten) and `pending_revenue` (a `zero` resets it, so a row whose only non-zero column is pending is a real change). **The Phase 1 backfill must have run on prod before the projecting code is live** — the first tick after the ledger is populated re-derives all of history in its scope (Task 8's precondition list).
+- One-shot repair for stage-days frozen before this shipped: `npx tsx scripts/resync-stage-day-conversions.ts` (dry-run by default, prints the target host, the coverage floor and every diff; `--apply` writes inside one transaction, prod needs approval). Both paths pre-flight `readProjectionCoverage` and refuse on `empty_ledger` / `ledger_behind_history` before printing anything. The dry run lists exactly the rows `--apply` would change, each tagged `insert` / `rewrite` / `zero`. ⭐ **That is now STRUCTURAL rather than a promise in the script's header (2026-09-19).** The script holds no SQL at all: the preview is `readStageDayResyncDiff()` and the write is `syncStageDayConversions()`, both in [lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts), built from the same CTEs (`stageDayLedgerCtes`), the same change test (`projectionChangedClause` over `PROJECTED_COLUMNS` — the upsert's own `WHERE`) and the same content test (`projectionNonEmptyClause` — the zeroing UPDATE's own), beside a verbatim copy of its anti-join and its `cov` floor subquery. The retyped copies that used to live in the script fell behind **twice**: Task 6 redefined a sale and the script kept counting refunds (`keitaro_type IN ('lead','sale','rejected')`); Phase 5 added `events` / `unmapped_conversions` to both write predicates and the script listed neither. For a while the run an operator approved was not the run that happened. Bars **R0–R10** execute the diff and the write against one world and require the row sets to be EQUAL in both directions. **The Phase 1 backfill must have run on prod before the projecting code is live** — the first tick after the ledger is populated re-derives all of history in its scope (Task 8's precondition list).
 - `mirrorStageCountersFromResults` (exported from `lib/keitaro/poll.ts`) runs after BOTH the click upsert and the conversion projection, so `campaign_stages.checkout_click_count` never lags a tick. The projection calls it with `exactCheckoutClicks: true`: the projection is non-monotonic, so that one field takes the recomputed sum even when it DECREASES (0 included) — otherwise a zeroed day would leave a stale higher counter on the campaign page and in the creatives metrics cache forever. `click_count` and `sales_payout_each` keep their positive-only/COALESCE guard, `sales_count` is never touched. It also THROWS now instead of swallowing: the swallow lives at `pollKeitaro`'s call site (the pool), because swallowing inside would poison a caller-supplied transaction (`--apply`, the DB tests). See [keitaro-poll.md §2a](keitaro-poll.md).
 
 Checks: `scripts/test-stage-day-conversions.ts` (camman-v2 only, rolled back, 66) — the projection's semantics; all three coverage bounds alongside the bug-2 correction that must survive them; the org join; the payout-only rewrite; the exact downward mirror; the watermark (first run, out-of-window, an old watermark extending the window, the cap, advance-only-on-a-finished-window, no advance on a refusal or a truncation, and — against a recording fake `dbc`, because a rolled-back savepoint could never prove it — no watermark UPDATE issued at all when the write throws). The fixture is built so a GLOBAL floor cannot pass: stage A is covered from 2026-05-01, stage Y only from 2026-09-14, and Y carries a stale non-zero row on 2026-06-01 — inside the global coverage, outside its own. Proven red on 2026-09-17 by two temporary variants of [lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts) (restored byte-identically, `cmp`-verified): a global-floor zeroing subquery ⇒ 3 failures incl. Y's row zeroed to 0/$0, and the guard removed ⇒ the pre-coverage case writes 3 rows, zeroes 1 and advances the cursor silently. The alert's decisions are in `scripts/test-conversion-monitor.ts` (J1-J5, J4b-J4d) and its latch in `scripts/test-conversion-monitor-db.ts` (C1-C9). ⚠️ The route guards in the test file (G1-G3) are SOURCE assertions — they read the route's text, so they go red on a rename and cannot see what the branch does at runtime.
@@ -486,7 +486,7 @@ or reads them until a later task.
 | column | type | what it holds |
 | --- | --- | --- |
 | `events` | `jsonb NOT NULL DEFAULT '{}'::jsonb` | the SAME numbers as `sales` / `revenue` / `pending_revenue`, split per `event_types.key` |
-| `unmapped_conversions` | `integer NOT NULL DEFAULT 0` | rows on this stage-day with no event type or no status (`conversion_events_unmapped_idx`'s own predicate) |
+| `unmapped_conversions` | `integer NOT NULL DEFAULT 0` | rows on this stage-day the org-scoped `event_types` join could not place: `et.key IS NULL OR ce.status IS NULL`. ⚠️ **Broader than `conversion_events_unmapped_idx`'s predicate** (`event_type_id IS NULL OR status IS NULL`) — see the divergence note under Task 3 |
 
 ```json
 {"purchase":     {"n": 12, "pending_n": 1, "revenue": 540.0000, "pending_revenue": 60.0000},
@@ -496,8 +496,10 @@ or reads them until a later task.
 `n` counts status `pending` + `approved`; `pending_n` is a SUBSET of `n`, never
 added to it; the two money fields exist for `counts_revenue` types only and are 0
 elsewhere by construction. The projection writes them (Task 3, below) in the same
-`INSERT … ON CONFLICT` as the scalars, from the same single pass over the ledger,
-so the scalars are the SUM of this object's entries and the two cannot drift.
+`INSERT … ON CONFLICT` as the scalars, from the same single pass over the ledger.
+⚠️ **The scalars are the sum of this object's entries PLUS a residual, and the two
+CAN differ** — an earlier version of this line said they could not. See the
+corrected identity under Task 3.
 
 Four decisions worth not re-litigating:
 
@@ -539,10 +541,48 @@ rolled back, the second asking the DATABASE rather than this process.
 now groups its single pass over `conversion_events` **one level finer** — by
 `event_types.key` — in a `per_event` CTE, and rolls it back up in a `ledger` CTE
 that builds the `events` object with `jsonb_object_agg`. The scalars and the
-object come out of the SAME statement, which is what makes the footing
-structural: `sales` is the sum of the per-event `n` over `is_purchase` types and
-`revenue` is the sum of the per-event `revenue`, and there is no second statement
-to drift from. Still **inert for the UI** — nothing selects the two columns yet.
+object come out of the SAME statement, so there is no second statement to drift
+from. Still **inert for the UI** — nothing selects the two columns yet.
+
+⚠️ **THE FOOTING IS AN IDENTITY WITH A RESIDUAL, NOT "THE SCALARS ARE THE SUM".**
+`db/schema.ts`, migration 0185's header and the CHANGELOG all said the scalars
+were *literally* the sum of the object's entries and "the two cannot drift"
+(corrected 2026-09-19; the migration file's header is left alone deliberately, see
+below). They can, and the difference is designed in: `sales` / `revenue` resolve
+`is_purchase` / `counts_revenue` through the **non-org-scoped**
+`PURCHASE_EVENT_TYPE_IDS` / `REVENUE_EVENT_TYPE_IDS` subqueries
+([lib/sale-attribution.ts](../../lib/sale-attribution.ts)) while the per-event
+entries come from the **org-scoped** join, so a ledger row carrying another org's
+`event_type_id` is counted by the scalar and placed under no key. What holds is
+
+```
+sales   = Σ entries[t].n over is_purchase types + strays
+revenue = Σ entries[t].revenue                  + stray revenue
+```
+
+with the strays reported in `unmapped_conversions`. Bars **P23c / P14b** assert it
+WITH the residual and **P23d / P14c** pin the residual **non-zero** (1 row / $70)
+against a fixture, so neither can start passing because the residual quietly went
+to 0. ⇒ **A screen must not render `events` as an explanation of the Sales number
+without showing `unmapped_conversions` beside it**: on a stage-day with a stray
+they do not add up, and that is correct.
+
+⚠️ **`unmapped_conversions` and the Telegram alert disagree by the stray, on
+purpose.** The column keys on the JOIN RESULT; `lib/conversions/monitor.ts`'s
+`unmapped` / `status_only_unmapped` combos key on the RAW columns, because that is
+what `conversion_events_unmapped_idx` is predicated on and what keeps those reads
+index-only however large the ledger grows. So a cross-org `event_type_id` appears
+in the column and **not** in the alert. The column is the more truthful of the two;
+reconcile by teaching the monitor the join (and paying for it), never by narrowing
+the column back to the raw predicate. Zero such rows in production today. The note
+is carried at both definitions so neither side gets "fixed" into agreement.
+
+📌 **Migration `0185_stage_event_breakdown.sql`'s header still carries the old
+claim, and is deliberately not edited.** The file is already applied on camman-v2
+and drizzle records a hash of its content; editing even a comment changes that
+hash, which is a false "drift" for `scripts/verify-migration-integrity.ts` and
+makes `PgDialect.migrate` treat it as unapplied. The authoritative text is
+`db/schema.ts` + this page.
 
 The two CTEs are separate because there is no `min(jsonb)`/aggregate-of-aggregate
 shortcut: the scalars group in `per_event`, the object builds in `ledger`, and
@@ -593,10 +633,16 @@ never trip the global refusal and the projection would happily zero it. Moot on 
 one (every pre-0185 row is `'{}'` / `0`) and asymmetric for ever after. **The other
 two bounds — the empty-ledger refusal and the per-stage coverage floor — are
 untouched**, and all three are red-proved against this version of the file.
+📌 Its cost note was wrong and is corrected (2026-09-19): the `stat_date < ledger_floor`
+range is **a sequential scan plus filter**, not an index probe.
+`keitaro_stage_results_campaign_date_idx` is `(campaign_id, stat_date)` and
+`keitaro_stage_results_stage_date_uniq` is `(org_id, stage_id, stat_date)` — `stat_date`
+leads neither, so nothing serves the range. Cheap at ~17.6K rows, which is why no index
+is being added, but it is a scan and it grows with the table.
 
 Checks:
 [`scripts/test-stage-day-conversions.ts`](../../scripts/test-stage-day-conversions.ts)
-— **108/0** on camman-v2 inside a transaction that always rolls back (70 before).
+— **119/0** on camman-v2 inside a transaction that always rolls back (70 before 0185, 108 before the resync bars).
 Eleven one-sided fixtures, **each on its OWN `stat_date`** so no shape can be read
 through another: registration-only; approved / pending / rejected purchase each
 ALONE; one deliberate mixed day; all three unmapped shapes (no type + no status, no
@@ -607,7 +653,17 @@ footing identity `sales = Σ (is_purchase) n + strays` with `strays` computed
 independently and made **non-zero (1)** by the cross-org fixture, its money twin
 `revenue = Σ per-event revenue + strays` (**$70**), a flat independently-shaped
 recomputation of every scalar, `parseEventMap` against a REAL jsonb row, and the two
-`ledger_behind_history` bars. Six red proofs, each restored byte-identically
+`ledger_behind_history` bars. **R0–R10 (added 2026-09-19)** run
+`readStageDayResyncDiff` and `syncStageDayConversions` against ONE world and require
+the changed-row sets to match in both directions: R0 pins an empty diff on an
+already-projected scope, then six one-sided breakages (a pre-0185 row whose scalars
+are right and whose breakdown is empty, an `unmapped_conversions`-only difference, a
+`pending_revenue`-only difference, a rejected-purchase day carrying the pre-Task-6
+sale count, and two covered days the ledger cannot explain whose only content is one
+of the two new columns) make R1/R2 non-vacuous at six rows a side. **P12 now reads
+its `is_purchase` key set from the registry** instead of testing `k === "purchase"`,
+and **P23 names the stored day it requires to be unexplained** rather than relying on
+`every` over a possibly empty array. Six red proofs, each restored byte-identically
 (`cmp` + md5): the raw-column unmapped predicate loses the cross-org row from both
 buckets (P18, P23b); the old zeroing anti-join wipes a registration-only day (P1,
 P3, P6); an inner join loses every unmapped row (12 bars); dropping `counts_revenue`

@@ -587,6 +587,18 @@ export function decideLedgerAlerts(h: LedgerHealth, firingKeys: readonly string[
 // (disjoint, and together exactly it); CONFLICT_WHERE is
 // conversion_events_type_conflict_idx's predicate verbatim. `ce` is the alias
 // every statement gives conversion_events.
+//
+// ⚠️ THESE TWO ARE NARROWER THAN keitaro_stage_results.unmapped_conversions, AND
+// THE DIFFERENCE IS DELIBERATE ON BOTH SIDES — do not "reconcile" them by
+// changing one. The column (migration 0185, written by
+// lib/keitaro/stage-day-conversions.ts) counts what an ORG-SCOPED join to
+// event_types could not place — "et.key IS NULL OR ce.status IS NULL" — so it
+// ALSO counts a row whose event_type_id belongs to ANOTHER org. These alerts read
+// the RAW columns, because that is what the partial index is predicated on and
+// what keeps them an index-only read however large the ledger grows. So a
+// cross-org event_type_id shows in the column and NOT in the alert; the column is
+// the more truthful of the two. Teaching the monitor the join would cost it the
+// index; that trade has not been made. Zero such rows in production today.
 export const UNMAPPED_WHERE = sql`ce.status IS NULL`;
 export const STATUS_ONLY_WHERE = sql`ce.event_type_id IS NULL AND ce.status IS NOT NULL`;
 export const CONFLICT_WHERE = sql`ce.conflicting_event_type_id IS NOT NULL`;

@@ -118,6 +118,58 @@ instead: PLACED or UNMAPPED, never both, never neither. Two rules:
   strays` — with a fixture that makes the residual **non-zero**. `strays = 0` on
   today's data is a countdown, not a test.
 
+⭐ **And then SAY SO where the column is documented — a residual you designed in is
+a residual a reader will trip over (added 2026-09-19).** `db/schema.ts`, migration
+`0185`'s header and the CHANGELOG all stated that the scalars are "literally the SUM
+of this object's entries and the two cannot drift", two sentences away from the
+suite that pins the residual at 1 row / $70. A confident false invariant in the
+column's own definition is worse than no invariant: it is exactly the belief that
+makes someone render the breakdown as an explanation of the Sales number and be
+wrong by the stray. The rule: **when a footing is asserted-with-a-residual rather
+than structural, the column comment states the residual, where it comes from, and
+which bar pins it non-zero.** (The `0185` file itself is deliberately NOT edited —
+drizzle records a SHA-256 of the migration's content and
+`scripts/verify-migration-integrity.ts` compares it, so a comment-only edit to an
+applied migration is a false drift. Correct the claim in `db/schema.ts` and the
+docs, and note the stale header there.)
+
+⭐ **A column that is deliberately broader than the index its predicate was copied
+from must say which surfaces now disagree.** `keitaro_stage_results.unmapped_conversions`
+keys on the join result; `lib/conversions/monitor.ts`'s `unmapped` /
+`status_only_unmapped` Telegram combos key on the raw columns, because that is what
+`conversion_events_unmapped_idx` is predicated on and what keeps them an index-only
+read. The two therefore disagree by the stray count, permanently and correctly. The
+note lives at BOTH definitions, because the failure mode is not either number — it
+is the next reader "reconciling" them by narrowing the truthful one.
+
+## A dry run built from a retyped predicate is a claim, not a preview (2026-09-19)
+
+`scripts/resync-stage-day-conversions.ts` is the manual production repair path for
+the stage-day projection: an operator reads its diff and then says yes to `--apply`.
+Its header asserted "THE DIFF IS THE PREDICATE `--apply` USES, not an approximation
+of it" — and the diff was a hand-retyped copy of the upsert's change test, the
+zeroing UPDATE's content test, its anti-join and its coverage-floor subquery. The
+copies fell behind **twice**: Task 6 redefined a sale (the script kept computing it
+from `keitaro_type IN ('lead','sale','rejected')`, i.e. counting refunds) and Phase 5
+added `events` / `unmapped_conversions` to both write predicates (the script tested
+neither, in either branch, nor `pending_revenue`). Neither divergence could fail a
+test, because nothing executed the two against the same world.
+
+The fix is not a better comment. The script now holds **no SQL**: both sides are
+built from `PROJECTED_COLUMNS`, `projectionChangedClause`, `projectionNonEmptyClause`
+and `stageDayLedgerCtes` in
+[lib/keitaro/stage-day-conversions.ts](../lib/keitaro/stage-day-conversions.ts), and
+bars **R0–R10** in `scripts/test-stage-day-conversions.ts` run
+`readStageDayResyncDiff()` and `syncStageDayConversions()` over one fixture world and
+require the changed-row sets to be equal **in both directions** — six one-sided
+breakages a side, so neither set can be empty. Two rules:
+
+- **a preview and the operation it previews share the predicate object, or they are
+  two implementations of one rule and one of them is wrong;**
+- **assert the agreement by executing both**, not by asserting that two SQL strings
+  look alike. A snapshot-diff of every column the write touches catches a column the
+  preview forgot; a text comparison catches a rename.
+
 ## A bar about "rows that already existed" cannot be asked of an empty table (2026-09-18)
 
 Migration 0185 adds two columns with defaults, and the claim worth asserting is

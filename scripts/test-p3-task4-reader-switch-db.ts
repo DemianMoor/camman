@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { readFileSync } from "node:fs";
 
@@ -118,12 +119,8 @@ import {
 //
 // docs/superpowers/plans/2026-09-17-conversion-events-phase3.md (Task 4)
 
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 // The fixture ET day. Far from any real preview-DB data, and the block-D world
 // state check asserts the ledger is empty inside this window before the fixtures
@@ -153,13 +150,7 @@ const money = (v: unknown) => Math.round(Number(v ?? 0) * 10000) / 10000;
 class Rollback extends Error {}
 
 async function main() {
-  const ref = /postgres\.([a-z0-9]+):/.exec(process.env.DATABASE_URL ?? "")?.[1] ?? "";
-  const host = ref === PREVIEW_REF ? "camman-v2 (preview)" : "UNKNOWN";
-  console.log(`Target DB: ${host}\n`);
-  if (host === "UNKNOWN") {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   let sawTx = false;
   try {

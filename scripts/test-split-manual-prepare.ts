@@ -11,6 +11,7 @@
 //
 // Run: npx tsx --conditions=react-server scripts/test-split-manual-prepare.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql } from "drizzle-orm";
 
@@ -30,11 +31,8 @@ import {
 // optional. Run it as:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
 //     npx tsx --conditions=react-server scripts/test-split-manual-prepare.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 const ORG_MARKER = "__SPLIT_PREPARE_TEST__";
 

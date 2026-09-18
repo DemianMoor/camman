@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
 
@@ -16,7 +17,6 @@ import { db, sql as pgConn } from "@/db/client";
 //
 // Preview only: it writes.
 
-const PROD_REF = "rtdarhkkjwcetlmruftl";
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
@@ -26,13 +26,7 @@ function check(label: string, actual: unknown, expected: unknown) {
 }
 
 async function main() {
-  const url = process.env.DATABASE_URL ?? "";
-  const ref = /postgres\.([a-z0-9]+):/.exec(url)?.[1] ?? "";
-  if (ref === PROD_REF) {
-    console.error("REFUSING to run against PRODUCTION. This test writes.");
-    process.exit(1);
-  }
-  console.log(`target ref: ${ref}`);
+  console.log(`Target DB: ${requirePreviewDb().label}`);
 
   // The route's insert literal is the thing under test, so read it at SOURCE
   // level too: a test that only exercised the DB would pass if someone later

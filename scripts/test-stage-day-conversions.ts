@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -26,11 +27,8 @@ import { approvedRevenueClause, purchasedClause, rescueSendIds } from "../lib/sa
 // transaction that ALWAYS rolls back. PREVIEW DB ONLY:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //     npx tsx scripts/test-stage-day-conversions.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 let passed = 0;
 let failed = 0;
@@ -138,12 +136,7 @@ async function throwPathIssuesNoAdvance() {
 }
 
 async function main() {
-  const host = process.env.DATABASE_URL?.includes("fdzxzxayhknywvmrhjcj") ? "camman-v2 (preview)" : "UNKNOWN";
-  console.log(`Target DB: ${host}\n`);
-  if (host === "UNKNOWN") {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   console.log("route guards (source assertions)");
   routeGuards();

@@ -18,6 +18,7 @@
 //
 // Run: npx tsx scripts/test-behavioral-split-lane-picker.ts
 import "./_env-preload"; // MUST be first — loads .env.local before db/client init
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -34,11 +35,8 @@ import { settleSplitGroup } from "@/lib/stages/split-group";
 // outright rather than trust the caller's environment:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
 //     npx tsx --conditions=react-server scripts/test-behavioral-split-lane-picker.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 const ORG_MARKER = "__BSPLIT_PICKER_TEST__";
 const COUNTED_TABLES = [

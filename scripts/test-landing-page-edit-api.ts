@@ -11,11 +11,11 @@
 //   NEXT_PUBLIC_SUPABASE_ANON_KEY=<preview anon key> \
 //   BASE_URL=https://camman-<hash>-demian-moors-projects.vercel.app \
 //   npx tsx --env-file=C:/AFF/camman/.env.demo scripts/test-landing-page-edit-api.ts
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
+
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import postgres from "postgres";
-
-const PREVIEW_DB_REF = "fdzxzxayhknywvmrhjcj";
 
 let pass = 0;
 let fail = 0;
@@ -28,8 +28,11 @@ function check(name: string, ok: boolean, extra = "") {
 async function main() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
   const base = process.env.BASE_URL ?? "";
-  if (!(process.env.DATABASE_URL ?? "").includes(PREVIEW_DB_REF) || !supabaseUrl.includes(PREVIEW_DB_REF)) {
-    console.error(`Refusing to run: DATABASE_URL and NEXT_PUBLIC_SUPABASE_URL must both be the preview project (${PREVIEW_DB_REF}).`);
+  // DATABASE_URL is already enforced by the import above; the API half has to
+  // agree with it, or the test would drive one project and assert on another.
+  const preview = requirePreviewDb();
+  if (!supabaseUrl.includes(preview.ref)) {
+    console.error(`Refusing to run: NEXT_PUBLIC_SUPABASE_URL must be the same preview project (${preview.ref}).`);
     process.exit(1);
   }
   if (!/^https:\/\/camman-[a-z0-9]+-demian-moors-projects\.vercel\.app$/.test(base)) {

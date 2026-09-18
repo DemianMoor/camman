@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -34,11 +35,8 @@ import { seedConversionEvent } from "./_conversion-fixture";
 //                        be a real finding — see the note at the bars.
 //   KEEP=1               skip teardown (leaves the throwaway org behind; preview
 //                        only). C0 then reds on the next run, correctly.
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 const ORG_MARKER = "__P4_CONSUMERS_TEST__";
 
 // Tables we snapshot to prove real data is untouched.
@@ -96,12 +94,7 @@ function printPlan(n: PlanNode, depth = 0): void {
 }
 
 async function main() {
-  const isPreview = (process.env.DATABASE_URL ?? "").includes("fdzxzxayhknywvmrhjcj");
-  console.log(`Target DB: ${isPreview ? "camman-v2 (preview)" : "UNKNOWN"}\n`);
-  if (!isPreview) {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const before = await tableCounts();
   console.log(

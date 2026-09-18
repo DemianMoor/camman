@@ -1,3 +1,5 @@
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
+
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
@@ -8,11 +10,9 @@ config({ path: resolve(process.cwd(), ".env.local") });
 // set, so the refusal is not optional. Run it as:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
 //     npx tsx --conditions=react-server scripts/test-campaign-tier.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import at the top — an
+// allowlist, and ahead of the dotenv load, so an unset DATABASE_URL is refused
+// rather than quietly resolved to `.env.local` (i.e. production).
 
 import { randomUUID } from "node:crypto";
 

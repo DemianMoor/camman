@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -46,8 +47,6 @@ import { seedConversionEvent } from "./_conversion-fixture";
 // requires each assertion to go red in at least one of them.
 // =============================================================================
 
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
 const MIGRATION_PATH = resolve(process.cwd(), "db/migrations/0183_report_views_from_ledger.sql");
 
 // ── the migration's own SQL, as statements ───────────────────────────────────
@@ -517,17 +516,7 @@ async function runOnce(sqlText: string, quiet: boolean): Promise<Run> {
 }
 
 async function main() {
-  const url = process.env.DATABASE_URL ?? "";
-  if (url.includes(PROD_REF)) {
-    console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-    process.exit(1);
-  }
-  const host = url.includes(PREVIEW_REF) ? "camman-v2 (preview)" : "UNKNOWN";
-  console.log(`Target DB: ${host}\n`);
-  if (host === "UNKNOWN") {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const text = readFileSync(MIGRATION_PATH, "utf8");
   const red = process.argv.includes("--red");

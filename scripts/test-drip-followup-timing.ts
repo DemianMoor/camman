@@ -1,4 +1,5 @@
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -34,11 +35,8 @@ import {
 // while the script stays pure.
 //   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
 //     npx tsx scripts/test-drip-followup-timing.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {

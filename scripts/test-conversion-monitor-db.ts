@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { inArray, like, sql, type SQL } from "drizzle-orm";
 import type { PgInsertValue } from "drizzle-orm/pg-core";
@@ -28,11 +29,8 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "../lib/reporting/cron-heartbeat
 // channel. PREVIEW DB ONLY:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //     npx tsx scripts/test-conversion-monitor-db.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 delete process.env.TELEGRAM_BOT_TOKEN;
 delete process.env.TELEGRAM_CHAT_ID;
 
@@ -93,12 +91,7 @@ async function usesIndex(tx: Tx, query: SQL, index: string): Promise<boolean> {
 }
 
 async function main() {
-  const host = process.env.DATABASE_URL?.includes("fdzxzxayhknywvmrhjcj") ? "camman-v2 (preview)" : "UNKNOWN";
-  console.log(`Target DB: ${host}\n`);
-  if (host === "UNKNOWN") {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const sent: string[] = [];
   const send = async (text: string) => {

@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -50,7 +51,6 @@ import { TOKEN_REQUESTS_PER_HOUR } from "@/lib/api/token-usage";
 // routes could not be leak-checked for this reason, rather than implying full
 // coverage.
 
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
 const OPERATOR_EMAIL = process.env.OPERATOR_TEST_EMAIL ?? "operator-test@exuma.io";
 const BASE = process.env.BASE_URL ?? "";
 
@@ -93,13 +93,6 @@ async function main() {
     process.exit(1);
   }
   const dbUrl = process.env.DATABASE_URL ?? "";
-  if (!dbUrl.includes(PREVIEW_REF)) {
-    console.error(
-      `REFUSING TO RUN: DATABASE_URL does not point at the preview project (${PREVIEW_REF}).\n` +
-        "This script creates a user and a membership; it must never touch production.",
-    );
-    process.exit(1);
-  }
   if (/camman\.vercel\.app$/.test(new URL(BASE).host)) {
     console.error("REFUSING TO RUN: BASE_URL is the production alias.");
     process.exit(1);
@@ -107,7 +100,7 @@ async function main() {
 
   console.log("=== operator access verification ===\n");
   console.log(`  target : ${BASE}`);
-  console.log(`  database: preview (${PREVIEW_REF})`);
+  console.log(`  Target DB: ${requirePreviewDb().label}`);
   console.log(`  operator: ${OPERATOR_EMAIL}\n`);
 
   const sql = postgres(dbUrl, { prepare: false, max: 1 });

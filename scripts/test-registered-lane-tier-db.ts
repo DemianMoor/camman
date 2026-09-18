@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -10,11 +11,8 @@ import { EXIT_TIER, LANE_TIER_VALUES } from "@/lib/campaign-tier";
 // PREVIEW DB ONLY, inside a transaction that ALWAYS rolls back:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //     npx tsx --conditions=react-server scripts/test-registered-lane-tier-db.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 let passed = 0;
 let failed = 0;
@@ -31,12 +29,7 @@ function check(label: string, ok: boolean, detail = "") {
 class Rollback extends Error {}
 
 async function main() {
-  const isPreview = (process.env.DATABASE_URL ?? "").includes("fdzxzxayhknywvmrhjcj");
-  console.log(`Target DB: ${isPreview ? "camman-v2 (preview)" : "UNKNOWN"}\n`);
-  if (!isPreview) {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   let rolledBack = false;
   try {

@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
@@ -16,7 +17,6 @@ import postgres from "postgres";
 // found nothing to look at has told you its setup broke, not that the system is
 // healthy.
 
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
 const OPERATOR_EMAIL = process.env.OPERATOR_TEST_EMAIL ?? "operator-test@exuma.io";
 const BASE = process.env.BASE_URL ?? "";
 
@@ -33,10 +33,6 @@ async function main() {
     console.error("BASE_URL is required (the preview deployment URL).");
     process.exit(1);
   }
-  if (!dbUrl.includes(PREVIEW_REF)) {
-    console.error(`REFUSING TO RUN: DATABASE_URL is not preview (${PREVIEW_REF}).`);
-    process.exit(1);
-  }
   if (/^camman\.vercel\.app$/.test(new URL(BASE).host)) {
     console.error("REFUSING TO RUN: BASE_URL is the production alias.");
     process.exit(1);
@@ -44,7 +40,7 @@ async function main() {
 
   console.log("=== operator guardrails ===\n");
   console.log(`  target  : ${BASE}`);
-  console.log(`  database: preview (${PREVIEW_REF})\n`);
+  console.log(`  Target DB: ${requirePreviewDb().label}\n`);
 
   const sql = postgres(dbUrl, { prepare: false, max: 1 });
   // SERVICE ROLE, not the anon key — admin.auth.admin.* refuses anon with

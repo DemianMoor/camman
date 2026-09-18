@@ -388,7 +388,11 @@ export async function performBehavioralSplit(
         await tx
           .update(campaign_stages)
           .set({ tracking_id: stageTrackingId, full_url: rewrittenFullUrl })
-          .where(eq(campaign_stages.id, s.id));
+          // org_id alongside the id (CLAUDE.md §3). Cannot change the result:
+          // every `s` is a row this same transaction INSERTed with
+          // `org_id: orgId`, so the added predicate is true by construction —
+          // it is here so the pattern holds by reading, not by provenance.
+          .where(and(eq(campaign_stages.id, s.id), eq(campaign_stages.org_id, orgId)));
       }
     }
 

@@ -265,9 +265,10 @@ type Stage = {
   tracking_id: string | null;
   split_index: number | null;
   split_total: number | null;
-  // Behavioral lane (step 5). behavioral_tier NULL ⇒ ordinary stage; 0/1/2 ⇒ a
-  // lane hanging off parent_stage_id (the prior position). audience_count is the
-  // LIVE lane preview for lanes (alive + exact tier − opt-outs, converted out).
+  // Behavioral lane (step 5). behavioral_tier NULL ⇒ ordinary stage; 0/1/2/3 ⇒ a
+  // lane hanging off parent_stage_id (the prior position); 3 is Registered since
+  // Phase 4. audience_count is the LIVE lane preview for lanes (alive + exact
+  // tier − opt-outs, Purchased contacts excluded).
   behavioral_tier: number | null;
   parent_stage_id: number | null;
   archived_at: string | null;
@@ -385,7 +386,13 @@ const BEHAVIORAL_TIER_META: Record<
 // twice inline. If the server default changes, this changes with it, and the
 // two must be edited together: the server's is what an omitted request body
 // gets, this one is what the picker ticks.
-const DEFAULT_SELECTED_TIERS = [1, 2];
+// ⚠️ FROZEN, AND COPIED AT EVERY USE. It was a plain array handed BY REFERENCE
+// to both useState and the reset below, so one future non-mutating-by-accident
+// handler (`prev.push(…)`, `prev.sort()`) would have rewritten "the default" for
+// the rest of the session — silently, and only after the first tick. The server's
+// counterpart is already `readonly number[]`; this one now matches it, and
+// Object.freeze makes the mistake throw in strict mode instead of sticking.
+const DEFAULT_SELECTED_TIERS: readonly number[] = Object.freeze([1, 2]);
 
 // Stage status is freely assignable among the non-archived states via an
 // inline dropdown, so an operator can record the resulting status directly.
@@ -635,7 +642,7 @@ export default function CampaignDetailPage() {
   // changes nobody's workflow until it is ticked deliberately. Reset in
   // openBehavioralSplit (an event handler), never in an effect.
   const [selectedTiers, setSelectedTiers] =
-    useState<number[]>(DEFAULT_SELECTED_TIERS);
+    useState<number[]>([...DEFAULT_SELECTED_TIERS]);
   const [importStage, setImportStage] = useState<Stage | null>(null);
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
@@ -795,7 +802,7 @@ export default function CampaignDetailPage() {
   // is fetched on open — never inline in the stages list.
   async function openBehavioralSplit() {
     setSplitPreview(null);
-    setSelectedTiers(DEFAULT_SELECTED_TIERS);
+    setSelectedTiers([...DEFAULT_SELECTED_TIERS]);
     setBehavioralSplitOpen(true);
     const result = await splitPreviewApi.execute(
       `/api/campaigns/${campaignId}/behavioral-split/preview`,
@@ -1093,7 +1100,7 @@ export default function CampaignDetailPage() {
             return (
               <span
                 className="font-mono text-sm tabular-nums"
-                title="Live preview — alive + at this exact tier, minus opt-outs (converted exit). Changes until send."
+                title="Live preview — alive + at this exact tier, minus opt-outs (Purchased contacts exit). Changes until send."
               >
                 {n.toLocaleString()}
                 <span className="ml-1 align-middle text-[9px] uppercase tracking-wide text-muted-foreground">
@@ -1855,11 +1862,15 @@ export default function CampaignDetailPage() {
               <span className="font-medium">Reached offer</span> — so someone who
               registered is <em>not</em> in the Reached-offer lane and gets no
               message unless a Registered lane exists.{" "}
-              {/* The space after this span MUST be an explicit {" "}: the text
-                  node that follows carries an entity (won&apos;t), and its
-                  leading space is dropped in the rendered HTML — the pre-Phase-4
-                  copy shipped reading "Convertedcontacts exit the sequence",
-                  verified in the DOM. */}
+              {/* The space after this span is an explicit {" "} because the
+                  words rendered JOINED without it. WHAT WAS ESTABLISHED: the
+                  symptom, read out of the rendered DOM of a DEV build — the copy
+                  showed "Convertedcontacts exit the sequence". The CAUSE was not
+                  isolated: under plain JSX semantics a space following </span> on
+                  the same line is preserved, so this is likely transform- or
+                  mode-specific, and nobody has confirmed a production build ever
+                  rendered them joined. The {" "} fix is transform-independent and
+                  correct either way, which is why it stays without the diagnosis. */}
               <span className="font-medium">Purchased</span>{" "}
               contacts exit the sequence (no lane) and opted-out contacts are
               suppressed, so lane counts won&apos;t sum to the full audience.{" "}

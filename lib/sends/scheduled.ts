@@ -735,7 +735,7 @@ export async function runScheduledSends(
     ) {
       await markLaneSkippedEmpty(dbc, row.stage_id);
       result.skipped_empty++;
-      void notifyLaneSkippedEmpty(dbc, row.stage_id).catch(() => {});
+      void notifyLaneSkippedEmpty(dbc, row.stage_id, row.org_id).catch(() => {});
       if (await settleSplitGroup(dbc, row.split_group_id)) result.split_groups_ready++;
     } else if (PERMANENT_REFUSALS.has(kickoff.reason)) {
       await dbc.execute(sql`

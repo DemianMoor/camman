@@ -199,8 +199,15 @@ async function main() {
     const bad4 = resolveLaneTiers([4]);
     check("⭐ resolveLaneTiers still REFUSES 4 (the exit is not a lane)",
       bad4.ok === false && bad4.code === "invalid_lane_tier");
+    // ⭐ DERIVED FROM LANE_TIERS, because the literal form could not fail for
+    // the reason the label claims: `includes("0, 1, 2, 3")` is green against a
+    // hard-coded "Valid tiers are 0, 1, 2, 3." — the exact thing it says it
+    // catches — and stays green when LANE_TIERS grows to 5 entries, because
+    // "0, 1, 2, 3, 4" still CONTAINS "0, 1, 2, 3". Comparing against the
+    // registry couples the produced message to the registry, which IS the claim.
     check("...and its message lists the valid tiers from LANE_TIERS, not a hard-coded string",
-      bad4.ok === false && bad4.message.includes("0, 1, 2, 3"), bad4.ok === false ? bad4.message : "");
+      bad4.ok === false && bad4.message.includes(LANE_TIERS.map((t) => t.tier).join(", ")),
+      bad4.ok === false ? bad4.message : "");
     const c2b = await readyCampaign("p4b");
     const s2b = await performBehavioralSplit({ orgId, campaignId: c2b, tiers: [2, 3] });
     check("a [2,3] split persists two lanes at tiers 2 and 3",

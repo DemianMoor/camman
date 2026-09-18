@@ -15,14 +15,14 @@ import "./_env-preload"; // MUST be first — loads .env.local before db/client 
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
-import { EXIT_TIER, LANE_TIER_VALUES } from "@/lib/campaign-tier";
-import {
-  performBehavioralSplit,
-  LANE_TIERS,
-} from "@/lib/stages/behavioral-split";
+import { performBehavioralSplit } from "@/lib/stages/behavioral-split";
 import { generateStageTrackingId } from "@/lib/tracking-id";
 
 const ORG_MARKER = "__BSPLIT_TEST__";
+// The tier set this file's cases ask for, named ONCE. Every assertion about
+// "which lanes were created" reads this, so the request and the expectation
+// cannot drift into a fourth hard-coded copy of the lane list.
+const TRIO = [0, 1, 2];
 const COUNTED_TABLES = [
   "organizations", "campaigns", "campaign_stages", "creatives",
 ] as const;
@@ -132,7 +132,7 @@ async function main() {
     const parent = await newStage(campaignId, creativeId);
 
     console.log("\nCase 1a - split with NO completed stages (must be rejected):");
-    const r1a = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
+    const r1a = await performBehavioralSplit({ orgId, campaignId, tiers: TRIO });
     check(
       "rejected with conflict / reason=no_completed_stages",
       !r1a.ok && r1a.status === 409 &&
@@ -144,13 +144,13 @@ async function main() {
 
     console.log("\nCase 1b - split a campaign with one completed stage:");
     await markComplete(parent.id);
-    const r1 = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
+    const r1 = await performBehavioralSplit({ orgId, campaignId, tiers: TRIO });
     check("returns ok with 3 lane ids", r1.ok && r1.lane_stage_ids.length === 3, JSON.stringify(r1));
     const lanes = await lanesOf(parent.id);
     check("exactly 3 lanes persisted", lanes.length === 3, `got ${lanes.length}`);
     check(
       "tiers are exactly {0,1,2}",
-      JSON.stringify(lanes.map((l) => l.behavioral_tier)) === JSON.stringify([0, 1, 2]),
+      JSON.stringify(lanes.map((l) => l.behavioral_tier)) === JSON.stringify(TRIO),
       lanes.map((l) => l.behavioral_tier).join(","),
     );
     check("all lanes anchor on the completed stage", lanes.every((l) => l.parent_stage_id === parent.id));
@@ -183,7 +183,7 @@ async function main() {
     check("all 3 lanes carry split_group_id", Number(lanesLinked[0].n) === 3, `got ${lanesLinked[0].n}`);
 
     console.log("\nCase 2 - re-split while one is still pending (must be rejected):");
-    const r2 = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
+    const r2 = await performBehavioralSplit({ orgId, campaignId, tiers: TRIO });
     check(
       "rejected with conflict / reason=split_already_pending",
       !r2.ok && r2.status === 409 &&
@@ -197,7 +197,7 @@ async function main() {
       UPDATE campaign_stages SET status = 'archived'
       WHERE split_group_id = ${g1.id}::uuid
     `);
-    const r2b = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
+    const r2b = await performBehavioralSplit({ orgId, campaignId, tiers: TRIO });
     check("re-split ALLOWED once lanes are archived", r2b.ok, JSON.stringify(r2b));
     const liveLanes = (await db.execute(sql`
       SELECT count(*)::int AS n FROM campaign_stages
@@ -215,7 +215,11 @@ async function main() {
     // and a half-configured / tier-4 row is rejected at the DB level).
     // ====================================================================
     console.log("\nCase 3 — behavioral_lane CHECK:");
-    check("created lanes satisfy CHECK (tier in {0,1,2} AND parent set)", lanes.every((l) => [0, 1, 2].includes(l.behavioral_tier) && l.parent_stage_id != null));
+    // Derived from what case 1b ASKED FOR, not a fourth hard-coded copy of the
+    // lane list: the claim is "the split created exactly the lanes requested and
+    // the DB accepted them", which a literal cannot state.
+    check(`created lanes satisfy CHECK (tier in {${TRIO.join(",")}} AND parent set)`,
+      lanes.every((l) => TRIO.includes(l.behavioral_tier) && l.parent_stage_id != null));
     async function insertRejected(label: string, tier: number | null, parent: number | null) {
       try {
         await db.execute(sql`
@@ -266,7 +270,7 @@ async function main() {
 
     let threw = false;
     try {
-      await performBehavioralSplit({ orgId, campaignId: campaign2Id, tiers: [0, 1, 2] });
+      await performBehavioralSplit({ orgId, campaignId: campaign2Id, tiers: TRIO });
     } catch {
       threw = true;
     }
@@ -280,22 +284,14 @@ async function main() {
       (await db.execute(sql`SELECT count(*)::int AS n FROM campaign_stages WHERE id = ${decoy.id}::int`)) as unknown as { n: number }[]
     )[0].n === 1);
 
-    // sanity, re-aimed 2026-09-18 (Phase 4): tier 3 is the Registered LANE now,
-    // so "no tier-3 lane" was asserting the opposite of the requirement. Stated
-    // as a COUPLING rather than a literal: the split's own registry (LANE_TIERS)
-    // must be exactly the scale's lane set (LANE_TIER_VALUES, = migration 0184's
-    // CHECK). Those two lists having drifted is precisely how tier 3 reached the
-    // confirm dialog as a tickable row that 400'd the whole split when ticked.
-    // `LANE_TIERS` is `as const`, so its tiers are the literal union 0|1|2|3 and
-    // `t.tier === EXIT_TIER` is a tsc error ("no overlap") rather than a runtime
-    // check — widened to number[] here so the bar can actually RUN and go red.
-    const laneRegistryTiers: number[] = LANE_TIERS.map((t) => t.tier);
-    check(
-      `LANE_TIERS is exactly LANE_TIER_VALUES (${LANE_TIER_VALUES.join(",")}) and excludes the exit tier ${EXIT_TIER}`,
-      JSON.stringify(laneRegistryTiers) === JSON.stringify([...LANE_TIER_VALUES]) &&
-        !laneRegistryTiers.includes(EXIT_TIER),
-      JSON.stringify(laneRegistryTiers),
-    );
+    // The LANE_TIERS ↔ LANE_TIER_VALUES coupling bar that used to sit here MOVED
+    // to scripts/test-campaign-tier-scale.ts (P17–P19). It needs no database,
+    // and lib/stages/split-group.ts states the rule for exactly this class of
+    // guard: "it lives in the pure suite, not next to the map, so it runs with
+    // no DB." Parked here it did not run in the no-DB lane at all. The DB half
+    // of that coupling — the lane list vs. migration 0184's CHECK — is asserted
+    // in scripts/test-registered-lane-tier-db.ts (C1/C2), which is where a
+    // pg_get_constraintdef read belongs.
   } finally {
     console.log("\nCleanup (scoped to test org only)");
     try {

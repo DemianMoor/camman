@@ -607,12 +607,20 @@ export async function notifyGroupStuck(
 export async function notifyLaneSkippedEmpty(
   dbc: DbOrTx,
   stageId: number,
+  orgId: string,
 ): Promise<void> {
+  // org_id alongside the id, and on the campaigns join too (CLAUDE.md §3).
+  // Cannot change the result: the only caller passes the org_id it read from
+  // the SAME campaign_stages row as stageId, and a stage whose campaign belongs
+  // to another org would be a data-integrity violation — but an alert that
+  // names a campaign is exactly the kind of read that should not be able to
+  // cross an org boundary by accident.
   const rows = (await dbc.execute(sql`
     SELECT c.name AS campaign, s.stage_number AS stage_number,
            s.label AS label, s.behavioral_tier AS tier
-    FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
-    WHERE s.id = ${stageId}::int LIMIT 1
+    FROM campaign_stages s
+    JOIN campaigns c ON c.id = s.campaign_id AND c.org_id = s.org_id
+    WHERE s.id = ${stageId}::int AND s.org_id = ${orgId}::uuid LIMIT 1
   `)) as unknown as {
     campaign: string | null;
     stage_number: number | null;

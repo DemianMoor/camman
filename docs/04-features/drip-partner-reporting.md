@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-09-18 (Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger)_
+_Last updated: 2026-09-18 (Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -202,6 +202,34 @@ campaign detail page via `/api/campaigns/[campaignId]/drip-journeys`.
 
 Reading progression as disjoint shows a funnel that loses nobody. The UI states
 which is which on the page.
+
+### ⚠️ There is no `Registered` step, and that is deliberate (2026-09-18)
+
+Conversion-events Phase 4 inserted **Registered** into the behavioural tier scale
+as tier 3 and moved the purchased **exit** to tier 4
+([behavioral-lanes.md](behavioral-lanes.md)). The progression funnel gained **no
+new row**; what moved is one threshold, in
+[`lib/drip/funnel.ts`](../../lib/drip/funnel.ts):
+
+| Row | Predicate | What changed |
+|---|---|---|
+| `clicked` | `COALESCE(t.tier, 0) >= 1` | unchanged |
+| `reached offer` | `COALESCE(t.tier, 0) >= 2` | **unchanged on purpose** — a registrant (3) and a buyer (4) *did* reach the offer, and that is what a cumulative high-water funnel means |
+| `converted` | `COALESCE(t.tier, 0) >= EXIT_TIER` (**4**, was 3) | a $0 REGISTRATION is no longer counted as a conversion |
+
+So a registrant shows up under **reached offer** and not under **converted**,
+which is the truth about them. The per-lane breakdown *does* name the new lane:
+`laneLabel` renders `Registered lane` for a tier-3 lane.
+
+⚠️ **`converted` can also be under-counted by a race**, independently of the
+above: [`lib/drip/lifecycle-sweep.ts`](../../lib/drip/lifecycle-sweep.ts) runs
+purchase → completed → expired on the pooled client with no enclosing
+transaction, so a purchase landing *between* the first two passes closes that
+journey as `completed` / `all_stages_sent` instead of `converted` / `purchased`.
+Sub-second per campaign, costs a funnel bucket and never a contact — the journey
+closes either way and no message differs. Phase 4 widened the window (before tier
+4, a buyer with unsent children could not be closed by the completed pass at
+all). Documented at the sweeper; not redesigned.
 
 ### ⚠️ Grouped on `(state, close_reason)`, not `state` alone
 

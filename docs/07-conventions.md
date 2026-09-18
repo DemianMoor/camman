@@ -26,14 +26,30 @@ pulls in the db client), it is a **two-file** edit that must land together.
 theoretical.** The preview renders a row per `LANE_TIER_VALUES` entry, so tier 3
 sat in the confirm dialog as a tickable row with a live count while
 `resolveLaneTiers` still refused it — ticking it 400'd the whole split. The two
-are now asserted equal (and asserted to exclude `EXIT_TIER`) by the
-`LANE_TIERS is exactly LANE_TIER_VALUES` bar in
-[`scripts/test-behavioral-split.ts`](../scripts/test-behavioral-split.ts).
+are now asserted equal (and asserted to exclude `EXIT_TIER`) by `P17`–`P19` in
+[`scripts/test-campaign-tier-scale.ts`](../scripts/test-campaign-tier-scale.ts)
+— the **pure** suite, because that bar needs no database and a pure bar parked in
+a DB-requiring script never runs in the no-DB lane. The third leg, `LANE_TIER_VALUES`
+against migration 0184's CHECK itself, is `C1`/`C2` in
+[`scripts/test-registered-lane-tier-db.ts`](../scripts/test-registered-lane-tier-db.ts),
+which reads `pg_get_constraintdef` — the only place the TS list and the database
+can be compared. Without it, adding a tier to both TS lists passes every static
+bar and fails at INSERT time, in production, on a lane the operator just ticked.
 
 ⭐ **A refusal message that restates its own valid set goes stale silently.** The
 `invalid_lane_tier` message read "Valid tiers are 0, 1, 2." as a literal; it now
 derives the list from `LANE_TIERS`. Nothing would have failed when the list
 changed — the operator would just have been told the wrong thing.
+
+⭐ **And the bar for that must compare against the REGISTRY, not against today's
+text.** The first attempt asserted `message.includes("0, 1, 2, 3")` under a label
+claiming the message was not hard-coded. It could not fail for that reason: a
+developer who hard-codes `"Valid tiers are 0, 1, 2, 3."` keeps it green, and when
+the registry grows the message `"0, 1, 2, 3, 4"` still *contains* `"0, 1, 2, 3"`
+— green again. The form that states the claim is
+`message.includes(LANE_TIERS.map((t) => t.tier).join(", "))`: it couples the
+produced message to the registry, which IS the claim. **Generally: a bar whose
+expected value is a literal copy of today's output tests nothing but today.**
 
 ## A tier-indexed map must be TOTAL over the tier list, and a bar must say so (2026-09-18)
 
@@ -44,16 +60,30 @@ Two rules:
 1. **Every value in `LANE_TIER_VALUES` has a label, and a bar asserts it** — `unlabelledLaneTiers()` in [`lib/stages/split-group.ts`](../lib/stages/split-group.ts), asserted by `P16` in [`scripts/test-campaign-tier-scale.ts`](../scripts/test-campaign-tier-scale.ts). Add a tier, and the guard goes red naming the number. It lives in the pure suite, not next to the map, so it runs with no DB.
 2. **A reader whose key space is NARROWER than the scale indexes defensively.** `FOLLOWUP_TIERS`/`FollowupTier` are deliberately `{0,1,2}` while lanes go to 3, so [`components/campaigns/drip-followup-children.tsx`](../components/campaigns/drip-followup-children.tsx) casts a number it does not control. `TIER_OPTIONS[3].map` would be a `TypeError` that blanks the whole stage section, so both lookups fall back (`?? \`Tier ${tier}\`` / `?? []`) instead of trusting the cast.
 
+## Tier 3 (Registered) is the one NON-MONOTONIC value on the behavioural scale (2026-09-18)
+
+Every other branch of `campaignTierExpr` is append-only, so a contact's tier can only rise — which is what "high-water" means and what most readers assume. Tier 3 can be **revoked**: the binding rule that a rejected purchase is not a registrant is enforced by a `NOT EXISTS` over purchase-type events at any *known* status, so **a rejected purchase arriving after a registration drops that contact from 3 back to their click / offer-reach tier**. The scale stays monotonic in *rank* (3 above 2, below 4 — all `MAX(tier)` needs); a contact's value over *time* is not.
+
+Deliberate, and the cost is bounded but real:
+
+- **Lanes** — none in practice: lane membership freezes at materialization.
+- **Drip journeys** — **order-dependent and irreversible.** A journey closed while the contact read 3 is never reopened (`close()` guards `state IN ('routed','active')`; `runDripFollowups` filters `j.state = 'active'`), so that contact silently loses the 0/1/2 follow-ups they would now qualify for. The **same final ledger state** yields two different outcomes depending on postback order vs. sweep timing.
+
+Do **not** "fix" it by dropping the `NOT EXISTS` — that re-admits a rejected buyer to the Registered lane, which is the thing the rule exists to prevent. Stated at the expression in [`lib/campaign-tier.ts`](../lib/campaign-tier.ts) and in [`docs/04-features/behavioral-lanes.md`](04-features/behavioral-lanes.md).
+
+⭐ **Generally: when one branch of a "high-water" expression carries an exclusion predicate, that branch is not high-water.** Say so where the expression is defined — a reader who trusts the word will build something that cannot be un-built.
+
 ## Renumbering a scale must be chased into its INLINE copies, not just the shared fragment (2026-09-18)
 
 `campaignTierExpr` ([`lib/campaign-tier.ts`](../lib/campaign-tier.ts)) is the source of truth for the behavioural tier scale, and every reader that CAN import it does. Two cannot: `closeCompletedJourneys()` and `expireJourneysPastEndDate()` in [`lib/drip/lifecycle.ts`](../lib/drip/lifecycle.ts) need the tier **correlated per journey row** (`j.campaign_id` / `j.contact_id`) while the shared fragment takes a literal campaign id, so they carry an inline copy of the scale — twice.
 
 ⭐ **An inline copy that stops one tier short does not fail; it WAITS.** Both copies ask "is an active behavioural child still owed a send?", and a child BELOW the contact's tier can never be owed because the tier is high-water. While the copies topped out at 2, a REGISTRANT (real tier 3) matched no drip child (0/1/2) yet the tier-2 child was still judged reachable — so the journey never completed, and since `drip_journeys_one_live_per_contact_uniq` keys on `state IN ('routed','active')` it held that contact's **only** live-journey slot against every future journey too. A buyer has the identical shape and only survives because `closeJourneysOnPurchase` closes those separately; there is no registration analogue and (user decision) none is being built.
 
-Two rules:
+Three rules:
 
-1. **Grep for the scale's literals, not just its constants, when a tier is inserted.** `tsc` cannot see a number inside a `sql` template. `grep -rn "behavioral_tier >= COALESCE" --include=*.ts .` finds every inline copy; it found exactly the two above.
-2. **Each copy needs its own bar.** The two copies are byte-identical, so a test that exercises one proves nothing about the other. [`scripts/test-drip-lifecycle.ts`](../scripts/test-drip-lifecycle.ts) carries one ⭐ registrant bar per copy (section 3 for completion, 3b for expiry), each asserting the journey **advances** — not that no error was raised.
+1. ⭐ **Couple the copies to the original with a BAR, not with a grep.** A grep a human has to remember to run is the weakest form of the guard this document argues for two paragraphs earlier, and remembering is exactly what failed here. `P20`–`P26` in [`scripts/test-campaign-tier-scale.ts`](../scripts/test-campaign-tier-scale.ts) (pure, no DB) extract the tier-3 rule from `lib/campaign-tier.ts` by balanced parens — comments stripped, whitespace collapsed, so CRLF and LF both match — and assert it **byte-identical** in both inline copies; that there are **exactly two** copies (a third added later would be unguarded by construction, and this is the bar that notices it exists); that each copy's UNION arms emit `TIER_REGISTERED` / `TIER_PURCHASED` read from the shared module, since `SELECT 3` / `SELECT 4` are bare literals no type checker sees; and that both ledger arms stay org-scoped. **What is NOT compared is the scoping** — literal ids in the fragment, correlated columns in the copies — because that difference is the whole reason the copy exists. Red-proved from both ends: mutate either copy, or mutate the original.
+2. **Each copy also needs its own behavioural bar.** Text equality proves the copies agree; it does not prove they are *right*. [`scripts/test-drip-lifecycle.ts`](../scripts/test-drip-lifecycle.ts) carries one ⭐ registrant bar per copy (section 3 for completion, 3b for expiry), each asserting the journey **advances** — not that no error was raised.
+3. ⭐ **A defensive line needs a fixture that only IT can satisfy.** `AND pe.status IS NOT NULL` inside the purchase-eviction `NOT EXISTS` is what stops an UNMAPPED purchase row from evicting a registrant — and it was deletable from **both** copies with every bar still green, because no fixture carried a purchase row of any status at all. A guard whose deletion is invisible is not guarded. The fixture that closes it is a registrant who **also** carries a purchase-type row with `status` NULL (`seedConversionEvent({ eventKey: "purchase", status: null })` — not an omitted `eventKey`, whose NULL `event_type_id` is already harmless because `NULL IN (…)` is NULL). When you add a defensive predicate, write down which fixture would go red without it; if the answer is "none", the predicate is undefended.
 
 **Progressing a journey past a registrant is NOT the same as giving registrants a follow-up.** `FOLLOWUP_TIERS` and `FollowupTier` stay `{0, 1, 2}`: a registrant matches no drip child, lands in `tierMismatch`, and that no-op is the intended behaviour. Widening either is what would create a Registered follow-up lane, which is explicitly out of scope.
 
@@ -63,7 +93,9 @@ Two rules:
 - **Arming it is the feature, not the fix.** A `WHEN 3` arm only does anything if a tier-3 child exists, which needs `FOLLOWUP_TIERS` widened — i.e. building the Registered follow-up that was ruled out. It also needs `FollowupTier` widened for `followupDueAt`'s input type.
 - **But the halves must move together.** A tier-3 child armed ONLY in the ladder hangs the journey anyway (`lifecycle.ts` waits on it at `3 >= 3`); a tier-3 child with NO arm never sends and hangs it too. So the invariant to pin is the coupling: **every non-zero member of `FOLLOWUP_TIERS` has a detection arm**, asserted in [`scripts/test-drip-followup-timing.ts`](../scripts/test-drip-followup-timing.ts) by reading the two literals out of their two DIFFERENT source files (whitespace collapsed first, so CRLF and LF both match) and red-proved from both sides.
 
-**Open, for the owner:** `drip_followup_minutes` is absent from `NON_UPDATABLE` in the stage PATCH route, while `behavioral_tier` and `parent_stage_id` are present. Nothing in `app/` writes it today — `ensureFollowupChildren` is its only writer — so no tier-3 drip child can exist. If a Registered LANE created by a behavioural split under a drip first-send stage could ever be PATCHed with a timer, it would become a drip child that hangs every registrant's journey. Adding the field to `NON_UPDATABLE` would close that off; it was NOT done here because it is outside the drip-only scope of this task.
+**CLOSED 2026-09-18, and NOT the way it was first proposed.** The hole was real: a Registered LANE has `drip_followup_minutes` NULL, and two raw `PATCH`es (a timer, then `drip_active: true`) turn it into a drip child that hangs every registrant's journey. But ⭐ **adding the field to `NON_UPDATABLE` would have been a SILENT FAILURE, not a fix.** That route drops `NON_UPDATABLE` keys *without an error* (`if (NON_UPDATABLE.has(k)) continue;`), and `drip_followup_minutes` is genuinely user-editable: the timer `<Select>` in [`components/campaigns/drip-followup-children.tsx`](../components/campaigns/drip-followup-children.tsx) is *the* way an operator changes a follow-up timer, and `ensureFollowupChildren` only ever writes the default. Listing it would have made that dropdown return **200**, toast "Follow-up updated", reload and show the old value — every drip child frozen at its default for ever, with no error anywhere.
+
+⭐ **Before making a field non-updatable, check whether the route's drop is SILENT and whether a live UI writes that field.** A generic patch loop that skips keys quietly turns "reject" into "pretend". The hole was closed **semantically** instead, by the thing that is actually wrong — the TIER: [`lib/api/followup-tier-guard.ts`](../lib/api/followup-tier-guard.ts) refuses a patch that sets `drip_followup_minutes` (non-null) or `drip_active: true` on a stage whose stored `behavioral_tier` is outside `FOLLOWUP_TIERS`, with `400` + `details.reason = "followup_tier_unsupported"`. Three carve-outs, each asserted: a NULL tier is **not a lane** and stays allowed (the drip first-send stage is NULL with `drip_active: true`; refusing it breaks drip itself), clearing a timer is always allowed, and `drip_active: false` is always allowed — otherwise a stage armed before the guard existed could never be disarmed. The bars live in [`scripts/test-drip-lifecycle.ts`](../scripts/test-drip-lifecycle.ts) rather than the pure suite because the guard's whole value is its coupling to `FOLLOWUP_TIERS`, whose module is `server-only`; a pure copy of that list would assert nothing. One of them reads the route's source and asserts it actually **calls** the guard — a guard nothing calls is not a guard.
 
 ## A source-grep check must not be able to pass by accident (2026-09-18)
 

@@ -36,6 +36,27 @@ import {
 // whose STATUS is unmapped (NULL) does NOT evict them: an unmapped row counts as
 // nothing everywhere else in this codebase and counts as nothing here.
 //
+// ⚠️⚠️ AND THAT MAKES TIER 3 THE ONE NON-MONOTONIC VALUE ON THIS SCALE. Every
+// other branch only ever ADDS a signal, so a contact's tier can only rise. Tier
+// 3 can be REVOKED: a rejected purchase arriving after a registration drops that
+// contact from 3 back to their click / offer-reach tier (0/1/2). The scale is
+// still monotonic in RANK — 3 is above 2 and below 4, which is what MAX needs —
+// but a contact's value over TIME is not, and the "high-water" wording below is
+// true of the other branches only.
+//
+// The consequence is ORDER-DEPENDENT and it is accepted (owner's ruling; the
+// rule that a rejected buyer is not a registrant is worth more than the edge):
+//   • lanes — membership freezes at materialization anyway, so a revocation
+//     after that point changes nothing for a lane already built;
+//   • drip — a journey CLOSED at tier 3 is never reopened (`close()` guards
+//     `state IN ('routed','active')`) and `runDripFollowups` filters
+//     `j.state = 'active'`, so that contact silently loses the 0/1/2 follow-ups
+//     they would now qualify for. The SAME final ledger state therefore produces
+//     two different outcomes depending on postback order vs. sweep timing.
+// Documented in docs/04-features/behavioral-lanes.md and docs/07-conventions.md.
+// Do not "fix" it by dropping the NOT EXISTS — that re-admits a rejected buyer
+// to the Registered lane, which is the thing the rule exists to prevent.
+//
 // ⚠️ EVERY BRANCH IS CAMPAIGN-SCOPED, including the two ledger ones. A
 // registration on a PREVIOUS campaign or offer does not place a contact in this
 // campaign's Registered lane; they read tier 0 and are targetable normally.
@@ -88,10 +109,15 @@ export function tierLiteral(n: number): SQL {
 
 // Returns a SUBQUERY that yields one row `(contact_id, tier)` for every contact
 // with AT LEAST ONE qualifying signal in this campaign, where `tier` is the
-// HIGHEST tier reached — high-water / monotonic, computed as MAX over a UNION of
-// the per-signal sources (so a contact who clicked AND reached AND bought reads
-// as 4, never 1). Campaign-scoped: only signals tied to THIS campaign count, not
-// the contact's org-wide activity.
+// HIGHEST tier reached — computed as MAX over a UNION of the per-signal sources
+// (so a contact who clicked AND reached AND bought reads as 4, never 1).
+// Campaign-scoped: only signals tied to THIS campaign count, not the contact's
+// org-wide activity.
+//
+// High-water over TIME for tiers 1, 2 and 4 — their signals are append-only, so
+// those values can only rise. NOT for tier 3: see the non-monotonicity note
+// above. Readers that assume "a tier never falls" are right about every branch
+// except Registered.
 //
 // ABSENCE = tier 0. A contact with no signal is simply not in the result set;
 // callers LEFT JOIN this and `COALESCE(t.tier, 0)` so an absent contact reads as

@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-09-18_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -11,6 +11,14 @@ campaign. **Zero sends** — a journey is an assignment, not a message. The sche
 > [drip-partner-reporting.md](drip-partner-reporting.md). Note in particular that
 > the **Ignored lane is terminal**: it closes its journey `completed`/`unengaged`
 > in the same transaction as the lane send.
+>
+> **2026-09-18 (conversion-events Phase 4).** The behavioural tier scale gained
+> **Registered** as tier 3 and the purchased exit moved to tier 4, but the funnel
+> above is unchanged and gained **no Registered step**: `reached offer` still
+> counts registrants (they did reach it) and only `converted` moved, from
+> `tier >= 3` to `tier >= 4`, so a $0 registration is no longer a conversion. See
+> [drip-partner-reporting.md](drip-partner-reporting.md) and
+> [behavioral-lanes.md](behavioral-lanes.md).
 
 Card `869endku0` · migrations **0159–0163** · recon:
 [2026-08-23-drip-phase-4-routing-recon.md](../superpowers/specs/2026-08-23-drip-phase-4-routing-recon.md)

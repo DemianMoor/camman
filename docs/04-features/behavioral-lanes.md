@@ -24,7 +24,8 @@ high-water tier.
 
 ## The tier model
 
-A contact's tier within a campaign is a **high-water mark** (only goes up):
+A contact's tier within a campaign is a **high-water mark** (only goes up — with
+one exception, tier 3; see the non-monotonicity note below the table):
 
 | Tier | Name | Signal (campaign-scoped) |
 |------|------|--------------------------|
@@ -66,6 +67,61 @@ lanes are mutually exclusive by construction.
 > contacts get **no message at that position**. The confirm dialog and the stages
 > explainer both say so. The change can therefore only ever REDUCE who is
 > messaged, never add someone.
+
+### ⚠️ Tier 3 is the one NON-MONOTONIC value on the scale
+
+Every other branch is append-only, so a contact's tier can only rise. Tier 3 can
+be **revoked**: the rule that a rejected purchase is not a registrant is enforced
+by a `NOT EXISTS` over purchase-type events at any *known* status, so a
+**rejected purchase arriving after a registration drops that contact from 3 back
+to their click / offer-reach tier** (0/1/2). The scale is still monotonic in
+*rank* — 3 sits above 2 and below 4, which is all `MAX(tier)` needs — but a
+contact's value over *time* is not.
+
+This is the owner's ruling and the behaviour is deliberate. What it costs:
+
+| Surface | Effect of a revocation |
+|---|---|
+| Lanes | none in practice — lane membership **freezes at materialization**, so a lane already built is unaffected. |
+| Drip journeys | **order-dependent and irreversible.** A journey closed while the contact read 3 is never reopened (`close()` guards `state IN ('routed','active')`, `runDripFollowups` filters `j.state = 'active'`), so that contact silently loses the 0/1/2 follow-ups they would now qualify for. The **same final ledger state** therefore produces two different outcomes depending on postback order vs. sweep timing. |
+| Reports | the contact simply reads their fallback tier from then on. |
+
+Do **not** "fix" it by dropping the `NOT EXISTS` — that re-admits a rejected
+buyer to the Registered lane, which is the thing the rule exists to prevent.
+Stated at the expression itself in [`lib/campaign-tier.ts`](../../lib/campaign-tier.ts).
+
+### Arming a follow-up child at a tier that has no timer is refused
+
+`FOLLOWUP_TIERS` ([`lib/drip/children.ts`](../../lib/drip/children.ts)) is
+`{0, 1, 2}` while lanes now reach 3, and **both halves** of the follow-up
+machinery key off the child's tier: `runDripFollowups`' detection ladder has no
+arm above 2 (so a tier-3 child can never be due) while
+[`lib/drip/lifecycle.ts`](../../lib/drip/lifecycle.ts)'s reachability predicate
+*waits* on any unsent child at or above the contact's tier. A tier-3 drip child
+therefore satisfies `3 >= 3` for a registrant, never sends, and hangs that
+journey for ever.
+
+No UI can create one — a behavioural-split lane has `drip_followup_minutes` NULL,
+and the follow-up editor's data source filters that column `IS NOT NULL`, so the
+lane never appears there — but two raw `PATCH`es could. `PATCH
+/api/campaigns/[campaignId]/stages/[stageId]` now refuses a patch that sets
+`drip_followup_minutes` (non-null) or `drip_active: true` on a stage whose stored
+`behavioral_tier` is outside `FOLLOWUP_TIERS`: **400**, `code: "validation"`,
+`details.reason = "followup_tier_unsupported"`
+([`lib/api/followup-tier-guard.ts`](../../lib/api/followup-tier-guard.ts)).
+
+Three carve-outs, all deliberate:
+
+- **`behavioral_tier` NULL is allowed** — a NULL tier is not a lane at all, and
+  the drip **first-send** stage is NULL with `drip_active: true`. Refusing it
+  would break drip itself.
+- **Clearing a timer (`null`) and `drip_active: false` are always allowed**, or a
+  stage armed before the guard existed could never be disarmed.
+- The fields are **not** added to the route's `NON_UPDATABLE` set. That route
+  drops `NON_UPDATABLE` keys *without an error*, so listing
+  `drip_followup_minutes` there would make the follow-up timer `<Select>` return
+  200, toast success and never save — every drip child frozen at its default for
+  ever, silently.
 
 ## Data model
 
@@ -341,7 +397,21 @@ Two entry points for two different actions; deliberately not two for one action.
   does not. **No Registered drip follow-up exists** — `FOLLOWUP_TIERS` /
   `FollowupTier` stay `0 | 1 | 2`, a registrant matches no child and simply
   completes. One ⭐ bar per copy in
-  [scripts/test-drip-lifecycle.ts](../../scripts/test-drip-lifecycle.ts).
+  [scripts/test-drip-lifecycle.ts](../../scripts/test-drip-lifecycle.ts), plus —
+  since 2026-09-18 — a registrant who ALSO carries a purchase-type row with an
+  UNMAPPED status, per copy. That fixture is the only one that can tell
+  `AND pe.status IS NOT NULL` apart from its absence: without a purchase row of
+  any kind, deleting that line from both copies leaves every other bar green,
+  and the resulting divergence from `campaign-tier.ts` re-creates the hang.
+  **The copies are also pinned to the original by TEXT**, not only by behaviour:
+  `P20`–`P26` in [scripts/test-campaign-tier-scale.ts](../../scripts/test-campaign-tier-scale.ts)
+  extract the tier-3 rule (the registration test plus the purchase-eviction
+  `NOT EXISTS`) from `campaign-tier.ts` by balanced parens and assert it appears
+  **byte-identical** in both copies, that there are **exactly two** copies, that
+  each copy's UNION arms emit `TIER_REGISTERED` / `TIER_PURCHASED`, and that both
+  ledger arms stay org-scoped. Scoping is excluded from the comparison by
+  construction — the literal-vs-correlated difference is the reason the copy
+  exists. That replaces the manual grep the conventions doc used to prescribe.
 - **Drip follow-up scheduling (the detection ladder):**
   `runDripFollowups()` in [lib/drip/followups.ts](../../lib/drip/followups.ts)
   imports `campaignTierExpr` (it is not a third copy of the scale) and matches a
@@ -456,7 +526,9 @@ Two entry points for two different actions; deliberately not two for one action.
 
 - [scripts/test-campaign-tier.ts](../../scripts/test-campaign-tier.ts) — tier fragment.
 - [scripts/test-recipients-lanes.ts](../../scripts/test-recipients-lanes.ts) — lane recipient sets + ordinary-SQL-unchanged.
-- [scripts/test-behavioral-split.ts](../../scripts/test-behavioral-split.ts) — the split endpoint + guards + rollback. Its call sites pass `tiers: [0, 1, 2]` explicitly so they keep exercising the three-lane path after the default changed to `[1, 2]`. Also carries the registry-coupling bar: `LANE_TIERS` (what the picker offers) must be exactly `LANE_TIER_VALUES` (the scale's lane set = migration 0184's CHECK) and must exclude `EXIT_TIER`. Those two lists having drifted is how tier 3 reached the confirm dialog as a row that 400'd when ticked.
+- [scripts/test-campaign-tier-scale.ts](../../scripts/test-campaign-tier-scale.ts) — **PURE, no DB.** The scale's constants, the rendered SQL of the tier fragment and of the lane guard, the label coupling (`P16`), the registry coupling (`P17`–`P19`: `LANE_TIERS`, what the picker offers, must be exactly `LANE_TIER_VALUES`, the scale's lane set, and must exclude `EXIT_TIER` — those two having drifted is how tier 3 reached the confirm dialog as a row that 400'd when ticked), and the **inline-copy coupling** (`P20`–`P26`, below).
+- [scripts/test-behavioral-split.ts](../../scripts/test-behavioral-split.ts) — the split endpoint + guards + rollback. Its call sites pass the trio explicitly (named once as `TRIO`, so the request and every "which lanes were created" assertion cannot drift apart) so they keep exercising the three-lane path after the default changed to `[1, 2]`. The registry-coupling bar it used to carry moved to the pure suite above: it needed no database, and a pure bar parked in a DB-requiring script does not run in the no-DB lane.
+- [scripts/test-registered-lane-tier-db.ts](../../scripts/test-registered-lane-tier-db.ts) — migration 0184's CHECK, on camman-v2 inside a rolled-back transaction. `C1` reads `pg_get_constraintdef` and asserts the admitted set is **exactly** `LANE_TIER_VALUES`; `C2` that it never admits `EXIT_TIER`. This is the only place the TS list and the DB constraint can be compared — before it, adding a tier to both TS lists passed every static bar and failed only at INSERT time.
 - [scripts/test-behavioral-split-lane-picker.ts](../../scripts/test-behavioral-split-lane-picker.ts) — the lane picker: the `[1,2]` default, the explicit trio, a single lane, de-duplication, both refusal codes writing nothing, and — the regression guard for 2026-09-05 — that a **default two-lane group can reach `materialized`** with no tier-0 lane present. Asserts against the group it just created, never a global "no tier-0 lanes exist" count, which would go red the first time someone legitimately ticks `Ignored`. Case 2b (Phase 4) adds tier 3: `LANE_TIERS` carries it labelled `Registered`, `resolveLaneTiers` accepts `[2,3]` and still refuses `4`, the refusal message lists the valid tiers derived from `LANE_TIERS`, a `[2,3]` split persists lanes at tiers 2 **and** 3, and — the bar that must not be allowed to drift — the default is **still `[1,2]`**, so the new lane does not start ticked.
 - [scripts/test-lane-preview-count.ts](../../scripts/test-lane-preview-count.ts) — the live preview counts (incl. zero-data).
 - [scripts/verify-campaign-level-split.ts](../../scripts/verify-campaign-level-split.ts) — **the 0174 enforcement proof.** Scope is printed and an empty scope FAILS; the three lanes partition the source set; cross-stage precedence (Offer > Clicked > Ignored); a stage completing between the split and the recompute is included; a click before materialization re-routes the contact; frozen after materialization; a failed group releases nothing; an empty lane is skipped not burned; plus old-is-a-subset-of-new against REAL production lanes. Run with `--conditions=react-server`.

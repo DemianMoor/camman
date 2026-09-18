@@ -2,6 +2,36 @@
 
 _Last updated: 2026-09-18_
 
+## A report column generated from a registry has a STABLE id, and it is not the label (2026-09-18)
+
+Phase 5's per-event report columns are generated from the `event_types` registry
+([lib/reporting/event-columns.ts](../lib/reporting/event-columns.ts),
+[docs/04-features/conversion-events.md](04-features/conversion-events.md)). Two id
+formats, and they are the persisted sort key — a URL query parameter or a
+localStorage value that outlives the registry that produced it:
+
+- `evt:<event_type key>:<kind>` — `kind` ∈ `count | rate | pending_n | revenue | pending_revenue | epc`
+- `evtfunnel:<signal key>:<purchase key>` — the ratio column; the **denominator is first**
+
+The id is built from `event_types.key`, never from `label`: the label is free text
+an operator may edit at any time, the key is the natural identity
+(`event_types_org_key_uniq`). `eventColumnById()` parses an id back **through
+`buildEventColumns()`** rather than re-deriving the grammar, so a second copy of
+the id/tier rules cannot drift; it returns `null` for anything that is not a
+generated id, and a key containing a `:` is **not round-trippable** and fails
+closed (a funnel id with a colon in either key would be ambiguous, and one rule
+that is the same on both sides beats two rules that differ).
+
+Three properties that later phases inherit and must not regress:
+
+- **A column comes from the REGISTRY, not from the data.** An active event type
+  with zero conversions still gets its column, which reads 0. It must not vanish.
+- **Ordering is TOTAL** (class rank → `display_order` → `key`), because the column
+  set is rebuilt on every render; a partial order lets equal rows swap places
+  between renders.
+- **Cross-org merges by `key`**, not by id — `event_types.id` is a global serial,
+  the natural key is `(org_id, key)`.
+
 ## A script that writes to a database must refuse production, by import (2026-09-18)
 
 `.env.local` is **PRODUCTION**, and `scripts/_env-preload.ts` loads it whenever `DATABASE_URL` is not already set. On 2026-09-18 a test-fixture script ran that way and created live campaign rows in production before tearing them down. Nothing was damaged; nothing had stopped it either.

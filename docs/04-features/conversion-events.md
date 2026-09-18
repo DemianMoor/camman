@@ -369,10 +369,92 @@ The two `lib/drip/lifecycle.ts` copies exist because they need the tier
 imports, and the coupling is pinned by bars `P20`–`P26` in
 [`scripts/test-campaign-tier-scale.ts`](../../scripts/test-campaign-tier-scale.ts).
 
+## Per-event report columns (Phase 5 Task 1)
+
+[`lib/reporting/event-columns.ts`](../../lib/reporting/event-columns.ts) turns the
+`event_types` registry into a report column set. It is the one place that knows
+what such a column set looks like; everything later in Phase 5 consumes it rather
+than re-deriving it. **It is inert — nothing imports it yet.**
+
+⭐ **Adding an event type is CONFIG, not code.** Nothing in the module, and
+nothing that may consume it, branches on the string `purchase` or `registration`.
+Every decision comes off an `event_types` row:
+
+| flag | what it decides |
+| --- | --- |
+| `is_retarget_signal` | ranks the type ahead of purchases, and makes it the LEFT (denominator) side of a funnel ratio |
+| `is_purchase` | makes it the RIGHT (numerator) side of a funnel ratio |
+| `counts_revenue` | earns the type a Revenue / Pending $ / EPC column — and only then |
+| `display_order`, `key` | break ties, so the order is TOTAL and a re-render cannot shuffle columns |
+
+**Order.** `orderEventTypes()` sorts signals, then everything else, then
+purchases, with `display_order` and then `key` as tie-breaks. That deliberately
+diverges from `display_order` alone: 0181 seeds `purchase=10, registration=20`,
+but the funnel reads registration → purchase. Rather than rewrite the seed and
+its copy inside `handle_new_user()` (0183), the class rank leads and
+`display_order` only tie-breaks within a class.
+
+**Generated columns**, per type, from `buildEventColumns()`:
+
+- Tier **a** (always visible, the owner's specified list): `evt:<key>:count`,
+  `evt:<key>:rate`, `evt:<key>:pending_n`, plus one
+  `evtfunnel:<signalKey>:<purchaseKey>` per signal × purchase pair.
+- Tier **b** (behind the Event-breakdown toggle) and only for a `counts_revenue`
+  type: `evt:<key>:revenue`, `evt:<key>:pending_revenue`, `evt:<key>:epc`. They
+  sit behind the toggle precisely because each duplicates an aggregate column
+  already on screen while exactly one `counts_revenue` type exists. Nothing the
+  owner named is ever behind the toggle.
+
+A non-`counts_revenue` type gets no money column at all: `approvedRevenueClause`
+([lib/sale-attribution.ts](../../lib/sale-attribution.ts)) is gated on the same
+flag, so its revenue is 0 everywhere by construction, and a permanently-$0.00
+column would read as "this earned nothing" rather than "this does not carry
+money".
+
+**A type with zero conversions still gets its column and reads 0** — the spec
+comes from the registry, not from the data. `visibleEventTypes()` drops a column
+only for an **archived** type, and only while no displayed row still carries a
+non-zero number for it, so archiving retires a column without erasing history.
+The loader deliberately has **no `status = 'active'` filter** for the same reason.
+
+**Headers** are pluralised in the generator and only for the count column
+(`Registration` ⇒ `Registrations`); everything else keeps the singular stem
+(`Registration rate`). 0181 seeds the labels singular and the same label is what
+the campaign-activity badge renders for ONE conversion, where the singular is
+right. `pluralizeLabel()` is deliberately dumb and total — `event_types.label` is
+`text NOT NULL` with no CHECK and no UI, so it may be empty, an emoji or a
+sentence. It does not double consonants (`Quiz` ⇒ `Quizes`) and knows no
+irregulars; a label that pluralises badly is fixed with one UPDATE on a config
+row, which is the point of a registry.
+
+**Ratios return `null` (rendered "—") over a zero denominator, and are NOT
+clamped at 100%.** Both can legitimately exceed 1: the EPC denominator
+(`counted_clickers`) rescues purchase- or revenue-bearing recipients only, so a
+registrant whose click was never scored human is in the numerator and not the
+denominator; and a purchase can arrive with no preceding registration (two
+independent postback URLs, or a lost registration postback). Clamping would hide
+a real signal behind a plausible number.
+
+**Per-org and cross-org.** `loadEventTypes(dbc, orgId)` reads one org's registry.
+`orgId = null` serves exactly one caller — the scheduled Telegram report, which
+has no user session and reports the whole business — and merges **by `key`**,
+because `event_types.id` is a global serial while the natural key is
+`(org_id, key)`. Two orgs' rows for the same key collapse to one spec: lowest
+`display_order` wins and carries its label, the flags are OR-ed (a key that
+counts revenue in ANY org earns its revenue column) and `archived` is true only
+when EVERY org has archived it. Inert today — one org sends tracker traffic — and
+stated so it is a rule rather than an accident the second org discovers.
+
+Checks: [`scripts/test-event-columns.ts`](../../scripts/test-event-columns.ts)
+(pure, 45 bars; its registry holds a `deposit` type and a second signal that
+exist in no database, so a generator that hard-coded the two seeded keys fails)
+and [`scripts/test-event-columns-db.ts`](../../scripts/test-event-columns-db.ts)
+(15 bars on camman-v2 inside a transaction that always rolls back).
+
 ## Not built yet
 
-- **Phase 5 — proposed, not built, not ratified:** per-event report columns. The
-  sketch is that registrations get columns of their own, which would make
-  `registeredClause()`'s consumers four rather than three and add the first
-  *reporting* one. None of it exists in the code and the owner has not signed
-  off on the shape, so nothing here should be relied on as decided.
+- **Phase 5 beyond Task 1 — proposed, not built.** Task 1's generator above
+  exists and is exercised, but **no reader, endpoint, matview column or table
+  consumes it yet**, and the `keitaro_stage_results.events` jsonb column that
+  `parseEventMap()` is written against arrives in a later task's migration.
+  Nothing downstream of the generator should be relied on as decided.

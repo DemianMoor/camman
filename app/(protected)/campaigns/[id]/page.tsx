@@ -1855,9 +1855,15 @@ export default function CampaignDetailPage() {
               <span className="font-medium">Reached offer</span> — so someone who
               registered is <em>not</em> in the Reached-offer lane and gets no
               message unless a Registered lane exists.{" "}
-              <span className="font-medium">Purchased</span> contacts exit the
-              sequence (no lane) and opted-out contacts are suppressed, so lane
-              counts won&apos;t sum to the full audience. The{" "}
+              {/* The space after this span MUST be an explicit {" "}: the text
+                  node that follows carries an entity (won&apos;t), and its
+                  leading space is dropped in the rendered HTML — the pre-Phase-4
+                  copy shipped reading "Convertedcontacts exit the sequence",
+                  verified in the DOM. */}
+              <span className="font-medium">Purchased</span>{" "}
+              contacts exit the sequence (no lane) and opted-out contacts are
+              suppressed, so lane counts won&apos;t sum to the full audience.{" "}
+              The{" "}
               <span className="font-mono">live</span> audience numbers are a
               preview computed from current behavior — they change until the
               stage is sent.

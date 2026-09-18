@@ -49,7 +49,35 @@ export interface EventTally {
 
 export type EventMap = Record<string, EventTally>;
 
-export const EMPTY_TALLY: EventTally = { n: 0, pending_n: 0, revenue: 0, pending_revenue: 0 };
+/**
+ * The all-zero tally, for READING ONLY — what a missing key is worth.
+ *
+ * ⭐ FROZEN, AND TYPED `Readonly`, BECAUSE IT IS SHARED. A consumer that seeds an
+ * accumulator with it (`acc[key] = EMPTY_TALLY`, then `addEventMaps(acc, …)`)
+ * used to mutate the ONE object every later missing-key read returns, so an
+ * unrelated cell elsewhere in the process started reporting that consumer's
+ * numbers instead of 0 — silently, with every test still green (found in review,
+ * 2026-09-18).
+ *
+ * ⚠️ THE TWO GUARDS COVER DIFFERENT CASES, AND THE TYPE IS THE WEAKER ONE.
+ * `Readonly<EventTally>` rejects a DIRECT write (`EMPTY_TALLY.n = 5`, TS2540) —
+ * but TypeScript ignores `readonly` modifiers when checking assignability, so
+ * `acc[key] = EMPTY_TALLY` compiles CLEAN (measured 2026-09-18). The aliasing
+ * case — the one that actually happened — is caught only by `Object.freeze`, at
+ * runtime, as a TypeError inside `addEventMaps` AT the mistake, instead of a
+ * wrong number somewhere else later. Do not drop the freeze on the strength of
+ * the type. Need a mutable zero? Call `emptyTally()`.
+ * Bars S1–S4, scripts/test-event-columns.ts.
+ */
+export const EMPTY_TALLY: Readonly<EventTally> = Object.freeze({
+  n: 0,
+  pending_n: 0,
+  revenue: 0,
+  pending_revenue: 0,
+});
+
+/** A FRESH, mutable all-zero tally — the accumulator seed. Never the shared constant. */
+export const emptyTally = (): EventTally => ({ n: 0, pending_n: 0, revenue: 0, pending_revenue: 0 });
 
 const num = (v: unknown): number => {
   const n = typeof v === "number" ? v : Number(v);
@@ -58,9 +86,20 @@ const num = (v: unknown): number => {
 
 /**
  * Coerce a jsonb value from keitaro_stage_results.events into an EventMap.
- * Numerics cross the wire as STRINGS (numeric(12,4) inside jsonb_build_object),
- * so this is not a cast — it is the parse. Never throws: a NULL column, a
- * pre-0185 row and a hand-edited value all become an empty map.
+ *
+ * It accepts a number OR a numeric string for every field, and it must: what a
+ * numeric arrives as depends on where it sits. postgres-js `JSON.parse`s a jsonb
+ * column, so integers, bigints and `numeric(12,4)` INSIDE the json all come back
+ * as JS numbers (measured exact at 1234567.8901 and 0.0001, 2026-09-18) — while a
+ * TOP-LEVEL `numeric` column arrives as a STRING, which is how any caller that
+ * assembles a tally from ordinary aggregate columns will hand it over. Neither
+ * branch is dead. Never throws: a NULL column, a pre-events row and a hand-edited
+ * value all become an empty map.
+ *
+ * ⚠️ The jsonb half is still measured against a hand-built round-trip, not against
+ * the real column: `keitaro_stage_results.events` does not exist yet — it arrives
+ * in a later Phase 5 task's migration. RE-ASSERT bar M5 against the real column
+ * the moment that migration lands.
  */
 export function parseEventMap(v: unknown): EventMap {
   if (v == null || typeof v !== "object" || Array.isArray(v)) return {};
@@ -265,6 +304,14 @@ export function pluralizeLabel(label: string): string {
  * screen while exactly one counts_revenue type exists. Nothing the owner named is
  * ever behind the toggle.
  *
+ * ⭐ THAT PREMISE IS A CONFIGURATION FACT, AND IT IS PINNED, NOT ASSUMED: bar R1
+ * in scripts/test-event-columns-db.ts fails the moment a SECOND counts_revenue
+ * type is configured. It has to, because the aggregate these columns duplicate —
+ * approvedRevenueClause / REVENUE_EVENT_TYPE_IDS, lib/sale-attribution.ts:50,66 —
+ * has NO per-type filter: with two revenue types the aggregate is their sum and
+ * the tier-B columns become the only decomposition of it, still hidden behind a
+ * toggle. When R1 goes red, revisit the hard-coded tier below.
+ *
  * A Revenue / Pending $ / EPC column exists ONLY for a counts_revenue type. That
  * is not cosmetic: approvedRevenueClause (lib/sale-attribution.ts) is gated on
  * the same flag, so a non-revenue type's revenue is 0 everywhere by construction,
@@ -286,6 +333,14 @@ export function buildEventColumns(types: readonly EventTypeSpec[]): EventColumn[
   }
   for (const s of ordered.filter((t) => t.is_retarget_signal)) {
     for (const p of ordered.filter((t) => t.is_purchase)) {
+      // ⭐ NEVER A TYPE AGAINST ITSELF. Nothing stops a row carrying BOTH
+      // is_retarget_signal and is_purchase — no CHECK in 0181 forbids it, and it
+      // is a plausible thing for an operator to tick (a deposit that both earns
+      // money and marks a lane). The cross product then emitted
+      // `evtfunnel:deposit:deposit`, "Deposit→Deposit %", whose value is n/n = 1
+      // for every row that has one at all: a column that is constant by
+      // construction and can only mislead. Its OTHER pairings still generate.
+      if (s.key === p.key) continue;
       out.push({
         id: `evtfunnel:${s.key}:${p.key}`,
         header: `${s.label}→${p.label} %`,
@@ -330,8 +385,11 @@ const synthetic = (key: string, f: Partial<EventTypeSpec> = {}): EventTypeSpec =
  * column kind is added. The only thing it cannot reproduce is the header (see
  * `synthetic`).
  *
- * A key containing a colon is not round-trippable and yields null — event_types.key
- * is free text with no CHECK, so this fails closed rather than mis-splitting.
+ * The split is EXACT, not a guess: `event_types_key_format_check` (migration
+ * 0181:43) constrains `key` to `^[a-z][a-z0-9_]*$`, so a key can never contain a
+ * `:` and a generated id always has exactly three segments. The arity check still
+ * earns its keep — the input is a URL parameter or a localStorage value and can be
+ * anything at all — but it is rejecting a malformed ID, not a legal key.
  */
 export function eventColumnById(id: string): EventColumn | null {
   const parts = id.split(":");
@@ -388,7 +446,11 @@ export function eventCellValue(
     case "epc":
       return countedClickers > 0 ? t.revenue / countedClickers : null;
     case "funnel": {
-      const to = events[col.toKey!] ?? EMPTY_TALLY;
+      // toKey is optional on the interface, so a hand-built funnel column can
+      // arrive without one. That is UNKNOWN, not zero: `events[undefined!]` falls
+      // through to EMPTY_TALLY and would render a confident 0.0%.
+      if (col.toKey === undefined) return null;
+      const to = events[col.toKey] ?? EMPTY_TALLY;
       return t.n > 0 ? to.n / t.n : null;
     }
   }

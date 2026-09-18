@@ -1,6 +1,7 @@
 import {
   addEventMaps,
   buildEventColumns,
+  emptyTally,
   EMPTY_TALLY,
   eventCellValue,
   eventColumnById,
@@ -9,7 +10,9 @@ import {
   pluralizeLabel,
   scaleEventMap,
   visibleEventTypes,
+  type EventColumn,
   type EventMap,
+  type EventTally,
   type EventTypeSpec,
 } from "@/lib/reporting/event-columns";
 
@@ -151,6 +154,24 @@ check(
   buildEventColumns(orderEventTypes([PROD[0]])).every((c) => c.kind !== "funnel"),
 );
 check("C8 an empty registry generates no columns at all", buildEventColumns([]).length === 0);
+// ⭐ C9/C10: a row can carry BOTH flags — nothing in 0181 forbids it, and it is a
+// plausible thing to tick (a deposit that earns money AND marks a retarget lane).
+// The cross product then paired it with itself: `evtfunnel:deposit:deposit`,
+// "Deposit→Deposit %", n/n = 1 for every row that has one. Constant by
+// construction; the only column here that cannot carry information.
+const bothFlags = buildEventColumns(
+  orderEventTypes([...PROD, T("deposit", "Deposit", 30, { is_purchase: true, counts_revenue: true, is_retarget_signal: true })]),
+).filter((c) => c.kind === "funnel");
+check(
+  "C9 ⭐ a type that is BOTH a signal and a purchase is never paired with ITSELF",
+  !bothFlags.some((c) => c.id === "evtfunnel:deposit:deposit"),
+  bothFlags.map((c) => c.id).join("|"),
+);
+check(
+  "C10 ⭐ and its other pairings still generate, in both directions",
+  bothFlags.map((c) => c.id).join("|") === "evtfunnel:registration:deposit|evtfunnel:registration:purchase|evtfunnel:deposit:purchase",
+  bothFlags.map((c) => c.id).join("|"),
+);
 
 // ── archived visibility (decision 12) ───────────────────────────────────────
 const withArchived = [
@@ -199,6 +220,23 @@ check(
   }, 200) === 2.5,
 );
 check("E12 a type absent from the map reads 0, not null", eventCellValue(by("evt:purchase:count"), {}, 200) === 0);
+// `toKey` is optional on EventColumn, so a hand-built funnel column — a fixture, a
+// consumer assembling one by hand — can arrive without one. UNKNOWN, not 0.0%.
+check(
+  "E12b ⭐ a funnel column with NO toKey is null (unknown), not a confident 0",
+  eventCellValue(
+    { id: "evtfunnel:registration:", header: "", kind: "funnel", tier: "a", eventKey: "registration", muted: true } satisfies EventColumn,
+    events,
+    200,
+  ) === null,
+  String(
+    eventCellValue(
+      { id: "evtfunnel:registration:", header: "", kind: "funnel", tier: "a", eventKey: "registration", muted: true } satisfies EventColumn,
+      events,
+      200,
+    ),
+  ),
+);
 // E13 is not in the brief. The mutation sweep found it: swapping the pending_n
 // case for the count case changed no bar, so the owner's "Pending" column — one
 // of the nine — had no cell-value guard at all. `pending_n` is a SUBSET of `n`
@@ -234,11 +272,20 @@ check(
     return src.purchase.n === 1;
   })(),
 );
+// ⚠️ M5 is asserted against a HAND-BUILT object: `keitaro_stage_results.events`
+// does not exist yet (a later Phase 5 task's migration adds it). RE-ASSERT IT
+// AGAINST THE REAL COLUMN when that lands. What was measured, 2026-09-18:
+// postgres-js `JSON.parse`s a jsonb column, so a numeric INSIDE the json arrives
+// as a JS number (exact at 1234567.8901 and 0.0001) — while a top-level `numeric`
+// column arrives as a string. The parser takes both; neither branch is dead.
 check(
-  "M5 parse accepts the jsonb shape the projection writes (numerics arrive as strings)",
+  "M5 parse takes both shapes: a number from jsonb, a string from a top-level numeric column",
   JSON.stringify(
-    parseEventMap({ purchase: { n: 2, pending_n: 0, revenue: "12.5000", pending_revenue: "0.0000" } }).purchase,
-  ) === JSON.stringify({ n: 2, pending_n: 0, revenue: 12.5, pending_revenue: 0 }),
+    parseEventMap({ purchase: { n: 2, pending_n: 0, revenue: 12.5, pending_revenue: 0 } }).purchase,
+  ) === JSON.stringify({ n: 2, pending_n: 0, revenue: 12.5, pending_revenue: 0 }) &&
+    JSON.stringify(
+      parseEventMap({ purchase: { n: 2, pending_n: 0, revenue: "12.5000", pending_revenue: "0.0000" } }).purchase,
+    ) === JSON.stringify({ n: 2, pending_n: 0, revenue: 12.5, pending_revenue: 0 }),
 );
 check(
   "M6 parse of null / undefined / a non-object is an empty map, never a throw",
@@ -252,30 +299,29 @@ check(
 // point that reads a column id back from a URL query parameter or localStorage,
 // after the registry that generated it may have changed, so it is the one place a
 // second copy of the id grammar could drift away from the generator.
+// ⭐ THE COUNT IS PART OF THE BAR. `.every()` over an empty list is `true`, so the
+// round-trip assertion alone passed vacuously against any generator that emitted
+// nothing at all. 22 = 18 per-type columns (3 for each of the two signals, 6 for
+// each of the two counts_revenue purchases) + 4 funnels (2 signals x 2 purchases).
+const roundTrip = buildEventColumns(orderEventTypes([...THREE, T("trial", "Trials", 15, { is_retarget_signal: true })]));
+const roundTripBroken = roundTrip.filter((c) => {
+  const r = eventColumnById(c.id);
+  return (
+    !r ||
+    r.id !== c.id ||
+    r.kind !== c.kind ||
+    r.tier !== c.tier ||
+    r.eventKey !== c.eventKey ||
+    r.toKey !== c.toKey ||
+    r.muted !== c.muted
+  );
+});
 check(
-  "B1 ⭐ every id the generator emits parses back to the SAME kind/tier/keys/muted",
-  buildEventColumns(orderEventTypes([...THREE, T("trial", "Trials", 15, { is_retarget_signal: true })])).every(
-    (c) => {
-      const r = eventColumnById(c.id);
-      return (
-        !!r &&
-        r.id === c.id &&
-        r.kind === c.kind &&
-        r.tier === c.tier &&
-        r.eventKey === c.eventKey &&
-        r.toKey === c.toKey &&
-        r.muted === c.muted
-      );
-    },
-  ),
-  JSON.stringify(
-    buildEventColumns(orderEventTypes(THREE))
-      .filter((c) => {
-        const r = eventColumnById(c.id);
-        return !r || r.kind !== c.kind || r.tier !== c.tier || r.eventKey !== c.eventKey || r.toKey !== c.toKey;
-      })
-      .map((c) => c.id),
-  ),
+  "B1 ⭐ all 22 ids this registry emits (18 per-type + 4 funnels) parse back to the SAME kind/tier/keys/muted",
+  roundTrip.length === 22 &&
+    roundTrip.filter((c) => c.kind === "funnel").length === 4 &&
+    roundTripBroken.length === 0,
+  `${roundTrip.length} columns, ${roundTrip.filter((c) => c.kind === "funnel").length} funnels, broken: ${JSON.stringify(roundTripBroken.map((c) => c.id))}`,
 );
 check(
   "B2 ⭐ a funnel id keeps BOTH keys the right way round (denominator, then numerator)",
@@ -292,10 +338,63 @@ check(
     eventColumnById("evtfunnel:registration") === null &&
     eventColumnById("evt::count") === null,
 );
+// `event_types_key_format_check` (0181:43) constrains key to ^[a-z][a-z0-9_]*$, so
+// no legal key contains a ':' and no id the generator emits has four segments.
+// This is about a MALFORMED id — the input is a URL parameter or a localStorage
+// value — not about a key the registry could hold.
 check(
-  "B4 an id whose key contains a colon fails CLOSED (event_types.key is free text)",
+  "B4 a malformed id with an extra segment is null, never mis-split",
   eventColumnById("evt:a:b:count") === null,
   JSON.stringify(eventColumnById("evt:a:b:count")),
+);
+check(
+  "B5 ⭐ a self-pairing funnel id has no column to parse back to, so it is null too",
+  eventColumnById("evtfunnel:deposit:deposit") === null,
+  JSON.stringify(eventColumnById("evtfunnel:deposit:deposit")),
+);
+
+// ── the shared empty tally ───────────────────────────────────────────────────
+// ⭐ THE REVIEW'S FINDING, MADE PERMANENT. `EMPTY_TALLY` is exported and
+// `eventCellValue` hands it back for a missing key, so the obvious mistake in any
+// consumer — `acc[k] = EMPTY_TALLY` followed by `addEventMaps(acc, …)` — mutated
+// the ONE shared object for the whole process. It failed SILENTLY: the review
+// measured an unrelated missing-key count cell reading 5 instead of 0 while every
+// bar above this line stayed green.
+check("S1 ⭐ EMPTY_TALLY is frozen, so the mistake below cannot be silent", Object.isFrozen(EMPTY_TALLY), JSON.stringify(EMPTY_TALLY));
+const poison: EventMap = {};
+// ⚠️ NO CAST, AND NO ERROR. `Readonly<EventTally>` does NOT stop this line:
+// TypeScript ignores `readonly` modifiers when checking assignability, so a
+// Readonly<T> goes into a Record<string, T> clean (measured 2026-09-18; the type
+// only rejects a DIRECT write, TS2540). The freeze is what catches this one.
+poison.ghost = EMPTY_TALLY;
+let poisonThrew = false;
+try {
+  addEventMaps(poison, { ghost: { n: 5, pending_n: 5, revenue: 5, pending_revenue: 5 } });
+} catch {
+  poisonThrew = true; // frozen ⇒ a loud TypeError AT the mistake, not silent corruption elsewhere
+}
+check(
+  "S2 ⭐ seeding an accumulator with EMPTY_TALLY cannot poison it process-wide",
+  poisonThrew &&
+    EMPTY_TALLY.n === 0 &&
+    EMPTY_TALLY.pending_n === 0 &&
+    EMPTY_TALLY.revenue === 0 &&
+    EMPTY_TALLY.pending_revenue === 0,
+  `threw=${poisonThrew} EMPTY_TALLY=${JSON.stringify(EMPTY_TALLY)}`,
+);
+check(
+  "S3 ⭐ and an unrelated missing-key count cell STILL reads 0 (E12, re-asked after the attempt)",
+  eventCellValue(by("evt:purchase:count"), {}, 200) === 0,
+  String(eventCellValue(by("evt:purchase:count"), {}, 200)),
+);
+check(
+  "S4 emptyTally() hands out a FRESH mutable zero, so nobody has to reach for the constant",
+  (() => {
+    const one = emptyTally();
+    const two = emptyTally();
+    one.n = 9;
+    return one !== two && two.n === 0 && one !== (EMPTY_TALLY as EventTally) && EMPTY_TALLY.n === 0;
+  })(),
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

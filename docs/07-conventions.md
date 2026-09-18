@@ -18,11 +18,26 @@ an operator may edit at any time, the key is the natural identity
 (`event_types_org_key_uniq`). `eventColumnById()` parses an id back **through
 `buildEventColumns()`** rather than re-deriving the grammar, so a second copy of
 the id/tier rules cannot drift; it returns `null` for anything that is not a
-generated id, and a key containing a `:` is **not round-trippable** and fails
-closed (a funnel id with a colon in either key would be ambiguous, and one rule
-that is the same on both sides beats two rules that differ).
+generated id.
 
-Three properties that later phases inherit and must not regress:
+**The three-segment split is exact, not a gamble.** `event_types_key_format_check`
+(migration `0181:43`) constrains `key` to `^[a-z][a-z0-9_]*$`, so a key can never
+contain a `:` and a generated id always has exactly three segments. The parser's
+arity check still earns its keep — the input is a URL parameter or a localStorage
+value and can be anything — but it rejects a **malformed id**, not a legal key.
+(An earlier note here claimed the key was free text with no CHECK and carried
+"a colon-bearing key fails closed" as an open concern. Both were wrong; the
+constraint has been there since 0181.)
+
+**A funnel column is never a type against itself.** Nothing in 0181 stops one row
+carrying both `is_purchase` and `is_retarget_signal`, and it is a plausible thing
+for an operator to tick. The signal × purchase cross product then emitted
+`evtfunnel:<k>:<k>` — a "X→X %" column whose value is `n/n = 1` for every row that
+has one, constant by construction. `buildEventColumns()` skips the self-pair; the
+type's other pairings still generate. There is **no CHECK** forbidding the flag
+combination at the database level — the guard is in the generator only.
+
+Five properties that later phases inherit and must not regress:
 
 - **A column comes from the REGISTRY, not from the data.** An active event type
   with zero conversions still gets its column, which reads 0. It must not vanish.
@@ -31,6 +46,28 @@ Three properties that later phases inherit and must not regress:
   between renders.
 - **Cross-org merges by `key`**, not by id — `event_types.id` is a global serial,
   the natural key is `(org_id, key)`.
+- **`EMPTY_TALLY` is a frozen, `Readonly` constant — never an accumulator seed.**
+  It is what a missing key reads as, and it is SHARED. `acc[key] = EMPTY_TALLY`
+  followed by `addEventMaps(acc, …)` used to mutate that one object for the whole
+  process, so an unrelated cell elsewhere started reporting another row's numbers
+  instead of 0 — silently, with the whole suite green (found in review 2026-09-18;
+  bars S1–S4). Use `emptyTally()` for a fresh mutable zero. The same rule applies
+  to any future shared default: **freeze it** — and note that `Object.freeze` is
+  the load-bearing half, not the type. ⚠️ **`Readonly<T>` does not stop the
+  aliasing:** TypeScript ignores `readonly` modifiers when checking assignability,
+  so `Readonly<T>` assigns into a `Record<string, T>` with no error (measured
+  2026-09-18); the type only rejects a *direct* write (TS2540). Only the freeze
+  turns the aliasing case into a loud TypeError at the mistake.
+- **Tier B's premise is pinned by a bar, not by prose.** The per-event money
+  columns sit behind the Event-breakdown toggle only because each duplicates an
+  aggregate already on screen *while exactly one `counts_revenue` type exists*.
+  `REVENUE_EVENT_TYPE_IDS` / `approvedRevenueClause`
+  ([lib/sale-attribution.ts](../lib/sale-attribution.ts)) carry no per-type filter,
+  so with two revenue types that aggregate is their SUM and the tier-B columns
+  become its only decomposition — still hidden. Bar R1 in
+  [scripts/test-event-columns-db.ts](../scripts/test-event-columns-db.ts) goes red
+  the moment a second `counts_revenue` type is configured, and its message says
+  what to reconsider.
 
 ## A script that writes to a database must refuse production, by import (2026-09-18)
 

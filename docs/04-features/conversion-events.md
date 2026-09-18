@@ -398,12 +398,26 @@ its copy inside `handle_new_user()` (0183), the class rank leads and
 
 - Tier **a** (always visible, the owner's specified list): `evt:<key>:count`,
   `evt:<key>:rate`, `evt:<key>:pending_n`, plus one
-  `evtfunnel:<signalKey>:<purchaseKey>` per signal × purchase pair.
+  `evtfunnel:<signalKey>:<purchaseKey>` per signal × purchase pair **where the two
+  are different types**. A row may carry both `is_purchase` and
+  `is_retarget_signal` — no CHECK in 0181 forbids it — and the self-pair
+  `evtfunnel:<k>:<k>` would be a "X→X %" column reading `n/n = 1` for every row
+  that has one, constant by construction. The generator skips it; the type's other
+  pairings still generate, in both directions.
 - Tier **b** (behind the Event-breakdown toggle) and only for a `counts_revenue`
   type: `evt:<key>:revenue`, `evt:<key>:pending_revenue`, `evt:<key>:epc`. They
   sit behind the toggle precisely because each duplicates an aggregate column
   already on screen while exactly one `counts_revenue` type exists. Nothing the
   owner named is ever behind the toggle.
+
+⭐ **That tier-B premise is pinned, not assumed.** Bar **R1** in
+[`scripts/test-event-columns-db.ts`](../../scripts/test-event-columns-db.ts) fails
+the moment a second `counts_revenue` type is configured, in any org, and its
+message names what to reconsider. It has to: `REVENUE_EVENT_TYPE_IDS` /
+`approvedRevenueClause` ([lib/sale-attribution.ts](../../lib/sale-attribution.ts))
+carry **no per-type filter**, so with two revenue types the aggregate these columns
+"duplicate" is their SUM and the per-type columns become its only decomposition —
+while still hidden behind a toggle.
 
 A non-`counts_revenue` type gets no money column at all: `approvedRevenueClause`
 ([lib/sale-attribution.ts](../../lib/sale-attribution.ts)) is gated on the same
@@ -445,11 +459,22 @@ counts revenue in ANY org earns its revenue column) and `archived` is true only
 when EVERY org has archived it. Inert today — one org sends tracker traffic — and
 stated so it is a rule rather than an accident the second org discovers.
 
+**The all-zero tally is READ-ONLY.** `EMPTY_TALLY` is what a missing key is worth,
+it is shared, and it is `Object.freeze`d and typed `Readonly<EventTally>` because
+of it: seeding an accumulator with it and then calling `addEventMaps()` used to
+mutate that one object process-wide, so an unrelated missing-key cell started
+reporting another row's numbers instead of 0 — silently, with every bar green
+(found in review, 2026-09-18). `emptyTally()` hands out a fresh mutable zero;
+reach for that, never the constant. ⚠️ The **freeze** is the load-bearing half:
+TypeScript ignores `readonly` modifiers when checking assignability, so
+`Readonly<EventTally>` assigns into an `EventMap` with no error and only rejects a
+direct write.
+
 Checks: [`scripts/test-event-columns.ts`](../../scripts/test-event-columns.ts)
-(pure, 45 bars; its registry holds a `deposit` type and a second signal that
+(pure, 53 bars; its registry holds a `deposit` type and a second signal that
 exist in no database, so a generator that hard-coded the two seeded keys fails)
 and [`scripts/test-event-columns-db.ts`](../../scripts/test-event-columns-db.ts)
-(15 bars on camman-v2 inside a transaction that always rolls back).
+(16 bars on camman-v2 inside a transaction that always rolls back).
 
 ## Not built yet
 

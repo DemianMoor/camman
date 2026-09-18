@@ -39,6 +39,21 @@ class Rollback extends Error {}
 async function main() {
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
+  // ⭐ TAKEN BEFORE THE PROBE, OUTSIDE ITS TRANSACTION. L15 below asks whether the
+  // probe's row survived, and the only honest form of that question is a DELTA.
+  // "`deposit` has zero rows" is the WORLD's state, not this probe's effect: it
+  // passes today because nobody has configured a deposit type, and it would keep
+  // passing — for the wrong reason — the day someone does, even if the probe had
+  // committed. (A pre-existing `deposit` row in the org under test makes the
+  // probe's INSERT fail on event_types_org_key_uniq, which is loud, not silent.)
+  const depositRows = async () =>
+    Number(
+      ((await db.execute(sql`SELECT count(*)::int AS n FROM event_types WHERE key = 'deposit'`)) as unknown as {
+        n: number;
+      }[])[0]?.n ?? -1,
+    );
+  const depositBefore = await depositRows();
+
   let rolledBack = false;
   try {
     await db.transaction(async (tx) => {
@@ -57,6 +72,29 @@ async function main() {
       );
       check("L3 the purchase type carries is_purchase AND counts_revenue", !!base.find((t) => t.key === "purchase" && t.is_purchase && t.counts_revenue));
       check("L4 the registration type carries is_retarget_signal and NOT counts_revenue", !!base.find((t) => t.key === "registration" && t.is_retarget_signal && !t.counts_revenue));
+
+      // ⭐ R1 PINS A PREMISE THE GENERATOR HARD-CODES. buildEventColumns() puts the
+      // three money columns behind the Event-breakdown toggle (tier "b") because
+      // each one duplicates an aggregate already on screen — which is true only
+      // while exactly ONE counts_revenue type exists. `REVENUE_EVENT_TYPE_IDS` /
+      // `approvedRevenueClause` (lib/sale-attribution.ts:50,66) carry NO per-type
+      // filter, so the moment a second revenue type is configured that aggregate
+      // becomes their SUM and the tier-B columns are its only decomposition —
+      // still hidden behind a toggle. The premise was prose pinned by nothing;
+      // this is the bar that goes red when it stops holding.
+      //
+      // Cross-org (`orgId = null`) so a second org configuring one also trips it.
+      // Scope limit, stated rather than assumed: this reads the PREVIEW database,
+      // not production — the two registries come from the same 0181 seed and the
+      // same handle_new_user() copy (0183), so they agree today, and a production
+      // check would need a prod-facing bar this repo does not have.
+      // Taken BEFORE the probe's INSERT below, which adds a second revenue type.
+      const revenueTypes = (await loadEventTypes(tx, null)).filter((t) => t.counts_revenue);
+      check(
+        "R1 ⭐ exactly one counts_revenue type is configured — the premise tier \"b\" is hard-coded on",
+        revenueTypes.length <= 1,
+        `counts_revenue types: ${revenueTypes.map((t) => `${t.key}${t.archived ? " (archived)" : ""}`).join(", ")} — RECONSIDER the hard-coded tier "b" on evt:<key>:revenue / :pending_revenue / :epc in buildEventColumns() (lib/reporting/event-columns.ts): with a second revenue type these per-type columns are the ONLY decomposition of a Revenue/EPC aggregate that has no per-type filter, and they must not stay behind the Event-breakdown toggle`,
+      );
 
       await tx.execute(sql`
         INSERT INTO event_types (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal)
@@ -112,10 +150,12 @@ async function main() {
   // DATABASE, outside the transaction, whether the row it inserted survived.
   // Without it a committed probe would leave a fabricated event type on the
   // preview DB and every later run of this script would still print PASS.
-  const leaked = (await db.execute(sql`
-    SELECT count(*)::int AS n FROM event_types WHERE key = 'deposit'
-  `)) as unknown as { n: number }[];
-  check("L15 ⭐ and the DB agrees: the probe's event type is gone outside it", Number(leaked[0]?.n) === 0, `deposit rows remaining: ${leaked[0]?.n}`);
+  const depositAfter = await depositRows();
+  check(
+    "L15 ⭐ and the DB agrees: the count OUTSIDE the tx is exactly what it was before the probe",
+    depositBefore >= 0 && depositAfter === depositBefore,
+    `deposit rows before=${depositBefore} after=${depositAfter}`,
+  );
 
   console.log(`\n${passed} passed, ${failed} failed`);
   await pgConn.end();

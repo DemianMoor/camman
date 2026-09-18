@@ -336,7 +336,20 @@ const TIER_LABEL: Record<number, string> = {
   0: "Ignored",
   1: "Clicked",
   2: "Reached offer",
+  3: "Registered",
 };
+
+// ⚠️ EVERY VALUE IN `LANE_TIER_VALUES` MUST HAVE A LABEL HERE. `previewSplitLanes`
+// maps the tier values through `TIER_LABEL` and the confirm dialog renders
+// `{ln.label}` raw (app/(protected)/campaigns/[id]/page.tsx:2314-2352), so a
+// missing key is a BLANK but TICKABLE row carrying a live count — which is
+// exactly how tier 3 shipped between migration 0184 and this guard. `tsc` cannot
+// see it: indexing a `Record<number, string>` is typed `string`, never
+// `string | undefined`. Asserted by scripts/test-campaign-tier-scale.ts (P16),
+// which is why this is exported rather than checked inline.
+export function unlabelledLaneTiers(): number[] {
+  return LANE_TIER_VALUES.filter((t) => typeof TIER_LABEL[t] !== "string");
+}
 
 export async function previewSplitLanes(
   dbc: DbOrTx,

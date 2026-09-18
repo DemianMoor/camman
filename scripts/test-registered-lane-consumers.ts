@@ -28,8 +28,12 @@ import { seedConversionEvent } from "./_conversion-fixture";
 //     npx tsx --conditions=react-server scripts/test-registered-lane-consumers.ts
 //
 // Flags:
-//   --explain   also EXPLAIN the tier-3 lane query (Step 7a — a SHAPE check)
-//   KEEP=1      skip teardown (leaves the throwaway org behind; preview only)
+//   --explain            also EXPLAIN the tier-3 lane query (Step 7a — a SHAPE check)
+//   SHAPE_BARS_ARMED=1   turn X1/X2 from informational into assertions. Only
+//                        meaningful against a ledger big enough for a Seq Scan to
+//                        be a real finding — see the note at the bars.
+//   KEEP=1               skip teardown (leaves the throwaway org behind; preview
+//                        only). C0 then reds on the next run, correctly.
 const PROD_REF = "rtdarhkkjwcetlmruftl";
 if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
   console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
@@ -100,7 +104,27 @@ async function main() {
   }
 
   const before = await tableCounts();
-  console.log("Baseline counts captured.");
+  console.log(
+    `Baseline: organizations=${before.organizations}, conversion_events=${before.conversion_events}, ` +
+      `event_types=${before.event_types}, contacts=${before.contacts}`,
+  );
+
+  // ⭐ C0 — THE RESIDUE BAR. Teardown deletes `conversion_events` and
+  // `event_types` explicitly because `conversion_events.event_type_id` is
+  // ON DELETE RESTRICT while `campaign_id` is ON DELETE SET NULL: deleting the
+  // campaigns leaves the ledger rows behind with their org_id intact, so the org
+  // delete would only succeed if PostgreSQL happened to fire the
+  // conversion_events cascade before the event_types one. If that ordering ever
+  // fails — or an exception aborts teardown part-way — the marked org survives
+  // and THIS bar is red on the NEXT run, instead of the leak going unnoticed.
+  // World-state: red is also the correct answer after a deliberate `KEEP=1` run;
+  // delete that org by id and re-run.
+  const leftover = (
+    (await db.execute(sql`
+      SELECT count(*)::int AS n FROM organizations WHERE starts_with(name, ${ORG_MARKER})
+    `)) as unknown as { n: number }[]
+  )[0].n;
+  check("C0 ⭐ no residue from a previous run (no org carries the test marker)", leftover === 0, `${leftover} marked org(s) left behind`);
 
   let orgId = "";
   try {
@@ -283,13 +307,23 @@ async function main() {
       ];
       console.log(`\n  conversion_events indexes chosen: ${ceIndexes.join(", ") || "(none)"}`);
 
-      // ⚠️ THE BAR NAMES ITS WORLD-STATE. Below a few hundred rows a Seq Scan and
-      // a Nested Loop are the OPTIMAL plans, so asserting their absence here
-      // would be a gate that can only ever be red — and a gate that can only be
-      // red gets weakened by whoever runs it next. The threshold is the state the
-      // assertion depends on: it arms itself the moment the preview ledger grows,
-      // and the REAL measurement is Task 7 Step 3a's EXPLAIN (ANALYZE, BUFFERS)
-      // on prod, after the migration gate opens.
+      // ⚠️ THE BAR NAMES ITS WORLD-STATE, AND THE WORLD-STATE IS DECLARED BY THE
+      // RUNNER — NOT GUESSED FROM A ROW COUNT. These two bars used to arm
+      // themselves at `conversion_events >= 500`, which was a number nobody had
+      // measured: at 500 rows a Seq Scan on the ledger is still very plausibly
+      // the OPTIMAL plan, so the bars were positioned to go red the day the
+      // preview ledger crossed an arbitrary line, and a bar that reds for being
+      // correct gets deleted by whoever meets it next.
+      //
+      // Nothing here can supply the missing evidence: camman-v2's ledger is
+      // ~0 rows, and finding the real index/seq crossover means seeding tens of
+      // thousands of fixture rows into a shared preview DB. So the bars stay
+      // UNARMED unless a runner asserts a world-state in which a plan SHAPE is
+      // meaningful — `SHAPE_BARS_ARMED=1`, i.e. "I am pointed at a ledger large
+      // enough that a Seq Scan would be a real finding". The REAL measurement is
+      // Task 7 Step 3a's EXPLAIN (ANALYZE, BUFFERS) on prod, after the migration
+      // gate opens; until then this block prints the plan and the row count so a
+      // reader can judge, and asserts nothing it cannot back.
       const ledgerRows = Number(
         (
           (await db.execute(
@@ -297,28 +331,27 @@ async function main() {
           )) as unknown as { n: number }[]
         )[0]?.n ?? 0,
       );
-      const ARMED_AT = 500;
-      const armed = ledgerRows >= ARMED_AT;
+      const armed = process.env.SHAPE_BARS_ARMED === "1";
       console.log(
         `  world-state: conversion_events holds ${ledgerRows} row(s) on this DB; ` +
-          `the shape bars are ${armed ? "ARMED" : `INFORMATIONAL below ${ARMED_AT} rows`}.`,
+          `the shape bars are ${armed ? "ARMED (SHAPE_BARS_ARMED=1)" : "INFORMATIONAL (no SHAPE_BARS_ARMED=1)"}.`,
       );
       if (!armed) {
         console.log(
-          `  At this size a Seq Scan / Nested Loop over the ledger IS the optimal plan, so\n` +
-            `  their presence here is NOT evidence of a regression and their absence would NOT\n` +
-            `  be evidence of safety. Observed: ${ceSeqScans.length} seq scan(s), ` +
+          `  On a ledger this small a Seq Scan / Nested Loop IS the optimal plan, so their\n` +
+            `  presence here is NOT evidence of a regression and their absence would NOT be\n` +
+            `  evidence of safety. Observed: ${ceSeqScans.length} seq scan(s), ` +
             `${ceNestedLoops.length} nested loop(s) with the ledger on the inner side.\n` +
             `  The cost question is deferred to Task 7 Step 3a on prod — it is NOT answered here.`,
         );
       }
       check(
-        `X1 no Seq Scan on conversion_events (armed only at >= ${ARMED_AT} ledger rows)`,
+        "X1 no Seq Scan on conversion_events (armed only with SHAPE_BARS_ARMED=1)",
         !armed || ceSeqScans.length === 0,
         `${ceSeqScans.length} seq scan(s) at ${ledgerRows} rows`,
       );
       check(
-        `X2 ⭐ no Nested Loop whose INNER side is conversion_events (armed only at >= ${ARMED_AT} ledger rows)`,
+        "X2 ⭐ no Nested Loop whose INNER side is conversion_events (armed only with SHAPE_BARS_ARMED=1)",
         !armed || ceNestedLoops.length === 0,
         `${ceNestedLoops.length} nested loop(s) over the ledger at ${ledgerRows} rows`,
       );
@@ -337,14 +370,25 @@ async function main() {
             `Refusing teardown: org ${orgId} name "${name}" is not the test marker.`,
           );
         }
-        // Dependency order, all scoped to orgId. Deleting campaigns cascades
-        // stages, pool, stage_sends, links (→ clicks). Then unref'd FK targets.
+        // EXPLICIT DEPENDENCY ORDER, all scoped to orgId, and deliberately NOT
+        // leaning on the `organizations` cascade to reach these tables in a
+        // workable order. `conversion_events.event_type_id` is ON DELETE
+        // RESTRICT and its `campaign_id` is ON DELETE SET NULL, so the ledger
+        // rows OUTLIVE the campaign delete and then block `event_types` unless
+        // they go first. Relying on cascade ordering worked in practice but is
+        // not a promise PostgreSQL makes; C0 catches it if it ever stops.
+        // Every statement below is idempotent (a DELETE that matches nothing is
+        // a no-op), so this teardown is also correct when seeding threw
+        // part-way and only some of the rows exist.
+        await db.execute(sql`DELETE FROM conversion_events WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM drip_journeys WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM campaigns WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM lead_events WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM partner_keys WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM contacts WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM brands WHERE org_id = ${orgId}::uuid`);
+        // After the ledger, never before it (RESTRICT).
+        await db.execute(sql`DELETE FROM event_types WHERE org_id = ${orgId}::uuid`);
         await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
         console.log("  cleanup complete");
       } else if (KEEP) {

@@ -48,7 +48,14 @@ lanes are mutually exclusive by construction.
 > Registered; they fall back to their click / offer-reach tier. A purchase row
 > whose status is UNMAPPED (NULL) counts as nothing and does not evict them.
 > **Tier 3 is not selectable yet** — `LANE_TIERS` still offers `{0,1,2}` and the
-> API still refuses a request for tier 3.
+> API still refuses a request for tier 3 (`invalid_lane_tier`, by two independent
+> paths: `resolveLaneTiers` and the route's `.max(LANE_TIERS.length)`). The split
+> **preview** is a step ahead of the picker: `previewSplitLanes` reports a row per
+> `LANE_TIER_VALUES` entry, so the confirm dialog shows a labelled **Registered**
+> row with its live count already. Ticking it fails the whole split with
+> `400 invalid_lane_tier` until Task 3 lands — nothing is created. (Before the
+> label existed that row rendered BLANK; every lane tier now has one, asserted by
+> `P16` in `scripts/test-campaign-tier-scale.ts`.)
 
 ## Data model
 

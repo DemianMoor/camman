@@ -2,6 +2,15 @@
 
 _Last updated: 2026-09-18_
 
+## A tier-indexed map must be TOTAL over the tier list, and a bar must say so (2026-09-18)
+
+Inserting a value into the behavioural tier scale (`LANE_TIER_VALUES` in [`lib/campaign-tier.ts`](../lib/campaign-tier.ts)) does **not** fail loudly on the readers that index a `Record<number, string>` by it. `tsc` types `TIER_LABEL[t]` as `string`, never `string | undefined`, so a missing key is not a type error, not a crash and not a blank page: it is a **blank but tickable row carrying a live count** in the split confirm dialog (which renders `{ln.label}` raw), and ticking it 400s the whole split. Tier 3 shipped exactly that way between migration 0184 and its label.
+
+Two rules:
+
+1. **Every value in `LANE_TIER_VALUES` has a label, and a bar asserts it** — `unlabelledLaneTiers()` in [`lib/stages/split-group.ts`](../lib/stages/split-group.ts), asserted by `P16` in [`scripts/test-campaign-tier-scale.ts`](../scripts/test-campaign-tier-scale.ts). Add a tier, and the guard goes red naming the number. It lives in the pure suite, not next to the map, so it runs with no DB.
+2. **A reader whose key space is NARROWER than the scale indexes defensively.** `FOLLOWUP_TIERS`/`FollowupTier` are deliberately `{0,1,2}` while lanes go to 3, so [`components/campaigns/drip-followup-children.tsx`](../components/campaigns/drip-followup-children.tsx) casts a number it does not control. `TIER_OPTIONS[3].map` would be a `TypeError` that blanks the whole stage section, so both lookups fall back (`?? \`Tier ${tier}\`` / `?? []`) instead of trusting the cast.
+
 ## A source-grep check must not be able to pass by accident (2026-09-18)
 
 Several guards assert things about a FILE's text (`readFileSync(...).includes(...)`) because the real call site cannot be executed from a rolled-back proof. Two rules, both learned the hard way in `scripts/test-p3-task4-reader-switch-db.ts`:

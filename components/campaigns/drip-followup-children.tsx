@@ -90,8 +90,17 @@ export function DripFollowupChildren({
         when the signal was <strong>detected</strong>, not when it happened.
       </p>
       {ordered.map((c) => {
+        // ⚠️ INDEX DEFENSIVELY. `behavioral_tier` is whatever the API returned,
+        // and the tier scale is wider than the FOLLOW-UP tiers: Phase 4 added
+        // tier 3 (Registered) as a lane while `FOLLOWUP_TIERS` deliberately
+        // stays [0,1,2]. The cast is a lie the moment a 3 reaches this list, and
+        // `TIER_OPTIONS[3].map` is a TypeError that blanks the whole stage
+        // section rather than one row. Degrade to a bare label and no timer
+        // options instead.
         const tier = (c.behavioral_tier ?? 0) as FollowupTier;
-        const options = TIER_OPTIONS[tier];
+        const tierLabel =
+          (TIER_LABEL as Record<number, string | undefined>)[tier] ?? `Tier ${tier}`;
+        const options = (TIER_OPTIONS as Record<number, number[] | undefined>)[tier] ?? [];
         const isBusy = busy === c.id;
         return (
           <div
@@ -102,7 +111,7 @@ export function DripFollowupChildren({
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className="text-[10px]">
-                  {TIER_LABEL[tier]}
+                  {tierLabel}
                 </Badge>
                 {!c.creative_id && (
                   <span className="text-destructive text-xs">needs a creative</span>
@@ -115,7 +124,7 @@ export function DripFollowupChildren({
 
             <div className="min-w-0">
               <Label htmlFor={`t-${c.id}`} className="sr-only">
-                {TIER_LABEL[tier]} timer
+                {tierLabel} timer
               </Label>
               <Select
                 value={c.drip_followup_minutes ? String(c.drip_followup_minutes) : ""}
@@ -144,7 +153,7 @@ export function DripFollowupChildren({
                 checked={c.drip_active === true}
                 disabled={!canEdit || isBusy || !c.creative_id}
                 onCheckedChange={(on) => patch(c.id, { drip_active: on })}
-                aria-label={`${TIER_LABEL[tier]} follow-up on`}
+                aria-label={`${tierLabel} follow-up on`}
               />
             </div>
           </div>

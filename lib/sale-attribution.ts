@@ -11,8 +11,11 @@ import { sql, type SQL } from "drizzle-orm";
 // `stage_sends.sale_status` could only ever hold ONE conversion per recipient —
 // latest `datetime` wins — which meant a registration arriving after a purchase
 // overwrote the purchase (measured: 14 recipients, $715 lost) and a registration
-// arriving as `lead` made the contact read as a BUYER: tier 3, a buyer in the
-// segment rules, its drip journey closed as purchased, dropped from every lane.
+// arriving as `lead` made the contact read as a BUYER — at the time, the top of
+// the behavioural scale: a buyer in the segment rules, its drip journey closed as
+// purchased, dropped from every lane. (That top value was renumbered from 3 to 4
+// in Phase 4, when Registered took 3; the historical bug is unchanged, only the
+// number it used to be written with. lib/campaign-tier.ts holds the scale.)
 //
 // The alias these predicates take is a `conversion_events` row (default "ce"),
 // NOT a `stage_sends` row. Call sites select FROM the ledger. That is deliberate:

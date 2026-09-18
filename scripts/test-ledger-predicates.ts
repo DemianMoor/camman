@@ -4,6 +4,7 @@ import { sql, type SQL } from "drizzle-orm";
 import {
   COUNTED_CONVERSION_STATUSES,
   approvedRevenueClause,
+  countedClause,
   legacySaleStatusPurchasedClause,
   pendingRevenueClause,
   purchasedClause,
@@ -119,6 +120,17 @@ function main() {
     !render(rescueSendIds(null)).includes("ce.org_id") &&
       render(rescueSendIds(null)).includes("ce.status IN ('pending', 'approved')"),
     render(rescueSendIds(null)),
+  );
+
+  check(
+    "P16 ⭐ purchasedClause still CONTAINS countedClause — the status rule has one home",
+    render(purchasedClause()).includes(render(countedClause())),
+    `${render(purchasedClause())} // ${render(countedClause())}`,
+  );
+  check(
+    "P17 ⭐ approvedRevenueClause still tests status = 'approved' (the per-event revenue aggregate copies that literal)",
+    /\bstatus\s*=\s*'approved'/.test(render(approvedRevenueClause())),
+    render(approvedRevenueClause()),
   );
 
   console.log(`\n${passed} passed, ${failed} failed`);

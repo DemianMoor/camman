@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-19_
 
 ## A report column generated from a registry has a STABLE id, and it is not the label (2026-09-18)
 
@@ -92,6 +92,31 @@ ordinary aggregate columns feeds it strings. **Do not "simplify" it to one type.
 The failure mode a bar must state explicitly is a silently rounded cent:
 writing the same value as `numeric(12,2)` still round-trips as a plausible
 `1234567.89`, and only an exact comparison at full scale catches it.
+
+## A per-org join must bucket on the JOIN RESULT, not on the raw FK column (2026-09-19)
+
+The stage-day projection places each ledger row under its `event_types.key` with an
+org-scoped `LEFT JOIN … ON et.id = ce.event_type_id AND et.org_id = ce.org_id`, and
+counts what it could not place into `unmapped_conversions`. The obvious predicate
+for that bucket is the one the index carries — `ce.event_type_id IS NULL OR
+ce.status IS NULL` — and it leaves a hole, because the FLAG predicates it shares the
+statement with (`purchasedClause`, `approvedRevenueClause`) resolve `is_purchase` /
+`counts_revenue` through a **non-org-scoped** subquery. A ledger row carrying
+ANOTHER org's `event_type_id` (representable: `conversion_events.event_type_id` has
+a plain FK to `event_types(id)`, with no composite `(id, org_id)`) is then counted in
+`sales` and `revenue`, placed in no `events` entry, and counted unmapped nowhere —
+invisible on every surface, including the one whose whole purpose is to reveal rows
+that count as nothing.
+
+Keying on `et.key IS NULL OR ce.status IS NULL` makes the two buckets a **partition**
+instead: PLACED or UNMAPPED, never both, never neither. Two rules:
+
+- when a statement mixes an org-scoped join with an un-scoped flag subquery, bucket
+  on what the JOIN produced, not on what the row stores;
+- assert the partition (`placed + unplaced = every row`) rather than the absence of
+  strays, and give the identity a residual term — `sales = Σ (is_purchase) n +
+  strays` — with a fixture that makes the residual **non-zero**. `strays = 0` on
+  today's data is a countdown, not a test.
 
 ## A bar about "rows that already existed" cannot be asked of an empty table (2026-09-18)
 

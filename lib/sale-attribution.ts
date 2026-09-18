@@ -62,6 +62,24 @@ export function purchasedClause(alias = "ce"): SQL {
   return sql`(${a}.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS} AND ${a}.status IN ('pending', 'approved'))`;
 }
 
+/**
+ * A COUNTED conversion of ANY event type, on the aliased conversion_events row:
+ * the status half of purchasedClause, with the is_purchase half removed.
+ *
+ * Its one consumer is the per-event aggregation in
+ * lib/keitaro/stage-day-conversions.ts, where the flag half moves to the
+ * event_types JOIN and only the status rule is left to apply per row. It exists
+ * so that rule has ONE home: an inline `status IN ('pending','approved')` there
+ * would be a second copy that drifts the day `rejected` changes meaning.
+ *
+ * scripts/test-ledger-predicates.ts asserts purchasedClause() still CONTAINS
+ * this clause's text, so the two cannot separate silently.
+ */
+export function countedClause(alias = "ce"): SQL {
+  const a = sql.raw(alias);
+  return sql`${a}.status IN ('pending', 'approved')`;
+}
+
 /** Revenue that counts toward Revenue / EPC: approved only, on the aliased conversion_events row. */
 export function approvedRevenueClause(alias = "ce"): SQL {
   const a = sql.raw(alias);

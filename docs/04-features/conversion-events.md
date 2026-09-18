@@ -1,6 +1,6 @@
 # Conversion events (multi-event conversions)
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-19_
 
 **Status:** Phase 3 in progress — the ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). ⚠️ **Migrations 0181/0182 are not yet applied to production** — `conversion_events`/`event_types` do not exist there yet; every reader switched in Tasks 1–4 and 6 is verified on camman-v2 (preview, auto-migrated) and by read-only checks against prod's still-live `stage_sends`/`counted_clickers` columns, not by running the new code against prod (it would 42P01). Applying 0181–0183 is gated on the Task 7 STOP approval. The same holds for **0184 and 0185** (Phase 4's lane tier and Phase 5 Task 2's per-event columns): both are applied on camman-v2 only and neither is applied to production.
 
@@ -495,7 +495,7 @@ or reads them until a later task.
 
 `n` counts status `pending` + `approved`; `pending_n` is a SUBSET of `n`, never
 added to it; the two money fields exist for `counts_revenue` types only and are 0
-elsewhere by construction. The projection will write them in the same
+elsewhere by construction. The projection writes them (Task 3, below) in the same
 `INSERT … ON CONFLICT` as the scalars, from the same single pass over the ledger,
 so the scalars are the SUM of this object's entries and the two cannot drift.
 
@@ -533,9 +533,94 @@ re-runnable; S9 covers a new row; S10–S15 the round trip including exact
 `numeric(12,4)` money at `1234567.8901` and `0.0001`; S16/S17 that the probe was
 rolled back, the second asking the DATABASE rather than this process.
 
+## The projection writes the per-event block (Phase 5 Task 3)
+
+[`lib/keitaro/stage-day-conversions.ts`](../../lib/keitaro/stage-day-conversions.ts)
+now groups its single pass over `conversion_events` **one level finer** — by
+`event_types.key` — in a `per_event` CTE, and rolls it back up in a `ledger` CTE
+that builds the `events` object with `jsonb_object_agg`. The scalars and the
+object come out of the SAME statement, which is what makes the footing
+structural: `sales` is the sum of the per-event `n` over `is_purchase` types and
+`revenue` is the sum of the per-event `revenue`, and there is no second statement
+to drift from. Still **inert for the UI** — nothing selects the two columns yet.
+
+The two CTEs are separate because there is no `min(jsonb)`/aggregate-of-aggregate
+shortcut: the scalars group in `per_event`, the object builds in `ledger`, and
+the join happens after grouping.
+
+Four things that are load-bearing rather than stylistic:
+
+- **The `event_types` join carries `org_id` as well as the id, and it is a LEFT
+  JOIN.** `event_types.id` is a global serial; joining on the id alone would let
+  one org's registry name another org's column. LEFT, because an UNMAPPED row has
+  to REACH the statement: it lands in the `event_key IS NULL` group, is counted
+  into `unmapped_conversions`, and is FILTERed out of the object — stored,
+  surfaced, counted as nothing.
+- ⭐ **The unmapped bucket keys on the JOIN RESULT (`et.key IS NULL`), not on the
+  raw column (`ce.event_type_id IS NULL`).** `purchasedClause` resolves
+  `is_purchase` through a **non-org-scoped** subquery while this join is
+  org-scoped, so a ledger row carrying ANOTHER org's `event_type_id` — which the
+  FK permits, there being no composite `(id, org_id)` FK — would otherwise be
+  counted in `sales`/`revenue`, placed in no `events` entry, and counted unmapped
+  nowhere: invisible on every surface Phase 5 adds, including the badge that
+  exists to reveal exactly that. Keying on `et.key` makes the two buckets a
+  **partition** — every ledger row on a stage-day is PLACED or UNMAPPED, never
+  both and never neither.
+- **An all-zero entry is omitted from the object**, so a stage-day whose only row
+  is a rejected purchase reads `'{}'` rather than a row of zeros that looks like a
+  configured-but-idle event type.
+- **The upsert's `WHERE` gained both columns.** Without them a stage-day whose
+  SCALARS did not move but whose BREAKDOWN did — a registration arriving where a
+  purchase already sat, a mapping healing an unmapped row — would never be
+  rewritten and the new columns would freeze at their first value.
+
+⚠️ **The zeroing anti-join widened from "no row that makes a number" to "no row at
+all", and that is not tidying.** Every ledger row now makes a number: a counted
+event of ANY type lands in `events`, an unmapped row lands in
+`unmapped_conversions`. Left as the four-filter list it was, a stage-day whose only
+conversions are REGISTRATIONS satisfies "nothing here" and the UPDATE would wipe a
+non-empty breakdown on a day the ledger fully explains. The widening strictly
+REDUCES the set of rows the statement touches, so it can only preserve a value,
+never invent one; the one shape it stops zeroing — a day whose only rows are
+rejected — needs no zeroing, because the INSERT already writes an all-zero row for
+it. `SET` and the change test gained `events`/`unmapped_conversions` with it.
+
+⚠️ **`readProjectionCoverage`'s `ledger_behind_history` probe learned the two
+columns in the same commit.** It asks whether `keitaro_stage_results` still
+REPORTS a conversion older than the ledger reaches; without the two new disjuncts a
+historical stage-day carrying only registrations, or only unmapped rows, could
+never trip the global refusal and the projection would happily zero it. Moot on day
+one (every pre-0185 row is `'{}'` / `0`) and asymmetric for ever after. **The other
+two bounds — the empty-ledger refusal and the per-stage coverage floor — are
+untouched**, and all three are red-proved against this version of the file.
+
+Checks:
+[`scripts/test-stage-day-conversions.ts`](../../scripts/test-stage-day-conversions.ts)
+— **108/0** on camman-v2 inside a transaction that always rolls back (70 before).
+Eleven one-sided fixtures, **each on its OWN `stat_date`** so no shape can be read
+through another: registration-only; approved / pending / rejected purchase each
+ALONE; one deliberate mixed day; all three unmapped shapes (no type + no status, no
+type + a real status, a mapped type + a NULL status); a **cross-org
+`event_type_id`**; and a THIRD event type (`deposit`) that exists in no other
+database, which goes red if any key is hard-coded. Plus the partition bars, the
+footing identity `sales = Σ (is_purchase) n + strays` with `strays` computed
+independently and made **non-zero (1)** by the cross-org fixture, its money twin
+`revenue = Σ per-event revenue + strays` (**$70**), a flat independently-shaped
+recomputation of every scalar, `parseEventMap` against a REAL jsonb row, and the two
+`ledger_behind_history` bars. Six red proofs, each restored byte-identically
+(`cmp` + md5): the raw-column unmapped predicate loses the cross-org row from both
+buckets (P18, P23b); the old zeroing anti-join wipes a registration-only day (P1,
+P3, P6); an inner join loses every unmapped row (12 bars); dropping `counts_revenue`
+from the per-event revenue filter breaks the corpus footing (P14b); dropping the
+per-stage floor zeroes stage Y's protected row (C1b); and defeating the
+empty-ledger test lets an empty ledger proceed (C1c).
+[`scripts/test-ledger-predicates.ts`](../../scripts/test-ledger-predicates.ts)
+**17/0** — P16 asserts `purchasedClause()` still CONTAINS `countedClause()`, so the
+status rule cannot separate into two copies.
+
 ## Not built yet
 
-- **Phase 5 beyond Tasks 1–2 — proposed, not built.** The generator exists, and
-  the `events` / `unmapped_conversions` columns now exist, but **no reader,
-  endpoint, matview column or writer consumes either yet** — the projection does
-  not populate them. Nothing downstream should be relied on as decided.
+- **Phase 5 beyond Tasks 1–3 — proposed, not built.** The generator exists, the
+  `events` / `unmapped_conversions` columns exist, and the projection now writes
+  them — but **no reader, endpoint, matview column or UI consumes either yet**.
+  Nothing downstream should be relied on as decided.

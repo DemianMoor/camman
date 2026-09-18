@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-19_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -107,10 +107,19 @@ touched by either mode. The mirror also THROWS on failure now; the "non-fatal, r
 swallow lives at `pollKeitaro`'s own call site, because swallowing inside the mirror
 would poison a caller-supplied transaction (the resync's `--apply`, the DB tests).
 
-⚠️ **A drop must be EXPLAINED, and the "explained" test names all four projected
-columns (fixed 2026-09-18).** The zeroing UPDATE asks "does the ledger explain any
-of the values on this row?" — and that test has to cover every column the INSERT
-writes: `SALES ∨ CHECKOUT ∨ REVENUE ∨ PENDING`. Task 6 briefly left `CHECKOUT` out,
+⚠️ **A drop must be EXPLAINED, and since Phase 5 Task 3 "explained" means ANY
+ledger row on that stage-day (widened 2026-09-19).** `events` and
+`unmapped_conversions` mean every ledger row now writes something — a counted event
+of any type lands in the breakdown, an unmapped row lands in the count — so the
+honest complement of the INSERT is `NOT EXISTS (a ledger row for this stage-day)`,
+with no filter list at all. Left as the list it was, a stage-day whose only
+conversions are REGISTRATIONS would satisfy "nothing here" and have its breakdown
+wiped on a day the ledger fully explains. The widening strictly reduces the rows the
+statement touches, so it can only preserve a value, never invent one (bar P6).
+
+The history, because the list was itself a fix: the zeroing UPDATE asks "does the
+ledger explain any of the values on this row?" — and that test had to cover every
+column the INSERT writes: `SALES ∨ CHECKOUT ∨ REVENUE ∨ PENDING`. Task 6 briefly left `CHECKOUT` out,
 which was harmless only while `SALES_FILTER` happened to be a superset of it
 (`keitaro_type IN ('lead','sale','rejected')` ⊇ `keitaro_type = 'lead'`). Once sales
 became `purchasedClause()`, a stage-day whose only ledger rows are lead-TYPE

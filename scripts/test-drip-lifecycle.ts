@@ -342,17 +342,103 @@ async function main() {
       check("⭐ a REGISTRANT completes — the tier-2 child is unreachable at tier 3",
             (await closeCompletedJourneys(tx, { orgId, campaignId: campId })).closed, 1);
       check("...its state is completed", (await state(reg.jid)).state, "completed");
-      void regLane;
+
+      // ⭐ THE UNMAPPED-STATUS PURCHASE CASE — the ONLY fixture that can tell
+      // `AND pe.status IS NOT NULL` (lib/drip/lifecycle.ts, both copies) apart
+      // from its absence. Every other fixture in this file is green with that
+      // line deleted, because none of them carries a purchase row at all.
+      //
+      // Delete it and the eviction NOT EXISTS starts matching a purchase-type
+      // row whose STATUS is unmapped: the registration is thrown away, this
+      // contact reads tier 0 in the lifecycle while lib/campaign-tier.ts still
+      // reads them 3 — so recipients.ts sends them nothing while the lifecycle
+      // keeps waiting on a child that can never match. The journey hangs for
+      // ever: exactly the bug this whole section exists to prevent, re-created
+      // by one deleted line. An unmapped row counts as NOTHING everywhere else
+      // in this codebase (conversion_events_unmapped_idx — "stored, alerted,
+      // never counted"), so it must evict nobody here either.
+      //
+      // ONE-SIDED where it counts: the purchase-type row is the only extra
+      // signal — no click, no offer reach, no legacy sale_status — and its
+      // status is NULL, so it is not a purchase under any reading.
+      const regu = await newJourney("+19978" + sfx);
+      const reguSend = (
+        (await tx.execute(sql`
+          INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                   rendered_text, status, created_at)
+          VALUES (${orgId}, ${campId}, ${parentId}, ${regu.cid}, ${"+19978" + sfx},
+                  'probe', 'sent', now())
+          RETURNING id::text AS id`)) as unknown as { id: string }[]
+      )[0].id;
+      check("⭐ NOT complete yet — the tier-2 child is genuinely owed to a tier-0 contact",
+            (await closeCompletedJourneys(tx, { orgId, campaignId: campId })).closed, 0);
+      await seedConversionEvent(tx, {
+        orgId, stageSendId: reguSend, contactId: regu.cid, campaignId: campId, stageId: parentId,
+        eventKey: "registration", status: "approved", revenue: 0, keitaroType: "lead",
+      });
+      // status: null ⇒ a PURCHASE-TYPE row we do not understand. Not `eventKey`
+      // omitted — that shape (NULL event_type_id) is already harmless because
+      // `NULL IN (…)` is NULL, and would prove nothing about the status filter.
+      await seedConversionEvent(tx, {
+        orgId, stageSendId: reguSend, contactId: regu.cid, campaignId: campId, stageId: parentId,
+        eventKey: "purchase", status: null, revenue: 0, keitaroType: "lead",
+      });
+      check("⭐ a registrant carrying an UNMAPPED-STATUS purchase row STILL completes — an unmapped row evicts nobody",
+            (await closeCompletedJourneys(tx, { orgId, campaignId: campId })).closed, 1);
+      check("...its state is completed", (await state(regu.jid)).state, "completed");
 
       // ── 3b. the SAME predicate's twin, in expireJourneysPastEndDate ───────
       // ⭐ THE TWIN IS A SEPARATE COPY AND HAS TO BE PROVEN SEPARATELY. The
       // reachability block is inlined TWICE (completion and expiry) because it
       // is correlated per journey row; an untested copy is exactly how the two
       // drift and a registrant hangs past end_at instead of hanging before it.
+      //
+      // ⭐ AND ITS COVERAGE MIRRORS SECTION 3's, case for case. The twin shipped
+      // with no test at all; covering only the registrant would have left the
+      // other three shapes section 3 proves (owed ⇒ held, everything sent ⇒
+      // closes, a lane BELOW the contact's tier never blocks) asserted on one
+      // copy only — which is the asymmetry that lets the two drift in the first
+      // place. Every bar below has a named sibling in section 3.
       console.log("\n3b. ⭐ past end_at ⇒ expired — the twin copy of the same predicate:");
       await tx.execute(sql`
         INSERT INTO drip_campaign_configs (campaign_id, org_id, interest_tag, end_at)
-        VALUES (${campId}, ${orgId}, ${"probe-" + sfx}, now() - interval '1 day')`);
+        VALUES (${campId}, ${orgId}, ${"probe-" + sfx}, NULL)`);
+
+      // ⭐ THE end_at GATE ITSELF, in all three of its states — and a registrant
+      // is the cleanest probe for it, because "nothing owed" is already true for
+      // them, so end_at is the ONLY thing holding the journey open. Before this,
+      // only the "already past" state was ever exercised: an implementation that
+      // dropped the `cfg.end_at <= now()` test, or the `IS NOT NULL` one, would
+      // have expired every live journey on a campaign that has no end date and
+      // no bar would have noticed.
+      const gate = await newJourney("+19977" + sfx);
+      const gateSend = (
+        (await tx.execute(sql`
+          INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                   rendered_text, status, created_at)
+          VALUES (${orgId}, ${campId}, ${parentId}, ${gate.cid}, ${"+19977" + sfx},
+                  'probe', 'sent', now())
+          RETURNING id::text AS id`)) as unknown as { id: string }[]
+      )[0].id;
+      await seedConversionEvent(tx, {
+        orgId, stageSendId: gateSend, contactId: gate.cid, campaignId: campId, stageId: parentId,
+        eventKey: "registration", status: "approved", revenue: 0, keitaroType: "lead",
+      });
+      check("⭐ end_at NULL ⇒ nothing expires, even with nothing owed",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 0);
+      await tx.execute(sql`
+        UPDATE drip_campaign_configs SET end_at = now() + interval '1 day'
+        WHERE campaign_id = ${campId} AND org_id = ${orgId}`);
+      check("⭐ a FUTURE end_at ⇒ still nothing (the campaign is still running)",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 0);
+      await tx.execute(sql`
+        UPDATE drip_campaign_configs SET end_at = now() - interval '1 day'
+        WHERE campaign_id = ${campId} AND org_id = ${orgId}`);
+      check("⭐ ...and the SAME journey expires once end_at has passed",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 1);
+      check("...its state is expired", (await state(gate.jid)).state, "expired");
+      check("close_reason", (await state(gate.jid)).close_reason, "campaign_end_date_passed");
+
       const xp = await newJourney("+19979" + sfx);
       const xpSend = (
         (await tx.execute(sql`
@@ -371,6 +457,80 @@ async function main() {
       check("⭐ a REGISTRANT past end_at expires — the tier-3 branch in the twin",
             (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 1);
       check("...its state is expired", (await state(xp.jid)).state, "expired");
+
+      // Twin of "a registrant carrying an UNMAPPED-STATUS purchase row STILL
+      // completes". The `AND pe.status IS NOT NULL` line exists TWICE; a fixture
+      // that only reaches the completion copy lets the expiry copy lose it
+      // silently, and a registrant would then hang past end_at instead of
+      // before it — the drift this whole section is shaped to catch.
+      const xpu = await newJourney("+19976" + sfx);
+      const xpuSend = (
+        (await tx.execute(sql`
+          INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                   rendered_text, status, created_at)
+          VALUES (${orgId}, ${campId}, ${parentId}, ${xpu.cid}, ${"+19976" + sfx},
+                  'probe', 'sent', now())
+          RETURNING id::text AS id`)) as unknown as { id: string }[]
+      )[0].id;
+      check("⭐ NOT expired yet — the tier-2 child is genuinely owed to a tier-0 contact",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 0);
+      await seedConversionEvent(tx, {
+        orgId, stageSendId: xpuSend, contactId: xpu.cid, campaignId: campId, stageId: parentId,
+        eventKey: "registration", status: "approved", revenue: 0, keitaroType: "lead",
+      });
+      await seedConversionEvent(tx, {
+        orgId, stageSendId: xpuSend, contactId: xpu.cid, campaignId: campId, stageId: parentId,
+        eventKey: "purchase", status: null, revenue: 0, keitaroType: "lead",
+      });
+      check("⭐ a registrant with an UNMAPPED-STATUS purchase row expires too — the twin's copy of the same filter",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 1);
+      check("...its state is expired", (await state(xpu.jid)).state, "expired");
+
+      // Twin of "complete once it has been sent". A tier-0 contact owes EVERY
+      // child; the send rows are inserted by parentage, not by tier, so this
+      // bar cannot restate the predicate it is testing.
+      const xpAll = await newJourney("+19975" + sfx);
+      check("NOT expired while children are unsent (tier 0 owes all of them)",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 0);
+      await tx.execute(sql`
+        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                 rendered_text, status, created_at)
+        SELECT ${orgId}::uuid, ${campId}::int, ch.id, ${xpAll.cid}::uuid,
+               ${"+19975" + sfx}::text, 'probe', 'sent', now()
+        FROM campaign_stages ch
+        WHERE ch.parent_stage_id = ${parentId}::int AND ch.org_id = ${orgId}::uuid`);
+      check("expires once every child has been sent",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 1);
+      check("...its state is expired", (await state(xpAll.jid)).state, "expired");
+
+      // Twin of "⭐ a clicker completes even though the Ignored lane never sent
+      // to it" — the high-water case caught on live data. Only the lanes AT OR
+      // ABOVE this contact's tier are sent, and they are named by id, not
+      // selected by tier, so the bar does not encode the rule it checks.
+      const xpClick = await newJourney("+19974" + sfx);
+      const linkId2 = (
+        (await tx.execute(sql`
+          INSERT INTO links (org_id, code, short_domain_id, destination_id, campaign_id,
+                             stage_id, contact_id, send_token,
+                             campaign_tracking_id, stage_tracking_id)
+          VALUES (${orgId}, ${"x" + sfx.slice(-6)}, ${sd}, ${lnk.id}, ${campId},
+                  ${parentId}, ${xpClick.cid}, ${"xtok" + sfx}, 'x', 'y')
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      await tx.execute(sql`
+        INSERT INTO clicks (org_id, link_id, classification) VALUES (${orgId}, ${linkId2}, 'human')`);
+      check("NOT expired while a lane AT OR ABOVE the clicker's tier is unsent",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 0);
+      await tx.execute(sql`
+        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                 rendered_text, status, created_at)
+        SELECT ${orgId}::uuid, ${campId}::int, ch.id, ${xpClick.cid}::uuid,
+               ${"+19974" + sfx}::text, 'probe', 'sent', now()
+        FROM campaign_stages ch
+        WHERE ch.id IN (${highLane}::int, ${regLane}::int)`);
+      check("⭐ a clicker expires even though the two Ignored lanes never sent to it",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 1);
+      check("...its state is expired", (await state(xpClick.jid)).state, "expired");
 
       // ── 4. archive ⇒ exited ───────────────────────────────────────────────
       console.log("\n4. campaign archived ⇒ exited:");

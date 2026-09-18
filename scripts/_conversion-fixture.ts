@@ -33,8 +33,16 @@ export interface SeedConversionEvent {
    *                          existing event type, which may be none).
    */
   eventKey?: "purchase" | "registration";
-  /** Defaults to "approved" for a mapped row, and to NULL for an unmapped one. */
-  status?: "pending" | "approved" | "rejected";
+  /**
+   * Defaults to "approved" for a mapped row, and to NULL for an unmapped one.
+   *
+   * Pass `null` EXPLICITLY for the third unmapped shape: a row whose event TYPE
+   * is mapped (so it is a purchase-type row) but whose STATUS is not. That row
+   * counts as nothing everywhere — and it is the one shape that tells
+   * `AND pe.status IS NOT NULL` apart from its absence, in `lib/campaign-tier.ts`
+   * and in both inline copies in `lib/drip/lifecycle.ts`.
+   */
+  status?: "pending" | "approved" | "rejected" | null;
   revenue?: number;
   /** The raw Keitaro conversion type, for the stage-day projection's filters. */
   keitaroType?: string;
@@ -62,7 +70,8 @@ export async function seedConversionEvent(
       (org_id, keitaro_event_id, keitaro_status, keitaro_type, event_type_id, status, revenue,
        occurred_at, last_postback_at, stage_send_id, contact_id, campaign_id, stage_id, offer_id)
     VALUES (${e.orgId}::uuid, ${`fixture-${randomUUID()}`}, ${type}, ${type},
-            ${eventTypeId}, ${e.eventKey ? (e.status ?? "approved") : (e.status ?? null)},
+            ${eventTypeId},
+            ${e.status !== undefined ? e.status : (e.eventKey ? "approved" : null)},
             ${(e.revenue ?? 0).toFixed(4)}::numeric,
             now(), now(), ${e.stageSendId ?? null}::uuid, ${e.contactId ?? null}::uuid,
             ${e.campaignId ?? null}::int, ${e.stageId ?? null}::int, ${e.offerId ?? null}::int)

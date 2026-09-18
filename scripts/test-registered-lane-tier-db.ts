@@ -2,6 +2,7 @@ import "./_env-preload";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { EXIT_TIER, LANE_TIER_VALUES } from "@/lib/campaign-tier";
 
 // Migration 0184: campaign_stages.behavioral_tier may now hold 3 (the Registered
 // lane). 4 must STAY rejected — the purchased tier is an EXIT, not a lane.
@@ -66,8 +67,31 @@ async function main() {
           SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
           WHERE conname = 'campaign_stages_behavioral_lane_check'`)) as unknown as { def: string }[]
       )[0]?.def ?? "";
-      check("C1 the lane CHECK mentions 3", /\b3\b/.test(def), def);
-      check("C2 the lane CHECK does NOT mention 4", !/\b4\b/.test(def), def);
+      // ⭐ ANCHORED TO THE TS LIST, NOT TO A LITERAL. `LANE_TIER_VALUES` is
+      // DOCUMENTED as "mirrors migration 0184's CHECK" — before this bar nothing
+      // asserted it. Adding a tier 5 to LANE_TIER_VALUES and to LANE_TIERS
+      // passed every static bar in the suite and failed only at INSERT time, in
+      // production, as a 23514 on a lane the operator had just ticked. This is
+      // the only place the two can be compared, because the constraint text
+      // lives in the database.
+      //
+      // Postgres normalises `IN (0,1,2,3)` to `= ANY (ARRAY[0, 1, 2, 3])`; both
+      // spellings are accepted so a future re-statement of the migration does
+      // not red this for a cosmetic reason.
+      const arrayText =
+        /behavioral_tier\s*=\s*ANY\s*\(\s*ARRAY\[([^\]]*)\]/.exec(def)?.[1] ??
+        /behavioral_tier\s+IN\s*\(([^)]*)\)/.exec(def)?.[1] ??
+        "";
+      const checkTiers = arrayText
+        .split(",")
+        .map((s) => Number(s.replace(/[^0-9-]/g, "")))
+        .filter((n) => Number.isFinite(n));
+      check("C1 ⭐ the lane CHECK admits EXACTLY LANE_TIER_VALUES — the TS list and the DB constraint cannot drift",
+        checkTiers.length > 0 &&
+          JSON.stringify(checkTiers) === JSON.stringify([...LANE_TIER_VALUES]),
+        `check=[${checkTiers.join(",")}] LANE_TIER_VALUES=[${LANE_TIER_VALUES.join(",")}] def=${def}`);
+      check(`C2 ⭐ the CHECK does NOT admit the exit tier ${EXIT_TIER} (a buyer is never a lane)`,
+        checkTiers.length > 0 && !checkTiers.includes(EXIT_TIER), def);
 
       async function insertLane(tier: number | null, withParent: boolean): Promise<string | null> {
         try {

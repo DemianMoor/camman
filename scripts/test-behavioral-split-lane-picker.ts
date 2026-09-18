@@ -29,6 +29,17 @@ import {
 } from "@/lib/stages/behavioral-split";
 import { settleSplitGroup } from "@/lib/stages/split-group";
 
+// ⚠️ `.env.local` is PRODUCTION and `_env-preload` loads it whenever
+// DATABASE_URL is not already set. This script WRITES fixtures, so refuse
+// outright rather than trust the caller's environment:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/test-behavioral-split-lane-picker.ts
+const PROD_REF = "rtdarhkkjwcetlmruftl";
+if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
+  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
+  process.exit(1);
+}
+
 const ORG_MARKER = "__BSPLIT_PICKER_TEST__";
 const COUNTED_TABLES = [
   "organizations", "campaigns", "campaign_stages", "creatives",

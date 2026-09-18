@@ -610,11 +610,16 @@ export async function notifyLaneSkippedEmpty(
   orgId: string,
 ): Promise<void> {
   // org_id alongside the id, and on the campaigns join too (CLAUDE.md §3).
-  // Cannot change the result: the only caller passes the org_id it read from
-  // the SAME campaign_stages row as stageId, and a stage whose campaign belongs
-  // to another org would be a data-integrity violation — but an alert that
-  // names a campaign is exactly the kind of read that should not be able to
-  // cross an org boundary by accident.
+  //
+  // ⚠️ The org_id the caller passes is `campaigns.org_id` (lib/sends/scheduled.ts
+  // selects `c.org_id AS org_id`), NOT the campaign_stages row's own org_id, and
+  // NO constraint ties the two together — the FK is a plain
+  // `campaign_id REFERENCES campaigns(id)`. So `s.org_id = <that org>` holds by
+  // application invariant, not by the database. Safe HERE because the worst case
+  // is zero rows and an alert that says "(unknown)". Do NOT copy this shape into
+  // `markLaneSkippedEmpty`: there a zero-row UPDATE would leave the lane
+  // unstamped, its group unsettleable and its siblings held — the 2026-09-05
+  // freeze, reintroduced by a safety predicate.
   const rows = (await dbc.execute(sql`
     SELECT c.name AS campaign, s.stage_number AS stage_number,
            s.label AS label, s.behavioral_tier AS tier

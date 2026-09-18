@@ -4,7 +4,7 @@ import { sql as drizzleSql } from "drizzle-orm";
 
 import { db } from "../db/client";
 import { buildSegmentAudienceClause } from "../lib/segment-rules-eval";
-import { campaignTierExpr } from "../lib/campaign-tier";
+import { campaignTierExpr, EXIT_TIER, tierLiteral } from "../lib/campaign-tier";
 import {
   legacySaleStatusPurchasedClause,
   purchasedClause,
@@ -36,7 +36,22 @@ import { seedConversionEvent } from "./_conversion-fixture";
 //   C. The fix is load-bearing — the OLD predicate is re-run and must produce a
 //      STRICTLY SMALLER audience. If the network ever starts sending 'sale' for
 //      everything this bar goes quiet-equal, which is reported, not asserted.
-//   D. The converted tier (campaign-tier.ts tier 3) is reachable.
+//   D. The purchased tier (campaign-tier.ts EXIT_TIER, 4 since Phase 4 — it was
+//      3 before Registered joined the scale) is reachable.
+
+// ⚠️ `.env.local` is PRODUCTION and `_env-preload` loads it whenever
+// DATABASE_URL is not already set. B synthesizes a 'rejected' conversion — the
+// transaction always ROLLBACKs, but a rollback is a promise, not a guarantee
+// against an interrupted run, so refuse the production ref outright:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/verify-purchase-rule-definition.ts
+// A/C/E compare LIVE counts, so they are only meaningful against an org that
+// actually has sends and conversions — point VERIFY_ORG_ID at one.
+const PROD_REF = "rtdarhkkjwcetlmruftl";
+if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
+  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
+  process.exit(1);
+}
 
 const ORG_ID = process.env.VERIFY_ORG_ID ?? "b0ce3435-5ea2-4510-ab11-8cdd0d0c125b";
 
@@ -316,7 +331,7 @@ async function main() {
   );
 
   // --------------------------------------------- D. converted tier reachable
-  console.log("\nD. campaign-tier tier 3 ('converted') is reachable");
+  console.log(`\nD. campaign-tier tier ${EXIT_TIER} ('purchased', the exit) is reachable`);
   const campRow = (await db.execute(drizzleSql`
     SELECT ce.campaign_id AS id, count(*)::int AS n FROM conversion_events ce
     WHERE ce.org_id = ${ORG_ID}::uuid AND ce.contact_id IS NOT NULL AND ${purchasedClause()}
@@ -331,11 +346,11 @@ async function main() {
     const tierCount = await scalar(drizzleSql`
       SELECT count(*)::int AS n
       FROM (${campaignTierExpr(campRow[0].id, ORG_ID)}) t
-      WHERE t.tier = 3`);
+      WHERE t.tier = ${tierLiteral(EXIT_TIER)}`);
     check(
-      `campaign ${campRow[0].id}: ${tierCount} contacts at tier 3 (converted)`,
+      `campaign ${campRow[0].id}: ${tierCount} contacts at tier ${EXIT_TIER} (purchased)`,
       tierCount > 0,
-      "tier 3 still unreachable",
+      `tier ${EXIT_TIER} still unreachable`,
     );
   }
 

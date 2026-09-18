@@ -2,7 +2,7 @@ import { sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
-import { campaignTierExpr } from "@/lib/campaign-tier";
+import { EXIT_TIER, campaignTierExpr, tierLiteral } from "@/lib/campaign-tier";
 import {
   applyEligibilityExcept,
   buildStageEligibilityExclusions,
@@ -162,11 +162,13 @@ export function stageRecipientsSql(opts: {
         )`
       : sql``;
 
-  // Block 2 — EXACT tier match + the global converted guard. campaignTierExpr is
+  // Block 2 — EXACT tier match + the global exit guard. campaignTierExpr is
   // LEFT JOINed (alias bt) so the high-water tier is read live; a contact with no
-  // signal has NULL tier ⇒ coalesce 0 (the tier-0 / "ignored" lane). The `<> 3`
-  // guard is redundant with exact-match against {0,1,2} but makes "converted
-  // never appears in any lane" explicit and survives a future threshold lane.
+  // signal has NULL tier ⇒ coalesce 0 (the tier-0 / "ignored" lane). The
+  // `<> EXIT_TIER` guard is redundant with exact-match against the lane tiers
+  // but makes "a buyer never appears in any lane" explicit and survives a future
+  // threshold lane. It is 4 since Phase 4 — tier 3 is now the Registered LANE,
+  // so guarding 3 here would empty that lane.
   const tierJoin = isLane
     ? sql`
       left join (${campaignTierExpr(campaignId, orgId)}) bt on bt.contact_id = p.contact_id`
@@ -211,7 +213,7 @@ export function stageRecipientsSql(opts: {
   const behavioralWhere = isLane
     ? sql`${aliveness}
         and coalesce(bt.tier, 0) = ${f.behavioralTier!}::int
-        and coalesce(bt.tier, 0) <> 3${siblingExclusion}`
+        and coalesce(bt.tier, 0) <> ${tierLiteral(EXIT_TIER)}${siblingExclusion}`
     : sql``;
 
   // Content-dedup exclusions (Phase 2). Built from the stage's creative + the

@@ -7,7 +7,7 @@ import { db } from "@/db/client";
 import { inUseSetBody, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
 
-import { campaignTierExpr } from "./campaign-tier";
+import { EXIT_TIER, campaignTierExpr, tierLiteral } from "./campaign-tier";
 import {
   buildStageEligibilityExclusions,
   type StageEligibilityParams,
@@ -903,7 +903,7 @@ export async function computeStageAudienceCountsBatchForDraft(
 
 // ── Batched behavioral-lane audience counts ──────────────────────────────────
 // Lane stages (behavioral_tier set) show a LIVE preview: alive (received the
-// parent position) ∩ exact current tier − opt-outs, converted excluded. The
+// parent position) ∩ exact current tier − opt-outs, purchased (tier 4) excluded. The
 // per-lane path (countStageRecipients → campaignTierExpr) recomputes the SAME
 // expensive live-tier scan (links⋈clicks + stage_sends) once PER LANE — a
 // behavioral split has 3 lanes, so a single page load paid ~3× the same ~6.6s
@@ -1055,7 +1055,10 @@ export async function computeLaneAudienceCountsBatch(
         )
         and not (ln.exc_cl and p.was_clicker_at_snapshot)
         and coalesce(t.tier, 0) = ln.tier
-        and coalesce(t.tier, 0) <> 3
+        -- The exit guard, mirroring stageRecipientsSql's Block 2. 4 since
+        -- Phase 4: tier 3 is the Registered lane and must NOT be excluded here,
+        -- or its displayed count would always be 0.
+        and coalesce(t.tier, 0) <> ${tierLiteral(EXIT_TIER)}
         -- Sibling exclusion — mirrors "Block 3" in stageRecipientsSql. Lanes are
         -- independent now, so the first lane to materialize a contact owns them;
         -- without this the displayed count would over-predict every lane that

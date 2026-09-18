@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
-import { campaignTierExpr } from "@/lib/campaign-tier";
+import { EXIT_TIER, LANE_TIER_VALUES, campaignTierExpr, tierLiteral } from "@/lib/campaign-tier";
 import { resolveCompletedStages } from "@/lib/sends/stage-complete";
 
 // ── Behavioural split GROUP state machine (migration 0174) ───────────────────
@@ -350,7 +350,7 @@ export async function previewSplitLanes(
     source_stages: [],
     anchor_stage_id: null,
     source_contacts: 0,
-    lanes: [0, 1, 2].map((t) => ({ tier: t, label: TIER_LABEL[t], count: 0 })),
+    lanes: LANE_TIER_VALUES.map((t) => ({ tier: t, label: TIER_LABEL[t], count: 0 })),
     converted_excluded: 0,
     opted_out_excluded: 0,
   };
@@ -387,10 +387,16 @@ export async function previewSplitLanes(
     select
       count(*) filter (where not opted_out)                        as source_contacts,
       count(*) filter (where opted_out)                            as opted_out_excluded,
-      count(*) filter (where not opted_out and tier = 3)           as converted_excluded,
-      count(*) filter (where not opted_out and tier = 0)           as t0,
-      count(*) filter (where not opted_out and tier = 1)           as t1,
-      count(*) filter (where not opted_out and tier = 2)           as t2
+      -- The EXIT is tier 4 since Phase 4. Counting the OLD exit literal here
+      -- would report every registrant as a buyer and hide the new lane from the
+      -- operator. Reaches SQL only via tierLiteral (see lib/campaign-tier.ts).
+      count(*) filter (where not opted_out and tier = ${tierLiteral(EXIT_TIER)}) as converted_excluded,
+      ${sql.join(
+        LANE_TIER_VALUES.map(
+          (t) => sql`count(*) filter (where not opted_out and tier = ${tierLiteral(t)}) as ${sql.raw(`t${t}`)}`,
+        ),
+        sql`, `,
+      )}
     from classified
   `)) as unknown as Record<string, string | number>[];
   const r = rows[0] ?? {};
@@ -403,7 +409,7 @@ export async function previewSplitLanes(
     anchor_stage_id: Number(sources[sources.length - 1].id),
     // source_contacts is POST-opt-out, so lanes + converted == source_contacts.
     source_contacts: n("source_contacts"),
-    lanes: [0, 1, 2].map((t) => ({
+    lanes: LANE_TIER_VALUES.map((t) => ({
       tier: t,
       label: TIER_LABEL[t],
       count: n(`t${t}`),

@@ -1,6 +1,6 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-09-07_
+_Last updated: 2026-09-18_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
@@ -31,15 +31,28 @@ A contact's tier within a campaign is a **high-water mark** (only goes up):
 | 0 | Ignored | no qualifying click |
 | 1 | Clicked | a CLEAN click (not bot/prefetch/suspect) on a link in this campaign |
 | 2 | Reached offer | a `stage_sends` row with `offer_reached_at` set |
-| 3 | Converted | a `stage_sends` row with a non-rejected conversion — `purchasedClause()` in [`lib/sale-attribution.ts`](../../lib/sale-attribution.ts), i.e. `sale_status IN ('lead','sale')` |
+| 3 | Registered | a counted REGISTRATION in the `conversion_events` ledger — `registeredClause()` in [`lib/sale-attribution.ts`](../../lib/sale-attribution.ts) — **and** no purchase-type event of any known status on this campaign |
+| 4 | Purchased | a counted PURCHASE in the `conversion_events` ledger — `purchasedClause()` in [`lib/sale-attribution.ts`](../../lib/sale-attribution.ts) |
 
-Tier 3 (**converted**) **exits** the sequence — there is no tier-3 lane. Lanes
+Tier 4 (**purchased**) **exits** the sequence — there is no tier-4 lane. Lanes
 match on **exact** tier (a contact at tier 2 is in the tier-2 lane only), so the
-three lanes are mutually exclusive by construction.
+lanes are mutually exclusive by construction.
+
+> **The exit moved from 3 to 4 on 2026-09-18** (conversion-events Phase 4), so
+> the scale stays monotonic in behavioural rank: the ranking function is
+> `MAX(tier)`, so a contact who registered **and** bought must read as the
+> HIGHER value. Appending Registered as 4 instead would have made `MAX` rank a
+> $0 registration above a real sale and messaged a buyer again. Nothing was back
+> filled — the tier is computed by [`lib/campaign-tier.ts`](../../lib/campaign-tier.ts)
+> and never stored. A **rejected** purchase does not return a contact to
+> Registered; they fall back to their click / offer-reach tier. A purchase row
+> whose status is UNMAPPED (NULL) counts as nothing and does not evict them.
+> **Tier 3 is not selectable yet** — `LANE_TIERS` still offers `{0,1,2}` and the
+> API still refuses a request for tier 3.
 
 ## Data model
 
-- `campaign_stages.behavioral_tier` (`0|1|2`, nullable) + `parent_stage_id`
+- `campaign_stages.behavioral_tier` (`0|1|2|3` since migration 0184, nullable) + `parent_stage_id`
   (self-FK, `ON DELETE CASCADE`, nullable). Both NULL ⇒ an ordinary stage. Set
   together for a lane (DB CHECK `campaign_stages_behavioral_lane_check`). Migration
   `0071_stage_behavioral_lanes.sql`. See [03-data-model](../03-data-model.md).
@@ -346,8 +359,10 @@ Two entry points for two different actions; deliberately not two for one action.
     refused selection writes **nothing** — no group row, no lane rows — because
     an orphan group would permanently block the campaign via its own
     `split_already_pending` guard.
-  - Tier 3 (`converted`) stays unrepresentable: it exits the sequence and never
-    gets a lane.
+  - Tier 4 (`purchased`) stays unrepresentable: it exits the sequence and never
+    gets a lane. Tier 3 (`registered`) IS a lane tier as of 2026-09-18, but is
+    not offered yet — `LANE_TIERS` still lists `{0,1,2}`, so a request for tier 3
+    is still refused with `invalid_lane_tier`.
 - **Lane display:** each lane row shows a tier chip (`↳ Ignored` / `Clicked` /
   `Reached offer`) with `· from #N` pointing at the parent position; the parent
   row shows an `N behavioral lanes` badge.

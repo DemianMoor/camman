@@ -3,7 +3,7 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { campaignTierExpr } from "@/lib/campaign-tier";
+import { EXIT_TIER, campaignTierExpr, tierLiteral } from "@/lib/campaign-tier";
 
 // The journey funnel for one drip campaign (Drip Phase 7, ruling R4).
 //
@@ -47,7 +47,7 @@ export interface FunnelOutcome {
 export interface FunnelStageRow {
   stage_id: number;
   stage_number: number | null;
-  /** null on the first-send stage; 0..2 on a behavioural lane child. */
+  /** null on the first-send stage; 0..3 on a behavioural lane child (0184). */
   behavioral_tier: number | null;
   label: string;
   sent: number;
@@ -82,8 +82,12 @@ function outcomeLabel(state: string, reason: string | null): string {
 function laneLabel(tier: number | null, stageNumber: number | null): string {
   if (tier == null) return `Stage ${stageNumber ?? "?"} — first send`;
   return (
-    { 0: "Ignored lane", 1: "Clicked lane", 2: "Reached-offer lane" }[tier] ??
-    `Tier ${tier} lane`
+    {
+      0: "Ignored lane",
+      1: "Clicked lane",
+      2: "Reached-offer lane",
+      3: "Registered lane",
+    }[tier] ?? `Tier ${tier} lane`
   );
 }
 
@@ -97,8 +101,13 @@ export async function getDripFunnel(
       count(*)::int                                              AS routed,
       count(*) FILTER (WHERE j.first_send_at IS NOT NULL)::int    AS sent,
       count(*) FILTER (WHERE COALESCE(t.tier, 0) >= 1)::int       AS clicked,
+      -- reached_offer deliberately keeps >= 2, so a registrant (tier 3) and a
+      -- buyer (tier 4) still count as having reached the offer — that is what a
+      -- cumulative high-water funnel means.
       count(*) FILTER (WHERE COALESCE(t.tier, 0) >= 2)::int       AS reached_offer,
-      count(*) FILTER (WHERE COALESCE(t.tier, 0) >= 3)::int       AS converted
+      -- converted is the EXIT tier, 4 since Phase 4. At >= 3 it would count
+      -- every $0 registration as a conversion.
+      count(*) FILTER (WHERE COALESCE(t.tier, 0) >= ${tierLiteral(EXIT_TIER)})::int AS converted
     FROM drip_journeys j
     LEFT JOIN (${campaignTierExpr(campaignId, orgId)}) t
            ON t.contact_id = j.contact_id

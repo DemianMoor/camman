@@ -69,6 +69,48 @@ Five properties that later phases inherit and must not regress:
   the moment a second `counts_revenue` type is configured, and its message says
   what to reconsider.
 
+## A numeric INSIDE jsonb comes back a number; a top-level numeric comes back a string (2026-09-18)
+
+Measured against the real column — `keitaro_stage_results.events`, migration
+0185 — with one row carrying the same value in both places (bars S13–S15,
+[scripts/test-stage-event-columns-db.ts](../scripts/test-stage-event-columns-db.ts)):
+
+| where the value sits | written as | what postgres-js hands back |
+| --- | --- | --- |
+| inside `jsonb_build_object(…)` | `(1234567.8901)::numeric(12,4)` | JS **number** `1234567.8901` — exact, and exact at `0.0001` too |
+| a top-level `numeric(12,4)` column | `(1234567.8901)::numeric(12,4)` | JS **string** `"1234567.8901"` |
+| `events #>> '{purchase,revenue}'` | — | JS string `"1234567.8901"` (a text extraction) |
+
+postgres-js `JSON.parse`s a jsonb column, so integers, bigints and `numeric`
+inside the json all arrive parsed; a top-level `numeric` arrives as text because
+its value can exceed what a double holds. `jsonb` also KEEPS the numeric's scale
+(`0.0000`, not `0`), so `events::text` shows four decimals. This is why
+`parseEventMap()` ([lib/reporting/event-columns.ts](../lib/reporting/event-columns.ts))
+accepts a number OR a numeric string for every field and neither branch is dead —
+the jsonb column feeds it numbers, and any caller assembling a tally out of
+ordinary aggregate columns feeds it strings. **Do not "simplify" it to one type.**
+The failure mode a bar must state explicitly is a silently rounded cent:
+writing the same value as `numeric(12,2)` still round-trips as a plausible
+`1234567.89`, and only an exact comparison at full scale catches it.
+
+## A bar about "rows that already existed" cannot be asked of an empty table (2026-09-18)
+
+Migration 0185 adds two columns with defaults, and the claim worth asserting is
+that rows written BEFORE the `ALTER` read `'{}'` / `0` rather than NULL. The
+obvious bar — `SELECT count(*) … WHERE events IS NULL` = 0 over the live table —
+is **vacuously true on camman-v2, which holds 0 `keitaro_stage_results` rows**,
+so it would have printed PASS against a migration that omitted the `DEFAULT`
+entirely. The bar now BUILDS the world-state it is about: three rows in a
+`TEMP … ON COMMIT DROP` fixture table, then the migration's own two statements —
+**read off disk, not re-typed** — replayed over them (bars S8/S8b). Re-typing the
+DDL into the test would only ever test the copy. Two rules fall out of it:
+
+- a count-is-zero bar must also assert that the population it counts over is
+  non-empty, or it is a bar about today's world-state and not about the code;
+- a fixture table inside a rolled-back probe should be `TEMP … ON COMMIT DROP`.
+  An ordinary `CREATE TABLE` survives if the probe ever commits — which happened
+  while red-proving the rollback bars, and had to be dropped off camman-v2 by hand.
+
 ## A script that writes to a database must refuse production, by import (2026-09-18)
 
 `.env.local` is **PRODUCTION**, and `scripts/_env-preload.ts` loads it whenever `DATABASE_URL` is not already set. On 2026-09-18 a test-fixture script ran that way and created live campaign rows in production before tearing them down. Nothing was damaged; nothing had stopped it either.

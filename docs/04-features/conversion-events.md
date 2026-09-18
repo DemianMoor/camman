@@ -2,7 +2,7 @@
 
 _Last updated: 2026-09-18_
 
-**Status:** Phase 3 in progress — the ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). ⚠️ **Migrations 0181/0182 are not yet applied to production** — `conversion_events`/`event_types` do not exist there yet; every reader switched in Tasks 1–4 and 6 is verified on camman-v2 (preview, auto-migrated) and by read-only checks against prod's still-live `stage_sends`/`counted_clickers` columns, not by running the new code against prod (it would 42P01). Applying 0181–0183 is gated on the Task 7 STOP approval.
+**Status:** Phase 3 in progress — the ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). ⚠️ **Migrations 0181/0182 are not yet applied to production** — `conversion_events`/`event_types` do not exist there yet; every reader switched in Tasks 1–4 and 6 is verified on camman-v2 (preview, auto-migrated) and by read-only checks against prod's still-live `stage_sends`/`counted_clickers` columns, not by running the new code against prod (it would 42P01). Applying 0181–0183 is gated on the Task 7 STOP approval. The same holds for **0184 and 0185** (Phase 4's lane tier and Phase 5 Task 2's per-event columns): both are applied on camman-v2 only and neither is applied to production.
 
 ## Why
 
@@ -476,10 +476,66 @@ exist in no database, so a generator that hard-coded the two seeded keys fails)
 and [`scripts/test-event-columns-db.ts`](../../scripts/test-event-columns-db.ts)
 (16 bars on camman-v2 inside a transaction that always rolls back).
 
+## Per-event storage on the stage-day projection (Phase 5 Task 2)
+
+Migration [`0185_stage_event_breakdown.sql`](../../db/migrations/0185_stage_event_breakdown.sql)
+gives the projection somewhere to put the numbers Task 1's generator reads.
+Two additive columns on `keitaro_stage_results`, **both inert**: nothing writes
+or reads them until a later task.
+
+| column | type | what it holds |
+| --- | --- | --- |
+| `events` | `jsonb NOT NULL DEFAULT '{}'::jsonb` | the SAME numbers as `sales` / `revenue` / `pending_revenue`, split per `event_types.key` |
+| `unmapped_conversions` | `integer NOT NULL DEFAULT 0` | rows on this stage-day with no event type or no status (`conversion_events_unmapped_idx`'s own predicate) |
+
+```json
+{"purchase":     {"n": 12, "pending_n": 1, "revenue": 540.0000, "pending_revenue": 60.0000},
+ "registration": {"n": 40, "pending_n": 0, "revenue": 0.0000,   "pending_revenue": 0.0000}}
+```
+
+`n` counts status `pending` + `approved`; `pending_n` is a SUBSET of `n`, never
+added to it; the two money fields exist for `counts_revenue` types only and are 0
+elsewhere by construction. The projection will write them in the same
+`INSERT … ON CONFLICT` as the scalars, from the same single pass over the ledger,
+so the scalars are the SUM of this object's entries and the two cannot drift.
+
+Four decisions worth not re-litigating:
+
+- **Keyed by `key`, never `id`.** `event_types.id` is a global serial while the
+  natural key is `(org_id, key)` (`event_types_org_key_uniq`, 0181), and the one
+  cross-org reader — the scheduled Telegram report — needs a key that means the
+  same thing in two organizations.
+- **`unmapped_conversions` is a scalar OUTSIDE the object**, deliberately: inside
+  it, some future loop over `events` would sum it into a total, and an unmapped
+  conversion must count as nothing everywhere. Keeping it out makes that
+  structural rather than a convention.
+- **No index.** The table is read by `(org_id, stage_id, stat_date)` and
+  `(campaign_id, stat_date)`, both already indexed, and neither new column is ever
+  a predicate. A GIN index on `events` would cost writes on every 5-minute tick.
+- **Existing rows get `'{}'` / `0`** and stay empty-but-not-null until the
+  projection next covers their stage — the same catch-up `pending_revenue` (0182)
+  had.
+
+⚠️ **The money inside the object is a JSON number, not a string.** See
+[07-conventions.md](../07-conventions.md): `jsonb` keeps the numeric's scale
+(`540.0000`) and postgres-js `JSON.parse`s the column, so a reader gets a **number**
+there and a **string** from a top-level `numeric` column — which is exactly why
+`parseEventMap()` takes both and neither of its branches is dead. That claim is now
+measured against the real column (bars S13–S15) instead of a hand-built object.
+
+Checks:
+[`scripts/test-stage-event-columns-db.ts`](../../scripts/test-stage-event-columns-db.ts)
+— 18 bars on camman-v2 inside a transaction that always rolls back. S1–S7 read the
+catalog; **S8/S8b replay the migration's own statements, read off disk, over three
+rows that predate them** (the live table is empty on preview, so the obvious
+"no row is NULL" bar would have passed for the wrong reason) and prove the file
+re-runnable; S9 covers a new row; S10–S15 the round trip including exact
+`numeric(12,4)` money at `1234567.8901` and `0.0001`; S16/S17 that the probe was
+rolled back, the second asking the DATABASE rather than this process.
+
 ## Not built yet
 
-- **Phase 5 beyond Task 1 — proposed, not built.** Task 1's generator above
-  exists and is exercised, but **no reader, endpoint, matview column or table
-  consumes it yet**, and the `keitaro_stage_results.events` jsonb column that
-  `parseEventMap()` is written against arrives in a later task's migration.
-  Nothing downstream of the generator should be relied on as decided.
+- **Phase 5 beyond Tasks 1–2 — proposed, not built.** The generator exists, and
+  the `events` / `unmapped_conversions` columns now exist, but **no reader,
+  endpoint, matview column or writer consumes either yet** — the projection does
+  not populate them. Nothing downstream should be relied on as decided.

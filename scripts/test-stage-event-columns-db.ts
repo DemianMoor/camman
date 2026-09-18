@@ -1,6 +1,9 @@
 import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -35,6 +38,10 @@ const BIG_MONEY = 1234567.8901;
 const SMALL_MONEY = 0.0001;
 /** The probe row's stage_tracking_id. Nothing else writes it; S17 counts it outside the transaction. */
 const PROBE_TRACKING_ID = "p5-task2-events-probe";
+/** The migration under test, read off disk and replayed by S8 so the bar tests the FILE, not a copy of it. */
+const MIGRATION_FILE = "db/migrations/0185_stage_event_breakdown.sql";
+/** S8/S8b's fixture table. Created and dropped with the transaction; nothing outside it ever sees it. */
+const PROBE_TABLE = "p5_task2_pre_0185_probe";
 
 let passed = 0;
 let failed = 0;
@@ -111,23 +118,80 @@ async function main() {
           `${um?.is_nullable}/${um?.column_default}`,
         );
 
-        // An EXISTING row must have been backfilled by the column default, not
-        // left NULL — every reader treats the column as always-present.
+        // ── the promise about ROWS THAT ALREADY EXISTED ──────────────────────
+        // A row written before the ALTER must read '{}' / 0, not NULL: every
+        // reader treats both columns as always-present.
         //
-        // ⭐ THE TOTAL IS PART OF THE BAR. "0 rows are NULL" is also true of an
-        // EMPTY table, which is how this would pass for the wrong reason; the bar
-        // therefore also demands the table hold rows the default had to cover.
-        // Deliberately NOT org-scoped: a per-org sweep would miss exactly the
-        // rows a whole-table backfill could have missed.
+        // ⭐ IT IS ASSERTED AGAINST A FIXTURE, NOT AGAINST THIS DATABASE, AND
+        // THAT IS THE POINT. The obvious bar — "no row of keitaro_stage_results
+        // is NULL in either column" — is VACUOUSLY TRUE here: the preview table
+        // holds 0 rows (printed below), so it would print PASS against a
+        // migration that forgot the DEFAULT entirely. The fixture builds the one
+        // world-state the claim is about — rows that PREDATE the columns — and
+        // then replays the migration's OWN statements, read off disk, over them.
+        // Re-typing the DDL here would only test the copy.
         const sweep = (await tx.execute(sql`
           SELECT count(*)::int AS total,
                  count(*) FILTER (WHERE events IS NULL OR unmapped_conversions IS NULL)::int AS nulls
           FROM keitaro_stage_results
         `)) as unknown as { total: number; nulls: number }[];
+        console.log(
+          `  live keitaro_stage_results: total=${sweep[0]?.total} rows, NULL in either new column=${sweep[0]?.nulls} (context, NOT a bar — see S8)\n`,
+        );
+
+        const migrationSql = readFileSync(join(process.cwd(), MIGRATION_FILE), "utf8");
+        const statements = migrationSql
+          .split("--> statement-breakpoint")
+          .map((s) => s.replace(/public\.keitaro_stage_results/g, PROBE_TABLE))
+          .filter((s) => s.trim().length > 0);
+        // ⚠️ TEMP … ON COMMIT DROP, not a plain table. Measured the hard way:
+        // while red-proving S16/S17 (the mutation that lets the probe COMMIT) an
+        // ordinary CREATE TABLE committed too and had to be dropped off camman-v2
+        // by hand. A temp table with ON COMMIT DROP cannot survive either exit.
+        // The migration's statements are rewritten to the unqualified name, so
+        // they resolve to the temp schema ahead of public.
+        await tx.execute(
+          sql.raw(`CREATE TEMP TABLE ${PROBE_TABLE} (id int primary key, note text) ON COMMIT DROP`),
+        );
+        await tx.execute(sql.raw(`INSERT INTO ${PROBE_TABLE} (id, note) VALUES (1,'a'),(2,'b'),(3,'c')`));
+        for (const s of statements) await tx.execute(sql.raw(s));
+        const pre = (await tx.execute(sql.raw(`
+          SELECT count(*)::int AS total,
+                 count(*) FILTER (WHERE events IS NULL OR unmapped_conversions IS NULL)::int AS nulls,
+                 count(*) FILTER (WHERE events::text = '{}' AND unmapped_conversions = 0)::int AS defaulted
+          FROM ${PROBE_TABLE}
+        `))) as unknown as { total: number; nulls: number; defaulted: number }[];
         check(
-          "S8 ⭐ the table is non-empty AND no pre-existing row carries a NULL in either column",
-          Number(sweep[0]?.total ?? 0) > 0 && Number(sweep[0]?.nulls ?? -1) === 0,
-          `total=${sweep[0]?.total} nulls=${sweep[0]?.nulls}`,
+          `S8 ⭐ the migration's OWN two statements, replayed over 3 rows that PREDATE them, leave every one reading '{}' and 0 — never NULL`,
+          statements.length === 2 &&
+            migrationSql.includes("public.keitaro_stage_results") &&
+            Number(pre[0]?.total) === 3 &&
+            Number(pre[0]?.nulls) === 0 &&
+            Number(pre[0]?.defaulted) === 3,
+          `statements=${statements.length} total=${pre[0]?.total} nulls=${pre[0]?.nulls} defaulted=${pre[0]?.defaulted}`,
+        );
+        // Re-runnable, so a `when` bump could re-apply it on preview without a
+        // second thought: both statements are ADD COLUMN IF NOT EXISTS.
+        // ⚠️ INSIDE A SAVEPOINT (a nested drizzle transaction). A statement that
+        // errors POISONS its transaction — every later query returns 25P02 — so
+        // catching the error without one would turn "0185 is not re-runnable"
+        // into a cascade of crashes in the bars below instead of one red line.
+        let reapplyError: string | null = null;
+        try {
+          await tx.transaction(async (tx2) => {
+            for (const s of statements) await tx2.execute(sql.raw(s));
+          });
+        } catch (e) {
+          reapplyError = e instanceof Error ? (e.cause instanceof Error ? e.cause.message : e.message) : String(e);
+        }
+        const again = (await tx.execute(sql.raw(`
+          SELECT count(*) FILTER (WHERE events::text = '{}' AND unmapped_conversions = 0)::int AS defaulted
+          FROM ${PROBE_TABLE}
+        `))) as unknown as { defaulted: number }[];
+        check(
+          "S8b ⭐ and applying the same file a SECOND time raises nothing and changes nothing (re-runnable)",
+          reapplyError === null && Number(again[0]?.defaulted) === 3,
+          `error=${reapplyError ?? "none"} defaulted=${again[0]?.defaulted}`,
         );
 
         // A row written WITHOUT naming the columns gets the defaults.

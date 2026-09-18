@@ -19,6 +19,7 @@
 // Guard-grade per docs/07-conventions.md: prints its input scope, refuses an
 // empty scope, and never compares a value to itself.
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";

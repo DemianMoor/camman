@@ -8,6 +8,7 @@
 // 0 rows. Runs on an isolated throwaway table so no real data is touched.
 //
 // Run: npx tsx scripts/test-scheduled-claim.ts
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });

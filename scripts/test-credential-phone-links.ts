@@ -9,6 +9,7 @@
 // Runs entirely inside one rolled-back transaction against the shared DB
 // (established pattern — see scripts/test-credential-write-path.ts). Never
 // commits, never logs a secret.
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import assert from "node:assert";
 import { sql } from "drizzle-orm";
 

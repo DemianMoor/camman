@@ -6,6 +6,7 @@
 // fake sendSms for the gate-OPEN pass. Single rolled-back tx; nothing persists.
 // Run: npx tsx scripts/test-scheduled-gate-stamp.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";

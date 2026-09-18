@@ -1,4 +1,5 @@
 // scripts/test-resolve-key-for-stage.ts — structural assertions (no live send).
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import assert from "node:assert";
 import { db } from "@/db/client";
 import { sql } from "drizzle-orm";

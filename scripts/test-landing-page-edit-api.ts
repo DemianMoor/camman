@@ -11,6 +11,7 @@
 //   NEXT_PUBLIC_SUPABASE_ANON_KEY=<preview anon key> \
 //   BASE_URL=https://camman-<hash>-demian-moors-projects.vercel.app \
 //   npx tsx --env-file=C:/AFF/camman/.env.demo scripts/test-landing-page-edit-api.ts
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import postgres from "postgres";

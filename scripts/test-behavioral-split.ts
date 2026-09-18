@@ -211,7 +211,7 @@ async function main() {
 
     // ====================================================================
     // CASE 3 — the CHECK constraint from step 1 is active (lanes are coherent,
-    // and a half-configured / tier-3 row is rejected at the DB level).
+    // and a half-configured / tier-4 row is rejected at the DB level).
     // ====================================================================
     console.log("\nCase 3 — behavioral_lane CHECK:");
     check("created lanes satisfy CHECK (tier in {0,1,2} AND parent set)", lanes.every((l) => [0, 1, 2].includes(l.behavioral_tier) && l.parent_stage_id != null));
@@ -227,7 +227,9 @@ async function main() {
       }
     }
     await insertRejected("CHECK rejects tier set + parent NULL", 1, null);
-    await insertRejected("CHECK rejects tier=3 (converted is never a lane)", 3, parent.id);
+    // Phase 4 / migration 0184: 3 is the Registered LANE now. The value the
+    // CHECK must still refuse is 4 — the purchased tier EXITS the sequence.
+    await insertRejected("CHECK rejects tier=4 (purchased exits; never a lane)", 4, parent.id);
 
     // ====================================================================
     // CASE 4 — a failure mid-transaction rolls back cleanly (no orphan lanes).

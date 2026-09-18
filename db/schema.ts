@@ -2070,8 +2070,12 @@ export const campaign_stages = pgTable(
     // stage that draws from the whole frozen campaign pool (today's behavior).
     // When set, the stage is a behavioral "lane":
     //   * behavioral_tier — the high-water tier this lane targets:
-    //       0 = ignored, 1 = clicked, 2 = reached offer. Tier 3 "converted"
-    //     EXITS the sequence and is never a lane (allowed set {0,1,2}).
+    //       0 = ignored, 1 = clicked, 2 = reached offer, 3 = REGISTERED
+    //       (migration 0184 — a $0 registration with no purchase of any status).
+    //     Tier 4 "purchased" EXITS the sequence and is never a lane, so the
+    //     allowed set is {0,1,2,3}. The exit moved 3 → 4 in Phase 4; nothing
+    //     was back filled because the contact's tier is computed, never stored
+    //     (lib/campaign-tier.ts), and no row anywhere ever held 3.
     //   * parent_stage_id — the stage at the PRIOR position, used ONLY for the
     //     aliveness check ("received the prior position"); NOT a
     //     "was-in-this-lane-before" link. The recipient list is resolved live
@@ -2202,12 +2206,12 @@ export const campaign_stages = pgTable(
               AND ${table.split_total} BETWEEN 2 AND 1000)`,
     ),
     // Behavioral lane coherence: either fully ordinary (both NULL) or fully a
-    // lane (tier in {0,1,2} AND a parent). Rejects half-configured rows and
-    // tier 3 (converted exits, never a lane).
+    // lane (tier in {0,1,2,3} AND a parent). Rejects half-configured rows and
+    // tier 4 (purchased exits, never a lane) — migration 0184.
     check(
       "campaign_stages_behavioral_lane_check",
       sql`(${table.behavioral_tier} IS NULL AND ${table.parent_stage_id} IS NULL)
-          OR (${table.behavioral_tier} IN (0, 1, 2) AND ${table.parent_stage_id} IS NOT NULL)`,
+          OR (${table.behavioral_tier} IN (0, 1, 2, 3) AND ${table.parent_stage_id} IS NOT NULL)`,
     ),
     // Sparse — only behavioral lanes carry a parent. Backs the aliveness join.
     index("campaign_stages_parent_stage_id_idx")

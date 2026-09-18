@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-18_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -375,10 +375,11 @@ sequenceDiagram
   Cron->>Ledger: then the conversion ledger (rolling 7-day ET window, own try/catch)
   Ledger->>K: POST /conversions/log (all conversion types, refused if malformed or truncated)
   K-->>Ledger: rows[{event_id, tid, sub_id_1, sub_id_3, conversion_type, revenue, status_history…}]
+  Ledger->>DB: which status-only rows have no ledger row yet (first sightings — they land with no event type)
   Ledger->>DB: UPSERT conversion_events ON keitaro_event_id (one transaction)
   opt cron path only
-    Cron->>DB: read ledger problem combos (unmapped, type conflicts) + firing combo keys + heartbeat age on a failed or thrown tick (fetch_failed 15-min debounce)
-    Cron->>TG: page on a transition into firing (alert_state latch, one page per new unmapped/conflict combo, most recently changed first, plus a per-kind combo_cap_exceeded page past the 10-combo cap), clear keys whose condition or combo is gone
+    Cron->>DB: read ledger problem combos (unmapped, status-only untyped, type conflicts) + firing combo keys + heartbeat age on a failed or thrown tick (fetch_failed 15-min debounce)
+    Cron->>TG: page on a transition into firing (alert_state latch, one page per new combo of each of the three kinds, most recently changed first, plus a per-kind combo_cap_exceeded page past the 10-combo cap), clear keys whose condition or combo is gone
     Cron->>DB: stamp conversion-events-ingest heartbeat (complete windows only)
   end
   CRM->>DB: GET results?campaign_id → per-stage + campaign rollup (derived rates)

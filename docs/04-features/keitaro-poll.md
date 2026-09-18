@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-18_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -230,7 +230,7 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
 - `GET|POST /api/keitaro/poll` — cron (CRON_SECRET) or manual (operator+,
   `result_imports.create`). `?windowDays=N` (aggregate poll only). Returns
   `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, classification_degraded, visit_campaigns_matched, unmatched_samples, error, counted_clickers, counted_clickers_error, conversion_events, conversion_events_error }`.
-  - `conversion_events`: the ledger ingest's `IngestResult`, or `null` when the ingest threw. Fields: `ok`, `dryRun`, `range`, `fetched`, `invalid`/`invalidSamples`, `unresolved`/`unresolvedSamples` (samples include `sub_id_1`), `rows`, `unmappedInBatch`, `statusOnlyInBatch`, `inserted`/`updated`/`unchanged`, `typeConflicts`, `orgMismatch`/`orgMismatchSamples`, `error`. `ok:false` with `error` means the window was refused (Keitaro HTTP error, timeout, a malformed 200 that isn't JSON with a `rows` array and a numeric `total`, or a truncated page) and nothing was written.
+  - `conversion_events`: the ledger ingest's `IngestResult`, or `null` when the ingest threw. Fields: `ok`, `dryRun`, `range`, `fetched`, `invalid`/`invalidSamples`, `unresolved`/`unresolvedSamples` (samples include `sub_id_1`), `rows`, `unmappedInBatch`, `statusOnlyInBatch`, `statusOnlyFirstSeenInBatch`/`statusOnlyFirstSeenSamples` (conversions a **status-only** mapping classified with no existing ledger row — they land with a status and no event type and count as nothing; see [conversion-events.md](conversion-events.md)), `inserted`/`updated`/`unchanged`, `typeConflicts`, `orgMismatch`/`orgMismatchSamples`, `error`. `ok:false` with `error` means the window was refused (Keitaro HTTP error, timeout, a malformed 200 that isn't JSON with a `rows` array and a numeric `total`, or a truncated page) and nothing was written.
   - `conversion_events_error`: the thrown message when the ingest threw; `monitor: …` when the cron path's alert evaluation or heartbeat stamp threw (appended after `; ` if the ingest also threw); `null` otherwise. On the cron path a thrown ingest also counts as a failed tick for the debounced `conversion_events:fetch_failed` alert.
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
   date) rows plus per-stage and campaign rollups with the Clickers → Offer

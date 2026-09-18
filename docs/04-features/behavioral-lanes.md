@@ -324,6 +324,24 @@ Two entry points for two different actions; deliberately not two for one action.
 - **Completed-stage predicate:** `stageCompleteExpr()` / `resolveCompletedStages()` in
   [lib/sends/stage-complete.ts](../../lib/sends/stage-complete.ts) -- shared by the
   split's source set AND the P4 parent-complete gate, so the two cannot drift.
+- **Drip journey completion (a SECOND, INLINE copy of the scale — twice):**
+  `closeCompletedJourneys()` and `expireJourneysPastEndDate()` in
+  [lib/drip/lifecycle.ts](../../lib/drip/lifecycle.ts) ask whether any active
+  behavioural child is still owed a send; a child BELOW the contact's tier can
+  never be owed, because the tier is high-water. That test needs the tier
+  correlated **per journey row** (`j.campaign_id` / `j.contact_id`) while
+  `campaignTierExpr` takes a literal campaign id, so the scale is inlined rather
+  than imported. **Phase 4 (2026-09-18) gave both copies the tier-3 (registered)
+  and tier-4 (purchased) branches.** Until then they topped out at 2, so a
+  registrant's real tier of 3 matched no drip child (0/1/2) while the tier-2
+  child was still judged reachable: the journey hung for ever and held the
+  contact's only live-journey slot. The tier-3 branch carries the same
+  `NOT EXISTS` over purchase events at any KNOWN status as `campaign-tier.ts`,
+  so a rejected purchase evicts a registrant here identically and an unmapped one
+  does not. **No Registered drip follow-up exists** — `FOLLOWUP_TIERS` /
+  `FollowupTier` stay `0 | 1 | 2`, a registrant matches no child and simply
+  completes. One ⭐ bar per copy in
+  [scripts/test-drip-lifecycle.ts](../../scripts/test-drip-lifecycle.ts).
 - **Group state machine + recompute + preview:**
   [lib/stages/split-group.ts](../../lib/stages/split-group.ts).
 - **Lane creation:** `performBehavioralSplit()` in

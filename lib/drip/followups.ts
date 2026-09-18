@@ -14,11 +14,14 @@ import { dispatchDripSend, GateRefused, MintRefused } from "./send-one";
 // Behavioural follow-up scheduling (Drip Phase 6).
 //
 // ⚠️ THE TIER MODEL IS NOT REBUILT HERE (G3). campaignTierExpr already returns
-// (contact_id, tier) with exactly the four states this needs — 0 ignored,
-// 1 clicked, 2 reached_offer, 3 converted — high-water, campaign-scoped, and
-// defining "clean click" identically to the click report. Two definitions of
-// "clicked" is precisely how the report and the lanes would drift apart. Tier 3
-// never selects a lane: a buyer EXITS.
+// (contact_id, tier) with exactly the five states this needs — 0 ignored,
+// 1 clicked, 2 reached_offer, 3 registered, 4 purchased — high-water,
+// campaign-scoped, and defining "clean click" identically to the click report.
+// Two definitions of "clicked" is precisely how the report and the lanes would
+// drift apart. Tier 4 never selects a lane: a buyer EXITS. Tier 3 selects none
+// either, for a different reason — Phase 4 added the Registered LANE for regular
+// campaigns but (user decision) NO Registered drip follow-up, so a registrant
+// matches no child here and simply falls through.
 //
 // ⚠️ FOLLOW-UPS GO THROUGH THE SAME SEND PATH AS FIRST-SENDS (G1). Same mint,
 // same opt-out gate, same stage_sends insert, same unmodified drain. That is
@@ -173,8 +176,13 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
       if (r.already_sent) { res.alreadySent++; continue; }
       if (r.campaign_paused) { res.pausedSkipped++; continue; }
 
-      // ⚠️ EXACT tier match, and tier 3 never matches any lane — a buyer has
-      // exited, and campaignTierExpr is high-water so 3 outranks everything.
+      // ⚠️ EXACT tier match, and tier 4 never matches any lane — a buyer has
+      // exited, and campaignTierExpr is high-water so 4 outranks everything.
+      //
+      // ⚠️ A REGISTRANT (tier 3) therefore lands in `tierMismatch` for every
+      // 0/1/2 child, and that no-op is the intended behaviour: there is no
+      // Registered follow-up. It is NOT a stuck journey — lib/drip/lifecycle.ts
+      // judges those same children unreachable at tier 3 and completes them.
       if (Number(r.tier) !== Number(r.child_tier)) { res.tierMismatch++; continue; }
 
       const due = followupDueAt({

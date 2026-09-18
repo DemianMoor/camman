@@ -8,6 +8,7 @@ import {
   closeJourneyOnOptOut,
   closeJourneysOnArchive,
   closeJourneysOnPurchase,
+  expireJourneysPastEndDate,
 } from "@/lib/drip/lifecycle";
 
 import { seedConversionEvent } from "./_conversion-fixture";
@@ -306,6 +307,70 @@ async function main() {
       check("...its state is completed", (await state(g.jid)).state, "completed");
       void lowLane;
 
+      // ⭐ THE REGISTERED CASE (Phase 4). A registrant's real tier is 3, above
+      // every drip child (0/1/2), so no child can ever match them. If the
+      // inlined reachability expression still tops out at 2 it judges the tier-2
+      // child "reachable", the child never sends, and the journey hangs for ever
+      // — the same shape as a buyer, which only survives today because
+      // closeJourneysOnPurchase closes those separately. There is no
+      // registration analogue and (user decision) none is being built.
+      //
+      // ONE-SIDED: this contact gets a registration ledger row and nothing else —
+      // no click, no offer reach, no sale_status.
+      const reg = await newJourney("+19989" + sfx);
+      const regLane = (
+        (await tx.execute(sql`
+          INSERT INTO campaign_stages (org_id, campaign_id, parent_stage_id, behavioral_tier,
+                                       drip_followup_minutes, drip_active, stage_number)
+          VALUES (${orgId}, ${campId}, ${parentId}, 2, 60, true, 95)
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      const regSend = (
+        (await tx.execute(sql`
+          INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                   rendered_text, status, created_at)
+          VALUES (${orgId}, ${campId}, ${parentId}, ${reg.cid}, ${"+19989" + sfx},
+                  'probe', 'sent', now())
+          RETURNING id::text AS id`)) as unknown as { id: string }[]
+      )[0].id;
+      check("⭐ NOT complete yet — the tier-2 child is genuinely owed to a tier-0 contact",
+            (await closeCompletedJourneys(tx, { orgId, campaignId: campId })).closed, 0);
+      await seedConversionEvent(tx, {
+        orgId, stageSendId: regSend, contactId: reg.cid, campaignId: campId, stageId: parentId,
+        eventKey: "registration", status: "approved", revenue: 0, keitaroType: "lead",
+      });
+      check("⭐ a REGISTRANT completes — the tier-2 child is unreachable at tier 3",
+            (await closeCompletedJourneys(tx, { orgId, campaignId: campId })).closed, 1);
+      check("...its state is completed", (await state(reg.jid)).state, "completed");
+      void regLane;
+
+      // ── 3b. the SAME predicate's twin, in expireJourneysPastEndDate ───────
+      // ⭐ THE TWIN IS A SEPARATE COPY AND HAS TO BE PROVEN SEPARATELY. The
+      // reachability block is inlined TWICE (completion and expiry) because it
+      // is correlated per journey row; an untested copy is exactly how the two
+      // drift and a registrant hangs past end_at instead of hanging before it.
+      console.log("\n3b. ⭐ past end_at ⇒ expired — the twin copy of the same predicate:");
+      await tx.execute(sql`
+        INSERT INTO drip_campaign_configs (campaign_id, org_id, interest_tag, end_at)
+        VALUES (${campId}, ${orgId}, ${"probe-" + sfx}, now() - interval '1 day')`);
+      const xp = await newJourney("+19979" + sfx);
+      const xpSend = (
+        (await tx.execute(sql`
+          INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone,
+                                   rendered_text, status, created_at)
+          VALUES (${orgId}, ${campId}, ${parentId}, ${xp.cid}, ${"+19979" + sfx},
+                  'probe', 'sent', now())
+          RETURNING id::text AS id`)) as unknown as { id: string }[]
+      )[0].id;
+      check("⭐ NOT expired yet — the tier-2 child is genuinely owed to a tier-0 contact",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 0);
+      await seedConversionEvent(tx, {
+        orgId, stageSendId: xpSend, contactId: xp.cid, campaignId: campId, stageId: parentId,
+        eventKey: "registration", status: "approved", revenue: 0, keitaroType: "lead",
+      });
+      check("⭐ a REGISTRANT past end_at expires — the tier-3 branch in the twin",
+            (await expireJourneysPastEndDate(tx, { orgId, campaignId: campId })).closed, 1);
+      check("...its state is expired", (await state(xp.jid)).state, "expired");
 
       // ── 4. archive ⇒ exited ───────────────────────────────────────────────
       console.log("\n4. campaign archived ⇒ exited:");

@@ -3,7 +3,11 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { purchasedClause } from "@/lib/sale-attribution";
+import {
+  PURCHASE_EVENT_TYPE_IDS,
+  purchasedClause,
+  registeredClause,
+} from "@/lib/sale-attribution";
 
 /** Either the pooled client or an open transaction. */
 type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -171,6 +175,15 @@ export async function closeCompletedJourneys(
             -- Waiting on it would make completion unreachable for every contact
             -- above the lowest active lane -- i.e. for anyone who ever engaged,
             -- which is exactly the population whose journey should end cleanly.
+            --
+            -- ⚠️ THIS IS AN INLINE COPY OF lib/campaign-tier.ts's SCALE, and it
+            -- has to be: the predicate is correlated per journey row
+            -- (j.campaign_id / j.contact_id) while campaignTierExpr takes a
+            -- literal campaign id. Keep the branches in step with that file.
+            -- Phase 4 added tier 3 (registered, no purchase of any status) and
+            -- moved the purchased exit to 4. Without them a REGISTRANT's journey
+            -- hangs for ever: their real tier is 3, so no child (0/1/2) can ever
+            -- match, yet a max of 2 judges the tier-2 child still reachable.
             AND ch.behavioral_tier >= COALESCE((
               SELECT MAX(t.tier) FROM (
                 SELECT 1 AS tier FROM links l
@@ -182,6 +195,27 @@ export async function closeCompletedJourneys(
                 SELECT 2 FROM stage_sends ss3
                  WHERE ss3.campaign_id = j.campaign_id AND ss3.contact_id = j.contact_id
                    AND ss3.org_id = j.org_id AND ss3.offer_reached_at IS NOT NULL
+                UNION ALL
+                SELECT 3 FROM conversion_events ce
+                 WHERE ce.campaign_id = j.campaign_id AND ce.contact_id = j.contact_id
+                   AND ce.org_id = j.org_id
+                   AND ${registeredClause()}
+                   AND NOT EXISTS (
+                     SELECT 1 FROM conversion_events pe
+                      WHERE pe.campaign_id = ce.campaign_id
+                        AND pe.org_id = ce.org_id
+                        AND pe.contact_id = ce.contact_id
+                        AND pe.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS}
+                        -- in step with lib/campaign-tier.ts: an UNMAPPED status
+                        -- counts as nothing everywhere, so it must not evict a
+                        -- registrant here either.
+                        AND pe.status IS NOT NULL
+                   )
+                UNION ALL
+                SELECT 4 FROM conversion_events ce2
+                 WHERE ce2.campaign_id = j.campaign_id AND ce2.contact_id = j.contact_id
+                   AND ce2.org_id = j.org_id
+                   AND ${purchasedClause("ce2")}
               ) t
             ), 0)
             AND NOT EXISTS (
@@ -265,6 +299,15 @@ export async function expireJourneysPastEndDate(
             -- Waiting on it would make completion unreachable for every contact
             -- above the lowest active lane -- i.e. for anyone who ever engaged,
             -- which is exactly the population whose journey should end cleanly.
+            --
+            -- ⚠️ THIS IS AN INLINE COPY OF lib/campaign-tier.ts's SCALE, and it
+            -- has to be: the predicate is correlated per journey row
+            -- (j.campaign_id / j.contact_id) while campaignTierExpr takes a
+            -- literal campaign id. Keep the branches in step with that file.
+            -- Phase 4 added tier 3 (registered, no purchase of any status) and
+            -- moved the purchased exit to 4. Without them a REGISTRANT's journey
+            -- hangs for ever: their real tier is 3, so no child (0/1/2) can ever
+            -- match, yet a max of 2 judges the tier-2 child still reachable.
             AND ch.behavioral_tier >= COALESCE((
               SELECT MAX(t.tier) FROM (
                 SELECT 1 AS tier FROM links l
@@ -276,6 +319,27 @@ export async function expireJourneysPastEndDate(
                 SELECT 2 FROM stage_sends ss3
                  WHERE ss3.campaign_id = j.campaign_id AND ss3.contact_id = j.contact_id
                    AND ss3.org_id = j.org_id AND ss3.offer_reached_at IS NOT NULL
+                UNION ALL
+                SELECT 3 FROM conversion_events ce
+                 WHERE ce.campaign_id = j.campaign_id AND ce.contact_id = j.contact_id
+                   AND ce.org_id = j.org_id
+                   AND ${registeredClause()}
+                   AND NOT EXISTS (
+                     SELECT 1 FROM conversion_events pe
+                      WHERE pe.campaign_id = ce.campaign_id
+                        AND pe.org_id = ce.org_id
+                        AND pe.contact_id = ce.contact_id
+                        AND pe.event_type_id IN ${PURCHASE_EVENT_TYPE_IDS}
+                        -- in step with lib/campaign-tier.ts: an UNMAPPED status
+                        -- counts as nothing everywhere, so it must not evict a
+                        -- registrant here either.
+                        AND pe.status IS NOT NULL
+                   )
+                UNION ALL
+                SELECT 4 FROM conversion_events ce2
+                 WHERE ce2.campaign_id = j.campaign_id AND ce2.contact_id = j.contact_id
+                   AND ce2.org_id = j.org_id
+                   AND ${purchasedClause("ce2")}
               ) t
             ), 0)
             AND NOT EXISTS (

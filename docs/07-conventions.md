@@ -44,6 +44,19 @@ Two rules:
 1. **Every value in `LANE_TIER_VALUES` has a label, and a bar asserts it** — `unlabelledLaneTiers()` in [`lib/stages/split-group.ts`](../lib/stages/split-group.ts), asserted by `P16` in [`scripts/test-campaign-tier-scale.ts`](../scripts/test-campaign-tier-scale.ts). Add a tier, and the guard goes red naming the number. It lives in the pure suite, not next to the map, so it runs with no DB.
 2. **A reader whose key space is NARROWER than the scale indexes defensively.** `FOLLOWUP_TIERS`/`FollowupTier` are deliberately `{0,1,2}` while lanes go to 3, so [`components/campaigns/drip-followup-children.tsx`](../components/campaigns/drip-followup-children.tsx) casts a number it does not control. `TIER_OPTIONS[3].map` would be a `TypeError` that blanks the whole stage section, so both lookups fall back (`?? \`Tier ${tier}\`` / `?? []`) instead of trusting the cast.
 
+## Renumbering a scale must be chased into its INLINE copies, not just the shared fragment (2026-09-18)
+
+`campaignTierExpr` ([`lib/campaign-tier.ts`](../lib/campaign-tier.ts)) is the source of truth for the behavioural tier scale, and every reader that CAN import it does. Two cannot: `closeCompletedJourneys()` and `expireJourneysPastEndDate()` in [`lib/drip/lifecycle.ts`](../lib/drip/lifecycle.ts) need the tier **correlated per journey row** (`j.campaign_id` / `j.contact_id`) while the shared fragment takes a literal campaign id, so they carry an inline copy of the scale — twice.
+
+⭐ **An inline copy that stops one tier short does not fail; it WAITS.** Both copies ask "is an active behavioural child still owed a send?", and a child BELOW the contact's tier can never be owed because the tier is high-water. While the copies topped out at 2, a REGISTRANT (real tier 3) matched no drip child (0/1/2) yet the tier-2 child was still judged reachable — so the journey never completed, and since `drip_journeys_one_live_per_contact_uniq` keys on `state IN ('routed','active')` it held that contact's **only** live-journey slot against every future journey too. A buyer has the identical shape and only survives because `closeJourneysOnPurchase` closes those separately; there is no registration analogue and (user decision) none is being built.
+
+Two rules:
+
+1. **Grep for the scale's literals, not just its constants, when a tier is inserted.** `tsc` cannot see a number inside a `sql` template. `grep -rn "behavioral_tier >= COALESCE" --include=*.ts .` finds every inline copy; it found exactly the two above.
+2. **Each copy needs its own bar.** The two copies are byte-identical, so a test that exercises one proves nothing about the other. [`scripts/test-drip-lifecycle.ts`](../scripts/test-drip-lifecycle.ts) carries one ⭐ registrant bar per copy (section 3 for completion, 3b for expiry), each asserting the journey **advances** — not that no error was raised.
+
+**Progressing a journey past a registrant is NOT the same as giving registrants a follow-up.** `FOLLOWUP_TIERS` and `FollowupTier` stay `{0, 1, 2}`: a registrant matches no drip child, lands in `tierMismatch`, and that no-op is the intended behaviour. Widening either is what would create a Registered follow-up lane, which is explicitly out of scope.
+
 ## A source-grep check must not be able to pass by accident (2026-09-18)
 
 Several guards assert things about a FILE's text (`readFileSync(...).includes(...)`) because the real call site cannot be executed from a rolled-back proof. Two rules, both learned the hard way in `scripts/test-p3-task4-reader-switch-db.ts`:

@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-09-11_
+_Last updated: 2026-09-17_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -48,6 +48,22 @@ External services CamMan talks to, their contracts, and every environment variab
 > Telnyx gotchas (`lib/telnyx/`): `carrier.type` has **no `landline` value** — its enum is libphonenumber's (`fixed line`, `mobile`, `voip`, `fixed line or mobile`, `toll free`, …). Map `fixed line`→landline, prefer `portability.line_type` (port-corrected) over `carrier.type`, and send anything exotic/ambiguous to `unknown` (which stays **eligible** — never silently suppress). We request a single `type=carrier` (the repeat-vs-array param syntax is ambiguous in Telnyx's own docs, but moot for one value). `/v2/balance` returns **strings**, not numbers — parse before comparing; gate on `available_credit`. **403 code 10038** = account-level feature gate → alert, do NOT retry. **Negative balance disables lookup** on Telnyx's side (402-class) → pause the batch + Telegram alert, never retry-loop. Rate limits are undocumented → configurable concurrency (default 10 rps) with exponential backoff on 429. Normalize every number to E.164 `+1XXXXXXXXXX` (via `lib/phone-validation.ts`) before the call **and** before writing `phone_lookups.phone`, so the global cache joins `contacts.phone_number` and never double-pays. Pricing has a **mobile-only** surcharge (base LRN + carrier only on mobile results); rates are admin-editable in `lookup_settings` because Telnyx exposes no pricing API.
 
 > Keitaro gotchas (`lib/keitaro/`): point all calls at the single admin host `KEITARO_API_URL` (default `https://admin.gdkn.org`) — never a brand tracking domain. Group reports by `sub_id_3` + `campaign_id`, where `sub_id_3` carries the **stage tracking id** (not a bare campaign id), so mapping back is `sub_id_3` → `campaign_stages.tracking_id`. The `campaign_id` dimension separates landing-page **visits** (campaign **name** `gk-lp-visits` — its alias is a random code, so match on name not alias) from **offer redirects** — resolve the name → `campaign_id`(s) via `GET /admin_api/v1/campaigns`, never a hardcoded id (rebuild-safe). Keep `admin.gdkn.org` DNS-only / WAF-excepted so the every-5-min calls aren't bot-challenged. The documented grouping/metric keys live in one place (`KEITARO_GROUPING` / `KEITARO_METRICS` in `lib/keitaro/client.ts`) — a wrong key silently returns nothing. **Conversions log** (`conversions/log`, per-recipient sales): returns **only** the `columns` you request and **400s on any unknown column name** (unlike report/build, which silently drops); it also rejects an `order` key (sort in memory). Confirmed columns: `event_id` (unique conversion id, UUIDv7 — the dedup key), `sub_id_1` (= recipient `stage_sends.id`), `status` (`lead`/`sale`/`rejected`, lowercase), `revenue` (NOT `payout` — doesn't exist), `datetime` (ET wall-clock). Pinned in `KEITARO_CONVERSION_COLUMNS`. **Clicks log** (`clicks/log`, per-recipient offer-page reach — Level 2): same `events` report schema / 400-on-unknown-column contract. Confirmed columns: `event_id` (per-click id, dedup key), `sub_id_1` (recipient id), `campaign` (NAME — `gk-lp-visits` ⇒ landing/L1, dropped; any other ⇒ offer/L2), `campaign_id`, `datetime` (ET). Filter `sub_id_1 NOT_EQUAL ""` server-side. Pinned in `KEITARO_CLICK_COLUMNS`.
+>
+> **Conversion ledger** (`fetchKeitaroConversionLedger`, `KEITARO_LEDGER_COLUMNS`, 0181): no status filter, all conversion types. Extra columns verified live 2026-09-17:
+> - `tid`
+> - `sub_id` (click id)
+> - `conversion_type` — canonical type name: Lead/Sale/Rejected/Trash/Registration/Deposit. Many raw statuses resolve to one type, so this is the mapping key.
+> - `version` — bumps on an in-place update
+> - `status_history` — `"N. Type (YYYY-MM-DD HH:MM:SS)"` in the report timezone
+> - `params` — the postback query as JSON
+> - `offer_id` — Keitaro's offer id (0 = none); used to attribute a conversion with no resolvable click via `offers.keitaro_offer_id`
+>
+> Gotchas:
+> - A bad column's 400 body lists the entire `events` definition. `original_status`/`previous_status`/`conversion_id`/`postback_datetime` return 200 but are silently omitted.
+> - **Keitaro updates a conversion in place:** `event_id` is stable, `datetime` moves to the latest re-post.
+> - A different `tid` on one click is a separate conversion.
+> - The response carries `total`, and a page with `rows < total` is refused. So is a 200 that isn't JSON with a `rows` array and a numeric `total` (e.g. an HTML bot challenge) — never read as an empty window.
+> - Keitaro conversion types are listed at `GET /admin_api/v1/conversion_types`. Network postback templates are at `GET /admin_api/v1/affiliate_networks/{id}`; the URL contains the postback key, so redact it before logging.
 
 > Ahoi gotchas (`lib/sends/providers/ahoi.ts`): the platform **always returns HTTP 200** — never trust the HTTP status, classify off the body `status` field only. Numbers are 10-digit with no `+1` on the wire in both directions (`toAhoiRecipient`/re-add `+1` on the way back). Portal "Enforce GSM/160" settings have no effect — Ahoi silently sends Unicode and splits messages over 160 chars into billed segments, which is why the segment-count preflight gate (`lib/sends/segments.ts`, G8) exists. Webhook registration is **manual, not API-driven** — Phase 0 recon found no Ahoi equivalent of TextHub's `registerOptOutCallback`. `scripts/seed-ahoi-webhook-token.ts` mints `provider_credentials.inbound_webhook_token` (idempotent) and prints both webhook URLs (`/api/webhooks/ahoi/dlr/<token>`, `/api/webhooks/ahoi/inbound/<token>`) — the SAME token authenticates both paths (the URL path, not the token, distinguishes DLR vs inbound) — for the operator to paste into the Ahoi/api19 portal by hand.
 

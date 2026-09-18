@@ -158,6 +158,18 @@ erDiagram
 
   campaigns ||--o{ keitaro_stage_results : "poll rollup"
   campaign_stages ||--o{ keitaro_stage_results : "sub_id_3 = stage tracking id"
+  organizations ||--o{ event_types : "event registry (0181)"
+  organizations ||--o{ conversion_event_mappings : "keitaro type -> event (0181)"
+  affiliate_networks ||--o{ conversion_event_mappings : "network-level rule"
+  offers ||--o{ conversion_event_mappings : "offer-level override"
+  event_types ||--o{ conversion_event_mappings : "maps to (null = keep)"
+  event_types ||--o{ conversion_events : classifies
+  stage_sends ||--o{ conversion_events : "sub_id_1 (set null)"
+  campaign_stages ||--o{ conversion_events : "sub_id_3 (set null)"
+  offers ||--o{ conversion_events : "set null"
+  organizations ||--o{ conversion_events : "org"
+  contacts ||--o{ conversion_events : "set null"
+  campaigns ||--o{ conversion_events : "set null"
   stage_sends ||--o| stage_sends : "sale stamped by sub_id_1 = id"
   campaign_stages ||--o{ report_stage_hour : "hourly rollup (send-hour ET)"
   campaign_stages ||--o{ report_group_hour : "hourly rollup × group"
@@ -218,7 +230,7 @@ erDiagram
 |-------|------------|-------|
 | `brands` | `brand_id` (text uniq), `website`, `short_link_base` (legacy) | brand↔short-domain mapping is in `short_domains` |
 | `affiliate_networks` | `network_id` (text uniq) | |
-| `offers` | `offer_id` (text uniq), `network_id` (NOT NULL, **restrict**), `payout_model` cpa/revshare, `payout_cpa`, `payout_revshare`, `sales_pages` jsonb | `payout_cpa` is the **current-rate cache only** — never used to compute historical revenue (that's `keitaro_stage_results.revenue`); rate history lives in `offer_payouts` |
+| `offers` | `offer_id` (text uniq), `network_id` (NOT NULL, **restrict**), `payout_model` cpa/revshare, `payout_cpa`, `payout_revshare`, `sales_pages` jsonb | `payout_cpa` is the **current-rate cache only** — never used to compute historical revenue (that's `keitaro_stage_results.revenue`); rate history lives in `offer_payouts` · `keitaro_offer_id` (0181, nullable, unique per org) — Keitaro's offer id, for conversions with no resolvable click |
 | `offer_payouts` | `offer_id` (→offers, cascade), `payout_cpa` (NOT NULL), `effective_from`, `effective_to` (NULL=current), partial UNIQUE(offer_id) WHERE effective_to IS NULL | effective-dated CPA history (migration 0083). The offers write path closes the current row (`effective_to=now()`) and opens a new one on every CPA change instead of overwriting. For display/audit of "the rate that applied when" — NOT for recomputing earnings |
 | `sms_providers` | `sms_provider_id` (text uniq — the row IDENTITY), `adapter_code` (the CONNECTION TYPE, 0134; NULL = no API adapter), `supports_api_send`, `sends_enabled` + `opt_out_footer` (0138), send-window cols, circuit-breaker cols (`send_paused*`, `max_sends_per_run` / `_minute` / `_24h` volume caps) | per-second rate lives on `provider_phones` (0073), not here. `adapter_code` answers "what kind of provider"; `sms_provider_id` answers "which row" — breakers, windows and reporting stay per-ROW. Capability (`supports_api_send`) / posture (`sends_enabled`) / latch (`send_paused`) are three separate questions — see 0138 below |
 | `provider_credentials` | `provider_id`, `brand_id` (NULL=default), `label`, `api_key` (legacy plaintext, nullable), `api_key_encrypted`, `api_key_last4`, `inbound_webhook_token` | **N accounts per provider** as of migration `0110` — a row IS an account (`label` distinguishes them). Both single-account unique indexes dropped (`provider_credentials_provider_brand_uniq`, `provider_credentials_provider_default_uniq`); `api_key` DROP NOT NULL (encrypted-only writes now allowed). See [security-notes.md](security-notes.md) and [07-conventions.md](07-conventions.md) |
@@ -365,6 +377,15 @@ erDiagram
 > **New indexes (migration 0093):** `stage_sends (sent_at, contact_id)` and `contact_contact_groups (contact_group_id, contact_id)` — support the twice-daily refresh's list-pressure/fresh-pool joins. The pre-existing `contact_contact_groups` PK is `(contact_id, contact_group_id)`, the wrong column order for "all contacts in a group."
 
 > **Per-recipient group attribution (migration `0132`).** Before this migration, `offer_group_report_mv` built its rows by `unnest`-ing `offer_report_campaign_econ.group_ids` — a campaign targeting 12 groups contributed its WHOLE sends/revenue/sales/cost/optouts to all 12 rows, and the API route's `offerTotals` (summed from those same rows) inherited the same inflation, reading 10.2x the true total on one measured offer. `0132` rebuilds the group rows directly from `stage_sends ⋈ contact_contact_groups`, restricted to `offer_report_tracked_campaigns` (`link_mode='tracked'` only — a manual campaign's `sms_count` has no per-recipient row to attribute), and moves the footer to its own matview (`offer_report_offer_totals_mv`) read at offer grain instead of summed from the rows. The columns still don't foot — a contact in three groups is one send and three group-sends — but the non-additivity is now the correct, deliberate kind (the same rule migration `0128` applied to clicks) rather than an unbounded fan-out. See [04-features/offer-group-report.md](04-features/offer-group-report.md) and [07-conventions.md](07-conventions.md).
+
+### Conversion events (migration 0181)
+| Table | Key columns | Notes |
+|-------|------------|-------|
+| `event_types` | UNIQUE(`org_id`, `key`); `label`, `display_order`, `is_purchase`, `counts_revenue`, `is_retarget_signal`, `status`/`archived_at` | org event registry; seeded `purchase` and `registration` for every org. Meaning lives in the flags. [04-features/conversion-events.md](04-features/conversion-events.md) |
+| `conversion_event_mappings` | `affiliate_network_id` XOR `offer_id` (CHECK `num_nonnulls = 1`), `keitaro_type`, `event_type_id` (nullable = keep existing), `conversion_status` pending/approved/rejected; partial UNIQUE per (network, type) and (offer, type) among active rows | Keitaro conversion TYPE → (event, status); offer rule beats network rule; no rule ⇒ unmapped. Seeded for `pl`, `swp`, `scc`, `psb` |
+| `conversion_events` | UNIQUE(`keitaro_event_id`); `tid`, `stage_send_id`/`contact_id`/`campaign_id`/`stage_id`/`offer_id` (all **SET NULL**), `event_type_id` (locked once set) + `status` (NULL = unmapped), `conflicting_event_type_id` + `event_type_conflict_at` (a later type mapped to a different event), `revenue numeric(12,4)`, `occurred_at` (original time, never updated), `last_postback_at`, `keitaro_status`/`keitaro_type`/`keitaro_version`, `status_history`, `raw_params jsonb` | one row per Keitaro conversion (several per click). Written by `lib/conversions/ingest.ts`; **no reader until Phase 3**. Indexes: (campaign, event, contact), (contact, event), (offer, event, occurred_at), (stage, occurred_at), (stage_send), partial unmapped (org, created_at), partial type-conflict (org, event_type_conflict_at) |
+
+> RLS: all three tables enable RLS with an own-org `SELECT` policy (pattern `0178`); writes go through the server connection.
 
 ### Reports rollup (migration 0112)
 

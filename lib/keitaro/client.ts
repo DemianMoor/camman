@@ -233,6 +233,119 @@ export async function fetchKeitaroConversions(
   }
 }
 
+// ── Conversion ledger (lib/conversions/ingest.ts) ────────────────────────────
+// EVERY conversion, ALL conversion types — no status filter. Registration /
+// deposit / trash are classified by conversion_event_mappings, not by this
+// fetch. Columns verified live 2026-09-17 (a bad column's 400 body lists the
+// whole 'events' definition). Note some names are ACCEPTED but silently not
+// returned (original_status, previous_status, conversion_id, postback_datetime)
+// — a 200 does not prove a column exists.
+//   tid             — transaction id; a different tid on one click = separate conversion
+//   sub_id          — Keitaro's click id
+//   conversion_type — canonical type NAME (Lead/Sale/Rejected/Trash/Registration/
+//                     Deposit): the mapping key, since many raw statuses resolve to one type
+//   version         — bumps when Keitaro updates a conversion IN PLACE (event_id stays)
+//   status_history  — "1. Lead (YYYY-MM-DD HH:MM:SS)" in the report timezone
+//   params          — the postback query as JSON (currency lives here)
+export const KEITARO_LEDGER_COLUMNS = [
+  "event_id",
+  "tid",
+  "sub_id",
+  "sub_id_1",
+  "sub_id_3",
+  "status",
+  "conversion_type",
+  "revenue",
+  "datetime",
+  "status_history",
+  "params",
+  "offer_id",
+  "version",
+] as const;
+
+export interface KeitaroLedgerResult {
+  ok: boolean;
+  status: number;
+  rows: KeitaroReportRow[];
+  total: number | null;
+  error: string | null;
+}
+
+// Same never-throw contract as fetchKeitaroConversions. Fails (ok:false) unless the
+// body is JSON with a `rows` array AND a numeric `total` (a 200 HTML bot challenge,
+// a missing total or a non-array rows is not an empty window), and when the
+// response carries fewer rows than its own `total` — a truncated page must never
+// be ingested as if it were the whole window.
+export async function fetchKeitaroConversionLedger(
+  range: KeitaroReportRange,
+  opts?: { timeoutMs?: number },
+): Promise<KeitaroLedgerResult> {
+  const key = apiKey();
+  if (!key) {
+    return { ok: false, status: 0, rows: [], total: null, error: "KEITARO_API_KEY is not set" };
+  }
+
+  try {
+    const res = await fetch(`${baseUrl()}/admin_api/v1/conversions/log`, {
+      method: "POST",
+      headers: { "Api-Key": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ range, columns: KEITARO_LEDGER_COLUMNS, filters: [] }),
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return {
+        ok: false,
+        status: res.status,
+        rows: [],
+        total: null,
+        error: `Keitaro conversions/log HTTP ${res.status}: ${body.slice(0, 300)}`,
+      };
+    }
+
+    const text = await res.text().catch(() => "");
+    let body: { rows?: unknown; total?: unknown } | null = null;
+    try {
+      body = JSON.parse(text) as { rows?: unknown; total?: unknown } | null;
+    } catch {
+      body = null;
+    }
+    if (!body || !Array.isArray(body.rows) || typeof body.total !== "number") {
+      return {
+        ok: false,
+        status: res.status,
+        rows: [],
+        total: null,
+        error: `Keitaro conversions/log malformed response (expected JSON with a rows array and a numeric total): ${text.slice(0, 200)}`,
+      };
+    }
+    const rows = body.rows as KeitaroReportRow[];
+    const total = body.total;
+    if (rows.length < total) {
+      return {
+        ok: false,
+        status: res.status,
+        rows: [],
+        total,
+        error: `Keitaro conversions/log truncated: ${rows.length} of ${total} rows`,
+      };
+    }
+    return { ok: true, status: res.status, rows, total, error: null };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "TimeoutError";
+    return {
+      ok: false,
+      status: 0,
+      rows: [],
+      total: null,
+      error: aborted
+        ? "Keitaro conversions/log timed out"
+        : `Keitaro conversions/log network error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 // ── Clicks log (per-recipient OFFER-PAGE REACH attribution) ──────────────────
 // POST /admin_api/v1/clicks/log (the 'events' report) returns ONE row per click,
 // each carrying the click's sub_id slots + the Keitaro `campaign` NAME. An

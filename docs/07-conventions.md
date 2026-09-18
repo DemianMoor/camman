@@ -2698,3 +2698,25 @@ Rule: when deriving an update schema from a create schema with `.partial()`,
 re-declare each defaulted field as plain `.optional()`. Check with
 `schema.safeParse({ oneField })` — the output must contain only that field.
 
+## Keitaro updates a conversion in place — `event_id` is stable, `datetime` is not (2026-09-17)
+
+A repeat postback for a conversion — same click and no `tid`, or the same `tid` — updates it: Keitaro bumps `version`, appends to `status_history`, and moves `datetime` to the new postback. `event_id` stays the same. Measured on one conversion re-posted 09-14 → 09-17. Two consequences in pre-ledger code:
+
+- **Dedup on `event_id` alone drops the update.** `poll-conversions.ts` skips a row whose stored `keitaro_conversion_id` equals the incoming `event_id`, so a hold → approved or → rejected transition never reached `stage_sends`.
+- **Dating by `datetime` inside a rolling window double-counts.** The aggregate poll re-dates the conversion to the new day while the old day's row sits outside its 3-day window, frozen. Measured: +1 sale / +$100 on one stage.
+
+The ledger (`conversion_events`) keys on `event_id`, **updates** changed rows, and dates by `occurred_at` = the earliest `status_history` stamp, which never moves.
+
+## Map Keitaro conversions by conversion TYPE, per network — `lead` does not mean one thing (2026-09-17)
+
+Sweeply's postback template hardcodes `status=lead` for **paid** conversions. Keitaro's Affise template maps Affise pending/hold (2, 5) to `lead`. The same word means approved on one network and on-hold on another, so a global "lead = X" rule is wrong for somebody.
+
+`conversion_event_mappings` classifies per network or offer, keyed on Keitaro's canonical conversion **type** (many raw statuses — `approved`, `confirmed`, `paid` — resolve to the one `Sale` type). An unknown network/type is stored with NULL event type and status and is never counted as a purchase. Guessing "it's probably a sale" is exactly how a $0 registration would have become a buyer.
+
+## A migration that touches hot tables: `SET LOCAL lock_timeout` first, strongest lock first (2026-09-17)
+
+Drizzle applies **every pending migration in one transaction**, and each lock is held until that transaction commits. `CREATE TABLE … REFERENCES stage_sends/contacts` takes a lock that conflicts with the drain's inserts and updates. `ALTER TABLE … ADD COLUMN` takes ACCESS EXCLUSIVE. A migration stuck waiting for one of those locks makes every later writer queue behind it.
+
+- Make the first statement `SET LOCAL lock_timeout = '5s';` so a blocked lock fails the migration and you retry, instead of stalling the app.
+- Take the strongest lock first. In `0181_conversion_events.sql`, the `offers` `ADD COLUMN` + index run before any `CREATE TABLE` with a foreign key, so `offers` never needs a lock upgrade while the FK locks on `stage_sends`/`contacts` are held.
+- A seed that `LEFT JOIN`s a lookup by name (e.g. an event-type key) needs `WHERE v.key IS NULL OR lookup.id IS NOT NULL`. Without it, a typo silently seeds a NULL reference, which for conversion mappings means a status-only rule.

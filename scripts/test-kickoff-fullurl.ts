@@ -12,6 +12,7 @@
 // 1,198 existing stages still use.
 // Run: npx tsx scripts/test-kickoff-fullurl.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";

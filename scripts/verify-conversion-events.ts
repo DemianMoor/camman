@@ -106,14 +106,32 @@ async function main() {
     );
   }
 
+  // The two halves of conversion_events_unmapped_idx's predicate, reported apart
+  // because the fix differs: V3 needs a mapping row for the Keitaro type, V3b
+  // needs an event type on the postback that arrives FIRST (and SQL for the rows
+  // that already landed — a status-only rule keeps an existing type, and these
+  // have none). Same split as the status_only_unmapped alert.
   const unmapped = (await db.execute(sql`
     SELECT ce.keitaro_event_id AS id, ce.keitaro_type AS type, an.network_id AS network
     FROM conversion_events ce
     LEFT JOIN offers o ON o.id = ce.offer_id
     LEFT JOIN affiliate_networks an ON an.id = o.network_id
-    WHERE ce.event_type_id IS NULL OR ce.status IS NULL
+    WHERE ce.status IS NULL
   `)) as unknown as { id: string; type: string; network: string | null }[];
-  check("V3 no unmapped conversions", unmapped.length === 0, unmapped.slice(0, 10).map((u) => `${u.id} ${u.network ?? "∅"}/${u.type}`).join("; "));
+  check("V3 no unmapped conversions (no mapping rule matched their Keitaro type)", unmapped.length === 0, unmapped.slice(0, 10).map((u) => `${u.id} ${u.network ?? "∅"}/${u.type}`).join("; "));
+
+  const statusOnlyUnmapped = (await db.execute(sql`
+    SELECT ce.keitaro_event_id AS id, ce.keitaro_type AS type, ce.status, an.network_id AS network
+    FROM conversion_events ce
+    LEFT JOIN offers o ON o.id = ce.offer_id
+    LEFT JOIN affiliate_networks an ON an.id = o.network_id
+    WHERE ce.event_type_id IS NULL AND ce.status IS NOT NULL
+  `)) as unknown as { id: string; type: string; status: string; network: string | null }[];
+  check(
+    "V3b no conversions first seen through a status-only mapping (a status but NO event type — nothing heals them)",
+    statusOnlyUnmapped.length === 0,
+    statusOnlyUnmapped.slice(0, 10).map((u) => `${u.id} ${u.network ?? "∅"}/${u.type} status ${u.status}`).join("; "),
+  );
 
   const conflicts = (await db.execute(sql`
     SELECT ce.keitaro_event_id AS id, ce.keitaro_type AS type, et.key AS locked, ct.key AS mapped,

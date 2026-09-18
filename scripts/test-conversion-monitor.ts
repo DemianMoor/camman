@@ -13,6 +13,7 @@ import {
   FETCH_FAILED_DEBOUNCE_MINUTES,
   INGEST_HEARTBEAT_ALERT_KEY,
   LEDGER_MAX_COMBOS,
+  STATUS_ONLY_COMBOS_SQL,
   UNMAPPED_COMBOS_SQL,
   decideIngestAlerts,
   decideLedgerAlerts,
@@ -20,12 +21,14 @@ import {
   formatIngestHeartbeatAlert,
   ingestFailed,
   projectionOutcomeFor,
+  statusOnlyAlertKey,
   typeConflictAlertKey,
   unmappedAlertKey,
   type ConflictCombo,
   type ConversionAlertDecision,
   type IngestOutcome,
   type LedgerHealth,
+  type StatusOnlyCombo,
   type UnmappedCombo,
 } from "../lib/conversions/monitor";
 
@@ -88,6 +91,8 @@ const run = (over: Partial<IngestResult>): IngestResult => ({
   rows: 9,
   unmappedInBatch: 0,
   statusOnlyInBatch: 0,
+  statusOnlyFirstSeenInBatch: 0,
+  statusOnlyFirstSeenSamples: [],
   inserted: 1,
   updated: 0,
   unchanged: 8,
@@ -290,15 +295,30 @@ const conf = (over: Partial<ConflictCombo>): ConflictCombo => ({
   sample_event_ids: ["ev-conflict"],
   ...over,
 });
+const so = (over: Partial<StatusOnlyCombo>): StatusOnlyCombo => ({
+  offer_id: 134,
+  keitaro_offer_id: null,
+  offer_name: "Psycho Book",
+  network_name: "PsychoBook",
+  keitaro_type: "rejected",
+  total: 1,
+  last_24h: 1,
+  sample_event_ids: ["ev-rej"],
+  ...over,
+});
 // A ledger read that lists every combo (under the cap) unless `over` says otherwise.
 const ledger = (
   unmapped: UnmappedCombo[],
   conflicts: ConflictCombo[],
   over: Partial<LedgerHealth> = {},
+  statusOnly: StatusOnlyCombo[] = [],
 ): LedgerHealth => ({
   unmapped_total: unmapped.reduce((n, c) => n + c.total, 0),
   unmapped_combo_count: unmapped.length,
   unmapped_combos: unmapped,
+  status_only_total: statusOnly.reduce((n, c) => n + c.total, 0),
+  status_only_combo_count: statusOnly.length,
+  status_only_combos: statusOnly,
   conflict_total: conflicts.reduce((n, c) => n + c.total, 0),
   conflict_combo_count: conflicts.length,
   conflict_combos: conflicts,
@@ -394,11 +414,11 @@ check(
 );
 
 console.log("\nledger alerts (per problem combo)");
-const capKeys = [K.unmappedComboCap, K.typeConflictComboCap];
+const capKeys = [K.unmappedComboCap, K.statusOnlyComboCap, K.typeConflictComboCap];
 const cleanDs = decideLedgerAlerts(ledger([], []), []);
 check(
-  "L1 clean ledger, nothing firing → no combo decision; both cap keys ok (under the cap)",
-  cleanDs.length === 2 && sameKeys(okKeysOf(cleanDs), capKeys),
+  "L1 clean ledger, nothing firing → no combo decision; all three cap keys ok (under the cap)",
+  cleanDs.length === 3 && sameKeys(okKeysOf(cleanDs), capKeys),
   keysOnly(cleanDs),
 );
 
@@ -440,8 +460,8 @@ check(
   `${unmappedText}\n---\n${conflictText}`,
 );
 check(
-  "L6 new combos, nothing firing → one firing decision per combo on its own key, no clears beyond the two under-cap cap keys",
-  sickDs.length === 6 &&
+  "L6 new combos, nothing firing → one firing decision per combo on its own key, no clears beyond the three under-cap cap keys",
+  sickDs.length === 7 &&
     sameKeys(okKeysOf(sickDs), capKeys) &&
     sameKeys(firingKeysOf(sickDs), [
       unmappedAlertKey(psycho),
@@ -456,7 +476,12 @@ const latchedDs = decideLedgerAlerts(ledger([grownK41], []), [unmappedAlertKey(k
 check(
   "L7 the same combo already firing, with more rows since → 'firing' on the SAME key again and no combo key cleared (notifyOnTransition's latch makes it no new page — DB S1b)",
   keysOnly(latchedDs) ===
-    JSON.stringify([`ok ${K.unmappedComboCap}`, `ok ${K.typeConflictComboCap}`, `firing ${unmappedAlertKey(k41)}`]),
+    JSON.stringify([
+      `ok ${K.unmappedComboCap}`,
+      `ok ${K.statusOnlyComboCap}`,
+      `ok ${K.typeConflictComboCap}`,
+      `firing ${unmappedAlertKey(k41)}`,
+    ]),
   keysOnly(latchedDs),
 );
 const staleDs = decideLedgerAlerts(ledger([k41], []), [
@@ -468,8 +493,8 @@ const staleDs = decideLedgerAlerts(ledger([k41], []), [
   K.fetchFailed,
 ]);
 check(
-  "L8 firing keys whose combo is gone → ok, under both prefixes; a present combo stays firing; keys outside the prefixes get no stale decision (only the two cap keys, from the cap rule)",
-  staleDs.length === 5 &&
+  "L8 firing keys whose combo is gone → ok, under every prefix; a present combo stays firing; keys outside the prefixes get no stale decision (only the three cap keys, from the cap rule)",
+  staleDs.length === 6 &&
     sameKeys(okKeysOf(staleDs), [unmappedAlertKey(psycho), typeConflictAlertKey(regToPurchase), ...capKeys]) &&
     sameKeys(firingKeysOf(staleDs), [unmappedAlertKey(k41)]),
   keysOnly(staleDs),
@@ -480,7 +505,7 @@ const collideDs = decideLedgerAlerts(ledger([spaced, underscored], []), []);
 check(
   "L9 two combos whose Keitaro types sanitise alike → two keys and two pages, each with its own count (the hash suffix keeps them apart)",
   unmappedAlertKey(spaced) !== unmappedAlertKey(underscored) &&
-    collideDs.length === 4 &&
+    collideDs.length === 5 &&
     firingText(collideDs, unmappedAlertKey(spaced)).includes("9 conversion(s)") &&
     firingText(collideDs, unmappedAlertKey(underscored)).includes("2 conversion(s)"),
   keysOnly(collideDs),
@@ -501,7 +526,7 @@ check(
     cappedTexts.length === 10 &&
     cappedTexts.every((t) => t.includes("4 more unmapped combo(s) are not listed or paged")) &&
     !firingText(cappedDs, typeConflictAlertKey(regToPurchase)).includes("not listed or paged") &&
-    sameKeys(okKeysOf(cappedDs), [staleConflictKey, K.typeConflictComboCap]),
+    sameKeys(okKeysOf(cappedDs), [staleConflictKey, K.statusOnlyComboCap, K.typeConflictComboCap]),
   `${keysOnly(cappedDs)}\n${cappedTexts[0]}`,
 );
 const capText = firingText(cappedDs, K.unmappedComboCap);
@@ -511,7 +536,8 @@ check(
     capText.startsWith(PREFIX) &&
     capText.includes("14 unmapped combos exist, more than the 10 per kind that are listed and paged.") &&
     capText.includes("Only the 10 most recently changed unmapped combos page.") &&
-    capText.includes("WHERE event_type_id IS NULL OR status IS NULL") &&
+    capText.includes("WHERE status IS NULL") &&
+    !capText.includes("WHERE event_type_id IS NULL OR status IS NULL") &&
     firingText(
       decideLedgerAlerts(ledger([], listed.map(() => regToPurchase), { conflict_combo_count: 11 }), []),
       K.typeConflictComboCap,
@@ -537,8 +563,108 @@ const orderBy = (q: SQL) => {
 check(
   "L13 both combo statements rank by RECENCY, not by size: ORDER BY max(ce.updated_at) DESC first, then every GROUP BY column (so a new 1-row combo is listed and paged even when 10 bigger ones exist — DB P2)",
   orderBy(UNMAPPED_COMBOS_SQL) === "max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3" &&
+    orderBy(STATUS_ONLY_COMBOS_SQL) === "max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3" &&
     orderBy(CONFLICT_COMBOS_SQL) === "max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3, 4",
-  JSON.stringify([orderBy(UNMAPPED_COMBOS_SQL), orderBy(CONFLICT_COMBOS_SQL)]),
+  JSON.stringify([orderBy(UNMAPPED_COMBOS_SQL), orderBy(STATUS_ONLY_COMBOS_SQL), orderBy(CONFLICT_COMBOS_SQL)]),
+);
+
+console.log("\nstatus-only first sighting (the gap this closes)");
+// A status-only mapping rule (event type NULL, status set — the seeded PsychoBook
+// `rejected`) means "keep the row's existing event type, just move its status".
+// On a conversion we have NEVER seen there is no row and so no type to keep: it
+// lands with a status and a NULL event type, counting as nothing everywhere.
+// That is not the ordinary unmapped case (no rule at all, status NULL), and the
+// fix differs, so it gets its own key, message and cap.
+const psbRejected = so({});
+const soK41 = so({ offer_id: null, keitaro_offer_id: 41, offer_name: null, network_name: null });
+const soNone = so({
+  offer_id: null,
+  keitaro_offer_id: null,
+  offer_name: null,
+  network_name: null,
+  keitaro_type: "refund",
+  total: 4,
+  last_24h: 2,
+  sample_event_ids: ["ev-1", "ev-2", "ev-3", "ev-4"],
+});
+check(
+  "SO1 its own prefix, with the same <offer>:<keitaro type> combo shape as unmapped. The prefixes are disjoint (':status_only_unmapped:' does NOT start with ':unmapped:'), so a status-only key is never read, paged or cleared as an unmapped one; the network is not a key part, so renaming or re-pointing it can't move the key",
+  statusOnlyAlertKey(psbRejected) === "conversion_events:status_only_unmapped:134:rejected" &&
+    statusOnlyAlertKey(soK41) === "conversion_events:status_only_unmapped:k41:rejected" &&
+    statusOnlyAlertKey(soNone) === "conversion_events:status_only_unmapped:none:refund" &&
+    statusOnlyAlertKey(psbRejected) !== unmappedAlertKey(psbRejected) &&
+    !statusOnlyAlertKey(psbRejected).startsWith(P.unmapped) &&
+    !P.statusOnlyUnmapped.startsWith(P.unmapped) &&
+    statusOnlyAlertKey({ ...psbRejected, network_name: "Renamed", total: 99, sample_event_ids: [] }) ===
+      statusOnlyAlertKey(psbRejected),
+  JSON.stringify([statusOnlyAlertKey(psbRejected), statusOnlyAlertKey(soK41), statusOnlyAlertKey(soNone)]),
+);
+const soDs = decideLedgerAlerts(ledger([], [], {}, [psbRejected, soNone]), []);
+const soText = firingText(soDs, statusOnlyAlertKey(psbRejected));
+check(
+  "SO2 the page says what happened in operator language, names the offer, the NETWORK (where the mapping row usually belongs) and the Keitaro type, says the rows count as nothing and that nothing will heal them, and says the fix is a config row",
+  soText.startsWith(PREFIX) &&
+    soText.includes(
+      "1 conversion(s) for Psycho Book (offer 134), network PsychoBook were FIRST seen as Keitaro type rejected, which is mapped status-only",
+    ) &&
+    soText.includes(
+      "There was no earlier row, so there was no type to keep and they have none (1 created in the last 24h).",
+    ) &&
+    soText.includes("they count as nothing: not a purchase, not a registration, no revenue") &&
+    soText.includes("A later postback will NOT fix them") &&
+    soText.includes("Sample Keitaro event ids: ev-rej") &&
+    soText.includes("this is a missing config row, not a bug") &&
+    soText.includes("conversion_event_mappings row that names an event_type_id") &&
+    soText.includes("set their event_type_id by SQL") &&
+    soText.length < 2000,
+  soText,
+);
+const soNoneText = firingText(soDs, statusOnlyAlertKey(soNone));
+check(
+  "SO3 no CamMan offer and no network → no network clause in the headline; counts and samples are still per combo (4 rows, 2 created in the last 24h, at most 3 sample ids)",
+  soNoneText.includes("4 conversion(s) for no offer were FIRST seen as Keitaro type refund") &&
+    !soNoneText.includes(", network ") &&
+    soNoneText.includes("(2 created in the last 24h)") &&
+    soNoneText.includes("Sample Keitaro event ids: ev-1, ev-2, ev-3") &&
+    !soNoneText.includes("ev-4"),
+  soNoneText,
+);
+// Each statement's OWN WHERE: the last one, since the FILTER aggregates have theirs.
+const whereOf = (q: SQL) => {
+  const text = new PgDialect().sqlToQuery(q).sql.replace(/\s+/g, " ");
+  return text.slice(text.lastIndexOf("WHERE ") + "WHERE ".length).split(" GROUP BY")[0];
+};
+check(
+  "SO4 the two statements PARTITION what conversion_events_unmapped_idx covers (event_type_id IS NULL OR status IS NULL): unmapped is the 'status IS NULL' half, status-only the 'event_type_id IS NULL AND status IS NOT NULL' half. Disjoint (no row is both, so none pages twice) and total (no row of the index falls between them, so none goes unreported); each half still implies the index predicate",
+  whereOf(UNMAPPED_COMBOS_SQL) === "ce.status IS NULL" &&
+    whereOf(STATUS_ONLY_COMBOS_SQL) === "ce.event_type_id IS NULL AND ce.status IS NOT NULL",
+  JSON.stringify([whereOf(UNMAPPED_COMBOS_SQL), whereOf(STATUS_ONLY_COMBOS_SQL)]),
+);
+const soListed = Array.from({ length: LEDGER_MAX_COMBOS }, (_, i) => so({ keitaro_type: `so-${i}` }));
+const soGoneKey = statusOnlyAlertKey(so({ keitaro_type: "gone" }));
+const soCapDs = decideLedgerAlerts(
+  ledger([psycho], [], { status_only_combo_count: LEDGER_MAX_COMBOS + 2 }, soListed),
+  [soGoneKey, unmappedAlertKey(k41)],
+);
+const soCapText = firingText(soCapDs, K.statusOnlyComboCap);
+check(
+  "SO5 the kind has its own cap key and its own past-cap rule: over the cap it pages once naming the kind, the count and the SQL that lists every combo; every status-only page names the 2 unlisted combos; no status-only combo key clears — while the unmapped kind, under its own cap, still clears its own stale key and names nothing extra",
+  soCapText.includes("12 status-only unmapped combos exist, more than the 10 per kind") &&
+    soCapText.includes("WHERE event_type_id IS NULL AND status IS NOT NULL") &&
+    firingText(soCapDs, statusOnlyAlertKey(soListed[0])).includes(
+      "2 more status-only unmapped combo(s) are not listed or paged",
+    ) &&
+    !firingText(soCapDs, unmappedAlertKey(psycho)).includes("not listed or paged") &&
+    sameKeys(okKeysOf(soCapDs), [unmappedAlertKey(k41), K.unmappedComboCap, K.typeConflictComboCap]),
+  keysOnly(soCapDs),
+);
+check(
+  "SO6 the split is exclusive in the decisions too: a ledger holding only status-only combos produces NO decision under the unmapped prefix, and the ordinary unmapped page no longer carries the status-only advice (it moved to the page that actually names the combo)",
+  sameKeys(firingKeysOf(soDs), [statusOnlyAlertKey(psbRejected), statusOnlyAlertKey(soNone)]) &&
+    !firingKeysOf(soDs).some((k) => k.startsWith(P.unmapped)) &&
+    !unmappedText.includes("status-only") &&
+    !unmappedText.includes("set by SQL"),
+  `${keysOnly(soDs)}\n---\n${unmappedText}`,
 );
 
 console.log("\nstage-day projection alert (Phase 3 Task 3)");
@@ -669,6 +795,9 @@ const texts = [
   unmappedText,
   k41Text,
   noOfferText,
+  soText,
+  soNoneText,
+  soCapText,
   conflictText,
   cappedTexts[0] ?? "",
   capText,
@@ -683,18 +812,21 @@ check(
   texts.filter((t) => t.length === 0 || MARKUP.test(t)).join("\n---\n"),
 );
 check(
-  "K1 the fixed keys, the combo key prefixes and the heartbeat key are the strings the docs and alert_state rows name; neither cap key starts with a combo prefix, so the stale-combo clear can never touch one",
+  "K1 the fixed keys, the three combo key prefixes and the heartbeat key are the strings the docs and alert_state rows name; no cap key starts with a combo prefix, so the stale-combo clear can never touch one; and no prefix is a prefix of another",
   K.fetchFailed === "conversion_events:fetch_failed" &&
     K.invalidRows === "conversion_events:invalid_rows" &&
     K.orgMismatch === "conversion_events:org_mismatch" &&
     K.projectionFailed === "conversion_events:projection_failed" &&
     K.unmappedComboCap === "conversion_events:combo_cap_exceeded:unmapped" &&
+    K.statusOnlyComboCap === "conversion_events:combo_cap_exceeded:status_only_unmapped" &&
     K.typeConflictComboCap === "conversion_events:combo_cap_exceeded:type_conflicts" &&
-    Object.keys(K).length === 6 &&
+    Object.keys(K).length === 7 &&
     P.unmapped === "conversion_events:unmapped:" &&
+    P.statusOnlyUnmapped === "conversion_events:status_only_unmapped:" &&
     P.typeConflicts === "conversion_events:type_conflicts:" &&
-    Object.keys(P).length === 2 &&
-    capKeys.every((k) => !k.startsWith(P.unmapped) && !k.startsWith(P.typeConflicts)) &&
+    Object.keys(P).length === 3 &&
+    capKeys.every((k) => Object.values(P).every((prefix) => !k.startsWith(prefix))) &&
+    Object.values(P).every((a) => Object.values(P).every((b) => a === b || !a.startsWith(b))) &&
     INGEST_HEARTBEAT_ALERT_KEY === "heartbeat:conversion-events-ingest",
 );
 

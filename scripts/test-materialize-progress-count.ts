@@ -15,6 +15,7 @@
 // mints links and cannot send. Full cleanup in `finally`.
 //
 // Run: npx tsx scripts/test-materialize-progress-count.ts
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });

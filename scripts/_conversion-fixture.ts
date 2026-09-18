@@ -1,3 +1,5 @@
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
+
 import { randomUUID } from "node:crypto";
 
 import { sql } from "drizzle-orm";

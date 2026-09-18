@@ -2,6 +2,29 @@
 
 _Last updated: 2026-09-18_
 
+## A script that writes to a database must refuse production, by import (2026-09-18)
+
+`.env.local` is **PRODUCTION**, and `scripts/_env-preload.ts` loads it whenever `DATABASE_URL` is not already set. On 2026-09-18 a test-fixture script ran that way and created live campaign rows in production before tearing them down. Nothing was damaged; nothing had stopped it either.
+
+[scripts/_require-preview-db.ts](../scripts/_require-preview-db.ts) is now the single refusal, and [scripts/test-preview-db-guard.ts](../scripts/test-preview-db-guard.ts) (`npm run check:guards`) enforces that every write-capable script carries it.
+
+- **It is an ALLOWLIST, not a denylist.** The obvious guard — and the one 14 scripts had hand-copied — asks "does `DATABASE_URL` contain the production project ref?" and runs if it does not. A raw IP, a custom hostname, a CNAME'd pooler alias, a second connection string for the same cluster, or a future prod project with a new ref all pass straight through. The helper asks the opposite question: **is this one of the databases I am allowed to write to?** Adding a preview database is one line in `PREVIEW_PROJECT_REFS`; adding a production one is impossible by construction.
+- **An empty or missing `DATABASE_URL` is refused, not permitted.** `postgres()` falls back to the libpq `PG*` variables when handed no connection string, so `DATABASE_URL= npx tsx …` is not "no database", it is "whatever `PGHOST` and `~/.pgpass` say". The denylist form read that case as safe (`""` contains no prod ref).
+- **Import it for its side effect, ordered ahead of every app module** — second after `./_env-preload`, or first in a script that calls `dotenv`'s `config()` itself (that statement runs *after* all imports, so the guard beats it and a bare invocation can no longer pick up `.env.local`):
+
+  ```ts
+  import "./_env-preload";
+  import "./_require-preview-db"; // MUST be second
+  import { db } from "../db/client";
+  ```
+
+  **Position is a checked property, not a style note.** A refusal written as a statement in the module body runs only after every import has been evaluated; it works today purely because postgres-js connects lazily. A module-scope query — in the script or in anything it imports — would outrun it.
+- **Enrolment is the default.** The bar's population is derived from the source tree: any script that reaches a database *and* carries a write signal (an ORM `.insert/.update/.delete`, a raw-SQL write verb, or `.unsafe(`) must import the helper. A new fixture script is covered the moment it writes, with nobody editing a list.
+- **Opting out is a review decision with a reason.** Prod-facing tooling — the `apply-*` index builders, the one-shot `backfill-*` repairs, the conversion backfill/verify, the deliberate `verify-*-production` proofs, and read-only diagnostics — is named in `EXCLUSIONS` in the bar **with a one-line reason**. An entry naming a file that no longer exists fails the bar rather than rotting.
+- **`check:guards` is deliberately NOT in `vercel-build`.** It is a source scan; a false positive would block a production deploy.
+
+⚠️ **The known hole: a script whose writes happen only inside an app library it calls** (`ingestKeitaroConversions(db, …)`, say) carries no write token of its own and the scan cannot see it. Those are handled by being named in `EXCLUSIONS` anyway, but if you add one, **add the guard import yourself**. Transitive import analysis would close it and was measured: it flags ~39 more scripts, nearly all read-only diagnostics that merely import a write-capable module, which trades a crisp signal for a noisy one.
+
 ## "Selectable" and "selected" are FOUR separate registries for a behavioural lane tier (2026-09-18)
 
 Whether a lane tier can be stored, offered, and ticked by default are three
@@ -2870,6 +2893,31 @@ The generalisation: **any job that derives a table from another and deletes _or 
 Sweeply's postback template hardcodes `status=lead` for **paid** conversions. Keitaro's Affise template maps Affise pending/hold (2, 5) to `lead`. The same word means approved on one network and on-hold on another, so a global "lead = X" rule is wrong for somebody.
 
 `conversion_event_mappings` classifies per network or offer, keyed on Keitaro's canonical conversion **type** (many raw statuses — `approved`, `confirmed`, `paid` — resolve to the one `Sale` type). An unknown network/type is stored with NULL event type and status and is never counted as a purchase. Guessing "it's probably a sale" is exactly how a $0 registration would have become a buyer.
+
+## A "keep the existing value" rule has nothing to keep on a first sighting (2026-09-18)
+
+A `conversion_event_mappings` row with `event_type_id` NULL is a **status-only rule**: "keep this conversion's existing event type and only move its status". PsychoBook's seeded `rejected` is one, and it is right — for the rejection of a conversion already in the ledger.
+
+If that postback is the **first** one for its `keitaro_event_id`, there is no row and no type to keep. The conversion lands with a status and `event_type_id` NULL, which is the same shape as "no mapping matched at all" and counts as nothing everywhere. Two ways that stayed invisible:
+
+- the batch counter `unmappedInBatch` tests `status === null`, and this row HAS a status;
+- the table-level `unmapped` alert did catch it (it read `event_type_id IS NULL OR status IS NULL`) but reported it as an ordinary unmapped combo, whose advice — "add a mapping row for this Keitaro type" — does not fix it. **Nothing heals it**: the sticky `COALESCE(existing, incoming)` only fills a NULL from a mapping that names a type, and the rule that classified the row has none.
+
+Two lessons, neither specific to conversions:
+
+1. **A rule defined relative to prior state needs a defined behaviour for "no prior state."** Write down what happens on the first sighting when you write the rule, not when the first one arrives.
+2. **Two problems that produce the same shape but need different fixes must be two alerts.** Merging them means the page tells the operator to do something that cannot work. The split here is `conversion_events:unmapped:` (`status IS NULL`) vs `conversion_events:status_only_unmapped:` (`event_type_id IS NULL AND status IS NOT NULL`) — disjoint and together exactly the old predicate, so nothing is double-paged and nothing is dropped. Both halves still imply the partial index's predicate, so splitting needed no migration.
+
+Detected before the write by `findStatusOnlyFirstSeen` ([lib/conversions/ingest.ts](../lib/conversions/ingest.ts)), so a dry run reports it too. See [04-features/conversion-events.md](04-features/conversion-events.md).
+
+## A planner assertion on a near-empty table asserts nothing (2026-09-18)
+
+`scripts/test-conversion-monitor-db.ts` proves each combo statement can be read from its partial index: `SET LOCAL enable_seqscan = off`, `EXPLAIN`, look for the index name. On the preview project that check was quietly meaningless, and then flaky:
+
+- `conversion_events` is **empty** there. Against an un-analysed 0-page relation the planner takes the seq scan whatever `enable_seqscan` says — measured 25/25 misses for every predicate, including the one already on `main`. The check only ever passed because the transaction's own inserts happened to move `relpages`.
+- Once ANALYZEd, ten rows are still not a decision. With seq scans off, a FULL scan of `conversion_events_offer_event_occurred_idx` beat the partial index for one predicate and lost for another, flipping run to run on identical code.
+
+A planner check must be asked in the regime whose answer you care about. The fix is to build that regime: a savepoint inserts 2,000 healthy rows — production's shape, a large ledger where problem rows are rare — `ANALYZE`s, EXPLAINs, and rolls back. Then the partial index is decisively cheapest and the answer is stable. Report the index actually chosen in the failure detail; "false" tells you nothing.
 
 ## A migration that touches hot tables: `SET LOCAL lock_timeout` first, strongest lock first (2026-09-17)
 

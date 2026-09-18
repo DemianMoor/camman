@@ -9,6 +9,7 @@
 //
 // Run: npx tsx scripts/test-lane-preview-count.ts
 import "./_env-preload"; // MUST be first — loads .env.local before db/client init
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
@@ -23,11 +24,8 @@ import { seedConversionEvent } from "./_conversion-fixture";
 // outright rather than trust the caller's environment:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
 //     npx tsx --conditions=react-server scripts/test-lane-preview-count.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 const ORG_MARKER = "__LANE_PREVIEW_TEST__";
 const COUNTED_TABLES = [
@@ -265,6 +263,17 @@ async function main() {
       }
       return e;
     };
+    // ⭐ PIN THE THROW. It is unreachable today — every tier in LANE_TIER_VALUES
+    // has a row in `expectedLane` — and an unreachable throw is not a working
+    // one. Its whole job is to make a future scale addition LOUD instead of
+    // letting the tier compare against `undefined`, so prove it fires.
+    let unmappedThrew = false;
+    try {
+      expectLane(-1);
+    } catch {
+      unmappedThrew = true;
+    }
+    check("⭐ a tier with no seeded count THROWS (not silently skipped)", unmappedThrew);
     let sum = 0;
     for (const tier of LANE_TIER_VALUES) {
       const e = expectLane(tier);

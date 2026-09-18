@@ -37,6 +37,7 @@
 // (the react-server condition is required: this pulls in lib/sends/scheduled.ts,
 //  which transitively imports a module guarded by `server-only`.)
 import "./_env-preload"; // MUST be first — loads .env.local before db/client init
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { randomUUID } from "node:crypto";
 
@@ -67,11 +68,8 @@ import { performBehavioralSplit } from "@/lib/stages/behavioral-split";
 // outright rather than trust the caller's environment:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
 //     npx tsx --conditions=react-server scripts/verify-campaign-level-split.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 // The lane trio blocks (6)-(12) deliberately keep. Named once so the two
 // performBehavioralSplit calls below cannot drift apart, and so the pin reads as
@@ -454,9 +452,21 @@ async function main() {
     const createdTiers = (
       (await db.execute(sql`
         SELECT behavioral_tier AS tier FROM campaign_stages
-        WHERE split_group_id = ${groupId}::uuid ORDER BY behavioral_tier
+        WHERE org_id = ${orgId}::uuid AND split_group_id = ${groupId}::uuid
+        ORDER BY behavioral_tier
       `)) as unknown as { tier: number }[]
     ).map((r) => Number(r.tier));
+    // ⭐ ANCHORED TO A LITERAL, NOT TO `PINNED_TIERS`. Comparing the split's
+    // output against the same constant the split was CALLED with proves only
+    // that performBehavioralSplit honours its argument — widening the pin moves
+    // both sides together and the bar stays green, which is exactly the drift
+    // the comment above warns about. The trio is spelled out here so widening
+    // the pin has to come here and argue with this line first.
+    check(
+      "⭐ the pin is still the legacy trio [0,1,2] — widening it is what this bar catches",
+      JSON.stringify(PINNED_TIERS) === JSON.stringify([0, 1, 2]),
+      PINNED_TIERS.join(","),
+    );
     check(
       `split created EXACTLY the pinned lanes {${PINNED_TIERS.join(",")}} — no Registered lane in this block`,
       JSON.stringify(createdTiers) === JSON.stringify(PINNED_TIERS),

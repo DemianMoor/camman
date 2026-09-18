@@ -1,7 +1,16 @@
 import "./_env-preload";
+
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import {
+  checkFollowupTierSupported,
+  FOLLOWUP_TIER_UNSUPPORTED,
+} from "@/lib/api/followup-tier-guard";
+import { FOLLOWUP_TIERS } from "@/lib/drip/children";
 import {
   cancelPendingForJourney,
   closeCompletedJourneys,
@@ -48,6 +57,68 @@ function check(label: string, actual: unknown, expected: unknown) {
 
 async function main() {
   console.log(`ref: ${/postgres\.([a-z0-9]+):/.exec(process.env.DATABASE_URL ?? "")?.[1]}`);
+
+  // ── 0. the follow-up TIER guard on the stage PATCH route ──────────────────
+  //
+  // ⭐ THE HOLE IT CLOSES. A tier-3 lane is creatable (Phase 4, Task 3) with
+  // drip_followup_minutes NULL and drip_active NULL. Two raw PATCHes turn it
+  // into a drip follow-up CHILD — and that child can never send (runDripFollowups'
+  // detection ladder has no arm above tier 2) while the reachability predicate in
+  // lib/drip/lifecycle.ts keeps waiting on it (3 >= 3). The journey hangs for
+  // ever, which is exactly the failure sections 3 and 3b below exist to prevent.
+  //
+  // ⭐ WHY IT IS A REFUSAL AND NOT A NON_UPDATABLE ENTRY. The route DROPS
+  // NON_UPDATABLE keys silently, so listing drip_followup_minutes there would
+  // make the follow-up timer <Select> return 200, toast success and never save —
+  // a live feature broken invisibly. The refusal names the TIER instead, so the
+  // editor (children are always 0/1/2) is untouched.
+  //
+  // These bars live here rather than in the pure suite because the guard's whole
+  // point is its coupling to FOLLOWUP_TIERS, and lib/drip/children.ts is
+  // `server-only` — a pure copy of that list would assert nothing.
+  console.log("\n0. the follow-up tier guard (PATCH /stages/[stageId]):");
+  const refusalOf = (r: ReturnType<typeof checkFollowupTierSupported>) =>
+    r === null ? null : { field: r.field, reason: r.reason };
+  check("⭐ tier 3 + a follow-up timer is REFUSED",
+        refusalOf(checkFollowupTierSupported({ behavioralTier: 3, dripFollowupMinutes: 60 })),
+        { field: "drip_followup_minutes", reason: FOLLOWUP_TIER_UNSUPPORTED });
+  check("⭐ tier 3 + drip_active:true is REFUSED",
+        refusalOf(checkFollowupTierSupported({ behavioralTier: 3, dripActive: true })),
+        { field: "drip_active", reason: FOLLOWUP_TIER_UNSUPPORTED });
+  check("⭐ tier 1 + a follow-up timer still SUCCEEDS (the editor is untouched)",
+        checkFollowupTierSupported({ behavioralTier: 1, dripFollowupMinutes: 60 }), null);
+  check("⭐ tier 1 + drip_active:true still SUCCEEDS",
+        checkFollowupTierSupported({ behavioralTier: 1, dripActive: true }), null);
+  check("tier 0 and tier 2 timers still succeed",
+        [0, 2].map((t) => checkFollowupTierSupported({ behavioralTier: t, dripFollowupMinutes: 60 })),
+        [null, null]);
+  // The drip FIRST-SEND stage is behavioral_tier NULL with drip_active true —
+  // the posture switch for the whole stage. Refusing it would break drip itself.
+  check("⭐ a NULL tier is not a lane: drip_active:true still succeeds (the drip first-send stage)",
+        checkFollowupTierSupported({ behavioralTier: null, dripActive: true }), null);
+  // Disarming must always be possible, or a stage armed before this guard
+  // existed could never be switched off again.
+  check("clearing the timer on an unsupported tier is allowed (disarm)",
+        checkFollowupTierSupported({ behavioralTier: 3, dripFollowupMinutes: null }), null);
+  check("switching an unsupported tier OFF is allowed",
+        checkFollowupTierSupported({ behavioralTier: 3, dripActive: false }), null);
+  check("an unrelated edit to a tier-3 lane is untouched",
+        checkFollowupTierSupported({ behavioralTier: 3 }), null);
+  // The message restates its own valid set, so it is derived — not retyped.
+  const refusalMsg = checkFollowupTierSupported({ behavioralTier: 3, dripActive: true })?.message ?? "";
+  check("⭐ the refusal message names every FOLLOWUP_TIER, derived rather than hard-coded",
+        FOLLOWUP_TIERS.filter((t) => !refusalMsg.includes(String(t))), []);
+  // A guard nothing calls is not a guard. Read from the route's source so this
+  // cannot pass on a wired-up-looking module that no request ever reaches.
+  const routeSrc = readFileSync(
+    resolve(process.cwd(), "app/api/campaigns/[campaignId]/stages/[stageId]/route.ts"),
+    "utf8",
+  ).replace(/\s+/g, " ");
+  check("⭐ the PATCH route actually CALLS the guard",
+        /import \{ checkFollowupTierSupported \} from "@\/lib\/api\/followup-tier-guard";/.test(routeSrc)
+          && routeSrc.includes("checkFollowupTierSupported({ behavioralTier: current.behavioral_tier"),
+        true);
+
   let rolledBack = false;
 
   try {

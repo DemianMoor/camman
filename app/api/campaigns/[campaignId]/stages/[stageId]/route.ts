@@ -10,6 +10,7 @@ import {
   sms_providers,
 } from "@/db/schema";
 import { checkDripStageWindow } from "@/lib/api/drip-stage-window-guard";
+import { checkFollowupTierSupported } from "@/lib/api/followup-tier-guard";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
@@ -398,6 +399,9 @@ export async function PATCH(
       sales_page_label: campaign_stages.sales_page_label,
       utm_tag_ids: campaign_stages.utm_tag_ids,
       current_scheduled_at: campaign_stages.scheduled_at,
+      // Read for the follow-up tier guard below. Not patchable through this
+      // route — the stored value is the whole truth.
+      behavioral_tier: campaign_stages.behavioral_tier,
       sent_at: campaign_stages.sent_at,
       schedule_missed_at: campaign_stages.schedule_missed_at,
       campaign_tracking_id: campaigns.tracking_id,
@@ -422,6 +426,24 @@ export async function PATCH(
     });
   }
   const current = existing[0];
+
+  // A stage may only be ARMED as a behavioural follow-up child at a tier that
+  // has follow-up machinery. Closed here, by tier, rather than by making the
+  // fields non-updatable: NON_UPDATABLE keys are dropped SILENTLY by the loop
+  // above, which would freeze the follow-up timer editor at 200 OK for ever.
+  // See lib/api/followup-tier-guard.ts for the journey-hang this prevents.
+  const followupRefusal = checkFollowupTierSupported({
+    behavioralTier: current.behavioral_tier,
+    dripFollowupMinutes: input.drip_followup_minutes,
+    dripActive: input.drip_active,
+  });
+  if (followupRefusal) {
+    return apiError(400, followupRefusal.message, API_ERROR_CODES.VALIDATION, {
+      reason: followupRefusal.reason,
+      field: followupRefusal.field,
+      behavioral_tier: current.behavioral_tier,
+    });
+  }
 
   // Brand -> numbers (1a). GRANDFATHERED: only when this PATCH actually changes
   // the stage's number. The campaign's brand cannot change from this route, so

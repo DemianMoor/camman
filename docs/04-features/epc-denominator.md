@@ -26,16 +26,12 @@ deduplicated at the grain of the row displayed.
 > row (no `event_types` match, so neither a purchase nor revenue anywhere) is not
 > rescued either.
 >
-> ⚠️ **Open until Phase 3 Task 6:** the EPC *numerator* is still wider than this
-> rescue. It comes from the stage-day projection
-> ([lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts)),
-> whose sales/revenue filters are still TYPE-based (`keitaro_type IN
-> ('lead','sale','rejected')`), so a rejected or unmapped conversion would put
-> revenue in the numerator while its recipient is deliberately outside the
-> denominator — the one thing Rule F exists to prevent. Zero impact today: 0
-> rejected and 0 unmapped rows in the whole corpus. Task 6 closes it by flipping
-> those filters to the shared `purchasedClause()` / `approvedRevenueClause()`. The
-> fix belongs on the numerator; do **not** widen the rescue to match it.
+> **Closed (Phase 3 Task 6, 2026-09-18).** The EPC *numerator* — the stage-day
+> projection
+> ([lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts))
+> — now reads the same shared definitions as this rescue (`purchasedClause()` /
+> `approvedRevenueClause()`), so a rejected or unmapped conversion can never put
+> revenue in the numerator while its recipient sits outside the denominator.
 
 > **`scored_at IS NOT NULL` is part of the predicate, not a tidiness filter.**
 > `clicks.classification` carries a *first-pass* verdict written inline by the

@@ -20,6 +20,7 @@ import {
   syncStageDayConversions,
   type DbOrTx,
 } from "../lib/keitaro/stage-day-conversions";
+import { approvedRevenueClause, purchasedClause, rescueSendIds } from "../lib/sale-attribution";
 
 // The stage-day projection, run through the REAL exported functions inside a
 // transaction that ALWAYS rolls back. PREVIEW DB ONLY:
@@ -216,7 +217,7 @@ async function main() {
       const read = async (stageId: number) =>
         (await tx.execute(sql`
           SELECT stat_date::text AS stat_date, visit_clicks_clean, checkouts, sales,
-                 revenue::text AS revenue, pending_revenue::text AS pending,
+                 revenue::text AS revenue, pending_revenue::text AS pending_revenue,
                  payout_at_conversion::text AS payout, stage_tracking_id
           FROM keitaro_stage_results WHERE stage_id = ${stageId}::int ORDER BY stat_date
         `)) as unknown as {
@@ -225,7 +226,7 @@ async function main() {
           checkouts: number;
           sales: number;
           revenue: string;
-          pending: string;
+          pending_revenue: string;
           payout: string | null;
           stage_tracking_id: string;
         }[];
@@ -234,7 +235,7 @@ async function main() {
       const readAll = async (dbc: DbOrTx) =>
         (await dbc.execute(sql`
           SELECT stage_id, stat_date::text AS stat_date, visit_clicks_clean, checkouts, sales,
-                 revenue::text AS revenue, pending_revenue::text AS pending,
+                 revenue::text AS revenue, pending_revenue::text AS pending_revenue,
                  payout_at_conversion::text AS payout
           FROM keitaro_stage_results ORDER BY stage_id, stat_date
         `)) as unknown as unknown[];
@@ -385,14 +386,30 @@ async function main() {
       const rowsA = await read(stageA);
       check("S1 the conversion day gets a row of its own", rowsA.some((r) => r.stat_date === LATE));
       const d14 = rowsA.find((r) => r.stat_date === LATE)!;
-      check("S2 sales counts lead + sale + rejected (today's semantics)", d14.sales === 3, JSON.stringify(d14));
-      check("S3 checkouts counts the lead only", d14.checkouts === 1, JSON.stringify(d14));
-      check("S4 revenue is the ledger sum", Number(d14.revenue) === 350, d14.revenue);
-      check(
-        "S5 payout_at_conversion = revenue / sales",
-        Math.abs(Number(d14.payout) - 350 / 3) < 0.001,
-        String(d14.payout),
-      );
+      check("S2 sales counts the counted PURCHASE events only (rejected is not a sale)", d14.sales === 2, JSON.stringify(d14));
+      check("S3 checkouts still counts the lead-TYPE rows", d14.checkouts === 1, JSON.stringify(d14));
+      check("S4 revenue is the APPROVED sum", Number(d14.revenue) === 350, d14.revenue);
+      check("S5 payout_at_conversion = revenue / sales", Math.abs(Number(d14.payout) - 175) < 0.001, String(d14.payout));
+
+      const pendingId = await seedConversionEvent(tx, {
+        orgId,
+        campaignId: camp,
+        stageId: stageA,
+        eventKey: "purchase",
+        status: "pending",
+        revenue: 60,
+        keitaroType: "lead",
+      });
+      await tx.execute(sql`
+        UPDATE conversion_events
+        SET occurred_at = ('2026-09-14 12:00:00'::text || ' ' || 'America/New_York')::timestamptz
+        WHERE id = ${pendingId}::bigint
+      `);
+      await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const wp = (await read(stageA)).find((r) => r.stat_date === "2026-09-14")!;
+      check("S5b ⭐ a pending purchase IS a sale", wp.sales === 3, JSON.stringify(wp));
+      check("S5c ⭐ its payout is NOT in revenue", Number(wp.revenue) === 350, wp.revenue);
+      check("S5d ⭐ it is in pending_revenue, on its own", Number(wp.pending_revenue) === 60, wp.pending_revenue);
       check("S6 the inserted row carries the stage's tracking id", d14.stage_tracking_id === tidA, d14.stage_tracking_id);
       const d17 = rowsA.find((r) => r.stat_date === "2026-09-17")!;
       check(
@@ -402,7 +419,7 @@ async function main() {
       );
       check("S8 ⭐ its CLICK columns are untouched", d17.visit_clicks_clean === 40, JSON.stringify(d17));
       check("S8b zeroing clears payout_at_conversion", d17.payout === null, JSON.stringify(d17));
-      check("S8c zeroing resets pending_revenue too (migration 0182)", Number(d17.pending) === 0, JSON.stringify(d17));
+      check("S8c zeroing resets pending_revenue too (migration 0182)", Number(d17.pending_revenue) === 0, JSON.stringify(d17));
       check("S9 the run reports what it wrote", first.rowsWritten >= 1 && first.rowsZeroed === 1, JSON.stringify(first));
       check(
         "S9b it reports the scope it was GIVEN, not the stages that happen to have rows",
@@ -463,7 +480,9 @@ async function main() {
           payoutRun.rowsZeroed === 0 &&
           Math.abs(Number(d14Payout.payout) - 350 / 3) < 0.001 &&
           d14Payout.sales === 3 &&
-          d14Payout.checkouts === 1 &&
+          // checkouts = 2: leadA AND the S5b pending purchase are both
+          // keitaro_type = 'lead' — CHECKOUT_FILTER doesn't look at status.
+          d14Payout.checkouts === 2 &&
           Number(d14Payout.revenue) === 350,
         JSON.stringify({ payoutRun, d14Payout }),
       );
@@ -506,20 +525,24 @@ async function main() {
       console.log("\nI2 — the mirror must be able to correct DOWNWARDS");
       const mirroredUp = await stageRow(stageA);
       check(
+        // 2, not 1: leadA AND the S5b pending purchase both carry
+        // keitaro_type = 'lead' (CHECKOUT_FILTER ignores status).
         "M1 the counter mirror ran off the fresh rows",
-        mirroredUp.checkout_click_count === 1,
+        mirroredUp.checkout_click_count === 2,
         JSON.stringify(mirroredUp),
       );
-      // The projection is non-monotonic: drop the only `lead` and the day's
-      // checkouts fall to 0. The stage counter must follow it down.
+      // The projection is non-monotonic: drop leadA and the day's checkouts
+      // fall from 2 to 1 — the S5b pending purchase is still keitaro_type =
+      // 'lead' and keeps counting as a checkout regardless of its status. The
+      // stage counter must follow the projection down.
       await tx.execute(sql`DELETE FROM conversion_events WHERE id = ${leadA}::bigint`);
       const third = await syncStageDayConversions(tx, { stageIds: [stageA, stageD] });
       const d14After = (await read(stageA)).find((r) => r.stat_date === "2026-09-14")!;
-      check("M2 the projected day recomputes downwards", d14After.checkouts === 0 && d14After.sales === 2, JSON.stringify(d14After));
+      check("M2 the projected day recomputes downwards", d14After.checkouts === 1 && d14After.sales === 2, JSON.stringify(d14After));
       const mirroredDown = await stageRow(stageA);
       check(
-        "M3 ⭐ checkout_click_count follows it DOWN to 0 (the positive-only guard would have kept 1)",
-        mirroredDown.checkout_click_count === 0,
+        "M3 ⭐ checkout_click_count follows it DOWN (the positive-only guard would have kept it at 2)",
+        mirroredDown.checkout_click_count === 1,
         JSON.stringify(mirroredDown),
       );
       const stageDRow = await stageRow(stageD);
@@ -667,7 +690,7 @@ async function main() {
           const afterRefusal = JSON.stringify(
             (await tx2.execute(sql`
               SELECT stat_date::text AS stat_date, visit_clicks_clean, checkouts, sales,
-                     revenue::text AS revenue, pending_revenue::text AS pending,
+                     revenue::text AS revenue, pending_revenue::text AS pending_revenue,
                      payout_at_conversion::text AS payout, stage_tracking_id
               FROM keitaro_stage_results WHERE stage_id = ${stageA}::int ORDER BY stat_date
             `)) as unknown as unknown[],
@@ -701,6 +724,147 @@ async function main() {
         "C1c4 the savepoint rolled back — the ledger is back",
         ledgerRowsAfter === ledgerRowsBefore && ledgerRowsBefore > 0,
         JSON.stringify({ ledgerRowsBefore, ledgerRowsAfter }),
+      );
+
+      console.log("\nRule F closing check (Task 6 precondition) — the numerator can never sit outside the rescue");
+      // A fresh stage, fresh recipients, one stage_sends row per recipient (so
+      // rescueSendIds — keyed on stage_send_id — has something to evaluate).
+      // Isolated from every earlier fixture on this campaign.
+      const stageF = await stage(6, `p3_${run}_f`);
+      const mkSend = async (tag: string) => {
+        const cid = (
+          (await tx.execute(sql`
+            INSERT INTO contacts (org_id, phone_number)
+            VALUES (${orgId}::uuid, ${`+1215${run}${tag}`})
+            RETURNING id::text AS id
+          `)) as unknown as { id: string }[]
+        )[0].id;
+        const sid = (
+          (await tx.execute(sql`
+            INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status, sent_at)
+            VALUES (${orgId}::uuid, ${camp}::int, ${stageF}::int, ${cid}::uuid, ${`+1${tag}`}, 'probe', 'sent', now())
+            RETURNING id::text AS id
+          `)) as unknown as { id: string }[]
+        )[0].id;
+        return { cid, sid };
+      };
+      // One recipient per shape the brief requires covered: an APPROVED purchase
+      // (positive control), a REJECTED purchase, a $0 REGISTRATION, and UNMAPPED
+      // in both forms — (a) event_type_id AND status both NULL (no mapping rule),
+      // (b) event_type_id NULL with status='approved' (a status-only mapping rule,
+      // lib/conversions/build-rows.ts:5-7,140).
+      const approvedSend = await mkSend("appr");
+      const rejectedSend = await mkSend("rej");
+      const registrationSend = await mkSend("reg");
+      const unmappedSend = await mkSend("unmap");
+      const unmappedStatusSend = await mkSend("unmaps");
+      const CLOSE_DAY = "2026-09-16";
+      const closeEvt = async (send: { sid: string }, args: Parameters<typeof seedConversionEvent>[1]) => {
+        const id = await seedConversionEvent(tx, { ...args, stageSendId: send.sid, stageId: stageF, campaignId: camp });
+        await tx.execute(sql`
+          UPDATE conversion_events
+          SET occurred_at = (${`${CLOSE_DAY} 12:00:00`}::text || ' ' || 'America/New_York')::timestamptz
+          WHERE id = ${id}::bigint
+        `);
+        return id;
+      };
+      await closeEvt(approvedSend, { orgId, eventKey: "purchase", status: "approved", revenue: 42, keitaroType: "sale" });
+      await closeEvt(rejectedSend, { orgId, eventKey: "purchase", status: "rejected", revenue: 77, keitaroType: "rejected" });
+      await closeEvt(registrationSend, { orgId, eventKey: "registration", status: "approved", revenue: 0, keitaroType: "registration" });
+      // shape (a): no mapping rule at all.
+      await closeEvt(unmappedSend, { orgId, revenue: 55, keitaroType: "upsell" });
+      // shape (b): a status-only mapping rule.
+      await closeEvt(unmappedStatusSend, { orgId, status: "approved", revenue: 66, keitaroType: "upsell" });
+
+      await syncStageDayConversions(tx, { stageIds: [stageF] });
+      const rowF = (await read(stageF)).find((r) => r.stat_date === CLOSE_DAY)!;
+      check(
+        "RF1 the projected stage-day counts ONLY the approved purchase — rejected, registration and both unmapped shapes contribute nothing",
+        rowF.sales === 1 && Number(rowF.revenue) === 42 && Number(rowF.pending_revenue) === 0,
+        JSON.stringify(rowF),
+      );
+
+      const fSends = [approvedSend, rejectedSend, registrationSend, unmappedSend, unmappedStatusSend];
+      const fIdsArr = sql`ARRAY[${sql.join(fSends.map((s) => sql`${s.sid}`), sql`, `)}]::uuid[]`;
+      const rescuedRows = (await tx.execute(sql`
+        SELECT r.stage_send_id::text AS id FROM (${rescueSendIds(null)}) r WHERE r.stage_send_id = ANY(${fIdsArr})
+      `)) as unknown as { id: string }[];
+      const rescuedSet = new Set(rescuedRows.map((r) => r.id));
+      check(
+        "RF2 ⭐ ONLY the approved purchase's recipient is rescued into the EPC denominator — rejected/registration/both unmapped shapes are not",
+        rescuedSet.size === 1 && rescuedSet.has(approvedSend.sid),
+        JSON.stringify([...rescuedSet]),
+      );
+
+      // RF3-STRUCTURAL: the shared definitions themselves never violate the
+      // invariant — no row purchasedClause()/approvedRevenueClause() would count
+      // sits outside rescueSendIds's rescue. True by construction of
+      // lib/sale-attribution.ts (rescueSendIds is is_purchase OR counts_revenue,
+      // a strict superset of each), so this alone would stay green even if
+      // lib/keitaro/stage-day-conversions.ts regressed to a different filter —
+      // it is a regression guard on the shared module, not on the projection.
+      const structuralViolations = (await tx.execute(sql`
+        SELECT ce.id, ce.stage_send_id::text AS stage_send_id, ce.status, ce.keitaro_type
+        FROM conversion_events ce
+        WHERE ce.stage_send_id = ANY(${fIdsArr})
+          AND (${purchasedClause()} OR ${approvedRevenueClause()})
+          AND NOT EXISTS (
+            SELECT 1 FROM (${rescueSendIds(null)}) r WHERE r.stage_send_id = ce.stage_send_id
+          )
+      `)) as unknown as { id: number; stage_send_id: string; status: string; keitaro_type: string }[];
+      check(
+        "RF3 the shared purchase/revenue definitions never violate the rescue invariant",
+        structuralViolations.length === 0,
+        JSON.stringify(structuralViolations),
+      );
+
+      // RF3b ⭐⭐ THE CLOSING CHECK, tied to what the PROJECTION actually wrote
+      // (rowF), not just to the shared predicates in isolation. Recompute the
+      // purchase count / approved revenue restricted to ONLY the rescued
+      // recipients, using the same shared clauses, and require the stage-day
+      // row syncStageDayConversions wrote to equal that restriction exactly. If
+      // the projection's SALES_FILTER/REVENUE_FILTER ever drift from the shared
+      // definitions, this stored sum diverges from the rescue-restricted one and
+      // goes red — it does not merely infer safety from "0 rejected rows today".
+      const rescueScoped = (
+        (await tx.execute(sql`
+          SELECT count(*) FILTER (WHERE ${purchasedClause()})::int AS sales,
+                 coalesce(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause()}), 0)::numeric(12, 4) AS revenue
+          FROM conversion_events ce
+          WHERE ce.stage_send_id = ANY(${fIdsArr})
+            AND EXISTS (SELECT 1 FROM (${rescueSendIds(null)}) r WHERE r.stage_send_id = ce.stage_send_id)
+        `)) as unknown as { sales: number; revenue: string }[]
+      )[0];
+      check(
+        "RF3b ⭐⭐ THE CLOSING CHECK: the projected stage-day's sales/revenue equal the rescue-restricted purchase/revenue count exactly",
+        rowF.sales === Number(rescueScoped.sales) && Number(rowF.revenue) === Number(rescueScoped.revenue),
+        JSON.stringify({ rowF, rescueScoped }),
+      );
+
+      // RF4 ⭐ RED PROOF that RF3b is not vacuous — the OLD, PRE-TASK-6
+      // type-based filter (retyped: that code no longer exists to import, same
+      // convention as scripts/test-p3-task4-reader-switch-db.ts) DOES violate
+      // the invariant on this exact fixture: the rejected row satisfies
+      // `keitaro_type IN ('lead', 'sale', 'rejected')` but fails rescueSendIds's
+      // `status IN ('pending','approved')`, so it would have counted revenue
+      // outside the rescue — precisely the window Task 6 closes. This is proven
+      // against the RETYPED literal here; the real module was independently
+      // mutated to this exact literal and restored byte-identically (cmp
+      // silent) as part of this task's verification — see the report.
+      const oldSalesFilter = sql`ce.keitaro_type IN ('lead', 'sale', 'rejected')`;
+      const oldViolations = (await tx.execute(sql`
+        SELECT ce.id, ce.stage_send_id::text AS stage_send_id
+        FROM conversion_events ce
+        WHERE ce.stage_send_id = ANY(${fIdsArr})
+          AND ${oldSalesFilter}
+          AND NOT EXISTS (
+            SELECT 1 FROM (${rescueSendIds(null)}) r WHERE r.stage_send_id = ce.stage_send_id
+          )
+      `)) as unknown as { id: number; stage_send_id: string }[];
+      check(
+        "RF4 ⭐ RED PROOF — the OLD type-based filter DOES violate the invariant on this fixture (the rejected row)",
+        oldViolations.length === 1 && oldViolations[0]?.stage_send_id === rejectedSend.sid,
+        JSON.stringify(oldViolations),
       );
 
       throw new Rollback();

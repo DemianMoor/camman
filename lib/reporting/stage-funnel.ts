@@ -179,6 +179,7 @@ export async function getStageMetricsInRange(
             clean_clicks: keitaro_stage_results.clean_clicks,
             sales: keitaro_stage_results.sales,
             revenue: keitaro_stage_results.revenue,
+            pending_revenue: keitaro_stage_results.pending_revenue,
             cost: keitaro_stage_results.cost,
           })
           .from(keitaro_stage_results)

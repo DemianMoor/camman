@@ -355,6 +355,7 @@ export async function GET(
       SELECT stage_id,
              sum(sales)::int AS sales,
              sum(revenue)::numeric(12,4)::text AS revenue,
+             sum(pending_revenue)::numeric(12,4)::text AS pending_revenue,
              -- Both visit columns: the clickers-gap rule is a ZERO-test across
              -- the pair (hasNoKeitaroVisits), never clean alone — raw is a
              -- superset, so "raw > 0, clean = 0" is common and is NOT a gap.
@@ -380,6 +381,7 @@ export async function GET(
       stage_id: number;
       sales: number;
       revenue: string;
+      pending_revenue: string;
       visit_clicks_raw: number;
       visit_clicks_clean: number;
     }[],
@@ -391,6 +393,7 @@ export async function GET(
       {
         sales: Number(r.sales ?? 0),
         revenue: r.revenue ?? "0.0000",
+        pendingRevenue: r.pending_revenue ?? "0.0000",
         visitClicksRaw: Number(r.visit_clicks_raw ?? 0),
         visitClicksClean: Number(r.visit_clicks_clean ?? 0),
       },
@@ -452,6 +455,9 @@ export async function GET(
     inbound_stop_count: r.inbound_opt_out_count,
     keitaro_sales_count: keitaroByStage.get(r.id)?.sales ?? 0,
     keitaro_revenue: keitaroByStage.get(r.id)?.revenue ?? "0.0000",
+    // Approved revenue is keitaro_revenue; this is the same money still pending
+    // (lib/sale-attribution.ts). Never add them — ROI and EPC count approved only.
+    keitaro_pending_revenue: keitaroByStage.get(r.id)?.pendingRevenue ?? "0.0000",
     // Inputs to shouldSubstituteClickers (lib/reporting/tracking-gap.ts). A
     // stage with no keitaro_stage_results row at all is the strongest gap
     // signal, so a missing row must read 0/0 — never "unknown".

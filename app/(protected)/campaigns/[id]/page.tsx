@@ -252,6 +252,8 @@ type Stage = {
   // Real per-conversion revenue from Keitaro (summed across stat_dates). The
   // revenue source of truth — never sales × the offer's current CPA.
   keitaro_revenue: string;
+  // Same money, still pending approval — never added into revenue/ROI/EPC.
+  keitaro_pending_revenue: string;
   // Tracking-gap inputs. When a tracked stage's landing page ships without the
   // Keitaro visit script, these stay 0 while CamMan keeps recording every tap —
   // so the Clickers total substitutes counted_clickers. See the totals memo.
@@ -1284,16 +1286,19 @@ export default function CampaignDetailPage() {
         enableSorting: false,
         cell: ({ row }) => {
           const s = row.original;
-          // Revenue is the real per-conversion payout recorded by Keitaro, NOT
-          // sales × the offer's current CPA (a mid-flight CPA change would
-          // retro-misprice prior sales). "—" when no tracked revenue exists.
+          // Revenue is the real per-conversion payout recorded by the tracker,
+          // NOT sales × the offer's current CPA (a mid-flight CPA change would
+          // retro-misprice prior sales) — and APPROVED only. `pending` is the
+          // same money still held; it is shown beside ROI and never inside it.
           const revenue = Number(s.keitaro_revenue);
-          if (!(revenue > 0))
+          const pending = Number(s.keitaro_pending_revenue);
+          if (!(revenue > 0) && !(pending > 0))
             return <span className="text-muted-foreground">—</span>;
           const roi = stageRoi(revenue, Number(s.total_cost));
           return (
             <span className="font-mono text-xs tabular-nums">
               {formatRevenue(revenue)} · {formatRoi(roi)}
+              {pending > 0 ? ` · pending ${formatRevenue(pending)}` : ""}
             </span>
           );
         },
@@ -1494,6 +1499,7 @@ export default function CampaignDetailPage() {
     // render "—" rather than a misleading $0 for purely-manual campaigns.
     let revenue = 0;
     let revenueKnown = false;
+    let pendingRevenue = 0;
     // Tracking-gap substitution, the SAME rule the Reports Overview tab applies
     // (shouldSubstituteClickers / substitutionDominates in
     // lib/reporting/tracking-gap.ts — imported, never transcribed, so the two
@@ -1537,6 +1543,7 @@ export default function CampaignDetailPage() {
         revenue += r;
         revenueKnown = true;
       }
+      pendingRevenue += Number(s.keitaro_pending_revenue);
     }
     return {
       sms,
@@ -1555,6 +1562,7 @@ export default function CampaignDetailPage() {
       sales,
       cost,
       revenue: revenueKnown ? revenue : null,
+      pendingRevenue,
     };
   }, [stages, inboundStopContacts]);
   const hasResults =
@@ -1872,6 +1880,11 @@ export default function CampaignDetailPage() {
               <TotalsMetric
                 label="Revenue"
                 value={formatRevenue(campaignTotals.revenue)}
+                raw
+              />
+              <TotalsMetric
+                label="Pending revenue"
+                value={formatRevenue(campaignTotals.pendingRevenue)}
                 raw
               />
               <TotalsMetric

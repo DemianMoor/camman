@@ -53,6 +53,7 @@ type ReportRow = {
   sales: number;
   sales_cr: number;
   revenue: number;
+  pending_revenue: number;
   cost: number;
   epc: number; // PERIOD — the selected date range
   counted_clickers: number;
@@ -498,6 +499,16 @@ export function KeitaroReport() {
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums">{fmtUsd(row.original.revenue)}</span>
+        ),
+      },
+      {
+        id: "pending_revenue",
+        header: "Pending $",
+        enableSorting: true,
+        cell: ({ row }) => (
+          <span className="tabular-nums text-muted-foreground">
+            {fmtUsd(row.original.pending_revenue)}
+          </span>
         ),
       },
       {

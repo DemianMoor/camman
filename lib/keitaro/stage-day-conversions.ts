@@ -3,6 +3,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { mirrorStageCountersFromResults } from "@/lib/keitaro/poll";
+import { approvedRevenueClause, pendingRevenueClause, purchasedClause } from "@/lib/sale-attribution";
 
 // THE STAGE-DAY CONVERSION PROJECTION.
 //
@@ -117,16 +118,21 @@ export const MAX_CHANGED_STAGE_IDS = 20000;
 // unscoped run names every stage in the org.
 const MIRROR_CHUNK = 1000;
 
-// TODAY'S SEMANTICS, DELIBERATELY (Phase 3 task 3). The aggregate poll counted
-// every conversions/log row it fetched as a Sale — the fetch filtered to the
-// lead/sale/rejected statuses that make up Keitaro's `conversions` metric — and
-// a `lead` row also as a Checkout (Keitaro's `leads`). Reproduced here on the
-// ledger's canonical `keitaro_type` so the ONLY delta from this task is the
-// −$100 double count. Task 6 replaces SALES_FILTER/REVENUE_FILTER with the
-// shared purchase / approved-revenue predicates.
-const SALES_FILTER: SQL = sql`ce.keitaro_type IN ('lead', 'sale', 'rejected')`;
+// THE SHARED DEFINITIONS (lib/sale-attribution.ts). Sales = counted PURCHASE
+// events (pending or approved; a rejected conversion is a refund, not a sale —
+// which the old aggregate poll got wrong, counting every fetched row including
+// rejected). Revenue = `counts_revenue` events in status `approved` only, with
+// `pending` in its own column so a held payout is visible but never summed into
+// Revenue / EPC / ROI / profit (user decision 3).
+//
+// Checkouts stays Keitaro's `leads` metric — the count of `lead`-TYPE
+// conversions — unchanged, because campaign_stages.checkout_click_count mirrors
+// it and its meaning is "reached checkout", not "purchased". Phase 5's per-event
+// columns supersede it.
+const SALES_FILTER: SQL = purchasedClause();
 const CHECKOUT_FILTER: SQL = sql`ce.keitaro_type = 'lead'`;
-const REVENUE_FILTER: SQL = sql`ce.keitaro_type IN ('lead', 'sale', 'rejected')`;
+const REVENUE_FILTER: SQL = approvedRevenueClause();
+const PENDING_REVENUE_FILTER: SQL = pendingRevenueClause();
 
 /**
  * Why a run wrote nothing on purpose.
@@ -286,16 +292,17 @@ export async function syncStageDayConversions(
              (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date AS stat_date,
              count(*) FILTER (WHERE ${SALES_FILTER})::int AS sales,
              count(*) FILTER (WHERE ${CHECKOUT_FILTER})::int AS checkouts,
-             coalesce(sum(ce.revenue) FILTER (WHERE ${REVENUE_FILTER}), 0)::numeric(12, 4) AS revenue
+             coalesce(sum(ce.revenue) FILTER (WHERE ${REVENUE_FILTER}), 0)::numeric(12, 4) AS revenue,
+             coalesce(sum(ce.revenue) FILTER (WHERE ${PENDING_REVENUE_FILTER}), 0)::numeric(12, 4) AS pending_revenue
       FROM conversion_events ce
       WHERE ce.stage_id ${scope}
       GROUP BY 1, 2, 3
     )
     INSERT INTO keitaro_stage_results
       (org_id, campaign_id, stage_id, stage_tracking_id, stat_date,
-       checkouts, sales, revenue, payout_at_conversion)
+       checkouts, sales, revenue, pending_revenue, payout_at_conversion)
     SELECT l.org_id, cs.campaign_id, l.stage_id, coalesce(cs.tracking_id, ''), l.stat_date,
-           l.checkouts, l.sales, l.revenue,
+           l.checkouts, l.sales, l.revenue, l.pending_revenue,
            CASE WHEN l.sales > 0 THEN (l.revenue / l.sales)::numeric(12, 4) ELSE NULL END
     FROM ledger l
     -- BOTH keys (review fix A3). The row is written with the LEDGER's org_id, so
@@ -308,11 +315,13 @@ export async function syncStageDayConversions(
       checkouts            = EXCLUDED.checkouts,
       sales                = EXCLUDED.sales,
       revenue              = EXCLUDED.revenue,
+      pending_revenue      = EXCLUDED.pending_revenue,
       payout_at_conversion = EXCLUDED.payout_at_conversion,
       synced_at            = now()
     WHERE keitaro_stage_results.checkouts IS DISTINCT FROM EXCLUDED.checkouts
        OR keitaro_stage_results.sales     IS DISTINCT FROM EXCLUDED.sales
        OR keitaro_stage_results.revenue   IS DISTINCT FROM EXCLUDED.revenue
+       OR keitaro_stage_results.pending_revenue IS DISTINCT FROM EXCLUDED.pending_revenue
        -- payout is derived from the two above, so it only differs on its own when
        -- a row predates the column or was written NULL by an older path. Without
        -- this the stale/NULL payout can never be repaired.
@@ -353,7 +362,7 @@ export async function syncStageDayConversions(
         WHERE ce.stage_id = k.stage_id
           AND ce.org_id = k.org_id
           AND (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date = k.stat_date
-          AND (${SALES_FILTER} OR ${REVENUE_FILTER})
+          AND (${SALES_FILTER} OR ${REVENUE_FILTER} OR ${PENDING_REVENUE_FILTER})
       )
     RETURNING k.id AS id
   `)) as unknown as { id: number }[];

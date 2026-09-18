@@ -69,6 +69,7 @@ export interface PerfMetrics {
   lifetime_revenue: number;
   sales: number;
   revenue: number;
+  pending_revenue: number;
   cost: number;
 }
 
@@ -122,6 +123,7 @@ export const ZERO: PerfMetrics = {
   lifetime_revenue: 0,
   sales: 0,
   revenue: 0,
+  pending_revenue: 0,
   cost: 0,
 };
 
@@ -150,6 +152,7 @@ function stageMetrics(
     lifetime_revenue: lifetimeRevenueByStage.get(s.stage_id) ?? 0,
     sales: s.tally.sales,
     revenue: s.tally.revenue,
+    pending_revenue: s.tally.pending_revenue,
     cost: s.tally.cost,
   };
 }
@@ -166,6 +169,7 @@ function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     lifetime_revenue: a.lifetime_revenue + b.lifetime_revenue,
     sales: a.sales + b.sales,
     revenue: a.revenue + b.revenue,
+    pending_revenue: a.pending_revenue + b.pending_revenue,
     cost: a.cost + b.cost,
   };
 }
@@ -181,6 +185,7 @@ function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     lifetime_revenue: m.lifetime_revenue * f,
     sales: m.sales * f,
     revenue: m.revenue * f,
+    pending_revenue: m.pending_revenue * f,
     cost: m.cost * f,
   };
 }
@@ -593,6 +598,7 @@ async function distributeToGroups(
       // dimension sums the stage totals directly.
       spread(add, m.sales, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "sales");
       spread(add, m.revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "revenue");
+      spread(add, m.pending_revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "pending_revenue");
       spread(add, m.cost, sentW, "cost");
     } else {
       const allocW = nonEmpty(manualAlloc.get(s.campaign_id)) ?? equalW;
@@ -616,6 +622,7 @@ async function distributeToGroups(
       lifetime_revenue: round2(m.lifetime_revenue),
       sales: round2(m.sales),
       revenue: round2(m.revenue),
+      pending_revenue: round2(m.pending_revenue),
       cost: round2(m.cost),
     }))
     .sort((a, b) => b.sent - a.sent);
@@ -947,7 +954,14 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
 
   const rows: PerfRow[] = [...hours.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([h, m]) => ({ key: String(h), label: formatEtHour(h), ...m }));
+    .map(([h, m]) => ({
+      key: String(h),
+      label: formatEtHour(h),
+      ...m,
+      // The hourly tab renders no pending column (its columns are activity-time
+      // rates), so this is deliberately not computed rather than half-computed.
+      pending_revenue: 0,
+    }));
 
   // Manual row (pinned first): all results from MANUAL campaigns mapped to the
   // range — manual sales by ledger entry date, plus manual-campaign opt-outs.

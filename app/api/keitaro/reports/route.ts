@@ -53,6 +53,7 @@ export const SORTABLE = new Set([
   "sales",
   "sales_cr",
   "revenue",
+  "pending_revenue",
   "cost",
   "epc",
   // Added with the lifetime columns. A column rendered with enableSorting but

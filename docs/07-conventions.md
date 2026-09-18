@@ -57,6 +57,14 @@ Two rules:
 
 **Progressing a journey past a registrant is NOT the same as giving registrants a follow-up.** `FOLLOWUP_TIERS` and `FollowupTier` stay `{0, 1, 2}`: a registrant matches no drip child, lands in `tierMismatch`, and that no-op is the intended behaviour. Widening either is what would create a Registered follow-up lane, which is explicitly out of scope.
 
+⭐ **The third site is a detection ladder, and the safe thing to do with it was nothing.** `runDripFollowups` ([`lib/drip/followups.ts`](../lib/drip/followups.ts)) resolves each child's detection moment with a `CASE ch.behavioral_tier` ladder armed for tiers 1 and 2, plus `ELSE NULL`. That looks like the same omission as the reachability copies and is not:
+
+- **It fails CLOSED, in the wanted direction.** `followupDueAt` returns `no_detection` without a detection moment, so an unarmed tier can never send. For tier 3 that IS the ruling — a registrant gets no drip follow-up.
+- **Arming it is the feature, not the fix.** A `WHEN 3` arm only does anything if a tier-3 child exists, which needs `FOLLOWUP_TIERS` widened — i.e. building the Registered follow-up that was ruled out. It also needs `FollowupTier` widened for `followupDueAt`'s input type.
+- **But the halves must move together.** A tier-3 child armed ONLY in the ladder hangs the journey anyway (`lifecycle.ts` waits on it at `3 >= 3`); a tier-3 child with NO arm never sends and hangs it too. So the invariant to pin is the coupling: **every non-zero member of `FOLLOWUP_TIERS` has a detection arm**, asserted in [`scripts/test-drip-followup-timing.ts`](../scripts/test-drip-followup-timing.ts) by reading the two literals out of their two DIFFERENT source files (whitespace collapsed first, so CRLF and LF both match) and red-proved from both sides.
+
+**Open, for the owner:** `drip_followup_minutes` is absent from `NON_UPDATABLE` in the stage PATCH route, while `behavioral_tier` and `parent_stage_id` are present. Nothing in `app/` writes it today — `ensureFollowupChildren` is its only writer — so no tier-3 drip child can exist. If a Registered LANE created by a behavioural split under a drip first-send stage could ever be PATCHed with a timer, it would become a drip child that hangs every registrant's journey. Adding the field to `NON_UPDATABLE` would close that off; it was NOT done here because it is outside the drip-only scope of this task.
+
 ## A source-grep check must not be able to pass by accident (2026-09-18)
 
 Several guards assert things about a FILE's text (`readFileSync(...).includes(...)`) because the real call site cannot be executed from a rolled-back proof. Two rules, both learned the hard way in `scripts/test-p3-task4-reader-switch-db.ts`:

@@ -342,6 +342,21 @@ Two entry points for two different actions; deliberately not two for one action.
   `FollowupTier` stay `0 | 1 | 2`, a registrant matches no child and simply
   completes. One ⭐ bar per copy in
   [scripts/test-drip-lifecycle.ts](../../scripts/test-drip-lifecycle.ts).
+- **Drip follow-up scheduling (the detection ladder):**
+  `runDripFollowups()` in [lib/drip/followups.ts](../../lib/drip/followups.ts)
+  imports `campaignTierExpr` (it is not a third copy of the scale) and matches a
+  contact to a child on **exact** tier, so a registrant at tier 3 lands in
+  `tierMismatch` for every 0/1/2 child and nothing sends — the intended no-op.
+  Its `CASE ch.behavioral_tier` ladder resolves each child's *detection* moment
+  and is armed for tiers **1 and 2 only**: tier 0's clock runs from the parent's
+  first send, and tiers 3/4 have no child to detect. `ELSE NULL` **fails closed**
+  — `followupDueAt` answers `no_detection` — so an unarmed tier can never send.
+  ⚠️ Arming it with a `WHEN 3` is not a safety fix, it is how a Registered
+  follow-up would SEND; and a tier-3 child armed only there would hang for ever,
+  because the reachability predicate above waits on it (`3 >= 3`) while nothing
+  can send it. The coupling "every non-zero `FOLLOWUP_TIERS` member has an arm"
+  is pinned by
+  [scripts/test-drip-followup-timing.ts](../../scripts/test-drip-followup-timing.ts).
 - **Group state machine + recompute + preview:**
   [lib/stages/split-group.ts](../../lib/stages/split-group.ts).
 - **Lane creation:** `performBehavioralSplit()` in

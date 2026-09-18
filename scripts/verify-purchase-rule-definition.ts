@@ -314,12 +314,14 @@ async function main(tx: RoTx) {
     );
   }
 
-  // ⚠️ SAME WORLD-STATE AS A: with zero registration-typed ledger rows the two
-  // definitions agree on every contact, so `lost` is expected to be 0. The
-  // first PsychoBook registration changes that CORRECTLY — the network posts it
-  // with a `lead` status, so the legacy predicate calls that contact a buyer and
-  // the ledger does not. Those contacts are subtracted by name below, so a
-  // correct future does not read as a regression.
+  // ⚠️ SAME WORLD-STATE AS A: as measured on 2026-09-18 production carried zero
+  // registration-typed ledger rows, so the two definitions agreed on every
+  // contact and `lost` came out 0. That is a dated observation, not a standing
+  // fact. The first PsychoBook registration changes it CORRECTLY — the network
+  // posts it with a `lead` status, so the legacy predicate calls that contact a
+  // buyer and the ledger does not. Those contacts are subtracted by name below
+  // and the counts are printed, so a correct future does not read as a
+  // regression and nobody has to trust this comment's date.
   // ----------------------------------------------- E. ledger vs legacy drift
   console.log("\nE. Ledger buyers vs the legacy sale_status definition (drift)");
   const drift = (await tx.execute(drizzleSql`

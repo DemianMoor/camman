@@ -72,7 +72,7 @@ A renumber must also land in ONE commit across every site, or the tree is half-r
 
 **A tier number reaches SQL only through `tierLiteral()`.** Not a bind parameter: `SELECT $1 AS tier` inside a `UNION ALL` fails with *could not determine data type of parameter*, and a parameterised `coalesce(t.tier,0) <> $1` would quietly turn a rendered-SQL guard into one the source-text bars (`P10`–`P26`) can no longer read. Its input is always a module constant, so there is nothing to escape.
 
-**Lane membership freezes at materialization.** A contact who registers or buys *after* their lane materialized is still sent that lane's message: the drain re-checks only opt-outs and the 1-hour cross-campaign phone dedup, not the tier. The recon measured 382 of 382 recent lanes materializing before T−15 (p50 2.6h early), so the window is real but small. A send-time purchase/registration re-check is a **separate card**, deliberately not attempted — and it is also why the non-monotonicity below costs lanes nothing in practice.
+**Lane membership freezes at materialization.** A contact who registers or buys *after* their lane materialized is still sent that lane's message: the drain re-checks only opt-outs and the 1-hour cross-campaign phone dedup, not the tier. The recon measured 382 of 382 recent lanes materializing before T−15 (p50 2.6h early), so the window is real but small. A send-time purchase/registration re-check is **out of scope** — the owner ruled it out and it was deliberately not attempted here. No follow-up card for it is known to exist, so treat it as unscheduled work, not as something already queued elsewhere. It is also why the non-monotonicity below costs lanes nothing in practice.
 
 ## Tier 3 (Registered) is the one NON-MONOTONIC value on the behavioural scale (2026-09-18)
 
@@ -408,7 +408,7 @@ Guards:
 - [`scripts/test-p3-task4-reader-switch-db.ts`](../scripts/test-p3-task4-reader-switch-db.ts) — preview DB only, rolled back. Runs the actual query text of each Task 4 reader (partner-report `purchases` CTE / rollup `conv_sends`, `trackedWeights` sale basis, `getHourlyReport`'s `ledgerHourAgg`, `rescueSendIds`, the activity-badge LATERAL) against the same three one-sided fixtures (`ledger_only`, `legacy_only`, `rejected_ledger`), and runs the OLD `stage_sends`-column query text against the identical rows next to it — the red proof: the old query's numbers for these fixtures are what pre-switch code would have shown, and they are wrong (misses the real purchase, counts a non-purchase, rescues a rejected conversion).
 - **UPDATED 2026-09-18** — that script now carries SIX one-sided fixtures (adding a recipient with TWO ledger conversions, an UNMAPPED row and a $0 registration) and every block invokes the real exported code, including `refreshCountedClickers()` itself inside the rolled-back transaction; three surfaces (`getPartnerReport`, `trackedWeights`, `getHourlyReport`) execute against the module-level `db` and so cannot see uncommitted fixtures — for those the changed fragment is exported and executed, and the call site is covered by a source guard that the script labels as weak. Proven RED against the pre-switch definitions (39/62 failing), restored byte-identically (`cmp`).
 - ⭐ **A guard must assert the rule the code now uses, not the rule it used to.** [`scripts/verify-counted-clickers.ts`](../scripts/verify-counted-clickers.ts) hand-coded `ss.converted_at IS NOT NULL` in both its independent recomputation and its Rule F invariant; after the switch those asserted the PRE-switch rescue rule, so the first rejected or unmapped conversion would have turned them red for correct behaviour. They now take the predicate from `rescueSendIds()`. Sharing a DEFINITION does not make a comparison vacuous — sharing the COMPUTATION does: the recomputation still walks the base tables in one pass with its own aggregation, against a cache the real `refreshCountedClickers` built.
-- [`scripts/verify-purchase-rule-definition.ts`](../scripts/verify-purchase-rule-definition.ts) — production, read-only; the one write is a synthesized conversion inside a rolled-back transaction. It compares the ledger definition against the live reporting definition rather than a frozen number, so it does not expire as sales accumulate, and it flips a synthesized row `rejected` → `approved` to prove the bar can actually go red. **Its drift bars name their world-state**: with zero registration-typed ledger rows the two definitions agree on every contact, and the first registration makes them differ *correctly* — so those contacts are subtracted by name instead of read as a regression.
+- [`scripts/verify-purchase-rule-definition.ts`](../scripts/verify-purchase-rule-definition.ts) — production, read-only; the one write is a synthesized conversion inside a rolled-back transaction. It compares the ledger definition against the live reporting definition rather than a frozen number, so it does not expire as sales accumulate, and it flips a synthesized row `rejected` → `approved` to prove the bar can actually go red. **Its drift bars name their world-state**: as recorded on **2026-09-18**, production carried no registration-typed ledger rows, so the two definitions agreed on every contact. That is a dated measurement, not a standing fact — the first registration makes them differ *correctly*, so the script subtracts those contacts by name and prints the counts. Read the run's output, not this sentence, for today's state.
 
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
@@ -2878,3 +2878,56 @@ Drizzle applies **every pending migration in one transaction**, and each lock is
 - Make the first statement `SET LOCAL lock_timeout = '5s';` so a blocked lock fails the migration and you retry, instead of stalling the app.
 - Take the strongest lock first. In `0181_conversion_events.sql`, the `offers` `ADD COLUMN` + index run before any `CREATE TABLE` with a foreign key, so `offers` never needs a lock upgrade while the FK locks on `stage_sends`/`contacts` are held.
 - A seed that `LEFT JOIN`s a lookup by name (e.g. an event-type key) needs `WHERE v.key IS NULL OR lookup.id IS NOT NULL`. Without it, a typo silently seeds a NULL reference, which for conversion mappings means a status-only rule.
+
+## A refusal that lists what it forbids will always be out of date — allowlist the target (2026-09-18)
+
+`.env.local` is **production**. Every fixture-writing script in `scripts/` is one forgotten `DATABASE_URL=` away from seeding it, and for a while the protection was a five-line block copied into 32 files:
+
+```ts
+const PROD_REF = "rtdarhkkjwcetlmruftl";
+if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) { … process.exit(1); }
+```
+
+Three things were wrong with it, and only the first is obvious:
+
+1. **It was a denylist.** It refused one spelling of production. A raw IP, a custom hostname, a CNAME'd pooler alias, a second connection string for the same cluster, or a future prod project with a new ref all reach the same data without containing that literal — and all ran. An allowlist inverts the question to *"is this one of the databases I am allowed to write to?"*, which refuses targets nobody has thought of yet.
+2. **`DATABASE_URL=""` slipped through.** `""` contains no prod ref, so the check passed — and `postgres()` with no connection string falls back to the libpq `PG*` variables, i.e. whatever `PGHOST`/`PGDATABASE`/`~/.pgpass` say. Empty is not "no database", it is "an unknown one".
+3. **It ran too late to be total.** A statement in the module body runs only after *every* import has been evaluated. It worked purely because postgres-js connects lazily; a module-scope query anywhere in the import graph would have outrun it.
+
+The rule now: **[`scripts/_require-preview-db.ts`](../scripts/_require-preview-db.ts) is the only place a project ref is spelled, and scripts import it for its side effect, second — after `./_env-preload` and before any app module.**
+
+```ts
+import "./_env-preload";
+import "./_require-preview-db"; // or: import { requirePreviewDb } from "./_require-preview-db";
+
+import { db } from "../db/client";
+```
+
+Imports evaluate in source order (tsx emits its requires in source order too), so the process has already exited by the time `db/client` is required — which closes (3) rather than relying on lazy connection. `requirePreviewDb()` returns `{ ref, label }` for the `Target DB:` banner, so no caller needs the literal.
+
+[`scripts/test-preview-db-guard.ts`](../scripts/test-preview-db-guard.ts) (`npm run check:guards`) asserts the idiom instead of trusting it: no 20-letter project-ref literal outside the helper, every preview-only DB script importing it, and that import ahead of everything that can open a connection. Its population is **derived** — a script is enrolled when it touches a database *and* declares a preview target (imports the helper, or carries the `.env.demo` run line every one of these carries) — so a new fixture script copied from an existing one is covered without editing a list. The bar carries its own can-go-red controls.
+
+**Its limit, stated rather than implied:** a brand-new script that writes fixtures, imports the helper not at all and never mentions `.env.demo` is invisible to it. That hole is deliberate — roughly 150 other scripts here are read-only diagnostics that are *supposed* to run against production, so "every script that touches a database must refuse production" would be false. Closing it properly means every DB-writing script declaring its target either way.
+
+**A prod-facing diagnostic must NOT import the helper.** Refusing production would refuse its only purpose; see [`scripts/verify-purchase-rule-definition.ts`](../scripts/verify-purchase-rule-definition.ts), whose guard belongs on the write side (`SET TRANSACTION READ ONLY`) instead.
+
+## A bar whose two sides move together cannot fail — anchor one of them to a literal (2026-09-18)
+
+[`scripts/verify-campaign-level-split.ts`](../scripts/verify-campaign-level-split.ts) pins blocks (6)–(12) to the legacy lane trio, because those blocks address lanes by index and a fourth lane would leave an unmaterialized sibling and turn (10)'s settle bar red for a reason that has nothing to do with what it tests. The pin was named once, `PINNED_TIERS`, and guarded like this:
+
+```ts
+const split = await performBehavioralSplit({ …, tiers: PINNED_TIERS }, db);
+check("split created EXACTLY the pinned lanes", createdTiers === PINNED_TIERS);   // green forever
+```
+
+That asserts only that `performBehavioralSplit` honours its argument. Widening `PINNED_TIERS` to `[0,1,2,3]` moves **both** sides and the bar stays green — measured: with the pin widened, that check passed with `{0,1,2,3}` while the block it protects failed for unrelated reasons. The comment warned; the bar did not.
+
+The fix is one line anchored to something that does not move:
+
+```ts
+check("⭐ the pin is still the legacy trio [0,1,2]", JSON.stringify(PINNED_TIERS) === JSON.stringify([0, 1, 2]));
+```
+
+Now widening the pin has to come here and argue with the literal first. The same shape applies anywhere a guard compares a result against the constant that produced it.
+
+**And an unreachable `throw` is not a working one.** The total-lookup helpers added in Task 5 (`expectedFor` / `expectLane`) throw when a tier in `LANE_TIER_VALUES` has no seeded expectation — which cannot happen today, so nothing proved the throw fires. Each is now pinned with a call on an unmapped tier inside `try`/`catch`, so the safety net is tested before the day it is needed.

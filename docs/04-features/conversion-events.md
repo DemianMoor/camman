@@ -337,5 +337,8 @@ imports, and the coupling is pinned by bars `P20`–`P26` in
 
 ## Not built yet
 
-- **Phase 5:** per-event report columns (registrations will get their own, and
-  will be `registeredClause()`'s fourth consumer — the first reporting one).
+- **Phase 5 — proposed, not built, not ratified:** per-event report columns. The
+  sketch is that registrations get columns of their own, which would make
+  `registeredClause()`'s consumers four rather than three and add the first
+  *reporting* one. None of it exists in the code and the owner has not signed
+  off on the shape, so nothing here should be relied on as decided.

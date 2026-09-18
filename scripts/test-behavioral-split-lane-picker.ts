@@ -23,6 +23,7 @@ import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
 import {
   DEFAULT_LANE_TIERS,
+  LANE_TIERS,
   performBehavioralSplit,
   resolveLaneTiers,
 } from "@/lib/stages/behavioral-split";
@@ -147,9 +148,12 @@ async function main() {
       !rEmpty.ok && rEmpty.code === "no_lanes_selected",
       JSON.stringify(rEmpty),
     );
-    const rBad = resolveLaneTiers([3]);
+    // Re-aimed 2026-09-18 (Phase 4): tier 3 is the Registered LANE now, so the
+    // value that is still refused is 4 — the purchased EXIT. Keeping this on 3
+    // would have gone red for the right reason and told the wrong story.
+    const rBad = resolveLaneTiers([4]);
     check(
-      "[3] (converted — never a lane) ⇒ invalid_lane_tier",
+      "[4] (purchased — exits, never a lane) ⇒ invalid_lane_tier",
       !rBad.ok && rBad.code === "invalid_lane_tier",
       JSON.stringify(rBad),
     );
@@ -182,6 +186,34 @@ async function main() {
       check("persisted lanes are tiers [0,1,2]", JSON.stringify(t) === JSON.stringify([0, 1, 2]), JSON.stringify(t));
     }
 
+    // ── CASE 2b — tier 3 became a real, tickable lane (Phase 4) ─────────────
+    console.log("\nCase 2b - tier 3 (Registered) is a real lane (Phase 4):");
+    check("LANE_TIERS carries tier 3 labelled Registered",
+      LANE_TIERS.some((t) => t.tier === 3 && t.label === "Registered"),
+      JSON.stringify(LANE_TIERS));
+    check("⭐ the default is STILL [1,2] — a new lane must not start ticked",
+      JSON.stringify([...DEFAULT_LANE_TIERS]) === JSON.stringify([1, 2]),
+      JSON.stringify([...DEFAULT_LANE_TIERS]));
+    check("resolveLaneTiers accepts [2,3]",
+      JSON.stringify(resolveLaneTiers([2, 3])) === JSON.stringify({ ok: true, tiers: [2, 3] }));
+    const bad4 = resolveLaneTiers([4]);
+    check("⭐ resolveLaneTiers still REFUSES 4 (the exit is not a lane)",
+      bad4.ok === false && bad4.code === "invalid_lane_tier");
+    check("...and its message lists the valid tiers from LANE_TIERS, not a hard-coded string",
+      bad4.ok === false && bad4.message.includes("0, 1, 2, 3"), bad4.ok === false ? bad4.message : "");
+    const c2b = await readyCampaign("p4b");
+    const s2b = await performBehavioralSplit({ orgId, campaignId: c2b, tiers: [2, 3] });
+    check("a [2,3] split persists two lanes at tiers 2 and 3",
+      s2b.ok === true && JSON.stringify(s2b.tiers) === JSON.stringify([2, 3]),
+      JSON.stringify(s2b));
+    if (s2b.ok) {
+      // The return value is the intent; this is the STORED truth, and it is the
+      // only bar here that exercises migration 0184's widened CHECK.
+      const t2b = await tiersOfGroup(s2b.split_group_id);
+      check("...and the persisted rows carry behavioral_tier 2 and 3",
+        JSON.stringify(t2b) === JSON.stringify([2, 3]), JSON.stringify(t2b));
+    }
+
     // ── CASE 3 — a single lane is allowed ───────────────────────────────────
     console.log("\nCase 3 - tiers [1] ⇒ exactly 1 lane:");
     const c3 = await readyCampaign("single");
@@ -200,8 +232,9 @@ async function main() {
     const s4a = await performBehavioralSplit({ orgId, campaignId: c4, tiers: [] });
     check("[] refused with 400 no_lanes_selected",
       !s4a.ok && s4a.status === 400 && s4a.code === "no_lanes_selected", JSON.stringify(s4a));
-    const s4b = await performBehavioralSplit({ orgId, campaignId: c4, tiers: [3] });
-    check("[3] refused with 400 invalid_lane_tier",
+    // Re-aimed 2026-09-18 (Phase 4) from [3] to [4] — see the pure bar above.
+    const s4b = await performBehavioralSplit({ orgId, campaignId: c4, tiers: [4] });
+    check("[4] refused with 400 invalid_lane_tier",
       !s4b.ok && s4b.status === 400 && s4b.code === "invalid_lane_tier", JSON.stringify(s4b));
     const orphan = (await db.execute(sql`
       SELECT count(*)::int AS n FROM campaign_stage_split_groups

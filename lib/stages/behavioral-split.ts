@@ -22,10 +22,11 @@ import { loadStageUrlContext } from "@/lib/stage-url-context";
 //
 // ── CAMPAIGN-LEVEL (migration 0174) ──────────────────────────────────────────
 // The split is now taken against the CAMPAIGN, not against one chosen stage. It
-// stamps three lane-stages, one per behavioural tier (0 ignored / 1 clicked /
-// 2 reached offer), plus a `campaign_stage_split_groups` row that owns them.
+// stamps one lane-stage per SELECTED behavioural tier (0 ignored / 1 clicked /
+// 2 reached offer / 3 registered — Phase 4), plus a
+// `campaign_stage_split_groups` row that owns them.
 //
-// Tier 3 (converted) gets no lane — those contacts exit the sequence.
+// Tier 4 (purchased) gets no lane — those contacts exit the sequence.
 //
 // TWO THINGS ARE DELIBERATELY *NOT* DECIDED HERE:
 //
@@ -40,17 +41,27 @@ import { loadStageUrlContext } from "@/lib/stage-url-context";
 //
 // The ANCHOR is decided here, though: the latest completed stage by `sent_at`.
 // It is the P4 slip anchor (the lanes wait for it to finish before firing) and
-// it is the config template the three lanes are cloned from. Each lane's
+// it is the config template the selected lanes are cloned from. Each lane's
 // `parent_stage_id` points at it too, so the existing P4 / lane-count /
 // preflight code paths keep working unchanged.
 
-// tier → human label for the lane's starting label. Tier 3 deliberately absent.
-// This is the REGISTRY of every lane a split can create — it is not the set that
-// gets created. `tiers` on performBehavioralSplit filters it (see below).
+// tier → human label for the lane's starting label. This is the REGISTRY of
+// every lane a split can create — it is not the set that gets created. `tiers`
+// on performBehavioralSplit filters it (see below).
+//
+// Tier 3 "Registered" joined in Phase 4 (migration 0184): someone who fired a $0
+// registration on this campaign and has NOT purchased. It ranks above "Reached
+// offer", so a registrant is NO LONGER in the tier-2 lane — if the operator does
+// not tick Registered, those contacts get no message at this position. The
+// confirm dialog says so next to the count.
+//
+// Tier 4 (purchased) is deliberately absent: a buyer EXITS the sequence, and
+// migration 0184's CHECK refuses it at the database as well.
 export const LANE_TIERS = [
   { tier: 0, label: "Ignored" },
   { tier: 1, label: "Clicked" },
   { tier: 2, label: "Reached offer" },
+  { tier: 3, label: "Registered" },
 ] as const;
 
 // Which lanes a split creates when the caller doesn't say.
@@ -89,8 +100,10 @@ export function resolveLaneTiers(
     return {
       ok: false,
       code: "invalid_lane_tier",
-      // Tier 3 (converted) exits the sequence and never gets a lane.
-      message: `Not a behavioural lane tier: ${bad.join(", ")}. Valid tiers are 0, 1, 2.`,
+      // Derived from LANE_TIERS, not retyped: the list changed in Phase 4 and a
+      // hard-coded "0, 1, 2" would have gone stale silently. Tier 4 (purchased)
+      // exits the sequence and never gets a lane.
+      message: `Not a behavioural lane tier: ${bad.join(", ")}. Valid tiers are ${LANE_TIERS.map((t) => t.tier).join(", ")}.`,
     };
   }
   return { ok: true, tiers: unique };
@@ -119,7 +132,7 @@ export async function performBehavioralSplit(
   // lane created through the API must carry one: the deactivation kill switch
   // finds approved-but-unsent stages by author, and an unstamped lane child
   // would survive its creator's deactivation still armed to send.
-  // `tiers` is which lanes to create (subset of LANE_TIERS' 0/1/2). Omitted ⇒
+  // `tiers` is which lanes to create (subset of LANE_TIERS' 0/1/2/3). Omitted ⇒
   // DEFAULT_LANE_TIERS. Validated here rather than only in the route so the
   // script harnesses that call this directly exercise the same rules.
   opts: {

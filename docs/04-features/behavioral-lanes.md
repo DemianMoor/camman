@@ -5,7 +5,7 @@ _Last updated: 2026-09-18_
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
 ("position") is split into **lane-stages**, one per behavioral tier the operator
-picks (up to three; `Ignored` is off by default — see
+picks (up to four; `Ignored` and `Registered` are off by default — see
 [Lane picker](#operator-ui-campaign-detail-page)); at send time each
 still-in-sequence recipient is routed into exactly one lane by their current
 high-water tier.
@@ -47,15 +47,25 @@ lanes are mutually exclusive by construction.
 > and never stored. A **rejected** purchase does not return a contact to
 > Registered; they fall back to their click / offer-reach tier. A purchase row
 > whose status is UNMAPPED (NULL) counts as nothing and does not evict them.
-> **Tier 3 is not selectable yet** — `LANE_TIERS` still offers `{0,1,2}` and the
-> API still refuses a request for tier 3 (`invalid_lane_tier`, by two independent
-> paths: `resolveLaneTiers` and the route's `.max(LANE_TIERS.length)`). The split
-> **preview** is a step ahead of the picker: `previewSplitLanes` reports a row per
-> `LANE_TIER_VALUES` entry, so the confirm dialog shows a labelled **Registered**
-> row with its live count already. Ticking it fails the whole split with
-> `400 invalid_lane_tier` until Task 3 lands — nothing is created. (Before the
-> label existed that row rendered BLANK; every lane tier now has one, asserted by
-> `P16` in `scripts/test-campaign-tier-scale.ts`.)
+> **Tier 3 became SELECTABLE on 2026-09-18** (Phase 4 Task 3): `LANE_TIERS` now
+> lists `{0,1,2,3}`, so the picker's **Registered** row can be ticked and the
+> split creates a tier-3 lane. `DEFAULT_LANE_TIERS` is **unchanged at `[1, 2]`** —
+> the new lane starts UNTICKED, so no existing workflow changes shape until an
+> operator picks it deliberately. Tier 4 is still refused by both `resolveLaneTiers`
+> and migration 0184's CHECK. (The dialog's `Registered` row existed before the
+> picker did — `previewSplitLanes` reports one row per `LANE_TIER_VALUES` entry —
+> and ticking it used to fail the whole split with `400 invalid_lane_tier`; before
+> the label existed it rendered BLANK. Every lane tier now has a label, asserted by
+> `P16` in `scripts/test-campaign-tier-scale.ts`, and the two registries are
+> asserted equal by the `LANE_TIERS is exactly LANE_TIER_VALUES` bar in
+> `scripts/test-behavioral-split.ts`.)
+>
+> **The operator-visible consequence of the ordering.** `Registered` (3) outranks
+> `Reached offer` (2), and lanes match on EXACT tier — so a contact who registered
+> is no longer in the tier-2 lane. Leaving `Registered` unticked means those
+> contacts get **no message at that position**. The confirm dialog and the stages
+> explainer both say so. The change can therefore only ever REDUCE who is
+> messaged, never add someone.
 
 ## Data model
 
@@ -276,8 +286,8 @@ stage that really is a surprise.
 The **"Behavioral split..."** button lives at CAMPAIGN level, beside "Add stage",
 enabled only when at least one stage is complete. It opens a confirm modal
 showing the **source scope** (which completed stages, how many contacts they
-reached) and **provisional per-tier lane counts**, plus the converted/opted-out
-exclusions. The counts are a live scan (measured 1.0-3.5s on the widest
+reached) and **provisional per-tier lane counts**, plus the
+`Purchased (exits — no lane)` / opted-out exclusions. The counts are a live scan (measured 1.0-3.5s on the widest
 production campaigns) fetched on open -- never inline in a list.
 
 The A/B split stays inside the stage editor because it genuinely IS per-stage.
@@ -294,7 +304,8 @@ Two entry points for two different actions; deliberately not two for one action.
   overlays for lanes — **aliveness** (`EXISTS` a `stage_sends` row for
   `parent_stage_id` with `status='sent'`; manual-mode `stage_result_rows` source
   unions in later) and **exact tier match** (`LEFT JOIN campaignTierExpr`,
-  `coalesce(tier,0) = behavioral_tier`, plus a global `<> 3` converted guard).
+  `coalesce(tier,0) = behavioral_tier`, plus a global `<> 4` purchased-exit guard
+  — it was `<> 3` until the exit moved on 2026-09-18).
   For ordinary stages the emitted SQL is byte-identical to before. The frozen
   `campaign_audience_pool` stays the universe; tier + aliveness are live overlays.
 - **Sending (through the existing pipeline):** `kickoffStageSend()` and
@@ -345,10 +356,17 @@ Two entry points for two different actions; deliberately not two for one action.
   the stages table.
 - **Lane picker (2026-09-06).** The confirm dialog's lane list is a **picker**,
   not just a preview: each tier row is a checkbox alongside its provisional
-  count, and only ticked tiers are created. **Tier 0 (`Ignored`) is OFF by
-  default** — `DEFAULT_LANE_TIERS = [1, 2]` in
+  count, and only ticked tiers are created. **Tier 0 (`Ignored`) and tier 3
+  (`Registered`) are OFF by default** — `DEFAULT_LANE_TIERS = [1, 2]` in
   [lib/stages/behavioral-split.ts](../../lib/stages/behavioral-split.ts). The
   confirm button reads "Create N lanes" and is disabled at zero.
+  - **The client keeps its own copy of the default.** `DEFAULT_SELECTED_TIERS` in
+    [app/(protected)/campaigns/[id]/page.tsx](<../../app/(protected)/campaigns/[id]/page.tsx>)
+    — the module that owns `DEFAULT_LANE_TIERS` pulls in the db client and cannot
+    be imported into a client component. It is named once (it used to be the
+    literal `[1, 2]` inline twice), so changing the default is a two-file edit:
+    the server's value is what an omitted request body gets, the client's is what
+    the picker ticks.
   - **Why the default is two, not three.** Measured 2026-09-06: of the first 77
     split groups, **73 had only two lanes** because the operator deleted the
     tier-0 lane by hand every time (`campaign_events` held 124 `stage_deleted`
@@ -360,19 +378,23 @@ Two entry points for two different actions; deliberately not two for one action.
   - `tiers` is an **optional** body field. Absent body / unparseable JSON ⇒ the
     default; a body carrying a malformed `tiers` ⇒ `400 invalid_lane_tier` (never
     a silent fallback to the default). `[]` ⇒ `400 no_lanes_selected`; any tier
-    outside `{0,1,2}` ⇒ `400 invalid_lane_tier`. Validation lives in
+    outside `{0,1,2,3}` ⇒ `400 invalid_lane_tier`, and the refusal message DERIVES
+    its valid list from `LANE_TIERS` rather than restating it (a hard-coded
+    "0, 1, 2" would have gone stale silently in Phase 4). Validation lives in
     `resolveLaneTiers` in the lib, not only the route, so the script harnesses
     that call `performBehavioralSplit` directly exercise the same rules. A
     refused selection writes **nothing** — no group row, no lane rows — because
     an orphan group would permanently block the campaign via its own
     `split_already_pending` guard.
   - Tier 4 (`purchased`) stays unrepresentable: it exits the sequence and never
-    gets a lane. Tier 3 (`registered`) IS a lane tier as of 2026-09-18, but is
-    not offered yet — `LANE_TIERS` still lists `{0,1,2}`, so a request for tier 3
-    is still refused with `invalid_lane_tier`.
+    gets a lane. Tier 3 (`registered`) became **selectable on 2026-09-18** —
+    `LANE_TIERS` lists `{0,1,2,3}` and a tier-3 lane persists against migration
+    0184's widened CHECK.
 - **Lane display:** each lane row shows a tier chip (`↳ Ignored` / `Clicked` /
-  `Reached offer`) with `· from #N` pointing at the parent position; the parent
-  row shows an `N behavioral lanes` badge.
+  `Reached offer` / `Registered`) with `· from #N` pointing at the parent
+  position; the parent row shows an `N behavioral lanes` badge. The chip registry
+  (`BEHAVIORAL_TIER_META`) is a deliberate client-side duplicate of `LANE_TIERS`
+  for the same import reason as the default above.
 - **Live preview counts (deferred + batched):** the **Audience** column for a
   lane row is the live lane count. Each lane's count is a seconds-long live-tier
   scan (`links⋈clicks` + `stage_sends`), and a split has 3 lanes — computing them
@@ -389,8 +411,11 @@ Two entry points for two different actions; deliberately not two for one action.
   proven byte-identical to the former per-lane `countStageRecipients()` path by
   [scripts/verify-lane-batch.ts](../../scripts/verify-lane-batch.ts). Lane rows
   always show the number (even `0`) tagged `live`. An explainer above the table
-  notes that converted contacts exit and opted-out are suppressed, so lane counts
-  won't sum to the full pool, and that the numbers change until send.
+  notes that **Purchased** contacts exit and opted-out are suppressed, so lane
+  counts won't sum to the full pool, that the numbers change until send, and —
+  since 2026-09-18 — that **Registered outranks Reached offer**, so a registrant
+  is not in the Reached-offer lane and gets nothing unless a Registered lane
+  exists.
 - **Per-lane copy:** a lane is an ordinary editable stage — edit its message via
   the normal stage editor. Tier/parent are not editable.
 
@@ -398,7 +423,7 @@ Two entry points for two different actions; deliberately not two for one action.
 
 - [scripts/test-campaign-tier.ts](../../scripts/test-campaign-tier.ts) — tier fragment.
 - [scripts/test-recipients-lanes.ts](../../scripts/test-recipients-lanes.ts) — lane recipient sets + ordinary-SQL-unchanged.
-- [scripts/test-behavioral-split.ts](../../scripts/test-behavioral-split.ts) — the split endpoint + guards + rollback. Its call sites pass `tiers: [0, 1, 2]` explicitly so they keep exercising the three-lane path after the default changed to `[1, 2]`.
-- [scripts/test-behavioral-split-lane-picker.ts](../../scripts/test-behavioral-split-lane-picker.ts) — the lane picker: the `[1,2]` default, the explicit trio, a single lane, de-duplication, both refusal codes writing nothing, and — the regression guard for 2026-09-05 — that a **default two-lane group can reach `materialized`** with no tier-0 lane present. Asserts against the group it just created, never a global "no tier-0 lanes exist" count, which would go red the first time someone legitimately ticks `Ignored`.
+- [scripts/test-behavioral-split.ts](../../scripts/test-behavioral-split.ts) — the split endpoint + guards + rollback. Its call sites pass `tiers: [0, 1, 2]` explicitly so they keep exercising the three-lane path after the default changed to `[1, 2]`. Also carries the registry-coupling bar: `LANE_TIERS` (what the picker offers) must be exactly `LANE_TIER_VALUES` (the scale's lane set = migration 0184's CHECK) and must exclude `EXIT_TIER`. Those two lists having drifted is how tier 3 reached the confirm dialog as a row that 400'd when ticked.
+- [scripts/test-behavioral-split-lane-picker.ts](../../scripts/test-behavioral-split-lane-picker.ts) — the lane picker: the `[1,2]` default, the explicit trio, a single lane, de-duplication, both refusal codes writing nothing, and — the regression guard for 2026-09-05 — that a **default two-lane group can reach `materialized`** with no tier-0 lane present. Asserts against the group it just created, never a global "no tier-0 lanes exist" count, which would go red the first time someone legitimately ticks `Ignored`. Case 2b (Phase 4) adds tier 3: `LANE_TIERS` carries it labelled `Registered`, `resolveLaneTiers` accepts `[2,3]` and still refuses `4`, the refusal message lists the valid tiers derived from `LANE_TIERS`, a `[2,3]` split persists lanes at tiers 2 **and** 3, and — the bar that must not be allowed to drift — the default is **still `[1,2]`**, so the new lane does not start ticked.
 - [scripts/test-lane-preview-count.ts](../../scripts/test-lane-preview-count.ts) — the live preview counts (incl. zero-data).
 - [scripts/verify-campaign-level-split.ts](../../scripts/verify-campaign-level-split.ts) — **the 0174 enforcement proof.** Scope is printed and an empty scope FAILS; the three lanes partition the source set; cross-stage precedence (Offer > Clicked > Ignored); a stage completing between the split and the recompute is included; a click before materialization re-routes the contact; frozen after materialization; a failed group releases nothing; an empty lane is skipped not burned; plus old-is-a-subset-of-new against REAL production lanes. Run with `--conditions=react-server`.

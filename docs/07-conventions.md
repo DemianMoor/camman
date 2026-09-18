@@ -2,6 +2,39 @@
 
 _Last updated: 2026-09-18_
 
+## "Selectable" and "selected" are FOUR separate registries for a behavioural lane tier (2026-09-18)
+
+Whether a lane tier can be stored, offered, and ticked by default are three
+different decisions spread over four places. Changing one does not change the
+others, and only one of them changes who receives a message:
+
+| What | Where | Means |
+|------|-------|-------|
+| `campaign_stages_behavioral_lane_check` | migration 0184 | what the DB will STORE (`0..3`) |
+| `LANE_TIER_VALUES` | [`lib/campaign-tier.ts`](../lib/campaign-tier.ts) | the scale's lane set — what `previewSplitLanes` RENDERS a row for |
+| `LANE_TIERS` | [`lib/stages/behavioral-split.ts`](../lib/stages/behavioral-split.ts) | what the picker OFFERS and a split may CREATE (`resolveLaneTiers` derives its valid set and its refusal message from this) |
+| `DEFAULT_LANE_TIERS` + `DEFAULT_SELECTED_TIERS` | the same lib + [`app/(protected)/campaigns/[id]/page.tsx`](<../app/(protected)/campaigns/[id]/page.tsx>) | what starts TICKED — the server's for an omitted request body, the client's for the dialog |
+
+⭐ **A tier added to `LANE_TIERS` but not to the default cannot message anybody
+new.** That is what made Phase 4 Task 3 safe to ship without an owner decision:
+`Registered` became tickable while `DEFAULT_LANE_TIERS` stayed `[1, 2]`. Turning
+it ON by default is a separate, louder change — and because the client keeps its
+own copy (a client component cannot import the module that owns the server's, it
+pulls in the db client), it is a **two-file** edit that must land together.
+
+⭐ **`LANE_TIER_VALUES` drifting ahead of `LANE_TIERS` is user-visible, not
+theoretical.** The preview renders a row per `LANE_TIER_VALUES` entry, so tier 3
+sat in the confirm dialog as a tickable row with a live count while
+`resolveLaneTiers` still refused it — ticking it 400'd the whole split. The two
+are now asserted equal (and asserted to exclude `EXIT_TIER`) by the
+`LANE_TIERS is exactly LANE_TIER_VALUES` bar in
+[`scripts/test-behavioral-split.ts`](../scripts/test-behavioral-split.ts).
+
+⭐ **A refusal message that restates its own valid set goes stale silently.** The
+`invalid_lane_tier` message read "Valid tiers are 0, 1, 2." as a literal; it now
+derives the list from `LANE_TIERS`. Nothing would have failed when the list
+changed — the operator would just have been told the wrong thing.
+
 ## A tier-indexed map must be TOTAL over the tier list, and a bar must say so (2026-09-18)
 
 Inserting a value into the behavioural tier scale (`LANE_TIER_VALUES` in [`lib/campaign-tier.ts`](../lib/campaign-tier.ts)) does **not** fail loudly on the readers that index a `Record<number, string>` by it. `tsc` types `TIER_LABEL[t]` as `string`, never `string | undefined`, so a missing key is not a type error, not a crash and not a blank page: it is a **blank but tickable row carrying a live count** in the split confirm dialog (which renders `{ln.label}` raw), and ticking it 400s the whole split. Tier 3 shipped exactly that way between migration 0184 and its label.

@@ -325,7 +325,8 @@ export interface SplitLanePreview {
   anchor_stage_id: number | null;
   // Distinct contacts who received ANY source stage, after opt-out suppression.
   source_contacts: number;
-  // Per-tier lane counts. `converted` exits the sequence (no lane) and is shown
+  // Per-tier lane counts, one entry per LANE_TIER_VALUES. `converted_excluded`
+  // is the EXIT tier (4, purchased): those contacts get no lane, and it is shown
   // so the operator can see why the lanes don't sum to source_contacts.
   lanes: { tier: number; label: string; count: number }[];
   converted_excluded: number;
@@ -600,8 +601,9 @@ export async function notifyGroupStuck(
   );
 }
 
-// Tier 3 — informational. An empty tier is a normal outcome, so this must not
-// read like a failure.
+// Tier 3 ALERT LEVEL — informational (the Telegram severity scale, unrelated to
+// the behavioural tier scale where 3 is the Registered lane). An empty lane is a
+// normal outcome, so this must not read like a failure.
 export async function notifyLaneSkippedEmpty(
   dbc: DbOrTx,
   stageId: number,
@@ -618,8 +620,9 @@ export async function notifyLaneSkippedEmpty(
     tier: number | null;
   }[];
   const r = rows[0];
-  const tierName =
-    r?.tier === 0 ? "Ignored" : r?.tier === 1 ? "Clicked" : r?.tier === 2 ? "Reached offer" : "lane";
+  // One map, not a ladder: the ladder silently said "lane" for tier 3 once
+  // Registered became selectable, so the alert would have named the wrong thing.
+  const tierName = TIER_LABEL[r?.tier ?? -1] ?? "lane";
   await notifyTelegram(
     `ℹ️ Behavioural lane skipped — 0 recipients (normal for a small audience).\n` +
       `Campaign "${r?.campaign ?? "(unknown)"}" · stage ${r?.stage_number ?? stageId} · ${tierName}\n` +

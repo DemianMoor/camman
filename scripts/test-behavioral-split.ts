@@ -15,6 +15,7 @@ import "./_env-preload"; // MUST be first — loads .env.local before db/client 
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { EXIT_TIER, LANE_TIER_VALUES } from "@/lib/campaign-tier";
 import {
   performBehavioralSplit,
   LANE_TIERS,
@@ -279,8 +280,22 @@ async function main() {
       (await db.execute(sql`SELECT count(*)::int AS n FROM campaign_stages WHERE id = ${decoy.id}::int`)) as unknown as { n: number }[]
     )[0].n === 1);
 
-    // sanity: LANE_TIERS is the 0/1/2 trio (no converted lane)
-    check("LANE_TIERS = tiers 0,1,2 (no tier-3 lane)", JSON.stringify(LANE_TIERS.map((t) => t.tier)) === JSON.stringify([0, 1, 2]));
+    // sanity, re-aimed 2026-09-18 (Phase 4): tier 3 is the Registered LANE now,
+    // so "no tier-3 lane" was asserting the opposite of the requirement. Stated
+    // as a COUPLING rather than a literal: the split's own registry (LANE_TIERS)
+    // must be exactly the scale's lane set (LANE_TIER_VALUES, = migration 0184's
+    // CHECK). Those two lists having drifted is precisely how tier 3 reached the
+    // confirm dialog as a tickable row that 400'd the whole split when ticked.
+    // `LANE_TIERS` is `as const`, so its tiers are the literal union 0|1|2|3 and
+    // `t.tier === EXIT_TIER` is a tsc error ("no overlap") rather than a runtime
+    // check — widened to number[] here so the bar can actually RUN and go red.
+    const laneRegistryTiers: number[] = LANE_TIERS.map((t) => t.tier);
+    check(
+      `LANE_TIERS is exactly LANE_TIER_VALUES (${LANE_TIER_VALUES.join(",")}) and excludes the exit tier ${EXIT_TIER}`,
+      JSON.stringify(laneRegistryTiers) === JSON.stringify([...LANE_TIER_VALUES]) &&
+        !laneRegistryTiers.includes(EXIT_TIER),
+      JSON.stringify(laneRegistryTiers),
+    );
   } finally {
     console.log("\nCleanup (scoped to test org only)");
     try {

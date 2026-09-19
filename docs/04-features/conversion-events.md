@@ -1057,9 +1057,135 @@ exercises `computeCreativeMetrics`". It does not — it signs in with `.env.loca
 would read sits behind a 15-minute in-memory cache. The new bars follow the
 execution model every other Phase 5 DB suite uses instead.
 
+## The Telegram report carries the split (Phase 5 Task 8)
+
+The scheduled report ([`/api/cron/telegram-report`](../../app/api/cron/telegram-report/route.ts))
+prints one line per event type immediately under `Sales`, generated from the
+registry. Both formats carry it:
+
+```
+📊 <b>CamMan — Wed 1 Jul</b> (final, ET)
+Sales: 12
+Registrations: 214
+Purchases: 11 · $880.00 ($120.00 pending)
+Manual tally: +1 (not in the lines above)
+⚠ 3 unmapped — counted nowhere
+Revenue: $900.00
+Spend: $392.26
+ROI: +129.4%
+Net Profit: $507.74
+Opt-outs: 853 (2.2% of 38,502 delivered)
+```
+
+- **Cross-org by construction.** The cron has no session and reports the whole
+  business, so the split is keyed by `event_types.key` and the labels come from
+  `loadEventTypes(db, null)` — merged by key, lowest `display_order` winning the
+  label, flags OR-ed, archived only when EVERY org archived it. This is that
+  branch's only caller.
+- **Which types get a line** is the same question the columns ask, so it gets the
+  same answer: `visibleEventTypesByCount()` in
+  [`computeReportMetrics`](../../lib/reporting/report-snapshot.ts). An ACTIVE type
+  prints even at zero (a configured type reading 0 at 22:00 is information);
+  an ARCHIVED type prints only while the window still holds a number for it.
+- **The rollup is the same query as the headline.** `salesRevenueTotals`
+  ([lib/reporting/attribution.ts](../../lib/reporting/attribution.ts)) gained an
+  `ev` CTE over the same window with the same `archived_at IS NULL` join, so the
+  split cannot describe a different set of stages from the number beside it. It
+  also returns `unmapped` and `manual_topup`. The additions are new keys; the
+  dashboard reads `.sales`/`.revenue` by name and is unaffected.
+
+### ⭐ The residual travels with the breakdown, structurally
+
+`sales` is **not** Σ (is_purchase) n. It is that sum plus the manual top-up plus
+anything the registry could not place:
+
+```
+sales = Σ events[t].n over is_purchase types + manual_topup + strays
+```
+
+`eventLines(m)` returns **one array** containing the per-type lines, the `+N more`
+marker and both residual lines; `eventBlock()` — the only thing that can separate
+them — is module-private. There is no exported way to take the breakdown without
+the lines that explain the gap, the same rule `eventColumnBlock()` enforces for the
+report tables. The residual lines are also **not droppable**: truncation takes
+per-type lines only (bar T15).
+
+### ⭐⭐ Escaping and the cap are the difference between a report and an outage
+
+This is not the best-effort alert path. `sendTelegramHtml` posts with
+`parse_mode: "HTML"` and **throws** on any non-2xx; `classify()` calls a 400
+**permanent**, so the cron returns 500 — and does the same thing the next hour,
+and every hour after, because nothing about the input changes. Telegram answers
+400 both for malformed markup and for text over 4096 characters, and
+`event_types.label` is free text with **no CHECK constraint and no UI**. So:
+
+- **Every registry-derived string is escaped at the point of interpolation**, in
+  the one helper `eventLabel()`, which also collapses whitespace (a newline inside
+  a label would otherwise forge an extra line that can read like a money line) and
+  falls back to the key when the label is empty. Bar **T22** scans the formatter
+  and fails if `.label` is referenced anywhere else — T4/T5 only prove today's
+  call site; a new `${t.label}` written tomorrow is what takes the report down.
+- **The cap is counted on the ASSEMBLED, POST-ESCAPE message.** Escaping lengthens
+  a string (one `&` becomes five characters), so a cap counted before escaping is
+  simply the wrong number. `assemble()` renders the real candidate and measures it.
+- **Lines are dropped WHOLE, so an entity can never be cut in half.** `&amp;`
+  sliced to `&am` is a 400, and a 400 is permanent. Measured: at 40 of 101
+  candidate cut points a blind `slice()` on an `&`-dense document lands inside an
+  entity (bar T8f).
+- **Money is never what gets dropped.** `assemble()` fits the message by popping
+  per-type lines off the tail and announcing them as `+N more event types`; the
+  header, `Sales`, the residual, the five money lines and hourly's
+  Yesterday-spend line are not candidates. The obvious implementation — join
+  everything and tail-cut — drops exactly the money lines, which is what bars
+  T7b/T15/T16/T17 exist to forbid.
+- **`capped()` is the floor, not the mechanism.** It cuts at the last newline
+  before the limit (never mid-entity) and REPLACES a single enormous line rather
+  than slicing it. With a bounded `dayLabel` it never fires.
+- **The cron's carrier-triage line is passed IN, not concatenated on.** It used to
+  be appended to the returned string, which put it outside every length guarantee
+  the formatter makes — the cap would have been enforced against a message that is
+  not the one Telegram receives.
+
+`MAX_EVENT_LINES = 6` (readability) and `MAX_MESSAGE_CHARS = 3500` (safety) are
+enforced **independently**: raising the first cannot breach the second.
+
+### ⚠️ `jsonb_each` on a non-object, again — and here it is worst
+
+The `ev` CTE filters `jsonb_typeof(ksr.events) = 'object'`, the same guard as
+[`stage-keitaro-aggregate.ts`](../../lib/reporting/stage-keitaro-aggregate.ts) and
+[`metrics-cache.ts`](../../lib/creatives/metrics-cache.ts). There is no CHECK
+constraint on the column, and 22023 aborts the **whole statement** — on the other
+surfaces that blanks a page until someone reloads; here it 500s the cron every
+hour for ever. Bar **T19** seeds a row with `events = '5'::jsonb` and proves the
+numbers still come out.
+
+### Bars
+
+- [`scripts/test-telegram-report-format.ts`](../../scripts/test-telegram-report-format.ts)
+  — 36 pure (3 whole-message goldens + T1–T22c). The three goldens are unchanged
+  and still pass with an empty registry, which is what proves the splice landed in
+  the right place. **T8c is what makes T8 mean anything**: it asserts the 200-type
+  × 600-char fixture exceeds the cap *before* trimming. Shortening those labels
+  leaves T8 and T7b green while T8c and T8b go red — demonstrated, not assumed.
+- [`scripts/test-telegram-report-metrics.ts`](../../scripts/test-telegram-report-metrics.ts)
+  — 14 on camman-v2 (T13–T24). It seeds a throwaway org because
+  `computeReportMetrics` binds the module-level `db`, and asserts DELTAS against a
+  pre-seed baseline. T13z/T14z pin both sides non-zero: an identity only ever
+  satisfied by zeros is a countdown. T20/T20b seed a deliberate stray so the
+  residual is proved to have a job. T23/T24 capture the real `sendTelegramReport`
+  payload with **global fetch stubbed and the bot token replaced by a fake** — no
+  message is ever sent to the real chat — and assert `parse_mode: "HTML"`, the
+  exact text, ≤4096 chars, and that a `<b>Buy</b> & <win> 💰` label leaves exactly
+  one `<b>…</b>` pair (the header) in the payload.
+
+  ⚠️ That script previously called dotenv's `config()` as a statement positioned
+  *after* its imports, so `@/db/client` was evaluated first and every run died
+  with 32P01 as the local OS user. Fixed to `import "./_env-preload"` first. It
+  now writes fixtures, so it also carries `_require-preview-db` second; the
+  production eyeball it used to offer is deliberately gone.
+
 ## Not built yet
 
-- **Phase 5 beyond Task 7 — proposed, not built.** The generator, the storage,
-  the projection, the read layer, the two report tables, the campaign page and now
-  the creatives page exist. The remaining task (the Telegram formatter) is not
-  built, and nothing downstream should be relied on as decided.
+- **Phase 5 is built through Task 8.** The generator, the storage, the projection,
+  the read layer, the two report tables, the campaign page, the creatives page and
+  the Telegram report all exist.

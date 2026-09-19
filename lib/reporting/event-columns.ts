@@ -63,6 +63,28 @@ export type EventMap = Record<string, EventTally>;
 export type EventCountMap = Record<string, number>;
 
 /**
+ * One event type's numbers at the SCHEDULED-REPORT grain: a count and the two
+ * money figures, and no `pending_n`.
+ *
+ * ⭐ THE THIRD GRAIN, AND A NARROWER SHAPE ON PURPOSE — same reasoning as
+ * EventCountMap above. The Telegram report is eight lines of plain text read on
+ * a phone: it prints a count and, for a type that carries money, the amount with
+ * its held portion named separately. A held COUNT has no line and never will, so
+ * carrying `pending_n` here would hand a later reader a field this grain never
+ * summed, reading as a measured 0. The type is what stops that.
+ *
+ * `revenue` and `pending_revenue` stay SEPARATE figures at this grain too:
+ * pending money is never added into revenue, here or anywhere else.
+ */
+export interface ReportEventTally {
+  n: number;
+  revenue: number;
+  pending_revenue: number;
+}
+
+export type ReportEventMap = Record<string, ReportEventTally>;
+
+/**
  * The all-zero tally, for READING ONLY — what a missing key is worth.
  *
  * ⭐ FROZEN, AND TYPED `Readonly`, BECAUSE IT IS SHARED. A consumer that seeds an

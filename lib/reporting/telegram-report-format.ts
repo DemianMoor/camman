@@ -28,16 +28,209 @@ const optOutLine = (m: ReportMetrics): string => {
   return `Opt-outs: ${int(m.optOuts)} (${ratio}% of ${int(m.delivered)} delivered)`;
 };
 
-export function dailyMessage(dayLabel: string, m: ReportMetrics): string {
-  return [
-    `📊 <b>CamMan — ${escapeHtml(dayLabel)}</b> (final, ET)`,
-    `Sales: ${int(m.sales)}`,
-    `Revenue: ${money(m.revenue)}`,
-    `Spend: ${money(m.spend)}`,
-    `ROI: ${roi(m.roiPct)}`,
-    `Net Profit: ${signedMoney(m.revenue - m.spend)}`,
-    optOutLine(m),
-  ].join("\n");
+// ── the per-event split ─────────────────────────────────────────────────────
+//
+// ⭐ THE REPORT IS SENT WITH parse_mode "HTML" AND A PERMANENT FAILURE IS
+// PERMANENT. sendTelegramHtml (lib/alerts/telegram.ts) throws on any non-2xx;
+// classify() calls a 400 "permanent"; the cron then returns 500 and does the same
+// thing every hour, for ever, because nothing about the input changes. Telegram
+// answers 400 both for malformed markup and for text over 4096 characters.
+//
+// event_types.label is FREE TEXT with no CHECK constraint (db/schema.ts) and no
+// UI validation — there is no event-type UI at all — so a label containing "<"
+// would kill this report until a human edited a database row. Hence: every
+// registry-derived string goes through escapeHtml at the point of
+// interpolation, and the ASSEMBLED, POST-ESCAPE message is length-capped.
+// Neither is tidiness; both are asserted in scripts/test-telegram-report-format.ts.
+export const MAX_EVENT_LINES = 6;
+export const MAX_MESSAGE_CHARS = 3500;
+
+/**
+ * A label, made safe for ONE line of an HTML-parsed message.
+ *
+ * Two things, in this order, and the order matters: collapse every whitespace
+ * run (including newlines) to a single space, THEN escape. A label is free text,
+ * so it can contain a newline — and this medium is line-oriented, so a newline
+ * inside a label would silently become an extra "line" of the report, able to
+ * read like one of the money lines below it. Collapsing first makes "one line
+ * per event type" true rather than nearly true; escaping second is what keeps
+ * Telegram parsing it at all.
+ *
+ * An empty or whitespace-only label falls back to the key. `label` is
+ * `text NOT NULL` with no CHECK, so "" is representable, and a line reading
+ * ": 0" names nothing.
+ */
+const eventLabel = (t: { key: string; label: string }): string =>
+  escapeHtml(t.label.replace(/\s+/g, " ").trim() || t.key);
+
+const moreLine = (n: number): string =>
+  `+${n} more event type${n === 1 ? "" : "s"}`;
+
+/**
+ * The event block, split into the part that may be DROPPED and the part that
+ * may not. Module-private on purpose — see eventLines() below.
+ */
+function eventBlock(m: ReportMetrics): {
+  typed: string[];
+  dropped: number;
+  residual: string[];
+} {
+  const shown = m.eventTypes.slice(0, MAX_EVENT_LINES);
+  const typed = shown.map((t) => {
+    const e = m.events[t.key] ?? { n: 0, revenue: 0, pending_revenue: 0 };
+    const amount =
+      e.revenue > 0 || e.pending_revenue > 0 ? ` · ${money(e.revenue)}` : "";
+    const held =
+      e.pending_revenue > 0 ? ` (${money(e.pending_revenue)} pending)` : "";
+    return `${eventLabel(t)}: ${int(e.n)}${amount}${held}`;
+  });
+  // ⭐ THE RESIDUAL. `sales` is NOT Σ (is_purchase) n — it is that sum plus the
+  // manual top-up plus anything the registry could not place — so a breakdown
+  // printed without these two lines under-explains the number directly above it.
+  // They are NOT in `typed`: they are protected from truncation exactly like the
+  // money lines, because a split that survives while its residual is dropped is
+  // worse than no split at all.
+  const residual: string[] = [];
+  if (m.manualTopup > 0) {
+    residual.push(`Manual tally: +${int(m.manualTopup)} (not in the lines above)`);
+  }
+  if (m.unmapped > 0) {
+    residual.push(`⚠ ${int(m.unmapped)} unmapped — counted nowhere`);
+  }
+  return { typed, dropped: m.eventTypes.length - shown.length, residual };
+}
+
+/**
+ * One line per event type, in registry order, capped — followed by the tail
+ * marker and the residual lines.
+ *
+ * ⭐ ONE ARRAY, AND THAT IS THE STRUCTURE THAT ENFORCES THE PAIRING. There is no
+ * exported way to obtain the per-type lines WITHOUT the manual-tally and
+ * unmapped lines that explain the gap between them and `Sales`; eventBlock() is
+ * module-private for that reason. It is the same rule eventColumnBlock() enforces
+ * for the report tables — the residual is not a second list a caller may forget.
+ *
+ * WHAT GETS DROPPED PAST THE CAP: the lowest-priority types under the registry's
+ * own order (retarget signals first, then everything else, then purchases, with
+ * display_order as the tie-break — orderEventTypes, lib/reporting/event-columns.ts),
+ * and the tail is announced rather than silently missing. The five money lines
+ * (Revenue, Spend, ROI, Net Profit, opt-outs), the Sales line, the residual lines
+ * and the hourly report's Yesterday-spend line are NEVER dropped — they are the
+ * report.
+ *
+ * A type with a zero count still prints its line: the whole point of a
+ * registry-driven report is that a configured event type reads 0 rather than
+ * vanishing, and "Registrations: 0" at 22:00 is information. (An ARCHIVED type
+ * with nothing in the window is already gone by here — computeReportMetrics
+ * applies visibleEventTypesByCount before handing the registry over.)
+ */
+export function eventLines(m: ReportMetrics): string[] {
+  const { typed, dropped, residual } = eventBlock(m);
+  return [...typed, ...(dropped > 0 ? [moreLine(dropped)] : []), ...residual];
+}
+
+/**
+ * Assemble a message that FITS, by dropping event lines — never money.
+ *
+ * ⭐ THE BUDGET IS COUNTED ON THE ASSEMBLED, POST-ESCAPE STRING, not estimated
+ * from the inputs: escaping lengthens a string (one "&" becomes five
+ * characters), so a cap counted before escaping is simply the wrong number.
+ * Each iteration renders the real candidate and measures it.
+ *
+ * ⭐ LINES ARE DROPPED WHOLE. Nothing here slices inside a line, so an escaped
+ * entity can never be cut in half — `&amp;` sliced to `&am` is a 400, and a 400
+ * is permanent. `head` and `tail` are never candidates for dropping, so the
+ * money lines survive any registry.
+ *
+ * At most MAX_EVENT_LINES + 1 renders of a <4KB string; the loop is bounded by
+ * `kept.length` and terminates.
+ */
+function assemble(head: string[], m: ReportMetrics, tail: string[]): string {
+  const { typed, dropped, residual } = eventBlock(m);
+  const kept = [...typed];
+  let missing = dropped;
+  const render = () =>
+    [
+      ...head,
+      ...kept,
+      ...(missing > 0 ? [moreLine(missing)] : []),
+      ...residual,
+      ...tail,
+    ].join("\n");
+  while (render().length > MAX_MESSAGE_CHARS && kept.length > 0) {
+    kept.pop();
+    missing++;
+  }
+  return capped(render());
+}
+
+/**
+ * Last line of defence on length. Telegram's limit is 4096; this cuts at 3500
+ * and says it did, because a truncated report that arrives beats a complete one
+ * that 400s and takes the next N hours with it.
+ *
+ * ⭐ IT CUTS ON A LINE BOUNDARY, NOT AT AN ARBITRARY INDEX. A blind
+ * `slice(0, N)` can land in the middle of an escaped entity — `&amp;` becomes
+ * `&am` — and Telegram may answer 400 to the malformed markup. classify() calls
+ * a 400 "permanent", sendTelegramReport throws, and the cron 500s every hour:
+ * i.e. a blind slice can cause the exact failure this function exists to
+ * prevent. Cutting at the last newline before the limit cannot split an entity,
+ * because escapeHtml never emits one containing a newline.
+ *
+ * If there is no newline in range (a single enormous line), the message is
+ * REPLACED rather than sliced — an unsendable report is worse than a useless one.
+ *
+ * ⭐ IT IS DEFENCE IN DEPTH, NOT THE MECHANISM. assemble() above already fits the
+ * message by dropping whole event lines, so with a bounded dayLabel this never
+ * fires — and if it ever does, the thing that overflowed was a FIXED line, and
+ * losing money lines beats a permanent 400. Exported so its own bars can execute
+ * the real function rather than a copy of it.
+ */
+export function capped(text: string): string {
+  if (text.length <= MAX_MESSAGE_CHARS) return text;
+  const marker = "\n… (truncated)";
+  const cut = text.lastIndexOf("\n", MAX_MESSAGE_CHARS - marker.length);
+  if (cut <= 0) {
+    // Wording note: this string deliberately does NOT contain the token
+    // ".label" — bar T22 scans this file for exactly that, to prove no registry
+    // label reaches a template without going through eventLabel().
+    return `⚠️ CamMan report suppressed: the assembled message is ${text.length} characters with no line break to cut on. Check event_types for an enormous label.`;
+  }
+  return `${text.slice(0, cut)}${marker}`;
+}
+
+/**
+ * `extraLines` are appended after the money lines and are INSIDE the cap.
+ *
+ * ⭐ THAT IS THE WHOLE REASON THE PARAMETER EXISTS. The cron used to append its
+ * carrier-triage line to the STRING this function returned, which put it outside
+ * every length guarantee made here: the cap would have been enforced against a
+ * message that is not the one Telegram receives. Passing it in keeps
+ * "the assembled, post-escape message is ≤ MAX_MESSAGE_CHARS" true of what is
+ * actually SENT. Callers pass ready-to-send text — today's only caller passes
+ * three integers — and lines land in the protected tail, so they are never
+ * dropped.
+ */
+export function dailyMessage(
+  dayLabel: string,
+  m: ReportMetrics,
+  extraLines: string[] = [],
+): string {
+  return assemble(
+    [
+      `📊 <b>CamMan — ${escapeHtml(dayLabel)}</b> (final, ET)`,
+      `Sales: ${int(m.sales)}`,
+    ],
+    m,
+    [
+      `Revenue: ${money(m.revenue)}`,
+      `Spend: ${money(m.spend)}`,
+      `ROI: ${roi(m.roiPct)}`,
+      `Net Profit: ${signedMoney(m.revenue - m.spend)}`,
+      optOutLine(m),
+      ...extraLines,
+    ],
+  );
 }
 
 export function hourlyMessage(
@@ -45,16 +238,21 @@ export function hourlyMessage(
   m: ReportMetrics,
   yesterdaySpend: number,
 ): string {
-  return [
-    `⏱ <b>CamMan — ${escapeHtml(dayLabel)}</b> (so far, ET)`,
-    `Sales: ${int(m.sales)}`,
-    `Revenue: ${money(m.revenue)}`,
-    `Spend: ${money(m.spend)}`,
-    `ROI: ${roi(m.roiPct)}`,
-    `Net Profit: ${signedMoney(m.revenue - m.spend)}`,
-    optOutLine(m),
-    `Yesterday spend: ${money(yesterdaySpend)}`,
-  ].join("\n");
+  return assemble(
+    [
+      `⏱ <b>CamMan — ${escapeHtml(dayLabel)}</b> (so far, ET)`,
+      `Sales: ${int(m.sales)}`,
+    ],
+    m,
+    [
+      `Revenue: ${money(m.revenue)}`,
+      `Spend: ${money(m.spend)}`,
+      `ROI: ${roi(m.roiPct)}`,
+      `Net Profit: ${signedMoney(m.revenue - m.spend)}`,
+      optOutLine(m),
+      `Yesterday spend: ${money(yesterdaySpend)}`,
+    ],
+  );
 }
 
 // ── notification settings defaults ──────────────────────────────────────────

@@ -471,6 +471,39 @@ check(
   scanned.length > 100 && bareCallers.length === 0,
   `scanned=${scanned.length} bare=${bareCallers.join(", ") || "none"}`,
 );
+// ⭐ N2 ASSERTS AN ABSENCE AND HAD NO CONTROL ON ITS OWN NEEDLE. N1 pins the
+// PREMISE (drizzle really does expand a bare select to the mirror); the file
+// count pins that the walk found something. Neither touches the regex that does
+// the finding — measured 2026-09-19: narrowing it to
+// /\.select\(\)\.from\(keitaro_stage_results\)/, which drops the whitespace and
+// intervening-chain tolerance every real call site needs, left this file at 57/0
+// with the bare select it exists to forbid invisible.
+//
+// So the needle is fired at hand-written samples of the call it forbids — never
+// generated from the regex — in BOTH line endings, because this checkout mixes
+// them and the needle spans a line break by design ([\s\S]{0,400}).
+const asCrlf = (s: string) => s.replace(/\n/g, "\r\n");
+const BARE_SAMPLES = [
+  "const rows = await db.select().from(keitaro_stage_results);",
+  "const rows = await db\n  .select()\n  .from(keitaro_stage_results)\n  .where(eq(keitaro_stage_results.org_id, orgId));",
+  "const rows = await db.select( ).from( keitaro_stage_results );",
+];
+// …and the shapes it must NOT drag in: a PROJECTED select (the whole point), and
+// a bare select over a different table.
+const PROJECTED_SAMPLES = [
+  "const rows = await db.select({ sales: keitaro_stage_results.sales }).from(keitaro_stage_results);",
+  "const rows = await db.select().from(campaign_stages);",
+];
+const missedBare = BARE_SAMPLES.flatMap((s) => [
+  ...(BARE_SELECT_ON_TABLE.test(s) ? [] : [`LF: ${s.slice(0, 40)}`]),
+  ...(BARE_SELECT_ON_TABLE.test(asCrlf(s)) ? [] : [`CRLF: ${s.slice(0, 40)}`]),
+]);
+const falsePositives = PROJECTED_SAMPLES.filter((s) => BARE_SELECT_ON_TABLE.test(s));
+check(
+  `N2b ⭐ the bare-select needle really fires on a bare select (${BARE_SAMPLES.length} shapes × LF/CRLF) and NOT on a projected one (${PROJECTED_SAMPLES.length} controls)`,
+  missedBare.length === 0 && falsePositives.length === 0,
+  `missed: ${missedBare.join(" | ") || "none"} | false positives: ${falsePositives.join(" | ") || "none"}`,
+);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

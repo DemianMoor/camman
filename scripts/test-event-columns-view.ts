@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -277,16 +277,33 @@ const perfLibSrc = readFileSync("lib/reporting/performance-report.ts", "utf8").r
 const hourlyRowMap = /const rows: PerfRow\[\] = \[\.\.\.hours\.entries\(\)\](.*?)\}\)\);/.exec(
   perfLibSrc,
 )?.[1];
+const OVERRIDE_NEEDLE = "pending_revenue:";
 check(
   "W19 ⭐ the hourly row map contains NO `pending_revenue` override — the scalar is computed, so a zero there is a measurement",
   hourlyRowMap !== undefined &&
     // Positive control: the block really is the hourly row map (it spreads the
     // accumulated metrics), so "no match" cannot pass as "no override".
     hourlyRowMap.includes("...m") &&
-    !hourlyRowMap.includes("pending_revenue:") &&
+    !hourlyRowMap.includes(OVERRIDE_NEEDLE) &&
     // …and the series that replaced it is in this file, off the shared clause.
     perfLibSrc.includes("ledgerHourAgg(pendingRevenueClause()"),
   hourlyRowMap === undefined ? "hourly row map not found" : hourlyRowMap.slice(0, 220),
+);
+// ⭐ THE NEGATED HALF OF W19 HAS NO CONTROL OF ITS OWN. `...m` proves the BLOCK
+// was found and `ledgerHourAgg(…)` proves the replacement is present, but
+// neither touches the needle that does the forbidding — measured 2026-09-19:
+// narrowing it to "pending_revenue: 0," left this file at 56/0 while a
+// re-inlined override went uncaught. So the needle is fired at a hand-written
+// copy of the very line it exists to forbid, in both line endings (the scan
+// collapses whitespace first, which is what makes a mid-line needle work at all).
+const reInlined = (nl: string) =>
+  `const rows: PerfRow[] = [...hours.entries()].map(([h, m]) => ({${nl}  ...m,${nl}  pending_revenue: held.get(h) ?? 0,${nl}}));`;
+check(
+  `W19b ⭐ …and the ${JSON.stringify(OVERRIDE_NEEDLE)} needle really fires on a re-inlined override, in BOTH line endings`,
+  reInlined("\n").replace(/\s+/g, " ").includes(OVERRIDE_NEEDLE) &&
+    reInlined("\r\n").replace(/\s+/g, " ").includes(OVERRIDE_NEEDLE) &&
+    // …and does NOT fire on the accumulator spread that legitimately stays.
+    !"({ ...m })".includes(OVERRIDE_NEEDLE),
 );
 
 // ── ⭐ AN ABSENT BREAKDOWN MUST NOT BE EMITTED AS AN EMPTY ONE ──────────────
@@ -300,12 +317,32 @@ check(
 // and a database; the helper's own behaviour is proved purely by F10-F12
 // (scripts/test-event-tally-merge.ts).
 const resultsSrc = readFileSync("app/api/keitaro/results/route.ts", "utf8").replace(/\s+/g, " ");
-const spreadsRaw = [...resultsSrc.matchAll(/\.\.\.withFunnelDerived\(/g)].length;
-const spreadsWrapped = [...resultsSrc.matchAll(/\.\.\.withoutEventBreakdown\( withFunnelDerived\(/g)].length;
+const BARE_SPREAD = /\.\.\.withFunnelDerived\(/g;
+const WRAPPED_SPREAD = /\.\.\.withoutEventBreakdown\( withFunnelDerived\(/g;
+const spreadsRaw = [...resultsSrc.matchAll(BARE_SPREAD)].length;
+const spreadsWrapped = [...resultsSrc.matchAll(WRAPPED_SPREAD)].length;
 check(
   `W20 ⭐ every response body in /api/keitaro/results strips the breakdown it never selected (${spreadsWrapped} wrapped, ${spreadsRaw} bare)`,
   spreadsWrapped === 3 && spreadsRaw === 0,
   `wrapped=${spreadsWrapped} bare=${spreadsRaw}`,
+);
+// ⭐ `spreadsRaw === 0` IS A NEGATIVE ASSERTION WEARING A COUNT. The wrapped
+// needle has a real control — its count has to be 3 — but the BARE one is only
+// ever asserted to find nothing, so a narrowed needle finds nothing for the
+// wrong reason and W20 stays green. Measured 2026-09-19: renaming it to
+// `withFunnelDerivedX` left this file at 56/0 with a re-bared response body
+// invisible. Fired here at a hand-written bare spread, in both line endings.
+const bareSpread = (nl: string) => `return NextResponse.json({${nl}  ...withFunnelDerived(tally),${nl}});`;
+check(
+  "W20b ⭐ …and the BARE-spread needle really fires on a response body that skipped the wrapper, in BOTH line endings",
+  [...bareSpread("\n").replace(/\s+/g, " ").matchAll(BARE_SPREAD)].length === 1 &&
+    [...bareSpread("\r\n").replace(/\s+/g, " ").matchAll(BARE_SPREAD)].length === 1 &&
+    // …and it does NOT fire on the WRAPPED form, which is what makes
+    // `spreadsRaw === 0` mean "none were left bare" rather than "the two needles
+    // shadow each other".
+    [...`return NextResponse.json({ ...withoutEventBreakdown( withFunnelDerived(tally)) });`.matchAll(
+      BARE_SPREAD,
+    )].length === 0,
 );
 
 // ── ⭐ AN ALL-ZERO ENTRY IS NOT DATA ─────────────────────────────────────────
@@ -680,6 +717,7 @@ check(
 // free of newlines, because this checkout mixes CRLF and LF per file and a
 // multi-line needle is an assertion that can never fail.
 const campaignPageSrc = readFileSync("app/(protected)/campaigns/[id]/page.tsx", "utf8").replace(/\s+/g, " ");
+const LOOSE_RESIDUAL_PROP = "unmapped={";
 check(
   "X7 ⭐ the campaign page renders the breakdown through the shared components — it does not roll its own segments or its own badge",
   campaignPageSrc.includes("<StageEventBreakdown") && campaignPageSrc.includes("<EventTotalsTiles"),
@@ -695,10 +733,23 @@ check(
   "X7b ⭐ …and it passes each of them ONE source object, never a loose residual prop",
   campaignPageSrc.includes("<StageEventBreakdown types={shownEventTypes} source={") &&
     campaignPageSrc.includes("<EventTotalsTiles types={shownEventTypes} source={") &&
-    !campaignPageSrc.includes("unmapped={"),
-  campaignPageSrc.includes("unmapped={")
+    !campaignPageSrc.includes(LOOSE_RESIDUAL_PROP),
+  campaignPageSrc.includes(LOOSE_RESIDUAL_PROP)
     ? "a loose unmapped={…} prop is back on the page"
     : "one of the two mounts does not pass source={…}",
+);
+// ⭐ X7b's THIRD CLAUSE IS THE ONLY NEGATED ONE, and the two positive clauses
+// beside it control different needles. Measured 2026-09-19: narrowing it to
+// `"unmapped={ "` left this file at 56/0 while the loose prop it forbids became
+// invisible. Fired here at a hand-written JSX mount, in both line endings.
+const looseProp = (nl: string) =>
+  `<StageEventBreakdown${nl}  types={shownEventTypes}${nl}  events={e}${nl}  unmapped={u}${nl}/>`;
+check(
+  `X7c ⭐ …and the ${JSON.stringify(LOOSE_RESIDUAL_PROP)} needle really fires on a loose residual prop, in BOTH line endings`,
+  looseProp("\n").replace(/\s+/g, " ").includes(LOOSE_RESIDUAL_PROP) &&
+    looseProp("\r\n").replace(/\s+/g, " ").includes(LOOSE_RESIDUAL_PROP) &&
+    // …and NOT on the paired form the page really uses, so the bar is one-sided.
+    !"<StageEventBreakdown types={t} source={s} />".includes(LOOSE_RESIDUAL_PROP),
 );
 
 // ── ⭐ …AND NEITHER CAN A SURFACE NOBODY HAS WRITTEN YET ─────────────────────
@@ -785,8 +836,16 @@ const KNOWN_SURFACES = [
 ];
 check(
   `X8 ⭐ the scanner finds the per-event surfaces that exist (${builders.length} of ${scanned.length} files) — a scan that finds nothing must fail HERE, not pass X9`,
-  KNOWN_SURFACES.every((p) => builders.includes(p)),
-  `found: ${builders.join(", ")}`,
+  // ⭐ …AND THE CONTROL LIST ITSELF CANNOT SHRINK. X8 is `every()` over
+  // KNOWN_SURFACES, so DELETING an entry strengthens nothing and weakens the
+  // control silently — measured 2026-09-19: dropping the creatives page left
+  // this file at 56/0. The roster is spelled out so removing a surface is a
+  // deliberate two-place edit, and every entry must still exist on disk so a
+  // rename fails here rather than dropping out of the control.
+  KNOWN_SURFACES.length === 4 &&
+    KNOWN_SURFACES.every((p) => existsSync(p)) &&
+    KNOWN_SURFACES.every((p) => builders.includes(p)),
+  `found: ${builders.join(", ")} | known=${KNOWN_SURFACES.length} missing-on-disk=${KNOWN_SURFACES.filter((p) => !existsSync(p)).join(", ") || "none"}`,
 );
 check(
   "X9 ⭐ every surface that builds per-event columns also mounts a component that renders the residual — discovered by scanning, so a NEW table is covered the day it is written",

@@ -115,7 +115,19 @@ export function strip(src: string): string {
 const flat = (p: string) => strip(readFileSync(p, "utf8"));
 
 // ── G0: negative controls on the matcher itself ─────────────────────────────
-check("G0a ⭐ the matcher fires on a quoted key", FORBIDDEN.some((re) => re.test(`const k = "purchase";`)));
+// ⭐ ONE SAMPLE PER QUOTE CHARACTER, not one for "a quoted key". The quoted
+// needle is `["'`]…["'`]` — a THREE-WAY alternation, and a multi-needle match
+// passes if any one alternative still fires. Measured 2026-09-19: narrowing it
+// to `["']…["']` (dropping the backtick) left this whole gate at 37/0 while a
+// key written as a template literal — `m[`purchase`]`, the natural shape for a
+// generated map lookup — stopped being caught.
+for (const [name, sample] of [
+  ["double", `const k = "purchase";`],
+  ["single", `const k = 'purchase';`],
+  ["backtick", "const k = `purchase`;"],
+] as const) {
+  check(`G0a ⭐ the matcher fires on a ${name}-quoted key`, FORBIDDEN.some((re) => re.test(sample)));
+}
 check("G0b ⭐ the matcher fires on unquoted property access", FORBIDDEN.some((re) => re.test(`row.events.purchase.n`)));
 check("G0c ⭐ the matcher fires on a key in an object literal", FORBIDDEN.some((re) => re.test(`{ purchase: 1 }`)));
 check(
@@ -304,9 +316,29 @@ check(
   "G3a the scanner sees the endpoint the Overview table DOES fetch (positive control)",
   surfaceSrc.includes("/api/keitaro/reports"),
 );
+const RESULTS_URL = "/api/keitaro/results";
 check(
   "G3b ⭐ no rendering surface fetches /api/keitaro/results — it carries NO per-event breakdown (it selects neither column and now emits neither field), so generated columns over it would render nothing",
-  !surfaceSrc.includes("/api/keitaro/results"),
+  !surfaceSrc.includes(RESULTS_URL),
+);
+// ⭐ G3b ASSERTS AN ABSENCE, AND G3a CONTROLS A DIFFERENT NEEDLE. G3a proves the
+// scanner reaches the surfaces at all; it says nothing about whether THIS needle
+// would still find the URL if a surface started fetching it. Measured
+// 2026-09-19: narrowing it to "/api/keitaro/results/v2" left the gate at 37/0
+// while the thing G3b exists to forbid became invisible. So the needle gets its
+// own positive control, against a hand-written fetch (never generated from the
+// needle — a control built out of the thing it controls is a tautology), in both
+// line endings, plus the isolation that keeps it distinct from G3a's sibling URL.
+// The fixture SPELLS THE URL OUT. Interpolating RESULTS_URL into it would narrow
+// the control in lockstep with the needle and prove nothing — the tautology this
+// whole file warns about, and the shape a first attempt at this bar had.
+const resultsFetch = (nl: string) =>
+  `// the results endpoint, in prose${nl}const r = await fetch(${nl}  "/api/keitaro/results?range=7d",${nl});${nl}`;
+check(
+  `G3c ⭐ …and the ${JSON.stringify(RESULTS_URL)} needle really fires on a surface that fetches it, in BOTH line endings, and is NOT satisfied by the sibling endpoint G3a names`,
+  strip(resultsFetch("\n")).includes(RESULTS_URL) &&
+    strip(resultsFetch("\r\n")).includes(RESULTS_URL) &&
+    !'const r = await fetch("/api/keitaro/reports?range=7d");'.includes(RESULTS_URL),
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

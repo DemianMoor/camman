@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
-import type { ReportEventMap } from "@/lib/reporting/event-columns";
+import { eventNum, type ReportEventMap } from "@/lib/reporting/event-columns";
 
 // ============================================================================
 // Sales & revenue attribution basis — SINGLE SOURCE OF TRUTH.
@@ -81,9 +81,13 @@ export interface SalesRevenueTotals {
   /** Per-event-type totals, keyed by event_types.key. Tracker events only. */
   events: ReportEventMap;
   /**
-   * Conversions in the window the org-scoped event_types join could not place.
-   * They are in NO other field here: not in sales, not in revenue, not in
-   * `events`. Summed from keitaro_stage_results.unmapped_conversions.
+   * Conversions in the window the ORG-SCOPED event_types join could not place.
+   * They are under no key of `events` — and NOT absent from the scalars beside
+   * it: `sales` and `revenue` come from keitaro_stage_results' own columns,
+   * which resolve is_purchase / counts_revenue through NON-org-scoped id lists
+   * (lib/sale-attribution.ts), so a conversion carrying another organisation's
+   * event type is already inside them. That difference is the whole reason this
+   * field is carried. Summed from keitaro_stage_results.unmapped_conversions.
    */
   unmapped: number;
   /**
@@ -130,20 +134,32 @@ export async function salesRevenueTotals(
     -- beside it. jsonb has no sum(), so the object is unrolled to (key, value)
     -- pairs and summed per key.
     --
-    -- ⚠️ jsonb_typeof(...) = 'object' IS LOAD-BEARING, NOT TIDINESS. jsonb_each
+    -- ⚠️ TWO GUARDS, AT TWO LEVELS, AND BOTH ARE LOAD-BEARING.
+    --
+    -- jsonb_typeof(ksr.events) = 'object' covers the TOP level: jsonb_each
     -- RAISES 22023 on a jsonb scalar or array and the error is NOT scoped to the
-    -- offending row — it kills the whole statement. The column is jsonb NOT NULL
-    -- DEFAULT '{}' with NO CHECK constraint (migration 0185), so object-ness is
-    -- a convention of the writer, not a guarantee of the database. Here that
-    -- matters more than anywhere else it has been fixed: this query backs the
-    -- scheduled Telegram report, whose failure mode is a 500 EVERY HOUR until a
-    -- human edits a row. Same guard, same reason, as
+    -- offending row — it kills the whole statement.
+    --
+    -- eventNum() covers the VALUE level, which that guard does not reach: a row
+    -- whose entry value is a bare string IS still an object, and the plain cast
+    -- this used to use — (e.value ->> 'n')::numeric — raises 22P02
+    -- statement-wide on it just the same. See lib/reporting/event-columns.ts
+    -- for the measurements. (NO BACKTICKS: see the note further down — one
+    -- inside this template literal TERMINATES it.)
+    --
+    -- The column is jsonb NOT NULL DEFAULT '{}' with NO CHECK constraint
+    -- (migration 0185), so both object-ness and number-ness are conventions of
+    -- the writer, not guarantees of the database. Here that matters more than
+    -- anywhere else either guard has been fixed: this query backs the scheduled
+    -- Telegram report, whose failure mode is a 500 EVERY HOUR until a human
+    -- edits a row. Same pair, same reason, in
     -- lib/reporting/stage-keitaro-aggregate.ts and lib/creatives/metrics-cache.ts.
+    -- Bars T19 (top level) and T19b (value level).
     ev as (
       select e.key as event_key,
-             sum((e.value ->> 'n')::numeric)::int as n,
-             sum((e.value ->> 'revenue')::numeric)::numeric(12,4) as revenue,
-             sum((e.value ->> 'pending_revenue')::numeric)::numeric(12,4) as pending_revenue
+             sum(${eventNum(sql`e.value`, "n")})::int as n,
+             sum(${eventNum(sql`e.value`, "revenue")})::numeric(12,4) as revenue,
+             sum(${eventNum(sql`e.value`, "pending_revenue")})::numeric(12,4) as pending_revenue
       from keitaro_stage_results ksr
       join campaign_stages cs on cs.id = ksr.stage_id and cs.archived_at is null
       cross join lateral jsonb_each(ksr.events) as e(key, value)

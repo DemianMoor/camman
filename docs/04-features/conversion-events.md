@@ -917,6 +917,24 @@ projection every five minutes.
 the shared unmapped badge. The tiles reflow in the existing responsive grid, so N
 types need no layout change.
 
+**Both residuals, not one (2026-09-19).** Sales on both surfaces is
+`max(manual tally, tracker)` per stage while the segments and tiles count TRACKER
+events only, so a hand-entered sale was in the total and in nothing that explains
+it — a second residual, invisible where the first one was already guarded. The
+line now carries `Manual: +N ·` and the card a `Manual tally` tile, from the same
+component and the same object. The number is `manualSalesTopup()`
+([lib/stage-results.ts](../../lib/stage-results.ts)), defined THROUGH
+`combineSales()` so "what Sales carries that the tracker did not report" cannot
+drift from the rule that produced Sales. Bars **X4b–X4d**, **X5b/X5c**.
+
+**And the figures come from ONE source object.** `StageEventBreakdown` /
+`EventTotalsTiles` take a single `source: EventBreakdownSource`
+(`{ events, unmapped, manual_topup }`, every field required) instead of three
+loose props — the same fix `eventColumnBlock()` made for the report tables, where
+a caller could pass a residual belonging to a different response. `stageEventSource(stage)`
+is the one adapter, reading all three off one row. Bar **X7b** pins the call
+sites; the required fields are what tsc enforces.
+
 **Both surfaces come from `components/reports/event-columns-view.tsx`** —
 `StageEventBreakdown` and `EventTotalsTiles`, each rendering its figures AND its
 residual, neither half separately exported. See
@@ -982,7 +1000,7 @@ picker; this table is already ~20 columns wide.
 | Layer | What it does |
 | --- | --- |
 | [`lib/creatives/metrics-cache.ts`](../../lib/creatives/metrics-cache.ts) | `k_stage_ev` unrolls `keitaro_stage_results.events` per stage; `creative_ev` rolls it to the creative and emits one `jsonb_object_agg` per creative. `k_stage` also sums `unmapped_conversions`, which `stage_agg` carries as `unmapped`. `CreativeMetricsRow` gains `events: EventCountMap` and `unmapped: number`. |
-| [`app/api/creatives/list/route.ts`](../../app/api/creatives/list/route.ts) | `events jsonb, unmapped int` on the `jsonb_to_recordset` column list; `events` / `unmapped` on the `metrics` object; `event_types` at the top level of the response. `RATIO_SQL` is untouched — no new ratio is computed. |
+| [`app/api/creatives/list/route.ts`](../../app/api/creatives/list/route.ts) | `events jsonb, unmapped int, manual_topup int` on the `jsonb_to_recordset` column list; `events` / `unmapped` / `manual_topup` on the `metrics` object; `event_types` at the top level of the response. `RATIO_SQL` is untouched — no new ratio is computed. |
 | [`app/(protected)/creatives/page.tsx`](../../app/(protected)/creatives/page.tsx) | One generated column per event type, spliced **immediately after `checkout_rate`**, through `eventCountColumns()`. |
 
 ### ⭐ The 30-day window is copied from `stage_agg`, deliberately
@@ -1008,13 +1026,31 @@ wrapper, so "which types are on screen" has ONE definition across both grains.
 The screen cannot mount `EventColumnsBar` (its toggle governs per-event money
 columns this screen does not have), nor `StageEventBreakdown` / `EventTotalsTiles`
 (a `·`-joined line and a tile grid, not a column set). So the RULE carries over
-rather than the markup: **`eventCountColumns()` returns the count columns and the
-residual column in ONE array**, and neither half is separately exported. The
-residual column appears only while some row on the page has a stray — the same
-"nothing at zero" rule `UnmappedBadge` renders by. Bars **Y1–Y7**; the scan bars
-**X8–X12** discover the surface rather than listing it (`eventCountColumns(` is in
-BOTH the builder and the residual needle lists, because a file that calls it has
-discharged the rule by construction).
+rather than the markup: **`eventCountColumns()` returns the count columns and
+BOTH residual columns in ONE array**, and no half is separately exported. Each
+residual column appears only while some row on the page has one — the same
+"nothing at zero" rule `UnmappedBadge` renders by — and the stray column stays
+LAST, because it is the one the operator can act on. Bars **Y1–Y9b**; the scan
+bars **X8–X12** discover the surface rather than listing it (`eventCountColumns(`
+is in BOTH the builder and the residual needle lists, because a file that calls
+it has discharged the rule by construction).
+
+**`Manual`, the second residual (2026-09-19).** This table shows
+`Sales = max(manual tally, tracker)` per stage while its counts are tracker-only,
+so manual sales — which exist in production today — were in Sales and in no
+column. `manual_topup` is summed in `stage_agg` as
+`greatest(cs.sales_count - coalesce(ks.sales, 0), 0)` over the SAME 30-day
+stages, travels the recordset and the response beside `events`/`unmapped`, and
+renders as its own generated column. Bars **C13/C13b** — the second foots the row
+identity `Σ (is_purchase) counts + manual top-up + strays = Sales` with all three
+parts non-zero.
+
+⚠️ **And the residual fields are REQUIRED on `EventCountRow`, not optional.**
+With `unmapped?: number`, a caller mapping its rows to `{ events }` rendered the
+counts with no residual column at all — the column is emitted only when some row
+HAS one, so a row shape that cannot carry one suppresses it silently — and it
+compiled clean and left every scan bar green. Bar **Y9** asserts the
+DECLARATION, because an optional field is not something tsc can fail.
 
 ### ⚠️ `jsonb_each` on a non-object kills the whole statement
 
@@ -1028,11 +1064,20 @@ which is why `parseEventMap()` already defends against the same shapes in JS.
 opening the page, not by reading the code: a hand-written fixture stored a JSON
 string and the creatives list 22023'd on the spot. Bar **C11**.
 
-The one other `jsonb_each` reader of that column —
+The other two `jsonb_each` readers of that column —
 [`lib/reporting/stage-keitaro-aggregate.ts`](../../lib/reporting/stage-keitaro-aggregate.ts)
-`ev`, Task 6's stages aggregate, where the same row would have blanked every stage on a
-campaign page — carries the same guard now. It has no bar of its own; the construct is
-proved by C11, and the code comment there says so.
+`ev` (Task 6's stages aggregate, where the same row would have blanked every stage on a
+campaign page) and [`lib/reporting/attribution.ts`](../../lib/reporting/attribution.ts)
+`ev` (Task 8's Telegram rollup, where it 500s the cron every hour) — carry the
+same guard. Bars **K6** and **T19** cover them.
+
+⭐ **The VALUE level is a second, identical hazard (2026-09-19).** The guard above
+is about the top level. `{"k":"abc"}` IS an object, so it passes — and
+`(e.value ->> 'n')::numeric` then raises **22P02**, also statement-wide. All three
+readers take their numbers through `eventNum()`
+([lib/reporting/event-columns.ts](../../lib/reporting/event-columns.ts)): a JSON
+number or a strict numeric string is used, anything else reads 0 for that field
+only. Bars **C12/C12b/C12c** here, **K7** and **T19b/T19c** on the other two.
 
 ### Interaction with the lifetime-driven row set
 
@@ -1044,7 +1089,7 @@ vanishing. Bars **C2** and **C7**.
 
 ### Bars
 
-**C1–C11** in
+**C1–C13b** in
 [`scripts/test-creative-event-counts-db.ts`](../../scripts/test-creative-event-counts-db.ts),
 against camman-v2 inside a transaction that always rolls back.
 `computeCreativeMetrics(orgId, dbc)` now takes a connection so the bars can hand
@@ -1069,7 +1114,7 @@ Sales: 12
 Registrations: 214
 Purchases: 11 · $880.00 ($120.00 pending)
 Manual tally: +1 (not in the lines above)
-⚠ 3 unmapped — counted nowhere
+⚠ 3 unmapped — in no line above, but Sales/Revenue may already count them
 Revenue: $900.00
 Spend: $392.26
 ROI: +129.4%
@@ -1109,6 +1154,27 @@ them — is module-private. There is no exported way to take the breakdown witho
 the lines that explain the gap, the same rule `eventColumnBlock()` enforces for the
 report tables. The residual lines are also **not droppable**: truncation takes
 per-type lines only (bar T15).
+
+⚠️ **The unmapped line used to say "counted nowhere", and that was false**
+(corrected 2026-09-19). `sales` and `revenue` resolve `is_purchase` /
+`counts_revenue` through NON-org-scoped id lists while the per-event map comes
+from an org-scoped join, so a conversion carrying **another organisation's**
+event type is already inside the `Sales` and `Revenue` lines of the same message
+while sitting under no key — which is precisely why the lines above fall short.
+Bar **T20** of [scripts/test-telegram-report-metrics.ts](../../scripts/test-telegram-report-metrics.ts)
+seeds exactly that case and measures it (`sales=3`, Σ purchases `=2`, top-up `0`,
+unmapped `1`). The rest of the bucket (no mapping at all, or no status) really is
+counted nowhere and nothing at this grain separates the two, so the line says
+**"may already count them"**. **T10b** fails on the property — a line that claims
+they are counted nowhere, or that never names Sales — rather than on today's
+wording, so the old sentence cannot come back as a tidy-up.
+
+**The event lines are PLURALISED** with the same `pluralizeLabel()` the report
+tables and the campaign tiles use (`Registrations: 214`, not `Registration: 214`)
+— one function, so the phone and the screen cannot disagree about a label.
+Pluralise **before** escaping: a label ending in `&` escapes to `&amp;` and an
+`s` appended after that is `&amps;`, a malformed entity, which is a 400, which is
+permanent (bar T4a2).
 
 ### ⭐⭐ Escaping and the cap are the difference between a report and an outage
 
@@ -1159,16 +1225,28 @@ surfaces that blanks a page until someone reloads; here it 500s the cron every
 hour for ever. Bar **T19** seeds a row with `events = '5'::jsonb` and proves the
 numbers still come out.
 
+⭐ **And the same failure one level down (2026-09-19).** That guard covers the
+TOP level only. A row whose `events` is a perfectly good object holding a rotten
+VALUE — `{"k":{"n":"abc"}}` — passes it, and `(e.value ->> 'n')::numeric` then
+raises **22P02**, also statement-wide, for exactly the same blast radius.
+Measured on camman-v2, including the mixed case (one good row and one bad in the
+same statement returns nothing at all). All three readers now pull their numbers
+through `eventNum()` ([lib/reporting/event-columns.ts](../../lib/reporting/event-columns.ts)),
+the SQL-side twin of `parseEventMap()`: a JSON number or a strict numeric string
+is taken, anything else reads **0 for that field only**, so a key with a good `n`
+and a rotten `revenue` still contributes its count. Bars **T19b/T19c** here,
+**K7** on the campaign page's aggregate, **C12/C12b/C12c** on /creatives.
+
 ### Bars
 
 - [`scripts/test-telegram-report-format.ts`](../../scripts/test-telegram-report-format.ts)
-  — 36 pure (3 whole-message goldens + T1–T22c). The three goldens are unchanged
+  — 42 pure (3 whole-message goldens + T1–T26b). The three goldens are unchanged
   and still pass with an empty registry, which is what proves the splice landed in
   the right place. **T8c is what makes T8 mean anything**: it asserts the 200-type
   × 600-char fixture exceeds the cap *before* trimming. Shortening those labels
   leaves T8 and T7b green while T8c and T8b go red — demonstrated, not assumed.
 - [`scripts/test-telegram-report-metrics.ts`](../../scripts/test-telegram-report-metrics.ts)
-  — 14 on camman-v2 (T13–T24). It seeds a throwaway org because
+  — 16 on camman-v2 (T13–T24). It seeds a throwaway org because
   `computeReportMetrics` binds the module-level `db`, and asserts DELTAS against a
   pre-seed baseline. T13z/T14z pin both sides non-zero: an identity only ever
   satisfied by zeros is a countdown. T20/T20b seed a deliberate stray so the

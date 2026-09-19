@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { readCreativeCtr } from "@/lib/creatives/ctr-rollup";
-import type { DbOrTx, EventCountMap } from "@/lib/reporting/event-columns";
+import { eventNum, type DbOrTx, type EventCountMap } from "@/lib/reporting/event-columns";
 
 // Per-creative 30-day performance metrics, cached in memory.
 //
@@ -65,12 +65,28 @@ export interface CreativeMetricsRow {
   // revenue column off a number that was never summed at this grain. `n`, and
   // nothing else, crosses this boundary.
   events: EventCountMap;
-  // The residual those counts do NOT explain: conversions on this creative's
-  // stages in the same window that the org-scoped event_types join could not
-  // place (keitaro_stage_results.unmapped_conversions). They count as NOTHING —
-  // not a sale, not revenue, not in `events` — so a screen that renders the
-  // breakdown without this number silently under-explains its own Sales column.
+  // ── THE TWO RESIDUALS ────────────────────────────────────────────────────
+  // `sales` on this row is NOT Σ events[t] over the purchase types. It is that
+  // sum plus these two, and they are carried for the same reason the counts are:
+  //
+  //     sales = Σ (is_purchase) events[t]  +  manual_topup  +  unmapped strays
+  //
+  // Conversions on this creative's stages in the same window that the
+  // ORG-SCOPED event_types join could not place
+  // (keitaro_stage_results.unmapped_conversions). They are in no `events` key —
+  // but they are NOT counted nowhere: `sales` and `payout` resolve is_purchase /
+  // counts_revenue through the NON-org-scoped id lists (lib/sale-attribution.ts)
+  // and already count a cross-organisation stray, which is exactly how the two
+  // numbers come to differ. A screen that renders the breakdown without this
+  // silently under-explains its own Sales column.
   unmapped: number;
+  // The part of `sales` the operator's MANUAL tally contributed. A stage's sales
+  // is max(sales_count, keitaro), so this is Σ max(manual − tracker, 0) over the
+  // same 30-day stages — the gap between the tracker-only per-event counts and
+  // the Sales column. Manual sales exist in production today, so a breakdown
+  // without this line under-explains Sales by a residual the strays cannot
+  // account for.
+  manual_topup: number;
 }
 
 // ⭐ A FUNCTION, NOT A SHARED CONSTANT, BECAUSE IT NOW CARRIES AN OBJECT.
@@ -97,6 +113,7 @@ const noActivity = (creative_id: number): CreativeMetricsRow => ({
   ctr_clicks_lifetime: 0,
   events: {},
   unmapped: 0,
+  manual_topup: 0,
 });
 
 /**
@@ -159,20 +176,32 @@ export async function computeCreativeMetrics(
     -- k_stage because jsonb_each on '{}' yields no rows, and a stage with sales
     -- and an empty breakdown must keep its k_stage row.
     --
-    -- ⚠️ jsonb_typeof(...) = 'object' IS LOAD-BEARING, NOT BELT-AND-BRACES.
-    -- jsonb_each RAISES 22023 ("cannot call jsonb_each on a non-object") on a
-    -- jsonb scalar or array, and that error is not scoped to the offending row:
-    -- it kills the WHOLE statement, so ONE malformed stage-day row would blank
-    -- every number on /creatives for the entire org. The column is
-    -- jsonb NOT NULL DEFAULT the empty object, with NO CHECK constraint
-    -- (migration 0185), so object-ness is a convention of stage-day-conversions,
-    -- not a guarantee of the database — which is exactly why parseEventMap()
-    -- defends against the same shapes on the JS side. Found the hard way: a
-    -- hand-written fixture stored a JSON STRING and the whole query 22023'd.
-    -- A malformed row contributes nothing rather than taking the page with it.
-    -- Bar C11.
+    -- ⚠️ TWO GUARDS, AT TWO LEVELS, NEITHER BELT-AND-BRACES.
+    --
+    -- jsonb_typeof(ksr.events) = 'object' covers the TOP level: jsonb_each
+    -- RAISES 22023 ("cannot call jsonb_each on a non-object") on a jsonb scalar
+    -- or array, and that error is not scoped to the offending row — it kills the
+    -- WHOLE statement, so ONE malformed stage-day row would blank every number
+    -- on /creatives for the entire org. Found the hard way: a hand-written
+    -- fixture stored a JSON STRING and the whole query 22023'd. Bar C11.
+    --
+    -- eventNum() covers the VALUE level, which that guard does not reach: a
+    -- row whose entry value is a bare string IS still an object, and the plain
+    -- cast this used to use —
+    -- (e.value ->> 'n')::numeric — raises 22P02 on it with the same blast
+    -- radius. This screen degrades more gently than the other two sites (a
+    -- failed compute falls back to the last cached rows, getCreativeMetrics
+    -- below), but "more gently" means stale-or-empty metrics for the whole org,
+    -- not a handled error. Bar C12.
+    --
+    -- The column is jsonb NOT NULL DEFAULT the empty object, with NO CHECK
+    -- constraint (migration 0185), so object-ness and number-ness are both
+    -- conventions of stage-day-conversions, not guarantees of the database —
+    -- which is exactly why parseEventMap() and eventNum() defend against the
+    -- same shapes on the JS and SQL sides. A malformed row or value contributes
+    -- nothing rather than taking the page with it.
     k_stage_ev AS (
-      SELECT ksr.stage_id, e.key AS event_key, sum((e.value ->> 'n')::numeric)::int AS n
+      SELECT ksr.stage_id, e.key AS event_key, sum(${eventNum(sql`e.value`, "n")})::int AS n
         FROM keitaro_stage_results ksr
         CROSS JOIN LATERAL jsonb_each(ksr.events) AS e(key, value)
        WHERE ksr.org_id = ${orgId}
@@ -210,9 +239,13 @@ export async function computeCreativeMetrics(
              -- read 0 and Sales CR showed 0.0% on every creative (fixed 2026-09-15).
              coalesce(sum(greatest(cs.sales_count, coalesce(ks.sales, 0))), 0)::int AS sales,
              coalesce(sum(ks.revenue), 0)::numeric AS payout,
-             -- Same CTE, same window, same rows as checkouts above: the
-             -- residual is bounded by the very aggregate it qualifies.
+             -- Same CTE, same window, same rows as checkouts above: BOTH
+             -- residuals are bounded by the very aggregate they qualify.
              coalesce(sum(ks.unmapped), 0)::int AS unmapped,
+             -- The manual half of the greatest() one line up, per stage, so the
+             -- two cannot describe different stages. No second pass: the same
+             -- row carries the manual tally and the tracker count.
+             coalesce(sum(greatest(cs.sales_count - coalesce(ks.sales, 0), 0)), 0)::int AS manual_topup,
              coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS manual_clean
         FROM campaign_stages cs
         JOIN campaigns c ON c.id = cs.campaign_id
@@ -278,6 +311,7 @@ export async function computeCreativeMetrics(
            (coalesce(sl.lifetime_manual, 0) + coalesce(kl.lifetime_tracked, 0)) AS lifetime_clean,
            coalesce(sl.lifetime_sales, 0) AS lifetime_sales,
            coalesce(s.unmapped, 0)       AS unmapped,
+           coalesce(s.manual_topup, 0)   AS manual_topup,
            -- ⚠️ LEFT, not INNER. A creative with conversions and an EMPTY
            -- breakdown — every stage-day row reading '{}' — has no creative_ev
            -- row at all, and an inner join would drop it off the screen
@@ -306,6 +340,7 @@ export async function computeCreativeMetrics(
       lifetime_sales: Number(r.lifetime_sales ?? 0),
       events: toCountMap(r.events),
       unmapped: Number(r.unmapped ?? 0),
+      manual_topup: Number(r.manual_topup ?? 0),
     });
   }
   // A creative can have sends in the CTR snapshot but no row above (nothing in

@@ -280,6 +280,34 @@ async function main() {
       visitsRaw: 90,
       visitsClean: 11,
     });
+    // ── ⭐ TWO MALFORMED ROWS, FOR THE TWO GUARD LEVELS (K6, K7) ─────────────
+    //
+    // `events` is jsonb NOT NULL DEFAULT '{}' with NO CHECK constraint (0185),
+    // so both object-ness and number-ness are conventions of the writer. Each
+    // failure kills the STATEMENT, not the row — which on this query means
+    // every stage on the campaign page reads nothing:
+    //
+    //   stageBadObject — a jsonb scalar. jsonb_each raises 22023.
+    //   stageBadValue  — a well-formed OBJECT holding rotten values. The
+    //                    top-level guard waves it through and the numeric cast
+    //                    raises 22P02 (measured on camman-v2).
+    //
+    // Both sit on DAY2, on their OWN stages, so nothing the R bars read moves.
+    // The second row is MIXED on purpose: a good entry beside the rotten ones,
+    // so "it survived by returning nothing" fails.
+    const stageBadObject = await stage(4, DAY2);
+    const stageBadValue = await stage(5, DAY2);
+    await ksr(stageBadObject, 4, 0, "0.0000", '"not an object"', 0, { date: DAY2 });
+    await ksr(
+      stageBadValue, 5, 0, "0.0000",
+      JSON.stringify({
+        purchase: { n: 4, pending_n: 0, revenue: 0, pending_revenue: 0 },
+        bare_string_entry: "not an object",
+        word_count: { n: "abc", pending_n: 0, revenue: "xyz", pending_revenue: 0 },
+      }),
+      0,
+      { date: DAY2 },
+    );
 
     // The MANUAL top-up: 5 manual sales on stage A against 2 tracker sales ⇒ a
     // top-up of 3. It exists ONLY here — no ledger row, no events entry — which
@@ -572,6 +600,30 @@ async function main() {
       "K5 ⭐ the query runs at all — no aggregate over jsonb (min(jsonb) does not exist: 42883)",
       aggError === "" && agg.size > 0,
       aggError || `${agg.size} stage(s)`,
+    );
+    // ⭐ THE TWO MALFORMED ROWS. Both failures are STATEMENT-wide, so the
+    // proof is not "the bad stage reads 0" — it is that EVERY OTHER stage on
+    // this campaign still reads its real number with the bad row present. K1's
+    // 5 is the anchor: unguarded, aggError carries the SQLSTATE and every K bar
+    // above goes red beside these two.
+    check(
+      "K6 ⭐ a stage-day row whose events is a jsonb SCALAR does not abort the campaign page's aggregate (22023 is statement-wide)",
+      aggError === "" && KN(stageA, "purchase") === 5 && agg.has(stageBadObject) &&
+        Object.keys(agg.get(stageBadObject)?.events ?? {}).length === 0,
+      aggError || `stageA purchase=${KN(stageA, "purchase")} badObject=${JSON.stringify(agg.get(stageBadObject) ?? null)}`,
+    );
+    check(
+      "K7 ⭐⭐ a malformed VALUE inside a well-formed object does not abort it either (22P02, which the top-level guard does not catch) — and the good entry on that same row still reads 4",
+      aggError === "" &&
+        KN(stageA, "purchase") === 5 &&
+        KN(stageBadValue, "purchase") === 4 &&
+        KN(stageBadValue, "word_count") === 0 &&
+        KN(stageBadValue, "bare_string_entry") === 0 &&
+        // …and the rotten money field on that entry reads 0 rather than taking
+        // the count with it: a field is skipped, never its whole entry.
+        Number(agg.get(stageBadValue)?.events.word_count?.revenue ?? -1) === 0,
+      aggError ||
+        `stageA purchase=${KN(stageA, "purchase")} badValue=${JSON.stringify(agg.get(stageBadValue)?.events)}`,
     );
 
     console.log(`\n${passed} passed, ${failed} failed`);

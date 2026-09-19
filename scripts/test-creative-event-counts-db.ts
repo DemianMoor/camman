@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
 import { computeCreativeMetrics, type CreativeMetricsRow } from "@/lib/creatives/metrics-cache";
+import { eventNum, loadEventTypes } from "@/lib/reporting/event-columns";
 
 // Phase 5 Task 7: /creatives gains one per-event COUNT column per event type,
 // immediately right of "Checkout Rate" — the column whose numerator is
@@ -257,6 +258,42 @@ async function main() {
           `${rows.length} rows, ${new Set(maps).size} distinct objects`,
         );
 
+        // ── ⭐ THE SECOND RESIDUAL: THE MANUAL TALLY ─────────────────────────
+        //
+        // /creatives shows Sales = max(manual tally, tracker) per stage while
+        // its per-event counts are TRACKER ONLY, so a hand-entered sale is in
+        // the Sales column and in no event count. ONE-SIDED: creative A's
+        // in-window top-up is 2 (stage 1: 3 manual vs 1 tracker; stage 2: 0 vs
+        // 2), while its 40-day-old stage holds another 10 that must NOT appear
+        // — so a top-up computed over the wrong window reads 12, and one that
+        // forgot the greatest() reads 0.
+        //
+        // ⭐ BEFORE THE MALFORMED ROWS, DELIBERATELY. Their red proof ABORTS the
+        // transaction (Postgres 25P02: every later statement in it raises), so a
+        // bar placed after them that needs a query of its own — this one loads
+        // the registry — would die with a stack trace instead of printing red.
+        const purchaseKeys = new Set(
+          (await loadEventTypes(tx, ORG_ID)).filter((t) => t.is_purchase).map((t) => t.key),
+        );
+        const sumPurchase = (r: CreativeMetricsRow | undefined) =>
+          Object.entries(r?.events ?? {})
+            .filter(([k]) => purchaseKeys.has(k))
+            .reduce((s, [, n]) => s + n, 0);
+        check(
+          "C13 ⭐ the manual top-up rides with the counts and shares their 30-day window — 2, not the 12 that includes the 40-day-old stage's 10",
+          a?.manual_topup === 2 && b?.manual_topup === 0,
+          `A=${a?.manual_topup} (want 2) B=${b?.manual_topup} (want 0)`,
+        );
+        check(
+          `C13b ⭐⭐ …and the row FOOTS: Σ (is_purchase) counts + manual top-up + strays = Sales, with all three parts non-zero (purchase keys: ${[...purchaseKeys].join(", ")})`,
+          a !== undefined &&
+            sumPurchase(a) + a.manual_topup + a.unmapped === a.sales &&
+            sumPurchase(a) > 0 &&
+            a.manual_topup > 0 &&
+            a.unmapped > 0,
+          `Σpurchase=${sumPurchase(a)} + topup=${a?.manual_topup} + strays=${a?.unmapped} vs sales=${a?.sales}`,
+        );
+
         // ── ⭐ ONE MALFORMED ROW MUST NOT TAKE THE WHOLE ORG'S NUMBERS WITH IT ─
         //
         // jsonb_each RAISES 22023 on a jsonb scalar or array, and the error is
@@ -296,6 +333,88 @@ async function main() {
           raised !== ""
             ? `query raised ${raised}`
             : `registration=${aAfter?.events.registration} deposit=${aAfter?.events.deposit}`,
+        );
+
+        // ── ⭐ …AND THE SAME AGAIN ONE LEVEL DOWN: A MALFORMED VALUE ─────────
+        //
+        // C11's guard is jsonb_typeof(events) = 'object'. This row IS an object
+        // — it is the VALUE inside it that is rotten — so that guard waves it
+        // through and `(e.value ->> 'n')::numeric` raises 22P02 ("invalid input
+        // syntax for type numeric"), statement-wide, for exactly the same blast
+        // radius. Measured on camman-v2 before the fix; the three shapes below
+        // are one entry that is a bare string, one whose `n` is a word, and one
+        // whose `n` is an object.
+        //
+        // ONE-SIDED AND MIXED: the SAME row also carries a well-formed entry
+        // (registration: 5), so "it survived by returning nothing" fails, and
+        // the good half of a half-rotten row still has to be counted.
+        const sBadValue = await insertStage(tx, {
+          campaignId, creativeId: crB, stageNumber: 7, ageDays: 1, checkouts: 0, manualSales: 0,
+        });
+        await tx.execute(sql`
+          INSERT INTO keitaro_stage_results
+            (org_id, campaign_id, stage_id, stage_tracking_id, stat_date,
+             sales, revenue, unmapped_conversions, events)
+          VALUES
+            (${ORG_ID}::uuid, ${campaignId}, ${sBadValue}, ${`${PROBE}-badvalue`}, current_date,
+             0, ${"0"}, 0,
+             ${JSON.stringify({
+               registration: { n: 5, pending_n: 0, revenue: 0, pending_revenue: 0 },
+               bare_string_entry: "not an object",
+               word_count: { n: "abc", pending_n: 0, revenue: 0, pending_revenue: 0 },
+               object_count: { n: { a: 1 }, pending_n: 0, revenue: 0, pending_revenue: 0 },
+             })}::jsonb)
+        `);
+        let afterVal: CreativeMetricsRow[] | null = null;
+        let raisedVal = "";
+        try {
+          afterVal = await computeCreativeMetrics(ORG_ID, tx);
+        } catch (e) {
+          const c = (e as { cause?: { code?: string } })?.cause;
+          raisedVal = c?.code ?? String(e);
+        }
+        const aVal = afterVal?.find((r) => r.creative_id === crA);
+        const bVal = afterVal?.find((r) => r.creative_id === crB);
+        check(
+          "C12 ⭐⭐ a malformed VALUE inside a well-formed events object is ignored, not fatal — the cast raises 22P02 statement-wide, which the top-level jsonb_typeof guard does not catch",
+          raisedVal === "" &&
+            aVal?.events.registration === 7 &&
+            aVal?.events.deposit === 2,
+          raisedVal !== ""
+            ? `query raised ${raisedVal}`
+            : `registration=${aVal?.events.registration} deposit=${aVal?.events.deposit}`,
+        );
+        check(
+          "C12b ⭐ …and the GOOD entry on that very row is still counted (5), while the three rotten ones read 0 — a malformed field is skipped, not its whole row",
+          bVal?.events.registration === 5 &&
+            (bVal?.events.word_count ?? -1) === 0 &&
+            (bVal?.events.object_count ?? -1) === 0 &&
+            (bVal?.events.bare_string_entry ?? -1) === 0,
+          JSON.stringify(bVal?.events),
+        );
+        // ⭐ CAUGHT, NOT LET FLY. This bar executes the guard directly, and the
+        // mutation it exists to catch makes that statement RAISE — which
+        // uncaught would end the run with a stack trace, print no summary, and
+        // take C13/C13b and the rollback bars with it. A red bar has to be
+        // readable to be a proof.
+        let strNum = -1;
+        let strRaised = "";
+        try {
+          strNum = Number(
+            (
+              (await tx.execute(sql`
+                select sum(${eventNum(sql`e.value`, "n")})::int as n
+                  from jsonb_each(${JSON.stringify({ k: { n: "4" }, j: { n: 2 } })}::jsonb) e
+              `)) as unknown as { n: number }[]
+            )[0]?.n ?? -1,
+          );
+        } catch (e) {
+          strRaised = (e as { cause?: { code?: string } })?.cause?.code ?? String(e);
+        }
+        check(
+          "C12c ⭐ a numeric STRING is still a number, not collateral damage — the guard narrows the cast, it does not narrow the data",
+          strRaised === "" && strNum === 6,
+          strRaised !== "" ? `query raised ${strRaised}` : `sum=${strNum} (want 6)`,
         );
 
         throw new Rollback();

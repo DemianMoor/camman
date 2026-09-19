@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 
@@ -152,6 +152,64 @@ export function parseEventMap(v: unknown): EventMap {
     };
   }
   return out;
+}
+
+/**
+ * ⭐ THE SQL-SIDE TWIN OF parseEventMap: one numeric field of one `events` entry,
+ * read so that a malformed value CANNOT abort the statement.
+ *
+ * Every reader of keitaro_stage_results.events unrolls it with
+ * `jsonb_each(...)` and pulls the numbers out with `(e.value ->> 'n')::numeric`.
+ * That cast RAISES 22P02 ("invalid input syntax for type numeric") on anything
+ * that is not a numeric literal, and — exactly like the 22023 the
+ * `jsonb_typeof(events) = 'object'` guard already covers — THE ERROR IS NOT
+ * SCOPED TO THE OFFENDING ROW. It kills the whole statement, so one hand-edited
+ * value blanks every number the query serves. MEASURED on camman-v2, not
+ * theorised (2026-09-19):
+ *
+ *     {"k":{"n":"abc"}}      -> 22P02: invalid input syntax for type numeric: "abc"
+ *     {"k":{"n":{"a":1}}}    -> 22P02: invalid input syntax for type numeric: "{"a": 1}"
+ *     a 2-row set, 1 bad     -> 22P02 — the good row's 7 is lost with it
+ *
+ * The top-level guard does NOT cover this: `{"k":"abc"}` IS an object, so
+ * jsonb_each is happy; it is the VALUE that is malformed. (A non-object value is
+ * separately harmless — `'5'::jsonb ->> 'n'` returns NULL rather than raising,
+ * also measured — so this guard is about the cast, not about `->>`.)
+ *
+ * WHAT IT ACCEPTS, AND WHY BOTH BRANCHES. A JSON number is what the writer emits
+ * (`jsonb_build_object('n', <int>, 'revenue', <numeric>)`,
+ * lib/keitaro/stage-day-conversions.ts) — that branch is the live one. A strict
+ * numeric STRING is accepted too, because the column's own type declares it
+ * (`revenue: number | string`, db/schema.ts) and parseEventMap() reads it on the
+ * JS side: zeroing a value that works today would be a wrong number, which is
+ * not what a crash fix is allowed to buy. Anything else — a word, an object, an
+ * array, null, a missing key — reads 0 FOR THAT FIELD ONLY, so a key with a good
+ * `n` and a rotten `revenue` still contributes its count.
+ *
+ * A numeric string with padding (`" 4 "`) reads 0 rather than 4: the regex is
+ * deliberately strict, no writer produces that shape, and the alternative is a
+ * trim whose only purpose is to rescue a hand-edit.
+ *
+ * ⚠️ THE DOT IS BRACKETED (`[.]`), NOT ESCAPED. `'\.'` inside a TS template
+ * literal loses its backslash before Postgres ever sees it, leaving `.` — which
+ * matches ANY character, so "4x5" would have parsed as a number. A character
+ * class cannot be eaten by an escape rule.
+ *
+ * There is NO CHECK constraint on the column (migration 0185), so object-ness
+ * and number-ness are both conventions of the writer rather than guarantees of
+ * the database. Used by lib/reporting/attribution.ts,
+ * lib/reporting/stage-keitaro-aggregate.ts and lib/creatives/metrics-cache.ts —
+ * the three statements that unroll this column.
+ */
+export function eventNum(value: SQL, field: string): SQL {
+  return sql`case
+    when jsonb_typeof(${value} -> ${field}::text) = 'number'
+      then (${value} ->> ${field}::text)::numeric
+    when jsonb_typeof(${value} -> ${field}::text) = 'string'
+         and (${value} ->> ${field}::text) ~ '^-?[0-9]+([.][0-9]+)?$'
+      then (${value} ->> ${field}::text)::numeric
+    else 0
+  end`;
 }
 
 /** Add `from` into `into`, in place, deep-copying any key `into` does not have. */

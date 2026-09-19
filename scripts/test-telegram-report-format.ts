@@ -8,6 +8,7 @@ import {
   MAX_EVENT_LINES,
   MAX_MESSAGE_CHARS,
 } from "@/lib/reporting/telegram-report-format";
+import { pluralizeLabel } from "@/lib/reporting/event-columns";
 import type { ReportMetrics } from "@/lib/reporting/report-snapshot";
 
 // Renders the daily + hourly messages from the ground-truth metrics pulled via
@@ -189,14 +190,24 @@ check(
     "Purchases: 3 · $120.00 ($40.00 pending)",
 );
 check(
-  "T4 ⭐ a label containing HTML is ESCAPED",
+  "T4 ⭐ a label containing HTML is ESCAPED (and pluralised BEFORE escaping, so the 's' can never land inside an entity)",
   eventLines(M({ eventTypes: [S("purchase", "<b>Buy</b> & win")] }))[0].startsWith(
-    "&lt;b&gt;Buy&lt;/b&gt; &amp; win: ",
+    "&lt;b&gt;Buy&lt;/b&gt; &amp; wins: ",
   ),
+  eventLines(M({ eventTypes: [S("purchase", "<b>Buy</b> & win")] }))[0],
+);
+check(
+  "T4a2 ⭐⭐ a label ENDING in '&' pluralises to '&amp;s', never the malformed '&amps;' — the order of the two steps, asserted on the case that breaks it",
+  (() => {
+    const line = eventLines(M({ eventTypes: [S("purchase", "Buy &")] }))[0];
+    return line.startsWith("Buy &amp;s: ") && !line.includes("&amps;");
+  })(),
+  eventLines(M({ eventTypes: [S("purchase", "Buy &")] }))[0],
 );
 check(
   "T4b ⭐ an emoji label survives intact (escapeHtml touches only & < >)",
-  eventLines(M({ eventTypes: [S("purchase", "💰 Buy")] }))[0].startsWith("💰 Buy: "),
+  eventLines(M({ eventTypes: [S("purchase", "💰 Buy")] }))[0].startsWith("💰 Buys: "),
+  eventLines(M({ eventTypes: [S("purchase", "💰 Buy")] }))[0],
 );
 check(
   "T4c ⭐ a single label too long to fit is DROPPED WHOLE and announced — never sliced mid-entity",
@@ -214,19 +225,25 @@ check(
   "T4d ⭐ a NEWLINE inside a label cannot forge an extra line (it would read as a money line)",
   (() => {
     const lines = eventLines(M({ eventTypes: [S("purchase", "Buy\nRevenue: $999,999.00")] }));
-    return lines.length === 1 && lines[0] === "Buy Revenue: $999,999.00: 0";
+    return lines.length === 1 && lines[0] === "Buy Revenue: $999,999.00s: 0";
   })(),
+  eventLines(M({ eventTypes: [S("purchase", "Buy\nRevenue: $999,999.00")] }))[0],
 );
 check(
+  // The KEY is pluralised too, deliberately: this line is a COUNT of events
+  // wherever the name came from, and a fallback that reads singular beside five
+  // plural lines looks like a different kind of row rather than a missing label.
   "T4e ⭐ an empty label falls back to the key rather than rendering a nameless \": 0\"",
-  eventLines(M({ eventTypes: [S("purchase", "   ")] }))[0] === "purchase: 0",
+  eventLines(M({ eventTypes: [S("purchase", "   ")] }))[0] === "purchases: 0",
+  eventLines(M({ eventTypes: [S("purchase", "   ")] }))[0],
 );
 check(
   "T4f ⭐ a label that FITS is kept whole — an `&`-dense line is present in full, entity by entity",
   (() => {
     const label = "A & B ".repeat(50); // 300 chars raw → 500 escaped; fits
-    // .trimEnd(): eventLabel collapses and TRIMS whitespace before escaping.
-    const line = `${"A &amp; B ".repeat(50).trimEnd()}: 0`;
+    // .trimEnd(): eventLabel collapses and TRIMS whitespace, THEN pluralises
+    // (the trailing "B" earns an "s"), and escapes last.
+    const line = `${"A &amp; B ".repeat(50).trimEnd()}s: 0`;
     const m = dailyMessage("Tue 1 Sep", M({ eventTypes: [S("purchase", label)] }));
     return m.includes(`\n${line}\n`) && m.length <= MAX_MESSAGE_CHARS;
   })(),
@@ -358,8 +375,31 @@ check(
   eventLines(M({ manualTopup: 4 })).includes("Manual tally: +4 (not in the lines above)"),
 );
 check(
-  "T10 ⭐ unmapped conversions get their own line and say they count nowhere",
-  eventLines(M({ unmapped: 7 })).includes("⚠ 7 unmapped — counted nowhere"),
+  "T10 ⭐ unmapped conversions get their own line, and it says what is TRUE of them",
+  eventLines(M({ unmapped: 7 })).includes(
+    "⚠ 7 unmapped — in no line above, but Sales/Revenue may already count them",
+  ),
+  JSON.stringify(eventLines(M({ unmapped: 7 }))),
+);
+check(
+  // ⭐ THE CLAIM THAT USED TO BE HERE WAS FALSE, and a bar asserting the new
+  // wording would go green again the day someone "tidied" it back. This one
+  // fails on the PROPERTY: the line may not tell the reader the strays are
+  // counted nowhere, because bar T20 of test-telegram-report-metrics.ts
+  // measures the opposite (sales=3 with Σ purchases=2 and 1 stray — the stray
+  // is INSIDE the Sales line of this very message), and it may not stay silent
+  // about where they went either.
+  "T10b ⭐⭐ the unmapped line does NOT claim they are counted nowhere, and DOES name where they already are",
+  (() => {
+    const line = eventLines(M({ unmapped: 7 })).find((l) => l.includes("unmapped")) ?? "";
+    return (
+      line !== "" &&
+      !/counted nowhere|counts? as nothing|not a sale/i.test(line) &&
+      /sales/i.test(line) &&
+      /revenue/i.test(line)
+    );
+  })(),
+  eventLines(M({ unmapped: 7 })).find((l) => l.includes("unmapped")) ?? "(no line)",
 );
 check(
   "T11 no manual top-up and no unmapped rows ⇒ no extra lines",
@@ -372,7 +412,7 @@ check(
     return (
       msg.length <= MAX_MESSAGE_CHARS &&
       msg.includes("\nManual tally: +4 (not in the lines above)\n") &&
-      msg.includes("\n⚠ 7 unmapped — counted nowhere\n")
+      msg.includes("\n⚠ 7 unmapped — in no line above, but Sales/Revenue may already count them\n")
     );
   })(),
 );
@@ -428,9 +468,9 @@ check(
   `T22 ⭐⭐ every use of a registry label in ${FORMATTER} goes through eventLabel(), which escapes — a new unescaped \${t.label} is what makes the outage permanent`,
   // Exactly one use, AND that use is the escaped one: together those say the
   // only path from a registry label into the message runs through escapeHtml.
-  labelUses.length === 1 && formatterCode.includes("escapeHtml(t.label.replace"),
+  labelUses.length === 1 && formatterCode.includes("escapeHtml(pluralizeLabel(t.label.replace"),
   `${labelUses.length} use(s) of .label found; escaped-use present: ${formatterCode.includes(
-    "escapeHtml(t.label.replace",
+    "escapeHtml(pluralizeLabel(t.label.replace",
   )}`,
 );
 check(
@@ -446,6 +486,63 @@ check(
     const nCrlf = (stripComments(crlf).match(LABEL_USE) ?? []).length;
     return nLf === 1 && nCrlf === 1;
   })(),
+);
+
+// ── T25: extraLines were the one way INTO the message that skipped escaping ─
+//
+// T22 holds the rule structurally for registry labels; `extraLines` bypassed it
+// entirely, because it is text the CALLER assembles and this function used to
+// splice it in verbatim. Today's only caller passes three integers — which is
+// exactly the reasoning that leaves a hole open until the day a caller
+// interpolates something with a "<" in it and the report 400s every hour for
+// ever. Now escaped at the door; these bars are what keep it that way.
+check(
+  "T25 ⭐⭐ an extra tail line carrying markup renders as TEXT — the one door into the message that skipped escapeHtml",
+  (() => {
+    const msg = dailyMessage("Tue 1 Sep", M({}), ["Carrier <b>triage</b>: 3 & 1 > 0"]);
+    return (
+      msg.endsWith("Carrier &lt;b&gt;triage&lt;/b&gt;: 3 &amp; 1 &gt; 0") &&
+      // …and the ONLY angle-bracket markup left in the payload is the header's
+      // own bold pair, which is the exact condition Telegram 400s on.
+      (msg.match(/<[^>]*>/g) ?? []).join("") === "<b></b>"
+    );
+  })(),
+  dailyMessage("Tue 1 Sep", M({}), ["Carrier <b>triage</b>: 3 & 1 > 0"]).split("\n").pop(),
+);
+check(
+  "T25b ⭐ …and the escaped line is still INSIDE the cap, counted post-escape, with the money lines intact",
+  (() => {
+    const msg = dailyMessage("Tue 1 Sep", M({ eventTypes: MANY_LONG }), [
+      `Carrier triage: ${"&".repeat(200)}`,
+    ]);
+    return (
+      msg.length <= MAX_MESSAGE_CHARS &&
+      msg.endsWith(`Carrier triage: ${"&amp;".repeat(200)}`) &&
+      MONEY_LINES.every((s) => msg.includes(s))
+    );
+  })(),
+);
+
+// ── T26: the tables print plural, and so does this ──────────────────────────
+//
+// The count columns on /reports and the tiles on the campaign page head
+// themselves with pluralizeLabel(); this report printed the RAW label, so one
+// screen read "Registrations" and the phone read "Registration" for the same
+// number. Both sides are checked: that the line agrees with the shared
+// generator, AND that the generator's answer is the literal expected word — a
+// comparison against one source alone would pass if both went singular.
+check(
+  "T26 ⭐ the event line is headed with the SAME pluralisation the report tables use",
+  (() => {
+    const line = eventLines(M({ eventTypes: [S("registration", "Registration")] }))[0];
+    return line === `${pluralizeLabel("Registration")}: 0` && line === "Registrations: 0";
+  })(),
+  eventLines(M({ eventTypes: [S("registration", "Registration")] }))[0],
+);
+check(
+  "T26b ⭐ …and an already-plural label is not pluralised twice (the shared rule, not a suffix)",
+  eventLines(M({ eventTypes: [S("purchase", "Purchases")] }))[0] === "Purchases: 0",
+  eventLines(M({ eventTypes: [S("purchase", "Purchases")] }))[0],
 );
 
 // ── the rendered article, for a human to read ───────────────────────────────

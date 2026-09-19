@@ -34,10 +34,11 @@ import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
 // The SAME generator the reports and the campaign page use, so a "Registrations"
 // column cannot come to mean two things on two screens — and it hands back the
-// residual column with the counts, never one without the other.
+// residual columns with the counts, never some without the others.
 import {
   eventCountColumns,
   eventCountValue,
+  type EventCountRow,
 } from "@/components/reports/event-columns-view";
 import type { EventCountMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 import {
@@ -140,10 +141,16 @@ type Creative = {
     // event_types.key. COUNTS ONLY — no rate, revenue or EPC is computed at
     // this grain, and the type is what keeps it that way.
     events: EventCountMap;
-    // The conversions those counts do NOT explain (no event-type mapping).
-    // Rendered beside them; see the column block below for why it is not
-    // optional.
+    // The TWO residuals those counts do not explain, both rendered beside them
+    // (see the column block below for why neither is optional):
+    //   unmapped     — conversions that matched no event-type mapping. In no
+    //                  event count here, but already inside Sales, which
+    //                  resolves its types through a list that is not org-scoped.
+    //   manual_topup — the part of Sales the operator's tally contributed. Sales
+    //                  is max(manual, tracker) per stage; the counts are tracker
+    //                  only.
     unmapped: number;
+    manual_topup: number;
   };
   // Spam scoring fields. spam_score is 0-100 (or null when unscored).
   // spam_label is the binary verdict mirrored from the cache; the list
@@ -157,6 +164,16 @@ type Creative = {
   spam_model_id: string | null;
   spam_score_error: string | null;
 };
+
+/**
+ * What a creative with NO metrics is worth to the generated columns: no counts
+ * and no residuals. It exists because the list endpoint omits `metrics` entirely
+ * on the include_metrics=false path — and because EventCountRow's residual
+ * fields are required, so `{}` no longer typechecks in their place. Spelling the
+ * zeros out is the point: a missing row reads as zero of everything, never as a
+ * shape that cannot carry a residual.
+ */
+const NO_EVENT_COUNTS: EventCountRow = { events: {}, unmapped: 0, manual_topup: 0 };
 
 type ListResponse = {
   data: Creative[];
@@ -921,12 +938,15 @@ export default function CreativesPage() {
       // registry-driven counts have to be readable in the same glance or the
       // column that is silently wrong stays silently wrong.
       //
-      // One call, one array: the counts and the residual that explains what they
-      // do NOT account for come out together, so this table cannot render a
-      // breakdown of its own Sales column while hiding the strays.
+      // One call, one array: the counts and BOTH residuals that explain what
+      // they do NOT account for come out together, so this table cannot render a
+      // breakdown of its own Sales column while hiding the strays or the manual
+      // tally. NO_EVENT_COUNTS rather than `{}` because EventCountRow's
+      // residuals are required — a row shape that cannot carry one would
+      // suppress its column silently.
       ...eventCountColumns(
         eventTypes,
-        data.map((d) => d.metrics ?? {}),
+        data.map((d) => d.metrics ?? NO_EVENT_COUNTS),
         (col): ColumnDef<Creative> => ({
           id: col.id,
           header: col.header,
@@ -936,15 +956,17 @@ export default function CreativesPage() {
           // reorder a subset while the arrow claimed the whole set.
           enableSorting: false,
           cell: ({ row }) => {
-            const n = eventCountValue(col, row.original.metrics ?? {});
+            const n = eventCountValue(col, row.original.metrics ?? NO_EVENT_COUNTS);
             return (
               <span
                 className={cn(
                   "tabular-nums",
-                  col.kind === "unmapped"
-                    ? n > 0
-                      ? "text-amber-700 dark:text-amber-500"
-                      : "text-muted-foreground"
+                  // Amber for the STRAYS only: those are actionable (a missing
+                  // conversion_event_mappings row). A manual top-up is an
+                  // explanation of Sales, not a fault, so it reads like the
+                  // counts beside it.
+                  col.kind === "unmapped" && n > 0
+                    ? "text-amber-700 dark:text-amber-500"
                     : "text-muted-foreground",
                 )}
                 title={col.title}

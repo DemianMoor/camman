@@ -3287,7 +3287,30 @@ A GENERATED column id (`evt:<event_types.key>:<kind>`) is saved as a sort key in
 
 `keitaro_stage_results.events` is `jsonb NOT NULL DEFAULT '{}'` with **no CHECK constraint** (migration 0185). Object-ness is a convention of the one writer ([lib/keitaro/stage-day-conversions.ts](../lib/keitaro/stage-day-conversions.ts)), not a guarantee of the database — which is precisely why `parseEventMap()` ([lib/reporting/event-columns.ts](../lib/reporting/event-columns.ts)) already coerces a NULL, a pre-`events` row and a hand-edited value to an empty map on the JS side. **A SQL reader has to defend the same way**: `AND jsonb_typeof(<col>) = 'object'` beside the org filter, so a malformed row contributes nothing instead of taking the page with it.
 
-There are exactly **two** `jsonb_each` readers of that column and both carry the guard: [lib/creatives/metrics-cache.ts](../lib/creatives/metrics-cache.ts) `k_stage_ev` (the creatives list; bar **C11** of [scripts/test-creative-event-counts-db.ts](../scripts/test-creative-event-counts-db.ts) proves the construct) and [lib/reporting/stage-keitaro-aggregate.ts](../lib/reporting/stage-keitaro-aggregate.ts) `ev` (the campaign page's stages table; no bar of its own yet). **A third reader must add it too** — the grep is `jsonb_each` under `lib/`, `app/`, `components/`.
+There are exactly **three** `jsonb_each` readers of that column and all three carry the guard: [lib/creatives/metrics-cache.ts](../lib/creatives/metrics-cache.ts) `k_stage_ev` (the creatives list; bar **C11**), [lib/reporting/stage-keitaro-aggregate.ts](../lib/reporting/stage-keitaro-aggregate.ts) `ev` (the campaign page's stages table; bar **K6**) and [lib/reporting/attribution.ts](../lib/reporting/attribution.ts) `ev` (the scheduled Telegram report; bar **T19**). **A fourth reader must add it too** — the grep is `jsonb_each` under `lib/`, `app/`, `components/`.
+
+### ⭐⭐ …and the VALUE level is the same bug one level down (2026-09-19)
+
+The guard above is about the TOP level, and it is not enough. `{"k":"abc"}` and `{"k":{"n":"abc"}}` are both perfectly good objects, so `jsonb_each` is happy — and `(e.value ->> 'n')::numeric`, the next thing every one of these readers does, raises **22P02 — "invalid input syntax for type numeric"**, which is **also statement-wide**. Measured on camman-v2, not reasoned about:
+
+| input | today's plain cast |
+| --- | --- |
+| `{"k":{"n":"abc"}}` | `22P02: invalid input syntax for type numeric: "abc"` |
+| `{"k":{"n":{"a":1}}}` | `22P02: … numeric: "{"a": 1}"` |
+| a 2-row set, 1 bad | `22P02` — **the good row's number is lost with it** |
+| `{"k":5}` (non-object VALUE) | harmless: `'5'::jsonb ->> 'n'` is NULL, it does not raise |
+
+So the fix is about the CAST, not about `->>`. All three readers now take their numbers through **`eventNum(value, field)`** ([lib/reporting/event-columns.ts](../lib/reporting/event-columns.ts)) — the SQL-side twin of `parseEventMap()`, which has always done this on the JS side:
+
+- a **JSON number** (what the writer emits) is cast;
+- a **strict numeric string** is cast too — the column's own `$type` declares `number | string` and `parseEventMap` accepts both, so zeroing a value that works today would be a wrong number, which a crash fix is not allowed to buy;
+- anything else — a word, an object, an array, `null`, a missing key — reads **0 for that FIELD only**, so a key with a good `n` and a rotten `revenue` still contributes its count.
+
+⚠️ **The regex brackets its dot (`[.]`), it does not escape it.** `'\.'` inside a TS template literal loses its backslash before Postgres sees it, leaving `.` — which matches any character, so `"4x5"` would have parsed as a number. A character class cannot be eaten by an escape rule.
+
+⚠️ **No backticks inside the `sql` template.** One terminates the literal and the file stops parsing — hit while writing the comment that explains this very guard, in the file that already carried a "NO BACKTICKS ANYWHERE IN THIS TEMPLATE" warning.
+
+**Should the column carry a CHECK constraint?** Recommended, but NOT in this change: it needs a migration and a violation sweep against production, and the guards above make it a defence-in-depth measure rather than a fix. See the "Recommended, not applied" note in [docs/03-data-model.md](03-data-model.md).
 
 *Found by opening the page, not by reading the code.* A hand-written fixture stored a JSON **string** — `${JSON.stringify(obj)}` bound through postgres-js's own tag rather than Drizzle's — and `/creatives` served zeros for every creative in the org. The bar is one-sided: the well-formed counts must still be exactly right WITH the malformed row present, so "it survived by returning nothing" fails it.
 
@@ -3298,3 +3321,27 @@ There are exactly **two** `jsonb_each` readers of that column and both carry the
 **The residual rule travels by shape, not by component.** A surface that renders the per-event breakdown must render the unclassified count beside it — `sales = Σ over is_purchase types + strays` — and there are now three shapes that do it: a column set with a filter bar (`eventColumnBlock` → `EventColumnsBar`), an inline `·`-joined line and a tile grid (`StageEventBreakdown` / `EventTotalsTiles`), and a count-only column set (`eventCountColumns`, which returns the residual column **inside the same array** as the counts, so there is no second list to drop). In every case the halves are module-private and only the pairing is exported. Bars **X8–X12** of [scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts) DISCOVER these surfaces by walking `app/` and `components/`; `eventCountColumns(` is listed as BOTH a builder needle and a residual needle, because a file that calls it has discharged the rule by construction.
 
 **⭐ A multi-needle scan bar passes if ANY needle matches, so every needle needs its own control.** X11 checks each needle against a hand-written sample of the call it names, and **X12** re-runs each of those samples with a newline inside the call in BOTH LF and CRLF — this checkout mixes line endings per file, and a needle that matched only one of them would classify a surface differently depending on which machine last touched it, silently, in the direction that makes X9 pass.
+
+**…and the same hole was still open in the key gate's OWN discovery scan (2026-09-19).** `test-reports-no-hardcoded-event-keys.ts` builds its population with `TOUCHES.some(...)`, and its positive control (G1c) names two files that are BOTH reachable through the `unmapped_conversions` needle alone — so nothing in its file clause depended on the registry-import needle at all. Measured: narrow that needle to `"event-columns-view"` and G1b **and** G1c both stay GREEN at 10 touching files while 8 producers (report-snapshot, performance-report, the four API routes…) drop out of coverage unnoticed; only its incidental `length >= 10` threshold notices a needle that dies outright. **G1c2** is now one bar per needle, each named to a file carrying THAT needle and not the other — and the isolation is asserted, not assumed, so a witness that grows the second needle later fails rather than quietly becoming a second copy of G1c. **G1c3** re-runs every needle through `strip()` in LF and CRLF, and in each ending also proves the needle is NOT matched from a comment.
+
+## A residual's copy must say what is TRUE of it, not what is tidy (2026-09-19)
+
+Every surface that carried the unmapped count told the reader it "counts as NOTHING — not a sale, not revenue": the campaign page's Results cell, both report tables' badge, `/creatives`' column tooltip, the Telegram line, and `keitaro_stage_results.unmapped_conversions`' own schema comment. **For the documented cross-organisation stray that is false, and the identity three paragraphs up says so**: `sales` and `revenue` resolve `is_purchase` / `counts_revenue` through NON-org-scoped id lists while the breakdown comes from an org-scoped join, so such a conversion is *inside* the very Sales number the breakdown is explaining — which is exactly why the breakdown falls short. Bar T20 of [scripts/test-telegram-report-metrics.ts](../scripts/test-telegram-report-metrics.ts) seeds it and measures it: `sales=3`, Σ purchases `=2`, top-up `0`, unmapped `1`.
+
+The rest of that bucket (no mapping at all, or no status) really is counted nowhere, and **nothing at this grain separates the two** — so the honest statement is "Sales/Revenue **may** already count them", and the hedge is the accuracy, not a weasel. The Telegram line fits it in one line:
+
+```
+⚠ 3 unmapped — in no line above, but Sales/Revenue may already count them
+```
+
+**The bars are on the PROPERTY, not on the wording** (T10b, X13): a copy that claims the strays are counted nowhere, or that never names Sales, fails — so the old sentence cannot come back as a tidy-up, and a rewrite that is honest in different words passes.
+
+## A breakdown has TWO residuals wherever Sales is a max() (2026-09-19)
+
+`manual_topup` was carried by the Telegram report and both report tables but not by the campaign page or `/creatives` — **both of which display `Sales = max(manual tally, tracker)`** while their per-event figures count tracker events only. Manual sales exist in production today, so those two surfaces under-explained their own totals by a residual nobody was guarding, while the stray count beside it was guarded three ways. Both now carry it, bundled the same way (one component, one source object, one array), and the number comes from `manualSalesTopup()` ([lib/stage-results.ts](../lib/stage-results.ts)) — defined THROUGH `combineSales()` rather than re-derived as `max(m − k, 0)`, so "what Sales carries that the tracker did not report" cannot drift from the rule that produced Sales.
+
+**The general rule:** when a total is a max(), a union or any other non-sum, the breakdown that explains it needs one term per source it can come from — not one for the source that happened to fail first.
+
+## An OPTIONAL field can detach a residual by TYPE alone (2026-09-19)
+
+`EventCountRow.unmapped` was `unmapped?: number`, and the residual column is emitted only while some row HAS one. So a caller mapping its rows to `{ events }` rendered the per-event counts with **no residual column at all**, compiled clean, and left every scan bar green — the structural pairing (`eventCountColumns` returns both in one array) was intact and irrelevant, because the ROW SHAPE suppressed the column. The fields are required now; the bar (**Y9**) is on the DECLARATION, because "this field is optional" is not something `tsc` can fail. The same reasoning as `EMPTY_TALLY`'s freeze: the type is the weaker of the two guards, so the guard goes where the hole is.

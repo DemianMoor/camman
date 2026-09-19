@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import { keitaro_stage_results } from "@/db/schema";
-import { parseEventMap, type DbOrTx, type EventMap } from "@/lib/reporting/event-columns";
+import { eventNum, parseEventMap, type DbOrTx, type EventMap } from "@/lib/reporting/event-columns";
 
 // =============================================================================
 // THE CAMPAIGN PAGE'S keitaro_stage_results ROLL-UP — one query, per stage.
@@ -28,10 +28,14 @@ export interface StageKeitaroTotals {
   /** Migration 0185: the same sales/revenue, split per event_types.key. */
   events: EventMap;
   /**
-   * Conversions on this stage that matched NO event-type mapping. They count as
-   * nothing in `sales`, in `revenue` and under every key of `events` — this is
-   * the only place they are visible at all, which is why every surface that
-   * shows the breakdown has to show this beside it.
+   * Conversions on this stage the ORG-SCOPED event-type join could not place.
+   * They are under no key of `events` — but they are NOT counted nowhere:
+   * `sales` and `revenue` are the projection's own columns, which resolve
+   * is_purchase / counts_revenue through NON-org-scoped id lists
+   * (lib/sale-attribution.ts), so a stray carrying another organisation's event
+   * type is already inside them. This is the only place it is visible AS a
+   * stray, which is why every surface showing the breakdown shows this beside
+   * it: it is the account of why the two disagree.
    */
   unmapped: number;
 }
@@ -95,24 +99,33 @@ export async function getStageKeitaroTotals(
     -- The per-event block re-aggregated across the stage's days. jsonb has no
     -- sum(), so the object is unrolled to (key, value) pairs and summed per key.
     --
-    -- ⚠️ jsonb_typeof(...) = 'object' IS LOAD-BEARING. jsonb_each RAISES 22023
-    -- on a jsonb scalar or array, and the error is NOT scoped to the offending
-    -- row — it kills the whole statement, so one malformed stage-day row would
-    -- take every stage on the campaign page with it. The column is jsonb NOT
-    -- NULL DEFAULT the empty object with NO CHECK constraint (migration 0185),
-    -- so object-ness is a convention of the writer, not a guarantee of the
-    -- database; parseEventMap() defends against the same shapes on the JS side.
-    -- Same guard, same reason, as lib/creatives/metrics-cache.ts k_stage_ev,
-    -- where bar C11 of scripts/test-creative-event-counts-db.ts proves the
-    -- construct. Added 2026-09-19 after the creatives list 22023'd on a
-    -- hand-written fixture; this site has no bar of its own yet.
+    -- ⚠️ TWO GUARDS, AT TWO LEVELS, AND BOTH ARE LOAD-BEARING.
+    --
+    -- jsonb_typeof(k.events) = 'object' covers the TOP level: jsonb_each RAISES
+    -- 22023 on a jsonb scalar or array, and the error is NOT scoped to the
+    -- offending row — it kills the whole statement, so one malformed stage-day
+    -- row would take every stage on the campaign page with it.
+    --
+    -- eventNum() covers the VALUE level, which that guard does not reach: a
+    -- malformed value sits INSIDE a perfectly good object, and the plain cast
+    -- this used to use — (e.value ->> 'n')::numeric — raises 22P02 on it,
+    -- statement-wide, for the same blast radius. See
+    -- lib/reporting/event-columns.ts for the measurements.
+    --
+    -- The column is jsonb NOT NULL DEFAULT the empty object with NO CHECK
+    -- constraint (migration 0185), so object-ness and number-ness are both
+    -- conventions of the writer, not guarantees of the database; parseEventMap()
+    -- defends against the same shapes on the JS side. Same pair, same reason, as
+    -- lib/creatives/metrics-cache.ts k_stage_ev (bars C11/C12) and
+    -- lib/reporting/attribution.ts (T19/T19b). Bars K6 (top level) and K7 (value
+    -- level) of scripts/test-report-event-columns-db.ts cover this site.
     ev AS (
       SELECT k.stage_id,
              e.key AS event_key,
-             sum((e.value ->> 'n')::numeric)::int AS n,
-             sum((e.value ->> 'pending_n')::numeric)::int AS pending_n,
-             sum((e.value ->> 'revenue')::numeric)::numeric(12,4) AS revenue,
-             sum((e.value ->> 'pending_revenue')::numeric)::numeric(12,4) AS pending_revenue
+             sum(${eventNum(sql`e.value`, "n")})::int AS n,
+             sum(${eventNum(sql`e.value`, "pending_n")})::int AS pending_n,
+             sum(${eventNum(sql`e.value`, "revenue")})::numeric(12,4) AS revenue,
+             sum(${eventNum(sql`e.value`, "pending_revenue")})::numeric(12,4) AS pending_revenue
       FROM ksr k
       CROSS JOIN LATERAL jsonb_each(k.events) AS e(key, value)
       WHERE jsonb_typeof(k.events) = 'object'

@@ -44,8 +44,14 @@ export interface ReportMetrics {
   // Carried rather than re-queried in the formatter so the formatter stays PURE
   // and its tests need no database.
   eventTypes: { key: string; label: string }[];
-  // Conversions in the window that matched no mapping. They are in NO other
-  // field here — not in sales, not in revenue, not in `events`.
+  // Conversions in the window that matched no mapping. They are under NO key of
+  // `events` — but they are NOT in no other field: `sales` and `revenue` resolve
+  // is_purchase / counts_revenue through NON-org-scoped id lists, so a stray
+  // carrying another organisation's event type is already counted by both. That
+  // is exactly why the per-event lines fall short of the headline, and why this
+  // number is printed beside them. (The rest of the bucket — no mapping at all,
+  // or no status — really is counted nowhere; nothing at this grain separates
+  // the two.)
   unmapped: number;
   // How much of `sales` came from the manual tally rather than the tracker. The
   // per-event lines count tracker events only, so without this line the report

@@ -53,6 +53,7 @@ import {
   EventTotalsTiles,
   StageEventBreakdown,
   visibleEventTypes,
+  type EventBreakdownSource,
 } from "@/components/reports/event-columns-view";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 import { ExportClickersDialog } from "@/components/campaigns/export-clickers-dialog";
@@ -71,6 +72,7 @@ import {
   combineSales,
   formatRevenue,
   formatRoi,
+  manualSalesTopup,
   stageRoi,
 } from "@/lib/stage-results";
 import { StageInlineEditor } from "@/components/campaigns/stage-inline-creator";
@@ -318,6 +320,24 @@ type Stage = {
   } | null;
   offer: { id: number; name: string; color: string | null; payout_cpa: string | null } | null;
 };
+
+/**
+ * ⭐ ONE STAGE ROW → THE BREAKDOWN AND BOTH ITS RESIDUALS, FROM ONE OBJECT.
+ *
+ * The counts, the strays and the manual top-up are read off the SAME row here,
+ * so a Results cell cannot show one stage's segments beside another number — the
+ * hole the report tables closed by deriving their bar from the very `totals`
+ * the columns came from. The top-up is computed rather than fetched because the
+ * row already carries both sides of it, and manualSalesTopup() is the same
+ * definition `sales` itself uses (lib/stage-results.ts) — not a second one.
+ */
+function stageEventSource(s: Stage): EventBreakdownSource {
+  return {
+    events: s.keitaro_events ?? {},
+    unmapped: s.keitaro_unmapped ?? 0,
+    manual_topup: manualSalesTopup(s.sales_count, s.keitaro_sales_count),
+  };
+}
 
 type StagesListResponse = {
   data: Stage[];
@@ -1364,8 +1384,7 @@ export default function CampaignDetailPage() {
               Clicks: {cl} · Checkout: {chk} ·{" "}
               <StageEventBreakdown
                 types={shownEventTypes}
-                events={events ?? {}}
-                unmapped={unmapped ?? 0}
+                source={stageEventSource(row.original)}
               />
               Sales: {sales} · CTR: {pct(cl)} · OptOut: {pct(oo)}
             </span>
@@ -1597,14 +1616,26 @@ export default function CampaignDetailPage() {
     let revenue = 0;
     let revenueKnown = false;
     let pendingRevenue = 0;
-    // The same conversions split per event type, and the ones that matched no
-    // mapping at all. `unmapped` is counted by `sales` and by no key of
-    // `events`, so it is the only account of the difference between the two —
-    // it is accumulated here so the tiles can never show one without the other.
-    // addEventMaps deep-copies a key it does not have yet (never aliasing the
-    // shared EMPTY_TALLY), which is why the fold is not written out by hand.
+    // The same conversions split per event type, and the TWO residuals that
+    // explain why the tiles need not sum to Sales:
+    //
+    //   unmapped     — a conversion the ORG-SCOPED registry join could not
+    //                  place. It is counted by `sales` (which resolves
+    //                  is_purchase through a NON-org-scoped list) and by no key
+    //                  of `events`, so it is the only account of that half of
+    //                  the difference.
+    //   manual_topup — the part of `sales` the operator's tally contributed.
+    //                  `sales` is max(manual, tracker) per stage while `events`
+    //                  counts TRACKER events only, so a hand-entered sale is in
+    //                  the total and in no tile.
+    //
+    // Both are accumulated here, beside the counts, so the tiles can never show
+    // one without the others. addEventMaps deep-copies a key it does not have
+    // yet (never aliasing the shared EMPTY_TALLY), which is why the fold is not
+    // written out by hand.
     const events: EventMap = {};
     let unmapped = 0;
+    let manualTopup = 0;
     // Tracking-gap substitution, the SAME rule the Reports Overview tab applies
     // (shouldSubstituteClickers / substitutionDominates in
     // lib/reporting/tracking-gap.ts — imported, never transcribed, so the two
@@ -1639,8 +1670,13 @@ export default function CampaignDetailPage() {
       scrubbed += s.scrubbed_count;
       bounced += s.bounced_count;
       checkoutClicks += s.checkout_click_count;
-      addEventMaps(events, s.keitaro_events ?? {});
-      unmapped += s.keitaro_unmapped ?? 0;
+      // ⭐ ONE SOURCE PER STAGE, the same object the Results cell renders from:
+      // the counts and both residuals are read off one row, never assembled
+      // field by field from two places.
+      const src = stageEventSource(s);
+      addEventMaps(events, src.events);
+      unmapped += src.unmapped;
+      manualTopup += src.manual_topup;
       // Keitaro wins when it reports the conversion; manual tally fills gaps.
       const stageSales = combineSales(s.sales_count, s.keitaro_sales_count);
       sales += stageSales;
@@ -1670,6 +1706,7 @@ export default function CampaignDetailPage() {
       cost,
       events,
       unmapped,
+      manual_topup: manualTopup,
       revenue: revenueKnown ? revenue : null,
       // Same "—, not $0.00" rule as revenue above, for the same reason: a
       // manual campaign has no held money to report, and a tile reading
@@ -1679,6 +1716,23 @@ export default function CampaignDetailPage() {
       pendingRevenue: pendingRevenue > 0 ? pendingRevenue : null,
     };
   }, [stages, inboundStopContacts]);
+  // ⭐ THE WHOLE CARD IS GATED, AND THAT IS WHY IT IS SAFE — written down here
+  // because it is the obvious thing to "fix".
+  //
+  // sms_count is 0 on API sends, so this gate can hide the card on a campaign
+  // that really did send: the per-stage Results cells carry the same numbers and
+  // are NOT gated (their own test includes the per-event counts and the strays),
+  // so nothing is unreachable — this is a summary card, not the only reading.
+  //
+  // What matters for the breakdown is that the gate is ALL-OR-NOTHING. It hides
+  // the event tiles, the manual-tally tile and the unmapped badge together, so
+  // the card can be absent but never present-and-under-explaining. Adding a
+  // per-event disjunct here (sales > 0, any events, unmapped > 0) would be the
+  // hazard: the card would then appear for a campaign with conversions and no
+  // sends, carrying tiles whose residuals were computed over the same stages but
+  // whose SMS/Delivered/Clickers tiles read 0 — a breakdown shown beside an
+  // empty frame. Leave the gate coarse; if it ever needs to widen, widen it to
+  // "any stage has any activity", never to one component of the breakdown.
   const hasResults =
     campaignTotals.sms > 0 || campaignTotals.inboundStops > 0;
 
@@ -2006,17 +2060,17 @@ export default function CampaignDetailPage() {
                 value={campaignTotals.checkoutClicks}
               />
               <TotalsMetric label="Sales" value={campaignTotals.sales} />
-              {/* One tile per event type, generated from the registry — and the
-                  unmapped badge, which comes out of the SAME component so the
-                  tiles cannot be on screen without it. Sales is the sum of the
-                  is_purchase tiles PLUS manual top-ups PLUS the strays the badge
-                  counts, so the badge is what keeps the row honest. */}
+              {/* One tile per event type, generated from the registry — and BOTH
+                  residuals, which come out of the SAME component and the SAME
+                  totals object so the tiles cannot be on screen without them.
+                  Sales is the sum of the is_purchase tiles PLUS the manual
+                  top-up PLUS the strays the badge counts; carrying only one of
+                  the two left the row under-explaining itself by the other. */}
               <EventTotalsTiles
                 types={shownEventTypes}
-                events={campaignTotals.events}
-                unmapped={campaignTotals.unmapped}
-                renderTile={({ key, label, value }) => (
-                  <TotalsMetric key={key} label={label} value={value} />
+                source={campaignTotals}
+                renderTile={({ key, label, value, title }) => (
+                  <TotalsMetric key={key} label={label} value={value} title={title} />
                 )}
               />
               <TotalsMetric

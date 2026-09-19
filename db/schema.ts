@@ -2660,9 +2660,17 @@ export const keitaro_stage_results = pgTable(
       .notNull()
       .default({}),
     // Migration 0185. Rows on this stage-day the org-scoped event_types join could
-    // not place: `et.key IS NULL OR ce.status IS NULL`. They count as NOTHING
-    // anywhere (not a sale, not revenue, not in `events`); this column exists so
-    // a screen can say they exist at all.
+    // not place: `et.key IS NULL OR ce.status IS NULL`. They are under no key of
+    // `events`; this column exists so a screen can say they exist at all.
+    //
+    // ⚠️ "COUNTED NOWHERE" IS WRONG FOR PART OF THIS BUCKET, and an earlier
+    // version of this line said it. The identity two comments up is the truth:
+    // `sales` and `revenue` resolve their flags through the NON-org-scoped id
+    // lists, so a row carrying ANOTHER ORG'S event type is counted by those
+    // scalars AND reported here. The rest of the bucket (no event_type_id at
+    // all, or no status) really is in nothing. Nothing at this grain separates
+    // the two, so a surface reporting this number says "may already be in Sales
+    // / Revenue", never "counted nowhere".
     //
     // ⚠️ BROADER THAN conversion_events_unmapped_idx's PREDICATE, ON PURPOSE. The
     // index (migration 0181) is predicated on the RAW columns —

@@ -61,6 +61,21 @@ const tally = (n: number, pending_n = 0, revenue = 0, pending_revenue = 0) => ({
   pending_revenue,
 });
 
+// Comments out, whitespace collapsed — the shape every source-scanning bar in
+// this file matches against (Y9 on a declaration, X8-X12 on a call). Defined
+// ONCE, here, because two copies of a stripper are two things to rot. A needle
+// therefore never contains a newline: this checkout mixes CRLF and LF per file
+// and a multi-line needle is an assertion that can never fail. (It is a local
+// copy of the key gate's stripper rather than an import, because importing that
+// module RUNS the gate, which exits the process.)
+const stripFlat = (s: string) =>
+  s
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
+    .replace(/\s+/g, " ");
+const flatSrc = (p: string) => stripFlat(readFileSync(p, "utf8"));
+const VIEW_MODULE = "components/reports/event-columns-view.tsx";
+
 // The column set a response yields. eventColumnBlock() is the ONLY way to get
 // it — the builder behind this is module-private precisely so a surface cannot
 // take the columns and leave the bar (X8–X11).
@@ -319,8 +334,15 @@ check(
 // `sales` counts a cross-organisation event type that the org-scoped map places
 // under no key, so a line reading "Deposits: 2 · Sales: 5" and nothing else
 // under-explains itself exactly as a report table would.
-const stageLine = (unmapped: number, types: EventTypeSpec[] = SPEC, events: EventMap = ROWS[0].events) =>
-  renderToStaticMarkup(createElement(StageEventBreakdown, { types, events, unmapped }));
+const stageLine = (
+  unmapped: number,
+  types: EventTypeSpec[] = SPEC,
+  events: EventMap = ROWS[0].events,
+  manual_topup = 0,
+) =>
+  renderToStaticMarkup(
+    createElement(StageEventBreakdown, { types, source: { events, unmapped, manual_topup } }),
+  );
 
 const lineWithStray = stageLine(7);
 check(
@@ -343,14 +365,42 @@ check(
   stageLine(0, []) === "",
   JSON.stringify(stageLine(0, [])),
 );
+// ── ⭐ THE SECOND RESIDUAL, ON THE SAME LINE ────────────────────────────────
+//
+// `sales` is max(manual tally, tracker) per stage while the segments count
+// TRACKER events only, so a hand-entered sale is inside Sales and inside no
+// segment. Task 6 showed the strays and not this one, which left the line
+// under-explaining itself by a different number than the one it was guarding.
+// ONE-SIDED: the fixture carries a top-up of 4 and NO strays, so a bar that
+// reads the wrong field cannot be satisfied by the other one.
+const lineWithTopup = stageLine(0, SPEC, ROWS[0].events, 4);
+check(
+  "X4b ⭐ the manual top-up is on the line, from the SAME source object as the counts, with no stray in sight",
+  lineWithTopup.includes("Manual: +4") &&
+    !lineWithTopup.includes("unmapped") &&
+    lineWithTopup.includes("Signups: 12"),
+  lineWithTopup,
+);
+check(
+  "X4c ⭐ …and it renders NOTHING at zero, exactly like the stray marker (a permanent 'Manual: +0' is furniture)",
+  !stageLine(7).includes("Manual:") && stageLine(7).includes("7 unmapped"),
+  stageLine(7),
+);
+check(
+  "X4d ⭐ both residuals at once, each reading its OWN number — 4 manual and 7 strays, never one twice",
+  (() => {
+    const both = stageLine(7, SPEC, ROWS[0].events, 4);
+    return both.includes("Manual: +4") && both.includes("⚠ 7 unmapped") && !both.includes("+7");
+  })(),
+  stageLine(7, SPEC, ROWS[0].events, 4),
+);
 // The tiles take the surrounding card's own tile markup through renderTile, so
 // what is pinned here is the COMPOSITION — N tiles AND the badge, from one call.
-const tiles = (unmapped: number) =>
+const tiles = (unmapped: number, manual_topup = 0) =>
   renderToStaticMarkup(
     createElement(EventTotalsTiles, {
       types: SPEC,
-      events: TOTALS.events,
-      unmapped,
+      source: { events: TOTALS.events, unmapped, manual_topup },
       renderTile: ({ key, label, value }: { key: string; label: string; value: string }) =>
         createElement("div", { key, "data-tile": key }, `${label} ${value}`),
     }),
@@ -363,6 +413,69 @@ check(
     tilesWithStray.includes("Deposits 0") &&
     tilesWithStray.includes("4 unmapped"),
   tilesWithStray,
+);
+// ⭐ …AND THE SECOND RESIDUAL, AS A TILE. ONE-SIDED: 9 manual, no strays — the
+// tile cannot be satisfied by the badge's number and vice versa.
+const tilesWithTopup = tiles(0, 9);
+check(
+  "X5b ⭐ the manual top-up is a tile from the SAME mount and the SAME source object, and it reads its own number",
+  (tilesWithTopup.match(/data-tile=/g) ?? []).length === SPEC.length + 1 &&
+    tilesWithTopup.includes("Manual tally 9") &&
+    !tilesWithTopup.includes("unmapped"),
+  tilesWithTopup,
+);
+check(
+  "X5c ⭐ …and no such tile at zero, while the registry tiles still render (the residuals are the conditional part)",
+  (tiles(0).match(/data-tile=/g) ?? []).length === SPEC.length &&
+    !tiles(0).includes("Manual tally") &&
+    tiles(0).includes("Signups 20"),
+  tiles(0),
+);
+// ── ⭐ WHAT THE RESIDUAL COPY IS ALLOWED TO SAY ─────────────────────────────
+//
+// Every one of these tooltips used to tell the reader the strays "count as
+// NOTHING — not a sale, not revenue". For the documented cross-organisation
+// stray that is FALSE and measured false: `sales` and `revenue` resolve
+// is_purchase / counts_revenue through NON-org-scoped id lists while the
+// per-event map comes from an org-scoped join, so such a conversion is inside
+// the very Sales column the breakdown is explaining (bar T20 of
+// scripts/test-telegram-report-metrics.ts: sales=3, Σ purchases=2, 1 stray).
+//
+// The bar is on the PROPERTY, not on today's wording — a bar quoting the new
+// sentence would go green again the day someone "tidied" the old one back. All
+// three surfaces at once, because the claim was identical on all three.
+const RESIDUAL_COPY = [
+  { where: "stage line", text: stageLine(7) },
+  { where: "totals badge", text: tiles(4) },
+  {
+    where: "creatives column",
+    // Called directly rather than through countCols(), which is declared with
+    // the Y bars further down: a `const` is not hoisted, and reaching it from
+    // here is a ReferenceError that ends the run instead of printing a bar.
+    text: eventCountColumns(
+      SPEC,
+      [{ events: { signup: 1 }, unmapped: 2, manual_topup: 0 }],
+      (c) => c.title,
+    ).join(" "),
+  },
+];
+const lyingCopy = RESIDUAL_COPY.filter(
+  ({ text }) =>
+    /counted nowhere|count as NOTHING in|not a sale, not revenue/i.test(text) ||
+    !/sales/i.test(text),
+);
+check(
+  `X13 ⭐⭐ no residual tooltip claims the strays are counted nowhere, and every one names Sales (${RESIDUAL_COPY.length} surfaces)`,
+  lyingCopy.length === 0,
+  lyingCopy.map((c) => c.where).join(", "),
+);
+check(
+  "X13b ⭐ …and the detector really fires on the sentence that was there before (positive control)",
+  (() => {
+    const old =
+      "12 conversion(s) on this stage matched no event-type mapping and count as NOTHING here — not a sale, not revenue, not in any segment above.";
+    return /counted nowhere|count as NOTHING in|not a sale, not revenue/i.test(old);
+  })(),
 );
 check(
   "X6 ⭐ no renderer of per-event figures is exported WITHOUT its residual — the stage line and the tiles are the only two, and neither half is reachable alone",
@@ -388,10 +501,19 @@ check(
 // type — carries nothing at all in these rows. A column set discovered from the
 // data instead of the registry loses it, which is Y2.
 const COUNT_ROWS: EventCountRow[] = [
-  { events: { signup: 12 } },
-  { events: { signup: 8 }, unmapped: 3 },
+  { events: { signup: 12 }, unmapped: 0, manual_topup: 0 },
+  { events: { signup: 8 }, unmapped: 3, manual_topup: 0 },
 ];
-const COUNT_ROWS_CLEAN: EventCountRow[] = [{ events: { signup: 12 } }, { events: { signup: 8 } }];
+const COUNT_ROWS_CLEAN: EventCountRow[] = [
+  { events: { signup: 12 }, unmapped: 0, manual_topup: 0 },
+  { events: { signup: 8 }, unmapped: 0, manual_topup: 0 },
+];
+// ⭐ ONE-SIDED THE OTHER WAY: a manual top-up and NO strays, so a bar about the
+// second residual cannot be satisfied by the first.
+const COUNT_ROWS_TOPUP: EventCountRow[] = [
+  { events: { signup: 12 }, unmapped: 0, manual_topup: 0 },
+  { events: { signup: 8 }, unmapped: 0, manual_topup: 5 },
+];
 const countCols = (spec: EventTypeSpec[], rows: EventCountRow[]): EventCountColumn[] =>
   eventCountColumns(spec, rows, (c) => c);
 
@@ -431,13 +553,13 @@ check(
 check(
   "Y4 ⭐ an ARCHIVED type gets a count column only while a row still carries a non-zero count for it — the same rule the report tables use, over bare counts",
   !countCols(SPEC_ARCHIVED, COUNT_ROWS).some((c) => c.id === "evt:legacy_cpa:count") &&
-    countCols(SPEC_ARCHIVED, [{ events: { legacy_cpa: 4 } }]).some(
-      (c) => c.id === "evt:legacy_cpa:count",
-    ) &&
+    countCols(SPEC_ARCHIVED, [
+      { events: { legacy_cpa: 4 }, unmapped: 0, manual_topup: 0 },
+    ]).some((c) => c.id === "evt:legacy_cpa:count") &&
     // …and an entry that is present but ZERO does not resurrect it (W21's rule).
-    !countCols(SPEC_ARCHIVED, [{ events: { legacy_cpa: 0 } }]).some(
-      (c) => c.id === "evt:legacy_cpa:count",
-    ),
+    !countCols(SPEC_ARCHIVED, [
+      { events: { legacy_cpa: 0 }, unmapped: 0, manual_topup: 0 },
+    ]).some((c) => c.id === "evt:legacy_cpa:count"),
 );
 check(
   "Y5 ⭐ neither half is separately exported — a surface cannot obtain the count columns without the residual, nor the residual on its own",
@@ -470,6 +592,87 @@ check(
   countCols([], COUNT_ROWS_CLEAN).length === 0,
 );
 
+// ── ⭐ THE SECOND RESIDUAL ON THE COUNT-ONLY GRAIN ──────────────────────────
+//
+// /creatives shows Sales = max(manual tally, tracker) while its event counts are
+// TRACKER ONLY, and manual sales exist in production today — so the strays alone
+// never explained that table's own Sales column.
+const withTopup = countCols(SPEC, COUNT_ROWS_TOPUP);
+check(
+  "Y8 ⭐ the manual top-up rides back in the SAME array as the counts, with no stray column beside it",
+  withTopup.filter((c) => c.kind === "manual_topup").length === 1 &&
+    withTopup.filter((c) => c.kind === "unmapped").length === 0 &&
+    withTopup.length === SPEC.length + 1,
+  JSON.stringify(withTopup.map((c) => `${c.kind}:${c.id}`)),
+);
+check(
+  "Y8b ⭐ …it reads its OWN field (5, not the 12 counts or the 0 strays) and the stray column reads the stray",
+  (() => {
+    const topup = withTopup.find((c) => c.kind === "manual_topup");
+    if (topup === undefined) return false;
+    return (
+      eventCountValue(topup, COUNT_ROWS_TOPUP[1]) === 5 &&
+      eventCountValue(topup, COUNT_ROWS_TOPUP[0]) === 0 &&
+      // …and on the stray fixture the top-up column is absent while the stray
+      // column reads 3: neither residual can ever render the other's number.
+      eventCountValue(withStray.find((c) => c.kind === "unmapped")!, COUNT_ROWS[1]) === 3
+    );
+  })(),
+);
+check(
+  "Y8c ⭐ with BOTH residuals present the stray column stays LAST — the actionable one is where the eye ends",
+  (() => {
+    const both = countCols(SPEC, [
+      { events: { signup: 12 }, unmapped: 2, manual_topup: 6 },
+    ]);
+    return (
+      both.length === SPEC.length + 2 &&
+      both[both.length - 1].kind === "unmapped" &&
+      both[both.length - 2].kind === "manual_topup"
+    );
+  })(),
+  JSON.stringify(
+    countCols(SPEC, [{ events: { signup: 12 }, unmapped: 2, manual_topup: 6 }]).map((c) => c.kind),
+  ),
+);
+check(
+  "Y8d neither residual column exists when no row carries one, while the registry columns still do",
+  countCols(SPEC, COUNT_ROWS_CLEAN).every((c) => c.kind === "count") &&
+    countCols(SPEC, COUNT_ROWS_CLEAN).length === SPEC.length,
+);
+
+// ── ⭐ THE RESIDUAL FIELDS ARE REQUIRED, AND THE BAR IS ON THE TYPE ─────────
+//
+// This one cannot be a runtime assertion, because the hole was not a runtime
+// one. With `unmapped?: number`, a caller mapping its rows to `{ events }`
+// rendered the counts with NO residual column — the column is emitted only when
+// some row HAS one, so a row shape that cannot carry one suppresses it silently
+// — and it compiled clean, passed every bar above, and left X8-X12 green. tsc
+// cannot fail an optional field, so the DECLARATION is what gets asserted.
+//
+// Field by field, with controls on the matcher: a bar that scans for a whole
+// interface body breaks on a reformat and then reads as "still required".
+const viewSrc = flatSrc(VIEW_MODULE);
+const countRowBody = /export interface EventCountRow \{([^}]*)\}/.exec(viewSrc)?.[1] ?? "";
+const isRequired = (field: string, body: string) =>
+  new RegExp(`\\b${field}\\s*:`).test(body) && !new RegExp(`\\b${field}\\s*\\?`).test(body);
+check(
+  "Y9 ⭐ EventCountRow declares BOTH residuals, and neither is optional — the detachability was a TYPE hole",
+  countRowBody !== "" &&
+    isRequired("unmapped", countRowBody) &&
+    isRequired("manual_topup", countRowBody),
+  `body: ${countRowBody.trim()}`,
+);
+check(
+  "Y9b ⭐ …and the matcher really distinguishes the two forms (controls, both line endings)",
+  isRequired("unmapped", "events?: EventCountMap; unmapped: number;") &&
+    !isRequired("unmapped", "events?: EventCountMap; unmapped?: number;") &&
+    isRequired("unmapped", stripFlat("events?: EventCountMap;\r\n  unmapped: number;")) &&
+    !isRequired("unmapped", stripFlat("events?: EventCountMap;\r\n  unmapped?: number;")) &&
+    isRequired("unmapped", stripFlat("events?: EventCountMap;\n  unmapped: number;")) &&
+    !isRequired("unmapped", stripFlat("events?: EventCountMap;\n  unmapped?: number;")),
+);
+
 // ── ⭐ …AND THE CAMPAIGN PAGE MOUNTS THOSE, RATHER THAN ITS OWN COPY ─────────
 //
 // X6 makes an under-explaining surface unbuildable out of THIS module; this is
@@ -481,6 +684,21 @@ check(
   "X7 ⭐ the campaign page renders the breakdown through the shared components — it does not roll its own segments or its own badge",
   campaignPageSrc.includes("<StageEventBreakdown") && campaignPageSrc.includes("<EventTotalsTiles"),
   `StageEventBreakdown=${campaignPageSrc.includes("<StageEventBreakdown")} EventTotalsTiles=${campaignPageSrc.includes("<EventTotalsTiles")}`,
+);
+check(
+  // ⭐ …AND HANDS EACH ONE A SINGLE SOURCE OBJECT. The residual used to be a
+  // caller-assembled prop (`unmapped={u}` beside `events={e}`), so nothing but
+  // care stopped a cell explaining one stage's counts with another's stray
+  // count. The props now travel together, and the page may not pass either
+  // separately — tsc enforces the shape, this pins the CALL SITES so a future
+  // `unmapped={…}` prop on a NEW component here is noticed too.
+  "X7b ⭐ …and it passes each of them ONE source object, never a loose residual prop",
+  campaignPageSrc.includes("<StageEventBreakdown types={shownEventTypes} source={") &&
+    campaignPageSrc.includes("<EventTotalsTiles types={shownEventTypes} source={") &&
+    !campaignPageSrc.includes("unmapped={"),
+  campaignPageSrc.includes("unmapped={")
+    ? "a loose unmapped={…} prop is back on the page"
+    : "one of the two mounts does not pass source={…}",
 );
 
 // ── ⭐ …AND NEITHER CAN A SURFACE NOBODY HAS WRITTEN YET ─────────────────────
@@ -499,14 +717,8 @@ check(
 //
 // Comments are stripped first, so a file that merely NAMES a builder in prose is
 // not dragged in, and one that names a residual component in prose cannot get
-// out. (The stripper is a local copy: importing the gate's would RUN the gate,
-// which exits the process.)
-const flatSrc = (p: string) =>
-  readFileSync(p, "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
-    .replace(/\s+/g, " ");
-
+// out. (`stripFlat`/`flatSrc` are defined at the top of this file: Y9 needs them
+// too, and a second copy of a stripper is a second thing to rot.)
 function walkSources(dir: string, out: string[] = []): string[] {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     if (e.name === "node_modules" || e.name.startsWith(".")) continue;
@@ -549,7 +761,6 @@ const RESIDUAL = [
   "<EventTotalsTiles",
   "eventCountColumns(",
 ];
-const VIEW_MODULE = "components/reports/event-columns-view.tsx";
 
 const scanned = ["app", "components"].flatMap((d) => walkSources(d));
 const srcOf = new Map(scanned.map((p) => [p, flatSrc(p)]));
@@ -619,8 +830,8 @@ const BUILDER_SAMPLES = [
 ];
 const RESIDUAL_SAMPLES = [
   "return <EventColumnsBar block={block} onShowEventsChange={f} />;",
-  "return <StageEventBreakdown types={t} events={e} unmapped={u} />;",
-  "return <EventTotalsTiles types={t} events={e} unmapped={u} renderTile={r} />;",
+  "return <StageEventBreakdown types={t} source={s} />;",
+  "return <EventTotalsTiles types={t} source={s} renderTile={r} />;",
   // The residual column rides back inside this call's own array.
   "const cols = eventCountColumns(eventTypes, rows, render);",
 ];

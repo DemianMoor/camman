@@ -196,6 +196,67 @@ check(
     touching.length >= 10,
   `touching (${touching.length}): ${touching.join(", ")}`,
 );
+// ⭐ …AND EVERY NEEDLE SEPARATELY. `touching` is built with `.some()`, so A
+// MULTI-NEEDLE SCAN BAR PASSES IF ANY ONE NEEDLE STILL MATCHES — and G1c above
+// is exactly that shape. Measured on this tree: BOTH files G1c names are found
+// by `unmapped_conversions` alone, so nothing in its file clause depends on the
+// registry-import needle at all; only its incidental `length >= 10` threshold
+// notices when that needle dies OUTRIGHT. Narrow it instead of killing it —
+// measured 2026-09-19 with the needle changed to "event-columns-view" — and
+// G1b and G1c both stay GREEN at 10 touching files while 8 producers
+// (report-snapshot, attribution's importers, performance-report, the four API
+// routes…) drop out of coverage unnoticed. The same systemic finding as T22 in
+// the telegram formatter and X11 in the view suite.
+//
+// So: one bar per needle, each named to a file that carries THAT NEEDLE AND NOT
+// THE OTHER — which is what makes the bar fail when its own needle rots. The
+// isolation is asserted, not assumed: a witness that grows the other needle
+// later fails here rather than quietly becoming a second copy of G1c.
+const witness: ReadonlyArray<{ needle: string; file: string }> = [
+  // Imports the registry; names no column.
+  { needle: "@/lib/reporting/event-columns", file: "lib/reporting/report-snapshot.ts" },
+  // Names the column; imports no registry. (It is also the projection WRITER —
+  // the module the whole breakdown comes from — so losing it would be the
+  // costliest gap of all.)
+  { needle: "unmapped_conversions", file: "lib/keitaro/stage-day-conversions.ts" },
+];
+for (const w of witness) {
+  const found = allSources.filter((p) => flat(p).includes(w.needle));
+  const otherNeedles = TOUCHES.filter((n) => n !== w.needle);
+  const isolated = otherNeedles.every((n) => !flat(w.file).includes(n));
+  check(
+    `G1c2 ⭐ the needle ${JSON.stringify(w.needle)} finds files ON ITS OWN (${found.length}), including ${w.file}, which NO other needle reaches`,
+    found.includes(w.file) && isolated && found.every((p) => touching.includes(p)),
+    !found.includes(w.file)
+      ? `witness not found by this needle; found (${found.length}): ${found.slice(0, 6).join(", ")}`
+      : !isolated
+        ? `witness is NOT isolated — it also carries: ${otherNeedles.filter((n) => flat(w.file).includes(n)).join(", ")}`
+        : `matches outside touching: ${found.filter((p) => !touching.includes(p)).join(", ")}`,
+  );
+}
+// ⭐ …AND IN BOTH LINE ENDINGS. This checkout mixes CRLF and LF per file
+// (core.autocrlf=true; .gitattributes pins only db/migrations/**), so a needle
+// that survived strip() in one of them and not the other would silently drop a
+// producer depending on which machine last touched the file — in the direction
+// that makes G1b pass. The samples are HAND-WRITTEN per needle rather than
+// generated from TOUCHES: a control built out of the thing it controls is a
+// tautology. Each sample puts the needle on its own line (the multi-line import
+// and the multi-line SQL both do) and each carries a comment mentioning it, so
+// the same sample proves the match AND proves comment-stripping in that ending.
+const asCrlf = (s: string) => s.replace(/\n/g, "\r\n");
+const inCode = (n: string) => `// ${n} in prose\nconst q = call(\n  "${n}"\n);\n`;
+const inProse = (n: string) => `// ${n} in prose\nconst a = 1;\n`;
+const endingBroken = witness
+  .flatMap((w) => [
+    { w, label: "LF", code: inCode(w.needle), prose: inProse(w.needle) },
+    { w, label: "CRLF", code: asCrlf(inCode(w.needle)), prose: asCrlf(inProse(w.needle)) },
+  ])
+  .filter((c) => !(strip(c.code).includes(c.w.needle) && !strip(c.prose).includes(c.w.needle)));
+check(
+  `G1c3 ⭐ every needle survives strip() in BOTH line endings, and is NOT matched from a comment in either (${witness.length} needles × 2)`,
+  endingBroken.length === 0,
+  endingBroken.map((c) => `${c.w.needle} @ ${c.label}`).join(" | "),
+);
 
 // ── G2: the gate proper ─────────────────────────────────────────────────────
 //

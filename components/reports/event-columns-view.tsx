@@ -213,8 +213,11 @@ function UnmappedBadge({ count }: { count: number }) {
     <span
       className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-500"
       title={
-        `${count.toLocaleString()} conversion(s) in this range matched no event-type mapping, so they count as ` +
-        `NOTHING in any column here — not a sale, not revenue, not in any event column. ` +
+        `${count.toLocaleString()} conversion(s) in this range matched no event-type mapping, so they are in ` +
+        `NONE of the event columns here. Sales and Revenue may already count them: those resolve event types ` +
+        `through a list that is not org-scoped, so a conversion carrying another organisation's event type is ` +
+        `inside both while sitting under no key here — which is exactly why the event columns can fall short ` +
+        `of Sales and Revenue. ` +
         `Fix: add a conversion_event_mappings row for that offer (or its network) and that tracker type; ` +
         `rows inside the 7-day live window heal on the next poll.`
       }
@@ -279,6 +282,26 @@ const eventCount = (events: EventMap, key: string): string =>
   fmtEventCell(events[key]?.n ?? 0, "count");
 
 /**
+ * ⭐ THE BREAKDOWN AND ITS RESIDUALS, AS ONE OBJECT — the campaign page's
+ * counterpart to the `totals` object eventColumnBlock() reads.
+ *
+ * Task 6 took `events`, `unmapped` and the tally as SEPARATE props, so the
+ * numbers explaining a line could be assembled by the caller from anywhere —
+ * `unmapped={0}` beside a stage carrying twelve strays compiled fine. The report
+ * tables fixed the same hole by deriving the bar from the very `totals` the
+ * columns were built from; this is that rule at the stage grain. One object, one
+ * source, and every field REQUIRED: a caller that has counts has both residuals
+ * too, or it does not typecheck.
+ */
+export interface EventBreakdownSource {
+  events: EventMap;
+  /** Conversions the ORG-SCOPED registry join could not place. See StageEventBreakdown. */
+  unmapped: number;
+  /** The part of Sales the operator's manual tally contributed (manualSalesTopup). */
+  manual_topup: number;
+}
+
+/**
  * ⭐ THE STAGES TABLE'S BREAKDOWN AND ITS RESIDUAL, IN ONE COMPONENT — the
  * campaign page's counterpart to EventColumnsBar, and private for the same
  * reason.
@@ -286,52 +309,68 @@ const eventCount = (events: EventMap, key: string): string =>
  * The campaign page's Results cell is one dense `·`-joined line, so the split
  * cannot be a column set and the badge cannot sit in a filter bar. What CAN be
  * kept is the property that matters: there is no exported way to render the
- * per-event segments that does not also render the unclassified count. A stage's
- * `sales` counts a conversion whose event type belongs to another organisation
- * while the org-scoped per-event map places it under NO key, so
+ * per-event segments that does not also render BOTH residuals. A stage's `sales`
+ * counts a conversion whose event type belongs to another organisation while the
+ * org-scoped per-event map places it under NO key, and it is a max() over the
+ * operator's manual tally which the tracker-only segments cannot see, so
  *
  *     sales = Σ over is_purchase types of events[t].n  +  manual top-ups  +  strays
  *
  * and a cell that reads "Purchases: 2 · Sales: 5" with nothing else on the line
- * silently under-explains itself. The marker lands immediately after the
- * segments it qualifies — beside the numbers it is about, not at the end of a
+ * silently under-explains itself. Both markers land immediately after the
+ * segments they qualify — beside the numbers they are about, not at the end of a
  * line the eye has already left.
  *
  * Every segment ends with its own `· ` separator, so the caller splices this
- * between two existing segments and an EMPTY registry changes the line by
- * exactly nothing.
+ * between two existing segments and an EMPTY registry with no residuals changes
+ * the line by exactly nothing.
  *
  * `types` is the registry (filtered by visibleEventTypes for the whole table, so
  * every row carries the same segments in the same order) — NEVER the keys found
  * in `events`. A configured type with no conversions reads 0 here; that is the
  * whole point of generating from the registry.
+ *
+ * ⭐ ONE `source`, NOT THREE NUMBERS — see EventBreakdownSource.
  */
 export function StageEventBreakdown({
   types,
-  events,
-  unmapped,
+  source,
 }: {
   types: readonly EventTypeSpec[];
-  events: EventMap;
-  unmapped: number;
+  source: EventBreakdownSource;
 }) {
   return (
     <>
       {types.map((t) => (
         <span key={t.key}>
-          {pluralizeLabel(t.label)}: {eventCount(events, t.key)} ·{" "}
+          {pluralizeLabel(t.label)}: {eventCount(source.events, t.key)} ·{" "}
         </span>
       ))}
-      {unmapped > 0 ? (
+      {source.manual_topup > 0 ? (
+        <span
+          className="text-muted-foreground"
+          title={
+            `${source.manual_topup.toLocaleString()} of this stage's Sales came from the operator's manual ` +
+            `tally rather than the tracker. Sales is max(manual tally, tracker conversions) and the segments ` +
+            `above count TRACKER events only, so this is the part of Sales no segment can show.`
+          }
+        >
+          Manual: +{source.manual_topup.toLocaleString()} ·{" "}
+        </span>
+      ) : null}
+      {source.unmapped > 0 ? (
         <span
           className="text-amber-700 dark:text-amber-500"
           title={
-            `${unmapped.toLocaleString()} conversion(s) on this stage matched no event-type mapping and ` +
-            `count as NOTHING here — not a sale, not revenue, not in any segment above. ` +
+            `${source.unmapped.toLocaleString()} conversion(s) on this stage matched no event-type mapping, ` +
+            `so they are in none of the segments above. Sales and Revenue may already count them: those ` +
+            `resolve event types through a list that is not org-scoped, so a stray carrying another ` +
+            `organisation's event type is inside them while sitting under no key here — which is why the ` +
+            `segments can fall short of Sales. ` +
             `Fix: add a conversion_event_mappings row for that offer (or its network) and that tracker type.`
           }
         >
-          ⚠ {unmapped.toLocaleString()} unmapped ·{" "}
+          ⚠ {source.unmapped.toLocaleString()} unmapped ·{" "}
         </span>
       ) : null}
     </>
@@ -348,49 +387,77 @@ export function StageEventBreakdown({
 // one is a `·`-joined line, the other a tile grid, and neither is a column set.
 //
 // What carries over is the RULE, not the markup: there is no exported way to
-// obtain the per-event count columns that does not also hand back the residual.
-// A creative's `sales` counts a conversion whose event type belongs to another
-// organisation while the org-scoped map places it under NO key, so
+// obtain the per-event count columns that does not also hand back BOTH
+// residuals. A creative's `sales` counts a conversion whose event type belongs
+// to another organisation while the org-scoped map places it under NO key, and
+// it is a max() over the operator's manual tally that the tracker-only counts
+// cannot see, so
 //
 //     sales = Σ over is_purchase types of events[t]  +  manual top-ups + strays
 //
 // and a row reading "Registrations 7 · Purchases 1" beside a Sales column of 5
 // under-explains itself exactly as a report table would.
 
-/** One generated column on a count-only surface: a registry type, or the residual. */
+/** One generated column on a count-only surface: a registry type, or a residual. */
 export interface EventCountColumn {
-  /** `evt:<key>:count` for a type, `evt:unmapped` for the residual. Stable. */
+  /** `evt:<key>:count` for a type, `evt:unmapped` / `evt:manual_topup` for a residual. Stable. */
   id: string;
   header: string;
-  kind: "count" | "unmapped";
-  /** The registry key a "count" column reads. EMPTY for the residual. */
+  kind: "count" | "unmapped" | "manual_topup";
+  /** The registry key a "count" column reads. EMPTY for a residual. */
   eventKey: string;
   /** Cell tooltip — the whole explanation, since there is no room for prose. */
   title: string;
 }
 
-/** What a count-only surface's row has to offer: its counts, and its strays. */
+/**
+ * What a count-only surface's row has to offer: its counts, and BOTH residuals.
+ *
+ * ⭐ THE RESIDUALS ARE REQUIRED, AND THE TYPE IS THE ONLY THING ENFORCING IT.
+ * `unmapped?: number` made the residual detachable BY TYPE: a caller mapping its
+ * rows to `{ events }` rendered the counts with no residual column at all,
+ * compiled clean, and left every scan bar green — the residual column is emitted
+ * only when some row HAS one, so a row shape that cannot carry one silently
+ * suppresses it. Required fields make that caller a compile error instead.
+ */
 export interface EventCountRow {
   events?: EventCountMap;
-  unmapped?: number;
+  unmapped: number;
+  manual_topup: number;
 }
 
-const RESIDUAL_COLUMN: EventCountColumn = {
-  id: "evt:unmapped",
-  header: "Unmapped",
-  kind: "unmapped",
-  eventKey: "",
-  title:
-    "Conversions on this creative's stages in the same window that matched no " +
-    "event-type mapping. They count as NOTHING in the columns to the left — not " +
-    "a sale, not revenue, not in any event count — so the counts and Sales do " +
-    "not add up while this is non-zero. Fix: add a conversion_event_mappings row " +
-    "for that offer (or its network) and that tracker type.",
-};
+const RESIDUAL_COLUMNS: EventCountColumn[] = [
+  {
+    id: "evt:manual_topup",
+    header: "Manual",
+    kind: "manual_topup",
+    eventKey: "",
+    title:
+      "Sales on this creative's stages in the same window that came from the " +
+      "operator's manual tally rather than the tracker. A stage's Sales is " +
+      "max(manual tally, tracker conversions) and the event counts to the left " +
+      "are TRACKER ONLY, so this is the part of Sales no event count can explain.",
+  },
+  {
+    id: "evt:unmapped",
+    header: "Unmapped",
+    kind: "unmapped",
+    eventKey: "",
+    title:
+      "Conversions on this creative's stages in the same window that matched no " +
+      "event-type mapping, so they are in NONE of the event counts to the left. " +
+      "Sales may already count them: it resolves event types through a list that " +
+      "is not org-scoped, so a stray carrying another organisation's event type " +
+      "is inside Sales while sitting under no key here — which is why the counts " +
+      "can fall short of it. " +
+      "Fix: add a conversion_event_mappings row for that offer (or its network) " +
+      "and that tracker type.",
+  },
+];
 
 /**
- * ⭐ THE ONE WAY TO OBTAIN PER-EVENT COUNT COLUMNS, AND IT EMITS THE RESIDUAL
- * COLUMN IN THE SAME ARRAY.
+ * ⭐ THE ONE WAY TO OBTAIN PER-EVENT COUNT COLUMNS, AND IT EMITS BOTH RESIDUAL
+ * COLUMNS IN THE SAME ARRAY.
  *
  * `render` exists for the same reason EventTotalsTiles takes `renderTile`: the
  * caller keeps its own markup (a TanStack ColumnDef, here) while the
@@ -399,13 +466,15 @@ const RESIDUAL_COLUMN: EventCountColumn = {
  * residual, because it never sees two lists.
  *
  * `rows` are read ONLY to decide whether an archived type still has data on
- * screen and whether any row carries a stray — NEVER to discover which types
+ * screen and whether any row carries a residual — NEVER to discover which types
  * exist. An active type configured with zero conversions gets a column and reads
  * 0; that is the whole point of generating from the registry.
  *
- * The residual column appears only while some row on the page HAS one, the same
+ * Each residual column appears only while some row on the page HAS one, the same
  * rule UnmappedBadge renders by: a permanently-0 column is furniture, and
- * furniture is not read on the day it changes.
+ * furniture is not read on the day it changes. "Only while some row has one" is
+ * why EventCountRow's residual fields are REQUIRED rather than optional — a row
+ * shape that cannot carry one suppresses the column instead of showing 0.
  */
 export function eventCountColumns<TCol>(
   types: readonly EventTypeSpec[],
@@ -426,46 +495,73 @@ export function eventCountColumns<TCol>(
       `the same window as Checkout Rate, and classified by the event-type registry rather than ` +
       `by the tracker's own type name.`,
   }));
-  if (rows.some((r) => (r.unmapped ?? 0) > 0)) cols.push(RESIDUAL_COLUMN);
+  // Registry order, then the residuals in the order they explain the gap:
+  // the manual top-up (part of Sales, in no tracker count) and then the strays.
+  // The stray column stays LAST — it is the one the operator can act on.
+  for (const c of RESIDUAL_COLUMNS) {
+    if (rows.some((r) => residualOf(c, r) > 0)) cols.push(c);
+  }
   return cols.map(render);
 }
 
+/** A residual column's own field on one row. The counts are read separately. */
+const residualOf = (col: EventCountColumn, row: EventCountRow): number =>
+  col.kind === "manual_topup" ? row.manual_topup : row.unmapped;
+
 /**
  * The number one generated cell shows. Missing key ⇒ 0 (the type is configured,
- * this creative simply has none), and the residual reads its own field — a
- * caller cannot accidentally render a count column with the stray count.
+ * this creative simply has none), and each residual reads its own field — a
+ * caller cannot accidentally render a count column with a residual, or one
+ * residual with the other's number.
  */
 export function eventCountValue(col: EventCountColumn, row: EventCountRow): number {
-  if (col.kind === "unmapped") return row.unmapped ?? 0;
+  if (col.kind !== "count") return residualOf(col, row);
   return row.events?.[col.eventKey] ?? 0;
 }
 
 /**
- * ⭐ THE CAMPAIGN TOTALS ROW'S BREAKDOWN AND ITS RESIDUAL, IN ONE COMPONENT —
- * same rule, same reason as StageEventBreakdown.
+ * ⭐ THE CAMPAIGN TOTALS ROW'S BREAKDOWN AND ITS RESIDUALS, IN ONE COMPONENT —
+ * same rule, same reason, same single `source` as StageEventBreakdown.
  *
  * `renderTile` exists so the tiles keep the surrounding card's own markup
  * (TotalsMetric) instead of this module growing a second tile style: the
  * COMPOSITION is what is shared and pinned, not the pixels. A caller can style
- * its tiles however it likes and still cannot obtain them without the badge.
+ * its tiles however it likes and still cannot obtain them without the residuals.
+ *
+ * The manual top-up is a TILE rather than a badge: it is not a warning, it is a
+ * component of the Sales tile beside it. It renders only when non-zero, for the
+ * same reason the badge does — a permanent "Manual 0" is furniture.
  */
 export function EventTotalsTiles({
   types,
-  events,
-  unmapped,
+  source,
   renderTile,
 }: {
   types: readonly EventTypeSpec[];
-  events: EventMap;
-  unmapped: number;
-  renderTile: (tile: { key: string; label: string; value: string }) => ReactNode;
+  source: EventBreakdownSource;
+  renderTile: (tile: { key: string; label: string; value: string; title?: string }) => ReactNode;
 }) {
   return (
     <>
       {types.map((t) =>
-        renderTile({ key: t.key, label: pluralizeLabel(t.label), value: eventCount(events, t.key) }),
+        renderTile({
+          key: t.key,
+          label: pluralizeLabel(t.label),
+          value: eventCount(source.events, t.key),
+        }),
       )}
-      <UnmappedBadge count={unmapped} />
+      {source.manual_topup > 0
+        ? renderTile({
+            key: "__manual_topup__",
+            label: "Manual tally",
+            value: fmtEventCell(source.manual_topup, "count"),
+            title:
+              "The part of Sales that came from the operator's manual tally rather than the tracker. " +
+              "Sales is max(manual tally, tracker conversions) per stage and the event tiles count " +
+              "TRACKER events only, so this is the part of Sales no tile can show.",
+          })
+        : null}
+      <UnmappedBadge count={source.unmapped} />
     </>
   );
 }

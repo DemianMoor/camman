@@ -152,7 +152,7 @@ export async function GET(req: NextRequest) {
            lifetime_payout numeric, lifetime_clean int, lifetime_sales int,
            ctr_sent_7d int, ctr_clicks_7d int, ctr_sent_30d int, ctr_clicks_30d int,
            ctr_sent_lifetime int, ctr_clicks_lifetime int,
-           events jsonb, unmapped int)
+           events jsonb, unmapped int, manual_topup int)
   ) AS metrics_agg`;
 
   const cleanExpr = drizzleSql`(coalesce(metrics_agg.manual_clean, 0) + coalesce(metrics_agg.tracked_clean, 0))`;
@@ -265,11 +265,13 @@ export async function GET(req: NextRequest) {
           m_ctr_clicks_30d: drizzleSql<number>`metrics_agg.ctr_clicks_30d`.as("m_ctr_clicks_30d"),
           m_ctr_sent_lifetime: drizzleSql<number>`metrics_agg.ctr_sent_lifetime`.as("m_ctr_sent_lifetime"),
           m_ctr_clicks_lifetime: drizzleSql<number>`metrics_agg.ctr_clicks_lifetime`.as("m_ctr_clicks_lifetime"),
-          // The 30-day conversions split per event_types.key, and the residual
-          // they do not explain. Selected TOGETHER and emitted together — a
-          // breakdown without its stray count under-explains Sales.
+          // The 30-day conversions split per event_types.key, and the TWO
+          // residuals they do not explain. Selected TOGETHER and emitted
+          // together — a breakdown without its stray count and its manual
+          // top-up under-explains Sales, which is max(manual, tracker).
           m_events: drizzleSql<Record<string, number> | null>`metrics_agg.events`.as("m_events"),
           m_unmapped: drizzleSql<number>`metrics_agg.unmapped`.as("m_unmapped"),
+          m_manual_topup: drizzleSql<number>`metrics_agg.manual_topup`.as("m_manual_topup"),
         })
         .from(creatives)
         // LEFT JOIN so a creative with no activity in the window still returns
@@ -410,6 +412,7 @@ export async function GET(req: NextRequest) {
             m_ctr_clicks_lifetime: number | null;
             m_events: Record<string, number> | null;
             m_unmapped: number | null;
+            m_manual_topup: number | null;
           };
           const delivered = Number(row.m_delivered ?? 0);
           const checkouts = Number(row.m_checkouts ?? 0);
@@ -461,11 +464,14 @@ export async function GET(req: NextRequest) {
                   ? Number(row.m_lifetime_payout ?? 0) / Number(row.m_lifetime_clean ?? 0)
                   : null,
               // COUNTS ONLY, over the same 30 days as checkout_rate above, and
-              // the residual beside them. A creative with no row in the metrics
-              // join reads {} / 0 — the LEFT JOIN's NULL, not a measured zero
-              // of some other window.
+              // BOTH residuals beside them — the strays the registry could not
+              // place, and the manual tally that `sales` (a max, not a sum)
+              // carries over the tracker. A creative with no row in the metrics
+              // join reads {} / 0 / 0 — the LEFT JOIN's NULL, not a measured
+              // zero of some other window.
               events: row.m_events ?? {},
               unmapped: Number(row.m_unmapped ?? 0),
+              manual_topup: Number(row.m_manual_topup ?? 0),
             },
           };
         })()

@@ -11,7 +11,7 @@ import {
   etDayRange,
   type ReportMetrics,
 } from "@/lib/reporting/report-snapshot";
-import { loadEventTypes } from "@/lib/reporting/event-columns";
+import { loadEventTypes, pluralizeLabel } from "@/lib/reporting/event-columns";
 import { dailyMessage } from "@/lib/reporting/telegram-report-format";
 
 // THE REAL-READER PROOF for the scheduled Telegram report's numbers (Phase 5
@@ -58,6 +58,11 @@ const DAY_ANCHOR = new Date("2026-05-12T16:00:00Z");
 // carries cannot perturb the clean reconciliation on DAY.
 const DAY2 = "2026-05-13";
 const DAY2_ANCHOR = new Date("2026-05-13T16:00:00Z");
+// A THIRD closed day, for the malformed-VALUE fixture (T19b). Kept apart for the
+// same reason DAY2 is: the row it carries has a real purchase count on it, and
+// on DAY or DAY2 that count would move T13x's or T20's exact deltas.
+const DAY3 = "2026-05-14";
+const DAY3_ANCHOR = new Date("2026-05-14T16:00:00Z");
 // Telegram's OWN sendMessage limit — the thing MAX_MESSAGE_CHARS keeps clear of.
 // Spelled here (not imported) so this bar still fails if MAX_MESSAGE_CHARS is
 // ever raised above it: a cap checked against itself checks nothing.
@@ -104,6 +109,7 @@ async function main() {
     // unrelated run cannot make a bar pass or fail on its own.
     const base = await computeReportMetrics(etDayRange(campaignDayBoundsUtc(DAY_ANCHOR)));
     const base2 = await computeReportMetrics(etDayRange(campaignDayBoundsUtc(DAY2_ANCHOR)));
+    const base3 = await computeReportMetrics(etDayRange(campaignDayBoundsUtc(DAY3_ANCHOR)));
     console.log(
       `baseline ${DAY}: sales=${base.sales} revenue=${base.revenue} unmapped=${base.unmapped} ` +
         `topup=${base.manualTopup} eventKeys=${Object.keys(base.events).length}`,
@@ -158,6 +164,7 @@ async function main() {
     const stageB = await stage(2, DAY);
     const stageBad = await stage(3, DAY);
     const stageStray = await stage(4, DAY2);
+    const stageBadValue = await stage(5, DAY3);
 
     const ksr = async (
       stageId: number,
@@ -223,6 +230,26 @@ async function main() {
       1,
     );
 
+    // DAY3 — ⭐ A MALFORMED VALUE INSIDE A WELL-FORMED OBJECT. The row above
+    // (events = '5') is caught by jsonb_typeof(events) = 'object'; THIS one is
+    // an object, so that guard passes it straight to
+    // `(e.value ->> 'n')::numeric`, which raises 22P02 ("invalid input syntax
+    // for type numeric") — statement-wide, exactly like the 22023, and with the
+    // same consequence: computeReportMetrics throws, the cron returns 500, and
+    // the report fails EVERY HOUR until a human edits the row. No CHECK
+    // constraint stops the value being written. MIXED on purpose: a real
+    // purchase count and real money sit on the same row as the rotten fields,
+    // so "it survived by returning nothing" fails.
+    await ksr(
+      stageBadValue, 5, DAY3, 2, "40.0000",
+      JSON.stringify({
+        purchase: { n: 2, pending_n: 0, revenue: 40.0, pending_revenue: 0 },
+        word_count: { n: "abc", pending_n: 0, revenue: "xyz", pending_revenue: 0 },
+        bare_string_entry: "not an object",
+      }),
+      0,
+    );
+
     // ── the bars ────────────────────────────────────────────────────────────
     const purchaseKeys = await purchaseKeysOf();
     // ⭐ A THROW IS TURNED INTO ZEROS, DELIBERATELY. The failure T19 exists to
@@ -245,6 +272,7 @@ async function main() {
     };
     const m = await safeMetrics(DAY_ANCHOR);
     const m2 = await safeMetrics(DAY2_ANCHOR);
+    const m3 = await safeMetrics(DAY3_ANCHOR);
 
     const dPurchaseN = sumPurchaseN(m, purchaseKeys) - sumPurchaseN(base, purchaseKeys);
     const dRev = sumRev(m) - sumRev(base);
@@ -299,6 +327,27 @@ async function main() {
         : `THREW: ${fatal}`,
     );
     check(
+      "T19b ⭐⭐ a malformed VALUE does not abort the statement either — the numeric cast raises 22P02 statement-wide, which the top-level jsonb_typeof guard does NOT catch",
+      fatal === "" &&
+        sumPurchaseN(m3, purchaseKeys) - sumPurchaseN(base3, purchaseKeys) === 2 &&
+        // …and the day's other two bars still hold with the bad row present:
+        // the good half of the half-rotten row is counted in full.
+        Math.abs(sumRev(m3) - sumRev(base3) - 40) < 1e-6,
+      fatal === ""
+        ? `Δpurchase=${sumPurchaseN(m3, purchaseKeys) - sumPurchaseN(base3, purchaseKeys)} Δrev=${sumRev(m3) - sumRev(base3)}`
+        : `THREW: ${fatal}`,
+    );
+    check(
+      "T19c ⭐ …and the rotten entries read 0 rather than taking their row with them — a field is skipped, never the row",
+      (m3.events.word_count?.n ?? -1) === 0 &&
+        (m3.events.word_count?.revenue ?? -1) === 0 &&
+        (m3.events.bare_string_entry?.n ?? -1) === 0,
+      JSON.stringify({
+        word_count: m3.events.word_count,
+        bare_string_entry: m3.events.bare_string_entry,
+      }),
+    );
+    check(
       "T20 ⭐ the RESIDUAL is real: on a day with a stray, Σ(is_purchase) n + topup is SHORT of sales by exactly the unmapped count",
       m2.sales - (sumPurchaseN(m2, purchaseKeys) + m2.manualTopup) === 1 &&
         m2.unmapped - base2.unmapped === 1,
@@ -321,15 +370,23 @@ async function main() {
         // That is the cross-org merge working; a bar that names a label is
         // asserting one org's configuration.
         const shown = m2.eventTypes.slice(0, 6);
+        // …and PLURALISED with the same generator the report tables use, so a
+        // label rendered one way on screen cannot be rendered another way here.
         const everyTypeHasALine = shown.every((t) =>
-          lines.some((l) => l.startsWith(`${escapeHtml(t.label.replace(/\s+/g, " ").trim() || t.key)}: `)),
+          lines.some((l) =>
+            l.startsWith(
+              `${escapeHtml(pluralizeLabel(t.label.replace(/\s+/g, " ").trim() || t.key))}: `,
+            ),
+          ),
         );
         const someTypeReadsZero = shown.some((t) => (m2.events[t.key]?.n ?? 0) === 0);
         return (
           shown.length > 0 &&
           everyTypeHasALine &&
           someTypeReadsZero &&
-          msg.includes(`⚠ ${m2.unmapped} unmapped — counted nowhere`)
+          msg.includes(
+            `⚠ ${m2.unmapped} unmapped — in no line above, but Sales/Revenue may already count them`,
+          )
         );
       })(),
       `types=${m2.eventTypes.map((t) => t.label).join(", ")}`,
@@ -419,7 +476,12 @@ async function main() {
         tags.length === 2 &&
         tags[0] === "<b>" &&
         tags[1] === "</b>" &&
-        hostileMsg.includes("&lt;b&gt;Buy&lt;/b&gt; &amp; &lt;win&gt; 💰: 0") &&
+        // Pluralised BEFORE escaping — the "s" lands on the label, never inside
+        // an entity (a "&amps;" would be the malformed markup this bar exists
+        // to catch). The label ends in an emoji, so the dumb pluraliser appends
+        // to it; that is the generator being total, not a special case.
+        hostileMsg.includes("&lt;b&gt;Buy&lt;/b&gt; &amp; &lt;win&gt; 💰s: 0") &&
+        !hostileMsg.includes("&amps;") &&
         hostileMsg.length <= TELEGRAM_HARD_LIMIT,
       `tags=${JSON.stringify(tags)} len=${hostileMsg.length}`,
     );

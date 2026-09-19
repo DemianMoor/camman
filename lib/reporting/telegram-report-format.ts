@@ -6,6 +6,7 @@
 // (scripts/test-telegram-report-*.ts) import from one place.
 
 import { escapeHtml } from "@/lib/alerts/telegram";
+import { pluralizeLabel } from "@/lib/reporting/event-columns";
 import type { ReportMetrics } from "@/lib/reporting/report-snapshot";
 
 // ── formatting helpers ──────────────────────────────────────────────────────
@@ -48,20 +49,27 @@ export const MAX_MESSAGE_CHARS = 3500;
 /**
  * A label, made safe for ONE line of an HTML-parsed message.
  *
- * Two things, in this order, and the order matters: collapse every whitespace
- * run (including newlines) to a single space, THEN escape. A label is free text,
- * so it can contain a newline — and this medium is line-oriented, so a newline
- * inside a label would silently become an extra "line" of the report, able to
- * read like one of the money lines below it. Collapsing first makes "one line
- * per event type" true rather than nearly true; escaping second is what keeps
- * Telegram parsing it at all.
+ * THREE things, in this order, and the order matters at every step:
+ *
+ *  1. COLLAPSE every whitespace run (including newlines) to a single space. A
+ *     label is free text, so it can contain a newline — and this medium is
+ *     line-oriented, so a newline inside a label would silently become an extra
+ *     "line" of the report, able to read like one of the money lines below it.
+ *  2. PLURALISE, with the same pluralizeLabel() the report tables and the
+ *     campaign tiles use. The line is a COUNT of events, so it is headed the
+ *     same way the count columns are — "Registrations: 214", not
+ *     "Registration: 214" on Telegram and "Registrations" everywhere else. One
+ *     function, so the two cannot drift.
+ *  3. ESCAPE — and it MUST be last. escapeHtml turns a trailing "&" into
+ *     "&amp;"; appending the plural "s" AFTER that would produce "&amps;", a
+ *     malformed entity, which is a 400, which is permanent.
  *
  * An empty or whitespace-only label falls back to the key. `label` is
  * `text NOT NULL` with no CHECK, so "" is representable, and a line reading
  * ": 0" names nothing.
  */
 const eventLabel = (t: { key: string; label: string }): string =>
-  escapeHtml(t.label.replace(/\s+/g, " ").trim() || t.key);
+  escapeHtml(pluralizeLabel(t.label.replace(/\s+/g, " ").trim() || t.key));
 
 const moreLine = (n: number): string =>
   `+${n} more event type${n === 1 ? "" : "s"}`;
@@ -90,12 +98,26 @@ function eventBlock(m: ReportMetrics): {
   // They are NOT in `typed`: they are protected from truncation exactly like the
   // money lines, because a split that survives while its residual is dropped is
   // worse than no split at all.
+  //
+  // ⚠️ THE UNMAPPED LINE USED TO SAY "counted nowhere", AND THAT WAS FALSE.
+  // `sales` and `revenue` resolve is_purchase / counts_revenue through
+  // NON-org-scoped id lists (lib/sale-attribution.ts) while the per-event map
+  // comes from an org-scoped join, so a conversion carrying another
+  // organisation's event type is ALREADY INSIDE the Sales and Revenue lines of
+  // this very message while sitting under no key — that is precisely why the
+  // lines above fall short. Bar T20 seeds exactly that case and measures it
+  // (sales=3, Σ purchases=2, topup=0, unmapped=1). The rest of the bucket (a
+  // conversion with no mapping at all, or no status) really is counted nowhere,
+  // and nothing at this grain can tell the two apart — hence "may", which is the
+  // honest word and not a hedge.
   const residual: string[] = [];
   if (m.manualTopup > 0) {
     residual.push(`Manual tally: +${int(m.manualTopup)} (not in the lines above)`);
   }
   if (m.unmapped > 0) {
-    residual.push(`⚠ ${int(m.unmapped)} unmapped — counted nowhere`);
+    residual.push(
+      `⚠ ${int(m.unmapped)} unmapped — in no line above, but Sales/Revenue may already count them`,
+    );
   }
   return { typed, dropped: m.eventTypes.length - shown.length, residual };
 }
@@ -207,9 +229,16 @@ export function capped(text: string): string {
  * every length guarantee made here: the cap would have been enforced against a
  * message that is not the one Telegram receives. Passing it in keeps
  * "the assembled, post-escape message is ≤ MAX_MESSAGE_CHARS" true of what is
- * actually SENT. Callers pass ready-to-send text — today's only caller passes
- * three integers — and lines land in the protected tail, so they are never
- * dropped.
+ * actually SENT. Lines land in the protected tail, so they are never dropped.
+ *
+ * ⭐ AND THEY ARE ESCAPED HERE. Callers pass PLAIN TEXT, never markup: today's
+ * only caller passes three integers, but "today's caller is safe" is the same
+ * reasoning that made every other unescaped interpolation in this file a
+ * one-line change away from a permanent 400 (see T22). This was the one way
+ * into the assembled message that did not go through escapeHtml; it does now, so
+ * the choke point has no hole to remember. A caller that wants bold text cannot
+ * have it through this door — which is the correct trade for a report whose
+ * failure mode is a 500 every hour. Bars T25/T25b.
  */
 export function dailyMessage(
   dayLabel: string,
@@ -228,7 +257,7 @@ export function dailyMessage(
       `ROI: ${roi(m.roiPct)}`,
       `Net Profit: ${signedMoney(m.revenue - m.spend)}`,
       optOutLine(m),
-      ...extraLines,
+      ...extraLines.map((l) => escapeHtml(l)),
     ],
   );
 }

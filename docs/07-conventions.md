@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-19_
 
 ## A script that writes to a database must refuse production, by import (2026-09-18)
 
@@ -22,6 +22,10 @@ _Last updated: 2026-09-18_
 - **Enrolment is the default.** The bar's population is derived from the source tree: any script that reaches a database *and* carries a write signal (an ORM `.insert/.update/.delete`, a raw-SQL write verb, or `.unsafe(`) must import the helper. A new fixture script is covered the moment it writes, with nobody editing a list.
 - **Opting out is a review decision with a reason.** Prod-facing tooling — the `apply-*` index builders, the one-shot `backfill-*` repairs, the conversion backfill/verify, the deliberate `verify-*-production` proofs, and read-only diagnostics — is named in `EXCLUSIONS` in the bar **with a one-line reason**. An entry naming a file that no longer exists fails the bar rather than rotting.
 - **`check:guards` is deliberately NOT in `vercel-build`.** It is a source scan; a false positive would block a production deploy.
+- ⭐ **The scan is a list of NAMED needles, and each one is proved individually (2026-09-19).** `touchesDb`/`writesDb` used to be single OR'd regexes, and **a multi-needle scan passes if any one needle still matches**. Deleting an alternative usually trips some incidental count; **NARROWING one does not.** Measured: dropping `.unsafe(` took the write-capable set 182 → 176, `update` → `upsert` took it to 178, dropping `from "postgres"` took the guarded population 141 → 137 and dropping `./_env-preload` took it to 140 — **all four still printed "All checks passed."** Each alternative is now a row in `DB_REACH` / `WRITE_SIGNAL` carrying a **hand-written sample** of the code it exists to find, and the bar asserts per needle that it still matches that sample and that **no sibling needle matches it** (isolation is what makes a dead needle change the verdict instead of hiding behind a neighbour), in **both LF and CRLF** — this checkout mixes them.
+  - **Write the sample out by hand; never generate it from the needle.** A control built out of the thing it controls is a tautology: narrow the needle and the fixture narrows with it, so the bar can never go red. Measured on five needles, a needle-derived fixture caught **0/5** narrowings where the hand-written sample caught **5/5**.
+  - **Narrowing is caught by the sample; DELETION is caught by the roster.** The per-needle bars iterate the surviving list, so removing a row outright leaves them green. The two roster assertions spell every id out, making a dropped or renamed needle a two-place edit a reviewer sees.
+  - **Two second-order bars watch the controls themselves**: an exclusion that stops carrying a write signal, or stops reaching a database at all, is either a stale entry or the tell of a dead needle. 16 exclusions reach a database *only* through the `postgres` needle, which is where that needle's death lands. `viaLibrary: true` marks the entries that deliberately have no write token of their own.
 
 ⚠️ **The known hole: a script whose writes happen only inside an app library it calls** (`ingestKeitaroConversions(db, …)`, say) carries no write token of its own and the scan cannot see it. Those are handled by being named in `EXCLUSIONS` anyway, but if you add one, **add the guard import yourself**. Transitive import analysis would close it and was measured: it flags ~39 more scripts, nearly all read-only diagnostics that merely import a write-capable module, which trades a crisp signal for a noisy one.
 

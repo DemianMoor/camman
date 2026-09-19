@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -8,9 +8,9 @@ import {
   EventTotalsTiles,
   StageEventBreakdown,
   eventCellValue,
-  eventColsFor,
+  eventColumnBlock,
   fmtEventCell,
-  tierBColumnCount,
+  sortColumnOrFallback,
 } from "@/components/reports/event-columns-view";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 
@@ -56,6 +56,16 @@ const tally = (n: number, pending_n = 0, revenue = 0, pending_revenue = 0) => ({
   revenue,
   pending_revenue,
 });
+
+// The column set a response yields. eventColumnBlock() is the ONLY way to get
+// it — the builder behind this is module-private precisely so a surface cannot
+// take the columns and leave the bar (X8–X11).
+const eventColsFor = (
+  spec: readonly EventTypeSpec[],
+  rows: ReadonlyArray<{ events?: EventMap }>,
+  totals: { events?: EventMap; unmapped?: number } | null,
+  showEvents: boolean,
+) => eventColumnBlock(spec, rows, totals, showEvents).columns;
 
 const SPEC: EventTypeSpec[] = [
   T("signup", "Signup", { display_order: 20, is_retarget_signal: true }),
@@ -118,12 +128,22 @@ check("W11 ⭐ a fractional count (By Group's split shares) shows up to 2 decima
 // TOGGLE. If it were computed from the VISIBLE set it would read 0 while the
 // toggle is on, EventBreakdownToggle's `count === 0` early return would unmount
 // the control, and tier B could be switched on and never off.
-const governedOff = tierBColumnCount(SPEC, ROWS, TOTALS);
-const visibleOff = eventColsFor(SPEC, ROWS, TOTALS, false);
-const visibleOn = eventColsFor(SPEC, ROWS, TOTALS, true);
-const governedOn = tierBColumnCount(SPEC, ROWS, TOTALS);
+//
+// ⭐ THE TWO SIDES ARE BUILT FROM DIFFERENT TOGGLE STATES, and that is the whole
+// bar. An earlier version compared `tierBColumnCount(…)` with a second call to
+// the same function on the same arguments — a tautology that no implementation
+// could fail. eventColumnBlock() DOES see `showEvents` (it has to: the columns
+// depend on it), so the count's independence is now a property of the code
+// rather than of the signature, and this is what holds it: blockOff and blockOn
+// differ in exactly that argument.
+const blockOff = eventColumnBlock(SPEC, ROWS, TOTALS, false);
+const blockOn = eventColumnBlock(SPEC, ROWS, TOTALS, true);
+const governedOff = blockOff.bar.tierBCount;
+const governedOn = blockOn.bar.tierBCount;
+const visibleOff = blockOff.columns;
+const visibleOn = blockOn.columns;
 check(
-  `W12 ⭐ the governed count is the same with the toggle on and off, and is non-zero (${governedOff})`,
+  `W12 ⭐ the governed count is the same with the toggle ON and OFF, and is non-zero (${governedOff})`,
   governedOff === governedOn &&
     governedOff === visibleOn.filter((c) => c.tier === "b").length &&
     governedOff > 0 &&
@@ -139,20 +159,22 @@ check(
 // SCALAR and placed under no key — it surfaces only as `unmapped`. A screen that
 // shows the breakdown without the stray count silently under-explains its own
 // total. These bars render the real component and read the real markup.
+// ⭐ NOTE WHAT IS *NOT* PASSED: no unmapped count. The bar takes the whole
+// block, and the block read the residual off the same `totals` it built the
+// columns from — so a caller cannot show a breakdown of one response beside the
+// stray count of another, or of none.
 const bar = (showEvents: boolean, unmapped: number) =>
   renderToStaticMarkup(
     createElement(EventColumnsBar, {
-      showEvents,
+      block: eventColumnBlock(SPEC, ROWS, { ...TOTALS, unmapped }, showEvents),
       onShowEventsChange: () => {},
-      tierBCount: governedOff,
-      unmapped,
     }),
   );
 
 const barOff = bar(false, 7);
 const barOn = bar(true, 7);
 check(
-  "W13 ⭐ with the toggle OFF the breakdown is on screen AND the badge renders",
+  "W13 ⭐ with the toggle OFF the breakdown is on screen AND the badge renders the response's OWN stray count",
   visibleOff.length > 0 && barOff.includes("7 unmapped"),
   `cols=${visibleOff.length} markup=${barOff.slice(0, 200)}`,
 );
@@ -166,10 +188,13 @@ check(
   !bar(false, 0).includes("unmapped") && !bar(true, 0).includes("unmapped"),
 );
 check(
-  "W16 ⭐ the toggle and the badge are not separately exported, so no surface can mount one without the other",
+  "W16 ⭐ neither the toggle, the badge, NOR THE COLUMN BUILDER is separately exported — no surface can mount one without the other",
   typeof view.EventColumnsBar === "function" && // positive control: the name check works
+    typeof view.eventColumnBlock === "function" &&
     !("EventBreakdownToggle" in view) &&
-    !("UnmappedBadge" in view),
+    !("UnmappedBadge" in view) &&
+    !("eventColsFor" in view) &&
+    !("tierBColumnCount" in view),
   `exports: ${Object.keys(view).join(", ")}`,
 );
 
@@ -356,6 +381,148 @@ check(
   "X7 ⭐ the campaign page renders the breakdown through the shared components — it does not roll its own segments or its own badge",
   campaignPageSrc.includes("<StageEventBreakdown") && campaignPageSrc.includes("<EventTotalsTiles"),
   `StageEventBreakdown=${campaignPageSrc.includes("<StageEventBreakdown")} EventTotalsTiles=${campaignPageSrc.includes("<EventTotalsTiles")}`,
+);
+
+// ── ⭐ …AND NEITHER CAN A SURFACE NOBODY HAS WRITTEN YET ─────────────────────
+//
+// X7 pins the ONE campaign page by name, and W16/X6 make an under-explaining
+// surface unbuildable out of this module's exports. Both are lists: a NEW table
+// that builds the columns straight off lib/reporting/event-columns and renders
+// its own cells is in neither, and the no-hardcoded-keys gate passes it happily
+// (it reads a fixed FILES list, and a file it has never heard of is not scanned
+// at all — measured: a hand-rolled probe reddens X9 and leaves that gate 32/0).
+//
+// So the surfaces are DISCOVERED, not listed: every .ts/.tsx under app/ and
+// components/ that builds per-event columns must also mount one of the two
+// components that carry the residual. A new one is required the moment it is
+// written, which is what "two-directional" buys over a list.
+//
+// Comments are stripped first, so a file that merely NAMES a builder in prose is
+// not dragged in, and one that names a residual component in prose cannot get
+// out. (The stripper is a local copy: importing the gate's would RUN the gate,
+// which exits the process.)
+const flatSrc = (p: string) =>
+  readFileSync(p, "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
+    .replace(/\s+/g, " ");
+
+function walkSources(dir: string, out: string[] = []): string[] {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory()) walkSources(p, out);
+    else if (p.endsWith(".ts") || p.endsWith(".tsx")) out.push(p);
+  }
+  return out;
+}
+
+// A file BUILDS the per-event figures if it calls any of these. `eventColsFor` /
+// `tierBColumnCount` are the names Task 5 exported: they are private now, and
+// listing them keeps the scan honest if either is ever exported again.
+const BUILDERS = ["eventColumnBlock(", "buildEventColumns(", "visibleEventTypes(", "eventColsFor(", "tierBColumnCount("];
+// …and it renders the residual if it MOUNTS one of the three components that
+// carry it. The module that defines them is excluded from the scan.
+const RESIDUAL = ["<EventColumnsBar", "<StageEventBreakdown", "<EventTotalsTiles"];
+const VIEW_MODULE = "components/reports/event-columns-view.tsx";
+
+const scanned = ["app", "components"].flatMap((d) => walkSources(d));
+const srcOf = new Map(scanned.map((p) => [p, flatSrc(p)]));
+const builders = scanned.filter(
+  (p) => p !== VIEW_MODULE && BUILDERS.some((n) => srcOf.get(p)!.includes(n)),
+);
+const residualLess = builders.filter((p) => !RESIDUAL.some((n) => srcOf.get(p)!.includes(n)));
+
+// POSITIVE CONTROL. Every absence-asserting bar needs one: a scanner pointed at
+// the wrong root, or one that stopped matching, finds nothing and X9 then reads
+// as a clean bill of health forever. These three surfaces exist today and MUST
+// be discovered — if one is legitimately removed, this bar is where that is
+// noticed, which is the right place for it.
+const KNOWN_SURFACES = [
+  "components/reports/keitaro-report.tsx",
+  "components/reports/performance-report.tsx",
+  "app/(protected)/campaigns/[id]/page.tsx",
+];
+check(
+  `X8 ⭐ the scanner finds the per-event surfaces that exist (${builders.length} of ${scanned.length} files) — a scan that finds nothing must fail HERE, not pass X9`,
+  KNOWN_SURFACES.every((p) => builders.includes(p)),
+  `found: ${builders.join(", ")}`,
+);
+check(
+  "X9 ⭐ every surface that builds per-event columns also mounts a component that renders the residual — discovered by scanning, so a NEW table is covered the day it is written",
+  residualLess.length === 0,
+  residualLess.length > 0 ? `breakdown without residual: ${residualLess.join(", ")}` : "",
+);
+// NEGATIVE CONTROLS ON THE CLASSIFIER ITSELF, the same reason G0a–G0h exist in
+// the key gate: X9 asserts an ABSENCE, so a needle that stopped matching makes
+// it permanently green.
+const classify = (src: string) => {
+  const s = src.replace(/\s+/g, " ");
+  return { builds: BUILDERS.some((n) => s.includes(n)), residual: RESIDUAL.some((n) => s.includes(n)) };
+};
+const handRolled = classify("const cols = buildEventColumns(visibleEventTypes(t, m));");
+const paired = classify("const b = eventColumnBlock(t, r, x, s); return <EventColumnsBar block={b} />;");
+const unrelated = classify("export function StatCard({ label }: { label: string }) { return <div>{label}</div>; }");
+check(
+  "X10 ⭐ the classifier flags a hand-rolled breakdown with no residual, clears a paired one, and ignores a component that builds nothing",
+  handRolled.builds &&
+    !handRolled.residual &&
+    paired.builds &&
+    paired.residual &&
+    !unrelated.builds &&
+    !unrelated.residual,
+  JSON.stringify({ handRolled, paired, unrelated }),
+);
+// ⭐ AND EVERY NEEDLE SEPARATELY, against a HAND-WRITTEN sample of the call it
+// names. X10's fixtures each match more than one needle, so a single dead needle
+// survives it — measured: renaming `buildEventColumns(` in the list left X8, X9
+// and X10 all green. The samples below are written out, never generated from
+// BUILDERS/RESIDUAL: a control built out of the thing it controls is a
+// tautology, and the whole point is that one list can rot without the other.
+const BUILDER_SAMPLES = [
+  "const b = eventColumnBlock(spec, rows, totals, showEvents);",
+  "const cols = buildEventColumns(types);",
+  "const live = visibleEventTypes(spec, maps);",
+  "const cols = eventColsFor(spec, rows, totals, false);",
+  "const n = tierBColumnCount(spec, rows, totals);",
+];
+const RESIDUAL_SAMPLES = [
+  "return <EventColumnsBar block={block} onShowEventsChange={f} />;",
+  "return <StageEventBreakdown types={t} events={e} unmapped={u} />;",
+  "return <EventTotalsTiles types={t} events={e} unmapped={u} renderTile={r} />;",
+];
+const deadBuilder = BUILDERS.filter((n) => !BUILDER_SAMPLES.some((s) => s.includes(n)));
+const deadResidual = RESIDUAL.filter((n) => !RESIDUAL_SAMPLES.some((s) => s.includes(n)));
+check(
+  `X11 ⭐ every needle in both lists still matches the call it names (${BUILDERS.length} builders, ${RESIDUAL.length} residual renderers)`,
+  BUILDER_SAMPLES.every((s) => classify(s).builds) &&
+    RESIDUAL_SAMPLES.every((s) => classify(s).residual) &&
+    deadBuilder.length === 0 &&
+    deadResidual.length === 0,
+  `dead builder needles: ${deadBuilder.join(", ") || "none"} | dead residual needles: ${deadResidual.join(", ") || "none"}`,
+);
+
+// ── ⭐ A PERSISTED SORT THAT NAMES A VANISHED COLUMN MUST FAIL VISIBLY ───────
+//
+// `sortBy` is persisted per browser while a GENERATED id belongs to a registry
+// row that can be archived or configured away. An id matching no column ties
+// every comparison: the rows come back in API order with no arrow anywhere,
+// which is indistinguishable from a sorted table. One-sided — the fixture holds
+// a generated id that IS on screen beside one that is not.
+const liveIds = visibleOff.map((c) => c.id);
+check(
+  `W22 ⭐ an id that matches no column falls back to one that exists (${liveIds.length} live ids)`,
+  liveIds.length > 0 &&
+    !liveIds.includes("evt:legacy_cpa:count") &&
+    sortColumnOrFallback(liveIds, "evt:legacy_cpa:count", "sent") === "sent" &&
+    sortColumnOrFallback([], "evt:signup:count", "sent") === "sent",
+  `ids=${liveIds.join(",")}`,
+);
+check(
+  "W23 a generated id that IS on screen is kept, not overridden (positive control)",
+  sortColumnOrFallback(liveIds, liveIds[0], "sent") === liveIds[0] &&
+    sortColumnOrFallback(["sent", "revenue"], "revenue", "sent") === "revenue",
+  `first=${liveIds[0]}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -360,6 +360,30 @@ check(
   eventColumnById("evtfunnel:deposit:deposit") === null,
   JSON.stringify(eventColumnById("evtfunnel:deposit:deposit")),
 );
+// ⭐ THE SEGMENT IS HELD TO THE SAME CONSTRAINT THE COLUMN IT CLAIMS TO NAME IS
+// (`event_types_key_format_check`, 0181:43). Without it `evt:PURCHASE:count`
+// parsed into a perfectly-formed column whose eventKey matches no registry row:
+// /api/keitaro/reports accepts a sort id by SHAPE, so a parse is an acceptance,
+// and every row then read 0/null, every comparison tied, and the sort silently
+// did nothing. Rejected, the route falls back to `revenue` — which is visible.
+// ONE-SIDED: the same shape with a legal key parses (B7), so "reject everything"
+// fails too.
+check(
+  "B6 ⭐ a key the DB could never hold is rejected rather than parsed into a column that matches nothing",
+  eventColumnById("evt:PURCHASE:count") === null &&
+    eventColumnById("evt:2fast:count") === null &&
+    eventColumnById("evt:with space:count") === null &&
+    eventColumnById("evt:kebab-case:count") === null &&
+    eventColumnById("evtfunnel:signup:Purchase") === null,
+  JSON.stringify([eventColumnById("evt:PURCHASE:count"), eventColumnById("evtfunnel:signup:Purchase")]),
+);
+check(
+  "B7 a LEGAL key shape still parses — digits and underscores included (positive control on B6)",
+  eventColumnById("evt:legacy_cpa2:count")?.eventKey === "legacy_cpa2" &&
+    eventColumnById("evt:signup:pending_revenue")?.kind === "pending_revenue" &&
+    eventColumnById("evtfunnel:signup:deposit_2")?.toKey === "deposit_2",
+  JSON.stringify(eventColumnById("evt:legacy_cpa2:count")),
+);
 
 // ── the shared empty tally ───────────────────────────────────────────────────
 // ⭐ THE REVIEW'S FINDING, MADE PERMANENT. `EMPTY_TALLY` is exported and

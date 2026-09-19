@@ -37,6 +37,9 @@ function seenMaps(
 /**
  * The columns to render for THIS response.
  *
+ * ⭐ PRIVATE. A table gets its columns from eventColumnBlock(), which hands back
+ * the bar's numbers in the same object — see there for why.
+ *
  * `rows` and `totals` are read only to decide whether an ARCHIVED type still has
  * data on screen (visibleEventTypes) — never to discover which types exist. A
  * type configured with zero conversions still gets a column and reads 0; that is
@@ -47,7 +50,7 @@ function seenMaps(
  * a split nobody can see is not a split. Tier B holds only the per-event money
  * columns, each of which duplicates an aggregate column already on screen.
  */
-export function eventColsFor(
+function eventColsFor(
   spec: readonly EventTypeSpec[],
   rows: ReadonlyArray<{ events?: EventMap }>,
   totals: { events?: EventMap } | null,
@@ -57,22 +60,73 @@ export function eventColsFor(
   return showTierB ? cols : cols.filter((c) => c.tier === "a");
 }
 
+/** The generated columns for one response, and the bar that has to sit beside them. */
+export interface EventColumnBlock {
+  /** The columns to render, honouring the toggle. */
+  columns: EventColumn[];
+  /** <EventColumnsBar>'s numbers. DERIVED HERE, never assembled by the caller. */
+  bar: { showEvents: boolean; tierBCount: number; unmapped: number };
+}
+
 /**
- * How many columns the Event-breakdown toggle GOVERNS.
+ * ⭐ THE ONE WAY TO OBTAIN THE GENERATED COLUMNS, AND IT HANDS BACK THE BAR WITH
+ * THEM.
  *
- * ⭐ IT TAKES NO `showTierB` ARGUMENT, DELIBERATELY. This is a constant of the
- * registry, not of the toggle's current state, and the control's own visibility
- * depends on it: a state-dependent count reads 0 while the toggle is ON, which
- * unmounts the control and leaves tier B switched on with no way to switch it
- * off. Giving the function no way to see the toggle makes that bug
- * unrepresentable rather than merely tested. Bar W12.
+ * Task 5 exported the column builder on its own and left `unmapped` a prop the
+ * caller assembled, so a new table could render the breakdown and pass the bar a
+ * different number — or never mount it. Both halves now come out of ONE call
+ * over ONE `totals` object:
+ *
+ *   - `bar.unmapped` is read off the SAME `totals` the columns were built from,
+ *     so the residual cannot describe a different response than the columns do.
+ *   - `bar.tierBCount` is the count of columns the toggle GOVERNS, computed with
+ *     a LITERAL `true` rather than `showEvents`. It is a constant of the
+ *     registry, not of the toggle's state: a state-dependent count reads 0 while
+ *     the toggle is ON, which trips EventBreakdownToggle's `count === 0` early
+ *     return, unmounts the control, and leaves tier B switched on with no way to
+ *     switch it off. Bar W12 compares the two states and fails if they differ.
+ *
+ * Mounting the returned bar is the one step left to the caller, and bars X8–X11
+ * are what make that step not a matter of memory: any file under app/ or
+ * components/ that builds per-event columns must also render one of the three
+ * residual-bearing surfaces, discovered by scanning rather than from a list.
  */
-export function tierBColumnCount(
+export function eventColumnBlock(
   spec: readonly EventTypeSpec[],
   rows: ReadonlyArray<{ events?: EventMap }>,
-  totals: { events?: EventMap } | null,
-): number {
-  return eventColsFor(spec, rows, totals, true).filter((c) => c.tier === "b").length;
+  totals: { events?: EventMap; unmapped?: number } | null,
+  showEvents: boolean,
+): EventColumnBlock {
+  return {
+    columns: eventColsFor(spec, rows, totals, showEvents),
+    bar: {
+      showEvents,
+      tierBCount: eventColsFor(spec, rows, totals, true).filter((c) => c.tier === "b").length,
+      unmapped: totals?.unmapped ?? 0,
+    },
+  };
+}
+
+/**
+ * The sort column a table should actually use: the persisted id while it is
+ * still on screen, otherwise `fallback`.
+ *
+ * ⭐ IT EXISTS BECAUSE A GENERATED COLUMN ID CAN VANISH. `sortBy` is persisted
+ * per browser (usePersistedFilters) and a generated id — `evt:<key>:<kind>` —
+ * belongs to a registry row that can be archived, renamed or configured away
+ * long after the sort was saved. The id then matches no column: every row reads
+ * `undefined`, every comparison ties, and the table renders in whatever order
+ * the API returned with no sort indicator anywhere. That is indistinguishable
+ * from "this is sorted", which is the one thing it must not look like. Falling
+ * back to a column that EXISTS both sorts the rows and puts the arrow where the
+ * sort actually is. Bars W22/W23.
+ */
+export function sortColumnOrFallback(
+  columnIds: readonly string[],
+  persisted: string,
+  fallback: string,
+): string {
+  return columnIds.includes(persisted) ? persisted : fallback;
 }
 
 /**
@@ -107,7 +161,8 @@ export { addEventMaps, eventCellValue, visibleEventTypes };
  *
  * It renders NOTHING when it governs no columns: a checkbox that reveals nothing
  * is a dead control. `count` therefore has to be the registry's constant, which
- * is why tierBColumnCount() cannot see the toggle.
+ * is why eventColumnBlock() computes it with a literal `true` instead of the
+ * toggle's own state.
  */
 function EventBreakdownToggle({
   value,
@@ -191,22 +246,28 @@ function UnmappedBadge({ count }: { count: number }) {
  * badge with it, structurally. Tier A is always rendered, so "the breakdown is
  * shown" is true on every tab, and this bar is mounted unconditionally beside
  * the filters — never inside a `showEvents` branch. Bars W13/W14.
+ *
+ * ⭐ IT TAKES THE WHOLE BLOCK, NOT FOUR LOOSE NUMBERS. Everything it renders is
+ * derived by eventColumnBlock() from the very `totals` the columns were built
+ * from; the caller supplies only the change handler, which cannot misstate a
+ * figure. Task 5's props let a caller pass `unmapped={0}` beside a breakdown
+ * built from a response carrying twelve strays.
  */
 export function EventColumnsBar({
-  showEvents,
+  block,
   onShowEventsChange,
-  tierBCount,
-  unmapped,
 }: {
-  showEvents: boolean;
+  block: EventColumnBlock;
   onShowEventsChange: (v: boolean) => void;
-  tierBCount: number;
-  unmapped: number;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <EventBreakdownToggle value={showEvents} onChange={onShowEventsChange} count={tierBCount} />
-      <UnmappedBadge count={unmapped} />
+      <EventBreakdownToggle
+        value={block.bar.showEvents}
+        onChange={onShowEventsChange}
+        count={block.bar.tierBCount}
+      />
+      <UnmappedBadge count={block.bar.unmapped} />
     </div>
   );
 }

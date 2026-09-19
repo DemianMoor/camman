@@ -11,9 +11,9 @@ import { useAuth } from "@/components/protected/auth-context";
 import {
   EventColumnsBar,
   eventCellValue,
-  eventColsFor,
+  eventColumnBlock,
   fmtEventCell,
-  tierBColumnCount,
+  type EventColumnBlock,
 } from "@/components/reports/event-columns-view";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -332,6 +332,16 @@ export function KeitaroReport() {
         setTotalCount(result.data.totalCount);
         setDeliveryAvailable(result.data.delivery?.available ?? true);
       } else {
+        // ⭐ THE STALE RESPONSE GOES WITH IT. The error block replaces the
+        // TABLE, but the stat cards and the unmapped badge sit above it — so a
+        // failed fetch used to leave an amber "12 unmapped" and a full set of
+        // totals beside "Couldn't load reports", describing a range the screen
+        // is no longer showing. Cleared, the cards and the badge render nothing
+        // and the error is the only claim on the page. Retry refills them.
+        setData([]);
+        setTotals(null);
+        setEventTypes([]);
+        setTotalCount(0);
         setFetchError(result.error);
       }
     })();
@@ -372,6 +382,15 @@ export function KeitaroReport() {
     }
     refetch();
   }
+
+  // The generated columns AND the bar's numbers, from ONE call over ONE
+  // response: the unmapped count the bar renders is read off the same `totals`
+  // these columns were built from, and the toggle's governed count is a constant
+  // of the registry rather than of the toggle's state (bar W12).
+  const block = useMemo<EventColumnBlock>(
+    () => eventColumnBlock(eventTypes, data, totals, filters.showEvents),
+    [eventTypes, data, totals, filters.showEvents],
+  );
 
   const columns = useMemo<ColumnDef<ReportRow>[]>(() => {
     const campaignCol: ColumnDef<ReportRow> = {
@@ -623,12 +642,7 @@ export function KeitaroReport() {
     // than by an index — an index would silently move the block the next time a
     // column is added. Before Sales, so the row reads as one funnel and no
     // existing column moves relative to its neighbours.
-    const generated: ColumnDef<ReportRow>[] = eventColsFor(
-      eventTypes,
-      data,
-      totals,
-      filters.showEvents,
-    ).map((e) => ({
+    const generated: ColumnDef<ReportRow>[] = block.columns.map((e) => ({
       id: e.id,
       header: e.header,
       enableSorting: true,
@@ -645,7 +659,7 @@ export function KeitaroReport() {
     const withEvents =
       at < 0 ? [...rest, ...generated] : [...rest.slice(0, at), ...generated, ...rest.slice(at)];
     return [campaignCol, stageCol, ...withEvents];
-  }, [filters.groupBy, filters.showEvents, deliveryAvailable, eventTypes, data, totals]);
+  }, [filters.groupBy, deliveryAvailable, block]);
 
   const isAuthLoading = !auth;
 
@@ -776,15 +790,13 @@ export function KeitaroReport() {
           EventColumnsBar carries the Event-breakdown toggle AND the unmapped
           badge together (they are not separately exported), so the breakdown
           cannot be on screen while the count of conversions it fails to explain
-          is hidden. It sits OUTSIDE the empty/error states too: a wholly
-          unmapped conversion resolves to no stage, so it appears in no row and
-          a range whose table is empty can still have strays worth seeing. */}
-      <EventColumnsBar
-        showEvents={filters.showEvents}
-        onShowEventsChange={(v) => updateFilters({ showEvents: v })}
-        tierBCount={tierBColumnCount(eventTypes, data, totals)}
-        unmapped={totals?.unmapped ?? 0}
-      />
+          is hidden. It takes the same `block` the columns came from, so the two
+          cannot describe different responses. It sits OUTSIDE the empty state: a
+          wholly unmapped conversion resolves to no stage, so it appears in no
+          row and a range whose table is empty can still have strays worth
+          seeing. On a fetch ERROR there is nothing to describe — the response is
+          cleared, so the block is empty and the bar renders nothing. */}
+      <EventColumnsBar block={block} onShowEventsChange={(v) => updateFilters({ showEvents: v })} />
 
       {fetchError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">

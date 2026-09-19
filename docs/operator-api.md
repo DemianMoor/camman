@@ -223,13 +223,14 @@ the scalar and placed under no key; `unmapped` is where it surfaces. A client
 that renders the breakdown as an explanation of `sales` must render `unmapped`
 beside it or it under-explains its own total.
 
-⚠️ **`dimension=hourly` reports a scalar `pending_revenue` of `0` regardless of
-the truth.** Hourly never computes a pending series — the zero is a
-NOT-COMPUTED sentinel, not a measurement — while `events[key].pending_n` and
-`events[key].pending_revenue` on the same row ARE computed, off
-`conversion_events` and bucketed on the same ET hour as that row's `sales` and
-`revenue`. On hourly, read pending money from `events`, never from the scalar.
-No other dimension has this split.
+`pending_revenue` is computed on **every** dimension, hourly included, and a `0`
+there is a measurement. (Between 2026-09-19 and the same day's fix, hourly's
+scalar was a hard-coded NOT-COMPUTED zero and this section told clients to read
+held money from `events` instead. That workaround is retired: `getHourlyReport`
+now runs a pending series off the same ledger, hour bucket and clause family as
+its approved `revenue`, so `pending_revenue = Σ events[key].pending_revenue +
+cross-org strays` holds on hourly exactly as on the other dimensions. If you
+implemented the workaround, delete it — it now reads the same number twice.)
 
 ⚠️ **`dimension=creative&range=lifetime` serves a stored hourly blob.** For up to
 an hour after a deploy it can report an empty `events` map, which is
@@ -267,6 +268,13 @@ is no Reports tab for it.
 
 One row per creative × offer: a creative sent on two offers is two rows. Every
 column of the other dimensions and the grading fields (§7), plus:
+
+⭐ **Both creative bodies carry `event_types` too, deliberately, although no
+screen renders them.** The rows carry `events` / `unmapped` like every other
+dimension, and a key is not a label: without the registry a client has a map of
+`event_types.key` it cannot name, order, or tell "counts revenue" from "signal".
+This is the one dimension whose consumer has no UI to fall back on, so dropping
+the registry here would be dropping it where it is least replaceable.
 
 | Field | Meaning |
 | --- | --- |

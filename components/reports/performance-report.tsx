@@ -7,9 +7,10 @@ import { ProviderPhoneCell } from "@/components/provider-phone-cell";
 import {
   EventColumnsBar,
   eventCellValue,
-  eventColsFor,
+  eventColumnBlock,
   fmtEventCell,
-  tierBColumnCount,
+  sortColumnOrFallback,
+  type EventColumnBlock,
 } from "@/components/reports/event-columns-view";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -76,6 +77,11 @@ function etDate(offsetDays: number): string {
     day: "2-digit",
   }).format(d);
 }
+
+// The initial sort AND the fallback when a persisted sortBy names a column this
+// response has no column for. It is on every dimension's column list, hourly
+// included, which is what makes it safe as a fallback.
+const DEFAULT_SORT_BY = "sent";
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const fmtUsd = (n: number) => usd.format(n);
@@ -205,7 +211,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
       from: etDate(0),
       to: etDate(0),
       providerPhoneId: null,
-      sortBy: "sent",
+      sortBy: DEFAULT_SORT_BY,
       sortDir: "desc",
       showEvents: false,
     },
@@ -232,6 +238,12 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
         setResp(result.data);
         setFetchError(null);
       } else {
+        // ⭐ THE STALE RESPONSE GOES WITH IT. The error block replaces the TABLE,
+        // but the stat cards and the unmapped badge live above it — so a failed
+        // fetch used to leave an amber "12 unmapped" beside "Couldn't load
+        // report", describing a range the screen is no longer showing. An error
+        // state that still carries numbers invites them to be read.
+        setResp(null);
         setFetchError(result.error);
       }
     })();
@@ -240,18 +252,15 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
     };
   }, [dimension, isHourly, filters.from, filters.to, filters.providerPhoneId, api.execute]);
 
-  const eventCols = useMemo<EventColumn[]>(
-    () => eventColsFor(resp?.event_types ?? [], resp?.data ?? [], resp?.totals ?? null, filters.showEvents),
+  // The generated columns AND the bar's numbers, from ONE call over ONE
+  // response: the unmapped count the bar renders is read off the same `totals`
+  // these columns were built from, and the toggle's governed count is a constant
+  // of the registry rather than of the toggle's state (bar W12).
+  const block = useMemo<EventColumnBlock>(
+    () => eventColumnBlock(resp?.event_types ?? [], resp?.data ?? [], resp?.totals ?? null, filters.showEvents),
     [resp, filters.showEvents],
   );
-  // How many columns the toggle GOVERNS — a constant of the registry, not of the
-  // toggle's state. tierBColumnCount() cannot see the toggle at all, so the
-  // "count reads 0 while it is on, the control unmounts and tier B can never be
-  // switched off" bug is unrepresentable here. Bar W12.
-  const tierBCount = useMemo(
-    () => tierBColumnCount(resp?.event_types ?? [], resp?.data ?? [], resp?.totals ?? null),
-    [resp],
-  );
+  const eventCols: EventColumn[] = block.columns;
   const cols = useMemo<Col[]>(() => {
     const base = isHourly ? HOURLY_COLS : FULL_COLS;
     // Spliced by the ID of the column the block sits BEFORE, not by an index —
@@ -269,11 +278,23 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
     return at < 0 ? [...base, ...generated] : [...base.slice(0, at), ...generated, ...base.slice(at)];
   }, [isHourly, eventCols]);
 
+  // ⭐ A PERSISTED SORT CAN NAME A COLUMN THAT NO LONGER EXISTS. A generated id
+  // belongs to a registry row, and `sortBy` outlives it in localStorage. Sorting
+  // by an id that matches no column used to tie every comparison — the rows came
+  // out in API order with no arrow anywhere, which reads exactly like a sorted
+  // table. It falls back to the default column instead, VISIBLY: the rows are
+  // sorted by it and the indicator says so.
+  const sortBy = sortColumnOrFallback(
+    cols.map((c) => c.id),
+    filters.sortBy,
+    DEFAULT_SORT_BY,
+  );
+
   const rows = useMemo<DerivedRow[]>(() => {
     const derived = (resp?.data ?? []).map(derive);
     const dir = filters.sortDir === "asc" ? 1 : -1;
-    const key = filters.sortBy as keyof DerivedRow;
-    const sortCol = cols.find((c) => c.id === filters.sortBy);
+    const key = sortBy as keyof DerivedRow;
+    const sortCol = cols.find((c) => c.id === sortBy);
     return [...derived].sort((a, b) => {
       // Pinned rows (hourly "Manual") always sort to the top.
       if (a.pinned && !b.pinned) return -1;
@@ -287,7 +308,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
       if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
       return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
     });
-  }, [resp, filters.sortBy, filters.sortDir, cols]);
+  }, [resp, sortBy, filters.sortDir, cols]);
 
   const totals = resp?.totals ?? null;
   const providers = resp?.providers ?? [];
@@ -296,8 +317,11 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
     if (filters.sortBy === id) updateFilters({ sortDir: filters.sortDir === "asc" ? "desc" : "asc" });
     else updateFilters({ sortBy: id, sortDir: "desc" });
   }
+  // Reads the EFFECTIVE sort, so the arrow sits on the column the rows are
+  // actually ordered by — including when a persisted id named a column that is
+  // no longer generated.
   const sortIndicator = (id: string) =>
-    filters.sortBy === id ? (filters.sortDir === "asc" ? " ▲" : " ▼") : "";
+    sortBy === id ? (filters.sortDir === "asc" ? " ▲" : " ▼") : "";
 
   function renderLabel(r: DerivedRow) {
     if (r.pinned) return <span className="text-sm font-medium">{r.label}</span>;
@@ -450,15 +474,13 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           EventColumnsBar carries the Event-breakdown toggle AND the unmapped
           badge together (they are not separately exported), so the breakdown
           cannot be on screen while the count of conversions it fails to explain
-          is hidden. It sits OUTSIDE the empty/error states too: a wholly
-          unmapped conversion resolves to no stage, so it appears in no row and
-          a range whose table is empty can still have strays worth seeing. */}
-      <EventColumnsBar
-        showEvents={filters.showEvents}
-        onShowEventsChange={(v) => updateFilters({ showEvents: v })}
-        tierBCount={tierBCount}
-        unmapped={totals?.unmapped ?? 0}
-      />
+          is hidden. It takes the same `block` the columns came from, so the two
+          cannot describe different responses. It sits OUTSIDE the empty state: a
+          wholly unmapped conversion resolves to no stage, so it appears in no
+          row and a range whose table is empty can still have strays worth
+          seeing. On a fetch ERROR there is nothing to describe — the response is
+          cleared, so the block is empty and the bar renders nothing. */}
+      <EventColumnsBar block={block} onShowEventsChange={(v) => updateFilters({ showEvents: v })} />
 
       {fetchError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 
 // ⭐ THE ONE GATE THAT PROVES PHASE 5'S CENTRAL CLAIM: the report columns are
 // GENERATED from the event_types registry, not written down. If any of these
@@ -21,10 +21,16 @@ import { existsSync, readFileSync } from "node:fs";
 // nothing. G0a–G0g run the matcher against strings that MUST match and one that
 // must NOT, so a broken matcher fails here first.
 //
-// ── WHY THE FILE LIST IS EXISTENCE-CHECKED ──────────────────────────────────
+// ── WHY THE FILE LIST IS CHECKED IN BOTH DIRECTIONS ─────────────────────────
 // G1 fails when a listed path does not exist. A renamed module would otherwise
 // drop silently out of coverage and the gate would keep printing PASS for a
 // surface it no longer reads.
+//
+// ⭐ THAT ALONE IS ONE-DIRECTIONAL, and a one-directional list is how
+// lib/reporting/stage-keitaro-aggregate.ts — written after this gate — came to
+// be an unlisted producer. G1b walks app/, lib/ and components/ and fails on a
+// module that touches the breakdown and is in neither FILES nor EXEMPT; G1c is
+// its positive control.
 
 let passed = 0;
 let failed = 0;
@@ -135,6 +141,60 @@ check(
   `G1 ⭐ every listed file exists (${FILES.length} files) — a renamed module must fail loudly, not drop out of coverage`,
   FILES.length >= 20 && missing.length === 0,
   missing.length > 0 ? `missing: ${missing.join(", ")}` : "",
+);
+
+// ── G1b: …AND THE LIST CANNOT BE SHORT ──────────────────────────────────────
+//
+// ⭐ G1 IS ONE-DIRECTIONAL, AND THAT IS HOW A PRODUCER GOES MISSING. It proves
+// every LISTED file exists; it says nothing about a file that exists and is not
+// listed. lib/reporting/stage-keitaro-aggregate.ts was written after this gate
+// and had to be added by hand — the gate would have kept printing PASS over a
+// producer it had never read, and the only thing that caught it was a reviewer.
+//
+// So the other direction is DISCOVERED: every .ts/.tsx under app/, lib/ and
+// components/ that imports the event-column registry, or names the
+// `unmapped_conversions` column, is a producer or a consumer of this breakdown
+// and must be covered. Both needles are CODE (an import specifier, a SQL
+// identifier), and comments are stripped first, so a module that merely
+// discusses the breakdown in prose is not dragged in.
+const walk = (dir: string, out: string[] = []): string[] => {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory()) walk(p, out);
+    else if (p.endsWith(".ts") || p.endsWith(".tsx")) out.push(p);
+  }
+  return out;
+};
+const TOUCHES = ["@/lib/reporting/event-columns", "unmapped_conversions"];
+const allSources = ["app", "lib", "components"].flatMap((d) => walk(d));
+const touching = allSources.filter((p) => {
+  const s = flat(p);
+  return TOUCHES.some((n) => s.includes(n));
+});
+// Covered = in FILES, or exempt for a stated reason. EXEMPT is deliberately
+// tiny: it is not a way to drop a surface, it is the record of a decision.
+const EXEMPT = [
+  // The ledger's DEFINITION file, not a report surface: its frozen legacy
+  // section quotes 'lead' / 'sale' (documented under G2's omissions).
+  "lib/sale-attribution.ts",
+];
+const uncovered = touching.filter((p) => !FILES.includes(p) && !EXEMPT.includes(p));
+check(
+  `G1b ⭐ every module that imports the event-column registry or names unmapped_conversions is COVERED (${touching.length} of ${allSources.length} scanned)`,
+  uncovered.length === 0,
+  uncovered.length > 0 ? `not in FILES: ${uncovered.join(", ")}` : "",
+);
+// POSITIVE CONTROL on the scanner. G1b asserts an ABSENCE, so a walker pointed
+// at the wrong root, or a needle that stopped matching, would find nothing and
+// read as "nothing is missing" forever. These two are producers the gate exists
+// for — the second is the very file that exposed G1's one-directionality.
+check(
+  "G1c ⭐ the scanner really does reach the producers (positive control on G1b's walk and needles)",
+  touching.includes("lib/keitaro/stage-day-conversions.ts") &&
+    touching.includes("lib/reporting/stage-keitaro-aggregate.ts") &&
+    touching.length >= 10,
+  `touching (${touching.length}): ${touching.join(", ")}`,
 );
 
 // ── G2: the gate proper ─────────────────────────────────────────────────────

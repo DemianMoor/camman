@@ -185,8 +185,14 @@ export async function GET(req: NextRequest) {
 
   // The registry rides along in the same round trip — it is one grouped read of a
   // 2-rows-per-org table, and the column set is useless without it. It goes on
-  // ALL THREE response bodies: miss one and dimension=creative renders no event
-  // columns while By Offer does.
+  // ALL THREE response bodies, INCLUDING the two `dimension=creative` ones,
+  // which serve no screen (API_ONLY_DIMENSIONS — there is no Reports tab for
+  // them). KEPT DELIBERATELY: those bodies carry `events` and `unmapped` on
+  // every row like the others, and a key is not a label — without the registry
+  // an API consumer has a map of `event_types.key` it cannot name, order, or
+  // tell "counts revenue" from "signal". Dropping it would make the one
+  // consumer that has no UI to fall back on the only one that cannot read the
+  // breakdown. Documented in docs/operator-api.md §3, "Creative bank".
   const [report, providers, eventTypes] = await Promise.all([
     getPerformanceReport(auth.orgId, dimension, { from, to, providerPhoneId, attribution, offerId }),
     getReportProviderOptions(auth.orgId),

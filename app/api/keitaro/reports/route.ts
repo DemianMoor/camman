@@ -143,8 +143,14 @@ export async function GET(req: NextRequest) {
     SORTABLE.has(sortRaw) || eventSortColumn(sortRaw) !== null ? sortRaw : "revenue";
   const sortDir = sp.get("sortDir") === "asc" ? "asc" : "desc";
 
-  const { stages, grand, grandOptOuts, grandTotalSent, clickers } =
-    await getStageMetricsInRange(auth.orgId, from, to);
+  // The registry rides ALONGSIDE the funnel read, not after it. It is one
+  // grouped read of a 2-rows-per-org table and depends on nothing the funnel
+  // produces, so awaiting it at the response literal only added its latency to
+  // a request that already carries a multi-second aggregate.
+  const [{ stages, grand, grandOptOuts, grandTotalSent, clickers }, eventTypes] = await Promise.all([
+    getStageMetricsInRange(auth.orgId, from, to),
+    loadEventTypes(db, auth.orgId),
+  ]);
 
   // ⭐ manual_topup NEEDS NO ROLL-UP HERE ANY MORE. It is a field of FunnelTally
   // (lib/keitaro/funnel.ts), so it rides mergeFunnel into the per-campaign tally
@@ -505,8 +511,9 @@ export async function GET(req: NextRequest) {
       // carries it (lib/reporting/stage-funnel.ts).
     },
     // The event-type registry, so the client can GENERATE the per-event columns
-    // rather than know them. Additive: no existing field changes meaning.
-    event_types: await loadEventTypes(db, auth.orgId),
+    // rather than know them. Additive: no existing field changes meaning. Read
+    // in parallel with the funnel above, not here.
+    event_types: eventTypes,
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });
 }

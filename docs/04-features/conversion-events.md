@@ -683,14 +683,18 @@ and the five performance tabs
 — now render a column per event type, GENERATED from the registry the API
 returns. Both endpoints emit `event_types` (the `EventTypeSpec[]` from
 `loadEventTypes`) beside the rows; `/api/reports/performance` emits it on **all
-three** response bodies, since missing one would leave `dimension=creative`
-without columns while By Offer had them.
+three** response bodies, including the two `dimension=creative` ones, which serve
+no screen — see "Why the creative bodies keep the registry" below.
+`/api/keitaro/reports` reads it **in parallel with the funnel** (one
+`Promise.all` beside `getStageMetricsInRange`): it depends on nothing that read
+produces, and awaiting it at the response literal added a round trip to a request
+that already carries a multi-second aggregate.
 
 The shared client half is
 [`components/reports/event-columns-view.tsx`](../../components/reports/event-columns-view.tsx):
-`eventColsFor()`, `tierBColumnCount()`, `fmtEventCell()` and `EventColumnsBar`.
-Both tables build their column list from it, so they cannot disagree about what a
-"Registrations" column is.
+`eventColumnBlock()`, `fmtEventCell()`, `sortColumnOrFallback()` and
+`EventColumnsBar`. Both tables build their column list from it, so they cannot
+disagree about what a "Registrations" column is.
 
 **Rendered order.** The generated block is spliced in **after `Redir %` and
 before `Sales`**, found by the neighbouring column's *id* rather than by an index,
@@ -709,12 +713,36 @@ without the toggle: the aggregate `Revenue`, `Pending $` and `EPC (period)` /
 and rates are tier A. The toggle is per-browser (`showEvents` in the persisted
 filters), off by default.
 
-⭐ **`tierBColumnCount()` takes no `showTierB` argument, deliberately.** The
-count is a constant of the registry, not of the toggle's state. A
-state-dependent count reads `0` while the toggle is ON, which trips
-`EventBreakdownToggle`'s `count === 0` early return, unmounts the control and
-leaves tier B switched on with no way to switch it off. Giving the function no
-way to see the toggle makes that bug unrepresentable rather than merely tested.
+⭐ **The toggle's governed count is computed with a literal `true`, never with
+the toggle's own state.** A state-dependent count reads `0` while the toggle is
+ON, which trips `EventBreakdownToggle`'s `count === 0` early return, unmounts the
+control and leaves tier B switched on with no way to switch it off. Task 5 made
+that unrepresentable by giving `tierBColumnCount()` no `showTierB` parameter;
+`eventColumnBlock()` has to see the toggle (the columns depend on it), so the
+property is now held by **bar W12**, which builds the block twice — once with the
+toggle on, once off — and fails if the two counts differ. The old W12 compared
+one call with a second call on the same arguments and could not fail; it was
+red-proved by making the count follow `showEvents` (it reads `off=0 on=3`).
+
+⭐ **A persisted sort can name a column the registry no longer has.** `sortBy`
+lives in `localStorage` while a generated id (`evt:<key>:<kind>`) belongs to a
+registry row that can be archived or configured away. The id then matches no
+column, every comparison ties, and the table renders in API order with no arrow
+anywhere — which looks exactly like a sorted table.
+`sortColumnOrFallback(columnIds, persisted, fallback)` falls back to the
+dimension's default column instead, and the sort INDICATOR reads the effective
+sort, so the arrow sits where the ordering actually is (bars W22/W23). Server
+side the same class is handled by `eventColumnById()` rejecting a key that the
+`event_types_key_format_check` constraint could never hold (bars B6/B7): the
+Overview route accepts a sort id by SHAPE, so a parse is an acceptance, and
+`evt:PURCHASE:count` used to be accepted and sort every row on 0. Rejected, the
+route falls back to `revenue`, which is visible.
+
+⭐ **A fetch error clears the response.** The error block replaces the table, but
+the stat cards and the unmapped badge sit ABOVE it, so a failed fetch used to
+leave "12 unmapped" and a full set of totals beside "Couldn't load report",
+describing a range the screen is no longer showing. Both tables now drop the
+stale response with the error; Retry refills it.
 
 ### ⭐ The unmapped badge cannot be hidden while the breakdown is shown
 
@@ -737,13 +765,57 @@ That is wired **structurally, not by convention**: `EventBreakdownToggle` and
 renders both, so a surface that wants the toggle takes the badge with it. Tier A
 is always rendered, so "the breakdown is shown" is true on every tab, and the bar
 is mounted unconditionally beside the filters — never inside a `showEvents`
-branch, and **outside the empty and error states**, because a wholly unmapped
-conversion resolves to no stage, appears in no row, and can therefore exist in a
-range whose table is empty.
+branch, and **outside the empty state**, because a wholly unmapped conversion
+resolves to no stage, appears in no row, and can therefore exist in a range whose
+table is empty. (On a fetch ERROR the response is cleared, so there is nothing
+left to under-explain and the bar renders nothing.)
+
+**…and the COLUMNS cannot be obtained without it either (review fix,
+2026-09-19).** Task 5 still exported the column builder on its own, so a new
+table could render tier-A per-event columns and simply never mount the bar, and
+`unmapped` was a number the caller assembled — it could differ from the response
+the columns came from, or be `0`. Both holes are closed:
+
+- `eventColsFor()` and `tierBColumnCount()` are **module-private**. The one entry
+  point is `eventColumnBlock(spec, rows, totals, showEvents)`, which returns
+  `{ columns, bar }` from ONE call over ONE `totals`, and `EventColumnsBar` takes
+  the whole `block` rather than four loose numbers. `bar.unmapped` is read off
+  the same `totals` the columns were built from, so the residual always describes
+  the response on screen. Bar **W16** now also asserts that neither builder name
+  is exported.
+- Mounting the bar is the one step left to the caller, and it is held by a
+  **discovered** gate rather than a list: bars **X8–X11** walk every `.ts`/`.tsx`
+  under `app/` and `components/`, classify a file as a per-event surface if it
+  calls any column builder, and fail if such a file mounts none of
+  `<EventColumnsBar>` / `<StageEventBreakdown>` / `<EventTotalsTiles>`. A table
+  written tomorrow is covered the day it is written. X8 is the positive control
+  (a scan that finds nothing fails THERE, not vacuously in X9), X10 controls the
+  classifier's discrimination, and X11 checks every needle separately against a
+  hand-written sample of the call it names — added because a dead
+  `buildEventColumns(` needle survived X8, X9 and X10 in the red proof.
+
+This is a gate, not a type: a structural version (a context provider, or a
+render-prop that hands the columns out only inside the bar's subtree) would mean
+splitting both 500–800-line report components across a hook boundary, since the
+columns are consumed inside `useMemo`s that sort and splice them. That was judged
+a disruptive rewrite for a property a scanning gate already holds, with the
+export shape doing the rest.
 
 The badge renders nothing at zero (a permanent "0 unmapped" chip is furniture).
 It carries an explanatory `title` and **no link**: `conversion_event_mappings`
 has no admin screen yet. Give it an `href` the day that page exists.
+
+### Why the creative bodies keep the registry
+
+`dimension=creative` (both the ranged body and `range=lifetime`) is operator-API
+only — `API_ONLY_DIMENSIONS`, no Reports tab — so its `event_types` serves no
+screen. It is **kept deliberately**, and the reason is the same one that makes
+the breakdown worth having: its rows carry `events` and `unmapped` like every
+other dimension, and a key is not a label. Without the registry a client holds a
+map of `event_types.key` it cannot name, order, or tell "counts revenue" from
+"signal" — and this is the one dimension whose consumer has no UI to fall back
+on. Documented for consumers in [operator-api.md](../operator-api.md) under
+"Creative bank".
 
 ### Hourly had two answers for pending money — FIXED 2026-09-19
 
@@ -803,6 +875,20 @@ fails when a listed path does not exist, so a renamed module cannot drop out of
 coverage silently. **G3b** keeps any rendering surface from fetching
 `/api/keitaro/results`, whose explicit projection omits `events` — its `{}` means
 "not selected", not "zero of everything" — with G3a as the positive control.
+
+⭐ **G1 alone is one-directional, which is how a producer goes missing (review
+fix, 2026-09-19).** It proves every LISTED file exists and says nothing about a
+file that exists and is not listed — which is exactly what
+`lib/reporting/stage-keitaro-aggregate.ts` was until a reviewer added it by hand.
+**G1b** walks `app/`, `lib/` and `components/` and fails on any module that
+imports `@/lib/reporting/event-columns` or names the `unmapped_conversions`
+column while being in neither `FILES` nor the (deliberately tiny, documented)
+`EXEMPT` list. Both needles are CODE — an import specifier and a SQL identifier —
+and comments are stripped first, so prose about the breakdown drags nothing in.
+**G1c** is its positive control: the walk must still reach the known producers,
+or a scanner pointed at the wrong root would report "nothing missing" forever.
+Red-proved with a new unlisted producer in BOTH line endings, and with the
+discovery needles broken (G1b then passes over 0 files and G1c is what fails).
 
 Deliberate omissions: `lib/sale-attribution.ts` (the ledger's definition file,
 whose frozen legacy section quotes `'lead'`/`'sale'`) and everything under

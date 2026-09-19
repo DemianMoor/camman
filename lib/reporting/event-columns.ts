@@ -392,12 +392,27 @@ const synthetic = (key: string, f: Partial<EventTypeSpec> = {}): EventTypeSpec =
  * `:` and a generated id always has exactly three segments. The arity check still
  * earns its keep — the input is a URL parameter or a localStorage value and can be
  * anything at all — but it is rejecting a malformed ID, not a legal key.
+ *
+ * ⭐ IT ALSO HOLDS THE SEGMENTS TO THAT SAME CONSTRAINT, and that is not
+ * belt-and-braces. The DB constraint governs what a key can BE; this input is a
+ * string off the wire that merely claims to name one, and `evt:PURCHASE:count`
+ * or `evt:drop table:count` used to parse happily into a column whose eventKey
+ * matches no registry row. Every row then read 0 / null, every comparison tied,
+ * and the sort quietly did nothing (the /api/keitaro/reports whitelist accepts
+ * an id by SHAPE, so a parse is an acceptance). Rejected, the caller falls back
+ * to its default sort, which is visible. Nothing here is interpolated into SQL —
+ * the key is only ever a property lookup into an EventMap this process built —
+ * so this is about honest failure, not injection. Bars B6/B7.
  */
+const KEY_FORMAT = /^[a-z][a-z0-9_]*$/; // event_types_key_format_check (0181)
+
 export function eventColumnById(id: string): EventColumn | null {
   const parts = id.split(":");
   if (parts.length !== 3) return null;
   const [prefix, a, b] = parts;
   if (!a || !b) return null;
+  if (!KEY_FORMAT.test(a)) return null;
+  if (prefix === "evtfunnel" && !KEY_FORMAT.test(b)) return null;
   if (prefix === "evtfunnel") {
     return (
       buildEventColumns([

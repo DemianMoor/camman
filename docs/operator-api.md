@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-19_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -190,11 +190,51 @@ curl -s "https://camman.vercel.app/api/reports/performance?dimension=offer&from=
   -H "Authorization: Bearer $CAMMAN_TOKEN"
 ```
 
-Response: `{ dimension, attribution, data: [row, …], totals, refreshedAt, providers, range }`.
+Response: `{ dimension, attribution, data: [row, …], totals, refreshedAt, providers, event_types, range }`.
 Every row, and `totals`, carries `sent`, `opt_outs`, `clickers` (the tracker's
 clean landing visits — not human clicks), `redirects`, `counted_clickers`,
 `sales`, `revenue`, `cost`, and the grading fields `reached`, `clicks_human`,
 `click_to_reach_pct`, `reach_to_sale_pct` and `opt_rate` (see §7).
+
+**Per-event-type breakdown (additive; no existing field changed meaning).**
+`event_types` is the org's event-type registry — `{ key, label, display_order,
+is_purchase, counts_revenue, is_retarget_signal, archived }` — and every row and
+`totals` carries `events`, `unmapped` and `manual_topup`:
+
+- `events` maps `event_types.key` → `{ n, pending_n, revenue, pending_revenue }`.
+  `n` counts events with status `pending` or `approved`; `pending_n` is the held
+  SUBSET of `n`, never added to it. `revenue`/`pending_revenue` are `0` for a
+  type whose `counts_revenue` is false, by construction.
+- `unmapped` counts conversions in scope whose tracker type matched no mapping.
+  ⭐ **They are in NO other field** — not `sales`, not `revenue`, not `events` —
+  so nothing but this number reveals them.
+- `manual_topup` is the part of `sales` that came from the manual result tally
+  rather than the tracker ledger.
+
+⭐ **`events` alone does not explain `sales`.** The identity is
+
+```
+sales = Σ over is_purchase types of events[key].n  +  manual_topup  +  strays
+```
+
+`sales` resolves `is_purchase` through a non-org-scoped id list while `events`
+comes from an org-scoped join, so a cross-organisation event type is counted by
+the scalar and placed under no key; `unmapped` is where it surfaces. A client
+that renders the breakdown as an explanation of `sales` must render `unmapped`
+beside it or it under-explains its own total.
+
+⚠️ **`dimension=hourly` reports a scalar `pending_revenue` of `0` regardless of
+the truth.** Hourly never computes a pending series — the zero is a
+NOT-COMPUTED sentinel, not a measurement — while `events[key].pending_n` and
+`events[key].pending_revenue` on the same row ARE computed, off
+`conversion_events` and bucketed on the same ET hour as that row's `sales` and
+`revenue`. On hourly, read pending money from `events`, never from the scalar.
+No other dimension has this split.
+
+⚠️ **`dimension=creative&range=lifetime` serves a stored hourly blob.** For up to
+an hour after a deploy it can report an empty `events` map, which is
+indistinguishable from a configured-but-idle event type; `stale_seconds` in the
+response tells the two apart.
 
 **Which days a number belongs to (`attribution`):**
 

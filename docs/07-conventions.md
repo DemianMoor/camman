@@ -3198,6 +3198,30 @@ So the read layer carries **all three** together, on every dimension and on the 
 
 **The corollary for a new aggregation:** `unmapped` and `manual_topup` have no finer weight by construction — an unmapped conversion resolved to no recipient, and a manual tally is a stage-level number — so the By-Group split spreads both on SENT weights while the map itself splits on SALE weights, the same basis as the `sales` it breaks down. Only the page total is exact; the per-group unmapped figure means "share of this stage's audience".
 
+**The corollary for a SCREEN (2026-09-19): make it structural, not conventional.** "If you add a surface that renders `events`, render `unmapped` beside it" is a rule somebody has to remember. In [components/reports/event-columns-view.tsx](../components/reports/event-columns-view.tsx) it is instead impossible to break: `EventBreakdownToggle` and `UnmappedBadge` are **not exported**, and the only export is `EventColumnsBar`, which renders both. A tab that wants the toggle takes the badge with it. The bar is mounted unconditionally — never inside a `showEvents` branch, and **outside the empty and error states**, because a wholly unmapped conversion resolves to no stage, appears in no row, and therefore exists precisely in the ranges whose table is empty. Bars W13–W16 of [scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts) render the real component with `renderToStaticMarkup` and assert the badge is in the markup in BOTH toggle states; W16 asserts the two halves are not separately exported, with a positive control on the name check so a typo cannot make it vacuous.
+
+**A control's "how many does this reveal" count must not be computed from its own state (2026-09-19).** `tierBColumnCount()` takes no `showTierB` argument at all. If the count came from the VISIBLE column set it would read 0 while the toggle is on, which trips the toggle's own `count === 0` early return, unmounts the control, and leaves the extra columns switched on with no way to switch them off. Removing the argument makes the bug unrepresentable rather than merely tested; W12 pins it and red-proves by reintroducing the parameter (the count then reads 0).
+
+## A NOT-COMPUTED zero and a computed figure must not meet on one row (2026-09-19)
+
+`dimension=hourly` sets the scalar `pending_revenue` to `0` by hand, and the comment says why: "the hourly tab renders no pending column … so this is deliberately not computed rather than half-computed". That zero is a **sentinel, not a measurement**. Since Phase 5 the same hourly row also carries `events[key].pending_n` and `events[key].pending_revenue`, which ARE computed — off `conversion_events`, bucketed on the same `ce.occurred_at` ET hour as that row's `sales` and `revenue`.
+
+**The computed one is correct.** So the per-event pending columns render on hourly; hiding a true number to agree with a placeholder would be backwards. What must never happen is both reaching the same row, where the table would show `$0.00` in one column and `$40.00` in the next.
+
+The safety condition — *no hourly column and no hourly stat card renders the scalar* — is true today and was implicit, which is one column addition away from being false. Bar **W20** makes it explicit by extracting `HOURLY_COLS` from the component source and refusing any id matching `^pending(_|$)`; **W19** is its positive control, asserting the same extractor DOES find a scalar pending column in `FULL_COLS`, so a broken parse fails loudly instead of passing. Making the two agree instead would mean computing a pending series in the hourly aggregation — a change to the aggregation layer, not the rendering layer.
+
+**The general rule:** a placeholder zero is only safe while nothing renders it. Write the condition down as a bar at the moment you rely on it, and give the bar a positive control — a negative assertion with no control is a guard that cannot fail.
+
+## A source gate over report surfaces (2026-09-19)
+
+[scripts/test-reports-no-hardcoded-event-keys.ts](../scripts/test-reports-no-hardcoded-event-keys.ts) proves Phase 5's central claim — that report columns are generated from the `event_types` registry rather than written down — by asserting no listed file names an event key. Three things make it a gate rather than decoration:
+
+- **Whitespace-collapsed matching.** This checkout mixes CRLF and LF per file (`core.autocrlf=true`; `.gitattributes` pins only `db/migrations/**`), so every needle is matched against collapsed source and **never contains a newline**. A multi-line needle is always absent, which makes a negative assertion permanently and invisibly green.
+- **Three needle forms per key, and `\b` in two of them.** Quoted literal, dot/optional-chain property access, and object-literal key (which also catches a hard-coded generated column id like `"evtfunnel:registration:purchase"`). The word boundary is load-bearing in BOTH directions: it spares `t.is_purchase` and `is_purchase:` — the registry FLAGS every module is supposed to read — and G0g pins that it also spares `repurchaseRate`. Without it the first response to a false positive would be to weaken the gate.
+- **Negative controls and an existence check.** Every bar but `G0*` asserts an ABSENCE, so a typo in one regex would make them all pass. G0a–G0h run the matcher against strings that must match and strings that must not. **G1** fails when a listed path does not exist, so a renamed module fails loudly instead of dropping silently out of coverage.
+
+Comments are stripped before matching, so prose may name the keys freely — every module in the list explains itself at length and those explanations name them.
+
 ## The unmapped bucket keys on the JOIN RESULT, in every query that computes it (2026-09-19)
 
 Recorded once for the stage-day projection; it now has a second implementation and the rule travels with it. `ledgerHourEventQuery()` ([lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts)) is the hourly tab's own per-event pass over `conversion_events`, and its unmapped count is

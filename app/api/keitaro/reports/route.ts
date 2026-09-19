@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import {
@@ -10,6 +11,11 @@ import {
 } from "@/lib/keitaro/funnel";
 import { can } from "@/lib/permissions";
 import { denominatorFor } from "@/lib/reporting/counted-clickers";
+import {
+  eventCellValue,
+  eventColumnById,
+  loadEventTypes,
+} from "@/lib/reporting/event-columns";
 import {
   getDeliveryByStage,
   getPhoneDirectory,
@@ -69,6 +75,18 @@ export const SORTABLE = new Set([
   "click_rate",
 ]);
 
+// The GENERATED per-event column ids cannot be enumerated in SORTABLE: they are
+// `evt:<event_types.key>:<kind>` / `evtfunnel:<key>:<key>` and the registry is
+// per-org DATA, unknowable at module scope. They are accepted by SHAPE instead,
+// through eventColumnById() — which is the ONE parser of that id grammar
+// (lib/reporting/event-columns.ts). Writing a second regex here would fork it.
+//
+// An id that parses but names no configured event type sorts every row on 0,
+// which is exactly as harmless as sorting on a column of zeros: the key is only
+// ever a property lookup into an EventMap this process built, never SQL and
+// never echoed back.
+const eventSortColumn = (id: string) => eventColumnById(id);
+
 function rateOfSent(numerator: number, totalSent: number): number {
   return totalSent > 0 ? numerator / totalSent : 0;
 }
@@ -120,13 +138,26 @@ export async function GET(req: NextRequest) {
     Number.isFinite(pageSizeRaw) && pageSizeRaw > 0
       ? Math.min(100, Math.floor(pageSizeRaw))
       : 20;
-  const sortBy = SORTABLE.has(sp.get("sortBy") ?? "")
-    ? (sp.get("sortBy") as string)
-    : "revenue";
+  const sortRaw = sp.get("sortBy") ?? "";
+  const sortBy =
+    SORTABLE.has(sortRaw) || eventSortColumn(sortRaw) !== null ? sortRaw : "revenue";
   const sortDir = sp.get("sortDir") === "asc" ? "asc" : "desc";
 
   const { stages, grand, grandOptOuts, grandTotalSent, clickers } =
     await getStageMetricsInRange(auth.orgId, from, to);
+
+  // ⭐ manual_topup IS PER-STAGE (StageMetrics) AND IS NOT PART OF THE FUNNEL
+  // TALLY, so — unlike `events` and `unmapped` — it does NOT ride
+  // withFunnelDerived's `...t` spread. Declaring the field without summing it
+  // here would put `undefined` on every Overview row and total, which renders as
+  // a blank footnote rather than a wrong number and so would never be noticed.
+  // Summed at each grain this route emits. Bar R12.
+  const topupByCampaign = new Map<number, number>();
+  let grandTopup = 0;
+  for (const s of stages) {
+    topupByCampaign.set(s.campaign_id, (topupByCampaign.get(s.campaign_id) ?? 0) + s.manual_topup);
+    grandTopup += s.manual_topup;
+  }
 
   // link_mode per campaign, so manual-mode rows fall back to Keitaro visits.
   const linkModeByCampaign = new Map(stages.map((s) => [s.campaign_id, s.link_mode]));
@@ -224,6 +255,11 @@ export async function GET(req: NextRequest) {
     // you can see the count it divided by was 4.
     lifetime_epc: number;
     lifetime_clickers: number;
+    // Sales that came from the manual result tally rather than the tracker
+    // ledger. The per-event columns count TRACKER events only, so this is the
+    // difference between Sales and the sum of the is_purchase columns:
+    //   sales = Σ (is_purchase) events[t].n + manual_topup + unmapped strays
+    manual_topup: number;
   } & ReturnType<typeof withFunnelDerived>;
 
   let data: OutRow[];
@@ -307,6 +343,7 @@ export async function GET(req: NextRequest) {
         clickers.lifetimeByCampaign.get(c.campaign_id),
         c.tally.visit_clicks_clean,
       ),
+      manual_topup: topupByCampaign.get(c.campaign_id) ?? 0,
     }));
   } else {
     data = stages.map((acc) => {
@@ -361,6 +398,7 @@ export async function GET(req: NextRequest) {
           clickers.lifetimeByStage.get(acc.stage_id),
           acc.tally.visit_clicks_clean,
         ),
+        manual_topup: acc.manual_topup,
       };
     });
   }
@@ -374,10 +412,24 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Resolved once, not per comparison: the parse is pure and the answer cannot
+  // change inside a single sort.
+  const sortEventCol = eventSortColumn(sortBy);
   data.sort((a, b) => {
     let cmp: number;
     if (sortBy === "campaign_name") {
       cmp = a.campaign_name.localeCompare(b.campaign_name);
+    } else if (sortEventCol) {
+      // A null (unknown ratio) sorts LAST in BOTH directions — "we cannot say" is
+      // not "zero", and it must not win a descending sort over a real 0.0%. The
+      // early `return` skips the tie-break on purpose: there is no ordering
+      // between two unknowns to break.
+      const av = eventCellValue(sortEventCol, a.events, a.counted_clickers);
+      const bv = eventCellValue(sortEventCol, b.events, b.counted_clickers);
+      if (av == null && bv == null) cmp = 0;
+      else if (av == null) return 1;
+      else if (bv == null) return -1;
+      else cmp = av - bv;
     } else {
       cmp =
         (a[sortBy as keyof typeof a] as number) -
@@ -454,7 +506,11 @@ export async function GET(req: NextRequest) {
         substitutedTotal,
         grand.visit_clicks_clean,
       ),
+      manual_topup: grandTopup,
     },
+    // The event-type registry, so the client can GENERATE the per-event columns
+    // rather than know them. Additive: no existing field changes meaning.
+    event_types: await loadEventTypes(db, auth.orgId),
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });
 }

@@ -4,6 +4,13 @@ import { useEffect, useMemo, useState } from "react";
 import { BarChart3 } from "lucide-react";
 
 import { ProviderPhoneCell } from "@/components/provider-phone-cell";
+import {
+  EventColumnsBar,
+  eventCellValue,
+  eventColsFor,
+  fmtEventCell,
+  tierBColumnCount,
+} from "@/components/reports/event-columns-view";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,6 +24,7 @@ import {
 import { CAMPAIGN_TIMEZONE_LABEL, formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
+import type { EventColumn, EventTypeSpec } from "@/lib/reporting/event-columns";
 import type {
   PerfMetrics,
   PerfRow,
@@ -30,6 +38,9 @@ interface PerfResponse {
   totals: PerfMetrics;
   refreshedAt: string | null;
   providers: ProviderOption[];
+  // The event-type registry. The per-event columns are GENERATED from it, so an
+  // empty array simply means no event columns — never a broken table.
+  event_types: EventTypeSpec[];
   range: { from: string; to: string; timezone: string };
 }
 
@@ -49,6 +60,11 @@ type PerfFilters = {
   providerPhoneId: number | null;
   sortBy: string;
   sortDir: "asc" | "desc";
+  // Per-browser, off by default — the same mechanism as the campaigns list's
+  // tracking-ID toggle. It governs ONLY the per-event money columns (tier B),
+  // each of which duplicates an aggregate column already on screen. Everything
+  // the owner named is visible without it.
+  showEvents: boolean;
 };
 
 function etDate(offsetDays: number): string {
@@ -86,20 +102,26 @@ function derive(r: PerfRow): DerivedRow {
   };
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="rounded-md border bg-background px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="text-lg font-semibold tabular-nums">{value}</div>
+      {hint ? <div className="text-[11px] text-muted-foreground">{hint}</div> : null}
     </div>
   );
 }
 
 type Col = {
-  id: keyof DerivedRow;
+  // `string`, not `keyof DerivedRow`: a GENERATED id is not a row key.
+  id: string;
   header: string;
-  kind: "count" | "pct" | "usd" | "profit";
+  kind: "count" | "pct" | "usd" | "profit" | "event";
   muted?: boolean;
+  /** Rendered as the header's tooltip. */
+  title?: string;
+  /** Set for a GENERATED column; its value is COMPUTED, not read off the row. */
+  event?: EventColumn;
 };
 // Full metric set for number/offer/sequence/group — mirrors the Overview tab.
 // BY-GROUP EXEMPTION, surfaced in the UI rather than left silent.
@@ -112,6 +134,12 @@ type Col = {
 const GROUP_CLICKS_NOTE =
   "By Group only: click counts are fractional shares split across each contact's groups, not deduplicated people. Not comparable with the other tabs.";
 
+// Why Sales does not equal the sum of the purchase columns beside it. Said on
+// the column AND on the stat card, because whichever one is read first is the
+// one that has to explain itself.
+const SALES_NOTE =
+  "Tracker conversions plus the manual tally. The per-event columns count tracker events only, so they sum to Sales minus the manual top-up (and minus any unmapped conversions, which the amber badge counts).";
+
 const FULL_COLS: Col[] = [
   { id: "sent", header: "Sent", kind: "count" },
   { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
@@ -120,7 +148,7 @@ const FULL_COLS: Col[] = [
   { id: "click_rate", header: "CR %", kind: "pct", muted: true },
   { id: "redirects", header: "Redirects", kind: "count" },
   { id: "redirect_rate", header: "Redir %", kind: "pct", muted: true },
-  { id: "sales", header: "Sales", kind: "count" },
+  { id: "sales", header: "Sales", kind: "count", title: SALES_NOTE },
   { id: "sales_cr", header: "Sales CR", kind: "pct", muted: true },
   { id: "revenue", header: "Revenue", kind: "usd" },
   { id: "pending_revenue", header: "Pending $", kind: "usd", muted: true },
@@ -146,24 +174,41 @@ const HOURLY_COLS: Col[] = [
   { id: "click_rate", header: "CR %", kind: "pct", muted: true },
   { id: "redirects", header: "Redirects", kind: "count" },
   { id: "redirect_rate", header: "Redir %", kind: "pct", muted: true },
-  { id: "sales", header: "Sales", kind: "count" },
+  { id: "sales", header: "Sales", kind: "count", title: SALES_NOTE },
   { id: "sales_cr", header: "Sales CR", kind: "pct", muted: true },
   { id: "revenue", header: "Revenue", kind: "usd" },
 ];
 
-function fmtCell(v: number, kind: Col["kind"]): string {
+function fmtCell(v: number, kind: Exclude<Col["kind"], "event">): string {
   if (kind === "count") return fmtNum(v);
   if (kind === "pct") return fmtPct(v);
   return fmtUsd(v);
 }
 
+/**
+ * One cell's value. A GENERATED column is computed from the row's event map and
+ * the row's own EPC denominator; every other column is a field on the row. Both
+ * the sort comparator and the body cell go through here, so they cannot disagree
+ * about what a column is worth.
+ */
+const cellValue = (r: DerivedRow, c: Col): number | null =>
+  c.event
+    ? eventCellValue(c.event, r.events ?? {}, r.counted_clickers)
+    : (r[c.id as keyof DerivedRow] as number);
+
 export function PerformanceReport({ dimension }: { dimension: ReportDimension }) {
   const isHourly = dimension === "hourly";
-  const cols = isHourly ? HOURLY_COLS : FULL_COLS;
 
   const [filters, updateFilters, resetFilters] = usePersistedFilters<PerfFilters>(
     "reports.performance",
-    { from: etDate(0), to: etDate(0), providerPhoneId: null, sortBy: "sent", sortDir: "desc" },
+    {
+      from: etDate(0),
+      to: etDate(0),
+      providerPhoneId: null,
+      sortBy: "sent",
+      sortDir: "desc",
+      showEvents: false,
+    },
   );
 
   const api = useApiCall<PerfResponse>();
@@ -195,20 +240,54 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
     };
   }, [dimension, isHourly, filters.from, filters.to, filters.providerPhoneId, api.execute]);
 
+  const eventCols = useMemo<EventColumn[]>(
+    () => eventColsFor(resp?.event_types ?? [], resp?.data ?? [], resp?.totals ?? null, filters.showEvents),
+    [resp, filters.showEvents],
+  );
+  // How many columns the toggle GOVERNS — a constant of the registry, not of the
+  // toggle's state. tierBColumnCount() cannot see the toggle at all, so the
+  // "count reads 0 while it is on, the control unmounts and tier B can never be
+  // switched off" bug is unrepresentable here. Bar W12.
+  const tierBCount = useMemo(
+    () => tierBColumnCount(resp?.event_types ?? [], resp?.data ?? [], resp?.totals ?? null),
+    [resp],
+  );
+  const cols = useMemo<Col[]>(() => {
+    const base = isHourly ? HOURLY_COLS : FULL_COLS;
+    // Spliced by the ID of the column the block sits BEFORE, not by an index —
+    // an index would silently move the block the next time a column is added.
+    // Before Sales, so the row reads as one funnel and no existing column moves
+    // relative to its neighbours.
+    const at = base.findIndex((c) => c.id === "sales");
+    const generated: Col[] = eventCols.map((e) => ({
+      id: e.id,
+      header: e.header,
+      kind: "event",
+      muted: e.muted,
+      event: e,
+    }));
+    return at < 0 ? [...base, ...generated] : [...base.slice(0, at), ...generated, ...base.slice(at)];
+  }, [isHourly, eventCols]);
+
   const rows = useMemo<DerivedRow[]>(() => {
     const derived = (resp?.data ?? []).map(derive);
     const dir = filters.sortDir === "asc" ? 1 : -1;
     const key = filters.sortBy as keyof DerivedRow;
+    const sortCol = cols.find((c) => c.id === filters.sortBy);
     return [...derived].sort((a, b) => {
       // Pinned rows (hourly "Manual") always sort to the top.
       if (a.pinned && !b.pinned) return -1;
       if (b.pinned && !a.pinned) return 1;
-      const av = a[key];
-      const bv = b[key];
+      const av = sortCol ? cellValue(a, sortCol) : a[key];
+      const bv = sortCol ? cellValue(b, sortCol) : b[key];
+      // "Unknown" sorts LAST in BOTH directions — it is not a small number. Same
+      // rule as the Overview API's comparator.
+      if (av == null && bv != null) return 1;
+      if (bv == null && av != null) return -1;
       if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
       return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
     });
-  }, [resp, filters.sortBy, filters.sortDir]);
+  }, [resp, filters.sortBy, filters.sortDir, cols]);
 
   const totals = resp?.totals ?? null;
   const providers = resp?.providers ?? [];
@@ -314,7 +393,11 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             <StatCard label="Opt-out %" value={fmtPct(rate(totals.opt_outs, totals.sent))} />
             <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
             <StatCard label="Redirects" value={fmtInt(totals.redirects)} />
-            <StatCard label="Sales" value={fmtInt(totals.sales)} />
+            <StatCard
+              label="Sales"
+              value={fmtInt(totals.sales)}
+              hint={totals.manual_topup > 0 ? `${fmtInt(totals.manual_topup)} from the manual tally` : undefined}
+            />
             <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
           </div>
         ) : (
@@ -323,7 +406,11 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             <StatCard label="Opt-out %" value={fmtPct(rate(totals.opt_outs, totals.sent))} />
             <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
             <StatCard label="Redirects" value={fmtInt(totals.redirects)} />
-            <StatCard label="Sales" value={fmtInt(totals.sales)} />
+            <StatCard
+              label="Sales"
+              value={fmtInt(totals.sales)}
+              hint={totals.manual_topup > 0 ? `${fmtInt(totals.manual_topup)} from the manual tally` : undefined}
+            />
             <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
             <StatCard label="Cost" value={fmtUsd(totals.cost)} />
             <StatCard label="Profit" value={fmtUsd(totals.revenue - totals.cost)} />
@@ -348,10 +435,30 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             Overview tab. EPC = revenue ÷ offer redirects.
             {dimension === "group"
               ? " Each stage's totals are split across its contact groups (tracked: per contact across the groups used in the campaign; manual: by each group's audience share), so group rows sum back to the stage total. Values may show 2 decimals."
-              : ""}
+              : ""}{" "}
+            Event columns are generated from your event-type registry: a count, a rate and a held count
+            per type, plus the signal→purchase conversion rate, and — under{" "}
+            <span className="font-medium">Event breakdown</span> — each revenue-bearing type&apos;s
+            revenue, held $ and EPC. Rates divide by <span className="font-medium">Clicks (period)</span>,
+            the same denominator as EPC, and can exceed 100% when a conversion&apos;s click was never
+            scored human. A dash means the denominator was zero.
           </>
         )}
       </p>
+
+      {/* ⭐ MOUNTED UNCONDITIONALLY, AND NEVER INSIDE A `showEvents` BRANCH.
+          EventColumnsBar carries the Event-breakdown toggle AND the unmapped
+          badge together (they are not separately exported), so the breakdown
+          cannot be on screen while the count of conversions it fails to explain
+          is hidden. It sits OUTSIDE the empty/error states too: a wholly
+          unmapped conversion resolves to no stage, so it appears in no row and
+          a range whose table is empty can still have strays worth seeing. */}
+      <EventColumnsBar
+        showEvents={filters.showEvents}
+        onShowEventsChange={(v) => updateFilters({ showEvents: v })}
+        tierBCount={tierBCount}
+        unmapped={totals?.unmapped ?? 0}
+      />
 
       {fetchError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">
@@ -376,6 +483,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
                 {cols.map((c) => (
                   <th
                     key={c.id}
+                    title={c.title}
                     className="cursor-pointer select-none whitespace-nowrap px-3 py-2 text-right font-medium hover:text-foreground"
                     onClick={() => toggleSort(c.id)}
                   >
@@ -390,10 +498,10 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
                 <tr key={r.key} className="border-b last:border-0 hover:bg-muted/30">
                   <td className="px-3 py-2">{renderLabel(r)}</td>
                   {cols.map((c) => {
-                    const v = r[c.id] as number;
+                    const v = cellValue(r, c);
                     const cls =
                       c.kind === "profit"
-                        ? v >= 0
+                        ? (v ?? 0) >= 0
                           ? "text-emerald-600 dark:text-emerald-400"
                           : "text-destructive"
                         : c.muted
@@ -401,7 +509,9 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
                           : "";
                     return (
                       <td key={c.id} className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${cls}`}>
-                        {fmtCell(v, c.kind)}
+                        {c.event
+                          ? fmtEventCell(v, c.event.kind)
+                          : fmtCell(v as number, c.kind as Exclude<Col["kind"], "event">)}
                       </td>
                     );
                   })}

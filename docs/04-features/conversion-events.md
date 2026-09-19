@@ -674,15 +674,133 @@ empty-ledger test lets an empty ledger proceed (C1c).
 **17/0** — P16 asserts `purchasedClause()` still CONTAINS `countedClause()`, so the
 status rule cannot separate into two copies.
 
+## The report tables render the generated columns (Phase 5 Task 5)
+
+**This is the first task of the phase that is on a screen.** Both report tables —
+the Overview tab ([`components/reports/keitaro-report.tsx`](../../components/reports/keitaro-report.tsx))
+and the five performance tabs
+([`components/reports/performance-report.tsx`](../../components/reports/performance-report.tsx))
+— now render a column per event type, GENERATED from the registry the API
+returns. Both endpoints emit `event_types` (the `EventTypeSpec[]` from
+`loadEventTypes`) beside the rows; `/api/reports/performance` emits it on **all
+three** response bodies, since missing one would leave `dimension=creative`
+without columns while By Offer had them.
+
+The shared client half is
+[`components/reports/event-columns-view.tsx`](../../components/reports/event-columns-view.tsx):
+`eventColsFor()`, `tierBColumnCount()`, `fmtEventCell()` and `EventColumnsBar`.
+Both tables build their column list from it, so they cannot disagree about what a
+"Registrations" column is.
+
+**Rendered order.** The generated block is spliced in **after `Redir %` and
+before `Sales`**, found by the neighbouring column's *id* rather than by an index,
+so the row reads as one funnel and no existing column moves relative to its
+neighbours. With production's registry (migration 0181: `purchase` =
+is_purchase + counts_revenue, `registration` = is_retarget_signal) the block is
+seven columns: Registrations · Registration rate · Registration pending ·
+Purchases · Purchase rate · Purchase pending · Registration→Purchase %.
+
+**Tier A is always visible; the toggle governs only tier B.** Tier B is the three
+per-event money columns of a `counts_revenue` type (Purchase $ · Purchase pending
+$ · Purchase EPC), each of which duplicates an aggregate column already on screen
+while exactly one revenue type exists. Everything the owner named is visible
+without the toggle: the aggregate `Revenue`, `Pending $` and `EPC (period)` /
+`EPC (all time)` columns were already default-visible, and the generated counts
+and rates are tier A. The toggle is per-browser (`showEvents` in the persisted
+filters), off by default.
+
+⭐ **`tierBColumnCount()` takes no `showTierB` argument, deliberately.** The
+count is a constant of the registry, not of the toggle's state. A
+state-dependent count reads `0` while the toggle is ON, which trips
+`EventBreakdownToggle`'s `count === 0` early return, unmounts the control and
+leaves tier B switched on with no way to switch it off. Giving the function no
+way to see the toggle makes that bug unrepresentable rather than merely tested.
+
+### ⭐ The unmapped badge cannot be hidden while the breakdown is shown
+
+A screen may not present the per-event breakdown as an explanation of `Sales`
+without the unclassified count beside it. `sales` and `revenue` resolve their
+flags through non-org-scoped id lists while the `events` entries come from an
+org-scoped join, so a cross-organisation event type is counted by the SCALAR and
+placed under no key — it surfaces only as `unmapped`. The invariant the table
+must keep honest is
+
+```
+sales = Σ over is_purchase types of events[key].n  +  manual_topup  +  strays
+```
+
+so a readable breakdown beside an unreadable stray count silently under-explains
+its own total.
+
+That is wired **structurally, not by convention**: `EventBreakdownToggle` and
+`UnmappedBadge` are **not exported**. The only export is `EventColumnsBar`, which
+renders both, so a surface that wants the toggle takes the badge with it. Tier A
+is always rendered, so "the breakdown is shown" is true on every tab, and the bar
+is mounted unconditionally beside the filters — never inside a `showEvents`
+branch, and **outside the empty and error states**, because a wholly unmapped
+conversion resolves to no stage, appears in no row, and can therefore exist in a
+range whose table is empty.
+
+The badge renders nothing at zero (a permanent "0 unmapped" chip is furniture).
+It carries an explanatory `title` and **no link**: `conversion_event_mappings`
+has no admin screen yet. Give it an `href` the day that page exists.
+
+### ⚠️ Hourly has two answers for pending money; only one reaches a row
+
+On `dimension=hourly` the SCALAR `pending_revenue` is set to `0` by hand
+([`lib/reporting/performance-report.ts`](../../lib/reporting/performance-report.ts),
+the hourly row map) because hourly never runs a pending query — the zero is a
+NOT-COMPUTED sentinel, not a measurement. Meanwhile `ledgerHourEventQuery()`
+**does** compute `pending_n` and `pending_revenue` into `m.events`, off
+`conversion_events`, bucketed on the same `ce.occurred_at` ET hour as hourly's
+own `sales` and `revenue`.
+
+**The per-event map is the correct one.** Its figures are real and on the same
+time basis as the rest of the row. So the per-event pending columns stay on
+hourly; hiding a true number to agree with a placeholder would be backwards.
+
+That is safe only while **no hourly column and no hourly stat card renders the
+scalar**, which is true today (`HOURLY_COLS` has no pending entry) and is one
+column addition away from being false — at which point the same row would show
+`$0.00` in one column and `$40.00` in the next. Bar **W20** pins it, with W19 as
+its positive control (`FULL_COLS` *does* carry a scalar pending column, so a
+broken extractor fails loudly instead of passing). Making the two AGREE would
+mean computing a pending series in the hourly aggregation, which is a change to
+the aggregation layer, not the rendering layer.
+
+Related: the hourly path emits **all-zero** per-event entries where the stage-day
+projection FILTERs the key out entirely. The two still produce the same column
+set, because `visibleEventTypes()` keys on a non-zero field rather than on key
+presence (bar **W21**, one-sided against W4).
+
+### Nothing may name an event key
+
+[`scripts/test-reports-no-hardcoded-event-keys.ts`](../../scripts/test-reports-no-hardcoded-event-keys.ts)
+is the gate on the phase's central claim, over 19 files — all four rendering
+surfaces plus everything between the registry and them. Three needles per key
+(quoted literal, dot/optional-chain property access, and object-literal key or
+generated-id segment), matched against **whitespace-collapsed** source so CRLF
+and LF files are treated alike and no needle can contain a newline it would never
+find. Comments are stripped first, so prose may name the keys freely. `\b` on the
+property and key needles is load-bearing in both directions: it spares
+`t.is_purchase` and `is_purchase:` — the registry FLAGS every module here is
+supposed to read — and G0g pins that it also spares `repurchaseRate`.
+
+Bars **G0a–G0h** are negative controls on the matcher itself, because every other
+bar asserts an ABSENCE and a typo in a regex would make them all pass. **G1**
+fails when a listed path does not exist, so a renamed module cannot drop out of
+coverage silently. **G3b** keeps any rendering surface from fetching
+`/api/keitaro/results`, whose explicit projection omits `events` — its `{}` means
+"not selected", not "zero of everything" — with G3a as the positive control.
+
+Deliberate omissions: `lib/sale-attribution.ts` (the ledger's definition file,
+whose frozen legacy section quotes `'lead'`/`'sale'`) and everything under
+`scripts/` (the tests MUST name keys — that is how they assert).
+
 ## Not built yet
 
-- **Phase 5 beyond Tasks 1–4 — proposed, not built.** The generator exists, the
-  `events` / `unmapped_conversions` columns exist, the projection writes them, and
-  as of Task 4 the **read layer carries them through every report dimension and the
-  hourly tab** (`FunnelTally.events` / `.unmapped`, `PerfMetrics.events` /
-  `.unmapped` / `.manual_topup` — see
-  [reports-rollup.md](reports-rollup.md) "Per-event figures ride the shared
-  metrics"). They ride out of `/api/reports/performance` as additive fields on
-  every row and on `totals`, because the row objects spread the metrics — but
-  **no component reads any of them and no column is generated on any screen yet**.
-  Nothing downstream should be relied on as decided.
+- **Phase 5 beyond Task 5 — proposed, not built.** The generator, the storage,
+  the projection, the read layer and now the two report tables exist. The
+  remaining tasks (the campaign page, the creatives page, the Telegram
+  formatter) are not built, and nothing downstream should be relied on as
+  decided.

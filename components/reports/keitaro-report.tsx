@@ -8,6 +8,13 @@ import type { ColumnDef } from "@tanstack/react-table";
 
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
+import {
+  EventColumnsBar,
+  eventCellValue,
+  eventColsFor,
+  fmtEventCell,
+  tierBColumnCount,
+} from "@/components/reports/event-columns-view";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,6 +26,7 @@ import {
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
+import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 
 // The "Overview" tab of /reports — the Keitaro Clickers → Offer Redirect → Sales
 // funnel, per stage or per campaign. Moved verbatim out of app/(protected)/reports
@@ -67,6 +75,15 @@ type ReportRow = {
   // < 100 ⇒ a MIXED-capability campaign; the figure must be labelled with its
   // coverage or a 4%-coverage number is indistinguishable from a 100% one.
   delivery_coverage_pct: number | null;
+  // The per-event-type breakdown of sales / revenue, keyed by event_types.key.
+  // The columns over it are GENERATED from the registry the response carries.
+  events: EventMap;
+  // Conversions in scope that matched no mapping. Counted in NO other field —
+  // which is why only the amber badge can tell you they exist.
+  unmapped: number;
+  // The part of `sales` that came from the manual tally rather than the tracker:
+  //   sales = Σ (is_purchase) events[t].n + manual_topup + unmapped strays
+  manual_topup: number;
 };
 
 // Delivered % cell. Three distinct "no number" cases, which must not look alike:
@@ -131,6 +148,9 @@ type ReportResponse = {
   data: ReportRow[];
   totalCount: number;
   totals: Totals;
+  // The event-type registry. The per-event columns are GENERATED from it, so an
+  // empty array simply means no event columns — never a broken table.
+  event_types: EventTypeSpec[];
   // available=false ⇒ the selected range exceeds the delivery cap and the
   // Delivered % column was not computed at all (see DeliveredCell).
   delivery?: { available: boolean; max_days: number };
@@ -156,6 +176,9 @@ type Filters = {
   pageSize: number;
   sortBy: string;
   sortDir: "asc" | "desc";
+  // Per-browser, off by default. It governs ONLY the per-event money columns
+  // (tier B), each of which duplicates an aggregate column already on screen.
+  showEvents: boolean;
 };
 
 function etDate(offsetDays: number): string {
@@ -177,6 +200,7 @@ const DEFAULT_FILTERS: Filters = {
   pageSize: 20,
   sortBy: "revenue",
   sortDir: "desc",
+  showEvents: false,
 };
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -194,6 +218,12 @@ function fmtInt(n: number): string {
 function fmtPct(n: number): string {
   return `${(n * 100).toFixed(1)}%`;
 }
+
+// Why Sales does not equal the sum of the purchase columns beside it. Said on
+// the column AND on the stat card, because whichever one is read first is the
+// one that has to explain itself.
+const SALES_NOTE =
+  "Tracker conversions plus the manual tally. The per-event columns count tracker events only, so they sum to Sales minus the manual top-up (and minus any unmapped conversions, which the amber badge counts).";
 
 // The Campaign cell carries two lines (name + send number), so an unbounded
 // name would push the metric columns off screen. Anything past 50 characters
@@ -232,11 +262,12 @@ function SendNumbers({ phones }: { phones: ReportRow["phones"] }) {
   );
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="rounded-md border bg-background px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="text-lg font-semibold tabular-nums">{value}</div>
+      {hint ? <div className="text-[11px] text-muted-foreground">{hint}</div> : null}
     </div>
   );
 }
@@ -267,6 +298,7 @@ export function KeitaroReport() {
 
   const [data, setData] = useState<ReportRow[]>([]);
   const [totals, setTotals] = useState<Totals | null>(null);
+  const [eventTypes, setEventTypes] = useState<EventTypeSpec[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
   // Whether the server computed the Delivered % column at all for this range.
@@ -296,6 +328,7 @@ export function KeitaroReport() {
       if (result.ok) {
         setData(result.data.data);
         setTotals(result.data.totals);
+        setEventTypes(result.data.event_types ?? []);
         setTotalCount(result.data.totalCount);
         setDeliveryAvailable(result.data.delivery?.available ?? true);
       } else {
@@ -477,7 +510,7 @@ export function KeitaroReport() {
       },
       {
         id: "sales",
-        header: "Sales",
+        header: () => <span title={SALES_NOTE}>Sales</span>,
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums">{fmtInt(row.original.sales)}</span>
@@ -586,8 +619,33 @@ export function KeitaroReport() {
         ),
       },
     ];
-    return [campaignCol, stageCol, ...rest];
-  }, [filters.groupBy, deliveryAvailable]);
+    // The GENERATED block, spliced by the ID of the column it sits BEFORE rather
+    // than by an index — an index would silently move the block the next time a
+    // column is added. Before Sales, so the row reads as one funnel and no
+    // existing column moves relative to its neighbours.
+    const generated: ColumnDef<ReportRow>[] = eventColsFor(
+      eventTypes,
+      data,
+      totals,
+      filters.showEvents,
+    ).map((e) => ({
+      id: e.id,
+      header: e.header,
+      enableSorting: true,
+      cell: ({ row }) => (
+        <span className={`tabular-nums${e.muted ? " text-muted-foreground" : ""}`}>
+          {fmtEventCell(
+            eventCellValue(e, row.original.events ?? {}, row.original.counted_clickers),
+            e.kind,
+          )}
+        </span>
+      ),
+    }));
+    const at = rest.findIndex((c) => c.id === "sales");
+    const withEvents =
+      at < 0 ? [...rest, ...generated] : [...rest.slice(0, at), ...generated, ...rest.slice(at)];
+    return [campaignCol, stageCol, ...withEvents];
+  }, [filters.groupBy, filters.showEvents, deliveryAvailable, eventTypes, data, totals]);
 
   const isAuthLoading = !auth;
 
@@ -686,7 +744,11 @@ export function KeitaroReport() {
               label="Offer Redirect"
               value={fmtInt(totals.offer_redirect)}
             />
-            <StatCard label="Sales" value={fmtInt(totals.sales)} />
+            <StatCard
+              label="Sales"
+              value={fmtInt(totals.sales)}
+              hint={totals.manual_topup > 0 ? `${fmtInt(totals.manual_topup)} from the manual tally` : undefined}
+            />
             <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
             {/* Held money, beside the revenue it is NOT part of. The table has
                 carried a "Pending $" column since Task 6; without the tile the
@@ -709,6 +771,20 @@ export function KeitaroReport() {
           ) : null}
         </>
       ) : null}
+
+      {/* ⭐ MOUNTED UNCONDITIONALLY, AND NEVER INSIDE A `showEvents` BRANCH.
+          EventColumnsBar carries the Event-breakdown toggle AND the unmapped
+          badge together (they are not separately exported), so the breakdown
+          cannot be on screen while the count of conversions it fails to explain
+          is hidden. It sits OUTSIDE the empty/error states too: a wholly
+          unmapped conversion resolves to no stage, so it appears in no row and
+          a range whose table is empty can still have strays worth seeing. */}
+      <EventColumnsBar
+        showEvents={filters.showEvents}
+        onShowEventsChange={(v) => updateFilters({ showEvents: v })}
+        tierBCount={tierBColumnCount(eventTypes, data, totals)}
+        unmapped={totals?.unmapped ?? 0}
+      />
 
       {fetchError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">

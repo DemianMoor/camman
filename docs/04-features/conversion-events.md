@@ -962,9 +962,104 @@ one-day fixture would pass against an aggregate that merely picked one row's
 object. The second day sits OUTSIDE the range the R bars read, so the same
 fixture cannot move them.
 
+## `/creatives` gains per-event counts beside Checkout Rate (Phase 5 Task 7)
+
+**Why this screen, when an earlier draft excluded it.** `CHECKOUT_FILTER` in
+[`lib/keitaro/stage-day-conversions.ts`](../../lib/keitaro/stage-day-conversions.ts)
+is `ce.keitaro_type = 'lead'` — the only conversion metric in the product keyed
+on a RAW tracker type. On most of this account's networks `lead` is a paid
+purchase; on one it is the free registration. `/creatives` shows that number as
+**"Checkout Rate"** and creatives are **sorted and ranked by this table**, so on
+that offer the screen has been ranking by free signups with nothing beside it to
+disagree. The exclusion rested on a factual error — that a per-event count here
+would need a new data source. It does not: `computeCreativeMetrics`'s `k_stage`
+CTE already reads `keitaro_stage_results`.
+
+**Counts only.** No per-creative rate, revenue or EPC split. The money split
+belongs on the reports' `dimension=creative`, which has a denominator and a range
+picker; this table is already ~20 columns wide.
+
+| Layer | What it does |
+| --- | --- |
+| [`lib/creatives/metrics-cache.ts`](../../lib/creatives/metrics-cache.ts) | `k_stage_ev` unrolls `keitaro_stage_results.events` per stage; `creative_ev` rolls it to the creative and emits one `jsonb_object_agg` per creative. `k_stage` also sums `unmapped_conversions`, which `stage_agg` carries as `unmapped`. `CreativeMetricsRow` gains `events: EventCountMap` and `unmapped: number`. |
+| [`app/api/creatives/list/route.ts`](../../app/api/creatives/list/route.ts) | `events jsonb, unmapped int` on the `jsonb_to_recordset` column list; `events` / `unmapped` on the `metrics` object; `event_types` at the top level of the response. `RATIO_SQL` is untouched — no new ratio is computed. |
+| [`app/(protected)/creatives/page.tsx`](../../app/(protected)/creatives/page.tsx) | One generated column per event type, spliced **immediately after `checkout_rate`**, through `eventCountColumns()`. |
+
+### ⭐ The 30-day window is copied from `stage_agg`, deliberately
+
+`creative_ev`'s inner select carries `cs.created_at >= now() - interval '30 days'`
+because the column it sits beside — "Checkout Rate", whose numerator is
+`stage_agg.checkouts` — has exactly that bound. Two different windows would make
+the comparison the columns exist to enable meaningless. The residual rides
+`k_stage` into `stage_agg` for the same reason: it is bounded by the very
+aggregate it qualifies. Bars **C3** and **C6**.
+
+### ⭐ A count-only grain gets its own type, and its own renderer
+
+`EventCountMap` (`Record<string, number>`,
+[`lib/reporting/event-columns.ts`](../../lib/reporting/event-columns.ts)) is
+deliberately narrower than `EventMap`: carrying the four-field tally here would
+hand a later reader `revenue` fields that were never summed at this grain and
+read as a measured $0.00.
+
+`visibleEventTypesByCount()` is now the primitive and `visibleEventTypes()` the
+wrapper, so "which types are on screen" has ONE definition across both grains.
+
+The screen cannot mount `EventColumnsBar` (its toggle governs per-event money
+columns this screen does not have), nor `StageEventBreakdown` / `EventTotalsTiles`
+(a `·`-joined line and a tile grid, not a column set). So the RULE carries over
+rather than the markup: **`eventCountColumns()` returns the count columns and the
+residual column in ONE array**, and neither half is separately exported. The
+residual column appears only while some row on the page has a stray — the same
+"nothing at zero" rule `UnmappedBadge` renders by. Bars **Y1–Y7**; the scan bars
+**X8–X12** discover the surface rather than listing it (`eventCountColumns(` is in
+BOTH the builder and the residual needle lists, because a file that calls it has
+discharged the rule by construction).
+
+### ⚠️ `jsonb_each` on a non-object kills the whole statement
+
+`jsonb_each` raises **22023** on a jsonb scalar or array, and the error is not
+scoped to the offending row — it aborts the statement, so ONE malformed stage-day
+row would blank every number on `/creatives` for the entire org. `events` is
+`jsonb NOT NULL DEFAULT '{}'` with **no CHECK constraint** (migration 0185), so
+object-ness is a convention of the writer, not a guarantee of the database —
+which is why `parseEventMap()` already defends against the same shapes in JS.
+`k_stage_ev` therefore filters on `jsonb_typeof(ksr.events) = 'object'`. Found by
+opening the page, not by reading the code: a hand-written fixture stored a JSON
+string and the creatives list 22023'd on the spot. Bar **C11**.
+
+The one other `jsonb_each` reader of that column —
+[`lib/reporting/stage-keitaro-aggregate.ts`](../../lib/reporting/stage-keitaro-aggregate.ts)
+`ev`, Task 6's stages aggregate, where the same row would have blanked every stage on a
+campaign page — carries the same guard now. It has no bar of its own; the construct is
+proved by C11, and the code comment there says so.
+
+### Interaction with the lifetime-driven row set
+
+The final SELECT is driven by the LIFETIME aggregates, so a creative idle 30+ days
+still gets a row and keeps its all-time columns. Its 30-day event counts read `{}`
+— correctly, because the counts ARE 30-day — and `creative_ev` is LEFT JOINed so a
+creative with conversions and an all-`{}` breakdown keeps its row rather than
+vanishing. Bars **C2** and **C7**.
+
+### Bars
+
+**C1–C11** in
+[`scripts/test-creative-event-counts-db.ts`](../../scripts/test-creative-event-counts-db.ts),
+against camman-v2 inside a transaction that always rolls back.
+`computeCreativeMetrics(orgId, dbc)` now takes a connection so the bars can hand
+it the fixture transaction; `readCreativeCtr(orgId, dbc)` was threaded for the
+same reason.
+
+⚠️ The Phase 5 plan said `scripts/test-creatives-list-metrics.ts` "already
+exercises `computeCreativeMetrics`". It does not — it signs in with `.env.local`
+(**production**) and fetches a running dev server over HTTP, and the aggregate it
+would read sits behind a 15-minute in-memory cache. The new bars follow the
+execution model every other Phase 5 DB suite uses instead.
+
 ## Not built yet
 
-- **Phase 5 beyond Task 6 — proposed, not built.** The generator, the storage,
-  the projection, the read layer, the two report tables and now the campaign page
-  exist. The remaining tasks (the creatives page, the Telegram formatter) are not
+- **Phase 5 beyond Task 7 — proposed, not built.** The generator, the storage,
+  the projection, the read layer, the two report tables, the campaign page and now
+  the creatives page exist. The remaining task (the Telegram formatter) is not
   built, and nothing downstream should be relied on as decided.

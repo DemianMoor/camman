@@ -9,8 +9,12 @@ import {
   StageEventBreakdown,
   eventCellValue,
   eventColumnBlock,
+  eventCountColumns,
+  eventCountValue,
   fmtEventCell,
   sortColumnOrFallback,
+  type EventCountColumn,
+  type EventCountRow,
 } from "@/components/reports/event-columns-view";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 
@@ -370,6 +374,102 @@ check(
   `exports: ${Object.keys(view).join(", ")}`,
 );
 
+// ── ⭐ THE THIRD SHAPE — A COUNT-ONLY COLUMN SET — KEEPS THE SAME RULE ───────
+//
+// /creatives is a table of CREATIVES, so the residual can be neither an inline
+// `·` segment nor a tile; and it cannot mount EventColumnsBar, whose toggle
+// governs per-event MONEY columns this screen deliberately does not have.
+// What survives is the property that matters: ONE call hands back the count
+// columns AND the residual column, and there is no export that yields either
+// half alone. `render` keeps the caller's own markup (a TanStack ColumnDef),
+// exactly as EventTotalsTiles' renderTile does.
+//
+// ⭐ ONE-SIDED: `signup` carries 12 and 8; `deposit` — an ACTIVE, configured
+// type — carries nothing at all in these rows. A column set discovered from the
+// data instead of the registry loses it, which is Y2.
+const COUNT_ROWS: EventCountRow[] = [
+  { events: { signup: 12 } },
+  { events: { signup: 8 }, unmapped: 3 },
+];
+const COUNT_ROWS_CLEAN: EventCountRow[] = [{ events: { signup: 12 } }, { events: { signup: 8 } }];
+const countCols = (spec: EventTypeSpec[], rows: EventCountRow[]): EventCountColumn[] =>
+  eventCountColumns(spec, rows, (c) => c);
+
+const withStray = countCols(SPEC, COUNT_ROWS);
+const noStray = countCols(SPEC, COUNT_ROWS_CLEAN);
+check(
+  "Y1 ⭐ ONE call yields the count columns AND the residual column — the counts cannot be taken without it, because there is no second list to take",
+  withStray.filter((c) => c.kind === "count").length === SPEC.length &&
+    withStray.filter((c) => c.kind === "unmapped").length === 1 &&
+    withStray.length === SPEC.length + 1 &&
+    // …and the residual lands AFTER the segments it qualifies, never adrift at
+    // the far end of a table the eye has already left.
+    withStray[withStray.length - 1].kind === "unmapped",
+  JSON.stringify(withStray.map((c) => `${c.kind}:${c.id}`)),
+);
+check(
+  "Y2 ⭐ a configured type with ZERO conversions still gets a column and it reads 0, beside one reading 12",
+  (() => {
+    const zero = withStray.find((c) => c.id === "evt:deposit:count");
+    const live = withStray.find((c) => c.id === "evt:signup:count");
+    return (
+      zero !== undefined &&
+      live !== undefined &&
+      eventCountValue(zero, COUNT_ROWS[0]) === 0 &&
+      eventCountValue(live, COUNT_ROWS[0]) === 12
+    );
+  })(),
+  JSON.stringify(withStray.map((c) => c.id)),
+);
+check(
+  "Y3 the residual column appears ONLY while a row on the page has a stray — the counts are unconditional, the residual is the one conditional part",
+  noStray.length === SPEC.length &&
+    !noStray.some((c) => c.kind === "unmapped") &&
+    noStray.some((c) => c.id === "evt:deposit:count"),
+  JSON.stringify(noStray.map((c) => c.id)),
+);
+check(
+  "Y4 ⭐ an ARCHIVED type gets a count column only while a row still carries a non-zero count for it — the same rule the report tables use, over bare counts",
+  !countCols(SPEC_ARCHIVED, COUNT_ROWS).some((c) => c.id === "evt:legacy_cpa:count") &&
+    countCols(SPEC_ARCHIVED, [{ events: { legacy_cpa: 4 } }]).some(
+      (c) => c.id === "evt:legacy_cpa:count",
+    ) &&
+    // …and an entry that is present but ZERO does not resurrect it (W21's rule).
+    !countCols(SPEC_ARCHIVED, [{ events: { legacy_cpa: 0 } }]).some(
+      (c) => c.id === "evt:legacy_cpa:count",
+    ),
+);
+check(
+  "Y5 ⭐ neither half is separately exported — a surface cannot obtain the count columns without the residual, nor the residual on its own",
+  typeof view.eventCountColumns === "function" && // positive control: the name check works
+    typeof view.eventCountValue === "function" &&
+    !("eventCountResidualColumn" in view) &&
+    !("RESIDUAL_COLUMN" in view) &&
+    !("eventCountColumnsOnly" in view),
+  `exports: ${Object.keys(view).join(", ")}`,
+);
+check(
+  "Y6 ⭐ a count column can never render the stray count, nor the residual a count — each reads its own field",
+  (() => {
+    // Both looked up, neither asserted non-null: a mutation that drops the
+    // residual has to FAIL this bar, not throw out of the suite and take the
+    // bars below it with it.
+    const zero = withStray.find((c) => c.id === "evt:deposit:count");
+    const residual = withStray.find((c) => c.kind === "unmapped");
+    if (zero === undefined || residual === undefined) return false;
+    const row = COUNT_ROWS[1]; // signup: 8, unmapped: 3, no deposit key
+    return (
+      eventCountValue(zero, row) === 0 &&
+      eventCountValue(residual, row) === 3 &&
+      eventCountValue(residual, COUNT_ROWS[0]) === 0
+    );
+  })(),
+);
+check(
+  "Y7 an EMPTY registry with no strays yields no columns at all — the table is changed by exactly nothing",
+  countCols([], COUNT_ROWS_CLEAN).length === 0,
+);
+
 // ── ⭐ …AND THE CAMPAIGN PAGE MOUNTS THOSE, RATHER THAN ITS OWN COPY ─────────
 //
 // X6 makes an under-explaining surface unbuildable out of THIS module; this is
@@ -420,10 +520,35 @@ function walkSources(dir: string, out: string[] = []): string[] {
 // A file BUILDS the per-event figures if it calls any of these. `eventColsFor` /
 // `tierBColumnCount` are the names Task 5 exported: they are private now, and
 // listing them keeps the scan honest if either is ever exported again.
-const BUILDERS = ["eventColumnBlock(", "buildEventColumns(", "visibleEventTypes(", "eventColsFor(", "tierBColumnCount("];
+//
+// ⚠️ `visibleEventTypes(` does NOT match `visibleEventTypesByCount(` — the "("
+// is part of the needle — so the count-grain primitive is listed in its own
+// right. Missing it would leave a surface that filters the registry by counts
+// and renders its own cells entirely unclassified.
+const BUILDERS = [
+  "eventColumnBlock(",
+  "buildEventColumns(",
+  "visibleEventTypes(",
+  "visibleEventTypesByCount(",
+  "eventColsFor(",
+  "tierBColumnCount(",
+  "eventCountColumns(",
+];
 // …and it renders the residual if it MOUNTS one of the three components that
 // carry it. The module that defines them is excluded from the scan.
-const RESIDUAL = ["<EventColumnsBar", "<StageEventBreakdown", "<EventTotalsTiles"];
+//
+// ⭐ `eventCountColumns(` IS IN BOTH LISTS, DELIBERATELY. It is a builder — it
+// generates the count columns — and it is ALSO a residual renderer, because the
+// residual column comes back inside the very array it returns and the caller is
+// never handed the two separately (Y1/Y5). A file that calls it has therefore
+// discharged X9 by construction, which is the strongest form of the rule this
+// scan exists to enforce, not an exemption from it.
+const RESIDUAL = [
+  "<EventColumnsBar",
+  "<StageEventBreakdown",
+  "<EventTotalsTiles",
+  "eventCountColumns(",
+];
 const VIEW_MODULE = "components/reports/event-columns-view.tsx";
 
 const scanned = ["app", "components"].flatMap((d) => walkSources(d));
@@ -442,6 +567,10 @@ const KNOWN_SURFACES = [
   "components/reports/keitaro-report.tsx",
   "components/reports/performance-report.tsx",
   "app/(protected)/campaigns/[id]/page.tsx",
+  // The count-only grain. It is here for the same reason as the other three:
+  // if the creatives table stops being discovered — a renamed call, a rotted
+  // needle — that must fail HERE rather than quietly shrink X9's population.
+  "app/(protected)/creatives/page.tsx",
 ];
 check(
   `X8 ⭐ the scanner finds the per-event surfaces that exist (${builders.length} of ${scanned.length} files) — a scan that finds nothing must fail HERE, not pass X9`,
@@ -483,13 +612,17 @@ const BUILDER_SAMPLES = [
   "const b = eventColumnBlock(spec, rows, totals, showEvents);",
   "const cols = buildEventColumns(types);",
   "const live = visibleEventTypes(spec, maps);",
+  "const live = visibleEventTypesByCount(spec, countMaps);",
   "const cols = eventColsFor(spec, rows, totals, false);",
   "const n = tierBColumnCount(spec, rows, totals);",
+  "const cols = eventCountColumns(eventTypes, rows, render);",
 ];
 const RESIDUAL_SAMPLES = [
   "return <EventColumnsBar block={block} onShowEventsChange={f} />;",
   "return <StageEventBreakdown types={t} events={e} unmapped={u} />;",
   "return <EventTotalsTiles types={t} events={e} unmapped={u} renderTile={r} />;",
+  // The residual column rides back inside this call's own array.
+  "const cols = eventCountColumns(eventTypes, rows, render);",
 ];
 const deadBuilder = BUILDERS.filter((n) => !BUILDER_SAMPLES.some((s) => s.includes(n)));
 const deadResidual = RESIDUAL.filter((n) => !RESIDUAL_SAMPLES.some((s) => s.includes(n)));
@@ -500,6 +633,31 @@ check(
     deadBuilder.length === 0 &&
     deadResidual.length === 0,
   `dead builder needles: ${deadBuilder.join(", ") || "none"} | dead residual needles: ${deadResidual.join(", ") || "none"}`,
+);
+// ⭐ …AND IN BOTH LINE ENDINGS. This checkout mixes CRLF and LF per file
+// (core.autocrlf=true; .gitattributes pins only db/migrations/**), so a needle
+// that matched only one of them would classify a surface differently depending
+// on which machine last touched the file — silently, and in the direction that
+// makes X9 pass. The classifier collapses whitespace first, which is what makes
+// this true; this bar is what keeps it true, needle BY needle rather than over a
+// fixture that several needles happen to share.
+const asCrlf = (s: string) => s.replace(/\n/g, "\r\n");
+const lineEndingSensitive = [
+  ...BUILDER_SAMPLES.map((s) => ({ s, want: "builds" as const })),
+  ...RESIDUAL_SAMPLES.map((s) => ({ s, want: "residual" as const })),
+].filter(({ s, want }) => {
+  // One needle per sample, split onto two lines so the collapse is load-bearing:
+  // an un-collapsed match would see "eventCountColumns(\r\n" and miss.
+  const split = s.replace(/\(/, "(\n  ");
+  return !(classify(split)[want] && classify(asCrlf(split))[want]);
+});
+check(
+  `X12 ⭐ every needle matches across a line break in BOTH line endings (${BUILDER_SAMPLES.length + RESIDUAL_SAMPLES.length} samples, LF and CRLF)`,
+  lineEndingSensitive.length === 0 &&
+    // Positive control: the split really does put a newline inside the call, so
+    // "they all matched" cannot mean "nothing was split".
+    BUILDER_SAMPLES[0].replace(/\(/, "(\n  ").includes("(\n"),
+  lineEndingSensitive.map(({ s }) => s).join(" | "),
 );
 
 // ── ⭐ A PERSISTED SORT THAT NAMES A VANISHED COLUMN MUST FAIL VISIBLY ───────

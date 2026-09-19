@@ -32,6 +32,14 @@ import {
 } from "@/components/creatives/creative-form";
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
+// The SAME generator the reports and the campaign page use, so a "Registrations"
+// column cannot come to mean two things on two screens — and it hands back the
+// residual column with the counts, never one without the other.
+import {
+  eventCountColumns,
+  eventCountValue,
+} from "@/components/reports/event-columns-view";
+import type { EventCountMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -128,6 +136,14 @@ type Creative = {
     epc_lifetime: number | null;
     // All-time sales: per stage max(manual tally, Keitaro conversions), summed.
     sales_lifetime: number;
+    // The same 30-day conversions as `checkouts` / `sales`, split per
+    // event_types.key. COUNTS ONLY — no rate, revenue or EPC is computed at
+    // this grain, and the type is what keeps it that way.
+    events: EventCountMap;
+    // The conversions those counts do NOT explain (no event-type mapping).
+    // Rendered beside them; see the column block below for why it is not
+    // optional.
+    unmapped: number;
   };
   // Spam scoring fields. spam_score is 0-100 (or null when unscored).
   // spam_label is the binary verdict mirrored from the cache; the list
@@ -142,7 +158,13 @@ type Creative = {
   spam_score_error: string | null;
 };
 
-type ListResponse = { data: Creative[]; totalCount: number };
+type ListResponse = {
+  data: Creative[];
+  totalCount: number;
+  // The org's event-type registry, response-level. Absent when the caller opted
+  // out of metrics (there would be no counts for the columns to show).
+  event_types?: EventTypeSpec[];
+};
 type OfferInfo = {
   id: number;
   name: string;
@@ -462,6 +484,10 @@ export default function CreativesPage() {
 
   const [data, setData] = useState<Creative[]>([]);
   const [totalCount, setTotalCount] = useState(0);
+  // The registry the per-event count columns are generated from. It arrives on
+  // the list response, so the columns and the counts always describe the same
+  // configuration — there is no second fetch that can be a beat behind.
+  const [eventTypes, setEventTypes] = useState<EventTypeSpec[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
@@ -501,6 +527,7 @@ export default function CreativesPage() {
       if (result.ok) {
         setData(result.data.data);
         setTotalCount(result.data.totalCount);
+        setEventTypes(result.data.event_types ?? []);
       } else {
         setFetchError(result.error);
       }
@@ -884,6 +911,50 @@ export default function CreativesPage() {
           );
         },
       },
+      // ⭐ THESE SIT DIRECTLY AFTER "Checkout Rate" ON PURPOSE, AND THAT
+      // PLACEMENT IS THE WHOLE TASK. That column's numerator is
+      // keitaro_type = 'lead' — the only conversion metric in the product keyed
+      // on a raw tracker type — which for one of this account's networks IS the
+      // free registration and for two others is a paid purchase. Creatives are
+      // SORTED AND RANKED by this table, so on that offer the screen has been
+      // ranking by registrations with nothing beside it to disagree. The
+      // registry-driven counts have to be readable in the same glance or the
+      // column that is silently wrong stays silently wrong.
+      //
+      // One call, one array: the counts and the residual that explains what they
+      // do NOT account for come out together, so this table cannot render a
+      // breakdown of its own Sales column while hiding the strays.
+      ...eventCountColumns(
+        eventTypes,
+        data.map((d) => d.metrics ?? {}),
+        (col): ColumnDef<Creative> => ({
+          id: col.id,
+          header: col.header,
+          // No server-side sort exists for these (the list endpoint sorts on
+          // SQL expressions over the metrics join, and no ratio is computed at
+          // this grain), and a client-only sort over one page would silently
+          // reorder a subset while the arrow claimed the whole set.
+          enableSorting: false,
+          cell: ({ row }) => {
+            const n = eventCountValue(col, row.original.metrics ?? {});
+            return (
+              <span
+                className={cn(
+                  "tabular-nums",
+                  col.kind === "unmapped"
+                    ? n > 0
+                      ? "text-amber-700 dark:text-amber-500"
+                      : "text-muted-foreground"
+                    : "text-muted-foreground",
+                )}
+                title={col.title}
+              >
+                {numberFmt.format(n)}
+              </span>
+            );
+          },
+        }),
+      ),
       {
         id: "sales_cr",
         header: "Sales CR",
@@ -1057,6 +1128,7 @@ export default function CreativesPage() {
     canCreate,
     canBulkAny,
     data,
+    eventTypes,
     selectedIds,
   ]);
 

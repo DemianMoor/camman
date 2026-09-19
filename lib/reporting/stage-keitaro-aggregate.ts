@@ -94,6 +94,18 @@ export async function getStageKeitaroTotals(
     ),
     -- The per-event block re-aggregated across the stage's days. jsonb has no
     -- sum(), so the object is unrolled to (key, value) pairs and summed per key.
+    --
+    -- ⚠️ jsonb_typeof(...) = 'object' IS LOAD-BEARING. jsonb_each RAISES 22023
+    -- on a jsonb scalar or array, and the error is NOT scoped to the offending
+    -- row — it kills the whole statement, so one malformed stage-day row would
+    -- take every stage on the campaign page with it. The column is jsonb NOT
+    -- NULL DEFAULT the empty object with NO CHECK constraint (migration 0185),
+    -- so object-ness is a convention of the writer, not a guarantee of the
+    -- database; parseEventMap() defends against the same shapes on the JS side.
+    -- Same guard, same reason, as lib/creatives/metrics-cache.ts k_stage_ev,
+    -- where bar C11 of scripts/test-creative-event-counts-db.ts proves the
+    -- construct. Added 2026-09-19 after the creatives list 22023'd on a
+    -- hand-written fixture; this site has no bar of its own yet.
     ev AS (
       SELECT k.stage_id,
              e.key AS event_key,
@@ -103,6 +115,7 @@ export async function getStageKeitaroTotals(
              sum((e.value ->> 'pending_revenue')::numeric)::numeric(12,4) AS pending_revenue
       FROM ksr k
       CROSS JOIN LATERAL jsonb_each(k.events) AS e(key, value)
+      WHERE jsonb_typeof(k.events) = 'object'
       GROUP BY 1, 2
     ),
     ev_obj AS (

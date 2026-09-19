@@ -50,6 +50,19 @@ export interface EventTally {
 export type EventMap = Record<string, EventTally>;
 
 /**
+ * One row's per-type COUNTS, and nothing else — `events[key] = n`.
+ *
+ * ⭐ A DELIBERATELY NARROWER SHAPE THAN EventMap, FOR A GRAIN THAT ONLY COUNTS.
+ * The /creatives table shows a count per event type beside "Checkout Rate" and
+ * no money at all (the money split belongs on the reports' dimension=creative,
+ * which already has a denominator and a range picker). Carrying the four-field
+ * tally there would hand a later reader `revenue` fields that were never summed
+ * at that grain and read as a measured $0.00. The type is the thing that stops
+ * that, so keep the two apart.
+ */
+export type EventCountMap = Record<string, number>;
+
+/**
  * The all-zero tally, for READING ONLY — what a missing key is worth.
  *
  * ⭐ FROZEN, AND TYPED `Readonly`, BECAUSE IT IS SHARED. A consumer that seeds an
@@ -234,11 +247,38 @@ export function visibleEventTypes(
   types: readonly EventTypeSpec[],
   seen: Iterable<EventMap>,
 ): EventTypeSpec[] {
+  // Delegated so "which types are on screen" has ONE definition across both
+  // grains. A tally is live when ANY of its four fields is non-zero; collapsing
+  // that to a single number here is exact, and it is the only thing the rule
+  // below ever asks of it.
+  return visibleEventTypesByCount(
+    types,
+    [...seen].map((m) => {
+      const out: EventCountMap = {};
+      for (const [k, t] of Object.entries(m)) {
+        out[k] = t.n || t.pending_n || t.revenue || t.pending_revenue;
+      }
+      return out;
+    }),
+  );
+}
+
+/**
+ * The same rule over bare COUNT maps — the /creatives grain, where a key's only
+ * number is `n`.
+ *
+ * ⭐ THIS IS THE PRIMITIVE, and visibleEventTypes() is the wrapper, rather than
+ * the other way round: an EventMap can always be collapsed to "is this key
+ * live", while a count map cannot be widened into one without inventing the
+ * three fields it does not have.
+ */
+export function visibleEventTypesByCount(
+  types: readonly EventTypeSpec[],
+  seen: Iterable<EventCountMap>,
+): EventTypeSpec[] {
   const live = new Set<string>();
   for (const m of seen) {
-    for (const [k, t] of Object.entries(m)) {
-      if (t.n !== 0 || t.pending_n !== 0 || t.revenue !== 0 || t.pending_revenue !== 0) live.add(k);
-    }
+    for (const [k, n] of Object.entries(m)) if (n !== 0) live.add(k);
   }
   return orderEventTypes(types).filter((t) => !t.archived || live.has(t.key));
 }

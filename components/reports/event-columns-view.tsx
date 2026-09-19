@@ -9,7 +9,9 @@ import {
   eventCellValue,
   pluralizeLabel,
   visibleEventTypes,
+  visibleEventTypesByCount,
   type EventColumn,
+  type EventCountMap,
   type EventMap,
   type EventTypeSpec,
 } from "@/lib/reporting/event-columns";
@@ -334,6 +336,108 @@ export function StageEventBreakdown({
       ) : null}
     </>
   );
+}
+
+// ── ⭐ THE THIRD SHAPE: A COUNT-ONLY COLUMN SET, AND ITS RESIDUAL ────────────
+//
+// /creatives is a TanStack table whose rows are CREATIVES, not stage-days. It
+// cannot mount EventColumnsBar — that bar's toggle governs the per-event MONEY
+// columns, and this screen deliberately has none (counts only; the money split
+// belongs on the reports' dimension=creative, which has a denominator and a
+// range picker). It cannot mount StageEventBreakdown or EventTotalsTiles either:
+// one is a `·`-joined line, the other a tile grid, and neither is a column set.
+//
+// What carries over is the RULE, not the markup: there is no exported way to
+// obtain the per-event count columns that does not also hand back the residual.
+// A creative's `sales` counts a conversion whose event type belongs to another
+// organisation while the org-scoped map places it under NO key, so
+//
+//     sales = Σ over is_purchase types of events[t]  +  manual top-ups + strays
+//
+// and a row reading "Registrations 7 · Purchases 1" beside a Sales column of 5
+// under-explains itself exactly as a report table would.
+
+/** One generated column on a count-only surface: a registry type, or the residual. */
+export interface EventCountColumn {
+  /** `evt:<key>:count` for a type, `evt:unmapped` for the residual. Stable. */
+  id: string;
+  header: string;
+  kind: "count" | "unmapped";
+  /** The registry key a "count" column reads. EMPTY for the residual. */
+  eventKey: string;
+  /** Cell tooltip — the whole explanation, since there is no room for prose. */
+  title: string;
+}
+
+/** What a count-only surface's row has to offer: its counts, and its strays. */
+export interface EventCountRow {
+  events?: EventCountMap;
+  unmapped?: number;
+}
+
+const RESIDUAL_COLUMN: EventCountColumn = {
+  id: "evt:unmapped",
+  header: "Unmapped",
+  kind: "unmapped",
+  eventKey: "",
+  title:
+    "Conversions on this creative's stages in the same window that matched no " +
+    "event-type mapping. They count as NOTHING in the columns to the left — not " +
+    "a sale, not revenue, not in any event count — so the counts and Sales do " +
+    "not add up while this is non-zero. Fix: add a conversion_event_mappings row " +
+    "for that offer (or its network) and that tracker type.",
+};
+
+/**
+ * ⭐ THE ONE WAY TO OBTAIN PER-EVENT COUNT COLUMNS, AND IT EMITS THE RESIDUAL
+ * COLUMN IN THE SAME ARRAY.
+ *
+ * `render` exists for the same reason EventTotalsTiles takes `renderTile`: the
+ * caller keeps its own markup (a TanStack ColumnDef, here) while the
+ * COMPOSITION — which columns, in what order, with the residual among them — is
+ * what is shared and pinned. A caller cannot take the counts and drop the
+ * residual, because it never sees two lists.
+ *
+ * `rows` are read ONLY to decide whether an archived type still has data on
+ * screen and whether any row carries a stray — NEVER to discover which types
+ * exist. An active type configured with zero conversions gets a column and reads
+ * 0; that is the whole point of generating from the registry.
+ *
+ * The residual column appears only while some row on the page HAS one, the same
+ * rule UnmappedBadge renders by: a permanently-0 column is furniture, and
+ * furniture is not read on the day it changes.
+ */
+export function eventCountColumns<TCol>(
+  types: readonly EventTypeSpec[],
+  rows: ReadonlyArray<EventCountRow>,
+  render: (col: EventCountColumn) => TCol,
+): TCol[] {
+  const visible = visibleEventTypesByCount(
+    types,
+    rows.map((r) => r.events ?? {}),
+  );
+  const cols: EventCountColumn[] = visible.map((t) => ({
+    id: `evt:${t.key}:count`,
+    header: pluralizeLabel(t.label),
+    kind: "count",
+    eventKey: t.key,
+    title:
+      `${pluralizeLabel(t.label)} attributed to this creative's stages in the last 30 days — ` +
+      `the same window as Checkout Rate, and classified by the event-type registry rather than ` +
+      `by the tracker's own type name.`,
+  }));
+  if (rows.some((r) => (r.unmapped ?? 0) > 0)) cols.push(RESIDUAL_COLUMN);
+  return cols.map(render);
+}
+
+/**
+ * The number one generated cell shows. Missing key ⇒ 0 (the type is configured,
+ * this creative simply has none), and the residual reads its own field — a
+ * caller cannot accidentally render a count column with the stray count.
+ */
+export function eventCountValue(col: EventCountColumn, row: EventCountRow): number {
+  if (col.kind === "unmapped") return row.unmapped ?? 0;
+  return row.events?.[col.eventKey] ?? 0;
 }
 
 /**

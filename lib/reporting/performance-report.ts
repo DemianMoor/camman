@@ -25,7 +25,12 @@ import {
   type EventMap,
 } from "@/lib/reporting/event-columns";
 import type { AttributionBasis, PerformanceDimension } from "@/lib/reporting/report-dimensions";
-import { approvedRevenueClause, countedClause, purchasedClause } from "@/lib/sale-attribution";
+import {
+  approvedRevenueClause,
+  countedClause,
+  pendingRevenueClause,
+  purchasedClause,
+} from "@/lib/sale-attribution";
 import {
   getStageMetricsInRange,
   type ClickerDenominators,
@@ -190,7 +195,7 @@ function stageMetrics(
     // second dimension in the same getStageDimensionReports() call also reads.
     events: addEventMaps({}, s.tally.events),
     unmapped: s.tally.unmapped,
-    manual_topup: s.manual_topup,
+    manual_topup: s.tally.manual_topup,
     pending_revenue: s.tally.pending_revenue,
     cost: s.tally.cost,
   };
@@ -1022,7 +1027,17 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       }),
     )) as unknown as { hour: number; v: number }[];
 
-  const [sentRows, clicks, redirects, sales, revenue, optouts, clickerRows, evRows] = await Promise.all([
+  const [
+    sentRows,
+    clicks,
+    redirects,
+    sales,
+    revenue,
+    pendingRevenue,
+    optouts,
+    clickerRows,
+    evRows,
+  ] = await Promise.all([
     // Sent messages by SEND hour (tracked stage_sends; manual-campaign sends have
     // no per-message time and roll up into the Manual row). This is the one column
     // bucketed by send time, not activity time — it's the denominator for the rates.
@@ -1046,6 +1061,22 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
     eventAgg("ss.offer_reached_at", provJoin, sql`ss.offer_reached_at IS NOT NULL`, sql`count(*)::int`),
     ledgerHourAgg(purchasedClause(), sql`count(*)::int`),
     ledgerHourAgg(approvedRevenueClause(), sql`coalesce(sum(ce.revenue), 0)::float8`),
+    // ⭐ HELD MONEY, COMPUTED — NOT LEFT AS A ZERO THAT MEANS "NOT COMPUTED".
+    // This series is the exact counterpart of `revenue` above: the same ledger,
+    // the same ce.occurred_at hour, the same shared clause family
+    // (lib/sale-attribution.ts), differing only in the status literal. Pending
+    // money is never added into revenue — it is a separate figure in EVERY
+    // surface that carries both.
+    //
+    // It exists because the hourly row map used to hard-code `pending_revenue: 0`
+    // while ledgerHourEventQuery computed REAL pending figures into `m.events`,
+    // so one API body answered the same question twice: `totals.pending_revenue:
+    // 0` beside a non-zero `events[k].pending_revenue`. A consumer could not tell
+    // that 0 from a measured one, and "no column renders it" is a condition one
+    // column addition away from being false. The two now agree by construction,
+    // with the same cross-org residual that `revenue` has (see
+    // ledgerHourEventQuery), which `unmapped` accounts for.
+    ledgerHourAgg(pendingRevenueClause(), sql`coalesce(sum(ce.revenue), 0)::float8`),
     // opt-outs by receipt time, for TRACKED stages
     (await db.execute(sql`
       SELECT ${hourExpr("oa.created_at")} AS hour, count(*)::int AS v
@@ -1105,20 +1136,30 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
   for (const r of clickerRows) bump(r.hour, "counted_clickers", Number(r.v));
   for (const r of sales) bump(r.hour, "sales", Number(r.v));
   for (const r of revenue) bump(r.hour, "revenue", Number(r.v));
+  for (const r of pendingRevenue) bump(r.hour, "pending_revenue", Number(r.v));
   for (const r of evRows) {
     if (!hours.has(r.hour)) hours.set(r.hour, { ...zeroMetrics(), reached: 0 });
     const m = hours.get(r.hour)!;
     m.unmapped += Number(r.unmapped);
     // A NULL key IS the unmapped bucket — counted above and nowhere else.
     if (r.event_key == null) continue;
-    addEventMaps(m.events, {
-      [r.event_key]: {
-        n: Number(r.n),
-        pending_n: Number(r.pending_n),
-        revenue: Number(r.revenue),
-        pending_revenue: Number(r.pending_revenue),
-      },
-    });
+    const t = {
+      n: Number(r.n),
+      pending_n: Number(r.pending_n),
+      revenue: Number(r.revenue),
+      pending_revenue: Number(r.pending_revenue),
+    };
+    // ⭐ AN ALL-ZERO ENTRY IS NOT DATA, AND THE TWO PATHS MUST AGREE ON THAT.
+    // The stage-day projection FILTERs such an entry out of its jsonb
+    // (lib/keitaro/stage-day-conversions.ts) so a stage-day whose only row is a
+    // REJECTED purchase reads `{}` rather than a row of zeros. This group exists
+    // for the same reason — a rejected conversion still forms a (hour, key)
+    // group — so emitting it here would put a key in hourly's map that By Offer
+    // omits for identical data. visibleEventTypes() keys on a non-zero field, so
+    // the rendered column set agrees either way (bar W21); the PAYLOAD did not,
+    // and an absent key and a zeroed key are different claims.
+    if (t.n === 0 && t.pending_n === 0 && t.revenue === 0 && t.pending_revenue === 0) continue;
+    addEventMaps(m.events, { [r.event_key]: t });
   }
   for (const r of optouts) bump(r.hour, "opt_outs", Number(r.v));
 
@@ -1128,9 +1169,10 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       key: String(h),
       label: formatEtHour(h),
       ...m,
-      // The hourly tab renders no pending column (its columns are activity-time
-      // rates), so this is deliberately not computed rather than half-computed.
-      pending_revenue: 0,
+      // `pending_revenue` is NOT overridden here any more. It used to be set to a
+      // literal 0 — "the hourly tab renders no pending column, so this is
+      // deliberately not computed" — which put a not-computed sentinel in the
+      // same body as the real per-event figures. It is computed above.
     }));
 
   // Manual row (pinned first): all results from MANUAL campaigns mapped to the

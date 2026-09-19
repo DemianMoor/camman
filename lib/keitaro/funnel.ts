@@ -50,6 +50,22 @@ export interface FunnelTally {
    * Carried so a screen can say they exist; that is their only purpose.
    */
   unmapped: number;
+  /**
+   * The part of `sales` that came from the MANUAL tally (stage_manual_sales) and
+   * not the tracker ledger, so the breakdown's standing identity holds on the
+   * tally alone:
+   *     Σ events[t].n over is_purchase types  +  manual_topup  +  strays  =  sales
+   *
+   * ⭐ IT IS A FIELD OF THE TALLY, NOT OF THE ROW. `addRowToFunnel` cannot set it
+   * — keitaro_stage_results has no manual column, the top-up is computed against
+   * stage_manual_sales in getStageMetricsInRange — so it is assigned there and
+   * summed by `mergeFunnel` from then on. It rode as a SEPARATE per-stage field
+   * before, which meant every consumer that presented `events` had to remember to
+   * roll it up by hand at each grain; the Overview route did, three times, and
+   * nothing failed if it had not. Here it rides the same spread as the breakdown
+   * it explains.
+   */
+  manual_topup: number;
   pending_revenue: number;
   cost: number;
 }
@@ -67,6 +83,7 @@ export function emptyFunnel(): FunnelTally {
     // the other (the EMPTY_TALLY aliasing bug, lib/reporting/event-columns.ts).
     events: {},
     unmapped: 0,
+    manual_topup: 0,
     pending_revenue: 0,
     cost: 0,
   };
@@ -102,6 +119,9 @@ export function addRowToFunnel(
   t.revenue += num(r.revenue);
   addEventMaps(t.events, parseEventMap(r.events));
   t.unmapped += r.unmapped_conversions ?? 0;
+  // `manual_topup` is deliberately NOT touched here: a stored Keitaro row carries
+  // no manual column. It is assigned in getStageMetricsInRange, which is where
+  // the manual tally is read, and summed by mergeFunnel below.
   t.pending_revenue += num(r.pending_revenue);
   t.cost += num(r.cost);
   return t;
@@ -119,6 +139,7 @@ export function mergeFunnel(into: FunnelTally, from: FunnelTally): FunnelTally {
   into.revenue += from.revenue;
   addEventMaps(into.events, from.events);
   into.unmapped += from.unmapped;
+  into.manual_topup += from.manual_topup;
   into.pending_revenue += from.pending_revenue;
   into.cost += from.cost;
   return into;
@@ -126,6 +147,34 @@ export function mergeFunnel(into: FunnelTally, from: FunnelTally): FunnelTally {
 
 function rate(numerator: number, denominator: number): number {
   return denominator > 0 ? numerator / denominator : 0;
+}
+
+/** The three fields that make up the per-event breakdown and its residuals. */
+export const EVENT_BREAKDOWN_FIELDS = ["events", "unmapped", "manual_topup"] as const;
+
+/**
+ * Drop the per-event breakdown — and BOTH residuals with it — from a derived
+ * tally, for a reader that does not select the columns behind them.
+ *
+ * ⭐ AN ABSENT FIELD AND AN EMPTY MAP ARE DIFFERENT CLAIMS. A caller that builds
+ * its tally from a projection WITHOUT `events` / `unmapped_conversions` (that is
+ * every row addRowToFunnel sees with those keys undefined) still gets
+ * `events: {}` and `unmapped: 0` — which says "measured, and nothing happened"
+ * when the truth is "not selected, so unknown". Emitting that in an API body
+ * invites a consumer to read a breakdown that was never computed. There is no
+ * third state to invent: the field simply does not appear.
+ *
+ * All THREE go together, never one of them: a breakdown that is absent has no
+ * residual to carry, and a residual with no breakdown beside it explains nothing
+ * (docs/07-conventions.md, "A breakdown must travel with the residual that
+ * explains it").
+ */
+export function withoutEventBreakdown<T extends Pick<FunnelTally, "events" | "unmapped" | "manual_topup">>(
+  t: T,
+): Omit<T, "events" | "unmapped" | "manual_topup"> {
+  const out = { ...t };
+  for (const f of EVENT_BREAKDOWN_FIELDS) delete (out as Partial<T>)[f];
+  return out;
 }
 
 // Derived funnel metrics from a tally. `clickers` / `offer_redirect` are the
@@ -147,8 +196,10 @@ function rate(numerator: number, denominator: number): number {
 // same money still held, so adding it anywhere would count a payout that may yet
 // be rejected.
 //
-// `events` and `unmapped` ride along untouched: no derived rate is computed
-// here. Per-event rates and EPCs are built at render time by eventCellValue()
+// `events`, `unmapped` and `manual_topup` ride along untouched: no derived rate
+// is computed here, and the three travel TOGETHER because the breakdown does not
+// explain Sales without the two residuals beside it (docs/07-conventions.md).
+// Per-event rates and EPCs are built at render time by eventCellValue()
 // (lib/reporting/event-columns.ts), which divides by the SAME countedClickers
 // this function takes — there is no second denominator.
 export function withFunnelDerived(t: FunnelTally, countedClickers: number) {

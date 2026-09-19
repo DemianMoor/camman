@@ -194,60 +194,77 @@ check(
   `funnel=${zeroFunnel?.id}`,
 );
 
-// ── ⭐ HOURLY HAS TWO ANSWERS FOR PENDING MONEY; ONLY ONE MAY REACH A ROW ────
+// ── ⭐ HOURLY HAD TWO ANSWERS FOR PENDING MONEY. NOW IT HAS ONE ─────────────
 //
-// FOUND: on the hourly dimension the SCALAR `pending_revenue` is set to 0 by
-// hand (lib/reporting/performance-report.ts, the hourly row map: "the hourly tab
-// renders no pending column … so this is deliberately not computed rather than
-// half-computed"), while ledgerHourEventQuery DOES compute pending_n and
-// pending_revenue into `m.events`, off conversion_events, bucketed on the same
-// ce.occurred_at ET hour as hourly's own sales and revenue.
+// FOUND (Task 5): on the hourly dimension the SCALAR `pending_revenue` was set
+// to 0 by hand — "the hourly tab renders no pending column … so this is
+// deliberately not computed rather than half-computed" — while
+// ledgerHourEventQuery DID compute pending_n and pending_revenue into
+// `m.events`, off conversion_events, on the same ce.occurred_at ET hour. One API
+// body therefore answered the same question twice: `totals.pending_revenue: 0`
+// beside a non-zero `events[k].pending_revenue`, with nothing in the payload to
+// tell that 0 from a measured one. Task 5 could only keep the two apart ON
+// SCREEN; the body stayed inconsistent.
 //
-// WHICH IS CORRECT: the per-event map. Its figures are real and on the same time
-// basis as the row's other numbers. The scalar's 0 is a NOT-COMPUTED sentinel,
-// not a measurement — hourly never ran a pending query at all. So the per-event
-// pending columns stay on hourly; hiding a true number to agree with a
-// placeholder would be backwards.
+// FIXED HERE, IN THE AGGREGATION LAYER (Task 4 review): getHourlyReport now runs
+// a pending series off the same ledger, the same hour bucket and the same shared
+// clause family as its approved `revenue` (pendingRevenueClause,
+// lib/sale-attribution.ts), and the hard-coded override is gone. The scalar and
+// the map agree by construction, so a 0 is now always a measured 0.
 //
-// WHY THAT IS SAFE TODAY, AND WHY IT NEEDS A BAR: the sentinel is only harmless
-// while NO hourly column and no hourly stat card renders the scalar. That
-// condition is implicit and one column addition away from being false — at which
-// point the same row would carry $0.00 in one column and $40.00 in the next.
-// This bar makes the condition explicit. Making the two AGREE would mean
-// computing a pending series in the hourly aggregation, which is Task 4's layer,
-// not this one — reported upward rather than reached into.
-const perfSrc = readFileSync("components/reports/performance-report.tsx", "utf8").replace(/\s+/g, " ");
-const colIds = (name: string): string[] => {
-  // The source is whitespace-collapsed first, so this tolerates CRLF and LF
-  // alike and never matches across a newline it cannot see.
-  const block = new RegExp(`const ${name}: Col\\[\\] = \\[(.*?)\\];`).exec(perfSrc);
-  if (!block) return [];
-  return [...block[1].matchAll(/id: "([^"]+)"/g)].map((m) => m[1]);
-};
-const fullIds = colIds("FULL_COLS");
-const hourlyIds = colIds("HOURLY_COLS");
-// A scalar pending field on a row — NOT a generated `evt:…:pending_n` id, which
-// is computed from the events map and is the figure that is actually right.
-const SCALAR_PENDING = /^pending(_|$)/;
+// ⭐ THIS BAR IS THE SENTINEL'S GRAVESTONE. The substantive proof is R13/R13b in
+// scripts/test-report-event-columns-db.ts, which reads a real $40-held hour
+// through the real reader. This one is cheap, runs with no database, and fails
+// the moment the literal override is put back — which is the single edit that
+// would make a not-computed 0 indistinguishable from a real one again.
+const perfLibSrc = readFileSync("lib/reporting/performance-report.ts", "utf8").replace(/\s+/g, " ");
+// The hourly ROW MAP alone — not the whole file. `ZERO` further up legitimately
+// declares `pending_revenue: 0` (it is the zero accumulator, where 0 is the only
+// right answer), so a file-wide scan would be permanently red for the wrong
+// reason. The block below is the one that used to override the computed figure.
+const hourlyRowMap = /const rows: PerfRow\[\] = \[\.\.\.hours\.entries\(\)\](.*?)\}\)\);/.exec(
+  perfLibSrc,
+)?.[1];
 check(
-  `W19 the column-list extractor works (FULL_COLS ${fullIds.length} ids, HOURLY_COLS ${hourlyIds.length}) and FULL_COLS DOES carry a scalar pending column`,
-  fullIds.length > 10 && hourlyIds.length > 5 && fullIds.some((id) => SCALAR_PENDING.test(id)),
-  `full=${fullIds.join(",")} hourly=${hourlyIds.join(",")}`,
+  "W19 ⭐ the hourly row map contains NO `pending_revenue` override — the scalar is computed, so a zero there is a measurement",
+  hourlyRowMap !== undefined &&
+    // Positive control: the block really is the hourly row map (it spreads the
+    // accumulated metrics), so "no match" cannot pass as "no override".
+    hourlyRowMap.includes("...m") &&
+    !hourlyRowMap.includes("pending_revenue:") &&
+    // …and the series that replaced it is in this file, off the shared clause.
+    perfLibSrc.includes("ledgerHourAgg(pendingRevenueClause()"),
+  hourlyRowMap === undefined ? "hourly row map not found" : hourlyRowMap.slice(0, 220),
 );
+
+// ── ⭐ AN ABSENT BREAKDOWN MUST NOT BE EMITTED AS AN EMPTY ONE ──────────────
+//
+// /api/keitaro/results deliberately does NOT select `events` /
+// `unmapped_conversions` (nothing there reads them), but addRowToFunnel folds an
+// absent column into an EMPTY map — so every response body carried
+// `events: {}`, `unmapped: 0`, which reads as "measured, nothing happened". The
+// route now wraps each derived tally in withoutEventBreakdown(), which removes
+// the three fields. Asserted on the SOURCE because the handler needs a session
+// and a database; the helper's own behaviour is proved purely by F10-F12
+// (scripts/test-event-tally-merge.ts).
+const resultsSrc = readFileSync("app/api/keitaro/results/route.ts", "utf8").replace(/\s+/g, " ");
+const spreadsRaw = [...resultsSrc.matchAll(/\.\.\.withFunnelDerived\(/g)].length;
+const spreadsWrapped = [...resultsSrc.matchAll(/\.\.\.withoutEventBreakdown\( withFunnelDerived\(/g)].length;
 check(
-  "W20 ⭐ HOURLY_COLS declares NO scalar pending column — hourly's scalar pending_revenue is a not-computed 0 while its events map carries the real figure, and one row may not answer twice",
-  hourlyIds.length > 5 && !hourlyIds.some((id) => SCALAR_PENDING.test(id)),
-  `hourly=${hourlyIds.join(",")}`,
+  `W20 ⭐ every response body in /api/keitaro/results strips the breakdown it never selected (${spreadsWrapped} wrapped, ${spreadsRaw} bare)`,
+  spreadsWrapped === 3 && spreadsRaw === 0,
+  `wrapped=${spreadsWrapped} bare=${spreadsRaw}`,
 );
 
 // ── ⭐ AN ALL-ZERO ENTRY IS NOT DATA ─────────────────────────────────────────
 //
-// The hourly path emits an all-zero per-event entry where the stage-day
-// projection FILTERs the key out entirely (a type whose rows in the hour were
-// all rejected). The two must still produce the SAME column set, or hourly would
-// show a column of zeros where By Offer shows nothing. visibleEventTypes() keys
-// on a non-zero field rather than on key presence, which is what makes them
-// agree; this pins it. One-sided against W4, where a NON-zero entry does
+// Both producers now FILTER an all-zero per-event entry out — the stage-day
+// projection in SQL (lib/keitaro/stage-day-conversions.ts) and the hourly reader
+// in JS (getHourlyReport; bar R14) — so a type whose rows in the window were all
+// rejected yields no key on either path. The COLUMN set has to agree with that
+// for a hand-built or a legacy map too: visibleEventTypes() keys on a non-zero
+// FIELD rather than on key presence, so an entry that slipped through as zeros
+// still renders nothing. One-sided against W4, where a NON-zero entry does
 // resurrect the very same archived type.
 check(
   "W21 ⭐ an ARCHIVED type whose only entry is ALL-ZERO gets no column — an emitted key and a filtered-out key must render alike",

@@ -152,18 +152,23 @@ for (const p of FILES) {
   check(`G2 ${p} names no event key in code`, hits.length === 0, hits.join(" | "));
 }
 
-// ── G3: the endpoint whose empty events map means "NOT FETCHED" ─────────────
+// ── G3: the endpoint that carries NO breakdown, and now says so ─────────────
 //
 // ⭐ app/api/keitaro/results/route.ts uses an EXPLICIT projection that
 // deliberately omits `events` and `unmapped_conversions` — nothing in that
-// handler reads them. Its rows then flow through addRowToFunnel, whose
+// handler reads them. Its rows flow through addRowToFunnel, whose
 // `events?: unknown` is optional, so parseEventMap(undefined) yields `{}` and
-// the tally reports `events: {}`, `unmapped: 0`. That is a FALSE empty map: it
-// means "not selected", not "zero of everything". Rendered as generated columns
-// it would read as a measured zero for every event type on the page.
+// the tally held `events: {}`, `unmapped: 0`. That was a FALSE empty map: it
+// meant "not selected", not "zero of everything", and rendered as generated
+// columns it would read as a measured zero for every event type on the page.
 //
-// No rendering surface fetches it today (lib/authz/route-map.ts marks it
-// machinery that no operator session reaches), and this bar keeps it that way.
+// FIXED 2026-09-19: the route now strips all three fields with
+// withoutEventBreakdown(), so the body no longer makes that claim at all (bar
+// W20, scripts/test-event-columns-view.ts). This bar is NOT retired with it —
+// the endpoint still carries no breakdown, so a surface that started fetching it
+// for event columns would render nothing where the sibling endpoint renders
+// data. No rendering surface fetches it today (lib/authz/route-map.ts marks it
+// machinery that no operator session reaches), and this keeps it that way.
 // The POSITIVE CONTROL is the point: the same scanner must find the sibling
 // endpoint the Overview table really does fetch, so a scanner that finds nothing
 // fails here instead of reading as a clean bill of health.
@@ -178,7 +183,7 @@ check(
   surfaceSrc.includes("/api/keitaro/reports"),
 );
 check(
-  "G3b ⭐ no rendering surface fetches /api/keitaro/results — its `events: {}` means NOT FETCHED, and generated columns over it would read as measured zeros",
+  "G3b ⭐ no rendering surface fetches /api/keitaro/results — it carries NO per-event breakdown (it selects neither column and now emits neither field), so generated columns over it would render nothing",
   !surfaceSrc.includes("/api/keitaro/results"),
 );
 

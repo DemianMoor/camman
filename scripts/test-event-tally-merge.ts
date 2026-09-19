@@ -1,4 +1,12 @@
-import { addRowToFunnel, emptyFunnel, mergeFunnel, type KeitaroResultRowLike } from "@/lib/keitaro/funnel";
+import {
+  addRowToFunnel,
+  emptyFunnel,
+  mergeFunnel,
+  withFunnelDerived,
+  withoutEventBreakdown,
+  type FunnelTally,
+  type KeitaroResultRowLike,
+} from "@/lib/keitaro/funnel";
 import { normaliseLifetimeRow } from "@/lib/reporting/creative-lifetime";
 import type { EventMap } from "@/lib/reporting/event-columns";
 import {
@@ -185,7 +193,9 @@ addRowToFunnel(uFunnel, {
 const uMerged = emptyFunnel();
 mergeFunnel(uMerged, uFunnel);
 check(
-  "U1 ⭐ unmapped + manual_topup survive addMetrics, scaleMetrics, addRowToFunnel and mergeFunnel",
+  // (addRowToFunnel is asserted on `unmapped` alone: a stored Keitaro row has no
+  // manual column, so manual_topup is not its to carry — see F9 for the merge.)
+  "U1 ⭐ unmapped + manual_topup survive addMetrics and scaleMetrics; unmapped survives addRowToFunnel and mergeFunnel",
   uSum.unmapped === 5 && uSum.manual_topup === 12 &&
     uScaled.unmapped === 2.5 && uScaled.manual_topup === 6 &&
     uFunnel.unmapped === 4 && uMerged.unmapped === 4,
@@ -223,6 +233,76 @@ check("F5 mergeFunnel carries the map and the unmapped count", into.events.purch
 if (into.events.purchase) into.events.purchase.n = 42;
 check("F6 ⭐ mergeFunnel did not alias the source map", EN(into.events.purchase) === 42 && EN(t.events.purchase) === 2, JSON.stringify({ into: into.events, t: t.events }));
 check("F7 ⭐ two emptyFunnel() do not share one map", (() => { const x = emptyFunnel(); const y = emptyFunnel(); x.events.k = { ...one }; return y.events.k === undefined; })());
+
+// ⭐ F8 IS TO mergeFunnel WHAT A1 IS TO addMetrics, AND IT IS THE BAR THAT WAS
+// MISSING. `manual_topup` reached FunnelTally after `events` and `unmapped`
+// precisely because nothing enumerated the type's fields: a field added to the
+// tally and forgotten in mergeFunnel reads zero at exactly one grain — the
+// rolled-up one — which is the hardest kind of reporting bug to see. The keys
+// are enumerated, never named, so the NEXT field is covered without editing this.
+const fProbe = Object.fromEntries(
+  Object.keys(emptyFunnel()).map((k) => [k, k === "events" ? { x: { ...one } } : 7]),
+) as unknown as FunnelTally;
+const fMerged = mergeFunnel(
+  Object.fromEntries(
+    Object.keys(emptyFunnel()).map((k) => [k, k === "events" ? { x: { ...one } } : 7]),
+  ) as unknown as FunnelTally,
+  fProbe,
+) as unknown as Record<string, unknown>;
+const missedMerge = Object.keys(emptyFunnel()).filter((k) =>
+  k === "events"
+    ? (fMerged.events as Record<string, typeof one>).x?.n !== 2
+    : fMerged[k] !== 14,
+);
+check(
+  "F8 ⭐ mergeFunnel carries EVERY field of FunnelTally (manual_topup included)",
+  missedMerge.length === 0,
+  missedMerge.join(","),
+);
+check(
+  "F9 ⭐ manual_topup is on the TALLY, so it rides the same merge and the same spread as the breakdown it explains",
+  (() => {
+    const a = emptyFunnel();
+    const b = emptyFunnel();
+    a.manual_topup = 3;
+    b.manual_topup = 4;
+    mergeFunnel(a, b);
+    // …and out through withFunnelDerived's `...t`, which is how every Overview
+    // grain gets it without the route re-rolling it by hand.
+    return a.manual_topup === 7 && withFunnelDerived(a, 10).manual_topup === 7;
+  })(),
+);
+
+// ── ⭐ AN ABSENT BREAKDOWN MUST NOT LOOK LIKE AN EMPTY ONE ───────────────────
+//
+// A reader whose projection does not SELECT `events` / `unmapped_conversions`
+// (app/api/keitaro/results/route.ts is one, deliberately) still gets
+// `events: {}` and `unmapped: 0` out of addRowToFunnel, because an absent column
+// folds as an empty map. Emitted in an API body that reads "measured, and
+// nothing happened" — a different claim from "not computed". withoutEventBreakdown
+// removes the field rather than inventing a third value for it.
+const stripped = withoutEventBreakdown(withFunnelDerived(emptyFunnel(), 10)) as unknown as Record<
+  string,
+  unknown
+>;
+check(
+  "F10 ⭐ withoutEventBreakdown DELETES events/unmapped/manual_topup — absent, not empty-and-zero",
+  !("events" in stripped) && !("unmapped" in stripped) && !("manual_topup" in stripped),
+  Object.keys(stripped).join(","),
+);
+check(
+  "F11 ⭐ …and touches nothing else: every other derived field is still there and still right",
+  stripped.sales === 0 && stripped.epc === 0 && "pending_revenue" in stripped && "counted_clickers" in stripped,
+  Object.keys(stripped).join(","),
+);
+check(
+  "F12 ⭐ it does not mutate its input (the tally is still a whole tally afterwards)",
+  (() => {
+    const t = withFunnelDerived(emptyFunnel(), 10);
+    withoutEventBreakdown(t);
+    return "events" in t && "manual_topup" in t;
+  })(),
+);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

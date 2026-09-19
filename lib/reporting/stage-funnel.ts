@@ -61,15 +61,22 @@ export interface StageMetrics {
   // in range. null for manual-mode stages — they mint no links, so reach is
   // unknowable, and null must never read as a real zero.
   reached: number | null;
-  tally: FunnelTally; // visit_clicks_clean = clickers, redirect_clicks_clean = offer redirect, sales, revenue, cost
   /**
-   * How much of `tally.sales` came from the MANUAL tally rather than the tracker
-   * (lib/reporting/attribution.ts). The per-event breakdown in `tally.events`
-   * counts tracker ledger events only, so:
-   *     Σ tally.events[t].n over is_purchase types  +  manual_topup  =  tally.sales
-   * Carried so the UI can say so instead of showing columns that do not foot.
+   * visit_clicks_clean = clickers, redirect_clicks_clean = offer redirect, sales,
+   * revenue, cost — plus the per-event breakdown and BOTH of its residuals.
+   *
+   * ⭐ `tally.manual_topup` IS INSIDE THE TALLY, NOT BESIDE IT. How much of
+   * `tally.sales` came from the MANUAL tally rather than the tracker
+   * (lib/reporting/attribution.ts) used to be a sibling field on this interface,
+   * which made it the one part of the breakdown that mergeFunnel did not carry:
+   * every consumer that rendered `events` had to re-roll it by hand at each grain
+   * it emitted, and nothing failed if one forgot. It now rides the same merge and
+   * the same spread as `events` and `unmapped`, so
+   *     Σ tally.events[t].n over is_purchase types + tally.manual_topup + strays
+   *       = tally.sales
+   * holds at every grain the tally reaches.
    */
-  manual_topup: number;
+  tally: FunnelTally;
 }
 
 // The EPC denominator, in both time bases, at both grains the reports render.
@@ -234,7 +241,6 @@ export async function getStageMetricsInRange(
         total_sent: 0,
         reached: null,
         tally: emptyFunnel(),
-        manual_topup: 0,
       };
       byStage.set(r.stage_id, acc);
       anchor.set(r.stage_id, {
@@ -268,7 +274,6 @@ export async function getStageMetricsInRange(
       total_sent: 0,
       reached: null,
       tally: emptyFunnel(),
-      manual_topup: 0,
     });
     anchor.set(r.stage_id, {
       sentAt: r.stage_sent_at,
@@ -366,7 +371,8 @@ export async function getStageMetricsInRange(
       // only, so this is exactly the gap between Σ (is_purchase) n and `sales`,
       // and a footing bar (or a screen that claims the columns explain Sales)
       // needs it. It was summed into grandSalesTopup and thrown away before.
-      acc.manual_topup = manual;
+      // ON THE TALLY, so mergeFunnel rolls it up with the breakdown it explains.
+      acc.tally.manual_topup = manual;
       acc.tally.cost = inRange ? a.totalCost : 0;
       grandOptOuts += acc.opt_outs;
       grandTotalSent += acc.total_sent;
@@ -375,6 +381,11 @@ export async function getStageMetricsInRange(
     }
   }
   grand.sales += grandSalesTopup;
+  // The grand tally is accumulated from the ROWS, not by merging the per-stage
+  // tallies, so the top-up has to be carried across explicitly — exactly like
+  // `sales` on the line above. A grand breakdown without it under-explains its
+  // own Sales total.
+  grand.manual_topup = grandSalesTopup;
   grand.cost = grandTotalCost;
 
   const clickers = await getClickerDenominators(

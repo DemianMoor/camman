@@ -10,6 +10,7 @@ import {
   emptyFunnel,
   addRowToFunnel,
   withFunnelDerived,
+  withoutEventBreakdown,
   type FunnelTally,
 } from "@/lib/keitaro/funnel";
 import {
@@ -52,6 +53,13 @@ export async function GET(req: NextRequest) {
   // handler's schema dependency is the one it actually has: `pending_revenue`
   // (0182) is named because addRowToFunnel reads it, while `events` and
   // `unmapped_conversions` (0185) are not named because nothing here reads them.
+  //
+  // ⭐ AND BECAUSE THEY ARE NOT SELECTED, THEY ARE NOT EMITTED. Every response
+  // body below goes through withoutEventBreakdown(), which deletes `events`,
+  // `unmapped` and `manual_topup` from the derived tally. Left in, they would
+  // read `{}` / 0 — indistinguishable from "this campaign had no conversions of
+  // any type" — because addRowToFunnel folds an absent column as an empty map.
+  // An absent field and an empty map must not look the same.
   const rows = await db
     .select({
       stage_id: keitaro_stage_results.stage_id,
@@ -127,9 +135,11 @@ export async function GET(req: NextRequest) {
     // in the stage's lifetime figure.
     time_basis: { totals: "lifetime", stages: "lifetime", rows: "per_day" },
     totals: {
-      ...withFunnelDerived(
-        campaignTally,
-        denominatorFor(linkMode, clickersByCampaign.get(campaignId), campaignTally.visit_clicks_clean),
+      ...withoutEventBreakdown(
+        withFunnelDerived(
+          campaignTally,
+          denominatorFor(linkMode, clickersByCampaign.get(campaignId), campaignTally.visit_clicks_clean),
+        ),
       ),
       lifetime_epc: withFunnelDerived(
         campaignTally,
@@ -141,9 +151,11 @@ export async function GET(req: NextRequest) {
       .map((s) => ({
         stage_id: s.stage_id,
         stage_tracking_id: s.stage_tracking_id,
-        ...withFunnelDerived(
-          s.tally,
-          denominatorFor(linkMode, clickersByStage.get(s.stage_id), s.tally.visit_clicks_clean),
+        ...withoutEventBreakdown(
+          withFunnelDerived(
+            s.tally,
+            denominatorFor(linkMode, clickersByStage.get(s.stage_id), s.tally.visit_clicks_clean),
+          ),
         ),
         lifetime_epc: withFunnelDerived(
           s.tally,
@@ -157,12 +169,14 @@ export async function GET(req: NextRequest) {
           stage_id: r.stage_id,
           stage_tracking_id: r.stage_tracking_id,
           stat_date: r.stat_date,
-          ...withFunnelDerived(
-            t,
-            denominatorFor(
-              linkMode,
-              clickersByStageDay.get(`${r.stage_id}|${r.stat_date}`),
-              t.visit_clicks_clean,
+          ...withoutEventBreakdown(
+            withFunnelDerived(
+              t,
+              denominatorFor(
+                linkMode,
+                clickersByStageDay.get(`${r.stage_id}|${r.stat_date}`),
+                t.visit_clicks_clean,
+              ),
             ),
           ),
           synced_at: r.synced_at,

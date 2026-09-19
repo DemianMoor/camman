@@ -146,18 +146,14 @@ export async function GET(req: NextRequest) {
   const { stages, grand, grandOptOuts, grandTotalSent, clickers } =
     await getStageMetricsInRange(auth.orgId, from, to);
 
-  // ⭐ manual_topup IS PER-STAGE (StageMetrics) AND IS NOT PART OF THE FUNNEL
-  // TALLY, so — unlike `events` and `unmapped` — it does NOT ride
-  // withFunnelDerived's `...t` spread. Declaring the field without summing it
-  // here would put `undefined` on every Overview row and total, which renders as
-  // a blank footnote rather than a wrong number and so would never be noticed.
-  // Summed at each grain this route emits. Bar R12.
-  const topupByCampaign = new Map<number, number>();
-  let grandTopup = 0;
-  for (const s of stages) {
-    topupByCampaign.set(s.campaign_id, (topupByCampaign.get(s.campaign_id) ?? 0) + s.manual_topup);
-    grandTopup += s.manual_topup;
-  }
+  // ⭐ manual_topup NEEDS NO ROLL-UP HERE ANY MORE. It is a field of FunnelTally
+  // (lib/keitaro/funnel.ts), so it rides mergeFunnel into the per-campaign tally
+  // and withFunnelDerived's `...t` spread onto every row and the totals, exactly
+  // like `events` and `unmapped` — the two residuals it belongs beside. This
+  // route used to re-roll it by hand at three grains because the field sat on
+  // StageMetrics instead; that hand-rolling was the only thing keeping the
+  // Overview breakdown footed, and nothing failed if a grain was missed.
+  // Bars R12/R12b (scripts/test-report-event-columns-db.ts).
 
   // link_mode per campaign, so manual-mode rows fall back to Keitaro visits.
   const linkModeByCampaign = new Map(stages.map((s) => [s.campaign_id, s.link_mode]));
@@ -255,11 +251,12 @@ export async function GET(req: NextRequest) {
     // you can see the count it divided by was 4.
     lifetime_epc: number;
     lifetime_clickers: number;
-    // Sales that came from the manual result tally rather than the tracker
-    // ledger. The per-event columns count TRACKER events only, so this is the
-    // difference between Sales and the sum of the is_purchase columns:
+    // `manual_topup` is NOT declared here: it arrives with the intersection
+    // below, off the tally. Sales that came from the manual result tally rather
+    // than the tracker ledger — the per-event columns count TRACKER events only,
+    // so it is the difference between Sales and the sum of the is_purchase
+    // columns:
     //   sales = Σ (is_purchase) events[t].n + manual_topup + unmapped strays
-    manual_topup: number;
   } & ReturnType<typeof withFunnelDerived>;
 
   let data: OutRow[];
@@ -343,7 +340,6 @@ export async function GET(req: NextRequest) {
         clickers.lifetimeByCampaign.get(c.campaign_id),
         c.tally.visit_clicks_clean,
       ),
-      manual_topup: topupByCampaign.get(c.campaign_id) ?? 0,
     }));
   } else {
     data = stages.map((acc) => {
@@ -398,7 +394,6 @@ export async function GET(req: NextRequest) {
           clickers.lifetimeByStage.get(acc.stage_id),
           acc.tally.visit_clicks_clean,
         ),
-        manual_topup: acc.manual_topup,
       };
     });
   }
@@ -506,7 +501,8 @@ export async function GET(req: NextRequest) {
         substitutedTotal,
         grand.visit_clicks_clean,
       ),
-      manual_topup: grandTopup,
+      // manual_topup rides `...withFunnelDerived(grand, …)` above — grand.tally
+      // carries it (lib/reporting/stage-funnel.ts).
     },
     // The event-type registry, so the client can GENERATE the per-event columns
     // rather than know them. Additive: no existing field changes meaning.

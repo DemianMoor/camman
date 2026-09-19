@@ -745,33 +745,43 @@ The badge renders nothing at zero (a permanent "0 unmapped" chip is furniture).
 It carries an explanatory `title` and **no link**: `conversion_event_mappings`
 has no admin screen yet. Give it an `href` the day that page exists.
 
-### ⚠️ Hourly has two answers for pending money; only one reaches a row
+### Hourly had two answers for pending money — FIXED 2026-09-19
 
-On `dimension=hourly` the SCALAR `pending_revenue` is set to `0` by hand
+On `dimension=hourly` the SCALAR `pending_revenue` used to be set to `0` by hand
 ([`lib/reporting/performance-report.ts`](../../lib/reporting/performance-report.ts),
-the hourly row map) because hourly never runs a pending query — the zero is a
-NOT-COMPUTED sentinel, not a measurement. Meanwhile `ledgerHourEventQuery()`
-**does** compute `pending_n` and `pending_revenue` into `m.events`, off
-`conversion_events`, bucketed on the same `ce.occurred_at` ET hour as hourly's
-own `sales` and `revenue`.
+the hourly row map) because hourly never ran a pending query — a NOT-COMPUTED
+sentinel, not a measurement. Meanwhile `ledgerHourEventQuery()` **did** compute
+`pending_n` and `pending_revenue` into `m.events`, off `conversion_events`,
+bucketed on the same `ce.occurred_at` ET hour as hourly's own `sales` and
+`revenue`. Nothing rendered the scalar, so nothing on SCREEN was wrong — but the
+API body said `totals.pending_revenue: 0` beside a non-zero
+`events[k].pending_revenue`, and no consumer could tell that 0 from a real one.
 
-**The per-event map is the correct one.** Its figures are real and on the same
-time basis as the rest of the row. So the per-event pending columns stay on
-hourly; hiding a true number to agree with a placeholder would be backwards.
+**Fixed in the aggregation layer: the scalar is now computed.** `getHourlyReport`
+runs a pending series off the same ledger, the same hour bucket and the same
+shared clause family as its approved revenue — `pendingRevenueClause()` beside
+`approvedRevenueClause()` — so the two answers agree by construction and a zero
+is always a measured zero. It is defined exactly as its stage-path twin, so
+`pending_revenue = Σ events[k].pending_revenue + cross-org strays` holds on
+hourly as it does on the projection.
 
-That is safe only while **no hourly column and no hourly stat card renders the
-scalar**, which is true today (`HOURLY_COLS` has no pending entry) and is one
-column addition away from being false — at which point the same row would show
-`$0.00` in one column and `$40.00` in the next. Bar **W20** pins it, with W19 as
-its positive control (`FULL_COLS` *does* carry a scalar pending column, so a
-broken extractor fails loudly instead of passing). Making the two AGREE would
-mean computing a pending series in the hourly aggregation, which is a change to
-the aggregation layer, not the rendering layer.
+The hourly tab still renders no pending COLUMN (its columns are activity-time
+rates); that is now a display choice with no bearing on the payload's
+consistency. Bars: **R13** (a fixture hour with `$40` held and `$0` approved),
+**R13b** (scalar = Σ map, on every row and the totals, with an explicit
+non-vacuity clause), **R13c** (held money is not revenue) in
+[`scripts/test-report-event-columns-db.ts`](../../scripts/test-report-event-columns-db.ts),
+plus **W19**, a cheap source bar that fails if the literal override comes back.
 
-Related: the hourly path emits **all-zero** per-event entries where the stage-day
-projection FILTERs the key out entirely. The two still produce the same column
-set, because `visibleEventTypes()` keys on a non-zero field rather than on key
-presence (bar **W21**, one-sided against W4).
+Related, fixed at the same time: the hourly path used to emit **all-zero**
+per-event entries where the stage-day projection FILTERs the key out entirely (a
+type whose rows in the hour were all rejected). It now applies the same test — in
+JS, after the row's `unmapped` count is taken, since that count comes off the
+same rows — so identical data yields identical keys on both paths (bar **R14**,
+one-sided against R9). The rendered column set already agreed either way, because
+`visibleEventTypes()` keys on a non-zero field rather than on key presence (bar
+**W21**, one-sided against W4), which is exactly why the payload disagreement was
+invisible.
 
 ### Nothing may name an event key
 

@@ -1,6 +1,6 @@
 # Audience Stats Report
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-19_
 
 A read-only report answering "for this contact group, which offers work?" —
 the inverse of the [Offer Group Performance Report](offer-group-report.md),
@@ -174,6 +174,33 @@ failure.
 **Skips.** Stored-vs-stored comparisons (a, the stored half of b, and the
 picker group set in d) skip with a stated reason when the cells were refreshed
 after the totals.
+
+## ⚠️ Phase 5's per-event split is deliberately NOT here — and these numbers are NOT wrong
+
+Conversion Events Phase 5 (2026-09-19) put a per-event-type breakdown on both
+report tables, the campaign page, `/creatives` and the Telegram report. **This
+screen was left out on purpose**, and a reader needs to conclude neither that it
+was forgotten nor that these figures are miscounting. Both, separately:
+
+**1 — Why it is out of scope.** The columns on the other surfaces are *generated*
+from the `event_types` registry: one per type, discovered at request time. That
+cannot be done inside a materialized view, whose column list is fixed at `CREATE`.
+Adding the split means a migration that recreates `audience_report_group_totals_mv`
+— and, because the two reports share a data layer, `offer_group_report_mv` and
+`offer_report_offer_totals_mv` with it (three different unique indexes, three
+different grains: offer × group, offer, and group), **plus a fourth matview in the
+family that migration 0183 does not even touch**, `offer_report_org_summary_mv`,
+which is the org benchmark row pinned at the top of this very screen. 0183 had
+only just recreated the first three. The intended follow-up is one
+`jsonb_object_agg(et.key, …)` `events` column across **all four**, done once.
+
+**2 — The numbers here are correct, not stale.** Every `conv` CTE behind these
+matviews filters the ledger on `is_purchase` / `counts_revenue`
+(`db/migrations/0183_report_views_from_ledger.sql`). A registration is neither, so
+a PsychoBook registration contributes **$0** to Sales, Revenue, EPC, RPM and Net
+profit on this screen — and **$0 to its CSV export**, which keeps its current
+columns. The split is **invisible** here, not miscounted. Nothing on this page is
+counting a registration as a sale, and nothing here is waiting for a backfill.
 
 ## Files involved
 

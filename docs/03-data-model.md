@@ -164,6 +164,7 @@ erDiagram
   offers ||--o{ conversion_event_mappings : "offer-level override"
   event_types ||--o{ conversion_event_mappings : "maps to (null = keep)"
   event_types ||--o{ conversion_events : classifies
+  event_types ..> keitaro_stage_results : "keys the events jsonb BY NAME (0185) - NOT an FK"
   stage_sends ||--o{ conversion_events : "sub_id_1 (set null)"
   campaign_stages ||--o{ conversion_events : "sub_id_3 (set null)"
   offers ||--o{ conversion_events : "set null"
@@ -192,6 +193,19 @@ erDiagram
 > `stage_sends.id`, injected into the tracked link as the `sub_id1` URL param at
 > redirect time) back to the row. `sub_id_1` is the per-recipient counterpart of
 > `sub_id_3` (the per-stage join key for `keitaro_stage_results`).
+
+> ⚠️ **The `event_types ..> keitaro_stage_results` edge is DASHED because it is not
+> a foreign key** (migration 0185). `keitaro_stage_results.events` is a jsonb object
+> keyed by `event_types.key` — a key-by-NAME relationship the database does not know
+> about and does not police. Nothing cascades: **deleting or renaming an `event_types`
+> row does not touch the stored `events` objects**, which keep the old key until the
+> stage-day projection next rewrites them. A reader that assumes referential integrity
+> here will be wrong in both directions — a key with no registry row still sits in the
+> jsonb (it simply renders under no column, because the column list comes from the
+> registry), and a registry row with no key in the jsonb renders a legitimate 0. The
+> keying is on `key` and never on `id` precisely because `id` is a global serial while
+> the natural key is `(org_id, key)`, and the Telegram report merges across
+> organisations. See the `keitaro_stage_results` row below.
 
 > **Offer group report (migrations 0093, 0132) and Audience Stats (0180):** the
 > reporting layer is not in the ERD above — `offer_report_campaign_econ` /

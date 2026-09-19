@@ -1,6 +1,6 @@
 # Feature — EPC denominator (counted clickers)
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-19_
 
 ## 1. Purpose
 
@@ -232,6 +232,47 @@ A NULL watermark counts as stale: never-run and stopped-running need the same at
 | [`verify-epc-monitors.ts`](../../scripts/verify-epc-monitors.ts) | every threshold fires on synthetic series; heartbeats detect never-run |
 
 ⚠️ Run these on a pool with **more than one connection**. `getExcludedClickerConversion` holds a transaction; concurrent monitors on a `max:1` pool deadlock behind it.
+
+## 9b. ⭐ Phase 5 adds NO denominator — and that is why a rate can exceed 100%
+
+**Every per-event rate and every per-event EPC that Phase 5 put on a screen divides
+by the same `counted_clickers` set this document defines.** There is no second
+denominator, no per-event click set, and no per-event rescue rule. `Registration
+rate` is `registrations ÷ counted clickers in the same window` — the identical
+divisor as `EPC` and `Sales CR`'s neighbours — and the report table's own header
+for that divisor reads `Clicks (period)`. (`clicks_human` is the Operator-API
+alias for the same number; §7 of [operator-api.md](../operator-api.md) says so.
+Phase 5 renamed nothing.)
+
+**The consequence, stated rather than buried: `<Type> rate` can legitimately read
+more than 100%, and it is not clamped.**
+
+Rule F — the rescue that pulls a recipient into the denominator when the click
+scorer never scored their click — is `rescueSendIds()` in
+[lib/sale-attribution.ts](../../lib/sale-attribution.ts), and its predicate is
+
+```sql
+ce.event_type_id IN (purchase types) OR ce.event_type_id IN (revenue-bearing types)
+```
+
+i.e. **purchase- or revenue-bearing conversions only**. A registration earns no
+money and is neither, so it does not trigger the rescue. A registrant whose click
+was never scored human is therefore counted in the rate's **numerator** (the event
+happened, the ledger has it) and absent from its **denominator** (no rescue, no
+human-scored click). With enough of those in one window the ratio passes 1.
+
+This is a real number, not a bug, and the screens say so: the ratio renders as
+measured, uncapped, and `—` rather than `0.0%` over a zero denominator.
+
+**The alternative that was NOT taken, and why it is a separate card.** The fix is
+to widen Rule F by adding `registeredClause` to `rescueSendIds` — one disjunct.
+It was rejected here because it is not a Phase 5-shaped change: widening the
+rescue adds recipients to `counted_clickers` **globally**, which enlarges the
+denominator of every EPC, RPM and rate on the platform — the dashboard, the offer
+report, the partner report and every historical comparison — for a reason that has
+nothing to do with the screen being fixed. **It would lower every EPC in the
+product.** That is a decision with its own before/after measurement and its own
+gate, not a line in a reporting-columns phase.
 
 ## 10. The unscored-click inflation (fixed 2026-08-27)
 

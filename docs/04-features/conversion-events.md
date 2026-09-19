@@ -1262,8 +1262,127 @@ and a rotten `revenue` still contributes its count. Bars **T19b/T19c** here,
   now writes fixtures, so it also carries `_require-preview-db` second; the
   production eyeball it used to offer is deliberately gone.
 
+## ⭐ The residual rule, and the THREE different mechanisms that enforce it (Phase 5 Task 9)
+
+This is the one thing a reader who was not here has to take away, so it is stated
+once, whole, rather than left distributed across the task sections above.
+
+**The identity.** For any window and any stage set:
+
+```
+sales = Σ over is_purchase types of events[key].n  +  manual_topup  +  strays
+```
+
+- **`strays`** exist because the two sides resolve event types differently. The
+  scalars (`sales`, `revenue`, `pending_revenue`) resolve `is_purchase` /
+  `counts_revenue` through **non-org-scoped** id lists in
+  [lib/sale-attribution.ts](../../lib/sale-attribution.ts), while the per-event
+  entries come from an **org-scoped** `LEFT JOIN event_types … AND et.org_id =
+  ce.org_id`. A conversion carrying **another organisation's** `event_type_id` is
+  therefore **inside `sales` and `revenue`** while sitting **under no key** of
+  `events`. It surfaces only as `unmapped_conversions`.
+- **`manual_topup`** is the **second residual**: `sales` is
+  `max(manual tally, tracker)` per stage, and the per-event entries count tracker
+  events only, so the excess of the manual figure over the tracker's is in `sales`
+  and in no event key either. It is shown on **all four surfaces** as of
+  2026-09-19 (both report tables, the campaign page, `/creatives`, and the
+  Telegram report's `Manual tally: +N` line).
+
+**Therefore: any surface that shows the breakdown must show the residuals beside
+it**, or it presents a number that is provably short of the `Sales` column next to
+it and offers no explanation. That is not a convention anybody has to remember —
+the three surface shapes each make it **structurally impossible to take one
+without the other**, and each does it a *different* way, because the three have
+different shapes:
+
+| Surface | Mechanism | Why this one |
+|---|---|---|
+| **The two report tables** (`/reports` Overview + Keitaro) | **One call returns both.** `eventColsFor()` and `tierBColumnCount()` are **module-private**; the only export is `eventColumnBlock(spec, rows, totals, showEvents)`, which returns `{ columns, bar }` from ONE pass over ONE `totals`. `EventColumnsBar` takes the whole `block`. | These are column sets with a filter row, so the residual can be a real UI control (`UnmappedBadge`) — and `bar.unmapped` is read off the *same* `totals` the columns were built from, so it cannot describe a different response. |
+| **The campaign page** (stages Results cell + totals card) | **The TYPE.** `StageEventBreakdown` and `EventTotalsTiles` each take ONE required `source` object carrying the counts and both residuals. There is no `unmapped={…}` prop to pass separately — and bar **X7b** fails if a loose one reappears. | There is no column set here: one is a `·`-joined line inside a cell, the other a tile grid. There is nothing to attach a bar to, so the enforcement moves into the prop shape and tsc holds it. |
+| **`/creatives`** | **The residual IS a column in the returned array.** `eventCountColumns()` hands back the per-type count columns and the `Manual` / `unmapped` columns in ONE array; the caller never sees two lists. `EventCountRow`'s residual fields are **required, not optional** — an optional field detached the residual *by type alone*, compiled clean, and left every scan bar green. | A TanStack table consumes a `columns` array. Bundling the residual into that array is the only shape the consumer cannot decompose. |
+
+And **across all three**, one cross-cutting gate that covers a surface nobody has
+written yet: bars **X8–X11** of
+[scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts)
+walk every `.ts`/`.tsx` under `app/` and `components/`, classify a file as a
+per-event surface if it calls any column builder, and fail if such a file mounts
+none of the three residual-bearing components. **Discovered, not listed** — a new
+table is covered the day it is written.
+
+### ⚠️ The jsonb hazards, at BOTH levels — and `->>` is not one of them
+
+`keitaro_stage_results.events` has **no CHECK constraint** (see
+[03-data-model.md](../03-data-model.md)), so object-ness and number-ness are
+conventions of the writer, not guarantees of the database. Two distinct failures,
+and **neither is scoped to the offending row — both abort the whole STATEMENT**:
+
+| Level | Trigger | Error | Guard |
+|---|---|---|---|
+| **Top** | `jsonb_each(events)` where `events` is not an object (`'5'::jsonb`, an array, a string) | **22023** | `WHERE jsonb_typeof(ksr.events) = 'object'` at every unrolling reader |
+| **Value** | `(e.value ->> 'n')::numeric` where the value is not a numeric literal (`{"k":{"n":"abc"}}`, `{"k":{"n":{"a":1}}}`) | **22P02** | `eventNum()` in [lib/reporting/event-columns.ts](../../lib/reporting/event-columns.ts) |
+
+Statement-wide means exactly what it says: **measured on camman-v2 with a 2-row
+set where one row was malformed, the good row's `7` was lost with it.** In
+[lib/reporting/attribution.ts](../../lib/reporting/attribution.ts) — which backs
+the hourly Telegram cron — that is a 500 **every hour** until a human edits a row.
+
+⭐ **The top-level guard does NOT cover the value level.** `{"k":"abc"}` *is* an
+object, so `jsonb_each` is perfectly happy; it is the value inside that is
+malformed. They are two guards, not one applied twice.
+
+⭐ **And `->>` itself never raises.** `'5'::jsonb ->> 'n'` returns `NULL`
+(measured) rather than erroring — **the hazard is the `::numeric` cast**, not the
+extraction operator. This matters when reading the code: an expression that only
+extracts is safe, and the guard belongs on the cast. `eventNum()` is written
+accordingly — it degrades **per field**, so a key with a good `n` and a rotten
+`revenue` still contributes its count, rather than the whole map reading zero.
+
+### ⭐ Adding an event type is CONFIG, and that is executed, not asserted
+
+"The columns are generated from the registry" would be a claim if the only
+registry ever exercised were production's two seeded rows — a generator that
+hard-coded `registration` and `purchase` would look identical.
+
+So [scripts/test-event-columns.ts](../../scripts/test-event-columns.ts) runs the
+real generator against a **synthetic registry that exists in no database
+anywhere**: `purchase`, `registration`, plus `deposit` (a second `is_purchase`,
+`counts_revenue` type) and `trial` (a second `is_retarget_signal`). Bar **C6**
+asserts the funnel columns come out as the full signal × purchase **cross
+product** over those four —
+`evtfunnel:trial:purchase | evtfunnel:trial:deposit | evtfunnel:registration:purchase | evtfunnel:registration:deposit`
+— which no hard-coded column array produces. **C7** (a registry with no signal
+generates no funnel column), **C8** (an empty registry generates no columns at
+all) and **C9/C10** (a type that is both a signal and a purchase is never paired
+with itself) close the shape.
+
+**Adding an event type is rows in `event_types`, not a code change. If you find
+yourself editing a column array to add one, something upstream has been broken.**
+[scripts/test-reports-no-hardcoded-event-keys.ts](../../scripts/test-reports-no-hardcoded-event-keys.ts)
+is the gate that says so, over all four rendering surfaces and everything between
+the registry and them.
+
 ## Not built yet
 
-- **Phase 5 is built through Task 8.** The generator, the storage, the projection,
-  the read layer, the two report tables, the campaign page, the creatives page and
-  the Telegram report all exist.
+- **Phase 5 is built through Task 9.** The generator, the storage, the projection,
+  the read layer, the two report tables, the campaign page, the creatives page,
+  the Telegram report and the docs all exist.
+- **Deliberately out of scope, each with its reason in its own doc:** the
+  matview-backed [offer group report](offer-group-report.md) and
+  [Audience Stats](audience-report.md) (**not** contaminated — registrations
+  contribute $0 there, including in their CSV exports); the partner report; the
+  dashboard; `/creatives`' rate / revenue / EPC split; and `checkouts` itself.
+- **Open, and recorded rather than done:**
+  - a **CHECK constraint** on `events` — top level only
+    (`jsonb_typeof(events) = 'object'`), in a LATER migration, `NOT VALID` then
+    `VALIDATE`, and only after a production violation sweep. The **value**-level
+    form is **refused by Postgres** (`0A000: cannot use subquery in check
+    constraint`) and would need an `IMMUTABLE` helper or a trigger. Measured
+    shape, the refusal and the three sweep queries: [03-data-model.md](../03-data-model.md).
+  - **widening the EPC rescue to registrations**, which would lower every EPC on
+    the platform — see [epc-denominator.md §9b](epc-denominator.md).
+  - a **`/reports/unmapped` drill-down**. The unmapped badge is per page, scoped
+    to the range and filters, and **links nowhere**: there is no unmapped screen
+    to link to. Give the badge an `href` the day one exists.
+  - **renaming `Clicks (period)` / `Clicks (all time)`** to match the
+    Operator-API's `clicks_human` alias. Not done here because a rename moves a
+    column every existing consumer and screenshot knows.

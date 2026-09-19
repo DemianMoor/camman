@@ -257,9 +257,20 @@ One real row, 2026-09-07..13 (offer name redacted, cost rounded):
   "reached": 400, "counted_clickers": 4480, "clicks_human": 4480,
   "lifetime_clickers": 10934, "lifetime_revenue": 11599,
   "sales": 50, "revenue": 3650, "cost": 1796.56,
-  "click_to_reach_pct": 8.93, "reach_to_sale_pct": 12.5, "opt_rate": 2.97
+  "click_to_reach_pct": 8.93, "reach_to_sale_pct": 12.5, "opt_rate": 2.97,
+  "events": {
+    "registration": { "n": 214, "pending_n": 0, "revenue": 0,    "pending_revenue": 0 },
+    "purchase":     { "n": 47,  "pending_n": 3, "revenue": 3650, "pending_revenue": 240 }
+  },
+  "unmapped": 0, "manual_topup": 3
 }
 ```
+
+The last three keys are the Phase 5 additions shown on this row for completeness —
+that row's `sales` of 50 is `47` purchases `+ 3` manual top-up `+ 0` strays, which
+is the identity above. **They are additive: every field that was there before this
+row means exactly what it meant before.** A consumer that ignores `events`,
+`unmapped` and `manual_topup` reads the same numbers it always did.
 
 ### Creative bank — `dimension=creative`
 
@@ -717,6 +728,15 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 - **`reached` is not `redirects`.** `redirects` counts the tracker's clean offer
   click events; `reached` counts recipients. They run close (1,226 vs 1,115 over
   2026-09-07..13) but measure different things.
+- **The per-event rates on the SCREENS use this same `clicks_human` denominator,
+  and they can exceed 100%.** There is no per-event denominator anywhere — a
+  `<Type> rate` is `events[key].n ÷ clicks_human`, the divisor `EPC` uses. The
+  rescue that pulls an unscored click into `clicks_human` fires on purchase- or
+  revenue-bearing conversions only, so a registrant whose click was never scored
+  human is in the numerator and not the denominator. Like `click_to_reach_pct`,
+  the ratio is **not clamped**, and a zero denominator gives `null`, never `0`.
+  (The report tables head that column `Clicks (period)`; `clicks_human` is this
+  API's alias for the same number. Nothing was renamed.)
 
 ---
 

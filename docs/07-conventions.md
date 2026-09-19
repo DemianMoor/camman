@@ -3345,3 +3345,66 @@ The rest of that bucket (no mapping at all, or no status) really is counted nowh
 ## An OPTIONAL field can detach a residual by TYPE alone (2026-09-19)
 
 `EventCountRow.unmapped` was `unmapped?: number`, and the residual column is emitted only while some row HAS one. So a caller mapping its rows to `{ events }` rendered the per-event counts with **no residual column at all**, compiled clean, and left every scan bar green — the structural pairing (`eventCountColumns` returns both in one array) was intact and irrelevant, because the ROW SHAPE suppressed the column. The fields are required now; the bar (**Y9**) is on the DECLARATION, because "this field is optional" is not something `tsc` can fail. The same reasoning as `EMPTY_TALLY`'s freeze: the type is the weaker of the two guards, so the guard goes where the hole is.
+
+## ⭐⭐ A multi-needle source scan passes if ANY needle still matches — so control every needle SEPARATELY (2026-09-19)
+
+Source-scan gates (grep a file, assert a needle is present or absent) are cheap and
+this repo has many. They all share one defect, and it is **not** the obvious one.
+
+**Deleting a needle usually trips something incidental** — a file count, a length
+floor, a `length === N` bar — so it looks covered. **Narrowing one does not.** A
+needle that still exists but matches less is invisible to every bar around it, and
+the coverage it used to give is simply gone. Measured across this branch on
+2026-09-19, twelve needles in six gates stayed **GREEN** when narrowed:
+
+| Gate | Narrowing | What went silently uncovered |
+| --- | --- | --- |
+| `npm run check:guards` (`test-preview-db-guard.ts`) | drop `\.unsafe\s*\(` from the write signal | write-capable set 182 → **176** scripts, "All checks passed" |
+| same | `update` → `upsert` in the ORM-write alternation | 182 → **178** |
+| same | drop `from "postgres"` from the db-reach test | guarded population 141 → **137** |
+| same | drop `import "./_env-preload"` | 141 → **140** |
+| `test-reports-no-hardcoded-event-keys.ts` | drop the backtick from the quoted-key character class | a template-literal key (`` m[`purchase`] ``) stops being caught |
+| same | G3b's `/api/keitaro/results` | the forbidden fetch becomes invisible |
+| `test-event-columns-view.ts` | W19's `"pending_revenue:"` | a re-inlined override stops being caught |
+| same | W20's bare `...withFunnelDerived(` | a re-bared response body stops being caught |
+| same | X7b's `"unmapped={"` | a loose residual prop stops being caught |
+| same | delete one entry from `KNOWN_SURFACES` | X8's `every()` control silently weakens |
+| `test-event-columns.ts` | N2's bare-select regex loses its whitespace/chain tolerance | a bare `db.select()` stops being caught; **N2 had no control on its needle at all** |
+| `test-p3-task4-reader-switch-db.ts` | any of F5/F6's three negated needles | the re-inlined copy it forbids stops being caught |
+
+**The law behind the table: a NEGATED needle can never go red when it is narrowed**,
+because narrowing only makes an absence more certain. Seven of the twelve are that
+shape. An absence bar is therefore *only* as good as a separate positive control on
+its own needle.
+
+**So, for every source-scan gate:**
+
+1. **One bar per needle**, fired at a **hand-written sample of the thing that needle
+   exists to match** — and a sample that no *sibling* needle also matches, so killing
+   one really does change the verdict rather than hiding behind a neighbour.
+2. **Write the sample out; never generate it from the needle.** A control built out
+   of the thing it controls is a tautology. (The first attempt at `G3c` interpolated
+   the needle constant into its own fixture and stayed green under exactly the
+   narrowing it was added to catch.)
+3. **Both line endings.** This checkout genuinely mixes them — measured 781 CRLF and
+   3 LF under `app/`+`lib/`+`components/`, `lib/reporting/stage-keitaro-aggregate.ts`
+   among the three — so a needle that survives `strip()`/whitespace-collapse in one
+   and not the other silently reclassifies a file depending on which machine last
+   touched it, **in the direction that makes the gate pass**.
+4. **Narrowing is caught by the per-needle sample; DELETION is caught by a roster.**
+   The sample bars iterate the surviving list, so removing a row outright leaves them
+   green. Spell the needle ids out (`DB_REACH` / `WRITE_SIGNAL` in
+   `test-preview-db-guard.ts`) so a removal is a two-place edit a reviewer sees.
+5. **Look for a second-order bar.** An exclusion list is one: if every entry of
+   `EXCLUSIONS` must still carry a write signal and still reach a database, then a
+   dead needle reddens the gate for a cause the population counts cannot show. 16 of
+   those entries reach a database only through the `postgres` needle, which is
+   exactly where its deletion lands.
+6. **Prefer a DISCOVERED file list to a hard-coded one.** Walk the tree and classify;
+   a surface written tomorrow is then covered the day it is written, instead of the
+   day someone remembers to add it. Keep the hard-coded list only as the *positive
+   control* on the walk — and put a roster and an on-disk check on that list too.
+
+**Proving it:** mutate the needle, see a **wrong result** (not a crash), restore from
+a **byte copy** (`cp`, never `git checkout`), and confirm `cmp` + md5 identity. A
+narrowing that produces a stack trace has proved nothing about the assertion.

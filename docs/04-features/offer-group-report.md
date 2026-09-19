@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-19_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -276,6 +276,35 @@ pin rows or foot a table; justified by the small per-offer row count).
   basis instead, so the count and money columns do not add up to the offer
   total — a contact in several groups is one send on the offer row and one
   send in each of their groups.
+
+## ⚠️ Phase 5's per-event split is deliberately NOT here — and these numbers are NOT wrong
+
+Conversion Events Phase 5 (2026-09-19) put a per-event-type breakdown on both
+report tables, the campaign page, `/creatives` and the Telegram report. **This
+screen was left out on purpose**, and a reader needs to conclude neither that it
+was forgotten nor that these figures are miscounting. Both, separately:
+
+**1 — Why it is out of scope.** The columns on the other surfaces are *generated*
+from the `event_types` registry: one per type, discovered at request time. A
+materialized view's column list is fixed at `CREATE`, so the registry cannot drive
+it. Adding the split means a migration recreating all three matviews behind this
+report — `offer_group_report_mv`, `offer_report_offer_totals_mv` and
+`audience_report_group_totals_mv`, three different unique indexes at three
+different grains (offer × group, offer, and group), all-time — **plus a fourth in
+the family that migration 0183 does not touch**, `offer_report_org_summary_mv`,
+the org benchmark row pinned at the top of both this screen and
+[Audience Stats](audience-report.md). 0183 had only just recreated the first
+three. The intended follow-up is one `jsonb_object_agg(et.key, …)` `events` column
+across **all four**, done once rather than four times.
+
+**2 — The numbers here are correct, not stale.** Every `conv` CTE behind these
+matviews filters the ledger on `is_purchase` / `counts_revenue`
+(`db/migrations/0183_report_views_from_ledger.sql` — the same predicate family the
+scalars everywhere else use). A registration is neither, so a PsychoBook
+registration contributes **$0** to Sales, Revenue, EPC, RPM and Net profit here —
+and **$0 to this report's CSV export**, which keeps its current columns. The split
+is **invisible** on this screen, not miscounted. Nothing here counts a
+registration as a sale, and nothing here is waiting for a backfill.
 
 ## Files involved
 

@@ -53,6 +53,7 @@ const FILES = [
   "lib/reporting/event-columns.ts",
   "lib/reporting/performance-report.ts",
   "lib/reporting/stage-funnel.ts",
+  "lib/reporting/stage-keitaro-aggregate.ts",
   "lib/reporting/creative-lifetime.ts",
   "lib/reporting/attribution.ts",
   "lib/reporting/report-snapshot.ts",
@@ -132,7 +133,7 @@ check(
 const missing = FILES.filter((p) => !existsSync(p));
 check(
   `G1 ⭐ every listed file exists (${FILES.length} files) — a renamed module must fail loudly, not drop out of coverage`,
-  FILES.length >= 19 && missing.length === 0,
+  FILES.length >= 20 && missing.length === 0,
   missing.length > 0 ? `missing: ${missing.join(", ")}` : "",
 );
 

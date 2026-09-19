@@ -34,12 +34,20 @@ const MARKER = "__P5_EVENT_COLUMNS_TEST__";
 // A CLOSED day in the past, so nothing that happens while the test runs can move
 // it, and no "today" boundary can make the ET range ambiguous.
 const DAY = "2026-05-12";
+// ⭐ A SECOND CLOSED DAY, DELIBERATELY OUTSIDE EVERY R BAR'S RANGE. The R bars
+// call the readers with from = to = DAY, which filter on stat_date, so the rows
+// below are invisible to them — while the campaign page's stage aggregate has NO
+// date filter at all (it is keyed on campaign_id) and sees both days. That is
+// what makes K1/K3 a SUM across a stage's days rather than a restatement of one
+// row, and it is why adding these fixtures cannot move R1-R14.
+const DAY2 = "2026-05-13";
 
 async function main() {
   const { requirePreviewDb } = await import("./_require-preview-db");
   const { db } = await import("@/db/client");
   const { getStageMetricsInRange } = await import("@/lib/reporting/stage-funnel");
   const { getPerformanceReport } = await import("@/lib/reporting/performance-report");
+  const { getStageKeitaroTotals } = await import("@/lib/reporting/stage-keitaro-aggregate");
 
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
@@ -180,17 +188,21 @@ async function main() {
       `)
     ).id;
 
-    const stage = async (n: number) =>
+    const stage = async (n: number, day = DAY) =>
       (
         await one<{ id: number }>(sql`
           INSERT INTO campaign_stages (org_id, campaign_id, stage_number, tracking_id, sent_at, sms_count, total_cost)
           VALUES (${orgId}::uuid, ${campaignId}, ${n}, ${`trk-${tag}-s${n}`},
-                  ${`${DAY} 12:00`}::timestamp AT TIME ZONE 'America/New_York', 2, 0)
+                  ${`${day} 12:00`}::timestamp AT TIME ZONE 'America/New_York', 2, 0)
           RETURNING id
         `)
       ).id;
     const stageA = await stage(1);
     const stageB = await stage(2);
+    // ⭐ A STAGE WITH CLICKS AND NO CONVERSIONS — the ordinary case, and the one
+    // the aggregate's shape exists to protect. Sent on DAY2 so it is outside the
+    // R bars' cohort as well as outside their stat_date range.
+    const stageClicksOnly = await stage(3, DAY2);
 
     const send = async (stageId: number, contactId: string) =>
       (
@@ -211,13 +223,25 @@ async function main() {
     // Stage B: 1 purchase ($20) + 1 unmapped.
     // Registrations carry no revenue and no purchase flag, so a bar about `sales`
     // cannot be satisfied by them.
-    const ksr = async (stageId: number, n: number, sales: number, revenue: string, events: string, unmapped: number) =>
+    const ksr = async (
+      stageId: number,
+      n: number,
+      sales: number,
+      revenue: string,
+      events: string,
+      unmapped: number,
+      // Defaults reproduce the pre-Task-6 fixture exactly, so every row written
+      // before this parameter existed is byte-for-byte the row it was.
+      o: { date?: string; pendingRevenue?: string; visitsRaw?: number; visitsClean?: number } = {},
+    ) =>
       db.execute(sql`
         INSERT INTO keitaro_stage_results
           (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, sales, revenue, pending_revenue,
-           events, unmapped_conversions, cost)
-        VALUES (${orgId}::uuid, ${campaignId}, ${stageId}, ${`trk-${tag}-s${n}`}, ${DAY}::date,
-                ${sales}, ${revenue}::numeric, 0, ${events}::jsonb, ${unmapped}, 0)
+           visit_clicks_raw, visit_clicks_clean, events, unmapped_conversions, cost)
+        VALUES (${orgId}::uuid, ${campaignId}, ${stageId}, ${`trk-${tag}-s${n}`}, ${o.date ?? DAY}::date,
+                ${sales}, ${revenue}::numeric, ${o.pendingRevenue ?? "0"}::numeric,
+                ${o.visitsRaw ?? 0}, ${o.visitsClean ?? 0},
+                ${events}::jsonb, ${unmapped}, 0)
       `);
     await ksr(
       stageA, 1, 2, "50.0000",
@@ -232,6 +256,30 @@ async function main() {
       JSON.stringify({ purchase: { n: 1, pending_n: 0, revenue: 20.0, pending_revenue: 0 } }),
       1,
     );
+    // ── ⭐ A SECOND DAY FOR STAGE A, for the campaign page's aggregate ───────
+    // The same event key again (3 more purchases) and 2 more unmapped rows, on
+    // DAY2. Nothing in the R bars' window changes; the stage aggregate must
+    // report 5 and 3, which it can only do by SUMMING a jsonb object across
+    // rows. A one-day fixture would pass against an aggregate that simply picked
+    // one row's object.
+    await ksr(
+      stageA, 1, 3, "0.0000",
+      JSON.stringify({ purchase: { n: 3, pending_n: 0, revenue: 0, pending_revenue: 0 } }),
+      2,
+      { date: DAY2 },
+    );
+    // ── ⭐ CLICKS, HELD MONEY, AND NO CONVERSIONS AT ALL ─────────────────────
+    // ONE-SIDED: `events` is '{}' and unmapped is 0 while the visit columns and
+    // pending_revenue are non-zero, so a row that vanishes from the aggregate
+    // (jsonb_each('{}') yields NO rows) takes REAL figures with it. $41.5000 is
+    // held money nothing else in this fixture carries on the projection, so K4
+    // cannot be satisfied by another row's pending_revenue.
+    await ksr(stageClicksOnly, 3, 0, "0.0000", "{}", 0, {
+      date: DAY2,
+      pendingRevenue: "41.5000",
+      visitsRaw: 90,
+      visitsClean: 11,
+    });
 
     // The MANUAL top-up: 5 manual sales on stage A against 2 tracker sales ⇒ a
     // top-up of 3. It exists ONLY here — no ledger row, no events entry — which
@@ -458,6 +506,72 @@ async function main() {
       "R14 ⭐ the hourly path omits an all-zero per-event entry, exactly as the projection's FILTER does",
       h11 !== undefined && Object.keys(h11.events).length === 0 && h11.sales === 0 && h11.unmapped === 0,
       `h11 keys=${JSON.stringify(Object.keys(h11?.events ?? {}))} sales=${h11?.sales} unmapped=${h11?.unmapped}`,
+    );
+
+    // ── ⭐ THE CAMPAIGN PAGE'S STAGE AGGREGATE, EXECUTED FOR REAL ───────────
+    //
+    // getStageKeitaroTotals is the statement
+    // app/api/campaigns/[campaignId]/stages/route.ts runs — imported, never
+    // retyped, because a bar that retypes a query proves only that the typist
+    // agreed with themselves. It lives in lib/reporting precisely so this script
+    // can execute it without standing up requireApiMembership and the rest of
+    // the auth chain.
+    console.log("\ngetStageKeitaroTotals (the campaign page's stages table):");
+    // ⭐ A STATEMENT THAT WILL NOT EXECUTE IS A RED BAR, NOT A STACK TRACE.
+    // K5's red proof is `min(o.events)` — PostgreSQL has no min/max for jsonb, so
+    // the statement fails with 42883 at EXECUTION time, which an un-caught call
+    // turns into a crash that prints no bar at all. Caught here, K5 goes red and
+    // says why, and K1-K4 go red on their sentinels beside it.
+    let agg: Awaited<ReturnType<typeof getStageKeitaroTotals>> = new Map();
+    let aggError = "";
+    try {
+      agg = await getStageKeitaroTotals(db, orgId, campaignId);
+    } catch (e) {
+      // Prefer the driver's CAUSE: drizzle's own message is "Failed query:"
+      // followed by the whole statement, while the cause carries the SQLSTATE
+      // and the one line that says what is wrong ("42883: function min(jsonb)
+      // does not exist"). A bar that goes red has to say why in its own line.
+      const c = (e as { cause?: unknown }).cause as { code?: string; message?: string } | undefined;
+      aggError = c?.code
+        ? `${c.code}: ${c.message}`
+        : e instanceof Error
+          ? `${e.name}: ${e.message}`
+          : String(e);
+    }
+    // ⭐ A MISSING STAGE IS A SENTINEL, NOT A CRASH — the same rule as N() above,
+    // and here it is load-bearing for the red proofs themselves. The mutation
+    // that reddens K2 (grouping the scalars off the lateral) DELETES the
+    // clicks-only stage from the map, so `agg.get(stageClicksOnly)!.pendingRevenue`
+    // would throw a TypeError inside K4 and the run would end in a stack trace
+    // with nothing printed about which bar failed. -1 can never be a legitimate
+    // count, unmapped total or held amount here.
+    const KN = (stageId: number, key: string) => agg.get(stageId)?.events[key]?.n ?? -1;
+    const KU = (stageId: number) => agg.get(stageId)?.unmapped ?? -1;
+    const KPR = (stageId: number) => Number(agg.get(stageId)?.pendingRevenue ?? -1);
+    check(
+      "K1 ⭐ the stage aggregate SUMS the per-event block across a stage's days",
+      KN(stageA, "purchase") === 5, // 2 on day one + 3 on day two
+      JSON.stringify(agg.get(stageA)?.events),
+    );
+    check(
+      "K2 ⭐ a stage whose events object is EMPTY still gets a row (the scalars are grouped separately from the jsonb)",
+      agg.has(stageClicksOnly) && Object.keys(agg.get(stageClicksOnly)?.events ?? {}).length === 0,
+      JSON.stringify(agg.get(stageClicksOnly) ?? null),
+    );
+    check(
+      "K3 ⭐ unmapped_conversions sums across days",
+      KU(stageA) === 3,
+      `${KU(stageA)}`,
+    );
+    check(
+      "K4 ⭐ pending_revenue SURVIVES the rewrite and still sums — the column this task's first draft silently deleted",
+      KPR(stageClicksOnly) === 41.5,
+      JSON.stringify(agg.get(stageClicksOnly) ?? null),
+    );
+    check(
+      "K5 ⭐ the query runs at all — no aggregate over jsonb (min(jsonb) does not exist: 42883)",
+      aggError === "" && agg.size > 0,
+      aggError || `${agg.size} stage(s)`,
     );
 
     console.log(`\n${passed} passed, ${failed} failed`);

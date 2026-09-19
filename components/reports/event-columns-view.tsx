@@ -1,10 +1,13 @@
 "use client";
 
 import { AlertTriangle } from "lucide-react";
+import type { ReactNode } from "react";
 
 import {
+  addEventMaps,
   buildEventColumns,
   eventCellValue,
+  pluralizeLabel,
   visibleEventTypes,
   type EventColumn,
   type EventMap,
@@ -93,7 +96,11 @@ export function fmtEventCell(v: number | null, kind: EventColumn["kind"]): strin
   return usd.format(v);
 }
 
-export { eventCellValue };
+// Re-exported so a client surface can order/filter the registry and fold the
+// per-row maps WITHOUT importing lib/reporting/event-columns directly — one
+// definition of "which types are on screen" and of "how two maps add up", shared
+// by the report tables and the campaign page.
+export { addEventMaps, eventCellValue, visibleEventTypes };
 
 /**
  * ⭐ PRIVATE, AND THAT IS THE POINT — see EventColumnsBar.
@@ -201,5 +208,99 @@ export function EventColumnsBar({
       <EventBreakdownToggle value={showEvents} onChange={onShowEventsChange} count={tierBCount} />
       <UnmappedBadge count={unmapped} />
     </div>
+  );
+}
+
+/** The counted events of one type inside one row, formatted. Missing key ⇒ "0". */
+const eventCount = (events: EventMap, key: string): string =>
+  fmtEventCell(events[key]?.n ?? 0, "count");
+
+/**
+ * ⭐ THE STAGES TABLE'S BREAKDOWN AND ITS RESIDUAL, IN ONE COMPONENT — the
+ * campaign page's counterpart to EventColumnsBar, and private for the same
+ * reason.
+ *
+ * The campaign page's Results cell is one dense `·`-joined line, so the split
+ * cannot be a column set and the badge cannot sit in a filter bar. What CAN be
+ * kept is the property that matters: there is no exported way to render the
+ * per-event segments that does not also render the unclassified count. A stage's
+ * `sales` counts a conversion whose event type belongs to another organisation
+ * while the org-scoped per-event map places it under NO key, so
+ *
+ *     sales = Σ over is_purchase types of events[t].n  +  manual top-ups  +  strays
+ *
+ * and a cell that reads "Purchases: 2 · Sales: 5" with nothing else on the line
+ * silently under-explains itself. The marker lands immediately after the
+ * segments it qualifies — beside the numbers it is about, not at the end of a
+ * line the eye has already left.
+ *
+ * Every segment ends with its own `· ` separator, so the caller splices this
+ * between two existing segments and an EMPTY registry changes the line by
+ * exactly nothing.
+ *
+ * `types` is the registry (filtered by visibleEventTypes for the whole table, so
+ * every row carries the same segments in the same order) — NEVER the keys found
+ * in `events`. A configured type with no conversions reads 0 here; that is the
+ * whole point of generating from the registry.
+ */
+export function StageEventBreakdown({
+  types,
+  events,
+  unmapped,
+}: {
+  types: readonly EventTypeSpec[];
+  events: EventMap;
+  unmapped: number;
+}) {
+  return (
+    <>
+      {types.map((t) => (
+        <span key={t.key}>
+          {pluralizeLabel(t.label)}: {eventCount(events, t.key)} ·{" "}
+        </span>
+      ))}
+      {unmapped > 0 ? (
+        <span
+          className="text-amber-700 dark:text-amber-500"
+          title={
+            `${unmapped.toLocaleString()} conversion(s) on this stage matched no event-type mapping and ` +
+            `count as NOTHING here — not a sale, not revenue, not in any segment above. ` +
+            `Fix: add a conversion_event_mappings row for that offer (or its network) and that tracker type.`
+          }
+        >
+          ⚠ {unmapped.toLocaleString()} unmapped ·{" "}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * ⭐ THE CAMPAIGN TOTALS ROW'S BREAKDOWN AND ITS RESIDUAL, IN ONE COMPONENT —
+ * same rule, same reason as StageEventBreakdown.
+ *
+ * `renderTile` exists so the tiles keep the surrounding card's own markup
+ * (TotalsMetric) instead of this module growing a second tile style: the
+ * COMPOSITION is what is shared and pinned, not the pixels. A caller can style
+ * its tiles however it likes and still cannot obtain them without the badge.
+ */
+export function EventTotalsTiles({
+  types,
+  events,
+  unmapped,
+  renderTile,
+}: {
+  types: readonly EventTypeSpec[];
+  events: EventMap;
+  unmapped: number;
+  renderTile: (tile: { key: string; label: string; value: string }) => ReactNode;
+}) {
+  return (
+    <>
+      {types.map((t) =>
+        renderTile({ key: t.key, label: pluralizeLabel(t.label), value: eventCount(events, t.key) }),
+      )}
+      <UnmappedBadge count={unmapped} />
+    </>
   );
 }

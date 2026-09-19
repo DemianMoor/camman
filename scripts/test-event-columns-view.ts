@@ -3,7 +3,15 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import * as view from "@/components/reports/event-columns-view";
-import { EventColumnsBar, eventCellValue, eventColsFor, fmtEventCell, tierBColumnCount } from "@/components/reports/event-columns-view";
+import {
+  EventColumnsBar,
+  EventTotalsTiles,
+  StageEventBreakdown,
+  eventCellValue,
+  eventColsFor,
+  fmtEventCell,
+  tierBColumnCount,
+} from "@/components/reports/event-columns-view";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 
 // PURE — no DB, no env, no browser. Run:
@@ -271,6 +279,83 @@ check(
   !eventColsFor(SPEC_ARCHIVED, [{ events: { legacy_cpa: tally(0, 0, 0, 0) } }], { events: {} }, true).some(
     (c) => c.eventKey === "legacy_cpa",
   ),
+);
+
+// ── ⭐ THE CAMPAIGN PAGE'S TWO SURFACES: SAME RULE, ENFORCED THE SAME WAY ────
+//
+// The stages table cannot carry a column set or a filter bar — its Results cell
+// is one dense `·`-joined line and its totals are a tile grid — so the property
+// that survives is the one that matters: THERE IS NO EXPORTED WAY TO RENDER THE
+// PER-EVENT FIGURES THAT DOES NOT ALSO RENDER THE UNCLASSIFIED COUNT. A stage's
+// `sales` counts a cross-organisation event type that the org-scoped map places
+// under no key, so a line reading "Deposits: 2 · Sales: 5" and nothing else
+// under-explains itself exactly as a report table would.
+const stageLine = (unmapped: number, types: EventTypeSpec[] = SPEC, events: EventMap = ROWS[0].events) =>
+  renderToStaticMarkup(createElement(StageEventBreakdown, { types, events, unmapped }));
+
+const lineWithStray = stageLine(7);
+check(
+  "X1 ⭐ the stage cell's segments and its residual come out of ONE component — both are in the markup, from one mount",
+  lineWithStray.includes("Signups: 12") && lineWithStray.includes("7 unmapped"),
+  lineWithStray,
+);
+check(
+  "X2 ⭐ a ZERO-conversion event type still renders a segment reading 0, beside one reading 12",
+  lineWithStray.includes("Deposits: 0") && lineWithStray.includes("Signups: 12"),
+  lineWithStray,
+);
+check(
+  "X3 the stage marker renders NOTHING at zero, and the segments still do (the residual is the only conditional part)",
+  !stageLine(0).includes("unmapped") && stageLine(0).includes("Deposits: 0"),
+  stageLine(0),
+);
+check(
+  "X4 ⭐ an EMPTY registry with no strays changes the Results line by exactly nothing — the component is spliced between two existing segments",
+  stageLine(0, []) === "",
+  JSON.stringify(stageLine(0, [])),
+);
+// The tiles take the surrounding card's own tile markup through renderTile, so
+// what is pinned here is the COMPOSITION — N tiles AND the badge, from one call.
+const tiles = (unmapped: number) =>
+  renderToStaticMarkup(
+    createElement(EventTotalsTiles, {
+      types: SPEC,
+      events: TOTALS.events,
+      unmapped,
+      renderTile: ({ key, label, value }: { key: string; label: string; value: string }) =>
+        createElement("div", { key, "data-tile": key }, `${label} ${value}`),
+    }),
+  );
+const tilesWithStray = tiles(4);
+check(
+  "X5 ⭐ the totals tiles carry the badge with them: one tile per registry type AND the unmapped count, from one mount",
+  (tilesWithStray.match(/data-tile=/g) ?? []).length === SPEC.length &&
+    tilesWithStray.includes("Signups 20") &&
+    tilesWithStray.includes("Deposits 0") &&
+    tilesWithStray.includes("4 unmapped"),
+  tilesWithStray,
+);
+check(
+  "X6 ⭐ no renderer of per-event figures is exported WITHOUT its residual — the stage line and the tiles are the only two, and neither half is reachable alone",
+  typeof view.StageEventBreakdown === "function" && // positive control
+    typeof view.EventTotalsTiles === "function" &&
+    !("UnmappedBadge" in view) &&
+    !("StageEventSegments" in view) &&
+    !("EventTiles" in view),
+  `exports: ${Object.keys(view).join(", ")}`,
+);
+
+// ── ⭐ …AND THE CAMPAIGN PAGE MOUNTS THOSE, RATHER THAN ITS OWN COPY ─────────
+//
+// X6 makes an under-explaining surface unbuildable out of THIS module; this is
+// what pins the campaign page to the module. Whitespace-collapsed and needle-
+// free of newlines, because this checkout mixes CRLF and LF per file and a
+// multi-line needle is an assertion that can never fail.
+const campaignPageSrc = readFileSync("app/(protected)/campaigns/[id]/page.tsx", "utf8").replace(/\s+/g, " ");
+check(
+  "X7 ⭐ the campaign page renders the breakdown through the shared components — it does not roll its own segments or its own badge",
+  campaignPageSrc.includes("<StageEventBreakdown") && campaignPageSrc.includes("<EventTotalsTiles"),
+  `StageEventBreakdown=${campaignPageSrc.includes("<StageEventBreakdown")} EventTotalsTiles=${campaignPageSrc.includes("<EventTotalsTiles")}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

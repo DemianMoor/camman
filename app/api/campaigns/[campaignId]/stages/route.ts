@@ -8,7 +8,6 @@ import {
   campaign_stages,
   campaigns,
   creatives,
-  keitaro_stage_results,
   offers,
   provider_phones,
   sms_providers,
@@ -28,7 +27,9 @@ import {
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
 import { denominatorFor, getCountedClickers } from "@/lib/reporting/counted-clickers";
+import { loadEventTypes } from "@/lib/reporting/event-columns";
 import { gradingRates } from "@/lib/reporting/grading-rates";
+import { getStageKeitaroTotals } from "@/lib/reporting/stage-keitaro-aggregate";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
 import { buildStageFullUrl, validateBrandLpShape, validateDestination } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
@@ -314,8 +315,19 @@ export async function GET(
   const countedClickersPromise = getCountedClickers(db, orgId, "stage", {
     campaignId: cid,
   });
+  // Keitaro sales/revenue/pending/visits AND the per-event breakdown per stage —
+  // one grouped query keyed on campaign_id (served by
+  // keitaro_stage_results_campaign_date_idx). It lives in lib/reporting so its
+  // bars can execute the REAL statement without standing up the auth chain
+  // (getStageKeitaroTotals, bars K1-K5). Started here so it runs alongside the
+  // grouped queries below; awaited once they resolve.
+  const keitaroTotalsPromise = getStageKeitaroTotals(db, orgId, cid);
+  // The event-type registry, once per response. The client generates one segment
+  // per type from THIS, never from the keys present in the data — a configured
+  // type with no conversions must read 0 rather than vanish.
+  const eventTypesPromise = loadEventTypes(db, orgId);
 
-  const [inboundStopContactsRow, sendCountRows, keitaroRows] = (await Promise.all([
+  const [inboundStopContactsRow, sendCountRows] = (await Promise.all([
     db.execute(drizzleSql`
       SELECT count(DISTINCT oo.contact_id)::int AS n
       FROM opt_out_attributions oa
@@ -347,24 +359,6 @@ export async function GET(
       WHERE org_id = ${orgId} AND campaign_id = ${cid}
       GROUP BY stage_id
     `),
-    // Keitaro sales/revenue per stage — one grouped query keyed on campaign_id
-    // (served by keitaro_stage_results_campaign_date_idx) instead of the former
-    // 2×N per-stage correlated subqueries. Numerically identical (missing stage
-    // → COALESCE 0 in the mapping below).
-    db.execute(drizzleSql`
-      SELECT stage_id,
-             sum(sales)::int AS sales,
-             sum(revenue)::numeric(12,4)::text AS revenue,
-             sum(pending_revenue)::numeric(12,4)::text AS pending_revenue,
-             -- Both visit columns: the clickers-gap rule is a ZERO-test across
-             -- the pair (hasNoKeitaroVisits), never clean alone — raw is a
-             -- superset, so "raw > 0, clean = 0" is common and is NOT a gap.
-             sum(visit_clicks_raw)::int AS visit_clicks_raw,
-             sum(visit_clicks_clean)::int AS visit_clicks_clean
-      FROM ${keitaro_stage_results}
-      WHERE org_id = ${orgId} AND campaign_id = ${cid}
-      GROUP BY stage_id
-    `),
   ])) as unknown as [
     { n: number }[],
     {
@@ -377,28 +371,9 @@ export async function GET(
       skipped_duplicate: number;
       reached: number;
     }[],
-    {
-      stage_id: number;
-      sales: number;
-      revenue: string;
-      pending_revenue: string;
-      visit_clicks_raw: number;
-      visit_clicks_clean: number;
-    }[],
   ];
   const inboundStopContacts = Number(inboundStopContactsRow[0]?.n ?? 0);
-  const keitaroByStage = new Map(
-    keitaroRows.map((r) => [
-      Number(r.stage_id),
-      {
-        sales: Number(r.sales ?? 0),
-        revenue: r.revenue ?? "0.0000",
-        pendingRevenue: r.pending_revenue ?? "0.0000",
-        visitClicksRaw: Number(r.visit_clicks_raw ?? 0),
-        visitClicksClean: Number(r.visit_clicks_clean ?? 0),
-      },
-    ]),
-  );
+  const keitaroByStage = await keitaroTotalsPromise;
   const sendCountsByStage = new Map(
     sendCountRows.map((r) => [
       Number(r.stage_id),
@@ -458,6 +433,18 @@ export async function GET(
     // Approved revenue is keitaro_revenue; this is the same money still pending
     // (lib/sale-attribution.ts). Never add them — ROI and EPC count approved only.
     keitaro_pending_revenue: keitaroByStage.get(r.id)?.pendingRevenue ?? "0.0000",
+    // The same sales/revenue numbers, split per event_types.key (migration
+    // 0185), plus the conversions that matched NO mapping. A missing row reads
+    // {} / 0 — never "unknown" — for the same reason the visit columns below do:
+    // an absent keitaro_stage_results row IS the zero, and a null here would
+    // make every gap look like a data outage.
+    //
+    // ⭐ keitaro_unmapped TRAVELS WITH keitaro_events, ALWAYS. It is counted by
+    // the scalar `sales` and placed under no key, so it is the only account of
+    // the difference between the two; a body that carried the breakdown without
+    // it would let a screen under-explain its own total.
+    keitaro_events: keitaroByStage.get(r.id)?.events ?? {},
+    keitaro_unmapped: keitaroByStage.get(r.id)?.unmapped ?? 0,
     // Inputs to shouldSubstituteClickers (lib/reporting/tracking-gap.ts). A
     // stage with no keitaro_stage_results row at all is the strongest gap
     // signal, so a missing row must read 0/0 — never "unknown".
@@ -490,6 +477,9 @@ export async function GET(
     data,
     totalCount: data.length,
     inbound_stop_contacts: inboundStopContacts,
+    // Once per response, not per stage: the column set is a property of the org's
+    // registry, not of this campaign's data.
+    event_types: await eventTypesPromise,
   });
 }
 

@@ -786,8 +786,9 @@ invisible.
 ### Nothing may name an event key
 
 [`scripts/test-reports-no-hardcoded-event-keys.ts`](../../scripts/test-reports-no-hardcoded-event-keys.ts)
-is the gate on the phase's central claim, over 19 files — all four rendering
-surfaces plus everything between the registry and them. Three needles per key
+is the gate on the phase's central claim, over 20 files — all four rendering
+surfaces plus everything between the registry and them (Task 6 added
+`lib/reporting/stage-keitaro-aggregate.ts`). Three needles per key
 (quoted literal, dot/optional-chain property access, and object-literal key or
 generated-id segment), matched against **whitespace-collapsed** source so CRLF
 and LF files are treated alike and no needle can contain a newline it would never
@@ -807,10 +808,77 @@ Deliberate omissions: `lib/sale-attribution.ts` (the ledger's definition file,
 whose frozen legacy section quotes `'lead'`/`'sale'`) and everything under
 `scripts/` (the tests MUST name keys — that is how they assert).
 
+## The campaign page splits its Results cell and its totals (Phase 5 Task 6)
+
+The stages table on `/campaigns/[id]` now carries the same split, generated from
+the same registry. `GET /api/campaigns/[campaignId]/stages` returns
+`event_types` once per response (`loadEventTypes`) and, per stage,
+`keitaro_events` + `keitaro_unmapped` beside the existing `keitaro_sales_count` /
+`keitaro_revenue` / `keitaro_pending_revenue`.
+
+**The Results cell** reads
+`Clicks: … · Checkout: … · Registrations: N · Purchases: M · [⚠ K unmapped ·] Sales: … · CTR: … · OptOut: …`
+— the generated segments spliced between `Checkout` and `Sales`, and the stray
+marker immediately after them, beside the numbers it is about. **`Checkout` stays
+and is NOT the registration segment**: it is `keitaro_type = 'lead'`, which means
+a registration for one network and a paid purchase for two others (0181's mapping
+seed). The registry-driven counts land beside it, and where the two disagree that
+disagreement is the point. Retiring `checkout_click_count` is a separate card —
+it is hand-editable (`manual-results-form.tsx`) and exact-mirrored from the
+projection every five minutes.
+
+**The totals card** gains one `TotalsMetric` per event type after `Sales`, plus
+the shared unmapped badge. The tiles reflow in the existing responsive grid, so N
+types need no layout change.
+
+**Both surfaces come from `components/reports/event-columns-view.tsx`** —
+`StageEventBreakdown` and `EventTotalsTiles`, each rendering its figures AND its
+residual, neither half separately exported. See
+[07-conventions.md](../07-conventions.md) for why that is structural rather than
+conventional, and bars **X1–X7** of
+[`scripts/test-event-columns-view.ts`](../../scripts/test-event-columns-view.ts).
+A configured type with zero conversions renders `Purchases: 0`, never a blank
+(`visibleEventTypes` keeps active types and drops an archived one only once no
+stage on screen has a non-zero entry for it). The cell's `hasResults` test now
+includes `keitaro_events` / `keitaro_unmapped`, so a stray cannot be swallowed by
+the em dash on an API-sent stage whose `sms_count` is 0.
+
+### The stage aggregate: no aggregate over jsonb, ever
+
+The endpoint's single grouped `keitaro_stage_results` query moved to
+[`lib/reporting/stage-keitaro-aggregate.ts`](../../lib/reporting/stage-keitaro-aggregate.ts)
+(`getStageKeitaroTotals`) so its bars can execute the REAL statement without
+standing up `requireApiMembership` and the auth chain — a bar that retypes a query
+proves only that the typist agreed with themselves. It is still ONE query keyed on
+`campaign_id`, served by `keitaro_stage_results_campaign_date_idx`.
+
+Its shape is load-bearing:
+
+- **The scalars are grouped in their own CTE (`scal`), off `ksr`** — never off the
+  `jsonb_each` lateral. `jsonb_each('{}')` yields NO rows, so a stage with clicks
+  and no conversions would vanish entirely and its cell would read as *no data*
+  rather than *no conversions* (bar **K2**).
+- **The per-event object is re-aggregated separately (`ev` → `ev_obj`) and
+  LEFT JOINed back.** jsonb has no `sum()`, and it has no `min()`/`max()` either:
+  PostgreSQL defines those for `anyarray`, `anyenum` and the scalar types only,
+  with no implicit `jsonb → text` cast, so `min(o.events)` fails at EXECUTION time
+  with `42883 function min(jsonb) does not exist` (bar **K5**, red-proved).
+- **`pending_revenue` (0182) stays among the scalars.** It feeds the per-stage
+  `pending $…` segment and the "Pending revenue" tile, and deleting it is SILENT —
+  the figure simply becomes 0. Bar **K4** is the one that notices; K1/K2/K3/K5 all
+  stay green without it.
+
+Bars **K1–K5** in
+[`scripts/test-report-event-columns-db.ts`](../../scripts/test-report-event-columns-db.ts)
+run against a throwaway org on camman-v2, with stage A's event key spread over
+**two** `stat_date`s (2 + 3) and its strays over the same two days (1 + 2) — a
+one-day fixture would pass against an aggregate that merely picked one row's
+object. The second day sits OUTSIDE the range the R bars read, so the same
+fixture cannot move them.
+
 ## Not built yet
 
-- **Phase 5 beyond Task 5 — proposed, not built.** The generator, the storage,
-  the projection, the read layer and now the two report tables exist. The
-  remaining tasks (the campaign page, the creatives page, the Telegram
-  formatter) are not built, and nothing downstream should be relied on as
-  decided.
+- **Phase 5 beyond Task 6 — proposed, not built.** The generator, the storage,
+  the projection, the read layer, the two report tables and now the campaign page
+  exist. The remaining tasks (the creatives page, the Telegram formatter) are not
+  built, and nothing downstream should be relied on as decided.

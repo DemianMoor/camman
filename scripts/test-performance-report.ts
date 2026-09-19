@@ -6,6 +6,10 @@ async function main() {
   const { sql } = await import("drizzle-orm");
   const { getPerformanceReport } = await import("@/lib/reporting/performance-report");
   const { getStageMetricsInRange } = await import("@/lib/reporting/stage-funnel");
+  const { requireReportingColumns } = await import("./_require-migration");
+  // Both readers below project keitaro_stage_results columns from 0182 + 0185.
+  // Name the missing one instead of dying on a raw 42703.
+  await requireReportingColumns(db, "test-performance-report");
   const orgId = ((await db.execute(sql`select org_id from campaigns limit 1`)) as unknown as { org_id: string }[])[0].org_id;
 
   const from = "2026-07-18", to = "2026-07-19";

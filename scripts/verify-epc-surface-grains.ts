@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 
 import { getPerformanceReport } from "@/lib/reporting/performance-report";
 import { getCountedClickersByDimension } from "@/lib/reporting/counted-clickers";
+import { requireReportingColumns } from "./_require-migration";
 
 // =============================================================================
 // CROSS-SURFACE EPC VERIFICATION
@@ -59,6 +60,9 @@ async function main() {
   const d = drizzle(c);
   const q = async (x: ReturnType<typeof sql>) =>
     (await d.execute(x)) as unknown as Record<string, unknown>[];
+  // getPerformanceReport reaches getStageMetricsInRange, whose projection needs
+  // 0182 + 0185. Name the missing column instead of dying on a raw 42703.
+  await requireReportingColumns(d, "verify-epc-surface-grains");
 
   const orgId = (
     (await q(sql`SELECT id FROM organizations LIMIT 1`)) as { id: string }[]

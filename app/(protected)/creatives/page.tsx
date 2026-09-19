@@ -40,6 +40,7 @@ import {
   eventCountValue,
   type EventCountRow,
 } from "@/components/reports/event-columns-view";
+import { CREATIVES_EXTRA_COLUMN_IDS } from "@/lib/reporting/column-visibility";
 import type { EventCountMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 import {
   AlertDialog,
@@ -201,6 +202,13 @@ type Filters = {
   pageSize: number;
   sortBy: string;
   sortDir: "asc" | "desc";
+  // The CURATED DEFAULT VIEW's toggle — per-browser, off by default, and NOT a
+  // filter: it changes which columns render and nothing about which rows are
+  // fetched, so it is deliberately absent from `filtersAreDefault` and from the
+  // list request's dependency array. This table is 20 columns / 2084px inside a
+  // 1004px container; the default view is the 9 the owner named. Which columns
+  // and why: lib/reporting/column-visibility.ts.
+  showAllColumns: boolean;
 };
 
 const DEFAULT_FILTERS: Filters = {
@@ -214,6 +222,7 @@ const DEFAULT_FILTERS: Filters = {
   pageSize: 20,
   sortBy: "created_at",
   sortDir: "desc",
+  showAllColumns: false,
 };
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -824,7 +833,7 @@ export default function CreativesPage() {
         />
       ),
     };
-    return [
+    const built: ColumnDef<Creative>[] = [
       ...(canBulkAny ? [selectColumn] : []),
       {
         id: "slug",
@@ -944,9 +953,17 @@ export default function CreativesPage() {
       // tally. NO_EVENT_COUNTS rather than `{}` because EventCountRow's
       // residuals are required — a row shape that cannot carry one would
       // suppress its column silently.
+      //
+      // ⭐ THE TOGGLE IS PASSED IN, NOT APPLIED TO THE RESULT. The curated view
+      // holds back the manual top-up and nothing else here: the counts ARE the
+      // breakdown, and the stray count is appended inside that call on a line
+      // that cannot see the flag. Filtering this array afterwards — the obvious
+      // shortcut — is what would let a later edit drop the strays while the
+      // counts stayed on screen.
       ...eventCountColumns(
         eventTypes,
         data.map((d) => d.metrics ?? NO_EVENT_COUNTS),
+        filters.showAllColumns,
         (col): ColumnDef<Creative> => ({
           id: col.id,
           header: col.header,
@@ -1143,6 +1160,13 @@ export default function CreativesPage() {
         },
       },
     ];
+    // The curated default view, applied by id over the FIXED columns only. The
+    // roster in lib/reporting/column-visibility.ts holds no `evt:` id and bar
+    // V12 keeps it that way, so this filter cannot reach a generated column —
+    // the residuals are decided inside eventCountColumns(), above.
+    return filters.showAllColumns
+      ? built
+      : built.filter((c) => !CREATIVES_EXTRA_COLUMN_IDS.has(c.id ?? ""));
   }, [
     canUpdate,
     canArchive,
@@ -1152,7 +1176,20 @@ export default function CreativesPage() {
     data,
     eventTypes,
     selectedIds,
+    filters.showAllColumns,
   ]);
+
+  // What ticking "Show all columns" would ADD: the fixed columns it holds back,
+  // plus the manual-top-up column when some row on this page has one. A constant
+  // of the page rather than of the toggle's state — see the same idiom on
+  // /reports — and it renders nothing at 0, because a control that reveals
+  // nothing is a dead control.
+  const hiddenColumnCount = useMemo(
+    () =>
+      CREATIVES_EXTRA_COLUMN_IDS.size +
+      (data.some((d) => (d.metrics ?? NO_EVENT_COUNTS).manual_topup > 0) ? 1 : 0),
+    [data],
+  );
 
   const isAuthLoading = !auth;
   const confirmBusy = archiveApi.isLoading || restoreApi.isLoading;
@@ -1280,6 +1317,23 @@ export default function CreativesPage() {
             Show archived
           </Label>
         </div>
+        {/* A DISPLAY preference, not a filter: it is not part of
+            `filtersAreDefault` (so it never summons "Reset filters" on its own)
+            and it is not in the list request's dependency array, so ticking it
+            re-renders the table without refetching it. */}
+        {hiddenColumnCount > 0 ? (
+          <div className="flex items-center gap-2">
+            <Switch
+              id="show-all-columns"
+              checked={filters.showAllColumns}
+              onCheckedChange={(checked) => updateFilters({ showAllColumns: checked })}
+            />
+            <Label htmlFor="show-all-columns" className="text-sm">
+              Show all columns{" "}
+              <span className="text-muted-foreground">({hiddenColumnCount} more)</span>
+            </Label>
+          </div>
+        ) : null}
         {!filtersAreDefault ? (
           <Button
             variant="ghost"

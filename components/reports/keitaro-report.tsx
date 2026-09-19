@@ -387,8 +387,15 @@ export function KeitaroReport() {
   // response: the unmapped count the bar renders is read off the same `totals`
   // these columns were built from, and the toggle's governed count is a constant
   // of the registry rather than of the toggle's state (bar W12).
+  // ⭐ `showAllColumns` IS A LITERAL `true` HERE, AND DELIBERATELY SO. The
+  // curated default view was specified for /reports' dimension tabs and for
+  // /creatives; Overview was not part of it, and quietly hiding four of its
+  // columns because a shared helper grew a parameter would be a change nobody
+  // asked for. Overview therefore renders the full generated set exactly as it
+  // did. Give it its own toggle the day it is asked for — the parameter is
+  // already here.
   const block = useMemo<EventColumnBlock>(
-    () => eventColumnBlock(eventTypes, data, totals, filters.showEvents),
+    () => eventColumnBlock(eventTypes, data, totals, filters.showEvents, true),
     [eventTypes, data, totals, filters.showEvents],
   );
 

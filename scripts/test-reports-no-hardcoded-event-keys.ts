@@ -55,6 +55,12 @@ const FILES = [
   "app/(protected)/campaigns/[id]/page.tsx",
   "app/(protected)/creatives/page.tsx",
   "lib/reporting/telegram-report-format.ts",
+  // The curated default view. It decides which GENERATED columns a table opens
+  // on, so it is exactly the kind of module that would be tempted to name a key
+  // ("registration and purchase are the ones worth showing") — and a default
+  // expressed that way would put a third type's count behind the toggle by
+  // omission. Listed here the day it was written, by G1b, which failed on it.
+  "lib/reporting/column-visibility.ts",
   // producers
   "lib/reporting/event-columns.ts",
   "lib/reporting/performance-report.ts",

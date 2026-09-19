@@ -1,6 +1,6 @@
 # Conversion events (multi-event conversions)
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-20_
 
 **Status:** Phase 3 in progress — the ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). ⚠️ **Migrations 0181/0182 are not yet applied to production** — `conversion_events`/`event_types` do not exist there yet; every reader switched in Tasks 1–4 and 6 is verified on camman-v2 (preview, auto-migrated) and by read-only checks against prod's still-live `stage_sends`/`counted_clickers` columns, not by running the new code against prod (it would 42P01). Applying 0181–0183 is gated on the Task 7 STOP approval. The same holds for **0184 and 0185** (Phase 4's lane tier and Phase 5 Task 2's per-event columns): both are applied on camman-v2 only and neither is applied to production.
 
@@ -1300,6 +1300,27 @@ different shapes:
 | **The two report tables** (`/reports` Overview + Keitaro) | **One call returns both.** `eventColsFor()` and `tierBColumnCount()` are **module-private**; the only export is `eventColumnBlock(spec, rows, totals, showEvents)`, which returns `{ columns, bar }` from ONE pass over ONE `totals`. `EventColumnsBar` takes the whole `block`. | These are column sets with a filter row, so the residual can be a real UI control (`UnmappedBadge`) — and `bar.unmapped` is read off the *same* `totals` the columns were built from, so it cannot describe a different response. |
 | **The campaign page** (stages Results cell + totals card) | **The TYPE.** `StageEventBreakdown` and `EventTotalsTiles` each take ONE required `source` object carrying the counts and both residuals. There is no `unmapped={…}` prop to pass separately — and bar **X7b** fails if a loose one reappears. | There is no column set here: one is a `·`-joined line inside a cell, the other a tile grid. There is nothing to attach a bar to, so the enforcement moves into the prop shape and tsc holds it. |
 | **`/creatives`** | **The residual IS a column in the returned array.** `eventCountColumns()` hands back the per-type count columns and the `Manual` / `unmapped` columns in ONE array; the caller never sees two lists. `EventCountRow`'s residual fields are **required, not optional** — an optional field detached the residual *by type alone*, compiled clean, and left every scan bar green. | A TanStack table consumes a `columns` array. Bundling the residual into that array is the only shape the consumer cannot decompose. |
+
+⭐ **The column-visibility toggle (2026-09-20) does not reopen any of this.** Both
+tables now open on a curated default view and reveal the rest behind a per-browser
+**Show all columns** switch, and the residual is out of its reach in both shapes:
+
+- On the report tables, `showAllColumns` is a parameter of
+  `eventColumnBlock(spec, rows, totals, showEvents, showAllColumns)` and it reaches
+  `columns` only. `bar` is assembled from `totals` on lines where no toggle state
+  is in scope, and the bar is still mounted unconditionally beside the filters.
+- On `/creatives`, `eventCountColumns(types, rows, showAllColumns, render)` applies
+  it to the **manual top-up alone**. The per-type counts are never held back (they
+  ARE the breakdown), and the stray-count column is appended by a statement that
+  does not take the flag as an argument — `if (rows.some((r) => r.unmapped > 0))
+  cols.push(UNMAPPED_COLUMN);`, with bar **V8** reading that statement's own text
+  and its neighbour's as a positive control. The page's by-id filter runs over the
+  built array, but the roster it filters by holds no `evt:` id and bar **V12**
+  keeps it that way, so it cannot reach a generated column either.
+
+Measured on screen, not inferred: `/reports` showed its amber `20 unmapped` badge
+in **all four** toggle states, and `/creatives`' default view rendered
+`Regs · Purchases · Unmapped` with `Manual` hidden. Bars **V1–V9**.
 
 And **across all three**, one cross-cutting gate that covers a surface nobody has
 written yet: bars **X8–X11** of

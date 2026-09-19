@@ -16,6 +16,11 @@ import {
   type EventCountColumn,
   type EventCountRow,
 } from "@/components/reports/event-columns-view";
+import {
+  CREATIVES_EXTRA_COLUMN_IDS,
+  REPORTS_EXTRA_COLUMN_IDS,
+  isDefaultViewEventColumn,
+} from "@/lib/reporting/column-visibility";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 
 // PURE — no DB, no env, no browser. Run:
@@ -79,12 +84,19 @@ const VIEW_MODULE = "components/reports/event-columns-view.tsx";
 // The column set a response yields. eventColumnBlock() is the ONLY way to get
 // it — the builder behind this is module-private precisely so a surface cannot
 // take the columns and leave the bar (X8–X11).
+//
+// ⭐ `showAllColumns` IS PINNED TO `true` HERE, so every W bar below keeps
+// asking the question it was written to ask: "what does the generator produce
+// for this registry?", not "what does today's curated view show?". The curated
+// view has its own bars (V1–V9) that pass `false` deliberately — and V3 is
+// one-sided against this helper, so a curated filter that did nothing would
+// fail there rather than quietly widening these.
 const eventColsFor = (
   spec: readonly EventTypeSpec[],
   rows: ReadonlyArray<{ events?: EventMap }>,
   totals: { events?: EventMap; unmapped?: number } | null,
   showEvents: boolean,
-) => eventColumnBlock(spec, rows, totals, showEvents).columns;
+) => eventColumnBlock(spec, rows, totals, showEvents, true).columns;
 
 const SPEC: EventTypeSpec[] = [
   T("signup", "Signup", { display_order: 20, is_retarget_signal: true }),
@@ -155,8 +167,8 @@ check("W11 ⭐ a fractional count (By Group's split shares) shows up to 2 decima
 // depend on it), so the count's independence is now a property of the code
 // rather than of the signature, and this is what holds it: blockOff and blockOn
 // differ in exactly that argument.
-const blockOff = eventColumnBlock(SPEC, ROWS, TOTALS, false);
-const blockOn = eventColumnBlock(SPEC, ROWS, TOTALS, true);
+const blockOff = eventColumnBlock(SPEC, ROWS, TOTALS, false, true);
+const blockOn = eventColumnBlock(SPEC, ROWS, TOTALS, true, true);
 const governedOff = blockOff.bar.tierBCount;
 const governedOn = blockOn.bar.tierBCount;
 const visibleOff = blockOff.columns;
@@ -182,10 +194,10 @@ check(
 // block, and the block read the residual off the same `totals` it built the
 // columns from — so a caller cannot show a breakdown of one response beside the
 // stray count of another, or of none.
-const bar = (showEvents: boolean, unmapped: number) =>
+const bar = (showEvents: boolean, unmapped: number, showAllColumns = true) =>
   renderToStaticMarkup(
     createElement(EventColumnsBar, {
-      block: eventColumnBlock(SPEC, ROWS, { ...TOTALS, unmapped }, showEvents),
+      block: eventColumnBlock(SPEC, ROWS, { ...TOTALS, unmapped }, showEvents, showAllColumns),
       onShowEventsChange: () => {},
     }),
   );
@@ -492,6 +504,7 @@ const RESIDUAL_COPY = [
     text: eventCountColumns(
       SPEC,
       [{ events: { signup: 1 }, unmapped: 2, manual_topup: 0 }],
+      true,
       (c) => c.title,
     ).join(" "),
   },
@@ -551,8 +564,14 @@ const COUNT_ROWS_TOPUP: EventCountRow[] = [
   { events: { signup: 12 }, unmapped: 0, manual_topup: 0 },
   { events: { signup: 8 }, unmapped: 0, manual_topup: 5 },
 ];
-const countCols = (spec: EventTypeSpec[], rows: EventCountRow[]): EventCountColumn[] =>
-  eventCountColumns(spec, rows, (c) => c);
+// ⭐ `showAllColumns` PINNED TO `true`, for the same reason eventColsFor() pins
+// it: the Y bars below are about what the generator emits for a registry, and
+// the curated view's own behaviour on this grain is V6/V7's question.
+const countCols = (
+  spec: EventTypeSpec[],
+  rows: EventCountRow[],
+  showAllColumns = true,
+): EventCountColumn[] => eventCountColumns(spec, rows, showAllColumns, (c) => c);
 
 const withStray = countCols(SPEC, COUNT_ROWS);
 const noStray = countCols(SPEC, COUNT_ROWS_CLEAN);
@@ -860,7 +879,7 @@ const classify = (src: string) => {
   return { builds: BUILDERS.some((n) => s.includes(n)), residual: RESIDUAL.some((n) => s.includes(n)) };
 };
 const handRolled = classify("const cols = buildEventColumns(visibleEventTypes(t, m));");
-const paired = classify("const b = eventColumnBlock(t, r, x, s); return <EventColumnsBar block={b} />;");
+const paired = classify("const b = eventColumnBlock(t, r, x, s, a); return <EventColumnsBar block={b} />;");
 const unrelated = classify("export function StatCard({ label }: { label: string }) { return <div>{label}</div>; }");
 check(
   "X10 ⭐ the classifier flags a hand-rolled breakdown with no residual, clears a paired one, and ignores a component that builds nothing",
@@ -879,20 +898,20 @@ check(
 // BUILDERS/RESIDUAL: a control built out of the thing it controls is a
 // tautology, and the whole point is that one list can rot without the other.
 const BUILDER_SAMPLES = [
-  "const b = eventColumnBlock(spec, rows, totals, showEvents);",
+  "const b = eventColumnBlock(spec, rows, totals, showEvents, showAllColumns);",
   "const cols = buildEventColumns(types);",
   "const live = visibleEventTypes(spec, maps);",
   "const live = visibleEventTypesByCount(spec, countMaps);",
   "const cols = eventColsFor(spec, rows, totals, false);",
   "const n = tierBColumnCount(spec, rows, totals);",
-  "const cols = eventCountColumns(eventTypes, rows, render);",
+  "const cols = eventCountColumns(eventTypes, rows, showAll, render);",
 ];
 const RESIDUAL_SAMPLES = [
   "return <EventColumnsBar block={block} onShowEventsChange={f} />;",
   "return <StageEventBreakdown types={t} source={s} />;",
   "return <EventTotalsTiles types={t} source={s} renderTile={r} />;",
   // The residual column rides back inside this call's own array.
-  "const cols = eventCountColumns(eventTypes, rows, render);",
+  "const cols = eventCountColumns(eventTypes, rows, showAll, render);",
 ];
 const deadBuilder = BUILDERS.filter((n) => !BUILDER_SAMPLES.some((s) => s.includes(n)));
 const deadResidual = RESIDUAL.filter((n) => !RESIDUAL_SAMPLES.some((s) => s.includes(n)));
@@ -951,6 +970,359 @@ check(
   sortColumnOrFallback(liveIds, liveIds[0], "sent") === liveIds[0] &&
     sortColumnOrFallback(["sent", "revenue"], "revenue", "sent") === "revenue",
   `first=${liveIds[0]}`,
+);
+
+// ═══ ⭐ THE CURATED DEFAULT VIEW ════════════════════════════════════════════
+//
+// Both tables outgrew their container (25 cols / 2069px in 1126px; 20 cols /
+// 2084px in 1004px), so each opens on a shorter list and a per-browser toggle
+// reveals the rest. Two things have to be true of that and neither is obvious:
+//
+//   1. THE UNCLASSIFIED RESIDUAL CANNOT BE HIDDEN WHILE THE BREAKDOWN SHOWS.
+//      `sales = Σ (is_purchase) n + manual top-ups + strays`, so a table showing
+//      the decomposition without the stray count under-explains its own total.
+//      The toggle is a NEW way to hide things; V1/V2/V6/V8/V9 are what stop it
+//      being a new way to hide THAT.
+//   2. THE DEFAULT SET SURVIVES A NEW EVENT TYPE. A list of ids matching today's
+//      two types would put a third type's count behind the toggle by omission,
+//      silently. V4 is the bar on that, and it uses keys that exist in no
+//      database anywhere.
+//
+// ⭐ THE REGISTRY BELOW HAS PRODUCTION'S LABELS AND KEYS PRODUCTION DOES NOT
+// HAVE. The owner's approved lists name HEADERS ("Regs", "Purchase pending"),
+// and a header comes from `event_types.label`; the KEY is what no module here
+// may branch on. So the fixture spells the labels and leaves the keys
+// deliberately wrong — `sig` and `buy` are in no database, and a default view
+// that recognised production's keys would produce the wrong answer for it.
+const CURATED_SPEC: EventTypeSpec[] = [
+  T("sig", "Reg", { display_order: 20, is_retarget_signal: true }),
+  T("buy", "Purchase", { display_order: 10, is_purchase: true, counts_revenue: true }),
+];
+// ⭐ ONE-SIDED: the signal carries numbers, the purchase type carries none, and
+// the stray count is non-zero — so "the badge survived" can never be satisfied
+// by an empty response.
+const CURATED_ROWS = [{ events: { sig: tally(12, 3) }, counted_clickers: 400 }];
+const CURATED_TOTALS = { events: { sig: tally(12, 3) }, counted_clickers: 400, unmapped: 7 };
+
+const curatedBlock = (showEvents: boolean, showAllColumns: boolean) =>
+  eventColumnBlock(CURATED_SPEC, CURATED_ROWS, CURATED_TOTALS, showEvents, showAllColumns);
+const STATES: ReadonlyArray<[boolean, boolean]> = [
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+];
+
+// ── ⭐ THE RESIDUAL IS OUT OF THE TOGGLE'S REACH ────────────────────────────
+const barsByState = STATES.map(([showEvents, showAll]) => ({
+  showEvents,
+  showAll,
+  block: curatedBlock(showEvents, showAll),
+}));
+check(
+  `V1 ⭐⭐ in ALL FOUR toggle states the bar reports the response's OWN stray count — the curated view reaches \`columns\` and nothing else (${barsByState.length} states)`,
+  barsByState.length === 4 &&
+    barsByState.every((s) => s.block.bar.unmapped === 7) &&
+    // …and every one of those states really is showing a breakdown, so this is
+    // not four readings of an empty table.
+    barsByState.every((s) => s.block.columns.length > 0),
+  barsByState.map((s) => `${s.showEvents}/${s.showAll}=${s.block.bar.unmapped}`).join(" "),
+);
+const curatedMarkup = barsByState.map((s) =>
+  renderToStaticMarkup(
+    createElement(EventColumnsBar, { block: s.block, onShowEventsChange: () => {} }),
+  ),
+);
+check(
+  "V2 ⭐⭐ the real badge renders in all four states — and the column sets genuinely DIFFER across the toggle, so this is not 'nothing moved'",
+  curatedMarkup.every((m) => m.includes("7 unmapped")) &&
+    curatedBlock(false, false).columns.length < curatedBlock(false, true).columns.length,
+  `curated=${curatedBlock(false, false).columns.length} all=${curatedBlock(false, true).columns.length}`,
+);
+
+// ── ⭐ WHAT THE CURATED VIEW HOLDS BACK, BY KIND ────────────────────────────
+const curatedA = curatedBlock(false, false).columns;
+const fullA = curatedBlock(false, true).columns;
+check(
+  `V3 ⭐ the curated view keeps every count and funnel column and holds back exactly the per-type rate and held count (${curatedA.length} of ${fullA.length})`,
+  curatedA.length > 0 &&
+    curatedA.every(isDefaultViewEventColumn) &&
+    fullA.filter(isDefaultViewEventColumn).length === curatedA.length &&
+    // one-sided: something really was held back, and it is the two kinds named
+    fullA.length > curatedA.length &&
+    fullA
+      .filter((c) => !curatedA.some((k) => k.id === c.id))
+      .every((c) => c.kind === "rate" || c.kind === "pending_n"),
+  `curated=${curatedA.map((c) => c.header).join(" | ")}`,
+);
+
+// ⭐ THE BAR THAT MAKES THE RULE A RULE. A third type is CONFIGURED, not coded:
+// nothing in this repo is edited, and its count and its funnel ratio must land
+// in the default view on their own. `quiz` exists in no database either.
+const THIRD_SPEC: EventTypeSpec[] = [
+  ...CURATED_SPEC,
+  T("quiz", "Quiz", { display_order: 30, is_retarget_signal: true }),
+];
+const thirdCurated = eventColumnBlock(THIRD_SPEC, CURATED_ROWS, CURATED_TOTALS, false, false).columns;
+const thirdFull = eventColumnBlock(THIRD_SPEC, CURATED_ROWS, CURATED_TOTALS, false, true).columns;
+check(
+  `V4 ⭐⭐ a NEWLY CONFIGURED third type lands its count and its funnel in the default view, with its rate and held count behind the toggle — no list was edited (${thirdCurated.length} default, ${thirdFull.length} total)`,
+  thirdCurated.some((c) => c.id === "evt:quiz:count") &&
+    thirdCurated.some((c) => c.id === "evtfunnel:quiz:buy") &&
+    !thirdCurated.some((c) => c.id === "evt:quiz:rate") &&
+    !thirdCurated.some((c) => c.id === "evt:quiz:pending_n") &&
+    thirdFull.some((c) => c.id === "evt:quiz:rate") &&
+    thirdFull.some((c) => c.id === "evt:quiz:pending_n") &&
+    // …and the default view grew by exactly the count plus the funnels the new
+    // type joins — the cross-product cost, measured rather than assumed.
+    thirdCurated.length === curatedA.length + 2,
+  `default=${thirdCurated.map((c) => c.id).join(",")}`,
+);
+
+// ⭐ TIER B IS EXEMPT, AND ITS CONTROL MUST NOT BLINK. If the money columns were
+// also subject to the curated view, EventBreakdownToggle would govern 0 columns
+// in the default view, hit its `count === 0` early return and unmount — a
+// control that appears and disappears as an unrelated checkbox moves.
+check(
+  "V5 ⭐ the per-event money columns answer to their OWN toggle in both views, and the count that control announces is identical in both",
+  curatedBlock(true, false).columns.some((c) => c.tier === "b") &&
+    curatedBlock(true, true).columns.some((c) => c.tier === "b") &&
+    curatedBlock(false, false).bar.tierBCount === curatedBlock(false, true).bar.tierBCount &&
+    curatedBlock(false, false).bar.tierBCount > 0,
+  `tierBCount curated=${curatedBlock(false, false).bar.tierBCount} all=${curatedBlock(false, true).bar.tierBCount}`,
+);
+
+// ── ⭐ THE COUNT-ONLY GRAIN: THE STRAY COLUMN IS NOT THE TOGGLE'S TO HIDE ────
+//
+// ⭐ ONE-SIDED IN BOTH DIRECTIONS AT ONCE: this fixture carries a real stray
+// count AND a real manual top-up, so "the stray column is there" cannot be
+// satisfied by the other residual, and "the top-up is hidden" cannot be
+// satisfied by its absence from the data.
+const BOTH_RESIDUALS: EventCountRow[] = [
+  { events: { sig: 12 }, unmapped: 0, manual_topup: 0 },
+  { events: { sig: 8 }, unmapped: 3, manual_topup: 5 },
+];
+const countCurated = countCols(CURATED_SPEC, BOTH_RESIDUALS, false);
+const countFull = countCols(CURATED_SPEC, BOTH_RESIDUALS, true);
+check(
+  `V6 ⭐⭐ the stray column renders in BOTH toggle states while the manual top-up is held back by the curated view (${countCurated.length} default, ${countFull.length} all)`,
+  countCurated.some((c) => c.kind === "unmapped") &&
+    countFull.some((c) => c.kind === "unmapped") &&
+    !countCurated.some((c) => c.kind === "manual_topup") &&
+    countFull.some((c) => c.kind === "manual_topup"),
+  `default=${countCurated.map((c) => c.header).join(",")} all=${countFull.map((c) => c.header).join(",")}`,
+);
+check(
+  "V7 ⭐ …and the per-type COUNTS are never held back either: the curated view of this grain drops exactly one column, and it is the manual top-up",
+  countFull.length - countCurated.length === 1 &&
+    countFull.filter((c) => c.kind === "count").length ===
+      countCurated.filter((c) => c.kind === "count").length &&
+    countCurated.filter((c) => c.kind === "count").length > 0,
+  `counts=${countCurated.filter((c) => c.kind === "count").length}`,
+);
+
+// ── ⭐ …AND THE SOURCE SAYS SO, NOT JUST TODAY'S BEHAVIOUR ──────────────────
+//
+// V6 is a behaviour bar and would go green again if someone gated the stray
+// column on a toggle that happened to be on. These two read the statements
+// themselves: the line appending the stray column takes no toggle, while the
+// line beside it — the positive control — does. Comments are stripped and
+// whitespace collapsed first, so CRLF and LF files read identically and no
+// needle here can contain a newline it would never find.
+const pushOf = (col: string) =>
+  new RegExp(`if \\(([^;]*?)\\) cols\\.push\\(${col}\\);`).exec(viewSrc)?.[1] ?? "";
+const strayPush = pushOf("UNMAPPED_COLUMN");
+const topupPush = pushOf("MANUAL_TOPUP_COLUMN");
+check(
+  `V8 ⭐⭐ the statement that appends the stray column names no toggle, while the one beside it does (positive control) — ${JSON.stringify(strayPush)}`,
+  strayPush.length > 0 && // the extractor really found it
+    topupPush.length > 0 &&
+    !strayPush.includes("showAllColumns") &&
+    topupPush.includes("showAllColumns"),
+  `stray=${JSON.stringify(strayPush)} topup=${JSON.stringify(topupPush)}`,
+);
+check(
+  "V8b ⭐ …and the extractor really fires on a gated push, in BOTH line endings (a matcher that stopped matching would make V8 permanently green)",
+  ["\n", "\r\n"].every((nl) => {
+    const gated = stripFlat(
+      `if (showAllColumns &&${nl}    rows.some((r) => r.unmapped > 0))${nl}  cols.push(UNMAPPED_COLUMN);`,
+    );
+    const inner = /if \(([^;]*?)\) cols\.push\(UNMAPPED_COLUMN\);/.exec(gated)?.[1] ?? "";
+    return inner.includes("showAllColumns");
+  }),
+);
+// ⭐ ANCHORED TO THE FUNCTION BODY, NOT TO THE FIRST "bar: {" IN THE FILE — the
+// EventColumnBlock INTERFACE declares the same three field names a few lines
+// earlier, and an unanchored match read the type instead of the value (observed
+// 2026-09-20: the bar failed on `unmapped: number`, which is exactly the sort of
+// near-miss that would otherwise have passed for the real thing).
+const blockBody = viewSrc.slice(viewSrc.indexOf("export function eventColumnBlock("));
+const barLiteral = /bar: \{(.*?)\}, \};/.exec(blockBody)?.[1] ?? "";
+const unmappedField = /unmapped: ([^,]*),/.exec(barLiteral)?.[1] ?? "";
+check(
+  `V9 ⭐ the badge's number is read off the response's totals and off nothing else — ${JSON.stringify(unmappedField)}`,
+  blockBody.length > 0 &&
+    barLiteral.includes("tierBCount") && // the extractor found the real literal
+    unmappedField.includes("totals") &&
+    !unmappedField.includes("showAllColumns") &&
+    !unmappedField.includes("showEvents"),
+  `bar=${JSON.stringify(barLiteral)}`,
+);
+
+// ── ⭐ THE FIXED-COLUMN ROSTERS ARE REAL, COMPLETE AND CONTAIN NO EVENT ──────
+//
+// A roster of IDS is legitimate for the columns that are WRITTEN DOWN (adding
+// one is a code change that passes through column-visibility.ts) and forbidden
+// for the generated ones (adding one is a config change that does not). These
+// bars hold both halves of that: every roster id is a real column, every real
+// column is classified, and no roster entry is a generated id.
+const perfSrc = flatSrc("components/reports/performance-report.tsx");
+const creativesSrc = flatSrc("app/(protected)/creatives/page.tsx");
+const COL_PAIR = /\{ id: "([^"]+)", header: "([^"]+)"/g;
+const pairsIn = (src: string, start: string, end: string): Array<[string, string]> => {
+  const from = src.indexOf(start);
+  const to = src.indexOf(end, from);
+  if (from < 0 || to < 0) return [];
+  return [...src.slice(from, to).matchAll(COL_PAIR)].map((m) => [m[1], m[2]] as [string, string]);
+};
+const fullCols = pairsIn(perfSrc, "const FULL_COLS: Col[] = [", "];");
+const hourlyCols = pairsIn(perfSrc, "const HOURLY_COLS: Col[] = [", "];");
+const creativeCols = pairsIn(
+  creativesSrc,
+  "const built: ColumnDef<Creative>[] = [",
+  "]; return filters.showAllColumns",
+);
+check(
+  `V10 ⭐ the source parser finds the real column declarations (${fullCols.length} FULL_COLS, ${hourlyCols.length} HOURLY_COLS, ${creativeCols.length} on /creatives) — a parser that found nothing must fail HERE, not pass V11`,
+  fullCols.length >= 15 && hourlyCols.length >= 8 && creativeCols.length >= 12,
+  `full=${fullCols.map((p) => p[0]).join(",")} creatives=${creativeCols.map((p) => p[0]).join(",")}`,
+);
+const rosterStrays = [
+  ...[...REPORTS_EXTRA_COLUMN_IDS].map((id) => ({
+    roster: "reports",
+    id,
+    real: fullCols.concat(hourlyCols).some((p) => p[0] === id),
+  })),
+  ...[...CREATIVES_EXTRA_COLUMN_IDS].map((id) => ({
+    roster: "creatives",
+    id,
+    real: creativeCols.some((p) => p[0] === id),
+  })),
+].filter((e) => !e.real);
+check(
+  `V11 ⭐ every id in both rosters is a real column id in the table it names (${REPORTS_EXTRA_COLUMN_IDS.size} + ${CREATIVES_EXTRA_COLUMN_IDS.size})`,
+  REPORTS_EXTRA_COLUMN_IDS.size > 0 &&
+    CREATIVES_EXTRA_COLUMN_IDS.size > 0 &&
+    rosterStrays.length === 0,
+  rosterStrays.map((e) => `${e.roster}:${e.id}`).join(", "),
+);
+check(
+  "V12 ⭐ neither roster holds a GENERATED id — which is what makes filtering the built array by id unable to reach a residual column (and the detector fires on one)",
+  [...REPORTS_EXTRA_COLUMN_IDS, ...CREATIVES_EXTRA_COLUMN_IDS].every((id) => !id.startsWith("evt")) &&
+    "evt:unmapped".startsWith("evt"), // positive control on the test itself
+);
+
+// ── ⭐ THE OWNER'S APPROVED LISTS, TRANSCRIBED ONCE AND COMPARED ────────────
+//
+// The anchor is HAND-WRITTEN here and the other side is computed from the
+// source plus the shared roster, so this is not two readings of one thing. The
+// dimension/label column is not in either list — it is the row's name, not a
+// metric — and the per-event MONEY columns are in neither, because they answer
+// to the Event-breakdown toggle rather than to this one.
+const sorted = (xs: readonly string[]) => [...xs].sort().join(" | ");
+const generatedHeaders = (showAll: boolean) =>
+  eventColumnBlock(CURATED_SPEC, CURATED_ROWS, CURATED_TOTALS, false, showAll).columns.map(
+    (c) => c.header,
+  );
+const reportsDefault = fullCols
+  .filter((p) => !REPORTS_EXTRA_COLUMN_IDS.has(p[0]))
+  .map((p) => p[1])
+  .concat(generatedHeaders(false));
+const OWNER_REPORTS_DEFAULT = [
+  "Sent", "Clickers", "CR %", "Regs", "Purchases", "Reg→Purchase %", "Sales", "Revenue",
+  "Pending $", "Cost", "Clicks (period)", "EPC (period)", "Profit", "OptOut %",
+];
+check(
+  `V13 ⭐⭐ /reports opens on exactly the ${OWNER_REPORTS_DEFAULT.length} columns the owner approved, beside the dimension`,
+  sorted(reportsDefault) === sorted(OWNER_REPORTS_DEFAULT),
+  `built: ${sorted(reportsDefault)}\n        owner: ${sorted(OWNER_REPORTS_DEFAULT)}`,
+);
+const reportsHidden = fullCols
+  .filter((p) => REPORTS_EXTRA_COLUMN_IDS.has(p[0]))
+  .map((p) => p[1])
+  .concat(generatedHeaders(true).filter((h) => !generatedHeaders(false).includes(h)));
+const OWNER_REPORTS_HIDDEN = [
+  "Opt-outs", "Redirects", "Redir %", "Reg rate", "Reg pending", "Purchase rate",
+  "Purchase pending", "Sales CR", "Clicks (all time)", "EPC (all time)",
+];
+check(
+  `V14 ⭐⭐ …and "Show all columns" adds exactly the ${OWNER_REPORTS_HIDDEN.length} he approved — so every FULL_COLS column is classified, and a new one lands on neither side by accident`,
+  sorted(reportsHidden) === sorted(OWNER_REPORTS_HIDDEN) &&
+    reportsDefault.length + reportsHidden.length === fullCols.length + generatedHeaders(true).length,
+  `built: ${sorted(reportsHidden)}\n        owner: ${sorted(OWNER_REPORTS_HIDDEN)}`,
+);
+
+// /creatives, same shape. `select` and the actions menu are structural rather
+// than data columns and carry no string header, so the parser never sees them.
+// The owner's names are transcribed to the page's own wording — "EPC (30d)"
+// carries the sort glyph the page prints, "Sales qty" is spelled with a comma
+// there — because the bar is on the COLUMN SET, not on the copy.
+const creativesDefault = creativeCols
+  .filter((p) => !CREATIVES_EXTRA_COLUMN_IDS.has(p[0]))
+  .map((p) => p[1])
+  .concat(countCols(CURATED_SPEC, BOTH_RESIDUALS, false).map((c) => c.header));
+const OWNER_CREATIVES_DEFAULT = [
+  "Slug", "Text", "CTR", "Checkout Rate", "Regs", "Purchases", "Unmapped", "Sales CR",
+  "EPC (30d) ↕",
+];
+check(
+  `V15 ⭐⭐ /creatives opens on exactly the ${OWNER_CREATIVES_DEFAULT.length} columns the owner approved`,
+  sorted(creativesDefault) === sorted(OWNER_CREATIVES_DEFAULT),
+  `built: ${sorted(creativesDefault)}\n        owner: ${sorted(OWNER_CREATIVES_DEFAULT)}`,
+);
+const creativesHidden = creativeCols
+  .filter((p) => CREATIVES_EXTRA_COLUMN_IDS.has(p[0]))
+  .map((p) => p[1])
+  .concat(
+    countCols(CURATED_SPEC, BOTH_RESIDUALS, true)
+      .map((c) => c.header)
+      .filter((h) => !countCols(CURATED_SPEC, BOTH_RESIDUALS, false).some((c) => c.header === h)),
+  );
+const OWNER_CREATIVES_HIDDEN = [
+  "Spam Score", "Offers", "Sequence", "Funnel Stage", "Status", "Manual", "EPC (all time)",
+  "Clicks (all time)", "Sales, qty (all time)", "Used Campaigns", "Created",
+];
+check(
+  `V16 ⭐⭐ …and its toggle adds exactly the ${OWNER_CREATIVES_HIDDEN.length} he approved, leaving no /creatives column unclassified`,
+  sorted(creativesHidden) === sorted(OWNER_CREATIVES_HIDDEN) &&
+    creativesDefault.length + creativesHidden.length ===
+      creativeCols.length + countCols(CURATED_SPEC, BOTH_RESIDUALS, true).length,
+  `built: ${sorted(creativesHidden)}\n        owner: ${sorted(OWNER_CREATIVES_HIDDEN)}`,
+);
+
+// ── ⭐ A PERSISTED SORT CAN NOW NAME A COLUMN THE DEFAULT VIEW HIDES ─────────
+//
+// W22 covered an id whose registry row went away. The toggle adds a second way
+// for `sortBy` — persisted per browser, keyed by route — to name a column that
+// is not on screen: it can simply be one of the ten the curated view holds
+// back. The rows would come out ordered by an invisible column with no
+// indicator anywhere, which reads exactly like an unsorted table. The same
+// helper handles both, over the CURATED ids; nothing new was written for it.
+// One-sided: the fixture's persisted id IS a real, currently-generated column —
+// it is only absent from THIS view.
+const curatedIds = curatedA.map((c) => c.id).concat(
+  fullCols.filter((p) => !REPORTS_EXTRA_COLUMN_IDS.has(p[0])).map((p) => p[0]),
+);
+const hiddenId = fullA.find((c) => !isDefaultViewEventColumn(c))?.id ?? "";
+check(
+  `V17 ⭐ a persisted sort naming a column the default view hides falls back to one that is on screen (${JSON.stringify(hiddenId)} ⇒ sent), while a visible one is kept`,
+  hiddenId.length > 0 &&
+    fullA.some((c) => c.id === hiddenId) && // one-sided: it IS a real column
+    !curatedIds.includes(hiddenId) &&
+    sortColumnOrFallback(curatedIds, hiddenId, "sent") === "sent" &&
+    sortColumnOrFallback(curatedIds, "redirects", "sent") === "sent" &&
+    sortColumnOrFallback(curatedIds, "evt:sig:count", "sent") === "evt:sig:count",
+  `curated=${curatedIds.join(",")}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

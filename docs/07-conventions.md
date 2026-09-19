@@ -1,6 +1,84 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-20_
+
+## A curated default view hides columns by KIND, never by key (2026-09-20)
+
+`/reports` (the dimension tabs) and `/creatives` open on a short, owner-approved
+column list and reveal the rest behind a per-browser **Show all columns** toggle.
+The rule that decides which side a column falls on is split in two, and the split
+is the whole point.
+
+- **A FIXED column** — one written down in `FULL_COLS` / `HOURLY_COLS`
+  ([components/reports/performance-report.tsx](../components/reports/performance-report.tsx))
+  or in the `/creatives` column array — is held back **by id**, from a roster in
+  [lib/reporting/column-visibility.ts](../lib/reporting/column-visibility.ts).
+  That is safe because configuring anything cannot add one: a new fixed column is
+  a code change, and it passes through that file.
+- **A GENERATED column** — one the `event_types` registry produces — is held back
+  **by kind**. `isDefaultViewEventColumn()` keeps `count` and `funnel` and holds
+  back `rate` and `pending_n`. ⭐ **A roster of ids would be the bug this phase
+  exists to prevent**: it would happen to match today's two event types, and the
+  day a third is configured its count column would land behind the toggle *by
+  omission* — silently, with every test still green, because nothing in a list of
+  ids can notice a member it never had.
+
+**What a newly configured event type gets, stated so it is a decision rather than
+a discovery:** one count column in the default view, plus one funnel column per
+signal↔purchase pairing it joins; its rate and held count go behind the toggle.
+The default view therefore grows by one column per type, except through the funnel
+cross product, which is `|signals| × |purchases|`. That is the number to watch if
+the registry ever grows past a handful of types.
+
+**Tier B is exempt.** The per-event MONEY columns have had their own control since
+Phase 5 Task 5 (the *Event breakdown* toggle, bound to the unclassified badge).
+Subjecting them to the curated view as well would leave that control governing
+nothing while the table is in its default view — and a control that governs
+nothing unmounts itself, so it would blink in and out as an unrelated checkbox
+moved. The Overview tab has no curated view at all and passes a literal `true`.
+
+**The residual is out of the toggle's reach, structurally.** `showAllColumns`
+reaches `EventColumnBlock.columns` and nothing else; `bar` is assembled from the
+response's `totals` on lines where no toggle state is in scope. On the count-only
+grain the manual top-up is an ordinary extra, while the stray-count column is
+appended by a statement that does not take the flag as an argument — so a table
+can never show a breakdown of its own Sales column while hiding the conversions
+that breakdown fails to explain. Bars **V1–V9** in
+[scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts),
+including a source bar on the two statements themselves.
+
+**Persistence is `usePersistedFilters`, keyed by route** (CLAUDE.md §9) — one
+boolean per table (`reports.performance`, `creatives.filters`), not a persisted
+list of column ids. A list would need its own unknown-id handling; a boolean
+cannot go stale. The *sort* key still can, and now in a second way: a persisted
+`sortBy` can name a real column the curated view hides. `sortColumnOrFallback()`
+already handled the first way (a registry row that went away) and handles this one
+unchanged — the sort falls back to a column that is on screen, **visibly**, rather
+than tying every comparison and rendering in API order with no arrow anywhere.
+`/creatives` sorting is server-side and authoritative over the whole result set,
+so it is deliberately NOT rewritten by the toggle: changing which rows come back
+as a side effect of a display choice is the thing to avoid.
+
+**Measured payoff (2026-09-20, real browser, 1440px viewport, one DOM session per
+table, camman-v2):**
+
+| table | state | columns | `table.scrollWidth` | container | overflow |
+|---|---|---|---|---|---|
+| `/reports` By Offer | default | 15 | **1147px** | 1126px | **21px** |
+| `/reports` By Offer | + Show all columns | 25 | 2051px | 1126px | 925px |
+| `/reports` By Offer | + Event breakdown too | 28 | 2374px | 1126px | 1248px |
+| `/creatives` | default | 11 (9 data + select + actions) | **1160px** | 1126px | **34px** |
+| `/creatives` | + Show all columns | 22 | 2220px | 1126px | 1094px |
+
+⚠️ **The default view does not quite fit — it is 21px over on `/reports` and 34px
+over on `/creatives`.** That is a horizontal scrollbar of a few pixels rather than
+the 943px/958px of scroll the tables carried before, but it is not zero and the
+list was not shaved to make it so. Both figures are content-dependent (a wider
+offer name or a six-figure Sent count pushes them out further), so treat "fits"
+as "one column away", not as a property. The `/creatives` all-columns figure of
+**2220px** carries two residual columns the earlier **2084px** baseline did not;
+with the same column set as that baseline this build measures **2084px exactly**,
+which is what makes the two comparable.
 
 ## A report column generated from a registry has a STABLE id, and it is not the label (2026-09-18)
 

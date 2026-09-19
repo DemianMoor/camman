@@ -25,6 +25,7 @@ import {
 import { CAMPAIGN_TIMEZONE_LABEL, formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
+import { REPORTS_EXTRA_COLUMN_IDS } from "@/lib/reporting/column-visibility";
 import type { EventColumn, EventTypeSpec } from "@/lib/reporting/event-columns";
 import type {
   PerfMetrics,
@@ -66,6 +67,12 @@ type PerfFilters = {
   // each of which duplicates an aggregate column already on screen. Everything
   // the owner named is visible without it.
   showEvents: boolean;
+  // The CURATED DEFAULT VIEW's toggle, also per-browser and also off by default.
+  // This table is 25 columns / 2069px inside a 1126px container; the default
+  // view is the 15 the owner named, and this reveals the other 10. See
+  // lib/reporting/column-visibility.ts for which and why. It is ORTHOGONAL to
+  // showEvents — the per-event money columns keep their own control.
+  showAllColumns: boolean;
 };
 
 function etDate(offsetDays: number): string {
@@ -214,6 +221,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
       sortBy: DEFAULT_SORT_BY,
       sortDir: "desc",
       showEvents: false,
+      showAllColumns: false,
     },
   );
 
@@ -257,16 +265,31 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
   // these columns were built from, and the toggle's governed count is a constant
   // of the registry rather than of the toggle's state (bar W12).
   const block = useMemo<EventColumnBlock>(
-    () => eventColumnBlock(resp?.event_types ?? [], resp?.data ?? [], resp?.totals ?? null, filters.showEvents),
-    [resp, filters.showEvents],
+    () =>
+      eventColumnBlock(
+        resp?.event_types ?? [],
+        resp?.data ?? [],
+        resp?.totals ?? null,
+        filters.showEvents,
+        filters.showAllColumns,
+      ),
+    [resp, filters.showEvents, filters.showAllColumns],
   );
   const eventCols: EventColumn[] = block.columns;
   const cols = useMemo<Col[]>(() => {
-    const base = isHourly ? HOURLY_COLS : FULL_COLS;
+    const all = isHourly ? HOURLY_COLS : FULL_COLS;
+    // The curated default view. A FIXED column is held back by id (the roster is
+    // in lib/reporting/column-visibility.ts, where the owner's list is written
+    // down once); a GENERATED one was already filtered by kind inside the block
+    // above, because a roster of ids cannot survive a new event type.
+    const base = filters.showAllColumns
+      ? all
+      : all.filter((c) => !REPORTS_EXTRA_COLUMN_IDS.has(c.id));
     // Spliced by the ID of the column the block sits BEFORE, not by an index —
     // an index would silently move the block the next time a column is added.
     // Before Sales, so the row reads as one funnel and no existing column moves
-    // relative to its neighbours.
+    // relative to its neighbours. Sales is never hidden, so the anchor holds in
+    // both views.
     const at = base.findIndex((c) => c.id === "sales");
     const generated: Col[] = eventCols.map((e) => ({
       id: e.id,
@@ -276,7 +299,30 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
       event: e,
     }));
     return at < 0 ? [...base, ...generated] : [...base.slice(0, at), ...generated, ...base.slice(at)];
-  }, [isHourly, eventCols]);
+  }, [isHourly, eventCols, filters.showAllColumns]);
+
+  // What ticking "Show all columns" would ADD — a constant of the table and its
+  // registry, not of the toggle's own state, for the same reason
+  // EventBreakdownToggle's count is (a state-dependent count reads 0 while the
+  // control is on, and a control announcing 0 unmounts itself). It renders
+  // nothing at 0: a checkbox that reveals nothing is a dead control.
+  const hiddenColumnCount = useMemo(() => {
+    const all = isHourly ? HOURLY_COLS : FULL_COLS;
+    // LITERAL true / LITERAL false, never `filters.showAllColumns` — the
+    // difference between the two column sets is the thing being counted, and
+    // reading the toggle here would make it 0 the moment the toggle is on.
+    const generated = (showAll: boolean) =>
+      eventColumnBlock(
+        resp?.event_types ?? [],
+        resp?.data ?? [],
+        resp?.totals ?? null,
+        filters.showEvents,
+        showAll,
+      ).columns.length;
+    return (
+      all.filter((c) => REPORTS_EXTRA_COLUMN_IDS.has(c.id)).length + (generated(true) - generated(false))
+    );
+  }, [isHourly, resp, filters.showEvents]);
 
   // ⭐ A PERSISTED SORT CAN NAME A COLUMN THAT NO LONGER EXISTS. A generated id
   // belongs to a registry row, and `sortBy` outlives it in localStorage. Sorting
@@ -465,7 +511,10 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             <span className="font-medium">Event breakdown</span> — each revenue-bearing type&apos;s
             revenue, held $ and EPC. Rates divide by <span className="font-medium">Clicks (period)</span>,
             the same denominator as EPC, and can exceed 100% when a conversion&apos;s click was never
-            scored human. A dash means the denominator was zero.
+            scored human. A dash means the denominator was zero. The table opens on a shorter default
+            view — each event type&apos;s count and the funnel ratio, with its rate and held count under{" "}
+            <span className="font-medium">Show all columns</span> alongside the other second-order
+            figures.
           </>
         )}
       </p>
@@ -479,8 +528,29 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           wholly unmapped conversion resolves to no stage, so it appears in no
           row and a range whose table is empty can still have strays worth
           seeing. On a fetch ERROR there is nothing to describe — the response is
-          cleared, so the block is empty and the bar renders nothing. */}
-      <EventColumnsBar block={block} onShowEventsChange={(v) => updateFilters({ showEvents: v })} />
+          cleared, so the block is empty and the bar renders nothing.
+
+          ⭐ THE COLUMN TOGGLE SITS BESIDE THE BAR, NEVER AROUND IT. It governs
+          `cols`, which is downstream of `block.columns`; `block.bar` is built
+          from `totals` and is not reachable from here at all. So the curated
+          view can drop generated columns and cannot drop the count of
+          conversions they fail to explain — the badge is rendered by the same
+          unconditional mount it always was. */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+        <EventColumnsBar block={block} onShowEventsChange={(v) => updateFilters({ showEvents: v })} />
+        {hiddenColumnCount > 0 ? (
+          <label className="inline-flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="size-3.5 accent-current"
+              checked={filters.showAllColumns}
+              onChange={(e) => updateFilters({ showAllColumns: e.target.checked })}
+            />
+            Show all columns
+            <span className="text-muted-foreground/70">({hiddenColumnCount} more columns)</span>
+          </label>
+        ) : null}
+      </div>
 
       {fetchError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">

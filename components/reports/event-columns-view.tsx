@@ -15,6 +15,7 @@ import {
   type EventMap,
   type EventTypeSpec,
 } from "@/lib/reporting/event-columns";
+import { isDefaultViewEventColumn } from "@/lib/reporting/column-visibility";
 
 // The client half of the generated column set, shared by the Overview tab and
 // the five performance tabs so the two tables cannot disagree about what a
@@ -47,19 +48,36 @@ function seenMaps(
  * type configured with zero conversions still gets a column and reads 0; that is
  * the whole point of generating from the registry.
  *
- * `showTierB` is the operator's per-browser toggle. Tier A — a count, a rate and
- * a held count per type, plus the signal→purchase ratio — is ALWAYS on, because
- * a split nobody can see is not a split. Tier B holds only the per-event money
- * columns, each of which duplicates an aggregate column already on screen.
+ * `showTierB` is the operator's per-browser Event-breakdown toggle. Tier B holds
+ * only the per-event money columns, each of which duplicates an aggregate column
+ * already on screen.
+ *
+ * `showAllColumns` is the OTHER per-browser toggle — the table's curated default
+ * view (lib/reporting/column-visibility.ts). It holds back the tier-A columns
+ * that are second-order reads of a number still on screen: the per-type rate and
+ * held count. The count and the funnel ratio stay, always, because a split
+ * nobody can see is not a split.
+ *
+ * ⭐ THE TWO TOGGLES ARE ORTHOGONAL AND TIER B IS EXEMPT FROM THE CURATED VIEW.
+ * Subjecting the money columns to BOTH would make the Event-breakdown control
+ * govern nothing while the table is in its default view — and a control that
+ * governs nothing unmounts itself (EventBreakdownToggle's `count === 0` early
+ * return), so it would blink in and out as the other toggle moved. Worse, the
+ * Overview tab has no curated view at all and would lose the money split
+ * outright. So the money columns keep the control they have always had, and the
+ * curated view governs exactly the columns the owner named.
  */
 function eventColsFor(
   spec: readonly EventTypeSpec[],
   rows: ReadonlyArray<{ events?: EventMap }>,
   totals: { events?: EventMap } | null,
   showTierB: boolean,
+  showAllColumns: boolean,
 ): EventColumn[] {
   const cols = buildEventColumns(visibleEventTypes(spec, seenMaps(rows, totals)));
-  return showTierB ? cols : cols.filter((c) => c.tier === "a");
+  const tiered = showTierB ? cols : cols.filter((c) => c.tier === "a");
+  if (showAllColumns) return tiered;
+  return tiered.filter((c) => c.tier === "b" || isDefaultViewEventColumn(c));
 }
 
 /** The generated columns for one response, and the bar that has to sit beside them. */
@@ -92,18 +110,26 @@ export interface EventColumnBlock {
  * are what make that step not a matter of memory: any file under app/ or
  * components/ that builds per-event columns must also render one of the three
  * residual-bearing surfaces, discovered by scanning rather than from a list.
+ *
+ * ⭐ AND THE COLUMN-VISIBILITY TOGGLE DOES NOT REOPEN THAT HOLE. `showAllColumns`
+ * reaches `columns` and NOTHING ELSE: `bar` is assembled from `totals` on the
+ * lines below, where no toggle state is in scope to read. A curated view can
+ * therefore drop generated columns and can never drop — or alter — the count of
+ * conversions those columns fail to explain. Bars V1/V2 hold both halves of that
+ * across all four toggle states.
  */
 export function eventColumnBlock(
   spec: readonly EventTypeSpec[],
   rows: ReadonlyArray<{ events?: EventMap }>,
   totals: { events?: EventMap; unmapped?: number } | null,
   showEvents: boolean,
+  showAllColumns: boolean,
 ): EventColumnBlock {
   return {
-    columns: eventColsFor(spec, rows, totals, showEvents),
+    columns: eventColsFor(spec, rows, totals, showEvents, showAllColumns),
     bar: {
       showEvents,
-      tierBCount: eventColsFor(spec, rows, totals, true).filter((c) => c.tier === "b").length,
+      tierBCount: eventColsFor(spec, rows, totals, true, showAllColumns).filter((c) => c.tier === "b").length,
       unmapped: totals?.unmapped ?? 0,
     },
   };
@@ -426,34 +452,33 @@ export interface EventCountRow {
   manual_topup: number;
 }
 
-const RESIDUAL_COLUMNS: EventCountColumn[] = [
-  {
-    id: "evt:manual_topup",
-    header: "Manual",
-    kind: "manual_topup",
-    eventKey: "",
-    title:
-      "Sales on this creative's stages in the same window that came from the " +
-      "operator's manual tally rather than the tracker. A stage's Sales is " +
-      "max(manual tally, tracker conversions) and the event counts to the left " +
-      "are TRACKER ONLY, so this is the part of Sales no event count can explain.",
-  },
-  {
-    id: "evt:unmapped",
-    header: "Unmapped",
-    kind: "unmapped",
-    eventKey: "",
-    title:
-      "Conversions on this creative's stages in the same window that matched no " +
-      "event-type mapping, so they are in NONE of the event counts to the left. " +
-      "Sales may already count them: it resolves event types through a list that " +
-      "is not org-scoped, so a stray carrying another organisation's event type " +
-      "is inside Sales while sitting under no key here — which is why the counts " +
-      "can fall short of it. " +
-      "Fix: add a conversion_event_mappings row for that offer (or its network) " +
-      "and that tracker type.",
-  },
-];
+const MANUAL_TOPUP_COLUMN: EventCountColumn = {
+  id: "evt:manual_topup",
+  header: "Manual",
+  kind: "manual_topup",
+  eventKey: "",
+  title:
+    "Sales on this creative's stages in the same window that came from the " +
+    "operator's manual tally rather than the tracker. A stage's Sales is " +
+    "max(manual tally, tracker conversions) and the event counts to the left " +
+    "are TRACKER ONLY, so this is the part of Sales no event count can explain.",
+};
+
+const UNMAPPED_COLUMN: EventCountColumn = {
+  id: "evt:unmapped",
+  header: "Unmapped",
+  kind: "unmapped",
+  eventKey: "",
+  title:
+    "Conversions on this creative's stages in the same window that matched no " +
+    "event-type mapping, so they are in NONE of the event counts to the left. " +
+    "Sales may already count them: it resolves event types through a list that " +
+    "is not org-scoped, so a stray carrying another organisation's event type " +
+    "is inside Sales while sitting under no key here — which is why the counts " +
+    "can fall short of it. " +
+    "Fix: add a conversion_event_mappings row for that offer (or its network) " +
+    "and that tracker type.",
+};
 
 /**
  * ⭐ THE ONE WAY TO OBTAIN PER-EVENT COUNT COLUMNS, AND IT EMITS BOTH RESIDUAL
@@ -475,10 +500,21 @@ const RESIDUAL_COLUMNS: EventCountColumn[] = [
  * furniture is not read on the day it changes. "Only while some row has one" is
  * why EventCountRow's residual fields are REQUIRED rather than optional — a row
  * shape that cannot carry one suppresses the column instead of showing 0.
+ *
+ * ⭐ `showAllColumns` IS THE TABLE'S CURATED-VIEW TOGGLE, AND IT REACHES EXACTLY
+ * ONE OF THESE COLUMNS. The counts are the breakdown itself and are never held
+ * back; the manual top-up is an ordinary extra (it explains Sales, but it is not
+ * a fault and there is nothing to do about it); and the STRAY COUNT is appended
+ * on a line that does not take the flag as an argument and has no way to read
+ * it. That is the shape of the invariant rather than a promise about it: hiding
+ * the strays while the counts are on screen would leave the table explaining its
+ * own Sales column with a decomposition it knows to be short, which is the one
+ * thing this module exists to prevent. Bars V6/V7.
  */
 export function eventCountColumns<TCol>(
   types: readonly EventTypeSpec[],
   rows: ReadonlyArray<EventCountRow>,
+  showAllColumns: boolean,
   render: (col: EventCountColumn) => TCol,
 ): TCol[] {
   const visible = visibleEventTypesByCount(
@@ -498,9 +534,9 @@ export function eventCountColumns<TCol>(
   // Registry order, then the residuals in the order they explain the gap:
   // the manual top-up (part of Sales, in no tracker count) and then the strays.
   // The stray column stays LAST — it is the one the operator can act on.
-  for (const c of RESIDUAL_COLUMNS) {
-    if (rows.some((r) => residualOf(c, r) > 0)) cols.push(c);
-  }
+  if (showAllColumns && rows.some((r) => r.manual_topup > 0)) cols.push(MANUAL_TOPUP_COLUMN);
+  // ⭐ NO TOGGLE ON THIS LINE, AND NONE MAY BE ADDED. See the doc comment above.
+  if (rows.some((r) => r.unmapped > 0)) cols.push(UNMAPPED_COLUMN);
   return cols.map(render);
 }
 

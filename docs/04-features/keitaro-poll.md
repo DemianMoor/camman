@@ -391,6 +391,62 @@ to auto-open that stage's editor (there is no standalone stage route).
   you can see exactly what Keitaro is sending if nothing maps back.
 - `KEITARO_API_KEY` unset ⇒ `degraded:true`, no writes.
 
+## 6b. Running `resync-stage-day-conversions.ts --apply` while the poll is live (2026-09-19)
+
+The one-shot resync ([scripts/resync-stage-day-conversions.ts](../../scripts/resync-stage-day-conversions.ts))
+writes `keitaro_stage_results` — the same table this poll writes — inside ONE
+transaction. **It does not need the poll paused.** The reasoning, so the question does
+not have to be re-derived next time:
+
+**Who else writes the table: nobody.** In app code there are exactly two writers, and
+both are on this poll's own tick — `pollKeitaro`'s click upsert
+([lib/keitaro/poll.ts](../../lib/keitaro/poll.ts)) and the stage-day projection's
+upsert + zeroing UPDATE
+([lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts)).
+Everything else (reports, campaign pages, `/creatives`, the matview refreshes, the
+hourly Telegram cron, `delete-stage`'s EXISTS gate) only reads, and a reader never
+blocks on a row lock.
+
+**It is too short to matter.** Measured read-only against production on 2026-09-19
+(`EXPLAIN ANALYZE` of each statement's SELECT half, inside a rolled-back
+`SET TRANSACTION READ ONLY`): coverage 12.1ms, upsert source 31.0ms (1,030 rows),
+zeroing selection 11.3ms (1 row), `stageIdsWithRows` 6.5ms, counter mirror 45.2ms per
+1,000-stage chunk (2 chunks at 1,971 stages) — **~0.19s of server execution**, with
+writes bounded by 1,030 upserted rows and 1,971 `campaign_stages` rows on 5.5MB and
+2.2MB tables. The transaction holds a connection for well under 2 seconds, against a
+poll whose `maxDuration` is **230s** and whose lease TTL is **240s**.
+
+**What a collision does.** A poll tick touching one of the same rows blocks on the row
+lock for that sub-second and then proceeds — no error. A deadlock needs opposed lock
+ordering; both paths take `keitaro_stage_results` then `campaign_stages`, so the cycle
+would have to come from row order within one statement. If one happens anyway,
+Postgres kills one side: the **poll** loses ⇒ `stage_day_conversions_error`, the
+latched `projection_failed` alert, and the watermark is **held** (the UPDATE is never
+reached), so the next tick repairs it; the **resync** loses ⇒ the whole `--apply`
+transaction rolls back, nothing partial, re-run it.
+
+**⭐ The one genuine race is self-healing, and this is the load-bearing reason.** Under
+READ COMMITTED the upsert's `ledger` CTE is computed from a snapshot taken at
+statement start, so a conversion the poll ingests *during* that 31ms could be
+overwritten by a value that does not include it. It cannot persist: the projection's
+discovery window is
+`[LEAST(watermark − PROJECTION_WATERMARK_OVERLAP_MINUTES, now() − LEDGER_CHANGE_LOOKBACK_MINUTES), now()]`,
+and the `LEAST` makes **30 minutes a hard floor** regardless of how far the watermark
+has advanced. Any conversion written in the last 30 minutes is therefore re-projected
+on every tick for the next six ticks, so the clobbered stage-day is repaired within
+one 5-minute cycle.
+
+**If you want to pause it anyway, no deploy is needed.** The poll's single-runner
+guard is a lease ROW, not a config flag: set `cron_locks.lease_until` for
+`job_name = 'keitaro-poll'` to a few minutes in the future and the next tick returns
+`{ skipped: true, reason: "prior_run_in_progress" }` without doing any work. Clear it
+(`lease_until = NULL`) to resume. Two properties make this safe: the release is a CAS
+on the claimer's own token, so a run that legitimately claimed cannot clear your
+pause; and expiry is absolute, so a forgotten pause self-clears instead of stranding
+the poll. Both the 7-day ledger ingest window and the 3-day click window absorb a
+skipped tick without loss. Note this is a production **write** — it is a decision, not
+a formality.
+
 ## 7. Scope & follow-ups
 - **In scope:** the aggregate layer — per-stage/campaign/day clicks, conversions,
   revenue, EPC — **split into Clickers (visits) vs Offer Redirect (offer clicks)**

@@ -3408,3 +3408,90 @@ its own needle.
 **Proving it:** mutate the needle, see a **wrong result** (not a crash), restore from
 a **byte copy** (`cp`, never `git checkout`), and confirm `cmp` + md5 identity. A
 narrowing that produces a stack trace has proved nothing about the assertion.
+
+### ⚠️ KNOWN WEAKNESS, NOT FIXED: the roster is a literal, and a failing roster reads like a chore (2026-09-19)
+
+Rule 4 above is load-bearing and it is the weakest thing on this page. Written down
+here deliberately rather than fixed, so the fix is a decision rather than a reflex.
+
+**What the roster actually protects.** In `test-preview-db-guard.ts` the roster is
+two sorted, comma-joined **string literals** compared against
+`list.map(n => n.id).sort().join(",")`. It is the only control in the gate that
+notices a needle being *removed* from `DB_REACH` / `WRITE_SIGNAL`. Every other bar —
+including all 15 per-needle sample bars — iterates the **surviving** list, so a
+deleted row contributes no sample, the loop is simply shorter, and it passes. The
+sample controls *narrowing*, which is a change to a row that still exists; deletion
+removes the subject of the control. No amount of sample-writing closes that.
+
+**How it is defeated, precisely.** The roster fails by printing the actual joined
+string next to the expected one. The diagnosis and the repair are both on screen, and
+the repair is to paste the actual value over the expected literal. That edit:
+
+- is one line, and is **byte-for-byte the same edit as a legitimate roster bump** —
+  adding a needle requires exactly it, and adding needles is the encouraged direction;
+- makes the gate green immediately, which reads as confirmation;
+- arrives with a message that supplies its own answer, so "why did the second place
+  change?" — the entire value of "a two-place edit a reviewer sees" — never gets asked.
+
+So the control costs an attacker, a hurried author, or an agent resolving a red build
+exactly one paste, and the paste looks like housekeeping in the diff.
+
+**What still bites, and why it is not enough — measured, 2026-09-19.** Six needles
+were deleted one at a time, each with the roster literal pasted to its surviving
+value (the reviewer's one-line fix), then `npm run check:guards` was run:
+
+| Deleted needle | Result after the paste |
+| --- | --- |
+| `truncate` | **GREEN** — write-capable population unchanged at **182** |
+| `drop-ddl` | **GREEN** — unchanged at 182 |
+| `alter-table` | **GREEN** — unchanged at 182 |
+| `refresh-matview` | **GREEN** — unchanged at 182 |
+| `postgres` | RED — `every exclusion still reaches a database at all` |
+| `unsafe` | RED — `every exclusion still carries the write signal it was excluded for` |
+
+So deletion is not *wholly* unguarded — the two second-order `EXCLUSIONS` bars
+(rule 5) do catch two of the six. But that is **incidental coverage**: it fires only
+while some currently-excluded file happens to depend on the dead needle. For the
+other four, **nothing moved at all** — not a bar, not a count. Those four are
+precisely the needles that exist for the script written next month, which is the case
+a source-scan gate is for. (The guard file was restored from a byte copy; md5
+identical, `git diff` clean.)
+
+**What a real fix would look like.** Four shapes, weighed honestly:
+
+1. **Derive the expected roster from something that cannot be edited in the same
+   commit** — e.g. read the ids out of the merge-base copy (`git show <base>:<file>`)
+   and require today's list to be a **superset**. Deletion then cannot be resolved in
+   the working tree at all; addition stays free. *Why it may not work here:* it makes
+   a pure source scan depend on git state, and this clone's `origin/main` was measured
+   **stale** on 2026-09-19 — it pointed at `c07636a` (PR #196), predating the very PR
+   (#197) that added this roster, which was not in the clone at all. A baseline that
+   can silently be the wrong commit fails **green**, which is worse than the literal.
+2. **Require a second signal of a different shape.** A `list.length === 11` bar is
+   *not* one — same literal-vs-list shape, same paste. The obvious consequence-keyed
+   version is to pin the write-capable / guarded **population sizes** (182 / 141),
+   generalising the `EXCLUSIONS` bars. *Why it does not work here:* **the table above
+   measures it failing** — all four undetected deletions left the population at 182,
+   so a size bar would have been green too. And the number moves whenever a script is
+   added, so it needs routine bumping, and a bumped number is the same paste again.
+   Strictly weaker than it looks; do not reach for it first.
+3. **Make deletion structurally impossible by making the needle set not a list** —
+   one module per needle (`scripts/guard-needles/unsafe.ts`), each exporting its regex
+   and its sample, **imported by name** by the gate. Deleting a needle is then a
+   `tsc` error, not a shorter array, and `tsc` cannot be satisfied by pasting a
+   printed value: the deletion has to be written out as the removal of an import, in a
+   diff that says exactly that. This is the only option that changes the *kind* of
+   work deletion requires. *Why it may not work:* it is more files and more ceremony
+   for 15 regexes, and if the gate ever iterates a discovered directory instead of
+   named imports, the defect returns with the floor-count as the new literal.
+4. **Accept it and lower the stakes instead** — make the guard's population a
+   *discovered* classification with no needle list to delete (rule 6 taken to its end).
+   Realistically a rewrite, not a fix.
+
+**The honest floor:** none of these stops a determined editor, because the checker and
+the thing checked live in one repo and ship in one commit. What they change is the
+**cost and visibility** of a deletion — from "paste the value the failure printed" to
+"delete a module and answer a type error". On the measurement above, **option 3 is the
+only one that earns its keep**: it is the only shape whose failure cannot be resolved
+by pasting a printed value. Option 2 is measurably green on the cases that matter,
+and option 1 should wait until a trustworthy base ref exists in this clone.

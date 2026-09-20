@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-20_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -70,7 +70,9 @@ corrected at all: no floor, no write, its numbers stay as they were.
 After each write to `keitaro_stage_results`, `mirrorStageCountersFromResults`
 (exported from `lib/keitaro/poll.ts`) syncs the stage's auto-owned counters for
 every stage named (summed across all `stat_date`s): `campaign_stages.click_count` ←
-`visit_clicks_clean` ("Clickers"), `checkout_click_count` ← `checkouts`. **It runs
+`visit_clicks_clean` ("Landing visits"; the header read "Clickers" until
+2026-09-20 and the field is still `clickers`), `checkout_click_count` ←
+`checkouts`. **It runs
 twice per tick** (Phase 3 Task 3) — once from `pollKeitaro` for the stages this
 tick's CLICK window touched, and again from
 [`lib/keitaro/stage-day-conversions.ts`](../../lib/keitaro/stage-day-conversions.ts)'s
@@ -194,7 +196,7 @@ in the period** (see the note above).
 Two kinds of Keitaro campaign fire clicks for the **same** `sub_id_3` (stage):
 
 - The **visit** campaign — Keitaro **name `gk-lp-visits`** — fires when a visitor
-  LANDS on the landing page. Its clean clicks are **Clickers**.
+  LANDS on the landing page. Its clean clicks are **Landing visits**.
 - **Offer** campaigns (one per offer, e.g. `Kinzeno - 14508`) fire when a visitor
   clicks through to the offer. Their clean clicks are **Offer Redirect**, and
   their conversions are **Sales**.
@@ -222,7 +224,7 @@ default) and `classification_degraded: true` is set — the next cycle self-heal
 once the list loads.
 
 **Funnel semantics — visits ⊇ redirects, never summed:** every offer redirect is
-also a visit, so total arrivals = the visit (Clickers) count. The headline number
+also a visit, so total arrivals = the visit (Landing visits) count. The headline number
 for each stage is the **clean** (bot/prefetch-filtered) count.
 
 ## 3. The poll (`lib/keitaro/poll.ts` → `pollKeitaro`)
@@ -255,7 +257,7 @@ for each stage is the **clean** (bot/prefetch-filtered) count.
 | Keitaro key | CamMan term | Column |
 |-------------|-------------|--------|
 | `clicks` (visit campaign) | Raw visit clicks | `visit_clicks_raw` |
-| `campaign_unique_clicks` (visit campaign) | **Clickers** | `visit_clicks_clean` |
+| `campaign_unique_clicks` (visit campaign) | **Landing visits** (was "Clickers" until 2026-09-20) | `visit_clicks_clean` |
 | `clicks` (offer campaigns) | Raw offer clicks | `redirect_clicks_raw` |
 | `campaign_unique_clicks` (offer campaigns) | **Offer Redirect** | `redirect_clicks_clean` |
 | `cost` (offer) | Cost | `cost` |
@@ -302,7 +304,7 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   - On the cron path the projection also drives the latched `conversion_events:projection_failed` alert: a throw, either refusal, or a truncated discovery window fires it; a run that finished its window clears it. A SKIPPED projection gets no decision.
   - `stage_day_conversions_error`: the thrown message when the projection threw, with `monitor: …` appended when the cron path's projection-alert evaluation threw; `null` otherwise (including when it was simply skipped).
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
-  date) rows plus per-stage and campaign rollups with the Clickers → Offer
+  date) rows plus per-stage and campaign rollups with the Landing visits → Offer
   Redirect → Sales funnel + derived rates. Requires `campaigns.view`.
 - `GET /api/keitaro/reports?from&to&search&groupBy&page&pageSize&sortBy&sortDir` —
   read-only; org-scoped. Cross-campaign funnel aggregated over an ET date
@@ -339,7 +341,7 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
     sent), rendered as a %.
   - `click_rate` (CR) = `clickers / total_sent` (a fraction, 0 when nothing was
     sent), rendered as a %. Shares the `rateOfSent` helper with `opt_out_rate`.
-  - Clickers/Offer Redirect/Revenue are the Keitaro funnel, bounded by
+  - Landing visits/Offer Redirect/Revenue are the Keitaro funnel, bounded by
     `stat_date`. **Cost** is the stage's auto-calculated SMS spend
     (`campaign_stages.total_cost` = `cost_per_sms × (sends + opt_outs)`, see
     [`lib/stages/total-cost.ts`](../../lib/stages/total-cost.ts)) — **not**
@@ -368,10 +370,11 @@ A dedicated cross-campaign page ([`app/(protected)/reports/page.tsx`](../../app/
 showing the funnel: Campaign · Stage · **Total Sent** (per-recipient `stage_sends`
 in range for tracked campaigns; the stage's `sms_count` for manual campaigns when
 `sent_at` is in range) · **Opt-outs** (STOPs credited to the stage in range) ·
-**OptOut, %** (opt-outs ÷ total sent) · **Clickers** · **CR, %** (clickers ÷ total
-sent) · **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
+**OptOut, %** (opt-outs ÷ total sent) · **Landing visits** (headed `Clickers`
+before 2026-09-20; the field is still `clickers`) · **CR, %** (landing visits ÷
+total sent) · **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
 with a date-range filter, search, sortable columns, grand-total stat cards
-(Clickers · Offer Redirect · Sales · Revenue · Cost · Profit · **Avg Opt-out** —
+(Landing visits · Offer Redirect · Sales · Revenue · Cost · Profit · **Avg Opt-out** —
 the period's aggregate opt-out rate, grand opt-outs ÷ grand total sent), and a
 manual **Refresh from Keitaro** button (operator+, runs the poll). A **Group by**
 toggle (Stage / Campaign) switches between per-stage rows and per-campaign rollups
@@ -449,7 +452,7 @@ a formality.
 
 ## 7. Scope & follow-ups
 - **In scope:** the aggregate layer — per-stage/campaign/day clicks, conversions,
-  revenue, EPC — **split into Clickers (visits) vs Offer Redirect (offer clicks)**
+  revenue, EPC — **split into Landing visits vs Offer Redirect (offer clicks)**
   (Step 5b), surfaced on the `/reports` page. **Plus** the per-recipient SALE
   attribution layer (§9 below).
 - **Metric-key verification:** keys come from the documented Keitaro schema and are

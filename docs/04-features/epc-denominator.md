@@ -246,9 +246,11 @@ names the window; `/creatives` heads its lifetime one `Human clicks (all time)` 
 see [07-conventions.md](../07-conventions.md)). §7 of
 [operator-api.md](../operator-api.md) says so too. **The API field names are
 unchanged** — this was a header rename on three screens, not a contract change.
-⚠️ **`Clickers`, four columns to its left, is NOT this set** and never carries
-the word "human": it is `visit_clicks_clean`, the tracker's bot-filtered
-landing-VISIT count, display-only. Bar V23 in
+⚠️ **`Landing visits`, four columns to its left, is NOT this set** and never
+carries the word "human": it is `visit_clicks_clean`, the tracker's bot-filtered
+landing-VISIT count, display-only. (It was headed `Clickers` until 2026-09-20 —
+a people-word over a visit count, which is exactly why it was renamed; the field
+is still `clickers`.) Bar V23 in
 [scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts)
 holds both halves.
 

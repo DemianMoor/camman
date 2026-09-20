@@ -1423,7 +1423,11 @@ the registry and them.
     has a date filter; the suffix is redundant"), leaving `Clicks` four columns
     from **`Clickers`** in the default view with nothing separating them.
     ⚠️ **THE TWO HEADERS ARE CROSSED IN KIND, WHICH IS WHY THIS NAMED
-    `Clicks` AND NOT `Clickers`.** Established from the source 2026-09-20:
+    `Clicks` AND NOT `Clickers`.** Established from the source 2026-09-20.
+    *(`Clickers` is written throughout this passage because that was its header
+    at the time; it became **`Landing visits`** later the same day — see the
+    applied card below. The crossing described here is exactly what that second
+    rename removed.)*
       - **`Clickers`** ← `s.tally.visit_clicks_clean`
         ([lib/reporting/performance-report.ts](../../lib/reporting/performance-report.ts)),
         Keitaro's clean landing-page **VISITS** — *"Clickers = landing-page
@@ -1482,31 +1486,70 @@ the registry and them.
     [07-conventions.md](../07-conventions.md) and in
     [reports-rollup.md](reports-rollup.md), so it is met wherever the width is
     read about.
-  - **⚠️ RENAMING `Clickers` — FLAGGED 2026-09-20, DELIBERATELY NOT DONE, and
-    the owner decides.** *"Leave `Clickers` alone for now, but flag it: a
-    people-word for a display-only Keitaro visit count, sitting near the real
-    denominator, is a trap waiting to catch someone."* **What it genuinely
-    counts:** `visit_clicks_clean` — landing-page **visits** that Keitaro's own
-    bot filter let through, counted as visits and not as people, display-only,
-    and **not** a denominator of anything EPC touches. It is the divisor of
-    `Redir %` and the numerator of `CR %`. **Why it is a trap even now that the
-    denominator says `Human clicks`:** the two sit four columns apart in the
-    default view; a reader wanting "how many humans clicked" reaches left, lands
-    on `Clickers`, and gets a number that is neither deduplicated nor
-    human-scored — and on a healthy tracked stage the two differ by only ~1.35×
+  - **✅ RENAMING `Clickers` → `Landing visits` — PROPOSED AND APPLIED
+    2026-09-20, owner-approved.** The flag that produced it: *"Leave `Clickers`
+    alone for now, but flag it: a people-word for a display-only Keitaro visit
+    count, sitting near the real denominator, is a trap waiting to catch
+    someone."* **What it genuinely counts:** `visit_clicks_clean` — landing-page
+    **visits** that Keitaro's own bot filter let through, counted as visits and
+    not as people, display-only, and **not** a denominator of anything EPC
+    touches. It is the divisor of `Redir %` and the numerator of `CR %`.
+    **Why it was a trap even after the denominator said `Human clicks`:** the two
+    sit four columns apart in the default view; a reader wanting "how many humans
+    clicked" reached left, landed on `Clickers`, and got a number that is neither
+    deduplicated nor human-scored — and on a healthy tracked stage the two differ
+    by only ~1.35×
     ([app/api/keitaro/reports/route.ts](<../../app/api/keitaro/reports/route.ts>)),
     which is plausible enough to pass unnoticed and wrong enough to matter.
-    **Candidates:** `Visits` (shortest; loses the bot-filtered nuance) ·
-    **`Landing visits`** (distinguishes it from `Redirects`, and *visits* stops
-    it claiming to be people) · `Tracker visits` (names the source; jargon-y).
-    **Pick: `Landing visits`** — the only one true in both halves.
-    **Cost:** no API cost (the API field `clickers` is a field name, not a
-    label, and would not move); no saved-sort cost (`sortBy` persists by column
-    **id**); six UI label sites plus one prose sentence and bar V13's roster;
-    and a **width** cost that must be re-measured on a LONG dimension value,
-    because By Offer is now at **zero slack** (see the table above). Full
-    reasoning, the candidate comparison and the site-by-site cost are in
-    [07-conventions.md](../07-conventions.md).
+    **Why this name:** `Visits` was shortest but bare beside `Redirects`;
+    `Tracker visits` named the source but is jargon; **`Landing visits` is the
+    only candidate true in both halves** — *landing* separates it from
+    `Redirects`, *visits* stops it claiming to be people.
+    **Applied at all six label sites** — `FULL_COLS`, `HOURLY_COLS` and two
+    `StatCard`s in
+    [components/reports/performance-report.tsx](../../components/reports/performance-report.tsx),
+    the column header and a `StatCard` in
+    [components/reports/keitaro-report.tsx](../../components/reports/keitaro-report.tsx)
+    — plus two prose sentences (the Overview funnel line and the Hourly rates
+    line) and bar V13's roster. **Nothing else moved, re-confirmed on applying:**
+    the column `id` is still `clickers` on all three tables, the Operator API
+    field is still `clickers` (§7 of [operator-api.md](../operator-api.md)), and a
+    live read of `localStorage["reports.performance"]` after the rename returned
+    `"sortBy":"sent"` — an **id**, never header text, so no saved sort moved.
+    **New bar V24** ([scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts))
+    transcribes the result: the header on all three tables, all three totals
+    tiles, the funnel sentence, and the unchanged `id`. V23 (a PROPERTY bar)
+    stayed green through the rename while V13 (a transcription bar) went red and
+    was updated — which is the pair working as designed.
+
+    **⚠️ WIDTH: FITS ON AN ORDINARY OFFER NAME, 18px OVER ON A LONG ONE.**
+    Re-measured after applying (real Chromium, 1440px viewport, camman-v2,
+    `table.scrollWidth` vs the same 1126px container, By Offer default view,
+    15 columns). All four cells read back in ONE session on ONE fixture:
+
+    | offer name | header | `table.scrollWidth` | container | overflow | `Offer` col | the renamed col |
+    | --- | --- | --- | --- | --- | --- | --- |
+    | 20 chars | `Clickers` | 1126px | 1126px | 0 | 112.7px | 70.7px |
+    | 49 chars | `Clickers` | 1126px | 1126px | 0 | 112.7px | 70.7px |
+    | 20 chars | **`Landing visits`** | **1126px** | 1126px | **0 — fits** | 79.7px | 103.7px |
+    | **49 chars** | **`Landing visits`** | **1144px** | 1126px | **+18px — OVER** | 97.1px | 103.7px |
+
+    The header grows **33px**; on a short name the flexible `Offer` column gives
+    up exactly that and the table still fits, on a 49-character name `Offer`
+    cannot fall below ~97px so only ~15px of the 33 can be found. **Nothing was
+    shortened and no column was dropped to hide it — the owner decides whether
+    18px of scroll on long offer names is worth the name.** **Method control,
+    same session:** *Show all columns* read **2056px in 1126px (overflow 930)**,
+    so the method detects overflow and 1126/0 is a real fit.
+    - ⚠️ **AND IT CONTRADICTS THE 2×2 RECORDED ABOVE FOR THE PREVIOUS RENAME.**
+      That table records 49 chars + `Human clicks` = **1138px / +12px**; the same
+      fixture (offer 5, camman-v2), re-measured on 2026-09-20, read **1126px /
+      0**. Both are read-backs from a real browser, so neither is "the wrong
+      one" — what differs is the fixture's rendered content (this session had a
+      single data row), and the `Offer` column's floor evidently depends on it
+      more than either measurement assumed. **The lesson stands and is now
+      doubly earned: re-measure on the real data, never quote a width from a
+      doc.**
   - **⚠️ `/creatives` DOES NOT OBEY THE TIME-BASIS CONVENTION — CARDED
     2026-09-20, NOT FIXED** (owner: *"card it, don't fix it now"*).
     **Current state.** The convention is *"on a date-filtered page an

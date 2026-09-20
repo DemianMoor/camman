@@ -1246,11 +1246,19 @@ const reportsDefault = fullCols
 //
 // ⭐ …AND THE DENOMINATOR IS HEADED `Human clicks` SINCE 2026-09-20 — the
 // owner's second rename, matching the Operator API's long-standing
-// `clicks_human` alias for the same number. `Clickers` beside it is a DIFFERENT
-// metric (Keitaro's landing VISITS) and is deliberately unchanged; V23 is what
-// stops the word migrating onto it.
+// `clicks_human` alias for the same number. The column beside it is a DIFFERENT
+// metric (Keitaro's landing VISITS); V23 is what stops the word migrating onto
+// it.
+//
+// ⭐ …AND THAT NEIGHBOUR IS HEADED `Landing visits` SINCE 2026-09-20 — the
+// owner's third rename, taken the same day it was proposed. It was `Clickers`:
+// a people-word over `visit_clicks_clean`, four columns from the real
+// denominator. Transcribed here exactly as the page prints it, so a revert to
+// `Clickers` turns this bar red rather than passing unnoticed. The column `id`
+// did NOT change (`clickers`), which is why no saved sort and no API field
+// moved — V24 pins the header on every table that shows it.
 const OWNER_REPORTS_DEFAULT = [
-  "Sent", "Clickers", "CR %", "Regs", "Purchases", "Reg→Purchase %", "Sales", "Revenue",
+  "Sent", "Landing visits", "CR %", "Regs", "Purchases", "Reg→Purchase %", "Sales", "Revenue",
   "Pending $", "Cost", "Human clicks", "EPC", "Profit", "OptOut %",
 ];
 check(
@@ -1577,9 +1585,12 @@ check(
 //
 // NOT written as `header === "Human clicks"`. The bar asks a PROPERTY — the
 // denominator's header begins with the denominator's name, no other column
-// claims the old one, and the visit count never claims the word — so the day
-// the owner takes the `Clickers` rename proposed in docs/07-conventions.md it
-// stays green on a correct change instead of expiring.
+// claims the old one, and the visit count never claims the word. That design
+// was tested on 2026-09-20: the owner took the `Clickers` → `Landing visits`
+// rename the same day, and this bar stayed green through it while V13 (a
+// literal roster) went red and had to be updated. A property bar survives a
+// correct change; a transcription bar reports one. Both are wanted, which is
+// why V24 below transcribes the new header and this one does not.
 const creativeTriples = creativeCols.map(
   ([id, h]) => ["/creatives", id, h] as [string, string, string],
 );
@@ -1620,16 +1631,113 @@ check(
     // discriminate, or one of them says yes (or no) to everything.
     allHeaders.length >= 40 &&
     visitColsSeen.length >= 2 &&
+    // `"Clickers"` stays here as a REGEX FIXTURE, not as a live label: it is
+    // the string that proves `/^Clicks\b/`'s word boundary does its job (the
+    // header no longer exists on any screen — see V24). `"Landing visits"` is
+    // the live neighbour, and neither matcher may claim it.
     IS_HUMAN_CLICKS.test("Human clicks (all time)") &&
     !IS_HUMAN_CLICKS.test("Clicks") &&
     !IS_HUMAN_CLICKS.test("Clickers") &&
+    !IS_HUMAN_CLICKS.test("Landing visits") &&
     IS_BARE_CLICKS.test("Clicks (all time)") &&
     !IS_BARE_CLICKS.test("Human clicks") &&
-    !IS_BARE_CLICKS.test("Clickers"),
+    !IS_BARE_CLICKS.test("Clickers") &&
+    !IS_BARE_CLICKS.test("Landing visits"),
   `denom: ${denomHeaders.map(([t, id, h]) => `${t}:${id}=${JSON.stringify(h ?? null)}`).join(", ")}` +
     ` | bare-Clicks: ${bareClicks.map(([t, id, h]) => `${t}:${id}=${JSON.stringify(h)}`).join(", ") || "none"}` +
     ` | human-on-clickers: ${humanOnVisits.map(([t, , h]) => `${t}=${JSON.stringify(h)}`).join(", ") || "none"}` +
     ` | headers=${allHeaders.length} visitCols=${visitColsSeen.length}`,
+);
+
+// ── ⭐ V24 — THE VISIT COUNT IS NAMED `Landing visits` ON EVERY SURFACE ───────
+//
+// The owner renamed `Clickers` → `Landing visits` on 2026-09-20, the same day
+// the trap was flagged. V23 above asks a PROPERTY and stayed green through it;
+// this one TRANSCRIBES the result, which is the half that notices a revert.
+// Both are wanted, and the pair is the point: a property bar survives a correct
+// change, a transcription bar reports an incorrect one.
+//
+// ⭐ WHY A COLUMN-HEADER BAR WOULD NOT HAVE BEEN ENOUGH. `clickers` reaches the
+// screen through THREE column declarations (FULL_COLS, HOURLY_COLS and the
+// Overview table) and THREE totals TILES that no column parser can see — two
+// <StatCard>s in performance-report.tsx and one in keitaro-report.tsx. That is
+// the six label sites the rename had to touch, and a bar reading only the
+// rosters would have been green with half the page still saying `Clickers`.
+// It also pins the Overview's funnel SENTENCE, the one piece of prose that
+// names the funnel's first stage out loud.
+//
+// ⭐ THE COLUMN `id` IS ASSERTED UNCHANGED, DELIBERATELY. The whole claim that
+// this rename cost nothing rests on it: sorts persist as `sortBy: "clickers"`
+// (usePersistedFilters stores column IDS, never header text) and the Operator
+// API ships the field as `clickers`. If a later tidy-up renames the id to match
+// the label, every saved sort falls back silently and an API field moves — so
+// the id is a clause of this bar, not an incidental of it.
+const VISIT_ID = "clickers";
+const VISIT_HEADER = "Landing visits";
+const OLD_VISIT_HEADER = "Clickers";
+const countIn = (hay: string, needle: string) => hay.split(needle).length - 1;
+const keitaroFlat = flatSrc("components/reports/keitaro-report.tsx");
+const visitHeaderCols = allHeaders.filter(([, id]) => id === VISIT_ID);
+const visitHeaderBad = visitHeaderCols.filter(([, , h]) => h !== VISIT_HEADER);
+const oldHeaderAnywhere = allHeaders.filter(([, , h]) => h === OLD_VISIT_HEADER);
+const newTiles =
+  countIn(perfSrc, `label="${VISIT_HEADER}"`) + countIn(keitaroFlat, `label="${VISIT_HEADER}"`);
+const oldTiles =
+  countIn(perfSrc, `label="${OLD_VISIT_HEADER}"`) + countIn(keitaroFlat, `label="${OLD_VISIT_HEADER}"`);
+const FUNNEL_NEW = `${VISIT_HEADER} → Offer Redirect → Sales funnel`;
+const FUNNEL_OLD = `${OLD_VISIT_HEADER} → Offer Redirect → Sales funnel`;
+check(
+  `V24 ⭐⭐ the landing-VISIT count reads ${JSON.stringify(VISIT_HEADER)} on all ${visitHeaderCols.length} tables that show it and on all ${newTiles} totals tiles, the Overview funnel sentence names it, nothing still reads ${JSON.stringify(OLD_VISIT_HEADER)} — and the column id stays ${JSON.stringify(VISIT_ID)}, so no saved sort and no API field moved`,
+  visitHeaderBad.length === 0 &&
+    oldHeaderAnywhere.length === 0 &&
+    oldTiles === 0 &&
+    newTiles === 3 &&
+    byXCols.get(VISIT_ID) === VISIT_HEADER &&
+    new Map(hourlyCols).get(VISIT_ID) === VISIT_HEADER &&
+    overviewCols.get(VISIT_ID) === VISIT_HEADER &&
+    keitaroFlat.includes(FUNNEL_NEW) &&
+    !keitaroFlat.includes(FUNNEL_OLD) &&
+    // One-sided five ways. The parse must have found real tables (or every
+    // "nothing violates" clause passes over an empty world); the visit column
+    // must actually BE on all three of them; and BOTH source needles must
+    // DISCRIMINATE, proved on hand-written samples in BOTH line endings —
+    // stripFlat collapses the JSX line wrap, so a needle that only worked under
+    // one line ending would be a permanently-green assertion under the other.
+    allHeaders.length >= 40 &&
+    visitHeaderCols.length === 3 &&
+    ["\n", "\r\n"].every((nl) => {
+      const renamed = stripFlat(
+        `Live campaign performance from Keitaro: the ${VISIT_HEADER} → Offer${nl}          Redirect → Sales funnel, per stage`,
+      );
+      const original = stripFlat(
+        `Live campaign performance from Keitaro: the ${OLD_VISIT_HEADER} → Offer Redirect →${nl}          Sales funnel, per stage`,
+      );
+      return (
+        renamed.includes(FUNNEL_NEW) &&
+        !renamed.includes(FUNNEL_OLD) &&
+        original.includes(FUNNEL_OLD) &&
+        !original.includes(FUNNEL_NEW)
+      );
+    }) &&
+    ["\n", "\r\n"].every((nl) => {
+      const renamedTile = stripFlat(
+        `<StatCard${nl}              label="${VISIT_HEADER}"${nl}              value={fmtInt(totals.clickers)}${nl}            />`,
+      );
+      const originalTile = stripFlat(
+        `<StatCard${nl}              label="${OLD_VISIT_HEADER}"${nl}              value={fmtInt(totals.clickers)}${nl}            />`,
+      );
+      return (
+        countIn(renamedTile, `label="${VISIT_HEADER}"`) === 1 &&
+        countIn(renamedTile, `label="${OLD_VISIT_HEADER}"`) === 0 &&
+        countIn(originalTile, `label="${OLD_VISIT_HEADER}"`) === 1 &&
+        countIn(originalTile, `label="${VISIT_HEADER}"`) === 0
+      );
+    }),
+  `cols: ${visitHeaderCols.map(([t, , h]) => `${t}=${JSON.stringify(h)}`).join(", ")}` +
+    ` | tiles new/old: ${newTiles}/${oldTiles}` +
+    ` | old header elsewhere: ${oldHeaderAnywhere.map(([t, id]) => `${t}:${id}`).join(", ") || "none"}` +
+    ` | funnel new/old: ${keitaroFlat.includes(FUNNEL_NEW)}/${keitaroFlat.includes(FUNNEL_OLD)}` +
+    ` | headers=${allHeaders.length} visitCols=${visitHeaderCols.length}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

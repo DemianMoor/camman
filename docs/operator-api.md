@@ -192,7 +192,9 @@ curl -s "https://camman.vercel.app/api/reports/performance?dimension=offer&from=
 
 Response: `{ dimension, attribution, data: [row, …], totals, refreshedAt, providers, event_types, range }`.
 Every row, and `totals`, carries `sent`, `opt_outs`, `clickers` (the tracker's
-clean landing visits — not human clicks), `redirects`, `counted_clickers`,
+clean landing visits — not human clicks; the `/reports` UI heads this column
+**`Landing visits`** since 2026-09-20, previously `Clickers` — **the field name
+did not change**, and no field on this endpoint did), `redirects`, `counted_clickers`,
 `sales`, `revenue`, `cost`, and the grading fields `reached`, `clicks_human`,
 `click_to_reach_pct`, `reach_to_sale_pct` and `opt_rate` (see §7).
 

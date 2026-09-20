@@ -28,7 +28,7 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 
-// The "Overview" tab of /reports — the Keitaro Clickers → Offer Redirect → Sales
+// The "Overview" tab of /reports — the Keitaro Landing visits → Offer Redirect → Sales
 // funnel, per stage or per campaign. Moved verbatim out of app/(protected)/reports
 // /page.tsx (which is now a thin tab router) when the five performance reports were
 // added; the page's <h1> + tab bar now live in the router, so this renders its own
@@ -486,7 +486,12 @@ export function KeitaroReport() {
       },
       {
         id: "clickers",
-        header: "Clickers",
+        // ⭐ `Landing visits`, NOT `Clickers` (owner, 2026-09-20) — the same
+        // rename as FULL_COLS/HOURLY_COLS in performance-report.tsx, and for
+        // the same reason: this is `visit_clicks_clean`, Keitaro's bot-filtered
+        // landing-page VISIT count, display-only and not the EPC denominator.
+        // The `id` stays `clickers` — sorts and the Operator API key off it.
+        header: "Landing visits",
         enableSorting: true,
         cell: ({ row }) => (
           <span
@@ -591,7 +596,8 @@ export function KeitaroReport() {
       // ⭐ "Human clicks", not "Clicks" — see the FULL_COLS note in
       // performance-report.tsx. The word belongs on counted_clickers (the EPC
       // denominator, the API's `clicks_human`) and NEVER on `clickers`, which
-      // is Keitaro's bot-filtered landing-VISIT count. Bar V23 pins both halves.
+      // is Keitaro's bot-filtered landing-VISIT count and now heads
+      // `Landing visits`. Bar V23 pins both halves; V24 pins the new header.
       {
         id: "lifetime_clickers",
         header: "Human clicks (all time)",
@@ -682,8 +688,8 @@ export function KeitaroReport() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          Live campaign performance from Keitaro: the Clickers → Offer Redirect →
-          Sales funnel, per stage or rolled up per campaign. Times in{" "}
+          Live campaign performance from Keitaro: the Landing visits → Offer
+          Redirect → Sales funnel, per stage or rolled up per campaign. Times in{" "}
           {CAMPAIGN_TIMEZONE_LABEL}.
         </p>
         {canRefresh ? (
@@ -766,7 +772,7 @@ export function KeitaroReport() {
         <>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-8">
             <StatCard
-              label="Clickers"
+              label="Landing visits"
               value={`${fmtInt(totals.clickers)}${totals.clickers_is_fallback ? "*" : ""}`}
             />
             <StatCard

@@ -157,16 +157,23 @@ const FULL_COLS: Col[] = [
   { id: "sent", header: "Sent", kind: "count" },
   { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
   { id: "opt_out_rate", header: "OptOut %", kind: "pct", muted: true },
-  // ⚠️ `Clickers` IS NOT A COUNT OF PEOPLE, DESPITE THE NAME — and it is not
-  // the EPC denominator either. It is `s.tally.visit_clicks_clean`: Keitaro's
-  // clean landing-page VISITS, bot-filtered by KEITARO, never human-scored by
-  // CamMan, and explicitly display-only (lib/keitaro/poll.ts, PerfMetrics in
-  // lib/reporting/performance-report.ts). The denominator is `Human clicks`
-  // (counted_clickers) further right. A people-word over a visit count sitting
-  // near the real denominator is the trap the owner flagged on 2026-09-20; the
-  // label is deliberately UNCHANGED pending his decision, and a replacement is
-  // proposed in docs/07-conventions.md. Do not spell "human" here — V23.
-  { id: "clickers", header: "Clickers", kind: "count" },
+  // ⭐ `Landing visits`, NOT `Clickers` (owner, 2026-09-20) — the rename that
+  // defuses the trap flagged the same day. The column is
+  // `s.tally.visit_clicks_clean`: Keitaro's clean landing-page VISITS,
+  // bot-filtered by KEITARO, never human-scored by CamMan, and explicitly
+  // display-only (lib/keitaro/poll.ts, PerfMetrics in
+  // lib/reporting/performance-report.ts). It is NOT the EPC denominator —
+  // that is `Human clicks` (counted_clickers) further right. The old header was
+  // a people-word over a visit count sitting four columns from the real
+  // denominator; `landing` separates it from `Redirects`, and `visits` stops it
+  // claiming to be people.
+  //
+  // ⭐ THE COLUMN `id` DELIBERATELY DID NOT MOVE. Sorts persist by id
+  // (usePersistedFilters stores `sortBy: "clickers"`) and the Operator API
+  // ships the field as `clickers`, so renaming the HEADER changed neither a
+  // saved sort nor a contract. Do not "tidy" the id to match the label.
+  // Do not spell "human" here — V23. Bars V13/V24 pin the new header.
+  { id: "clickers", header: "Landing visits", kind: "count" },
   { id: "click_rate", header: "CR %", kind: "pct", muted: true },
   { id: "redirects", header: "Redirects", kind: "count" },
   { id: "redirect_rate", header: "Redir %", kind: "pct", muted: true },
@@ -204,8 +211,8 @@ const FULL_COLS: Col[] = [
   // BOT-filtered by Keitaro rather than human-scored by CamMan, and explicitly
   // display-only. It is the trap this rename was made to defuse, and bar V23 in
   // scripts/test-event-columns-view.ts goes red if "human" ever lands on it.
-  // A better name for `clickers` is proposed in docs/07-conventions.md and is
-  // the owner's call; until he takes it, the header stays `Clickers`.
+  // That column now heads `Landing visits` (owner, 2026-09-20), so "human"
+  // would be doubly wrong there: it counts visits, and the header now says so.
   { id: "lifetime_clickers", header: "Human clicks (all time)", kind: "count" },
   { id: "lifetime_epc", header: "EPC (all time)", kind: "usd" },
   { id: "counted_clickers", header: "Human clicks", kind: "count", muted: true },
@@ -215,11 +222,13 @@ const FULL_COLS: Col[] = [
 // Hourly: Sent (by send hour) + activity-time engagement with % rates. Rates use
 // the same formulas as the other tabs (÷ sent, redirect ÷ clickers, sales ÷
 // redirects). No cost/EPC/profit (cost is a per-stage lump, not hour-bucketable).
+// `clickers` heads `Landing visits` here too — one metric, one name on every
+// table that shows it (V24).
 const HOURLY_COLS: Col[] = [
   { id: "sent", header: "Sent", kind: "count" },
   { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
   { id: "opt_out_rate", header: "OptOut %", kind: "pct", muted: true },
-  { id: "clickers", header: "Clickers", kind: "count" },
+  { id: "clickers", header: "Landing visits", kind: "count" },
   { id: "click_rate", header: "CR %", kind: "pct", muted: true },
   { id: "redirects", header: "Redirects", kind: "count" },
   { id: "redirect_rate", header: "Redir %", kind: "pct", muted: true },
@@ -497,7 +506,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <StatCard label="Sent" value={fmtInt(totals.sent)} />
             <StatCard label="Opt-out %" value={fmtPct(rate(totals.opt_outs, totals.sent))} />
-            <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
+            <StatCard label="Landing visits" value={fmtInt(totals.clickers)} />
             <StatCard label="Redirects" value={fmtInt(totals.redirects)} />
             <StatCard
               label="Sales"
@@ -510,7 +519,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
             <StatCard label="Sent" value={fmtInt(totals.sent)} />
             <StatCard label="Opt-out %" value={fmtPct(rate(totals.opt_outs, totals.sent))} />
-            <StatCard label="Clickers" value={fmtInt(totals.clickers)} />
+            <StatCard label="Landing visits" value={fmtInt(totals.clickers)} />
             <StatCard label="Redirects" value={fmtInt(totals.redirects)} />
             <StatCard
               label="Sales"
@@ -530,7 +539,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             Each hour is summed across the selected date range in {CAMPAIGN_TIMEZONE_LABEL}. <span className="font-medium">Sent</span> is
             by send hour; engagement is by <span className="font-medium">user-activity time</span> — clicks by click
             time, sales by conversion time, opt-outs by receipt time (internal event data; clicks won&apos;t equal the
-            Keitaro count on Overview). Rates are each action ÷ sent (redirect ÷ clickers, sales ÷ redirects).
+            Keitaro count on Overview). Rates are each action ÷ sent (redirect ÷ landing visits, sales ÷ redirects).
             Manual-campaign results have no per-event time and roll up into the pinned{" "}
             <span className="font-medium">Manual</span> row.
           </>

@@ -610,7 +610,10 @@ export function KeitaroReport() {
       },
       {
         id: "counted_clickers",
-        header: "Clicks (period)",
+        // Unsuffixed, matching the By-X tables — the owner's 2026-09-20 rename.
+        // Overview has the same date filter, so splitting the naming across two
+        // tabs of one section would be worse than either name on its own.
+        header: "Clicks",
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">
@@ -620,7 +623,7 @@ export function KeitaroReport() {
       },
       {
         id: "epc",
-        header: "EPC (period)",
+        header: "EPC",
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">

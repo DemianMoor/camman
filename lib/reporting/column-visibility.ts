@@ -119,3 +119,47 @@ export const CREATIVES_EXTRA_COLUMN_IDS: ReadonlySet<string> = new Set([
   "used_campaigns",
   "created_at",
 ]);
+
+/**
+ * Is this FIXED column held back from the curated default view?
+ *
+ * ⭐ THE COLUMN THE TABLE IS SORTED BY IS NEVER HELD BACK. A roster of ids says
+ * which columns are second-order reads of something still on screen — and the
+ * column the rows are ORDERED by is never that. It explains the row order,
+ * which is the one thing about a ranked table that cannot be recovered by eye
+ * from anything else. Hiding it leaves the rows genuinely sorted with no
+ * indicator anywhere, and "sorted by an invisible column" is indistinguishable
+ * on screen from "not sorted at all". Measured on /creatives 2026-09-20: the
+ * default view rendered ZERO up/down chevrons (only the neutral
+ * `ChevronsUpDown` that marks a column sortable), while the request really did
+ * carry `sortBy=created_at&sortDir=desc` and the rows really were in that
+ * order. Ticking "Show all columns" revealed `Created` carrying the ▼, same
+ * rows, same order — the sort was never broken, only unattributable.
+ *
+ * ⭐ WHY A REVEAL RATHER THAN A FALLBACK, WHICH IS WHAT /reports DOES.
+ * `sortColumnOrFallback()` (components/reports/event-columns-view.tsx) answers
+ * the same question on the Performance tables by MOVING the sort to a column
+ * that is on screen. That is free there because those tables sort CLIENT-side
+ * over an already-fetched response: changing the sort column re-orders rows
+ * that are already in memory. /creatives sorts SERVER-side — `sortBy` is a
+ * request parameter (app/api/creatives/list/route.ts) — so the same trick would
+ * silently re-issue the request and re-rank the page, and this table is what
+ * decides which creative gets sent next. Revealing the column changes what is
+ * RENDERED and nothing else: no request parameter, no row moves. The two
+ * surfaces answer the same hazard differently because their sorts live in
+ * different places, and that asymmetry is deliberate.
+ *
+ * ⭐ IT IS NOT A HOLE IN THE ROSTER. Exactly one held-back column can be
+ * revealed at a time, only while it is the active sort, and it goes back behind
+ * the toggle the moment the operator sorts by something visible. The default
+ * view still opens on the owner's list for every sort that names a column
+ * already in it.
+ */
+export function isHeldBackFromDefaultView(
+  columnId: string,
+  roster: ReadonlySet<string>,
+  activeSortId: string | null,
+): boolean {
+  if (columnId === activeSortId) return false;
+  return roster.has(columnId);
+}

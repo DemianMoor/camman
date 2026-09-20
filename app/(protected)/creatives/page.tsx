@@ -40,7 +40,10 @@ import {
   eventCountValue,
   type EventCountRow,
 } from "@/components/reports/event-columns-view";
-import { CREATIVES_EXTRA_COLUMN_IDS } from "@/lib/reporting/column-visibility";
+import {
+  CREATIVES_EXTRA_COLUMN_IDS,
+  isHeldBackFromDefaultView,
+} from "@/lib/reporting/column-visibility";
 import type { EventCountMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 import {
   AlertDialog,
@@ -1021,7 +1024,16 @@ export default function CreativesPage() {
       // $0.53 across 694 lifetime clickers. Sort by recent, show both.
       {
         id: "epc",
-        header: "EPC (30d) ↕",
+        // ⭐ NO LITERAL ↕ HERE ANY MORE, AND THE TITLE NO LONGER CLAIMS THE SORT.
+        // DataTable already draws a real indicator on every sortable header (a
+        // neutral ChevronsUpDown, or an up/down chevron when it IS the sort), so
+        // the glyph was a second, hand-drawn one beside it — and it asserted
+        // something false ON THIS PAGE. The list defaults to `created_at`; it is
+        // the creative PICKER dialog that sorts by the 30-day EPC
+        // (components/campaigns/creative-picker-dialog.tsx sends sortBy=epc).
+        // The convention in docs/07-conventions.md is about the picker; the
+        // glyph had been copied onto the page where it does not hold.
+        header: "EPC (30d)",
         enableSorting: true,
         cell: ({ row }) => {
           const m = row.original.metrics;
@@ -1029,7 +1041,7 @@ export default function CreativesPage() {
             <MetricCell
               value={m.epc}
               format={formatEpc}
-              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days) — this is the column the list sorts by`}
+              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days)`}
             />
           );
         },
@@ -1164,9 +1176,17 @@ export default function CreativesPage() {
     // roster in lib/reporting/column-visibility.ts holds no `evt:` id and bar
     // V12 keeps it that way, so this filter cannot reach a generated column —
     // the residuals are decided inside eventCountColumns(), above.
+    //
+    // ⭐ `filters.sortBy` IS PASSED SO THE SORTED COLUMN IS NEVER HELD BACK.
+    // This table sorts SERVER-side, so the column carrying the arrow has to be
+    // the one the request named — there is no free client-side fallback to move
+    // the sort onto a visible column the way /reports has. See
+    // isHeldBackFromDefaultView() for why the two surfaces differ.
     return filters.showAllColumns
       ? built
-      : built.filter((c) => !CREATIVES_EXTRA_COLUMN_IDS.has(c.id ?? ""));
+      : built.filter(
+          (c) => !isHeldBackFromDefaultView(c.id ?? "", CREATIVES_EXTRA_COLUMN_IDS, filters.sortBy),
+        );
   }, [
     canUpdate,
     canArchive,
@@ -1177,6 +1197,7 @@ export default function CreativesPage() {
     eventTypes,
     selectedIds,
     filters.showAllColumns,
+    filters.sortBy,
   ]);
 
   // What ticking "Show all columns" would ADD: the fixed columns it holds back,
@@ -1184,11 +1205,17 @@ export default function CreativesPage() {
   // of the page rather than of the toggle's state — see the same idiom on
   // /reports — and it renders nothing at 0, because a control that reveals
   // nothing is a dead control.
+  // ⭐ MINUS THE ONE THE SORT REVEALED, when the sort is on a held-back column.
+  // Counting it would promise a column that is already on screen, and on the
+  // last held-back column it would read "(1 more)" against a toggle that adds
+  // nothing visible. Computed from the SAME predicate the filter above uses, so
+  // the two cannot disagree about what the default view contains.
   const hiddenColumnCount = useMemo(
     () =>
-      CREATIVES_EXTRA_COLUMN_IDS.size +
-      (data.some((d) => (d.metrics ?? NO_EVENT_COUNTS).manual_topup > 0) ? 1 : 0),
-    [data],
+      [...CREATIVES_EXTRA_COLUMN_IDS].filter((id) =>
+        isHeldBackFromDefaultView(id, CREATIVES_EXTRA_COLUMN_IDS, filters.sortBy),
+      ).length + (data.some((d) => (d.metrics ?? NO_EVENT_COUNTS).manual_topup > 0) ? 1 : 0),
+    [data, filters.sortBy],
   );
 
   const isAuthLoading = !auth;

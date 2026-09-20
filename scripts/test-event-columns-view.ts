@@ -20,6 +20,7 @@ import {
   CREATIVES_EXTRA_COLUMN_IDS,
   REPORTS_EXTRA_COLUMN_IDS,
   isDefaultViewEventColumn,
+  isHeldBackFromDefaultView,
 } from "@/lib/reporting/column-visibility";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 
@@ -1238,9 +1239,13 @@ const reportsDefault = fullCols
   .filter((p) => !REPORTS_EXTRA_COLUMN_IDS.has(p[0]))
   .map((p) => p[1])
   .concat(generatedHeaders(false));
+// ⭐ `Clicks` / `EPC` CARRY NO TIME SUFFIX SINCE 2026-09-20 — the owner's
+// rename ("the page has a date filter; the suffix is redundant"). Transcribed
+// here exactly as the page prints them, so the day someone re-suffixes one this
+// bar goes red rather than the rename quietly reverting.
 const OWNER_REPORTS_DEFAULT = [
   "Sent", "Clickers", "CR %", "Regs", "Purchases", "Reg→Purchase %", "Sales", "Revenue",
-  "Pending $", "Cost", "Clicks (period)", "EPC (period)", "Profit", "OptOut %",
+  "Pending $", "Cost", "Clicks", "EPC", "Profit", "OptOut %",
 ];
 check(
   `V13 ⭐⭐ /reports opens on exactly the ${OWNER_REPORTS_DEFAULT.length} columns the owner approved, beside the dimension`,
@@ -1264,19 +1269,22 @@ check(
 
 // /creatives, same shape. `select` and the actions menu are structural rather
 // than data columns and carry no string header, so the parser never sees them.
-// The owner's names are transcribed to the page's own wording — "EPC (30d)"
-// carries the sort glyph the page prints, "Sales qty" is spelled with a comma
-// there — because the bar is on the COLUMN SET, not on the copy.
+// The owner's names are transcribed to the page's own wording — "Sales qty" is
+// spelled with a comma there — because the bar is on the COLUMN SET, not on the
+// copy. "EPC (30d)" LOST its hand-drawn ↕ on 2026-09-20: DataTable draws a real
+// indicator on every sortable header, and the glyph additionally asserted a
+// sort this page does not do (it defaults to `created_at`; the PICKER dialog is
+// what sends sortBy=epc).
 const creativesDefault = creativeCols
   .filter((p) => !CREATIVES_EXTRA_COLUMN_IDS.has(p[0]))
   .map((p) => p[1])
   .concat(countCols(CURATED_SPEC, BOTH_RESIDUALS, false).map((c) => c.header));
 const OWNER_CREATIVES_DEFAULT = [
   "Slug", "Text", "CTR", "Checkout Rate", "Regs", "Purchases", "Unmapped", "Sales CR",
-  "EPC (30d) ↕",
+  "EPC (30d)",
 ];
 check(
-  `V15 ⭐⭐ /creatives opens on exactly the ${OWNER_CREATIVES_DEFAULT.length} columns the owner approved`,
+  `V15 ⭐⭐ /creatives opens on exactly the ${OWNER_CREATIVES_DEFAULT.length} columns the owner approved, WHEN THE SORT NAMES ONE OF THEM (the roster alone decides that case — V18 covers the sort landing on a held-back column)`,
   sorted(creativesDefault) === sorted(OWNER_CREATIVES_DEFAULT),
   `built: ${sorted(creativesDefault)}\n        owner: ${sorted(OWNER_CREATIVES_DEFAULT)}`,
 );
@@ -1323,6 +1331,91 @@ check(
     sortColumnOrFallback(curatedIds, "redirects", "sent") === "sent" &&
     sortColumnOrFallback(curatedIds, "evt:sig:count", "sent") === "evt:sig:count",
   `curated=${curatedIds.join(",")}`,
+);
+
+// ── ⭐ /creatives SORTS SERVER-SIDE, SO IT REVEALS RATHER THAN FALLS BACK ────
+//
+// V17's fallback is the /reports answer and it is free there: those tables sort
+// client-side over a response already in memory, so moving the sort to a
+// visible column costs nothing. /creatives sends `sortBy` to the list endpoint
+// and this table decides which creative gets sent NEXT, so moving it would
+// silently re-rank the page. It holds the sort where it is and shows the column
+// instead. Measured on screen 2026-09-20: the default view rendered ZERO
+// up/down chevrons while the request carried `sortBy=created_at&sortDir=desc`
+// and the rows really were in that order — a working sort with no indicator.
+const revealed = [...CREATIVES_EXTRA_COLUMN_IDS].filter(
+  (id) => !isHeldBackFromDefaultView(id, CREATIVES_EXTRA_COLUMN_IDS, id),
+);
+const stillHeld = [...CREATIVES_EXTRA_COLUMN_IDS].filter((id) =>
+  // "epc" is default-visible, so every roster member stays held back here.
+  isHeldBackFromDefaultView(id, CREATIVES_EXTRA_COLUMN_IDS, "epc"),
+);
+check(
+  `V18 ⭐⭐ each of the ${CREATIVES_EXTRA_COLUMN_IDS.size} held-back /creatives columns is REVEALED while it is the active sort, and every one of them is held back again when the sort names a visible column`,
+  CREATIVES_EXTRA_COLUMN_IDS.size > 0 &&
+    revealed.length === CREATIVES_EXTRA_COLUMN_IDS.size &&
+    stillHeld.length === CREATIVES_EXTRA_COLUMN_IDS.size &&
+    // One-sided: a column that was never on the roster is never held back, so
+    // "revealed" cannot be passing because the predicate returns false for all.
+    !isHeldBackFromDefaultView("epc", CREATIVES_EXTRA_COLUMN_IDS, "created_at") &&
+    !isHeldBackFromDefaultView("epc", CREATIVES_EXTRA_COLUMN_IDS, null),
+  `revealed=${revealed.length}/${CREATIVES_EXTRA_COLUMN_IDS.size} stillHeld=${stillHeld.length}`,
+);
+
+// The rule above is only worth anything if the PAGE hands it the live sort. A
+// single needle, pinned on the third argument — the whole fix is that this is
+// `filters.sortBy` and not `null` — with a hand-written control in BOTH line
+// endings and a negative control spelled out rather than derived from the
+// needle, so narrowing it cannot stay green.
+const SORT_AWARE_FILTER =
+  'isHeldBackFromDefaultView(c.id ?? "", CREATIVES_EXTRA_COLUMN_IDS, filters.sortBy)';
+const wiredSample = (nl: string) =>
+  stripFlat(
+    `return filters.showAllColumns${nl}  ? built${nl}  : built.filter(${nl}      (c) => !isHeldBackFromDefaultView(c.id ?? "", CREATIVES_EXTRA_COLUMN_IDS, filters.sortBy),${nl}    );`,
+  );
+const unwiredSample = (nl: string) =>
+  stripFlat(
+    `return filters.showAllColumns${nl}  ? built${nl}  : built.filter(${nl}      (c) => !isHeldBackFromDefaultView(c.id ?? "", CREATIVES_EXTRA_COLUMN_IDS, null),${nl}    );`,
+  );
+check(
+  "V19 ⭐ the /creatives column filter is handed the LIVE sort (needle proved by a hand-written sample in CRLF and LF, and by a sample passing `null` in its place that must NOT match)",
+  creativesSrc.includes(SORT_AWARE_FILTER) &&
+    wiredSample("\n").includes(SORT_AWARE_FILTER) &&
+    wiredSample("\r\n").includes(SORT_AWARE_FILTER) &&
+    !unwiredSample("\n").includes(SORT_AWARE_FILTER) &&
+    !unwiredSample("\r\n").includes(SORT_AWARE_FILTER),
+  `found=${creativesSrc.includes(SORT_AWARE_FILTER)}`,
+);
+
+// ── ⭐ THE PERIOD PAIR IS NAMED THE SAME ON BOTH REPORT TABLES ──────────────
+//
+// `Clicks` / `EPC` lost their "(period)" suffix on BOTH the Overview tab
+// (keitaro-report.tsx) and the four By-X tabs (performance-report.tsx) in the
+// same change, because they are the same two metrics one click apart inside one
+// section and a rename applied to only one of them is worse than either name on
+// its own. V13 pins the VALUE on the By-X side; this pins the AGREEMENT, which
+// is the part a later edit to one file would break. Overview shows every column
+// unconditionally (`showAllColumns` is a literal `true` there), so it has no
+// curated-view bar of its own and this is its only cover.
+const overviewCols = new Map(
+  [...flatSrc("components/reports/keitaro-report.tsx").matchAll(COL_PAIR)].map(
+    (m) => [m[1], m[2]] as [string, string],
+  ),
+);
+const byXCols = new Map(fullCols);
+const PERIOD_PAIR = ["counted_clickers", "epc"] as const;
+check(
+  `V20 ⭐⭐ Overview and the By-X tables head the period pair identically — ${PERIOD_PAIR.map((id) => `${id}=${JSON.stringify(overviewCols.get(id))}`).join(", ")} — and neither carries a time suffix`,
+  // One-sided: the Overview parse must have found a real table, or two
+  // undefineds would "agree" and this bar would pass over nothing.
+  overviewCols.size >= 10 &&
+    PERIOD_PAIR.every(
+      (id) =>
+        overviewCols.get(id) !== undefined &&
+        overviewCols.get(id) === byXCols.get(id) &&
+        !/\(.*\)/.test(overviewCols.get(id)!),
+    ),
+  `overview=${overviewCols.size} cols; ${PERIOD_PAIR.map((id) => `${id}: ${overviewCols.get(id)} vs ${byXCols.get(id)}`).join(" | ")}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

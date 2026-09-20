@@ -168,12 +168,22 @@ const FULL_COLS: Col[] = [
   { id: "cost", header: "Cost", kind: "usd", muted: true },
   // LIFETIME first — it is the primary figure and ignores the date filter.
   // Each EPC sits immediately after the count it divided by: a $0.00 EPC is only
-  // interpretable when you can see the denominator was 4. Headers name the time
-  // basis explicitly so nobody has to guess which column is which.
+  // interpretable when you can see the denominator was 4.
+  //
+  // ⭐ THE PERIOD PAIR IS UNSUFFIXED, BY THE OWNER'S DECISION (2026-09-20): "the
+  // page has a date filter; the suffix is redundant". So the UNQUALIFIED header
+  // means "the range in the date picker above" and only the exception says so.
+  // It reverses the rule docs/07-conventions.md used to state ("a bare EPC is
+  // not acceptable"); that entry now records the reversal rather than the old
+  // rule. Worth knowing what it costs: in the ALL-COLUMNS view these sit beside
+  // `Clicks (all time)` / `EPC (all time)`, and in the DEFAULT view `Clicks`
+  // sits four columns from `Clickers` — a DIFFERENT metric (raw clickers in the
+  // range; this one is the deduplicated, human-scored EPC denominator). Both
+  // collisions were put to the owner with what they look like on screen.
   { id: "lifetime_clickers", header: "Clicks (all time)", kind: "count" },
   { id: "lifetime_epc", header: "EPC (all time)", kind: "usd" },
-  { id: "counted_clickers", header: "Clicks (period)", kind: "count", muted: true },
-  { id: "epc", header: "EPC (period)", kind: "usd", muted: true },
+  { id: "counted_clickers", header: "Clicks", kind: "count", muted: true },
+  { id: "epc", header: "EPC", kind: "usd", muted: true },
   { id: "profit", header: "Profit", kind: "profit" },
 ];
 // Hourly: Sent (by send hour) + activity-time engagement with % rates. Rates use
@@ -509,7 +519,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             Event columns are generated from your event-type registry: a count, a rate and a held count
             per type, plus the signal→purchase conversion rate, and — under{" "}
             <span className="font-medium">Event breakdown</span> — each revenue-bearing type&apos;s
-            revenue, held $ and EPC. Rates divide by <span className="font-medium">Clicks (period)</span>,
+            revenue, held $ and EPC. Rates divide by <span className="font-medium">Clicks</span>,
             the same denominator as EPC, and can exceed 100% when a conversion&apos;s click was never
             scored human. A dash means the denominator was zero. The table opens on a shorter default
             view — each event type&apos;s count and the funnel ratio, with its rate and held count under{" "}

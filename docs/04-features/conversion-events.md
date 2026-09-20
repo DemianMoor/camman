@@ -1404,14 +1404,41 @@ the registry and them.
   - a **`/reports/unmapped` drill-down**. The unmapped badge is per page, scoped
     to the range and filters, and **links nowhere**: there is no unmapped screen
     to link to. Give the badge an `href` the day one exists.
-  - **renaming `Clicks` / `Clicks (all time)`** to match the Operator-API's
-    `clicks_human` alias. Half of this moved on 2026-09-20 for a different
-    reason: the owner dropped the `(period)` suffix from `Clicks` and `EPC` on
-    both report tables ("the page has a date filter; the suffix is redundant").
-    The `clicks_human` alignment is still open, and there are now **two naming
-    collisions to weigh with it** — `Clicks` beside `Clicks (all time)` in the
-    all-columns view, and `Clicks` beside **`Clickers`** (a different metric) in
-    the default view. See [07-conventions.md](../07-conventions.md).
+  - **renaming `Clicks` / `Clicks (all time)` to `Human clicks` / `Human clicks
+    (all time)`**, matching the Operator-API's `clicks_human` alias. Half of
+    this moved on 2026-09-20 for a different reason: the owner dropped the
+    `(period)` suffix from `Clicks` and `EPC` on both report tables ("the page
+    has a date filter; the suffix is redundant"), leaving `Clicks` four columns
+    from **`Clickers`** in the default view with nothing separating them.
+    ⚠️ **THE TWO HEADERS ARE CROSSED IN KIND, WHICH IS WHY THIS CARD NAMES
+    `Clicks` AND NOT `Clickers`.** Established from the source 2026-09-20:
+      - **`Clickers`** ← `s.tally.visit_clicks_clean`
+        ([lib/reporting/performance-report.ts](../../lib/reporting/performance-report.ts)),
+        Keitaro's clean landing-page **VISITS** — *"Clickers = landing-page
+        visits (visit_clicks_clean)"*, [lib/keitaro/poll.ts](../../lib/keitaro/poll.ts).
+        Bot-filtered by Keitaro, **not** CamMan-human-scored, and explicitly
+        display-only: *"`clickers` above is the Keitaro landing-visit count and
+        is display-only"*.
+      - **`Clicks`** ← `counted_clickers`, deduplicated **PEOPLE** with a click
+        scored `human` (or a Rule-F conversion) — the single EPC denominator,
+        which the Operator API already ships as **`clicks_human`**
+        ([operator-api.md](../operator-api.md) prints `"counted_clickers": 4480,
+        "clicks_human": 4480` on one row).
+    So the column named for people counts clicks, and the column named for
+    clicks counts people. **Anything spelled "human" belongs on `counted_clickers`
+    and on nothing else**: putting it on `Clickers` would attach the word to the
+    one metric it is false of, four columns from the metric it is true of, and
+    collide with an API field name that is already taken.
+    **Width is not the obstacle — both wordings were measured** (2026-09-20,
+    real browser, 1440px, `table.scrollWidth` vs the 1126px container, By Offer
+    default view, baseline 1126px / overflow 0): `Clickers` → `Human clicks`
+    reads **1126px, overflow 0**, and `Clicks` → `Human clicks` +
+    `Clicks (all time)` → `Human clicks (all time)` also reads **1126px,
+    overflow 0**. In both cases the renamed header grows ~30px and the flexible
+    `Offer` column gives it up (154px → 124px / 113px). The all-columns view
+    goes 1978px → 2034px and already scrolls either way. ⚠️ Measured on a
+    fixture whose `Offer` cell had slack to give; a longer offer name removes
+    that cushion. See [07-conventions.md](../07-conventions.md).
   - **merging the two adjacent toggles on `/reports`.** The tab now carries
     **Event breakdown** and **Show all columns** side by side in one control
     row, and the owner wants them merged — *"card it, not now"* (2026-09-20).

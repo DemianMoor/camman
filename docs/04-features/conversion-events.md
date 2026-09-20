@@ -1404,13 +1404,25 @@ the registry and them.
   - a **`/reports/unmapped` drill-down**. The unmapped badge is per page, scoped
     to the range and filters, and **links nowhere**: there is no unmapped screen
     to link to. Give the badge an `href` the day one exists.
-  - **renaming `Clicks` / `Clicks (all time)` to `Human clicks` / `Human clicks
-    (all time)`**, matching the Operator-API's `clicks_human` alias. Half of
-    this moved on 2026-09-20 for a different reason: the owner dropped the
-    `(period)` suffix from `Clicks` and `EPC` on both report tables ("the page
+  - ✅ **DONE 2026-09-20 — `Clicks` / `Clicks (all time)` are now `Human clicks`
+    / `Human clicks (all time)`**, matching the Operator-API's `clicks_human`
+    alias (owner: *"Matches what the Operator API already ships as
+    clicks_human."*). Applied on the four By-X tables and Overview
+    (`counted_clickers`, `lifetime_clickers`) and on `/creatives`
+    (`clean_clicks_lifetime`), with the By-X explainer's *"Rates divide by
+    Clicks"* and the two lifetime tooltips moved to the same wording. **No API
+    field changed** — `counted_clickers` / `clicks_human` are unchanged, and
+    `sortBy` persists by column **id**, so no saved sort moved.
+    **Bar V23** in [scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts)
+    pins all five columns in one place, and pins that the word never lands on
+    `clickers`. **Re-measured after applying** — see the width note below.
+    The history that produced the card is kept because it is the reason the
+    rename went on this column and not the one next to it:
+    half of it moved on 2026-09-20 for a different reason (the owner dropped the
+    `(period)` suffix from `Clicks` and `EPC` on both report tables — "the page
     has a date filter; the suffix is redundant"), leaving `Clicks` four columns
     from **`Clickers`** in the default view with nothing separating them.
-    ⚠️ **THE TWO HEADERS ARE CROSSED IN KIND, WHICH IS WHY THIS CARD NAMES
+    ⚠️ **THE TWO HEADERS ARE CROSSED IN KIND, WHICH IS WHY THIS NAMED
     `Clicks` AND NOT `Clickers`.** Established from the source 2026-09-20:
       - **`Clickers`** ← `s.tally.visit_clicks_clean`
         ([lib/reporting/performance-report.ts](../../lib/reporting/performance-report.ts)),
@@ -1429,16 +1441,126 @@ the registry and them.
     and on nothing else**: putting it on `Clickers` would attach the word to the
     one metric it is false of, four columns from the metric it is true of, and
     collide with an API field name that is already taken.
-    **Width is not the obstacle — both wordings were measured** (2026-09-20,
-    real browser, 1440px, `table.scrollWidth` vs the 1126px container, By Offer
-    default view, baseline 1126px / overflow 0): `Clickers` → `Human clicks`
-    reads **1126px, overflow 0**, and `Clicks` → `Human clicks` +
-    `Clicks (all time)` → `Human clicks (all time)` also reads **1126px,
-    overflow 0**. In both cases the renamed header grows ~30px and the flexible
-    `Offer` column gives it up (154px → 124px / 113px). The all-columns view
-    goes 1978px → 2034px and already scrolls either way. ⚠️ Measured on a
-    fixture whose `Offer` cell had slack to give; a longer offer name removes
-    that cushion. See [07-conventions.md](../07-conventions.md).
+    **Width, RE-MEASURED AFTER APPLYING** (2026-09-20, real Chromium against
+    camman-v2, 1440px viewport, `table.scrollWidth` vs the container, By Offer
+    default view, 15 columns). Before/after taken in ONE session on ONE fixture,
+    and the "before" restored from a byte copy afterwards and re-read to prove
+    the restore took:
+
+    | By Offer, default view | `table.scrollWidth` | container | overflow | `Offer` col | the renamed col |
+    | --- | --- | --- | --- | --- | --- |
+    | before — `Clicks` | **1126px** | 1126px | **0** | 127px | `Clicks` 60px |
+    | **after — `Human clicks`** | **1126px** | 1126px | **0 — still fits** | 86px | `Human clicks` 101px |
+
+    **It still fits.** The renamed header grows **41px** (60 → 101) and the
+    flexible `Offer` column gives up exactly that much (127 → 86). The
+    all-columns view goes to **2061px in 1126px** and scrolls, as it always did.
+    `/creatives` is untouched in its default view (the renamed column is one of
+    the ten the toggle holds back) — **1126px / overflow 0** there too, with
+    `Human clicks (all time)` visible under *Show all columns* (2115px).
+
+    ⚠️ **"FITS" IS ONE LONG OFFER NAME AWAY FROM NOT FITTING, AND THAT IS NOW
+    MEASURED RATHER THAN ASSERTED.** The slack comes from the `Offer` cell, so it
+    depends on the data. The same 2×2, same session, with offer 5 renamed to a
+    49-character name (*"Nutra Weight Management Q4 Evergreen — US Desktop"*):
+
+    | offer name | header | width | container | overflow | `Offer` col |
+    | --- | --- | --- | --- | --- | --- |
+    | 20 chars | `Clicks` | 1126px | 1126px | 0 | 127px |
+    | 20 chars | `Human clicks` | 1126px | 1126px | **0** | 86px |
+    | 49 chars | `Clicks` | 1126px | 1126px | 0 | 127px |
+    | **49 chars** | **`Human clicks`** | **1138px** | 1126px | **+12px** | 97px |
+
+    A long name raises the `Offer` column's floor to ~97px, so only ~30px of the
+    41px the rename needs can be found and the table overflows by 12px. **The
+    rename is what tips it**: the same long name under the old header still fits.
+    This is not a reason to undo it — 12px of horizontal scroll on one tab is a
+    far smaller cost than a denominator whose header contradicts the API — but
+    **treat this table as "at zero slack", not as "it fits"**, and re-measure on
+    a LONG dimension value before adding or widening any column here. The same
+    caveat is written at the convention in
+    [07-conventions.md](../07-conventions.md) and in
+    [reports-rollup.md](reports-rollup.md), so it is met wherever the width is
+    read about.
+  - **⚠️ RENAMING `Clickers` — FLAGGED 2026-09-20, DELIBERATELY NOT DONE, and
+    the owner decides.** *"Leave `Clickers` alone for now, but flag it: a
+    people-word for a display-only Keitaro visit count, sitting near the real
+    denominator, is a trap waiting to catch someone."* **What it genuinely
+    counts:** `visit_clicks_clean` — landing-page **visits** that Keitaro's own
+    bot filter let through, counted as visits and not as people, display-only,
+    and **not** a denominator of anything EPC touches. It is the divisor of
+    `Redir %` and the numerator of `CR %`. **Why it is a trap even now that the
+    denominator says `Human clicks`:** the two sit four columns apart in the
+    default view; a reader wanting "how many humans clicked" reaches left, lands
+    on `Clickers`, and gets a number that is neither deduplicated nor
+    human-scored — and on a healthy tracked stage the two differ by only ~1.35×
+    ([app/api/keitaro/reports/route.ts](<../../app/api/keitaro/reports/route.ts>)),
+    which is plausible enough to pass unnoticed and wrong enough to matter.
+    **Candidates:** `Visits` (shortest; loses the bot-filtered nuance) ·
+    **`Landing visits`** (distinguishes it from `Redirects`, and *visits* stops
+    it claiming to be people) · `Tracker visits` (names the source; jargon-y).
+    **Pick: `Landing visits`** — the only one true in both halves.
+    **Cost:** no API cost (the API field `clickers` is a field name, not a
+    label, and would not move); no saved-sort cost (`sortBy` persists by column
+    **id**); six UI label sites plus one prose sentence and bar V13's roster;
+    and a **width** cost that must be re-measured on a LONG dimension value,
+    because By Offer is now at **zero slack** (see the table above). Full
+    reasoning, the candidate comparison and the site-by-site cost are in
+    [07-conventions.md](../07-conventions.md).
+  - **⚠️ `/creatives` DOES NOT OBEY THE TIME-BASIS CONVENTION — CARDED
+    2026-09-20, NOT FIXED** (owner: *"card it, don't fix it now"*).
+    **Current state.** The convention is *"on a date-filtered page an
+    unqualified header means THAT filter's range, and a column the filter does
+    not drive must name its own basis in the header"*
+    ([07-conventions.md](../07-conventions.md)). `/reports` obeys it on all
+    **47** fixed columns, pinned by bar V21. **`/creatives` has no date picker
+    at all**, so nothing on it can inherit a range — and its headers are mixed.
+    **Exactly which columns are affected** (all in
+    [app/(protected)/creatives/page.tsx](<../../app/(protected)/creatives/page.tsx>)):
+      - **Unqualified, but 30-day figures** — `CTR`, `Checkout Rate`,
+        `Sales CR`, and **every generated per-event count** (`Regs`,
+        `Purchases`, … — one per `event_types` row, so the set grows whenever
+        the operator adds a type) plus the two residual columns beside them
+        (`Unmapped`, `Manual`). Their basis lives **only** in a `title`
+        tooltip — e.g. *"N sales / M clean clicks (30d)"* — which is invisible
+        to anyone who does not hover, absent on touch, and absent from a
+        screenshot or a copy-paste.
+      - **Qualified, and correct** — `EPC (30d)`, `EPC (all time)`,
+        `Human clicks (all time)`, `Sales, qty (all time)`.
+    **Why it matters.** The two kinds sit in one row with nothing to tell them
+    apart: `Sales CR` (30 days) is two columns from `Sales, qty (all time)`, and
+    `Purchases` (30 days) is four from `EPC (all time)`. **A reader cannot tell a
+    30-day figure from an all-time one**, and the page's whole purpose is
+    ranking creatives against each other — a comparison that silently mixes two
+    windows is worse than one that is slower to read. It is also the page that
+    now opens ranked by `EPC (30d)`, so the window is load-bearing.
+    **What a fix would involve** (none of it built):
+      1. Decide the shape: **(a)** add a date picker and let the convention
+         apply as written — the largest change, because every metric on the page
+         comes from `lib/creatives/metrics-cache.ts`, whose windows are
+         **hard-coded 30-day intervals** in SQL, not parameters; or **(b)** keep
+         the fixed window and suffix the unqualified headers `(30d)`, which is
+         copy-only but widens the table.
+      2. Under (b), suffix `CTR` / `Checkout Rate` / `Sales CR` **and** every
+         generated count. The three hand-written ones are one-line edits. The
+         generated ones come from `eventCountColumns()` in
+         [components/reports/event-columns-view.tsx](<../../components/reports/event-columns-view.tsx>),
+         which — **checked, not assumed (2026-09-20)** — is called from
+         **`/creatives` alone** (`/reports` uses `eventColumnBlock`, the campaign
+         page `StageEventBreakdown`), and it **already hard-codes the 30-day
+         basis in the column's `title`**. So the window is not in doubt in the
+         code; it simply never reaches the header. Appending the basis to
+         `pluralizeLabel(t.label)` there is a small, contained change and does
+         **not** branch on any event key. ⚠️ It would, however, put the suffix on
+         the two residual columns' siblings too, so `Unmapped` / `Manual` need a
+         decision of their own — and the unclassified badge's
+         "no toggle on that line" invariant must survive untouched (bars V6/V7).
+      3. Re-measure: the default view is at **1126px in a 1126px container**
+         (zero slack), so four or more `(30d)` suffixes need a width decision,
+         probably by moving something into the toggle's hidden set.
+      4. Extend V21 — today it is scoped to the three `/reports` tables by
+         construction — or add a `/creatives` sibling, with the generated
+         columns exempted the same way (their labels are operator config).
   - **merging the two adjacent toggles on `/reports`.** The tab now carries
     **Event breakdown** and **Show all columns** side by side in one control
     row, and the owner wants them merged — *"card it, not now"* (2026-09-20).

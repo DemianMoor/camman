@@ -713,7 +713,7 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 | Field | Meaning |
 | --- | --- |
 | `reached` | Messages whose recipient reached the offer page (their first offer click, tracked per recipient). |
-| `clicks_human` | Distinct recipients with at least one click scored human, or a conversion. The same number the platform's EPC divides by. |
+| `clicks_human` | Distinct recipients with at least one click scored human, or a conversion. The same number the platform's EPC divides by, and the one the screens head **`Human clicks`** (2026-09-20). |
 | `click_to_reach_pct` | `reached ÷ clicks_human × 100`. Can exceed 100: a recipient can reach the offer without a click the scorer called human. |
 | `reach_to_sale_pct` | `conversions ÷ reached × 100`. Conversions come from the tracker (`sales` on report rows, `keitaro_sales_count` on stages). |
 | `opt_rate` | `opt_outs ÷ sent × 100`. |
@@ -724,7 +724,12 @@ Both are counts only. There is no endpoint on this list that returns a contact.
   made up only of manual-mode stages (those have no per-recipient reach).
 - **Grade on `clicks_human`.** Raw clicks are about 91% bots (only click-report
   shows them), and `clickers` on report rows is the tracker's landing-visit
-  count, not a human-click count.
+  count, not a human-click count. ⚠️ **`clickers` is a people-word for a visit
+  count** — it is `visit_clicks_clean`, bot-filtered by the tracker rather than
+  human-scored by CamMan, and it is display-only. Do not grade on it, do not
+  treat it as a denominator, and do not read it as "distinct people who
+  clicked": that is `clicks_human`. A better UI name for it is proposed in
+  [07-conventions.md](07-conventions.md); the API field name will not change.
 - **`reached` is not `redirects`.** `redirects` counts the tracker's clean offer
   click events; `reached` counts recipients. They run close (1,226 vs 1,115 over
   2026-09-07..13) but measure different things.
@@ -735,10 +740,14 @@ Both are counts only. There is no endpoint on this list that returns a contact.
   revenue-bearing conversions only, so a registrant whose click was never scored
   human is in the numerator and not the denominator. Like `click_to_reach_pct`,
   the ratio is **not clamped**, and a zero denominator gives `null`, never `0`.
-  (The report tables head that column `Clicks` — unsuffixed since 2026-09-20,
-  because the page's own date filter names the window; `clicks_human` is this
-  API's alias for the same number. **The API field name is unchanged**: this was
-  a header rename on two screens, not a contract change.)
+  (The report tables head that column **`Human clicks`** — renamed 2026-09-20 to
+  match this API's `clicks_human`, and unsuffixed because the page's own date
+  filter names the window. `/creatives` heads its lifetime one
+  `Human clicks (all time)`. **The API field names are unchanged**: this was a
+  header rename on three screens, not a contract change. ⚠️ **`clickers` on a
+  report row is NOT that column and never carries the word "human"** — it is the
+  tracker's bot-filtered landing-VISIT count, display-only; see the note under
+  `clicks_human` above.)
 
 ---
 

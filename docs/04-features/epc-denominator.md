@@ -240,10 +240,17 @@ by the same `counted_clickers` set this document defines.** There is no second
 denominator, no per-event click set, and no per-event rescue rule. `Registration
 rate` is `registrations ÷ counted clickers in the same window` — the identical
 divisor as `EPC` and `Sales CR`'s neighbours — and the report table's own header
-for that divisor reads `Clicks` (unsuffixed since 2026-09-20 — the page's date
-filter names the window; see [07-conventions.md](../07-conventions.md)).
-(`clicks_human` is the Operator-API alias for the same number; §7 of
-[operator-api.md](../operator-api.md) says so. The API name is unchanged.)
+for that divisor reads **`Human clicks`** (renamed 2026-09-20 to match the
+Operator API's `clicks_human`, and unsuffixed because the page's date filter
+names the window; `/creatives` heads its lifetime one `Human clicks (all time)` —
+see [07-conventions.md](../07-conventions.md)). §7 of
+[operator-api.md](../operator-api.md) says so too. **The API field names are
+unchanged** — this was a header rename on three screens, not a contract change.
+⚠️ **`Clickers`, four columns to its left, is NOT this set** and never carries
+the word "human": it is `visit_clicks_clean`, the tracker's bot-filtered
+landing-VISIT count, display-only. Bar V23 in
+[scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts)
+holds both halves.
 
 **The consequence, stated rather than buried: `<Type> rate` can legitimately read
 more than 100%, and it is not clamped.**

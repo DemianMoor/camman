@@ -1273,8 +1273,11 @@ check(
 // spelled with a comma there — because the bar is on the COLUMN SET, not on the
 // copy. "EPC (30d)" LOST its hand-drawn ↕ on 2026-09-20: DataTable draws a real
 // indicator on every sortable header, and the glyph additionally asserted a
-// sort this page does not do (it defaults to `created_at`; the PICKER dialog is
-// what sends sortBy=epc).
+// sort the page did not do (it defaulted to `created_at`; only the PICKER
+// dialog sent sortBy=epc). Later the same day the page's own default moved ONTO
+// `epc` (V22), which makes the old claim true and the glyph no less wrong — a
+// literal in a header string stops reporting the moment the operator sorts by
+// something else.
 const creativesDefault = creativeCols
   .filter((p) => !CREATIVES_EXTRA_COLUMN_IDS.has(p[0]))
   .map((p) => p[1])
@@ -1416,6 +1419,135 @@ check(
         !/\(.*\)/.test(overviewCols.get(id)!),
     ),
   `overview=${overviewCols.size} cols; ${PERIOD_PAIR.map((id) => `${id}: ${overviewCols.get(id)} vs ${byXCols.get(id)}`).join(" | ")}`,
+);
+
+// ── ⭐ A HEADER NAMES A TIME BASIS EXACTLY WHEN THE DATE FILTER DOES NOT ─────
+//
+// THE REASON a bare `EPC` is unambiguous on /reports, written as something
+// checkable instead of as a preference. ONE date picker sits above the page and
+// drives every tab, so an unqualified header has exactly one possible reading —
+// and that holds only while every column the picker does NOT drive names its
+// own basis in the header. Exactly two do not: the lifetime pair.
+//
+// BOTH DIRECTIONS, over all three fixed tables. A ranged column that GAINS a
+// basis is red (that is "(period)" creeping back). A lifetime column that LOSES
+// one is red — and that is the direction that matters, because it is the one
+// that would make a bare `EPC` mean two things on the same table.
+//
+// FIXED columns only. A generated column's header is an operator-configured
+// label out of the event-type registry and may contain parentheses for any
+// reason; policing it would be branching on config, which is the one thing
+// Phase 5 forbids.
+//
+// ⚠️ WHAT THIS DOES NOT COVER, said rather than left to be discovered: an
+// out-of-filter column added under a name that does not start `lifetime_` would
+// be asked to carry NO basis, which is backwards. V11/V14/V16 are what force a
+// new fixed column to be classified by hand; this pins the correspondence for
+// the columns that exist, and docs/07-conventions.md carries the rule itself.
+const TIME_BASIS = /\((?:all[ -]time|period|lifetime|last \d+ days?|\d+\s*[dwmy])\)/i;
+const fixedCols: Array<[string, string, string]> = [
+  ...fullCols.map(([id, h]) => ["By-X", id, h] as [string, string, string]),
+  ...hourlyCols.map(([id, h]) => ["Hourly", id, h] as [string, string, string]),
+  ...[...overviewCols].map(([id, h]) => ["Overview", id, h] as [string, string, string]),
+];
+const outOfFilter = (id: string) => id.startsWith("lifetime_");
+const basisViolations = fixedCols.filter(([, id, h]) => TIME_BASIS.test(h) !== outOfFilter(id));
+const lifetimeSeen = fixedCols.filter(([, id]) => outOfFilter(id));
+check(
+  `V21 ⭐⭐ across all ${fixedCols.length} fixed /reports columns a header names a time basis EXACTLY when the date filter does not drive it — the ${lifetimeSeen.length} lifetime columns all say so, and no other column does`,
+  fixedCols.length >= 40 &&
+    // One-sided twice over. Without a lifetime column anywhere, "nobody names a
+    // basis" would satisfy the rule vacuously — an assertion about today's
+    // empty state rather than about the rule. And the matcher itself has to
+    // discriminate, or every header would read as unqualified.
+    lifetimeSeen.length >= 4 &&
+    TIME_BASIS.test("Clicks (all time)") &&
+    TIME_BASIS.test("EPC (period)") &&
+    TIME_BASIS.test("EPC (30d)") &&
+    !TIME_BASIS.test("Clicks") &&
+    !TIME_BASIS.test("Pending $") &&
+    basisViolations.length === 0,
+  `violations: ${basisViolations.map(([t, id, h]) => `${t}:${id}=${JSON.stringify(h)}`).join(", ") || "none"}; lifetime=${lifetimeSeen.length}/${fixedCols.length}`,
+);
+
+// V21's correspondence is only worth something if `lifetime_` really names the
+// out-of-filter pair rather than being a prefix nobody honours. One needle per
+// side, each proved by a hand-written sample in BOTH line endings and by a
+// SWAPPED sample — the two aggregates exchanged — which must match neither.
+// Narrow either needle to the field name alone and the swapped sample starts
+// matching, so a needle that stopped discriminating cannot stay green.
+const libSrc = flatSrc("lib/reporting/performance-report.ts");
+const RANGED_FROM =
+  "counted_clickers: denominatorFor( s.link_mode, countedByStage.get(s.stage_id)";
+const LIFETIME_FROM =
+  "lifetime_clickers: denominatorFor( s.link_mode, lifetimeByStage.get(s.stage_id)";
+const pairSample = (nl: string, ranged: string, life: string) =>
+  stripFlat(
+    `counted_clickers: denominatorFor(${nl}      s.link_mode,${nl}      ${ranged}.get(s.stage_id),${nl}      s.tally.visit_clicks_clean,${nl}    ),${nl}    lifetime_clickers: denominatorFor(${nl}      s.link_mode,${nl}      ${life}.get(s.stage_id),${nl}      s.tally.visit_clicks_clean,${nl}    ),`,
+  );
+check(
+  "V21b ⭐ the two sides come from DIFFERENT aggregates — the ranged pair from countedByStage, the lifetime pair from lifetimeByStage (each needle proved in CRLF and LF, and by a swapped sample that must match neither)",
+  libSrc.includes(RANGED_FROM) &&
+    libSrc.includes(LIFETIME_FROM) &&
+    (["\n", "\r\n"] as const).every(
+      (nl) =>
+        pairSample(nl, "countedByStage", "lifetimeByStage").includes(RANGED_FROM) &&
+        pairSample(nl, "countedByStage", "lifetimeByStage").includes(LIFETIME_FROM) &&
+        !pairSample(nl, "lifetimeByStage", "countedByStage").includes(RANGED_FROM) &&
+        !pairSample(nl, "lifetimeByStage", "countedByStage").includes(LIFETIME_FROM),
+    ),
+  `ranged=${libSrc.includes(RANGED_FROM)} lifetime=${libSrc.includes(LIFETIME_FROM)}`,
+);
+
+// ── ⭐ /creatives OPENS ON A SORT THAT IS ALREADY ON SCREEN ─────────────────
+//
+// V18's reveal is the right answer for an operator who CHOSE a held-back sort.
+// Paying it in the DEFAULT view was self-inflicted: the page's own default
+// named `created_at`, a column the owner put behind the toggle, so every fresh
+// browser opened one column wider (measured 1242px vs 1126px of container) to
+// show an indicator it could have had for free. Owner, 2026-09-20: "created_at
+// is the wrong default for a ranking page."
+//
+// ⭐ A BAR ON THE PROPERTY, NOT ON THE LITERAL. It does not assert the default
+// is `epc`; it asserts the default is a real, SORTABLE column that the curated
+// view does not hide — which stays the correct requirement the next time the
+// owner moves it, instead of expiring on a correct change.
+const defaultsBlock = /const DEFAULT_FILTERS: Filters = \{(.*?)\};/.exec(creativesSrc)?.[1] ?? "";
+const defaultSortId = /sortBy: "([^"]*)"/.exec(defaultsBlock)?.[1] ?? "";
+const defaultSortCol = creativeCols.find((p) => p[0] === defaultSortId);
+// The same predicate is asked about the real default AND about a held-back id,
+// so it cannot be passing by saying yes to everything.
+const opensWithoutRevealing = (sortId: string) =>
+  creativeCols.some((p) => p[0] === sortId) &&
+  [...CREATIVES_EXTRA_COLUMN_IDS].every((id) =>
+    isHeldBackFromDefaultView(id, CREATIVES_EXTRA_COLUMN_IDS, sortId),
+  );
+const someHeldId = [...CREATIVES_EXTRA_COLUMN_IDS][0] ?? "";
+const sortableRe = (id: string) =>
+  new RegExp(`\\{ id: "${id}", header: "[^"]*", enableSorting: true`).test(creativesSrc);
+const nonSortableIds = creativeCols.map((p) => p[0]).filter((id) => !sortableRe(id));
+const defaultsSample = (nl: string, id: string) =>
+  stripFlat(
+    `const DEFAULT_FILTERS: Filters = {${nl}  search: "",${nl}  page: 0,${nl}  sortBy: "${id}",${nl}  sortDir: "desc",${nl}  showAllColumns: false,${nl}};`,
+  );
+check(
+  `V22 ⭐⭐ the /creatives default sort (${JSON.stringify(defaultSortId)} ⇒ ${JSON.stringify(defaultSortCol?.[1] ?? "(no such column)")}) names a SORTABLE column the default view already shows, so the indicator lands without revealing anything`,
+  defaultSortId.length > 0 &&
+    defaultSortCol !== undefined &&
+    opensWithoutRevealing(defaultSortId) &&
+    sortableRe(defaultSortId) &&
+    // One-sided, three ways: a held-back id must FAIL the same predicate; a
+    // non-sortable column must fail the same regex (so it can say no); and the
+    // parse must have found the real block, proved by hand-written samples in
+    // both line endings with the id round-tripped out of them.
+    someHeldId.length > 0 &&
+    !opensWithoutRevealing(someHeldId) &&
+    nonSortableIds.length > 0 &&
+    !sortableRe(nonSortableIds[0]) &&
+    (["\n", "\r\n"] as const).every(
+      (nl) => /sortBy: "([^"]*)"/.exec(defaultsSample(nl, "zzz_probe"))?.[1] === "zzz_probe",
+    ),
+  `default=${JSON.stringify(defaultSortId)} held=${JSON.stringify(someHeldId)} nonSortable=${nonSortableIds.join(",") || "(none)"} block=${defaultsBlock.slice(0, 60)}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

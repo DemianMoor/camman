@@ -214,6 +214,31 @@ type Filters = {
   showAllColumns: boolean;
 };
 
+// ⭐ THE LIST OPENS RANKED BY `EPC (30d)`, NOT BY `created_at` (owner,
+// 2026-09-20): "created_at is the wrong default for a ranking page." This is
+// the sort the SERVER performs — `sortBy` is a request parameter
+// (app/api/creatives/list/route.ts, the `RATIO_SQL.epc` branch, NULLS LAST so a
+// creative with no clean clicks sinks rather than floats) — not a client-side
+// re-order of one page. It matches what the creative PICKER dialog already
+// sends, so the two screens that decide what gets sent next now rank the same
+// way.
+//
+// It also removes a reveal. `created_at` is on the CREATIVES_EXTRA_COLUMN_IDS
+// roster, so while it was the default sort isHeldBackFromDefaultView() had to
+// show `Created` in the default view for the sort indicator to have anywhere to
+// land — 12 columns instead of 11. `epc` is default-visible, so the arrow lands
+// on a column that was already on screen and nothing is revealed. The reveal
+// rule is untouched and still fires for an operator who sorts by a held-back
+// column; it simply no longer fires in the DEFAULT case.
+//
+// ⚠️ PER-BROWSER, SO THIS MOVES NOBODY WHO HAS ALREADY USED THE PAGE.
+// usePersistedFilters merges localStorage OVER these defaults, so a browser
+// that has ever sorted this list (the toggle writes the whole filter object)
+// keeps its saved `sortBy` and still opens on `created_at`, revealing `Created`
+// exactly as before. Accepted by the owner, who is changing his own by hand.
+// The API route's own fallback is deliberately NOT changed: a caller that sends
+// no `sortBy` is the stage picker's `include_metrics=false` fast path, where no
+// metrics are joined and an EPC sort has nothing to order by.
 const DEFAULT_FILTERS: Filters = {
   search: "",
   offer_id: null,
@@ -223,7 +248,7 @@ const DEFAULT_FILTERS: Filters = {
   showArchived: false,
   page: 0,
   pageSize: 20,
-  sortBy: "created_at",
+  sortBy: "epc",
   sortDir: "desc",
   showAllColumns: false,
 };
@@ -1024,15 +1049,17 @@ export default function CreativesPage() {
       // $0.53 across 694 lifetime clickers. Sort by recent, show both.
       {
         id: "epc",
-        // ⭐ NO LITERAL ↕ HERE ANY MORE, AND THE TITLE NO LONGER CLAIMS THE SORT.
+        // ⭐ NO LITERAL ↕ HERE, EVEN NOW THAT THIS *IS* THE DEFAULT SORT.
         // DataTable already draws a real indicator on every sortable header (a
-        // neutral ChevronsUpDown, or an up/down chevron when it IS the sort), so
-        // the glyph was a second, hand-drawn one beside it — and it asserted
-        // something false ON THIS PAGE. The list defaults to `created_at`; it is
-        // the creative PICKER dialog that sorts by the 30-day EPC
-        // (components/campaigns/creative-picker-dialog.tsx sends sortBy=epc).
-        // The convention in docs/07-conventions.md is about the picker; the
-        // glyph had been copied onto the page where it does not hold.
+        // neutral ChevronsUpDown, or an up/down chevron when it IS the sort).
+        // The glyph that used to sit here was a second, hand-drawn one beside
+        // it, and it asserted something this page did not do — the list
+        // defaulted to `created_at` and only the creative PICKER dialog sorted
+        // by the 30-day EPC. Since 2026-09-20 the page defaults here too
+        // (DEFAULT_FILTERS above), which makes the old claim true and the old
+        // glyph MORE tempting and no less wrong: a literal in a header string
+        // cannot track the actual sort, so it would still be asserting rather
+        // than reporting the moment the operator clicked another column.
         header: "EPC (30d)",
         enableSorting: true,
         cell: ({ row }) => {
@@ -1492,7 +1519,10 @@ export default function CreativesPage() {
           sortDir={filters.sortDir}
           onSortChange={(by, dir) =>
             updateFilters({
-              sortBy: by ?? "created_at",
+              // Reads the default rather than repeating it: clearing the sort
+              // has to land back on whatever the page opens with, and a second
+              // literal is how those two drift apart.
+              sortBy: by ?? DEFAULT_FILTERS.sortBy,
               sortDir: dir,
               page: 0,
             })

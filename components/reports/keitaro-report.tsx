@@ -588,9 +588,13 @@ export function KeitaroReport() {
       // EPC is only interpretable when you can see the denominator was 4. The
       // two are NOT derivable from one another: counted clickers are
       // deduplicated, so a lifetime figure can never be summed out of periods.
+      // ⭐ "Human clicks", not "Clicks" — see the FULL_COLS note in
+      // performance-report.tsx. The word belongs on counted_clickers (the EPC
+      // denominator, the API's `clicks_human`) and NEVER on `clickers`, which
+      // is Keitaro's bot-filtered landing-VISIT count. Bar V23 pins both halves.
       {
         id: "lifetime_clickers",
-        header: "Clicks (all time)",
+        header: "Human clicks (all time)",
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums">
@@ -612,8 +616,9 @@ export function KeitaroReport() {
         id: "counted_clickers",
         // Unsuffixed, matching the By-X tables — the owner's 2026-09-20 rename.
         // Overview has the same date filter, so splitting the naming across two
-        // tabs of one section would be worse than either name on its own.
-        header: "Clicks",
+        // tabs of one section would be worse than either name on its own. V20
+        // pins that agreement; V23 pins the "Human clicks" wording itself.
+        header: "Human clicks",
         enableSorting: true,
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">

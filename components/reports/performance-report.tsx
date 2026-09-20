@@ -157,6 +157,15 @@ const FULL_COLS: Col[] = [
   { id: "sent", header: "Sent", kind: "count" },
   { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
   { id: "opt_out_rate", header: "OptOut %", kind: "pct", muted: true },
+  // ⚠️ `Clickers` IS NOT A COUNT OF PEOPLE, DESPITE THE NAME — and it is not
+  // the EPC denominator either. It is `s.tally.visit_clicks_clean`: Keitaro's
+  // clean landing-page VISITS, bot-filtered by KEITARO, never human-scored by
+  // CamMan, and explicitly display-only (lib/keitaro/poll.ts, PerfMetrics in
+  // lib/reporting/performance-report.ts). The denominator is `Human clicks`
+  // (counted_clickers) further right. A people-word over a visit count sitting
+  // near the real denominator is the trap the owner flagged on 2026-09-20; the
+  // label is deliberately UNCHANGED pending his decision, and a replacement is
+  // proposed in docs/07-conventions.md. Do not spell "human" here — V23.
   { id: "clickers", header: "Clickers", kind: "count" },
   { id: "click_rate", header: "CR %", kind: "pct", muted: true },
   { id: "redirects", header: "Redirects", kind: "count" },
@@ -184,16 +193,22 @@ const FULL_COLS: Col[] = [
   // NOT drive without naming its basis breaks the reading of every bare header
   // beside it, so it goes red.
   //
-  // ⚠️ STILL OPEN, and not fixed by any of this: in the default view `Clicks`
-  // sits four columns from `Clickers`, and the two are crossed in kind —
-  // `Clickers` is visit_clicks_clean (Keitaro's clean landing-page VISITS,
-  // display-only) while `Clicks` is counted_clickers (deduplicated human-scored
-  // PEOPLE, the EPC denominator, shipped by the Operator API as `clicks_human`).
-  // Anything spelled "human" belongs on THIS pair, never on `clickers`. Carded
-  // in docs/04-features/conversion-events.md; see docs/07-conventions.md.
-  { id: "lifetime_clickers", header: "Clicks (all time)", kind: "count" },
+  // ⭐ "HUMAN CLICKS", NOT "CLICKS" (owner, 2026-09-20) — and the word belongs
+  // on THIS pair and on nothing else. `counted_clickers` is deduplicated
+  // human-scored PEOPLE and the single EPC denominator; the Operator API has
+  // shipped it as `clicks_human` since long before the header said so, and the
+  // header now matches that vocabulary instead of contradicting it.
+  //
+  // ⚠️ DO NOT MOVE THE WORD ONTO `clickers` (four columns to the left). That
+  // one is `visit_clicks_clean` — Keitaro's clean landing-page VISITS,
+  // BOT-filtered by Keitaro rather than human-scored by CamMan, and explicitly
+  // display-only. It is the trap this rename was made to defuse, and bar V23 in
+  // scripts/test-event-columns-view.ts goes red if "human" ever lands on it.
+  // A better name for `clickers` is proposed in docs/07-conventions.md and is
+  // the owner's call; until he takes it, the header stays `Clickers`.
+  { id: "lifetime_clickers", header: "Human clicks (all time)", kind: "count" },
   { id: "lifetime_epc", header: "EPC (all time)", kind: "usd" },
-  { id: "counted_clickers", header: "Clicks", kind: "count", muted: true },
+  { id: "counted_clickers", header: "Human clicks", kind: "count", muted: true },
   { id: "epc", header: "EPC", kind: "usd", muted: true },
   { id: "profit", header: "Profit", kind: "profit" },
 ];
@@ -530,7 +545,7 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             Event columns are generated from your event-type registry: a count, a rate and a held count
             per type, plus the signal→purchase conversion rate, and — under{" "}
             <span className="font-medium">Event breakdown</span> — each revenue-bearing type&apos;s
-            revenue, held $ and EPC. Rates divide by <span className="font-medium">Clicks</span>,
+            revenue, held $ and EPC. Rates divide by <span className="font-medium">Human clicks</span>,
             the same denominator as EPC, and can exceed 100% when a conversion&apos;s click was never
             scored human. A dash means the denominator was zero. The table opens on a shorter default
             view — each event type&apos;s count and the funnel ratio, with its rate and held count under{" "}

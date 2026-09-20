@@ -1243,9 +1243,15 @@ const reportsDefault = fullCols
 // rename ("the page has a date filter; the suffix is redundant"). Transcribed
 // here exactly as the page prints them, so the day someone re-suffixes one this
 // bar goes red rather than the rename quietly reverting.
+//
+// ⭐ …AND THE DENOMINATOR IS HEADED `Human clicks` SINCE 2026-09-20 — the
+// owner's second rename, matching the Operator API's long-standing
+// `clicks_human` alias for the same number. `Clickers` beside it is a DIFFERENT
+// metric (Keitaro's landing VISITS) and is deliberately unchanged; V23 is what
+// stops the word migrating onto it.
 const OWNER_REPORTS_DEFAULT = [
   "Sent", "Clickers", "CR %", "Regs", "Purchases", "Reg→Purchase %", "Sales", "Revenue",
-  "Pending $", "Cost", "Clicks", "EPC", "Profit", "OptOut %",
+  "Pending $", "Cost", "Human clicks", "EPC", "Profit", "OptOut %",
 ];
 check(
   `V13 ⭐⭐ /reports opens on exactly the ${OWNER_REPORTS_DEFAULT.length} columns the owner approved, beside the dimension`,
@@ -1258,7 +1264,7 @@ const reportsHidden = fullCols
   .concat(generatedHeaders(true).filter((h) => !generatedHeaders(false).includes(h)));
 const OWNER_REPORTS_HIDDEN = [
   "Opt-outs", "Redirects", "Redir %", "Reg rate", "Reg pending", "Purchase rate",
-  "Purchase pending", "Sales CR", "Clicks (all time)", "EPC (all time)",
+  "Purchase pending", "Sales CR", "Human clicks (all time)", "EPC (all time)",
 ];
 check(
   `V14 ⭐⭐ …and "Show all columns" adds exactly the ${OWNER_REPORTS_HIDDEN.length} he approved — so every FULL_COLS column is classified, and a new one lands on neither side by accident`,
@@ -1301,7 +1307,7 @@ const creativesHidden = creativeCols
   );
 const OWNER_CREATIVES_HIDDEN = [
   "Spam Score", "Offers", "Sequence", "Funnel Stage", "Status", "Manual", "EPC (all time)",
-  "Clicks (all time)", "Sales, qty (all time)", "Used Campaigns", "Created",
+  "Human clicks (all time)", "Sales, qty (all time)", "Used Campaigns", "Created",
 ];
 check(
   `V16 ⭐⭐ …and its toggle adds exactly the ${OWNER_CREATIVES_HIDDEN.length} he approved, leaving no /creatives column unclassified`,
@@ -1461,10 +1467,10 @@ check(
     // empty state rather than about the rule. And the matcher itself has to
     // discriminate, or every header would read as unqualified.
     lifetimeSeen.length >= 4 &&
-    TIME_BASIS.test("Clicks (all time)") &&
+    TIME_BASIS.test("Human clicks (all time)") &&
     TIME_BASIS.test("EPC (period)") &&
     TIME_BASIS.test("EPC (30d)") &&
-    !TIME_BASIS.test("Clicks") &&
+    !TIME_BASIS.test("Human clicks") &&
     !TIME_BASIS.test("Pending $") &&
     basisViolations.length === 0,
   `violations: ${basisViolations.map(([t, id, h]) => `${t}:${id}=${JSON.stringify(h)}`).join(", ") || "none"}; lifetime=${lifetimeSeen.length}/${fixedCols.length}`,
@@ -1548,6 +1554,82 @@ check(
       (nl) => /sortBy: "([^"]*)"/.exec(defaultsSample(nl, "zzz_probe"))?.[1] === "zzz_probe",
     ),
   `default=${JSON.stringify(defaultSortId)} held=${JSON.stringify(someHeldId)} nonSortable=${nonSortableIds.join(",") || "(none)"} block=${defaultsBlock.slice(0, 60)}`,
+);
+
+// ── ⭐ THE EPC DENOMINATOR IS HEADED "HUMAN CLICKS" — AND `clickers` IS NOT ──
+//
+// Owner, 2026-09-20: *"Matches what the Operator API already ships as
+// clicks_human."* Two halves of one rule, because a rename applied in one file
+// is precisely how this vocabulary drifted apart in the first place:
+//
+//   (a) EVERY fixed column fed by `counted_clickers` — the single EPC
+//       denominator — heads "Human clicks…", on all three tables that carry
+//       one: the By-X tables, Overview, and /creatives' lifetime column.
+//   (b) NOTHING heads a bare "Clicks"/"Clicks (all time)" any more, AND the
+//       word "human" never appears over `clickers`.
+//
+// ⭐ (b) IS THE HALF THAT EARNS ITS KEEP. `clickers` is
+// `s.tally.visit_clicks_clean` — Keitaro's BOT-filtered landing-page VISITS,
+// display-only, not human-scored by CamMan at all — and it sits four columns
+// from the real denominator under a people-word. A later reader who
+// half-remembers "we put `human` on the clicks column" will reach for that one
+// first, and nothing else in this suite would notice.
+//
+// NOT written as `header === "Human clicks"`. The bar asks a PROPERTY — the
+// denominator's header begins with the denominator's name, no other column
+// claims the old one, and the visit count never claims the word — so the day
+// the owner takes the `Clickers` rename proposed in docs/07-conventions.md it
+// stays green on a correct change instead of expiring.
+const creativeTriples = creativeCols.map(
+  ([id, h]) => ["/creatives", id, h] as [string, string, string],
+);
+const allHeaders = [...fixedCols, ...creativeTriples];
+const DENOM_COLS: Array<[string, string]> = [
+  ["By-X", "counted_clickers"],
+  ["By-X", "lifetime_clickers"],
+  ["Overview", "counted_clickers"],
+  ["Overview", "lifetime_clickers"],
+  ["/creatives", "clean_clicks_lifetime"],
+];
+const headerOf = (table: string, id: string) =>
+  table === "Overview"
+    ? overviewCols.get(id)
+    : table === "/creatives"
+      ? creativeCols.find((p) => p[0] === id)?.[1]
+      : byXCols.get(id);
+const IS_HUMAN_CLICKS = /^Human clicks\b/;
+const IS_BARE_CLICKS = /^Clicks\b/;
+const denomHeaders = DENOM_COLS.map(
+  ([t, id]) => [t, id, headerOf(t, id)] as [string, string, string | undefined],
+);
+const denomMissing = denomHeaders.filter(([, , h]) => h === undefined);
+const denomBad = denomHeaders.filter(([, , h]) => h !== undefined && !IS_HUMAN_CLICKS.test(h));
+const bareClicks = allHeaders.filter(([, , h]) => IS_BARE_CLICKS.test(h));
+const humanOnVisits = allHeaders.filter(([, id, h]) => id === "clickers" && /human/i.test(h));
+const visitColsSeen = allHeaders.filter(([, id]) => id === "clickers");
+check(
+  `V23 ⭐⭐ all ${DENOM_COLS.length} counted_clicker columns head "Human clicks…" (the API's clicks_human) across the By-X tables, Overview and /creatives — no column heads a bare "Clicks", and the word never lands on \`clickers\`, which is Keitaro's landing-VISIT count`,
+  denomMissing.length === 0 &&
+    denomBad.length === 0 &&
+    bareClicks.length === 0 &&
+    humanOnVisits.length === 0 &&
+    // One-sided four ways. The parse must have found real tables (or every
+    // "nothing violates" clause passes over an empty world); the visit column
+    // must actually BE on screen, or "human never lands on clickers" is an
+    // assertion about a column that does not exist; and both matchers must
+    // discriminate, or one of them says yes (or no) to everything.
+    allHeaders.length >= 40 &&
+    visitColsSeen.length >= 2 &&
+    IS_HUMAN_CLICKS.test("Human clicks (all time)") &&
+    !IS_HUMAN_CLICKS.test("Clicks") &&
+    !IS_HUMAN_CLICKS.test("Clickers") &&
+    IS_BARE_CLICKS.test("Clicks (all time)") &&
+    !IS_BARE_CLICKS.test("Human clicks") &&
+    !IS_BARE_CLICKS.test("Clickers"),
+  `denom: ${denomHeaders.map(([t, id, h]) => `${t}:${id}=${JSON.stringify(h ?? null)}`).join(", ")}` +
+    ` | bare-Clicks: ${bareClicks.map(([t, id, h]) => `${t}:${id}=${JSON.stringify(h)}`).join(", ") || "none"}` +
+    ` | human-on-clickers: ${humanOnVisits.map(([t, , h]) => `${t}=${JSON.stringify(h)}`).join(", ") || "none"}` +
+    ` | headers=${allHeaders.length} visitCols=${visitColsSeen.length}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

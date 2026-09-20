@@ -1084,14 +1084,17 @@ export default function CreativesPage() {
             <MetricCell
               value={m.epc_lifetime}
               format={formatEpc}
-              title={`All-time: ${numberFmt.format(m.clean_clicks_lifetime)} counted clickers. Shown for context — the list sorts by the 30-day figure.`}
+              title={`All-time: ${numberFmt.format(m.clean_clicks_lifetime)} human clicks. Shown for context — the list sorts by the 30-day figure.`}
             />
           );
         },
       },
       {
         id: "clean_clicks_lifetime",
-        header: "Clicks (all time)",
+        // "Human clicks", matching /reports and the Operator API's
+        // `clicks_human`: this is counted_clickers (deduplicated human-scored
+        // people), never Keitaro's landing-visit count. See V23.
+        header: "Human clicks (all time)",
         enableSorting: false,
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">

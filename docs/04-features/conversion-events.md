@@ -708,7 +708,7 @@ Purchases · Purchase rate · Purchase pending · Registration→Purchase %.
 per-event money columns of a `counts_revenue` type (Purchase $ · Purchase pending
 $ · Purchase EPC), each of which duplicates an aggregate column already on screen
 while exactly one revenue type exists. Everything the owner named is visible
-without the toggle: the aggregate `Revenue`, `Pending $` and `EPC (period)` /
+without the toggle: the aggregate `Revenue`, `Pending $` and `EPC` /
 `EPC (all time)` columns were already default-visible, and the generated counts
 and rates are tier A. The toggle is per-browser (`showEvents` in the persisted
 filters), off by default.
@@ -1404,6 +1404,41 @@ the registry and them.
   - a **`/reports/unmapped` drill-down**. The unmapped badge is per page, scoped
     to the range and filters, and **links nowhere**: there is no unmapped screen
     to link to. Give the badge an `href` the day one exists.
-  - **renaming `Clicks (period)` / `Clicks (all time)`** to match the
-    Operator-API's `clicks_human` alias. Not done here because a rename moves a
-    column every existing consumer and screenshot knows.
+  - **renaming `Clicks` / `Clicks (all time)`** to match the Operator-API's
+    `clicks_human` alias. Half of this moved on 2026-09-20 for a different
+    reason: the owner dropped the `(period)` suffix from `Clicks` and `EPC` on
+    both report tables ("the page has a date filter; the suffix is redundant").
+    The `clicks_human` alignment is still open, and there are now **two naming
+    collisions to weigh with it** — `Clicks` beside `Clicks (all time)` in the
+    all-columns view, and `Clicks` beside **`Clickers`** (a different metric) in
+    the default view. See [07-conventions.md](../07-conventions.md).
+  - **merging the two adjacent toggles on `/reports`.** The tab now carries
+    **Event breakdown** and **Show all columns** side by side in one control
+    row, and the owner wants them merged — *"card it, not now"* (2026-09-20).
+    **Current state.** Both are per-browser `usePersistedFilters` booleans on
+    the same `reports.performance` key, both default off, both change only what
+    is RENDERED, and each prints the count of columns it would add. They are
+    **not** duplicates: `Show all columns` governs the FIXED columns in the
+    roster above plus each event type's tier-A `rate` and `pending_n`;
+    `Event breakdown` governs each revenue-bearing type's tier-B MONEY columns
+    (`revenue`, `pending_revenue`, `epc`).
+    **Why there are two.** The breakdown toggle is not a column control that
+    happens to sit there — it is half of `EventColumnsBar`, which carries the
+    **unclassified (amber) badge** in the same component precisely so the money
+    split cannot be on screen while the count of conversions it fails to explain
+    is hidden. It is also the Overview tab's ONLY route to the money split, and
+    Overview has no curated view at all (`showAllColumns` is a literal `true`
+    there). Folding it into the column toggle would either delete that control
+    on Overview or leave it governing nothing and unmounting itself — which is
+    why tier B is exempt from `isDefaultViewEventColumn()` rather than merged.
+    **What merging would need,** in order: (1) a decision on what ONE control
+    means on Overview, where the curated view does not exist; (2) keeping the
+    unmapped badge mounted unconditionally and provably un-hideable — the bars
+    that pin that today (V1, V2, V9, X7) assert it across all FOUR toggle
+    states, so a single toggle re-states rather than removes that obligation;
+    (3) a migration path for the two persisted keys (`showEvents`,
+    `showAllColumns`) already in operators' browsers, since a merged control
+    reading neither would silently reset both; (4) one combined "(N more
+    columns)" count, which today is computed separately per control and
+    deliberately from LITERAL `true`/`false` rather than from the live flag.
+    Not started. No code was written for this.

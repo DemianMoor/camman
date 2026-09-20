@@ -1,6 +1,6 @@
 # Feature — EPC denominator (counted clickers)
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-20_
 
 ## 1. Purpose
 
@@ -193,7 +193,7 @@ Measured: sorting by lifetime instead would move rankings by a mean of **4.17 pl
 
 The lifetime column exists so an operator can **see** the full history and override deliberately. It is doing real work: **14 creatives read $0.00 over 30 days while carrying genuine lifetime revenue** — creative 23 shows $0.0000 on 108 recent clickers but **$0.5303 across 694 lifetime clickers**. The 30-day view writes those off entirely.
 
-The sorted column is labelled `EPC (30d) ↕` and the lifetime column is explicitly not sortable, so the ordering can never silently disagree with what is being read.
+The lifetime column is explicitly not sortable, so the ordering can never silently disagree with what is being read. ⚠️ The **picker** is what sorts by `EPC (30d)`; the `/creatives` LIST defaults to `created_at`. Its header carried a hand-drawn `↕` until 2026-09-20 asserting otherwise — removed, because `DataTable` draws the real indicator and the page's curated default view now reveals whichever column the sort is actually on ([07-conventions.md](../07-conventions.md)).
 
 Tracked: [offer report date dimension](https://app.clickup.com/t/869egyapn) — recommended *not now*.
 
@@ -240,9 +240,10 @@ by the same `counted_clickers` set this document defines.** There is no second
 denominator, no per-event click set, and no per-event rescue rule. `Registration
 rate` is `registrations ÷ counted clickers in the same window` — the identical
 divisor as `EPC` and `Sales CR`'s neighbours — and the report table's own header
-for that divisor reads `Clicks (period)`. (`clicks_human` is the Operator-API
-alias for the same number; §7 of [operator-api.md](../operator-api.md) says so.
-Phase 5 renamed nothing.)
+for that divisor reads `Clicks` (unsuffixed since 2026-09-20 — the page's date
+filter names the window; see [07-conventions.md](../07-conventions.md)).
+(`clicks_human` is the Operator-API alias for the same number; §7 of
+[operator-api.md](../operator-api.md) says so. The API name is unchanged.)
 
 **The consequence, stated rather than buried: `<Type> rate` can legitimately read
 more than 100%, and it is not clamped.**

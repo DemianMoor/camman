@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-20_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -91,7 +91,8 @@ set.
   - **Counts only — no rate, revenue or EPC per type here**, deliberately: this screen has no denominator picker and no range picker. That split belongs on `/reports`' `dimension=creative`, which has both.
   - **Both residuals ride with the counts.** `eventCountColumns()` returns the per-type columns AND the `Manual` and `unmapped` residual columns in ONE array — the caller never receives the two lists separately. A creative's `Sales` is `max(manual tally, tracker)` over its stages while the counts are tracker-only, so `Sales = Σ (is_purchase) counts + Manual + strays`; a row reading "Registrations 7 · Purchases 1" beside a Sales of 5 would under-explain itself without them. Each residual column appears only while some row on the page has a non-zero value for it.
   - **Adding an event type is rows in `event_types`, not a code change here.** If you find yourself editing a column array on this page to add one, something upstream has been broken — [scripts/test-reports-no-hardcoded-event-keys.ts](../../scripts/test-reports-no-hardcoded-event-keys.ts) is the gate that says so.
-  - ⚠️ **Width.** This table's "all columns fit without horizontal scrolling" property (2026-09-14, above) **no longer holds**: measured 2026-09-19 at 20 columns and `scrollWidth` 2207px (18 columns before). See the width decision in the Phase 5 STOP.
+  - ⚠️ **Width.** This table's "all columns fit without horizontal scrolling" property (2026-09-14, above) **no longer holds**: measured 2026-09-19 at 20 columns and `scrollWidth` 2207px (18 columns before). A curated default view (2026-09-20) brought the opening state back to 11 columns / **1160px** in a 1126px container, and dropping the hand-drawn `↕` from the `EPC (30d)` header took that to **1149px** — still **23px** over, and the `/reports` header rename does not reach this table at all (neither `Clicks` nor `EPC` is one of its columns). See the width decision in the Phase 5 STOP.
+  - **The default view reveals whichever column the list is SORTED by** (2026-09-20), because this table sorts server-side and the arrow has to be on the column the request named. It ships defaulting to `sortBy=created_at`, which is one of the ten held-back columns — so the opening state is **12 columns / 1242px (+116px)**, the curated 11 plus `Created` carrying its ▼. Sort by any visible column and `Created` drops back out (11 columns / 1149px). ⚠️ **This is the cost of an honest indicator, and there is a cheaper way out that is the owner's call, not a refactor:** if the list's DEFAULT sort moved to a column already in the curated view (`EPC (30d)` is the obvious one, and is what the creative *picker* already uses), the reveal would never fire in the default case and the 116px would go away — but it would change what the page ranks by, which is a send-behaviour decision. See [07-conventions.md](../07-conventions.md).
 
 ### Tracking IDs ([`lib/tracking-id.ts`](../../lib/tracking-id.ts), [`lib/tracking-id-format.ts`](../../lib/tracking-id-format.ts))
 Auto-generated, **immutable**, separate from `id` and `human_id`.

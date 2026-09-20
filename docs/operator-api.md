@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-20_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -735,8 +735,10 @@ Both are counts only. There is no endpoint on this list that returns a contact.
   revenue-bearing conversions only, so a registrant whose click was never scored
   human is in the numerator and not the denominator. Like `click_to_reach_pct`,
   the ratio is **not clamped**, and a zero denominator gives `null`, never `0`.
-  (The report tables head that column `Clicks (period)`; `clicks_human` is this
-  API's alias for the same number. Nothing was renamed.)
+  (The report tables head that column `Clicks` — unsuffixed since 2026-09-20,
+  because the page's own date filter names the window; `clicks_human` is this
+  API's alias for the same number. **The API field name is unchanged**: this was
+  a header rename on two screens, not a contract change.)
 
 ---
 

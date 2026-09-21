@@ -1279,7 +1279,7 @@
     {
       "idx": 182,
       "version": "7",
-      "when": 1792108800000,
+      "when": 1792195200000,
       "tag": "0182_conversion_reader_switch",
       "breakpoints": true
     },
@@ -1288,6 +1288,20 @@
       "version": "7",
       "when": 1792281600000,
       "tag": "0183_report_views_from_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 184,
+      "version": "7",
+      "when": 1792454400000,
+      "tag": "0184_registered_lane_tier",
+      "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
+      "when": 1792540800000,
+      "tag": "0185_stage_event_breakdown",
       "breakpoints": true
     }
   ]

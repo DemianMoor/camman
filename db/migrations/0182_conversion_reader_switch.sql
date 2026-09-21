@@ -14,7 +14,26 @@
 --
 -- Recon: docs/superpowers/specs/2026-09-17-multi-event-conversions-recon.md
 -- Plan:  docs/superpowers/plans/2026-09-17-conversion-events-phase3.md
+--
+-- Every statement below is re-runnable (both are IF NOT EXISTS, and SET LOCAL is
+-- scoped to the apply transaction). See docs/07-conventions.md.
 
+-- ⭐ THIS MIGRATION LEADS THE NEXT PRODUCTION BATCH, so this line protects the
+-- whole of it. Drizzle applies every pending migration in ONE transaction and
+-- `SET LOCAL` lasts for that transaction, so the FIRST pending migration's
+-- lock_timeout is the one that covers 0182–0185. Production sits at 0181, whose
+-- own `SET LOCAL` (it led the batch before this one) is long committed and
+-- protects nothing here.
+--
+-- ⚠️ THE RISK IS QUEUEING, NOT DURATION. The ALTER below is milliseconds — PG 11+
+-- stores an ADD COLUMN … DEFAULT in the catalog (`atthasmissing`), so there is no
+-- table rewrite at ~17,600 rows. But ACCESS EXCLUSIVE on keitaro_stage_results
+-- blocks every reader and writer of it behind whatever already holds a
+-- conflicting lock, and /api/keitaro/poll allows maxDuration = 230: an unlucky
+-- apply stalls the table for MINUTES. A bounded wait fails the migration instead;
+-- just retry.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
 ALTER TABLE public.keitaro_stage_results
   ADD COLUMN IF NOT EXISTS pending_revenue numeric(12, 4) NOT NULL DEFAULT 0;
 --> statement-breakpoint

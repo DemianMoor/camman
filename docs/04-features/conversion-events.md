@@ -1382,6 +1382,147 @@ yourself editing a column array to add one, something upstream has been broken.*
 is the gate that says so, over all four rendering surfaces and everything between
 the registry and them.
 
+## Not yet exercised live — watch the first two-event network
+
+The registration → purchase chain on a **real recipient** — one recipient
+registers, the same recipient later buys, the ledger holds both rows, the lane
+moves them out — has been proven **only by fixtures and red-proofs**. Every live
+test so far was a self-generated click with no recipient, and the Psycho Book
+offer that would have exercised it is **paused (2026-09-21)**. So the first
+network onboarded that posts two events must be watched for its **first week**,
+with the three queries below. All three are **read-only**; run them in a
+`READ ONLY` transaction.
+
+**(1) Unmapped conversions, by (offer, Keitaro type, status).** These are the
+rows the `unmapped` (`status IS NULL`) and `status_only_unmapped` (a status but no
+event type) Telegram alerts key on — see `UNMAPPED_WHERE` / `STATUS_ONLY_WHERE` in
+[lib/conversions/monitor.ts](../../lib/conversions/monitor.ts). Every row here is
+a conversion counted as nothing until a `conversion_event_mappings` row covers
+its combo. A new network's second event type shows up here first. (The stage-day
+`unmapped_conversions` column is deliberately broader: it also counts a
+conversion carrying another org's `event_type_id`, which these alerts cannot see.)
+
+```sql
+SELECT CASE WHEN ce.status IS NULL THEN 'unmapped'
+            ELSE 'status_only_unmapped' END                      AS alert_kind,
+       ce.org_id,
+       ce.offer_id,
+       o.name                                                     AS offer_name,
+       CASE WHEN ce.offer_id IS NULL THEN ce.keitaro_offer_id END AS keitaro_offer_id,
+       ce.keitaro_type,
+       ce.status,
+       array_agg(DISTINCT ce.keitaro_status)                      AS keitaro_statuses,
+       count(*)                                                   AS conversions,
+       count(DISTINCT ce.contact_id)                              AS recipients,
+       count(*) FILTER (WHERE ce.created_at >= now() - interval '24 hours') AS last_24h,
+       min(ce.occurred_at)                                        AS first_occurred_at,
+       max(ce.updated_at)                                         AS last_changed_at
+FROM conversion_events ce
+LEFT JOIN offers o ON o.id = ce.offer_id
+WHERE ce.event_type_id IS NULL OR ce.status IS NULL
+GROUP BY 1, 2, 3, 4, 5, 6, 7
+ORDER BY last_changed_at DESC;
+```
+
+**(2) Per recipient, for the watched offer: who registered, who later bought,
+and whether the lane moved each buyer out.** Set the offer id in `params`. The
+event-type flags are read the way [lib/campaign-tier.ts](../../lib/campaign-tier.ts)
+reads them (`PURCHASE_EVENT_TYPE_IDS` / `RETARGET_EVENT_TYPE_IDS`), so
+`ledger_tier` is the tier the ledger gives that recipient on that campaign:
+**4 = Purchased, the exit**; 3 = Registered (a registration and no purchase of
+any known status); NULL = the click / offer-reach tier (0–2) decides. A buyer
+reads 4 by construction (MAX ranks Purchased above everything), so the column
+that can actually fail is **`lane_rows_after_purchase`, which must be 0**: it
+counts rows put into a lane stage (`behavioral_tier IS NOT NULL`) of the same
+campaign AFTER the ledger learned of the purchase (`purchase_known_at` = the
+ledger row's `created_at`). A lane row created BEFORE that moment is the
+documented materialization freeze, not a failure, and is not counted.
+
+```sql
+WITH params AS (
+  SELECT 0::int AS offer_id                  -- ← the offer being watched
+),
+per_recipient AS (
+  SELECT ce.org_id, ce.campaign_id, ce.contact_id,
+         count(*)            FILTER (WHERE et.is_retarget_signal AND ce.status IN ('pending', 'approved')) AS registrations,
+         min(ce.occurred_at) FILTER (WHERE et.is_retarget_signal AND ce.status IN ('pending', 'approved')) AS first_registered_at,
+         count(*)            FILTER (WHERE et.is_purchase AND ce.status IN ('pending', 'approved'))        AS purchases,
+         min(ce.occurred_at) FILTER (WHERE et.is_purchase AND ce.status IN ('pending', 'approved'))        AS first_purchased_at,
+         min(ce.created_at)  FILTER (WHERE et.is_purchase AND ce.status IN ('pending', 'approved'))        AS purchase_known_at,
+         count(*)            FILTER (WHERE et.is_purchase AND ce.status = 'rejected')                      AS rejected_purchases,
+         count(*)            FILTER (WHERE et.is_purchase AND ce.status IS NOT NULL)                       AS purchases_any_known_status
+  FROM conversion_events ce
+  JOIN params p ON p.offer_id = ce.offer_id
+  JOIN event_types et ON et.id = ce.event_type_id
+  WHERE ce.contact_id IS NOT NULL
+    AND ce.campaign_id IS NOT NULL
+  GROUP BY 1, 2, 3
+)
+SELECT r.*,
+       (r.registrations > 0 AND r.purchases > 0
+         AND r.first_purchased_at >= r.first_registered_at)   AS registered_then_bought,
+       CASE WHEN r.purchases > 0 THEN 4
+            WHEN r.registrations > 0 AND r.purchases_any_known_status = 0 THEN 3
+       END                                                     AS ledger_tier,
+       (SELECT count(*)
+          FROM stage_sends ss
+          JOIN campaign_stages cs ON cs.id = ss.stage_id
+         WHERE ss.org_id = r.org_id
+           AND ss.campaign_id = r.campaign_id
+           AND ss.contact_id = r.contact_id
+           AND cs.behavioral_tier IS NOT NULL
+           AND ss.created_at > r.purchase_known_at)            AS lane_rows_after_purchase
+FROM per_recipient r
+ORDER BY registered_then_bought DESC, r.first_registered_at NULLS LAST, r.contact_id;
+```
+
+**(3) The stage-day residual: `sales` vs Σ `events[key].n` over `is_purchase`
+types.** A `keitaro_stage_results` row never carries the manual tally (that lives
+on `campaign_stages.sales_count`), so at this grain the only documented residual
+is `strays` — a conversion carrying another org's `event_type_id`, counted by the
+`sales` scalar and placed under no key — and every stray is also in
+`unmapped_conversions` (see ⭐ **The residual rule** above).
+So every row must satisfy `0 ≤ sales − Σ n ≤ unmapped_conversions`, which the
+query prints as `verdict = 'ok'`. Anything else sorts to the top. One benign
+cause: an event type's `is_purchase` was changed after the projection last wrote
+that row (this query reads today's registry). Both jsonb levels are guarded, so a
+malformed row is reported, not fatal to the whole statement.
+
+```sql
+WITH stage_days AS (
+  SELECT k.org_id, k.stage_id, k.stat_date, k.sales, k.unmapped_conversions,
+         jsonb_typeof(k.events) AS events_shape,
+         CASE WHEN jsonb_typeof(k.events) = 'object' THEN (
+           SELECT coalesce(sum(CASE WHEN jsonb_typeof(e.value -> 'n') = 'number'
+                                    THEN (e.value ->> 'n')::numeric END), 0)
+           FROM jsonb_each(k.events) e
+           JOIN event_types et ON et.org_id = k.org_id AND et.key = e.key
+           WHERE et.is_purchase
+         ) END AS purchase_n
+  FROM keitaro_stage_results k
+  WHERE k.stat_date >= (now() AT TIME ZONE 'America/New_York')::date - 14
+    AND (k.sales <> 0 OR k.events <> '{}'::jsonb OR k.unmapped_conversions <> 0)
+)
+SELECT d.*,
+       d.sales - d.purchase_n AS residual,
+       CASE WHEN d.purchase_n IS NULL THEN 'MALFORMED: events is not an object'
+            WHEN d.sales - d.purchase_n BETWEEN 0 AND d.unmapped_conversions THEN 'ok'
+            ELSE 'OUTSIDE the documented residual'
+       END AS verdict
+FROM stage_days d
+ORDER BY (d.sales - d.purchase_n BETWEEN 0 AND d.unmapped_conversions) NULLS FIRST,
+         d.stat_date DESC, d.stage_id;
+```
+
+Proven on camman-v2, 2026-09-21: each query parses and returns inside a
+`READ ONLY` transaction (0 rows; the preview ledger is empty). Against a
+rolled-back fixture pushed through the real `syncStageDayConversions` (X registers
+then buys, Y only registers, plus one unmapped, one status-only and one cross-org
+stray) they returned 2, 2 and 3 rows: both unmapped combos and not the stray;
+X at tier 4 and Y at tier 3, with a lane row seeded after X's purchase counted;
+the real stage-day `ok` (`sales` 2 = 1 purchase + 1 stray, `unmapped_conversions`
+3), and two hand-broken stage-days reported `OUTSIDE` and `MALFORMED`.
+
 ## Not built yet
 
 - **Phase 5 is built through Task 9.** The generator, the storage, the projection,

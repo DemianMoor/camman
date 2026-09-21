@@ -1,6 +1,6 @@
 # Feature — EPC denominator (counted clickers)
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-20_
 
 ## 1. Purpose
 
@@ -193,7 +193,7 @@ Measured: sorting by lifetime instead would move rankings by a mean of **4.17 pl
 
 The lifetime column exists so an operator can **see** the full history and override deliberately. It is doing real work: **14 creatives read $0.00 over 30 days while carrying genuine lifetime revenue** — creative 23 shows $0.0000 on 108 recent clickers but **$0.5303 across 694 lifetime clickers**. The 30-day view writes those off entirely.
 
-The sorted column is labelled `EPC (30d) ↕` and the lifetime column is explicitly not sortable, so the ordering can never silently disagree with what is being read.
+The lifetime column is explicitly not sortable, so the ordering can never silently disagree with what is being read. The **picker** has always sorted by `EPC (30d)`, and since 2026-09-20 **the `/creatives` LIST opens on it too** (`DEFAULT_FILTERS.sortBy = "epc"`, descending, NULLS LAST — it used to be `created_at`). ⚠️ Its header carried a hand-drawn `↕` until 2026-09-20 asserting the picker's rule on a page that did not follow it; the glyph was removed and **must not return now that the claim happens to be true** — `DataTable` draws the real indicator, and a literal stops reporting the moment the operator sorts by something else. The curated default view also reveals whichever column the sort is actually on, which is what covers a browser whose persisted `sortBy` is still `created_at` ([07-conventions.md](../07-conventions.md)).
 
 Tracked: [offer report date dimension](https://app.clickup.com/t/869egyapn) — recommended *not now*.
 
@@ -232,6 +232,57 @@ A NULL watermark counts as stale: never-run and stopped-running need the same at
 | [`verify-epc-monitors.ts`](../../scripts/verify-epc-monitors.ts) | every threshold fires on synthetic series; heartbeats detect never-run |
 
 ⚠️ Run these on a pool with **more than one connection**. `getExcludedClickerConversion` holds a transaction; concurrent monitors on a `max:1` pool deadlock behind it.
+
+## 9b. ⭐ Phase 5 adds NO denominator — and that is why a rate can exceed 100%
+
+**Every per-event rate and every per-event EPC that Phase 5 put on a screen divides
+by the same `counted_clickers` set this document defines.** There is no second
+denominator, no per-event click set, and no per-event rescue rule. `Registration
+rate` is `registrations ÷ counted clickers in the same window` — the identical
+divisor as `EPC` and `Sales CR`'s neighbours — and the report table's own header
+for that divisor reads **`Human clicks`** (renamed 2026-09-20 to match the
+Operator API's `clicks_human`, and unsuffixed because the page's date filter
+names the window; `/creatives` heads its lifetime one `Human clicks (all time)` —
+see [07-conventions.md](../07-conventions.md)). §7 of
+[operator-api.md](../operator-api.md) says so too. **The API field names are
+unchanged** — this was a header rename on three screens, not a contract change.
+⚠️ **`Landing visits`, four columns to its left, is NOT this set** and never
+carries the word "human": it is `visit_clicks_clean`, the tracker's bot-filtered
+landing-VISIT count, display-only. (It was headed `Clickers` until 2026-09-20 —
+a people-word over a visit count, which is exactly why it was renamed; the field
+is still `clickers`.) Bar V23 in
+[scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts)
+holds both halves.
+
+**The consequence, stated rather than buried: `<Type> rate` can legitimately read
+more than 100%, and it is not clamped.**
+
+Rule F — the rescue that pulls a recipient into the denominator when the click
+scorer never scored their click — is `rescueSendIds()` in
+[lib/sale-attribution.ts](../../lib/sale-attribution.ts), and its predicate is
+
+```sql
+ce.event_type_id IN (purchase types) OR ce.event_type_id IN (revenue-bearing types)
+```
+
+i.e. **purchase- or revenue-bearing conversions only**. A registration earns no
+money and is neither, so it does not trigger the rescue. A registrant whose click
+was never scored human is therefore counted in the rate's **numerator** (the event
+happened, the ledger has it) and absent from its **denominator** (no rescue, no
+human-scored click). With enough of those in one window the ratio passes 1.
+
+This is a real number, not a bug, and the screens say so: the ratio renders as
+measured, uncapped, and `—` rather than `0.0%` over a zero denominator.
+
+**The alternative that was NOT taken, and why it is a separate card.** The fix is
+to widen Rule F by adding `registeredClause` to `rescueSendIds` — one disjunct.
+It was rejected here because it is not a Phase 5-shaped change: widening the
+rescue adds recipients to `counted_clickers` **globally**, which enlarges the
+denominator of every EPC, RPM and rate on the platform — the dashboard, the offer
+report, the partner report and every historical comparison — for a reason that has
+nothing to do with the screen being fixed. **It would lower every EPC in the
+product.** That is a decision with its own before/after measurement and its own
+gate, not a line in a reporting-columns phase.
 
 ## 10. The unscored-click inflation (fixed 2026-08-27)
 

@@ -246,6 +246,43 @@ consecutive stamps written by the real 05:00 UTC run, not estimates):
 
 The group refresh was **12.5s from the wall**.
 
+Where the 120s comes from, read back on prod 2026-09-21: `statement_timeout =
+120000 ms`, `source = configuration file`, `sourcefile =
+/etc/postgresql-custom/platform-defaults.conf:6`, `reset_val = 120000` — a
+Supabase **cluster** default. `pg_db_role_setting` has **no**
+`statement_timeout` entry for the `postgres` role (only `anon` 3s,
+`authenticated`/`authenticator` 8s). `offer_report_org_summary_mv` refreshes
+first and has no predecessor stamp, so its duration cannot be recovered from
+`report_refresh_log` this way.
+
+### Migration 0183 is not what costs — measured
+
+The 107.5s above is **pre-0183** and the condition is **pre-existing**, not
+something 0183 creates. Measured read-only on prod 2026-09-21 at the cluster's
+default settings, both definitions' SELECTs under `EXPLAIN (ANALYZE, BUFFERS)`:
+
+| defining SELECT | run 1 | run 2 | run 3 | avg |
+| --- | --- | --- | --- | --- |
+| `offer_group_report_mv` **installed (pre-0183)**, via `pg_get_viewdef` | 109.6s | 111.8s | 113.2s | 111.5s |
+| `offer_group_report_mv` **new (0183, over `conversion_events`)** | 112.1s | 111.2s | 114.8s | 112.7s |
+
+**0183 costs ~+1.2s on a ~112s query — inside run-to-run variance.** The ledger
+CTE aggregates ~1,500 indexed rows; what dominates is the sort described below.
+The variance is real, though: one of four measurements of the new SELECT at the
+default settings came in at **120.1s**, past the old wall.
+
+⭐ **`CONCURRENTLY`'s overhead is in the noise here, and that is measurable
+rather than assumed:** the installed definition's own SELECT measures 111.5s
+under `EXPLAIN ANALYZE` while the real `CONCURRENTLY` refresh of that same
+definition took **107.5s** — i.e. `EXPLAIN ANALYZE`'s per-node timing overhead
+exceeds the extra work `CONCURRENTLY` does. That holds because these matviews
+are tiny (56–96 kB, a few hundred rows): the transient copy, the unique-index
+build and the `FULL OUTER JOIN` diff are trivial next to a 112s scan. Do not
+carry forward the older guidance that "the real refresh costs MORE" than the
+SELECT — for *this* family it does not, so an `EXPLAIN ANALYZE` of a defining
+SELECT is a slight OVER-estimate of its refresh. The anchor for that comparison
+is the cron's own `report_refresh_log` stamp.
+
 ### Why a session-mode connection
 
 The root cause is one sort node. At the cluster's `work_mem = 5120kB`, read-only
@@ -253,7 +290,9 @@ The root cause is one sort node. At the cluster's `work_mem = 5120kB`, read-only
 reports `Sort Method: external merge  Disk: ~128MB` in both the leader and its
 parallel worker, while every other sort in the plan is an in-memory quicksort of
 a few MB. Given room, that node becomes `Sort Method: quicksort  Memory:
-~236–256MB` and **no sort in the plan spills** (0 of 13, every run).
+~236–256MB` and **no sort in the plan spills** (0 of 13, every run). An
+earlier read-only run the same day recorded the spill as `Sort Space Used:
+170160 kB`; the size varies by run, the spill does not.
 
 Measured read-only on production, 2026-09-21, each run inside a rolled-back
 `READ ONLY` transaction. Paired A/B (the two settings alternated so drifting
@@ -435,6 +474,35 @@ pin rows or foot a table; justified by the small per-offer row count).
   basis instead, so the count and money columns do not add up to the offer
   total — a contact in several groups is one send on the offer row and one
   send in each of their groups.
+
+## ⚠️ Phase 5's per-event split is deliberately NOT here — and these numbers are NOT wrong
+
+Conversion Events Phase 5 (2026-09-19) put a per-event-type breakdown on both
+report tables, the campaign page, `/creatives` and the Telegram report. **This
+screen was left out on purpose**, and a reader needs to conclude neither that it
+was forgotten nor that these figures are miscounting. Both, separately:
+
+**1 — Why it is out of scope.** The columns on the other surfaces are *generated*
+from the `event_types` registry: one per type, discovered at request time. A
+materialized view's column list is fixed at `CREATE`, so the registry cannot drive
+it. Adding the split means a migration recreating all three matviews behind this
+report — `offer_group_report_mv`, `offer_report_offer_totals_mv` and
+`audience_report_group_totals_mv`, three different unique indexes at three
+different grains (offer × group, offer, and group), all-time — **plus a fourth in
+the family that migration 0183 does not touch**, `offer_report_org_summary_mv`,
+the org benchmark row pinned at the top of both this screen and
+[Audience Stats](audience-report.md). 0183 had only just recreated the first
+three. The intended follow-up is one `jsonb_object_agg(et.key, …)` `events` column
+across **all four**, done once rather than four times.
+
+**2 — The numbers here are correct, not stale.** Every `conv` CTE behind these
+matviews filters the ledger on `is_purchase` / `counts_revenue`
+(`db/migrations/0183_report_views_from_ledger.sql` — the same predicate family the
+scalars everywhere else use). A registration is neither, so a PsychoBook
+registration contributes **$0** to Sales, Revenue, EPC, RPM and Net profit here —
+and **$0 to this report's CSV export**, which keeps its current columns. The split
+is **invisible** on this screen, not miscounted. Nothing here counts a
+registration as a sale, and nothing here is waiting for a backfill.
 
 ## Files involved
 

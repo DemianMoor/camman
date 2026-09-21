@@ -10,6 +10,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { db } from "../db/client";
 import { requirePreviewDb } from "./_require-preview-db";
 import { seedConversionEvent } from "./_conversion-fixture";
+import { CAMPAIGN_TIMEZONE } from "../lib/campaign-timezone";
 import { decideProjectionAlert, projectionOutcomeFor } from "../lib/conversions/monitor";
 import {
   MAX_CHANGED_STAGE_IDS,
@@ -18,11 +19,19 @@ import {
   advanceProjectionWatermark,
   discoverChangedLedgerStages,
   readProjectionCoverage,
+  readStageDayResyncDiff,
   runStageDayProjection,
   syncStageDayConversions,
   type DbOrTx,
+  type StageDayResyncDiff,
 } from "../lib/keitaro/stage-day-conversions";
-import { approvedRevenueClause, purchasedClause, rescueSendIds } from "../lib/sale-attribution";
+import { parseEventMap } from "../lib/reporting/event-columns";
+import {
+  approvedRevenueClause,
+  pendingRevenueClause,
+  purchasedClause,
+  rescueSendIds,
+} from "../lib/sale-attribution";
 
 // The stage-day projection, run through the REAL exported functions inside a
 // transaction that ALWAYS rolls back. PREVIEW DB ONLY:
@@ -31,6 +40,31 @@ import { approvedRevenueClause, purchasedClause, rescueSendIds } from "../lib/sa
 // The ./_require-preview-db import above is the refusal: an ALLOWLIST, so it
 // also stops a raw IP, a pooler alias or a future prod project, which a re-typed
 // "does the URL contain the prod ref?" test would wave straight through.
+
+// The projection's filter constants are module-PRIVATE, so the independent
+// recomputation is built from the shared CLAUSES instead, and writes the
+// checkout test itself. That is deliberate: the two sides must not be the same
+// object, or the comparison proves nothing.
+const SALES_FILTER = purchasedClause();
+const REVENUE_FILTER = approvedRevenueClause();
+const PENDING_REVENUE_FILTER = pendingRevenueClause();
+const CHECKOUT_FILTER = sql`ce.keitaro_type = 'lead'`;
+
+// Read from the REGISTRY, not written down — the same rule the columns follow,
+// and the whole reason the `deposit` fixture exists. Re-read at each call site
+// rather than cached once: `deposit` is seeded mid-transaction, so one snapshot
+// would be right for the bar before it and stale for the bar after.
+async function purchaseKeys(dbc: DbOrTx, orgId: string): Promise<Set<string>> {
+  const rows = (await dbc.execute(sql`
+    SELECT key FROM event_types WHERE org_id = ${orgId}::uuid AND is_purchase
+  `)) as unknown as { key: string }[];
+  return new Set(rows.map((r) => r.key));
+}
+
+/** One event type's entry inside `keitaro_stage_results.events`, as it arrives through `::text`. */
+type Tally = { n: number; pending_n: number; revenue: number | string; pending_revenue: number | string };
+/** A key the projection never wrote is genuinely absent — never an all-zero entry. */
+type EvMap = Record<string, Tally | undefined>;
 
 let passed = 0;
 let failed = 0;
@@ -216,6 +250,7 @@ async function main() {
         (await tx.execute(sql`
           SELECT stat_date::text AS stat_date, visit_clicks_clean, checkouts, sales,
                  revenue::text AS revenue, pending_revenue::text AS pending_revenue,
+                 events::text AS events, unmapped_conversions AS unmapped_conversions,
                  payout_at_conversion::text AS payout, stage_tracking_id
           FROM keitaro_stage_results WHERE stage_id = ${stageId}::int ORDER BY stat_date
         `)) as unknown as {
@@ -225,6 +260,8 @@ async function main() {
           sales: number;
           revenue: string;
           pending_revenue: string;
+          events: string;
+          unmapped_conversions: number;
           payout: string | null;
           stage_tracking_id: string;
         }[];
@@ -234,6 +271,7 @@ async function main() {
         (await dbc.execute(sql`
           SELECT stage_id, stat_date::text AS stat_date, visit_clicks_clean, checkouts, sales,
                  revenue::text AS revenue, pending_revenue::text AS pending_revenue,
+                 events::text AS events, unmapped_conversions AS unmapped_conversions,
                  payout_at_conversion::text AS payout
           FROM keitaro_stage_results ORDER BY stage_id, stat_date
         `)) as unknown as unknown[];
@@ -473,7 +511,9 @@ async function main() {
       const payoutRun = await syncStageDayConversions(tx, { stageIds: [stageA] });
       const d14Payout = (await read(stageA)).find((r) => r.stat_date === LATE)!;
       check(
-        "P1 ⭐ a row that differs only in payout IS rewritten, and nothing else about it moves",
+        // Renumbered from P1: Phase 5 opened a second P-series in this file and
+        // "FAIL P1" no longer named one bar. A9a belongs to the A9 section above it.
+        "A9a ⭐ a row that differs only in payout IS rewritten, and nothing else about it moves",
         payoutRun.rowsWritten === 1 &&
           payoutRun.rowsZeroed === 0 &&
           Math.abs(Number(d14Payout.payout) - 350 / 3) < 0.001 &&
@@ -689,6 +729,7 @@ async function main() {
             (await tx2.execute(sql`
               SELECT stat_date::text AS stat_date, visit_clicks_clean, checkouts, sales,
                      revenue::text AS revenue, pending_revenue::text AS pending_revenue,
+                     events::text AS events, unmapped_conversions AS unmapped_conversions,
                      payout_at_conversion::text AS payout, stage_tracking_id
               FROM keitaro_stage_results WHERE stage_id = ${stageA}::int ORDER BY stat_date
             `)) as unknown as unknown[],
@@ -923,6 +964,599 @@ async function main() {
         "PB4 ⭐ campaign_stages.checkout_click_count follows, and holds across both runs",
         gMirror1.checkout_click_count === 2 && gMirror2.checkout_click_count === 2,
         JSON.stringify({ gMirror1, gMirror2 }),
+      );
+
+      // ── Phase 5: the per-event block ──────────────────────────────────────
+      // Every fixture below lands on its OWN stat_date so one shape can never be
+      // read through another. Dates are set explicitly because seedConversionEvent
+      // stamps now().
+      //
+      // ⚠️ THE ROW LOOKUPS BELOW ARE OPTIONAL, NOT `!`. A mutation these bars exist
+      // to catch (an inner join in place of the LEFT JOIN) makes a whole stage-day
+      // row disappear, and a `!` would turn that into a TypeError — a crash proves
+      // nothing. Undefined has to reach `check()` as a FAILED assertion.
+      console.log("\nPhase 5 — the per-event breakdown (`events` / `unmapped_conversions`)");
+      const day = async (id: number, d: string) => {
+        await tx.execute(sql`
+          UPDATE conversion_events
+          SET occurred_at = (${d}::text || ' 12:00:00 America/New_York')::timestamptz
+          WHERE id = ${id}::bigint
+        `);
+      };
+      type StoredRow = Awaited<ReturnType<typeof read>>[number];
+      const dayRow = async (d: string): Promise<StoredRow | undefined> =>
+        (await read(stageA)).find((r) => r.stat_date === d);
+      const evOf = (r: StoredRow | undefined): EvMap => (r ? (JSON.parse(r.events) as EvMap) : {});
+      const sumField = (m: EvMap, f: "revenue" | "pending_revenue") =>
+        Object.values(m).reduce((s, v) => s + Number(v?.[f] ?? 0), 0);
+
+      // regonly — a $0 registration, alone on 2026-09-20.
+      await day(
+        await seedConversionEvent(tx, { orgId, campaignId: camp, stageId: stageA, eventKey: "registration", status: "approved", revenue: 0 }),
+        "2026-09-20",
+      );
+      await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const reg = await dayRow("2026-09-20");
+      const regEv = evOf(reg);
+      check("P1 ⭐ a registration produces an `events` entry under its own key", regEv.registration?.n === 1, reg?.events ?? "no row");
+      check("P2 ⭐ a registration is NOT a sale", reg?.sales === 0, JSON.stringify(reg));
+      check("P3 ⭐ a registration carries NO revenue (its type is not counts_revenue)", Number(regEv.registration?.revenue ?? -1) === 0, reg?.events ?? "no row");
+      check("P4 the registration stage-day has no unmapped rows", reg?.unmapped_conversions === 0, String(reg?.unmapped_conversions));
+      check("P5 ⭐ no purchase key was invented for a registration-only day", reg !== undefined && regEv.purchase === undefined, reg?.events ?? "no row");
+
+      // regonly_zeroing — re-project with NOTHING changed.
+      await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const reg2 = await dayRow("2026-09-20");
+      check(
+        "P6 ⭐ re-projecting a REGISTRATION-ONLY day does not wipe its breakdown (the widened zeroing anti-join)",
+        evOf(reg2).registration !== undefined,
+        reg2?.events ?? "no row",
+      );
+
+      // purchonly / pendpurch / rejpurch — EACH ALONE on its own stat_date, so a
+      // bar can be satisfied only by that one shape being placed correctly.
+      for (const [status, revenue, date] of [
+        ["approved", 80, "2026-09-21"],
+        ["pending", 60, "2026-09-25"],
+        ["rejected", 99, "2026-09-26"],
+      ] as const) {
+        await day(
+          await seedConversionEvent(tx, { orgId, campaignId: camp, stageId: stageA, eventKey: "purchase", status, revenue }),
+          date,
+        );
+      }
+      await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const p1 = await dayRow("2026-09-21");
+      const p1ev = evOf(p1);
+      check(
+        "P7a ⭐ an approved purchase ALONE: n=1, no pending, $80 revenue",
+        p1ev.purchase?.n === 1 && p1ev.purchase.pending_n === 0 && Number(p1ev.purchase.revenue) === 80 && Number(p1ev.purchase.pending_revenue) === 0,
+        p1?.events ?? "no row",
+      );
+      const p2 = await dayRow("2026-09-25");
+      const p2ev = evOf(p2);
+      check(
+        "P7b ⭐ a PENDING purchase ALONE is counted (n=1) and its money is pending only",
+        p2ev.purchase?.n === 1 && p2ev.purchase.pending_n === 1 && Number(p2ev.purchase.revenue) === 0 && Number(p2ev.purchase.pending_revenue) === 60,
+        p2?.events ?? "no row",
+      );
+      const p3 = await dayRow("2026-09-26");
+      check(
+        "P7c ⭐ a REJECTED purchase ALONE produces an EMPTY events object and $0 everywhere",
+        p3?.events === "{}" && p3.sales === 0 && Number(p3.revenue) === 0 && Number(p3.pending_revenue) === 0,
+        JSON.stringify(p3),
+      );
+
+      // mixedday — the ONE day where all three statuses share an entry, which is
+      // where the subset/exclusion arithmetic is worth asserting together.
+      for (const [status, revenue] of [["approved", 80], ["pending", 60], ["rejected", 99]] as const) {
+        await day(
+          await seedConversionEvent(tx, { orgId, campaignId: camp, stageId: stageA, eventKey: "purchase", status, revenue }),
+          "2026-09-27",
+        );
+      }
+      await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const pur = await dayRow("2026-09-27");
+      const purEv = evOf(pur);
+      check("P7 ⭐ counted purchases are approved + pending, never rejected", purEv.purchase?.n === 2, pur?.events ?? "no row");
+      check("P8 ⭐ pending_n is the pending SUBSET of n, not a sibling count", purEv.purchase?.pending_n === 1, pur?.events ?? "no row");
+      check("P9 ⭐ per-event revenue is APPROVED only", Number(purEv.purchase?.revenue) === 80, pur?.events ?? "no row");
+      check("P10 ⭐ the held payout is in pending_revenue, on its own", Number(purEv.purchase?.pending_revenue) === 60, pur?.events ?? "no row");
+      check(
+        "P11 ⭐ the rejected $99 is in NO field of the entry",
+        Number(purEv.purchase?.revenue) + Number(purEv.purchase?.pending_revenue) === 140,
+        pur?.events ?? "no row",
+      );
+
+      // ⭐ THE FOOTING BARS. `sales`/`revenue`/`pending_revenue` come from
+      // SALES_FILTER / REVENUE_FILTER / PENDING_REVENUE_FILTER; the object's
+      // fields come from countedClause + the event_types join. Two different
+      // expressions in the same statement, asserted equal — so a change to the
+      // shared clauses that does not reach the per-event side goes RED here.
+      const sumN = (e: EvMap, pred: (k: string) => boolean) =>
+        Object.entries(e).filter(([k]) => pred(k)).reduce((s, [, v]) => s + (v?.n ?? 0), 0);
+      // ⭐ THE KEY SET COMES FROM THE REGISTRY, NOT FROM THIS FILE. It used to read
+      // `k === "purchase"`, which is the one thing the deposit3 fixture exists to
+      // forbid: a footing bar that only foots for the key the author happened to
+      // seed. An empty set would make this red rather than vacuous (the day's
+      // sales is 2), and `size > 0` says so out loud.
+      const purKeys = await purchaseKeys(tx, orgId);
+      check(
+        "P12 ⭐ sales = Σ n over is_purchase types, the set read from the REGISTRY",
+        purKeys.size > 0 && pur?.sales === sumN(purEv, (k) => purKeys.has(k)),
+        `${pur?.sales} vs ${sumN(purEv, (k) => purKeys.has(k))} over keys [${[...purKeys].join(",")}]`,
+      );
+      check(
+        "P13 ⭐ revenue = Σ per-event revenue",
+        Math.abs(Number(pur?.revenue) - sumField(purEv, "revenue")) < 1e-6,
+        `${pur?.revenue} vs ${JSON.stringify(purEv)}`,
+      );
+      check(
+        "P14 ⭐ pending_revenue = Σ per-event pending_revenue",
+        Math.abs(Number(pur?.pending_revenue) - sumField(purEv, "pending_revenue")) < 1e-6,
+        `${pur?.pending_revenue} vs ${JSON.stringify(purEv)}`,
+      );
+
+      // The three unmapped shapes, EACH ON ITS OWN DAY.
+      await day(await seedConversionEvent(tx, { orgId, campaignId: camp, stageId: stageA }), "2026-09-22");
+      await day(await seedConversionEvent(tx, { orgId, campaignId: camp, stageId: stageA, status: "approved" }), "2026-09-28");
+      const purchaseTypeId = (
+        (await tx.execute(sql`SELECT id FROM event_types WHERE org_id = ${orgId}::uuid AND key = 'purchase'`)) as unknown as { id: number }[]
+      )[0].id;
+      const statusNullId = (
+        (await tx.execute(sql`
+          INSERT INTO conversion_events
+            (org_id, keitaro_event_id, keitaro_status, keitaro_type, event_type_id, status, revenue,
+             occurred_at, campaign_id, stage_id)
+          VALUES (${orgId}::uuid, ${"p5-statusnull-" + Date.now()}, 'lead', 'lead', ${purchaseTypeId}::int, NULL, 55,
+                  now(), ${camp}::int, ${stageA}::int)
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      await day(statusNullId, "2026-09-29");
+
+      // ⭐ foreign_type — the shape C-3 is about, and the one no other fixture can
+      // reach: a ledger row in THIS org carrying ANOTHER org's event_type_id.
+      // conversion_events.event_type_id has a plain FK to event_types(id) with no
+      // composite (id, org_id), so this is representable, and
+      // PURCHASE_EVENT_TYPE_IDS (lib/sale-attribution.ts) is not org-scoped, so
+      // SALES_FILTER counts it while the org-scoped join cannot place it.
+      const orgB = (
+        (await tx.execute(sql`
+          INSERT INTO organizations (name) VALUES (${"p5-orgB-" + Date.now()}) RETURNING id::text AS id
+        `)) as unknown as { id: string }[]
+      )[0].id;
+      const foreignTypeId = (
+        (await tx.execute(sql`
+          INSERT INTO event_types (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal)
+          VALUES (${orgB}::uuid, 'purchase', 'Purchase', 10, true, true, false)
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      const foreignId = (
+        (await tx.execute(sql`
+          INSERT INTO conversion_events
+            (org_id, keitaro_event_id, keitaro_status, keitaro_type, event_type_id, status, revenue,
+             occurred_at, campaign_id, stage_id)
+          VALUES (${orgId}::uuid, ${"p5-foreign-" + Date.now()}, 'sale', 'sale', ${foreignTypeId}::int, 'approved', 70,
+                  now(), ${camp}::int, ${stageA}::int)
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      await day(foreignId, "2026-09-30");
+
+      await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const un = await dayRow("2026-09-22");
+      const un2 = await dayRow("2026-09-28");
+      const un3 = await dayRow("2026-09-29");
+      const fr = await dayRow("2026-09-30");
+      check("P15a ⭐ no type AND no status is counted unmapped", un?.unmapped_conversions === 1 && un.events === "{}", JSON.stringify(un));
+      check("P15b ⭐ no type WITH a real status is counted unmapped (a status-only mapping rule)", un2?.unmapped_conversions === 1 && un2.events === "{}", JSON.stringify(un2));
+      check("P15c ⭐ a MAPPED type with a NULL status is counted unmapped", un3?.unmapped_conversions === 1 && un3.events === "{}", JSON.stringify(un3));
+      check(
+        "P17 ⭐ none of the three is a sale or revenue",
+        [un, un2, un3].every((r) => r !== undefined && r.sales === 0 && Number(r.revenue) === 0 && Number(r.pending_revenue) === 0),
+        JSON.stringify([un, un2, un3]),
+      );
+      check(
+        "P18 ⭐ a CROSS-ORG event_type_id is counted UNMAPPED — the `et.key IS NULL` fix, and the only bar that can prove it",
+        fr?.unmapped_conversions === 1 && fr.events === "{}",
+        JSON.stringify(fr),
+      );
+      check(
+        "P18b ⭐ …and it is exactly the residual the footing identity carries: SALES_FILTER still counts it, so sales=1 with an EMPTY breakdown, which is now VISIBLE in the badge instead of nowhere",
+        fr?.sales === 1 && Number(fr.revenue) === 70,
+        JSON.stringify(fr),
+      );
+
+      // deposit3 — a key the statement has never seen.
+      await tx.execute(sql`
+        INSERT INTO event_types (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal)
+        VALUES (${orgId}::uuid, 'deposit', 'Deposits', 30, true, true, false)
+      `);
+      const depTypeId = (
+        (await tx.execute(sql`SELECT id FROM event_types WHERE org_id = ${orgId}::uuid AND key = 'deposit'`)) as unknown as { id: number }[]
+      )[0].id;
+      const depId = (
+        (await tx.execute(sql`
+          INSERT INTO conversion_events
+            (org_id, keitaro_event_id, keitaro_status, keitaro_type, event_type_id, status, revenue,
+             occurred_at, campaign_id, stage_id)
+          VALUES (${orgId}::uuid, ${"p5-deposit-" + Date.now()}, 'sale', 'sale', ${depTypeId}::int, 'approved', 25,
+                  now(), ${camp}::int, ${stageA}::int)
+          RETURNING id`)) as unknown as { id: number }[]
+      )[0].id;
+      await day(depId, "2026-09-23");
+      await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const dep = await dayRow("2026-09-23");
+      const depEv = evOf(dep);
+      check("P19 ⭐ a THIRD event type gets its own entry, with no code change", depEv.deposit?.n === 1, dep?.events ?? "no row");
+      check("P20 ⭐ and it counts as a sale, because its registry row says is_purchase", dep?.sales === 1, JSON.stringify(dep));
+      check("P21 ⭐ and its money is revenue, because its registry row says counts_revenue", Number(dep?.revenue) === 25 && Number(depEv.deposit?.revenue) === 25, dep?.events ?? "no row");
+
+      // ⭐ INDEPENDENT RECOMPUTATION, differently shaped: no CTE, no jsonb, no
+      // grouping by key — a flat aggregate straight off the ledger. This is the
+      // proof that re-graining the statement did not move a scalar; a retyped copy
+      // of the old statement would only prove the typist agreed with themselves.
+      //
+      // ⚠️ ORG-SCOPED (CLAUDE.md §3), and not only on principle: the A3 fixture
+      // above deliberately parks a ledger row for ANOTHER org on this very stage,
+      // which writes no keitaro_stage_results row at all. An unscoped recomputation
+      // would read that day as a missing row and report drift that is by design.
+      const indep = (await tx.execute(sql`
+        SELECT (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date::text AS stat_date,
+               count(*) FILTER (WHERE ${SALES_FILTER})::int AS sales,
+               count(*) FILTER (WHERE ${CHECKOUT_FILTER})::int AS checkouts,
+               coalesce(sum(ce.revenue) FILTER (WHERE ${REVENUE_FILTER}), 0)::text AS revenue,
+               coalesce(sum(ce.revenue) FILTER (WHERE ${PENDING_REVENUE_FILTER}), 0)::text AS pending_revenue
+        FROM conversion_events ce
+        WHERE ce.stage_id = ${stageA}::int AND ce.org_id = ${orgId}::uuid
+        GROUP BY 1
+      `)) as unknown as { stat_date: string; sales: number; checkouts: number; revenue: string; pending_revenue: string }[];
+      const stored = new Map((await read(stageA)).map((r) => [r.stat_date, r]));
+      let drift = 0;
+      for (const i of indep) {
+        const s = stored.get(i.stat_date);
+        if (
+          !s ||
+          s.sales !== i.sales ||
+          s.checkouts !== i.checkouts ||
+          Math.abs(Number(s.revenue) - Number(i.revenue)) > 1e-6 ||
+          Math.abs(Number(s.pending_revenue) - Number(i.pending_revenue)) > 1e-6
+        ) {
+          drift++;
+          console.log(`      drift on ${i.stat_date}: stored=${JSON.stringify(s)} independent=${JSON.stringify(i)}`);
+        }
+      }
+      check("P22 ⭐ every scalar matches a flat, independently shaped recomputation", drift === 0, `${drift} day(s) differ`);
+      // The complement: a stored day the recomputation does NOT cover is a day the
+      // ledger no longer explains, and the ONLY legitimate shape for it is a fully
+      // zeroed row (fixture S7's stale 2026-09-17). Stated as a property rather
+      // than as `indep.length === stored.size`, which is false by construction here.
+      const uncovered = [...stored.values()].filter((r) => !indep.some((i) => i.stat_date === r.stat_date));
+      check(
+        "P23 ⭐ the recomputation covered every stored day the ledger explains — and each day it does not is fully ZEROED",
+        indep.length > 0 &&
+          // ⭐ THE SECOND HALF NAMES ITS OWN WORLD-STATE. `every` over an empty
+          // array is TRUE, so without this the bar would pass on a corpus where
+          // no stored day is unexplained — i.e. it would stop testing zeroing the
+          // moment a fixture changed, silently. S7's stale 2026-09-17 is the day
+          // that must be here, and it is named rather than counted.
+          uncovered.some((r) => r.stat_date === "2026-09-17") &&
+          uncovered.every(
+            (r) =>
+              r.sales === 0 &&
+              r.checkouts === 0 &&
+              Number(r.revenue) === 0 &&
+              Number(r.pending_revenue) === 0 &&
+              r.events === "{}" &&
+              r.unmapped_conversions === 0,
+          ),
+        `${indep.length} ledger days, ${stored.size} stored, uncovered=${JSON.stringify(uncovered.map((r) => r.stat_date))}`,
+      );
+
+      // ⭐ THE PARTITION BAR — this is what "structural" actually means here, and
+      // it is the bar that replaces the claim the first draft of this plan made
+      // and could not support. Every conversion_events row on a stage-day is in
+      // EXACTLY ONE of: PLACED (a same-org event_types.key and a non-NULL status
+      // — it has an entry in `events`, possibly all-zero and therefore filtered
+      // out of the object) or UNMAPPED (counted in unmapped_conversions). No row
+      // is in both; no row is in neither.
+      const part = (await tx.execute(sql`
+        SELECT (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date::text AS stat_date,
+               count(*)::int AS total,
+               count(*) FILTER (WHERE et.key IS NOT NULL AND ce.status IS NOT NULL)::int AS placed,
+               count(*) FILTER (WHERE et.key IS NULL OR ce.status IS NULL)::int AS unplaced
+        FROM conversion_events ce
+        LEFT JOIN event_types et ON et.id = ce.event_type_id AND et.org_id = ce.org_id
+        WHERE ce.stage_id = ${stageA}::int AND ce.org_id = ${orgId}::uuid
+        GROUP BY 1
+      `)) as unknown as { stat_date: string; total: number; placed: number; unplaced: number }[];
+      check(
+        "P23a ⭐ placed + unplaced = every ledger row, on every stage-day (the partition)",
+        part.length > 0 && part.every((r) => r.placed + r.unplaced === r.total),
+        JSON.stringify(part),
+      );
+      check(
+        "P23b ⭐ the stored unmapped_conversions IS the unplaced count, day for day",
+        part.length > 0 && part.every((r) => (stored.get(r.stat_date)?.unmapped_conversions ?? -1) === r.unplaced),
+        JSON.stringify(part),
+      );
+      // The footing identity, with its residual named rather than assumed away.
+      // `strays` is the number of UNPLACED rows that SALES_FILTER nevertheless
+      // counts — today only the cross-org shape can do that. On a healthy corpus
+      // it is 0; fixture `foreign_type` makes it 1, which is why this bar asserts
+      // the identity WITH the term rather than asserting the term is zero.
+      // Re-read AFTER `deposit` was seeded, so the set covers all three types.
+      const corpusPurchaseKeys = await purchaseKeys(tx, orgId);
+      const strays = (await tx.execute(sql`
+        SELECT count(*)::int AS n
+        FROM conversion_events ce
+        LEFT JOIN event_types et ON et.id = ce.event_type_id AND et.org_id = ce.org_id
+        WHERE ce.stage_id = ${stageA}::int AND ce.org_id = ${orgId}::uuid AND et.key IS NULL AND ${SALES_FILTER}
+      `)) as unknown as { n: number }[];
+      const totalSales = [...stored.values()].reduce((s, r) => s + r.sales, 0);
+      const totalPurchaseN = [...stored.values()].reduce(
+        (s, r) => s + sumN(evOf(r), (k) => corpusPurchaseKeys.has(k)),
+        0,
+      );
+      check(
+        "P23c ⭐ sales = Σ (is_purchase) n + strays — the identity WITH its residual, not a hopeful equality",
+        corpusPurchaseKeys.size > 1 && totalSales === totalPurchaseN + Number(strays[0].n),
+        `${totalSales} vs ${totalPurchaseN} + ${strays[0].n} over keys [${[...corpusPurchaseKeys].join(",")}]`,
+      );
+      check(
+        "P23d ⭐ the residual is exactly the cross-org fixture — 1, not 0, so this bar is exercised and not a countdown",
+        Number(strays[0].n) === 1,
+        String(strays[0].n),
+      );
+      // ⭐ THE SAME IDENTITY FOR MONEY, ACROSS THE WHOLE CORPUS. P13 is one day;
+      // this one is every stored day at once, and it is the bar that catches a
+      // per-event revenue aggregate that stops reading `counts_revenue` — the
+      // flag lives ONLY on the per-event side, so dropping it moves no scalar and
+      // no single-day purchase bar. Its residual is the same cross-org row,
+      // counted in dollars.
+      const strayRevenue = (await tx.execute(sql`
+        SELECT coalesce(sum(ce.revenue), 0)::text AS amount
+        FROM conversion_events ce
+        LEFT JOIN event_types et ON et.id = ce.event_type_id AND et.org_id = ce.org_id
+        WHERE ce.stage_id = ${stageA}::int AND ce.org_id = ${orgId}::uuid AND et.key IS NULL AND ${REVENUE_FILTER}
+      `)) as unknown as { amount: string }[];
+      const totalRevenue = [...stored.values()].reduce((s, r) => s + Number(r.revenue), 0);
+      const totalEvRevenue = [...stored.values()].reduce((s, r) => s + sumField(evOf(r), "revenue"), 0);
+      check(
+        "P14b ⭐ revenue = Σ per-event revenue + strays, over EVERY stored day",
+        Math.abs(totalRevenue - (totalEvRevenue + Number(strayRevenue[0].amount))) < 1e-6,
+        `${totalRevenue} vs ${totalEvRevenue} + ${strayRevenue[0].amount}`,
+      );
+      check(
+        "P14c ⭐ the revenue residual is the cross-org $70 — non-zero, so P14b is exercised and not a countdown",
+        Number(strayRevenue[0].amount) === 70,
+        strayRevenue[0].amount,
+      );
+
+      // The parse the readers will do, against a REAL row (the driver returns
+      // jsonb as parsed JS, so the numerics arrive as NUMBERS here, not strings —
+      // parseEventMap accepts both, and this is the bar for the number form).
+      //
+      // ⚠️ THE ROW IS THE MIXED DAY (2026-09-27), not the brief's 2026-09-21: the
+      // asserted pair (n = 2 AND revenue = 80) is the mixed day's — 2026-09-21
+      // carries ONE approved purchase, so its n is 1 and P7a says so. The values
+      // are the brief's, verbatim; the date is the one they describe.
+      const live = (await tx.execute(sql`
+        SELECT events FROM keitaro_stage_results
+        WHERE org_id = ${orgId}::uuid AND stage_id = ${stageA}::int AND stat_date = '2026-09-27'::date
+      `)) as unknown as { events: unknown }[];
+      const parsed = parseEventMap(live[0]?.events);
+      check(
+        "P24 ⭐ parseEventMap reads a REAL jsonb row (numeric form, not the text form)",
+        parsed.purchase?.revenue === 80 && parsed.purchase?.n === 2,
+        JSON.stringify(live[0]?.events),
+      );
+
+      // ── The resync's dry run IS the predicate --apply uses ─────────────────
+      // scripts/resync-stage-day-conversions.ts is the manual PRODUCTION repair
+      // path: an operator reads its diff and then says yes to --apply. Its header
+      // has claimed the two agree since review fix A4, and twice they did not —
+      // the script carried RETYPED copies of the upsert's change test and the
+      // zeroing UPDATE's content test, and both fell behind (Task 6 changed what a
+      // sale is; Phase 5 added `events` / `unmapped_conversions`). Both sides now
+      // come out of the same builders in lib/keitaro/stage-day-conversions.ts, and
+      // these bars EXECUTE the diff and the write against ONE world rather than
+      // trusting the comment. A column that reaches only one side is caught by
+      // R1/R2 whatever it is called.
+      console.log("\nR — the resync dry run predicts exactly what --apply does");
+      const RZERO_EVENTS = "2026-09-24"; // covered, no ledger row, breakdown only
+      const RZERO_UNMAPPED = "2026-09-19"; // covered, no ledger row, unmapped only
+      const cleanDiff = await readStageDayResyncDiff(tx, { stageIds: [stageA] });
+      check(
+        "R0 ⭐ with the scope already projected the diff is EMPTY — every bar below is about a row this test breaks on purpose",
+        cleanDiff.length === 0,
+        JSON.stringify(cleanDiff),
+      );
+
+      // SIX one-sided breakages. Four isolate a single column the hand-written
+      // diff never tested; one isolates the sale DEFINITION; one is the zero
+      // branch's blind spot, twice.
+      // (a) a row written before migration 0185: scalars right, breakdown missing.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET events = '{}'::jsonb
+        WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-27'::date
+      `);
+      // (b) unmapped_conversions alone.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET unmapped_conversions = 0
+        WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-22'::date
+      `);
+      // (c) pending_revenue alone — in NEITHER branch of the old hand-written diff.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET pending_revenue = 0
+        WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-25'::date
+      `);
+      // (d) the REJECTED-only day, made to carry the pre-Task-6 count. That diff
+      // derived sales from keitaro_type IN ('lead','sale','rejected'), so it would
+      // have called this row already correct; purchasedClause says 0 sales.
+      await tx.execute(sql`
+        UPDATE keitaro_stage_results SET sales = 1, revenue = 99, payout_at_conversion = 99
+        WHERE stage_id = ${stageA}::int AND stat_date = '2026-09-26'::date
+      `);
+      // (e, f) two COVERED stage-days the ledger does not explain at all, whose
+      // only content is one of the two new columns.
+      const orphan = async (statDate: string, events: string, unmapped: number) => {
+        await tx.execute(sql`
+          INSERT INTO keitaro_stage_results
+            (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, events, unmapped_conversions)
+          VALUES (${orgId}::uuid, ${camp}::int, ${stageA}::int, 'seed', ${statDate}::date,
+                  ${events}::jsonb, ${unmapped}::int)
+        `);
+      };
+      await orphan(
+        RZERO_EVENTS,
+        '{"registration": {"n": 1, "pending_n": 0, "revenue": 0, "pending_revenue": 0}}',
+        0,
+      );
+      await orphan(RZERO_UNMAPPED, "{}", 4);
+
+      // Every projected column of every stored row, keyed by (stage, day).
+      // `synced_at` is deliberately absent: it only moves on a row one of the two
+      // statements touched, so including it would make the comparison trivially
+      // true instead of a test of the predicates.
+      const snapshot = async () => {
+        const rows = (await tx.execute(sql`
+          SELECT stage_id, stat_date::text AS stat_date, checkouts, sales,
+                 revenue::text AS revenue, pending_revenue::text AS pending_revenue,
+                 events::text AS events, unmapped_conversions,
+                 coalesce(payout_at_conversion::text, 'null') AS payout
+          FROM keitaro_stage_results ORDER BY stage_id, stat_date
+        `)) as unknown as Record<string, unknown>[];
+        return new Map(rows.map((r) => [`${r.stage_id}|${r.stat_date}`, JSON.stringify(r)]));
+      };
+      const beforeApply = await snapshot();
+      const predictedDiff = await readStageDayResyncDiff(tx, { stageIds: [stageA] });
+      const applyRun = await syncStageDayConversions(tx, { stageIds: [stageA] });
+      const afterApply = await snapshot();
+      const dayKey = (d: StageDayResyncDiff) => `${d.stage_id}|${d.stat_date}`;
+      const predicted = new Set(predictedDiff.map(dayKey));
+      const changed = new Set<string>();
+      for (const [k, v] of afterApply) if (beforeApply.get(k) !== v) changed.add(k);
+      for (const k of beforeApply.keys()) if (!afterApply.has(k)) changed.add(k);
+      const unpredicted = [...changed].filter((k) => !predicted.has(k));
+      const phantom = [...predicted].filter((k) => !changed.has(k));
+      check(
+        "R1 ⭐⭐ every row --apply actually changed WAS in the dry run — the direction that broke silently twice",
+        unpredicted.length === 0,
+        `changed but not listed: ${JSON.stringify(unpredicted)}`,
+      );
+      check(
+        "R2 ⭐ and every row the dry run listed really changed — the operator approves no phantoms either",
+        phantom.length === 0,
+        `listed but unchanged: ${JSON.stringify(phantom)}`,
+      );
+      check(
+        "R3 ⭐ six rows on both sides — so R1/R2 are exercised and not two empty sets agreeing",
+        predicted.size === 6 && changed.size === 6,
+        `predicted=${JSON.stringify([...predicted])} changed=${JSON.stringify([...changed])}`,
+      );
+      const dOf = (d: string) => predictedDiff.find((x) => x.stat_date === d);
+      const rowOf = async (d: string) => (await read(stageA)).find((r) => r.stat_date === d);
+      check(
+        "R4 ⭐ a pre-0185 row — scalars right, breakdown empty — is listed as a rewrite",
+        dOf("2026-09-27")?.action === "rewrite" &&
+          dOf("2026-09-27")?.old_events === "{}" &&
+          dOf("2026-09-27")?.new_events !== "{}" &&
+          dOf("2026-09-27")?.old_sales === dOf("2026-09-27")?.new_sales,
+        JSON.stringify(dOf("2026-09-27")),
+      );
+      check(
+        "R5 ⭐ an unmapped_conversions-only difference is listed",
+        dOf("2026-09-22")?.action === "rewrite" &&
+          dOf("2026-09-22")?.old_unmapped === 0 &&
+          dOf("2026-09-22")?.new_unmapped === 1,
+        JSON.stringify(dOf("2026-09-22")),
+      );
+      check(
+        "R6 ⭐ a pending_revenue-only difference is listed",
+        dOf("2026-09-25")?.action === "rewrite" &&
+          Number(dOf("2026-09-25")?.old_pending_revenue) === 0 &&
+          Number(dOf("2026-09-25")?.new_pending_revenue) === 60,
+        JSON.stringify(dOf("2026-09-25")),
+      );
+      check(
+        "R7 ⭐⭐ the diff counts a REJECTED purchase as NO sale — the SHARED predicate, where the pre-Task-6 keitaro_type list called this very row correct",
+        dOf("2026-09-26")?.old_sales === 1 &&
+          dOf("2026-09-26")?.new_sales === 0 &&
+          Number(dOf("2026-09-26")?.new_revenue) === 0 &&
+          dOf("2026-09-26")?.new_payout === null,
+        JSON.stringify(dOf("2026-09-26")),
+      );
+      check(
+        "R8 ⭐ a covered day the ledger cannot explain whose ONLY content is the breakdown is listed as a zero, and IS zeroed",
+        dOf(RZERO_EVENTS)?.action === "zero" &&
+          dOf(RZERO_EVENTS)?.old_events !== "{}" &&
+          (await rowOf(RZERO_EVENTS))?.events === "{}",
+        JSON.stringify([dOf(RZERO_EVENTS), await rowOf(RZERO_EVENTS)]),
+      );
+      check(
+        "R9 ⭐ …and one whose only content is unmapped_conversions likewise",
+        dOf(RZERO_UNMAPPED)?.action === "zero" &&
+          dOf(RZERO_UNMAPPED)?.old_unmapped === 4 &&
+          (await rowOf(RZERO_UNMAPPED))?.unmapped_conversions === 0,
+        JSON.stringify([dOf(RZERO_UNMAPPED), await rowOf(RZERO_UNMAPPED)]),
+      );
+      check(
+        "R10 the run's own counters foot with the diff's action tally",
+        applyRun.rowsWritten === predictedDiff.filter((d) => d.action !== "zero").length &&
+          applyRun.rowsZeroed === predictedDiff.filter((d) => d.action === "zero").length,
+        JSON.stringify({ applyRun, tally: predictedDiff.map((d) => d.action) }),
+      );
+
+      // ── Step 3b: the ledger_behind_history probe knows the two new columns ──
+      // ⚠️ LAST, AND IN SAVEPOINTS. This refusal is GLOBAL: it aborts the whole
+      // projection, so a fixture that trips it would mask every bar after it.
+      console.log("\nA2 (Phase 5) — the third refusal still fires on the NEW columns alone");
+      // ⭐ THE WORLD-STATE THIS PAIR IS ABOUT. Without a historical row the very
+      // same call must NOT refuse, or P25/P26 would pass against a projection that
+      // refuses everything and prove nothing.
+      const beforeHistorical = await syncStageDayConversions(tx, { stageIds: [stageA] });
+      check(
+        "P24b the same call refuses NOTHING before the historical row is seeded",
+        beforeHistorical.refused === null,
+        JSON.stringify(beforeHistorical),
+      );
+      // The ledger's GLOBAL floor is stage A's EARLY conversion (2026-05-01), so a
+      // stored row on 2026-04-02 is reported history the ledger cannot reach. Each
+      // shape is seeded in its OWN savepoint and rolled back, because the refusal
+      // is global and would otherwise mask everything after it.
+      const historicalRow = async (label: string, extraCols: SQL, extraVals: SQL) => {
+        try {
+          await tx.transaction(async (tx2) => {
+            await tx2.execute(sql`
+              INSERT INTO keitaro_stage_results
+                (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, ${extraCols})
+              VALUES (${orgId}::uuid, ${camp}::int, ${stageC}::int, 'seed', '2026-04-02'::date, ${extraVals})
+            `);
+            const refused = await syncStageDayConversions(tx2, { stageIds: [stageA] });
+            check(
+              label,
+              refused.refused === "ledger_behind_history" &&
+                refused.rowsWritten === 0 &&
+                refused.rowsZeroed === 0 &&
+                refused.reportedHistoryFloor === "2026-04-02",
+              JSON.stringify(refused),
+            );
+            throw new Rollback();
+          });
+        } catch (err) {
+          if (!(err instanceof Rollback)) throw err;
+        }
+      };
+      // Every SCALAR left at its default 0 — `events` alone carries the signal.
+      await historicalRow(
+        "P25 ⭐ a historical row whose ONLY signal is `events` still trips ledger_behind_history",
+        sql`events`,
+        sql`'{"registration": {"n": 1, "pending_n": 0, "revenue": 0, "pending_revenue": 0}}'::jsonb`,
+      );
+      await historicalRow(
+        "P26 ⭐ and one whose only signal is unmapped_conversions does too",
+        sql`unmapped_conversions`,
+        sql`3::int`,
       );
 
       console.log("\nH — a hand-entered Checkout Clicks value is never overwritten by a tracker 0 (prod, 2026-09-21)");

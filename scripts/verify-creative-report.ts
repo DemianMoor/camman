@@ -11,6 +11,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { getPerformanceReport, type PerfRow } from "@/lib/reporting/performance-report";
+import { requireReportingColumns } from "./_require-migration";
 
 let failures = 0;
 let skipped = 0;
@@ -39,6 +40,9 @@ function mismatches(rows: PerfRow[], want: (r: PerfRow) => unknown, got: (r: Per
 }
 
 async function main() {
+  // getPerformanceReport reaches getStageMetricsInRange, whose projection needs
+  // 0182 + 0185. Name the missing column instead of dying on a raw 42703.
+  await requireReportingColumns(db, "verify-creative-report");
   const [{ org_id: orgId }] = await rowsOf<{ org_id: string }>(sql`
     SELECT org_id FROM campaigns GROUP BY org_id ORDER BY count(*) DESC LIMIT 1`);
   const to = addDays(formatInCampaignTimezone(new Date(), "yyyy-MM-dd"), -1);

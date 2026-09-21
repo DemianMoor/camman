@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-20_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -190,11 +190,54 @@ curl -s "https://camman.vercel.app/api/reports/performance?dimension=offer&from=
   -H "Authorization: Bearer $CAMMAN_TOKEN"
 ```
 
-Response: `{ dimension, attribution, data: [row, …], totals, refreshedAt, providers, range }`.
+Response: `{ dimension, attribution, data: [row, …], totals, refreshedAt, providers, event_types, range }`.
 Every row, and `totals`, carries `sent`, `opt_outs`, `clickers` (the tracker's
-clean landing visits — not human clicks), `redirects`, `counted_clickers`,
+clean landing visits — not human clicks; the `/reports` UI heads this column
+**`Landing visits`** since 2026-09-20, previously `Clickers` — **the field name
+did not change**, and no field on this endpoint did), `redirects`, `counted_clickers`,
 `sales`, `revenue`, `cost`, and the grading fields `reached`, `clicks_human`,
 `click_to_reach_pct`, `reach_to_sale_pct` and `opt_rate` (see §7).
+
+**Per-event-type breakdown (additive; no existing field changed meaning).**
+`event_types` is the org's event-type registry — `{ key, label, display_order,
+is_purchase, counts_revenue, is_retarget_signal, archived }` — and every row and
+`totals` carries `events`, `unmapped` and `manual_topup`:
+
+- `events` maps `event_types.key` → `{ n, pending_n, revenue, pending_revenue }`.
+  `n` counts events with status `pending` or `approved`; `pending_n` is the held
+  SUBSET of `n`, never added to it. `revenue`/`pending_revenue` are `0` for a
+  type whose `counts_revenue` is false, by construction.
+- `unmapped` counts conversions in scope whose tracker type matched no mapping.
+  ⭐ **They are in NO other field** — not `sales`, not `revenue`, not `events` —
+  so nothing but this number reveals them.
+- `manual_topup` is the part of `sales` that came from the manual result tally
+  rather than the tracker ledger.
+
+⭐ **`events` alone does not explain `sales`.** The identity is
+
+```
+sales = Σ over is_purchase types of events[key].n  +  manual_topup  +  strays
+```
+
+`sales` resolves `is_purchase` through a non-org-scoped id list while `events`
+comes from an org-scoped join, so a cross-organisation event type is counted by
+the scalar and placed under no key; `unmapped` is where it surfaces. A client
+that renders the breakdown as an explanation of `sales` must render `unmapped`
+beside it or it under-explains its own total.
+
+`pending_revenue` is computed on **every** dimension, hourly included, and a `0`
+there is a measurement. (Between 2026-09-19 and the same day's fix, hourly's
+scalar was a hard-coded NOT-COMPUTED zero and this section told clients to read
+held money from `events` instead. That workaround is retired: `getHourlyReport`
+now runs a pending series off the same ledger, hour bucket and clause family as
+its approved `revenue`, so `pending_revenue = Σ events[key].pending_revenue +
+cross-org strays` holds on hourly exactly as on the other dimensions. If you
+implemented the workaround, delete it — it now reads the same number twice.)
+
+⚠️ **`dimension=creative&range=lifetime` serves a stored hourly blob.** For up to
+an hour after a deploy it can report an empty `events` map, which is
+indistinguishable from a configured-but-idle event type; `stale_seconds` in the
+response tells the two apart.
 
 **Which days a number belongs to (`attribution`):**
 
@@ -216,9 +259,20 @@ One real row, 2026-09-07..13 (offer name redacted, cost rounded):
   "reached": 400, "counted_clickers": 4480, "clicks_human": 4480,
   "lifetime_clickers": 10934, "lifetime_revenue": 11599,
   "sales": 50, "revenue": 3650, "cost": 1796.56,
-  "click_to_reach_pct": 8.93, "reach_to_sale_pct": 12.5, "opt_rate": 2.97
+  "click_to_reach_pct": 8.93, "reach_to_sale_pct": 12.5, "opt_rate": 2.97,
+  "events": {
+    "registration": { "n": 214, "pending_n": 0, "revenue": 0,    "pending_revenue": 0 },
+    "purchase":     { "n": 47,  "pending_n": 3, "revenue": 3650, "pending_revenue": 240 }
+  },
+  "unmapped": 0, "manual_topup": 3
 }
 ```
+
+The last three keys are the Phase 5 additions shown on this row for completeness —
+that row's `sales` of 50 is `47` purchases `+ 3` manual top-up `+ 0` strays, which
+is the identity above. **They are additive: every field that was there before this
+row means exactly what it meant before.** A consumer that ignores `events`,
+`unmapped` and `manual_topup` reads the same numbers it always did.
 
 ### Creative bank — `dimension=creative`
 
@@ -227,6 +281,13 @@ is no Reports tab for it.
 
 One row per creative × offer: a creative sent on two offers is two rows. Every
 column of the other dimensions and the grading fields (§7), plus:
+
+⭐ **Both creative bodies carry `event_types` too, deliberately, although no
+screen renders them.** The rows carry `events` / `unmapped` like every other
+dimension, and a key is not a label: without the registry a client has a map of
+`event_types.key` it cannot name, order, or tell "counts revenue" from "signal".
+This is the one dimension whose consumer has no UI to fall back on, so dropping
+the registry here would be dropping it where it is least replaceable.
 
 | Field | Meaning |
 | --- | --- |
@@ -654,7 +715,7 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 | Field | Meaning |
 | --- | --- |
 | `reached` | Messages whose recipient reached the offer page (their first offer click, tracked per recipient). |
-| `clicks_human` | Distinct recipients with at least one click scored human, or a conversion. The same number the platform's EPC divides by. |
+| `clicks_human` | Distinct recipients with at least one click scored human, or a conversion. The same number the platform's EPC divides by, and the one the screens head **`Human clicks`** (2026-09-20). |
 | `click_to_reach_pct` | `reached ÷ clicks_human × 100`. Can exceed 100: a recipient can reach the offer without a click the scorer called human. |
 | `reach_to_sale_pct` | `conversions ÷ reached × 100`. Conversions come from the tracker (`sales` on report rows, `keitaro_sales_count` on stages). |
 | `opt_rate` | `opt_outs ÷ sent × 100`. |
@@ -665,10 +726,30 @@ Both are counts only. There is no endpoint on this list that returns a contact.
   made up only of manual-mode stages (those have no per-recipient reach).
 - **Grade on `clicks_human`.** Raw clicks are about 91% bots (only click-report
   shows them), and `clickers` on report rows is the tracker's landing-visit
-  count, not a human-click count.
+  count, not a human-click count. ⚠️ **`clickers` is a people-word for a visit
+  count** — it is `visit_clicks_clean`, bot-filtered by the tracker rather than
+  human-scored by CamMan, and it is display-only. Do not grade on it, do not
+  treat it as a denominator, and do not read it as "distinct people who
+  clicked": that is `clicks_human`. A better UI name for it is proposed in
+  [07-conventions.md](07-conventions.md); the API field name will not change.
 - **`reached` is not `redirects`.** `redirects` counts the tracker's clean offer
   click events; `reached` counts recipients. They run close (1,226 vs 1,115 over
   2026-09-07..13) but measure different things.
+- **The per-event rates on the SCREENS use this same `clicks_human` denominator,
+  and they can exceed 100%.** There is no per-event denominator anywhere — a
+  `<Type> rate` is `events[key].n ÷ clicks_human`, the divisor `EPC` uses. The
+  rescue that pulls an unscored click into `clicks_human` fires on purchase- or
+  revenue-bearing conversions only, so a registrant whose click was never scored
+  human is in the numerator and not the denominator. Like `click_to_reach_pct`,
+  the ratio is **not clamped**, and a zero denominator gives `null`, never `0`.
+  (The report tables head that column **`Human clicks`** — renamed 2026-09-20 to
+  match this API's `clicks_human`, and unsuffixed because the page's own date
+  filter names the window. `/creatives` heads its lifetime one
+  `Human clicks (all time)`. **The API field names are unchanged**: this was a
+  header rename on three screens, not a contract change. ⚠️ **`clickers` on a
+  report row is NOT that column and never carries the word "human"** — it is the
+  tracker's bot-filtered landing-VISIT count, display-only; see the note under
+  `clicks_human` above.)
 
 ---
 

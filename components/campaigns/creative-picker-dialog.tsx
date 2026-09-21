@@ -439,7 +439,7 @@ export function CreativePickerDialog({
                             </td>
                             <td
                               className="px-2 py-1.5 text-right align-top tabular-nums text-muted-foreground"
-                              title={`All time, across ${c.metrics.clean_clicks_lifetime.toLocaleString()} counted clickers. Context only — not the sort key.`}
+                              title={`All time, across ${c.metrics.clean_clicks_lifetime.toLocaleString()} human clicks. Context only — not the sort key.`}
                             >
                               {formatEpc(c.metrics.epc_lifetime)}
                             </td>

@@ -2607,6 +2607,85 @@ export const keitaro_stage_results = pgTable(
     pending_revenue: numeric("pending_revenue", { precision: 12, scale: 4 })
       .notNull()
       .default("0"),
+    // Migration 0185. The same numbers as sales / revenue / pending_revenue,
+    // split per event_types.key — written by the same statement in
+    // lib/keitaro/stage-day-conversions.ts, from the same single pass over
+    // conversion_events.
+    //
+    // ⚠️ THE SCALARS ARE THE SUM OF THIS OBJECT'S ENTRIES **PLUS A RESIDUAL**, AND
+    // THE TWO CAN DIFFER. An earlier version of this comment said "the two cannot
+    // drift". That was false, and the difference is deliberate: `sales` and
+    // `revenue` resolve is_purchase / counts_revenue through the NON-org-scoped
+    // PURCHASE_EVENT_TYPE_IDS / REVENUE_EVENT_TYPE_IDS subqueries
+    // (lib/sale-attribution.ts), while the entries below are built from an
+    // ORG-SCOPED join to event_types. A ledger row carrying ANOTHER org's
+    // event_type_id — representable, because conversion_events.event_type_id has a
+    // plain FK to event_types(id) and there is no composite (id, org_id) — is
+    // counted by the scalar and placed under no key. It is reported in
+    // unmapped_conversions below rather than vanishing; that is what the
+    // `et.key IS NULL` bucket is for.
+    //
+    // What holds is the identity WITH its residual:
+    //     sales   = Σ entries[t].n over is_purchase types + strays
+    //     revenue = Σ entries[t].revenue                  + stray revenue
+    // asserted by bars P23c / P14b of scripts/test-stage-day-conversions.ts, with
+    // P23d / P14c pinning the residual NON-ZERO (1 row / $70) against a fixture —
+    // so neither bar can start passing because the residual quietly became 0.
+    //
+    // ⇒ Do not render this object as an explanation of the Sales number without
+    // showing unmapped_conversions beside it. On a stage-day with a stray they do
+    // not add up, and that is correct behaviour, not a number to hide.
+    //
+    //   {"purchase": {"n": 12, "pending_n": 1,
+    //                 "revenue": 540.0000, "pending_revenue": 60.0000}}
+    //
+    // Keyed by `key`, never `id`: event_types.id is a global serial while the
+    // natural key is (org_id, key), and the scheduled Telegram report reads
+    // across organizations. Read through parseEventMap()
+    // (lib/reporting/event-columns.ts) and nothing else.
+    events: jsonb("events")
+      // `number | string`, not `string`: `jsonb_build_object('revenue', <numeric>)`
+      // stores a JSON NUMBER that keeps the numeric's scale, and postgres-js
+      // JSON.parses the column — so the DRIVER returns a number (measured exact
+      // at 1234567.8901 and 0.0001, bar S14 of
+      // scripts/test-stage-event-columns-db.ts), while a `#>> '{k,revenue}'` text
+      // extraction and a hand-written fixture return a string. Both reach
+      // parseEventMap, which is the only thing that should read this shape.
+      .$type<
+        Record<
+          string,
+          { n: number; pending_n: number; revenue: number | string; pending_revenue: number | string }
+        >
+      >()
+      .notNull()
+      .default({}),
+    // Migration 0185. Rows on this stage-day the org-scoped event_types join could
+    // not place: `et.key IS NULL OR ce.status IS NULL`. They are under no key of
+    // `events`; this column exists so a screen can say they exist at all.
+    //
+    // ⚠️ "COUNTED NOWHERE" IS WRONG FOR PART OF THIS BUCKET, and an earlier
+    // version of this line said it. The identity two comments up is the truth:
+    // `sales` and `revenue` resolve their flags through the NON-org-scoped id
+    // lists, so a row carrying ANOTHER ORG'S event type is counted by those
+    // scalars AND reported here. The rest of the bucket (no event_type_id at
+    // all, or no status) really is in nothing. Nothing at this grain separates
+    // the two, so a surface reporting this number says "may already be in Sales
+    // / Revenue", never "counted nowhere".
+    //
+    // ⚠️ BROADER THAN conversion_events_unmapped_idx's PREDICATE, ON PURPOSE. The
+    // index (migration 0181) is predicated on the RAW columns —
+    // `event_type_id IS NULL OR status IS NULL` — while this column keys on the
+    // JOIN RESULT, so it ALSO counts a row whose event_type_id belongs to another
+    // org (see `events` above: that row is the residual). Consequence worth
+    // knowing before anyone "fixes" it: lib/conversions/monitor.ts's `unmapped` /
+    // `status_only_unmapped` Telegram alerts partition the index's raw-column
+    // form, so this column and those alerts disagree by exactly the stray count.
+    // This column is the more truthful of the two. Reconcile by teaching the
+    // monitor the join, never by narrowing this back to the raw columns.
+    //
+    // DELIBERATELY NOT inside `events`: in there, a loop over the object would
+    // eventually sum it into a total.
+    unmapped_conversions: integer("unmapped_conversions").notNull().default(0),
     // ALWAYS 0 — DO NOT USE for ROI/EPC/profit. This is Keitaro ad-platform
     // spend, which is meaningless here: we don't buy traffic through Keitaro,
     // so every synced row carries cost 0. The real cost of a stage is the SMS

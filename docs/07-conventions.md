@@ -11,6 +11,270 @@ A stage counter that both a person and a tracker write has no provenance column,
 - **Limits:** a hand entry that happens to equal the tracker's previous value counts as the tracker's. A tracker-owned counter left stale by a failed mirror counts as hand-owned.
 - Pinned by H1–H5 in [scripts/test-stage-day-conversions.ts](../scripts/test-stage-day-conversions.ts). See [04-features/keitaro-poll.md §2a](04-features/keitaro-poll.md).
 
+## A curated default view hides columns by KIND, never by key (2026-09-20)
+
+`/reports` (the dimension tabs) and `/creatives` open on a short, owner-approved
+column list and reveal the rest behind a per-browser **Show all columns** toggle.
+The rule that decides which side a column falls on is split in two, and the split
+is the whole point.
+
+- **A FIXED column** — one written down in `FULL_COLS` / `HOURLY_COLS`
+  ([components/reports/performance-report.tsx](../components/reports/performance-report.tsx))
+  or in the `/creatives` column array — is held back **by id**, from a roster in
+  [lib/reporting/column-visibility.ts](../lib/reporting/column-visibility.ts).
+  That is safe because configuring anything cannot add one: a new fixed column is
+  a code change, and it passes through that file.
+- **A GENERATED column** — one the `event_types` registry produces — is held back
+  **by kind**. `isDefaultViewEventColumn()` keeps `count` and `funnel` and holds
+  back `rate` and `pending_n`. ⭐ **A roster of ids would be the bug this phase
+  exists to prevent**: it would happen to match today's two event types, and the
+  day a third is configured its count column would land behind the toggle *by
+  omission* — silently, with every test still green, because nothing in a list of
+  ids can notice a member it never had.
+
+**What a newly configured event type gets, stated so it is a decision rather than
+a discovery:** one count column in the default view, plus one funnel column per
+signal↔purchase pairing it joins; its rate and held count go behind the toggle.
+The default view therefore grows by one column per type, except through the funnel
+cross product, which is `|signals| × |purchases|`. That is the number to watch if
+the registry ever grows past a handful of types.
+
+**Tier B is exempt.** The per-event MONEY columns have had their own control since
+Phase 5 Task 5 (the *Event breakdown* toggle, bound to the unclassified badge).
+Subjecting them to the curated view as well would leave that control governing
+nothing while the table is in its default view — and a control that governs
+nothing unmounts itself, so it would blink in and out as an unrelated checkbox
+moved. The Overview tab has no curated view at all and passes a literal `true`.
+
+**The residual is out of the toggle's reach, structurally.** `showAllColumns`
+reaches `EventColumnBlock.columns` and nothing else; `bar` is assembled from the
+response's `totals` on lines where no toggle state is in scope. On the count-only
+grain the manual top-up is an ordinary extra, while the stray-count column is
+appended by a statement that does not take the flag as an argument — so a table
+can never show a breakdown of its own Sales column while hiding the conversions
+that breakdown fails to explain. Bars **V1–V9** in
+[scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts),
+including a source bar on the two statements themselves.
+
+**Persistence is `usePersistedFilters`, keyed by route** (CLAUDE.md §9) — one
+boolean per table (`reports.performance`, `creatives.filters`), not a persisted
+list of column ids. A list would need its own unknown-id handling; a boolean
+cannot go stale. The *sort* key still can, and now in a second way: a persisted
+`sortBy` can name a real column the curated view hides. `sortColumnOrFallback()`
+already handled the first way (a registry row that went away) and handles this one
+unchanged — the sort falls back to a column that is on screen, **visibly**, rather
+than tying every comparison and rendering in API order with no arrow anywhere.
+`/creatives` sorting is server-side and authoritative over the whole result set,
+so it is deliberately NOT rewritten by the toggle: changing which rows come back
+as a side effect of a display choice is the thing to avoid.
+
+**Measured payoff (2026-09-20, real browser, 1440px viewport, one DOM session per
+table, camman-v2):**
+
+| table | state | columns | `table.scrollWidth` | container | overflow |
+|---|---|---|---|---|---|
+| `/reports` By Offer | default | 15 | **1147px** | 1126px | **21px** |
+| `/reports` By Offer | + Show all columns | 25 | 2051px | 1126px | 925px |
+| `/reports` By Offer | + Event breakdown too | 28 | 2374px | 1126px | 1248px |
+| `/creatives` | default | 11 (9 data + select + actions) | **1160px** | 1126px | **34px** |
+| `/creatives` | + Show all columns | 22 | 2220px | 1126px | 1094px |
+
+⚠️ **The default view does not quite fit — it is 21px over on `/reports` and 34px
+over on `/creatives`.** That is a horizontal scrollbar of a few pixels rather than
+the 943px/958px of scroll the tables carried before, but it is not zero and the
+list was not shaved to make it so. Both figures are content-dependent (a wider
+offer name or a six-figure Sent count pushes them out further), so treat "fits"
+as "one column away", not as a property. The `/creatives` all-columns figure of
+**2220px** carries two residual columns the earlier **2084px** baseline did not;
+with the same column set as that baseline this build measures **2084px exactly**,
+which is what makes the two comparable.
+
+## A report column generated from a registry has a STABLE id, and it is not the label (2026-09-18)
+
+Phase 5's per-event report columns are generated from the `event_types` registry
+([lib/reporting/event-columns.ts](../lib/reporting/event-columns.ts),
+[docs/04-features/conversion-events.md](04-features/conversion-events.md)). Two id
+formats, and they are the persisted sort key — a URL query parameter or a
+localStorage value that outlives the registry that produced it:
+
+- `evt:<event_type key>:<kind>` — `kind` ∈ `count | rate | pending_n | revenue | pending_revenue | epc`
+- `evtfunnel:<signal key>:<purchase key>` — the ratio column; the **denominator is first**
+
+The id is built from `event_types.key`, never from `label`: the label is free text
+an operator may edit at any time, the key is the natural identity
+(`event_types_org_key_uniq`). `eventColumnById()` parses an id back **through
+`buildEventColumns()`** rather than re-deriving the grammar, so a second copy of
+the id/tier rules cannot drift; it returns `null` for anything that is not a
+generated id.
+
+**The three-segment split is exact, not a gamble.** `event_types_key_format_check`
+(migration `0181:43`) constrains `key` to `^[a-z][a-z0-9_]*$`, so a key can never
+contain a `:` and a generated id always has exactly three segments. The parser's
+arity check still earns its keep — the input is a URL parameter or a localStorage
+value and can be anything — but it rejects a **malformed id**, not a legal key.
+(An earlier note here claimed the key was free text with no CHECK and carried
+"a colon-bearing key fails closed" as an open concern. Both were wrong; the
+constraint has been there since 0181.)
+
+**A funnel column is never a type against itself.** Nothing in 0181 stops one row
+carrying both `is_purchase` and `is_retarget_signal`, and it is a plausible thing
+for an operator to tick. The signal × purchase cross product then emitted
+`evtfunnel:<k>:<k>` — a "X→X %" column whose value is `n/n = 1` for every row that
+has one, constant by construction. `buildEventColumns()` skips the self-pair; the
+type's other pairings still generate. There is **no CHECK** forbidding the flag
+combination at the database level — the guard is in the generator only.
+
+Five properties that later phases inherit and must not regress:
+
+- **A column comes from the REGISTRY, not from the data.** An active event type
+  with zero conversions still gets its column, which reads 0. It must not vanish.
+- **Ordering is TOTAL** (class rank → `display_order` → `key`), because the column
+  set is rebuilt on every render; a partial order lets equal rows swap places
+  between renders.
+- **Cross-org merges by `key`**, not by id — `event_types.id` is a global serial,
+  the natural key is `(org_id, key)`.
+- **`EMPTY_TALLY` is a frozen, `Readonly` constant — never an accumulator seed.**
+  It is what a missing key reads as, and it is SHARED. `acc[key] = EMPTY_TALLY`
+  followed by `addEventMaps(acc, …)` used to mutate that one object for the whole
+  process, so an unrelated cell elsewhere started reporting another row's numbers
+  instead of 0 — silently, with the whole suite green (found in review 2026-09-18;
+  bars S1–S4). Use `emptyTally()` for a fresh mutable zero. The same rule applies
+  to any future shared default: **freeze it** — and note that `Object.freeze` is
+  the load-bearing half, not the type. ⚠️ **`Readonly<T>` does not stop the
+  aliasing:** TypeScript ignores `readonly` modifiers when checking assignability,
+  so `Readonly<T>` assigns into a `Record<string, T>` with no error (measured
+  2026-09-18); the type only rejects a *direct* write (TS2540). Only the freeze
+  turns the aliasing case into a loud TypeError at the mistake.
+- **Tier B's premise is pinned by a bar, not by prose.** The per-event money
+  columns sit behind the Event-breakdown toggle only because each duplicates an
+  aggregate already on screen *while exactly one `counts_revenue` type exists*.
+  `REVENUE_EVENT_TYPE_IDS` / `approvedRevenueClause`
+  ([lib/sale-attribution.ts](../lib/sale-attribution.ts)) carry no per-type filter,
+  so with two revenue types that aggregate is their SUM and the tier-B columns
+  become its only decomposition — still hidden. Bar R1 in
+  [scripts/test-event-columns-db.ts](../scripts/test-event-columns-db.ts) goes red
+  the moment a second `counts_revenue` type is configured, and its message says
+  what to reconsider.
+
+## A numeric INSIDE jsonb comes back a number; a top-level numeric comes back a string (2026-09-18)
+
+Measured against the real column — `keitaro_stage_results.events`, migration
+0185 — with one row carrying the same value in both places (bars S13–S15,
+[scripts/test-stage-event-columns-db.ts](../scripts/test-stage-event-columns-db.ts)):
+
+| where the value sits | written as | what postgres-js hands back |
+| --- | --- | --- |
+| inside `jsonb_build_object(…)` | `(1234567.8901)::numeric(12,4)` | JS **number** `1234567.8901` — exact, and exact at `0.0001` too |
+| a top-level `numeric(12,4)` column | `(1234567.8901)::numeric(12,4)` | JS **string** `"1234567.8901"` |
+| `events #>> '{purchase,revenue}'` | — | JS string `"1234567.8901"` (a text extraction) |
+
+postgres-js `JSON.parse`s a jsonb column, so integers, bigints and `numeric`
+inside the json all arrive parsed; a top-level `numeric` arrives as text because
+its value can exceed what a double holds. `jsonb` also KEEPS the numeric's scale
+(`0.0000`, not `0`), so `events::text` shows four decimals. This is why
+`parseEventMap()` ([lib/reporting/event-columns.ts](../lib/reporting/event-columns.ts))
+accepts a number OR a numeric string for every field and neither branch is dead —
+the jsonb column feeds it numbers, and any caller assembling a tally out of
+ordinary aggregate columns feeds it strings. **Do not "simplify" it to one type.**
+The failure mode a bar must state explicitly is a silently rounded cent:
+writing the same value as `numeric(12,2)` still round-trips as a plausible
+`1234567.89`, and only an exact comparison at full scale catches it.
+
+## A per-org join must bucket on the JOIN RESULT, not on the raw FK column (2026-09-19)
+
+The stage-day projection places each ledger row under its `event_types.key` with an
+org-scoped `LEFT JOIN … ON et.id = ce.event_type_id AND et.org_id = ce.org_id`, and
+counts what it could not place into `unmapped_conversions`. The obvious predicate
+for that bucket is the one the index carries — `ce.event_type_id IS NULL OR
+ce.status IS NULL` — and it leaves a hole, because the FLAG predicates it shares the
+statement with (`purchasedClause`, `approvedRevenueClause`) resolve `is_purchase` /
+`counts_revenue` through a **non-org-scoped** subquery. A ledger row carrying
+ANOTHER org's `event_type_id` (representable: `conversion_events.event_type_id` has
+a plain FK to `event_types(id)`, with no composite `(id, org_id)`) is then counted in
+`sales` and `revenue`, placed in no `events` entry, and counted unmapped nowhere —
+invisible on every surface, including the one whose whole purpose is to reveal rows
+that count as nothing.
+
+Keying on `et.key IS NULL OR ce.status IS NULL` makes the two buckets a **partition**
+instead: PLACED or UNMAPPED, never both, never neither. Two rules:
+
+- when a statement mixes an org-scoped join with an un-scoped flag subquery, bucket
+  on what the JOIN produced, not on what the row stores;
+- assert the partition (`placed + unplaced = every row`) rather than the absence of
+  strays, and give the identity a residual term — `sales = Σ (is_purchase) n +
+  strays` — with a fixture that makes the residual **non-zero**. `strays = 0` on
+  today's data is a countdown, not a test.
+
+⭐ **And then SAY SO where the column is documented — a residual you designed in is
+a residual a reader will trip over (added 2026-09-19).** `db/schema.ts`, migration
+`0185`'s header and the CHANGELOG all stated that the scalars are "literally the SUM
+of this object's entries and the two cannot drift", two sentences away from the
+suite that pins the residual at 1 row / $70. A confident false invariant in the
+column's own definition is worse than no invariant: it is exactly the belief that
+makes someone render the breakdown as an explanation of the Sales number and be
+wrong by the stray. The rule: **when a footing is asserted-with-a-residual rather
+than structural, the column comment states the residual, where it comes from, and
+which bar pins it non-zero.** (The `0185` file itself is deliberately NOT edited —
+drizzle records a SHA-256 of the migration's content and
+`scripts/verify-migration-integrity.ts` compares it, so a comment-only edit to an
+applied migration is a false drift. Correct the claim in `db/schema.ts` and the
+docs, and note the stale header there.)
+
+⭐ **A column that is deliberately broader than the index its predicate was copied
+from must say which surfaces now disagree.** `keitaro_stage_results.unmapped_conversions`
+keys on the join result; `lib/conversions/monitor.ts`'s `unmapped` /
+`status_only_unmapped` Telegram combos key on the raw columns, because that is what
+`conversion_events_unmapped_idx` is predicated on and what keeps them an index-only
+read. The two therefore disagree by the stray count, permanently and correctly. The
+note lives at BOTH definitions, because the failure mode is not either number — it
+is the next reader "reconciling" them by narrowing the truthful one.
+
+## A dry run built from a retyped predicate is a claim, not a preview (2026-09-19)
+
+`scripts/resync-stage-day-conversions.ts` is the manual production repair path for
+the stage-day projection: an operator reads its diff and then says yes to `--apply`.
+Its header asserted "THE DIFF IS THE PREDICATE `--apply` USES, not an approximation
+of it" — and the diff was a hand-retyped copy of the upsert's change test, the
+zeroing UPDATE's content test, its anti-join and its coverage-floor subquery. The
+copies fell behind **twice**: Task 6 redefined a sale (the script kept computing it
+from `keitaro_type IN ('lead','sale','rejected')`, i.e. counting refunds) and Phase 5
+added `events` / `unmapped_conversions` to both write predicates (the script tested
+neither, in either branch, nor `pending_revenue`). Neither divergence could fail a
+test, because nothing executed the two against the same world.
+
+The fix is not a better comment. The script now holds **no SQL**: both sides are
+built from `PROJECTED_COLUMNS`, `projectionChangedClause`, `projectionNonEmptyClause`
+and `stageDayLedgerCtes` in
+[lib/keitaro/stage-day-conversions.ts](../lib/keitaro/stage-day-conversions.ts), and
+bars **R0–R10** in `scripts/test-stage-day-conversions.ts` run
+`readStageDayResyncDiff()` and `syncStageDayConversions()` over one fixture world and
+require the changed-row sets to be equal **in both directions** — six one-sided
+breakages a side, so neither set can be empty. Two rules:
+
+- **a preview and the operation it previews share the predicate object, or they are
+  two implementations of one rule and one of them is wrong;**
+- **assert the agreement by executing both**, not by asserting that two SQL strings
+  look alike. A snapshot-diff of every column the write touches catches a column the
+  preview forgot; a text comparison catches a rename.
+
+## A bar about "rows that already existed" cannot be asked of an empty table (2026-09-18)
+
+Migration 0185 adds two columns with defaults, and the claim worth asserting is
+that rows written BEFORE the `ALTER` read `'{}'` / `0` rather than NULL. The
+obvious bar — `SELECT count(*) … WHERE events IS NULL` = 0 over the live table —
+is **vacuously true on camman-v2, which holds 0 `keitaro_stage_results` rows**,
+so it would have printed PASS against a migration that omitted the `DEFAULT`
+entirely. The bar now BUILDS the world-state it is about: three rows in a
+`TEMP … ON COMMIT DROP` fixture table, then the migration's own two statements —
+**read off disk, not re-typed** — replayed over them (bars S8/S8b). Re-typing the
+DDL into the test would only ever test the copy. Two rules fall out of it:
+
+- a count-is-zero bar must also assert that the population it counts over is
+  non-empty, or it is a bar about today's world-state and not about the code;
+- a fixture table inside a rolled-back probe should be `TEMP … ON COMMIT DROP`.
+  An ordinary `CREATE TABLE` survives if the probe ever commits — which happened
+  while red-proving the rollback bars, and had to be dropped off camman-v2 by hand.
+
 ## A script that writes to a database must refuse production, by import (2026-09-18)
 
 `.env.local` is **PRODUCTION**, and `scripts/_env-preload.ts` loads it whenever `DATABASE_URL` is not already set. On 2026-09-18 a test-fixture script ran that way and created live campaign rows in production before tearing them down. Nothing was damaged; nothing had stopped it either.
@@ -469,7 +733,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
   - **Keitaro `sub_id_3` = the STAGE tracking id** (the offer postfix param carries it into the tracked URL), not a bare campaign id. The Keitaro poll groups by `sub_id_3` + `campaign_id` and maps back via `campaign_stages.tracking_id`; campaign totals are the SUM across stages. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md).
   - **Keitaro `sub_id_1` = the per-recipient id** (= `stage_sends.id`), appended to the tracked link at redirect time for per-sale → phone attribution (conversions poll).
   - **`sub_idN` URL-param vs `sub_id_N` Keitaro-token spelling split (don't mix them up):** the inbound URL param has **no** underscore before the digit (`sub_id1`, `sub_id3`); the Keitaro token / report column / `conversions/log` column has the underscore (`sub_id_1`, `sub_id_3`). The campaign *Parameters* tab maps one onto the other. A mismatch silently breaks attribution (real past bug). Constants: `STAGE_TRACKING_PARAM = "sub_id3"` ([lib/stage-url.ts](../lib/stage-url.ts)), `RECIPIENT_SUB_ID_PARAM = "sub_id1"` ([lib/links/resolve-click.ts](../lib/links/resolve-click.ts)).
-  - **Keitaro visit/redirect classification:** clicks are classified by the Keitaro campaign **name** `gk-lp-visits` (landing-page **visits** = "Clickers") vs **any other** campaign (**offer redirects**, whose conversions are sales). Match on **name, not alias** — in the live panel `gk-lp-visits` is the campaign's *name*; its *alias* is a random code (e.g. `ZttBSV`). Resolve the name → `campaign_id`(s) once, then classify rows by `campaign_id`; never hardcode the id (rebuild-safe). Funnel: Clickers → Offer Redirect → Sales, where visits ⊇ redirects (every redirect is also a visit) and the two are **never summed** — total arrivals = visit count. Headline numbers are the **clean** (bot/prefetch-filtered) counts.
+  - **Keitaro visit/redirect classification:** clicks are classified by the Keitaro campaign **name** `gk-lp-visits` (landing-page **visits**, headed "Landing visits" on screen — "Clickers" before 2026-09-20) vs **any other** campaign (**offer redirects**, whose conversions are sales). Match on **name, not alias** — in the live panel `gk-lp-visits` is the campaign's *name*; its *alias* is a random code (e.g. `ZttBSV`). Resolve the name → `campaign_id`(s) once, then classify rows by `campaign_id`; never hardcode the id (rebuild-safe). Funnel: Landing visits → Offer Redirect → Sales, where visits ⊇ redirects (every redirect is also a visit) and the two are **never summed** — total arrivals = visit count. Headline numbers are the **clean** (bot/prefetch-filtered) counts.
 - API route naming: `[parentEntityId]` for nested API segments, `[id]` for page routes (avoids Next's sibling-dynamic-segment prohibition).
 
 ## Timezone (ET everywhere)
@@ -479,6 +743,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 - Forms: `<input type="datetime-local">` ↔ `campaignLocalInputToUtcIso()` / `utcToCampaignLocalInput()`.
 - Send windows evaluated in ET via `lib/quiet-hours.ts` — sender-zone, not recipient-zone (known TCPA limitation).
 - **The Telegram performance report is the one place two zones coexist — keep them independent.** `/api/cron/telegram-report` schedules by **`Europe/Warsaw`** (when to send) but buckets all stats by **ET** (which day). Both are derived separately from `new Date()` via `Intl`/`date-fns-tz` `formatInTimeZone` — **never** offset arithmetic, because the Warsaw↔ET gap shifts (5/6/7h) on DST-transition weeks. "Delivered" in the opt-out ratio means **provider-accepted** (`stage_sends.status='sent'`), not DLR-confirmed delivery — CamMan polls no DLR (CLAUDE.md §12).
+- **⭐⭐ The Telegram REPORT path can break itself permanently — escape and cap everything user-typed that reaches it.** This is not the alert path: `notifyTelegram` is plain text and never throws, but `sendTelegramHtml` posts with `parse_mode: "HTML"` and **throws** on any non-2xx, `classify()` maps a 400 to **`permanent`**, and the cron then returns 500 — and does exactly the same thing every hour afterwards, because nothing about the input changes. There is no self-healing path; a human has to edit a database row. Telegram answers 400 both for **malformed markup** and for text over **4096 characters**, and `event_types.label` is `text NOT NULL` with **no CHECK constraint and no UI**. Four rules, all asserted in [scripts/test-telegram-report-format.ts](../scripts/test-telegram-report-format.ts): (1) **escape at the point of interpolation**, through ONE helper, and hold that structurally — bar T22 scans the formatter and fails if `.label` appears anywhere but inside `eventLabel()`, because T4/T5 only prove today's call site while a `${t.label}` added tomorrow is the outage; (2) **count the cap on the ASSEMBLED, POST-ESCAPE string** — escaping lengthens it (one `&` becomes five characters), so a cap estimated before escaping is the wrong number; (3) **drop whole LINES, never slice** — `&amp;` cut to `&am` is a 400, and at 40 of 101 candidate cut points a blind `slice()` on an `&`-dense document lands inside an entity (measured, bar T8f), so the last-ditch `capped()` cuts at the last newline and REPLACES a single over-long line rather than slicing it; (4) **the money lines are never the thing dropped** — the obvious "join everything then tail-cut" implementation drops precisely Revenue/Spend/ROI/Net Profit/opt-outs, so the assembler drops per-type lines off the tail instead and announces them as `+N more event types`. Corollary: **anything appended to the message AFTER the formatter returns is outside the cap** — the cron's carrier-triage line is passed IN for exactly that reason. And a length bar needs a fixture that actually reaches the cap: with short labels T8 passes with the cap *and* without it (bar T8c pins the fixture, and shortening it leaves T8 green while T8c goes red).
 - **postgres-js timestamptz-inference gotcha:** binding a bare ET wall-clock string and casting `${s}::timestamp` (or `::timestamptz`) lets postgres-js infer a `timestamptz` parameter and **pre-shifts the instant** (a silent multi-hour error). To convert an external ET wall-clock (e.g. Keitaro's `datetime`) to the correct UTC instant, build a zoned literal instead: `(${s} || ' ' || ${CAMPAIGN_TIMEZONE})::timestamptz` — concatenation forces text binding; NULL concat → NULL. (Seen in `lib/keitaro/poll-conversions.ts`.)
 - **⭐ A correlated `max(col)` subquery has no index behind it unless one LEADS with the correlating column — and the miss is unbounded, not merely slow.** Postgres rewrites a bare `max(x)`/`min(x)` into "walk an index on `x` and stop at the first row", which is brilliant when a match exists near the end and catastrophic when **no row matches at all**: it walks the entire index. `(SELECT max(ss.sent_at) FROM stage_sends ss WHERE ss.stage_id = s.id)` had only `stage_sends_sent_at_contact_idx` to work with, so `stage_id` was a **Filter, not an Index Cond** — for a stage that had never sent, **48 s and 1,846,869 rows removed by filter, per candidate row** (3.86 M-row table). Two such rows = 96 s inside a route capped at `maxDuration = 60`, which killed every hourly Telegram report for a full day on 2026-08-27 with no report and no alert. **The fix is a grouped second pass over the (small) candidate set** — `SELECT stage_id, max(sent_at) … WHERE stage_id IN (…) GROUP BY stage_id` — because the min/max index rewrite does **not** apply under `GROUP BY`, so the planner falls back to the ordinary equality index (`stage_sends_stage_id_idx`) as an Index Cond: **96,024 ms → 402 ms** on the identical input, no new index. Adding a `(stage_id, sent_at)` index would also have worked, but a second query on an already-tiny row set is cheaper than a 16th index on a 3 GB write-hot table. **Smell test:** a correlated `max()`/`min()` whose correlating column is not the leading column of some index — and where "no matching row" is a normal case — is the shape. `EXPLAIN ANALYZE` and look for `Rows Removed by Filter` in the millions under an `InitPlan`/`SubPlan`. Guarded by [scripts/test-stall-detector-perf.ts](../scripts/test-stall-detector-perf.ts).
 - **⭐ A best-effort diagnostic must never run before, or unbounded alongside, the job it diagnoses.** The same 2026-08-27 outage was *amplified* by ordering: the stall watch and the unjoinable watch ran **before** the report-window decision, with `try/catch` but no time bound. `try/catch` catches errors, not slowness — so the 96 s query was never "an error", it just ate the entire 60 s function budget, and the handler died at `maxDuration` **upstream of its own "report failed" alert**. Net effect: a watchdog for stuck sends silently suppressed 8 hours of reports *and* the alert that would have said so — and it did it precisely **when the queue actually stalled**, i.e. exactly when the reports mattered. `/api/cron/telegram-report` now sends the report **first** and runs each watch **after**, individually capped at `CHECK_TIMEOUT_MS = 10 s`. Applies to any handler with a hard wall-clock kill: order by what the caller actually needs, and give every best-effort extra its own bound. (The same lesson, learned separately, is why `/api/clicks/score-pending` no longer calls `propagateTrackedClickers()` — see [04-features/crons.md](04-features/crons.md).)
@@ -499,12 +764,17 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
 ## Database & migrations
 - Drizzle schema in `db/schema.ts`; migrations **hand-authored** SQL in `db/migrations/` (db:generate blocks on a TTY rename prompt — see memory). Hand-write SQL + clone the snapshot forward + add the journal entry, then `db:migrate` + `verify-migration-integrity`.
 - Migrations are **not** auto-applied on deploy — run them locally against the target `DATABASE_URL` before pushing dependent code. (Exception: the **camman-v2 preview** project auto-applies on its Vercel preview build — `vercel-build` runs `db:migrate` when `VERCEL_ENV=preview` and `RUN_PREVIEW_MIGRATIONS=1`.)
+- ⭐ **A bare `db.select()` is a HIDDEN dependency on every migration the schema mirror has run ahead of.** With no projection, drizzle expands the select to **every column `db/schema.ts` names** — so a handler that reads none of a new column still asks the database for it, and answers `42703 undefined_column` until the migration lands. Because additive leads the code here (CLAUDE.md §14), that window is every deploy between a schema commit and its apply, and the failing endpoint has no visible connection to the feature that widened the table. **Give any read of a table whose mirror is ahead of production an explicit projection**, so the handler's schema dependency is the one it actually has. `app/api/keitaro/results/route.ts` was the live instance: a bare select over `keitaro_stage_results` pulled in `events` and `unmapped_conversions` (0185) that nothing in the handler reads (fixed 2026-09-19; it now names its 14 columns, `pending_revenue` among them because `addRowToFunnel` genuinely reads it). Bars `N1`/`N2` in [scripts/test-event-columns.ts](../scripts/test-event-columns.ts) pin the premise and scan `app/` + `lib/` for a recurrence. **Note what this does and does not buy: it removes the ACCIDENTAL dependency, not the deliberate one** — an explicit list still names the columns the handler reads, so the ordinary rule (apply the migration before pushing the code) is unchanged.
 - **⚠️ Drizzle picks pending migrations by the journal `when`, NOT by the file hash. Editing an already-applied migration does not re-apply it.** `PgDialect.migrate` ([`drizzle-orm/pg-core/dialect.js:44-71`](../node_modules/drizzle-orm/pg-core/dialect.js)) reads the single newest row of `drizzle.__drizzle_migrations`, then applies each journal entry only when `entry.when > lastDbMigration.created_at`. The `hash` column is **written and never compared** — it exists for `scripts/verify-migration-integrity.ts`'s benefit, not drizzle's. Consequences:
   - Amend an already-applied file and the change is silently *not* pending. A database that already ran it (in practice: **camman-v2**) keeps the OLD definition indefinitely, while the repo, `tsc`, every review and every fresh database say otherwise. A green run against that preview then proves nothing about the file.
   - `verify-migration-integrity` is the only thing that notices, as `hash ✗ recorded … computed …`. **Treat that as "this database is running different SQL from the file", not as cosmetic bookkeeping.**
-  - **Remedy for an UNRELEASED migration** (not yet applied to prod): bump that entry's `when` in `db/migrations/meta/_journal.json` by the usual +86400000, leave every other entry alone, and say in the migration's header that the timestamp was bumped once and why — otherwise the next reader files it as drift. This only works if the file is **fully re-runnable** (every object preceded by `DROP … IF EXISTS`, or `CREATE OR REPLACE` / `ON CONFLICT DO NOTHING`); check that first, statement by statement. Done once for `0183_report_views_from_ledger` (2026-09-18, `1792195200000 → 1792281600000`), to land an `org_id` join fix on preview.
+  - **Remedy for an UNRELEASED migration** (not yet applied to prod): bump that entry's `when` in `db/migrations/meta/_journal.json` by the usual +86400000, leave every other entry alone, and say in the migration's header that the timestamp was bumped once and why — otherwise the next reader files it as drift. This only works if the file is **fully re-runnable** (every object preceded by `DROP … IF EXISTS`, or `CREATE OR REPLACE` / `ON CONFLICT DO NOTHING` / `IF NOT EXISTS`); check that first, statement by statement. Done for `0183_report_views_from_ledger` (2026-09-18, `1792195200000 → 1792281600000`) to land an `org_id` join fix on preview, and for `0182`/`0184`/`0185` (2026-09-19, `1792108800000 → 1792195200000`, `1792368000000 → 1792454400000`, `1792454400000 → 1792540800000`) to land the `SET LOCAL lock_timeout` first statement.
+  - ⭐ **A BUMP ONLY RE-APPLIES IF IT EXCEEDS THE DATABASE'S NEWEST RECORDED `created_at` — not merely its own old value.** `PgDialect.migrate` compares every entry against ONE row: the newest in `drizzle.__drizzle_migrations`. So bumping a MIDDLE entry of an already-applied run does nothing on that database, however much you raise it, unless the new value clears the whole run's high-water mark — and it cannot, if the journal must stay ascending and a later entry already sits above it. Measured 2026-09-19: camman-v2's newest row was `1792454400000` (`0185`), so of the three bumps above only `0185`'s took effect there; `0182`'s new value sits below the mark by construction, because raising it past `0185` would break the journal's order. **Check the target's newest row before promising a re-apply.** This is harmless when the edit has no catalog effect (a `SET LOCAL`, a comment) and is exactly why such an edit is safe to make on an applied file — but if the edit changes SHAPE, a middle entry cannot be fixed by a bump at all and needs a NEW migration.
+  - ⭐ **"Re-runnable" is NOT "shape-repairing".** `ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` match on the **name alone**: re-applied over an object of the wrong type, nullability, default or definition they are a silent no-op, not a repair. Re-runnable means only "applying it twice raises nothing and changes nothing" — which is all a `when` bump needs. A shape that has already drifted is fixed by a new migration that names the difference, never by re-running the old one. Bar `S8b` of [scripts/test-stage-event-columns-db.ts](../scripts/test-stage-event-columns-db.ts) asserts the former and says in its own label that it does not assert the latter.
   - **Never hand-repair a recorded hash, and never re-point `__drizzle_migrations` by hand.** For a RELEASED migration the answer is a new migration, never an edit — the edit would diverge every database that already ran it, in both directions and invisibly.
   - Re-applying leaves a **second row** for that entry, so `verify-migration-integrity` reports a record-count mismatch and a hash mismatch for it (it indexes `rows[entry.idx]` assuming one row per entry, in order). The database is correct; the checker's assumption is what broke.
+  - ⭐ **A COMMENT THAT HAS GONE FALSE IS WORTH THE HASH MISMATCH — correct it, do NOT bump the `when`.** A migration header is read by the person applying it, at the moment they decide whether to apply it, so a claim that has decayed is at its most expensive exactly then. Correcting it changes the SHA-256 and therefore shows on any database that already ran the file, but per the bullets above that is a diagnostic line, not divergence: drizzle never compares the hash, and a comment has no catalog effect. **Do not bump the journal `when` to "fix" the mismatch** — a bump is a request to RE-APPLY, which is a real change to a database that is already correct, and (per ⭐ above) usually a no-op anyway. Before choosing, read back three things rather than assuming: has production applied the file yet (if not, it records the corrected hash and the database that matters stays clean); does the target's recorded hash actually still match the file (often it already does not); and does the correction change only comments. Done 2026-09-21 for `0183_report_views_from_ledger`, whose `APPLY-TIME WINDOW` block claimed the three matviews are built from an EMPTY `conversion_events` ledger and read $0 to live users — false once `0181` applied to prod ahead of it and the backfill ran. Read back on prod the same day: ledger 1,517 rows, **$100,763.0000** approved revenue attributable at CREATE time. camman-v2 keeps the pre-correction hash for idx 183; prod had not applied `0183` and records the corrected one.
+  - **What camman-v2's `__drizzle_migrations` actually looks like after a run of bumps** (read back 2026-09-21, and the worked example for the ⭐ bullets above): newest row `1792540800000` (`0185`, hash matches the file); `1792454400000` (`0184`) carries the **pre-amend** hash, because its bump never cleared the high-water mark; and two rows sit at `1792108800000` and `1792368000000`, `when` values that **no longer exist in `meta/_journal.json`** at all — the pre-bump `0182` and `0184`. A preview database mid-release is expected to look like this; `verify-migration-integrity` against it is not a clean-room signal. Run it against **prod** to gate a release.
 - Soft-delete via `status='archived'` + `archived_at`; hard delete is rare and explicit (confirm before any DROP/DELETE/force-push).
 - Connection: Supabase **transaction pooler (port 6543)** + `?prepare=false`; `db/client.ts` caches the pool on `globalThis` (don't strip).
 
@@ -1135,8 +1405,9 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 
 ## Keitaro visit columns and their CamMan equivalents (see [04-features/tracking-attribution.md §7c](04-features/tracking-attribution.md))
 
-Only `visit_clicks_clean` is ever rendered (as "Clickers"); `visit_clicks_raw` is
-read into the funnel tally but reaches no screen.
+Only `visit_clicks_clean` is ever rendered (as "Landing visits" since 2026-09-20;
+"Clickers" before that); `visit_clicks_raw` is read into the funnel tally but
+reaches no screen.
 
 When substituting a CamMan figure for a Keitaro visit count, scope it to
 **human-classified** clicks. Measured 2026-08-24 over 284 healthy `guidekn.com`
@@ -1165,8 +1436,26 @@ the same row.
 - **The cache refresh is tied to the Keitaro poll**, not an independent schedule — otherwise EPC drifts between rebuilds and snaps back, which reads exactly like a real trend.
 - **Freshness is two values**, `updated_at` and `full_rebuild_at`. Never collapse them into one "last updated": an indicator that overstates staleness gets ignored, then is useless when it is right.
 - **Lifetime EPC is primary**; period EPC attributes revenue by the CLICK's date, not the sale's.
-- **Every surface names its time basis in the UI.** `EPC (all time)` / `EPC (period)` / `EPC (30d)`. A bare "EPC" is not acceptable — the denominator is unified but the WINDOW is not, so the basis has to be readable.
-- **The creatives picker sorts by the 30-day figure and says so** (`EPC (30d) ↕`); the lifetime column is shown but deliberately NOT sortable. The picker decides what gets sent next, recency predicts that better, and sorting by lifetime would move rankings by a mean of 4.17 places — a send-behaviour change must never arrive as a side effect of a display change.
+- **On a date-filtered page an unqualified header means THAT filter's range, and a column the filter does not drive must say so in its own header.** This is the reason a bare `EPC` is safe on `/reports` and it is the thing to re-check before dropping another suffix — **not** "the old rule was overturned". One picker sits above the page and drives every tab, so a header with no time basis has exactly one possible reading; the only way a bare name could mean two things is if some column on the same table answered to something else, which is what the second half of the rule forbids. **Checked, not assumed (2026-09-20):** across Overview, the four By-X tables and Hourly, the only fixed columns outside the date filter are `Human clicks (all time)` and `EPC (all time)` — `lifetime_clickers` / `lifetime_epc`, the pair fed by the lifetime aggregate rather than the ranged one ([lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts), `PerfMetrics`: *"LIFETIME pair — ignores the date filter entirely"*) — and both name it; every other fixed column, the unsuffixed `Human clicks` / `EPC` included, is in range. **Bar V21** ([scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts)) pins that correspondence in BOTH directions on all three tables: a ranged column that gains a basis, or a lifetime column that loses one, is red. The entry this replaced said "a bare EPC is not acceptable"; that rule was written for surfaces with no shared filter and it still holds on every one of them — what makes the unqualified form safe here is the filter, not a change of mind. The day a second out-of-filter column lands on these tables, the bare names stop being unambiguous and the suffixes come back.
+- ⚠️ **It is a property of the PAGE, not of the metric — and `/creatives` does not have it.** That table has no date picker, so nothing on it can inherit a range, and it does **not** obey the rule today: `CTR`, `Checkout Rate`, `Sales CR` and every generated event count are 30-day figures carrying their basis only in a `title` tooltip, sitting beside `EPC (30d)`, `EPC (all time)`, `Human clicks (all time)` and `Sales, qty (all time)`, which carry theirs in the header. Recorded as a real gap rather than smoothed over, and **carded** in [04-features/conversion-events.md](04-features/conversion-events.md) (owner, 2026-09-20: *"card it, don't fix it now"*) — the card names the affected columns, the reader-facing cost and what a fix would take. On a page with no picker the header is the only place a basis can live, so nothing above is licence for a bare `EPC` there.
+- **The EPC denominator is headed `Human clicks` everywhere it appears, and the word belongs to that metric alone (2026-09-20, APPLIED).** `counted_clickers` — deduplicated PEOPLE with a click scored `human`, or a Rule-F conversion; the single denominator behind every EPC — heads **`Human clicks`** on the four By-X tables and on Overview, and **`Human clicks (all time)`** for `lifetime_clickers` there and for `clean_clicks_lifetime` on `/creatives`. Owner: *"Matches what the Operator API already ships as `clicks_human`."* It does: [operator-api.md](operator-api.md) prints `"counted_clickers": 4480, "clicks_human": 4480` on one row, so the screen and the API now say the same word for the same number instead of contradicting each other. **The API field names did not change** — this was a header rename on three screens, not a contract change. **Bar V23** ([scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts)) pins all five columns at once, so a later edit to one file cannot quietly re-split the vocabulary.
+  - ⚠️ **Do NOT spell "human" over `Landing visits` (the column formerly headed `Clickers`) — it is a different metric, and the word would be false there.** That column is `s.tally.visit_clicks_clean`: Keitaro's clean landing-page **VISITS**, bot-filtered by **Keitaro** rather than human-scored by **CamMan**, and explicitly display-only ([lib/keitaro/poll.ts](../lib/keitaro/poll.ts): *"Clickers = landing-page visits (visit_clicks_clean)"*; `PerfMetrics` in [lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts): *"`clickers` above is the Keitaro landing-visit count and is display-only"*). V23's second half is red if "human" ever lands on it, and it stayed green through the `Landing visits` rename below — a property bar survives a correct change.
+- **⭐ `Clickers` WAS A TRAP AND IS NOW `Landing visits` — flagged and APPLIED 2026-09-20, owner-approved.** Owner, flagging it: *"Leave `Clickers` alone for now, but flag it: a people-word for a display-only Keitaro visit count, sitting near the real denominator, is a trap waiting to catch someone."* The shape of the trap, kept because it is the reason the new name is what it is: in the default `/reports` view that column sits **four columns** from `Human clicks`; the one named for **people counted visits**, and the one named for **clicks counts people**. A reader who wanted "how many humans clicked" reached left, landed on `Clickers`, and got a number that is **neither deduplicated nor human-scored** — and on a healthy tracked stage the two differ by roughly 1.35× (`counted_clickers` ≈ 1.35 × `visit_clicks_clean`, measured over 284 guidekn stages, [app/api/keitaro/reports/route.ts](<../app/api/keitaro/reports/route.ts>)), so the mistake was plausible enough to go unnoticed and wrong enough to matter. The column is also the divisor of `Redir %` and the numerator of `CR %`, and it is **not** a denominator anywhere EPC is involved.
+  - **Why `Landing visits` and not the alternatives.** What the field genuinely counts: **landing-page visits that Keitaro's own bot filter let through, counted as visits and not as people, for display only.** `Visits` alone was shortest but bare beside `Redirects`; `Tracker visits` named the source but is jargon. **`Landing visits` is the only candidate true in both halves** — *landing* distinguishes it from `Redirects` (offer clicks) one column later, and *visits* stops it claiming to be people — and it reads naturally beside `CR %` ("clicks ÷ sent") and `Redir %` ("redirects ÷ landing visits").
+  - **What it cost, verified on applying rather than quoted from the estimate.** **No API cost — re-confirmed:** the Operator API field is `clickers` (documented at [operator-api.md](operator-api.md) §7 as *"the tracker's clean landing visits — not human clicks"*); it is a FIELD NAME, not a label, and it did not move. There is no `/reports` CSV export and no `clickers_label` anywhere. **No saved-sort cost — re-confirmed:** sorts persist by column **id**, and a live read of `localStorage["reports.performance"]` after the rename returned `"sortBy":"sent"` — an id, never header text. The column id is still `clickers` on all three tables. **UI cost: the six label sites, all six applied** — `FULL_COLS`, `HOURLY_COLS` and **two** `StatCard`s in [components/reports/performance-report.tsx](../components/reports/performance-report.tsx), and the column header + a `StatCard` in [components/reports/keitaro-report.tsx](../components/reports/keitaro-report.tsx) — plus two prose sentences (the Overview funnel *"the Landing visits → Offer Redirect → Sales funnel"*, and the Hourly rates line *"redirect ÷ landing visits"*) and bar V13's roster literal.
+  - **⚠️ WIDTH: IT FITS ON AN ORDINARY OFFER NAME AND GOES 18px OVER ON A LONG ONE — measured, not estimated.** Real Chromium at a 1440px viewport against camman-v2, `table.scrollWidth` vs the same 1126px container, By Offer default view (15 columns), all four cells read back in ONE session on ONE fixture (offer 5), before and after in the same session:
+
+    | offer name | header | `table.scrollWidth` | container | overflow | `Offer` col | the renamed col |
+    | --- | --- | --- | --- | --- | --- | --- |
+    | 20 chars | `Clickers` | 1126px | 1126px | 0 | 112.7px | 70.7px |
+    | 49 chars | `Clickers` | 1126px | 1126px | 0 | 112.7px | 70.7px |
+    | 20 chars | **`Landing visits`** | **1126px** | 1126px | **0 — fits** | 79.7px | 103.7px |
+    | **49 chars** | **`Landing visits`** | **1144px** | 1126px | **+18px — OVER** | 97.1px | 103.7px |
+
+    The header grows **33px** (70.7 → 103.7). On an ordinary name the flexible `Offer` column gives up exactly that (112.7 → 79.7) and the table still fits. On a 49-character name `Offer` cannot fall below ~97px, so only ~15px of the 33 can be found and the table overflows by **18px**. **Nothing was shortened and no column was dropped to hide this** — the owner decides whether 18px of horizontal scroll on one tab, on long offer names only, is worth the name. **Method control:** the same measurement with *Show all columns* on read **2056px in 1126px (overflow 930)**, so the method detects overflow and a 1126/0 reading is a real fit, not an artefact of a `w-full` table.
+    - ⚠️ **This contradicts the figure recorded for the PREVIOUS rename and the contradiction is deliberately left visible.** [04-features/conversion-events.md](04-features/conversion-events.md) records 49 chars + `Human clicks` = **1138px / +12px**; the same fixture re-measured on 2026-09-20 read **1126px / 0**. Both are read-backs from real browsers; they differ, so the row count and cell content of the fixture evidently move the `Offer` column's floor more than either measurement assumed. **Treat any single width figure here as fixture-dependent and re-measure rather than quote** — which is the standing instruction anyway.
+- **The creative PICKER sorts by the 30-day figure** — [components/campaigns/creative-picker-dialog.tsx](../components/campaigns/creative-picker-dialog.tsx) sends `sortBy=epc`; the lifetime column is shown but deliberately NOT sortable. The picker decides what gets sent next, recency predicts that better, and sorting by lifetime would move rankings by a mean of 4.17 places — a send-behaviour change must never arrive as a side effect of a display change. **The `/creatives` PAGE now ranks the same way** (owner, 2026-09-20: *"created_at is the wrong default for a ranking page"*) — `DEFAULT_FILTERS.sortBy` in [app/(protected)/creatives/page.tsx](<../app/(protected)/creatives/page.tsx>) is `epc`, descending, executed server-side by the route's `RATIO_SQL.epc` branch with NULLS LAST. It used to default to `sortBy=created_at`, which is why its header once carried a hand-drawn `EPC (30d) ↕` asserting a sort the page did not do; the glyph was removed on 2026-09-20 and **must not come back now that the claim is true** — `DataTable` renders the real indicator, and a literal would go on asserting the moment the operator sorted by another column. ⚠️ `sortBy` is persisted per browser, so a browser that has used this list keeps its saved sort and still opens on `created_at`; the new default reaches fresh browsers only. **Do not hand-draw a sort glyph into a header string at all:** `DataTable` already renders a real one on every `enableSorting` column, so a literal is a second indicator that cannot track the actual sort.
+- **A curated default view must never hide the column the table is SORTED BY.** Rows ordered by an invisible column render with no indicator anywhere, and that is indistinguishable on screen from an unsorted table. Measured on `/creatives` 2026-09-20: the default view rendered **zero** up/down chevrons while the request really did carry `sortBy=created_at&sortDir=desc` and the rows really were in that order — a WORKING sort with a suppressed indicator, which is a different bug from a broken sort and must be diagnosed as one. **The two report surfaces fix it differently, deliberately, because their sorts live in different places:** `/reports` sorts CLIENT-side over a response already in memory, so `sortColumnOrFallback()` MOVES the sort onto a visible column for free; `/creatives` sorts SERVER-side (`sortBy` is a request parameter) and decides what gets sent next, so moving it would silently re-rank the page — `isHeldBackFromDefaultView()` in [lib/reporting/column-visibility.ts](../lib/reporting/column-visibility.ts) REVEALS the column instead, changing what is rendered and nothing else. Exactly one held-back column is revealed, only while it is the active sort. Bars V18/V19. **Moving the default sort onto a visible column is the cheaper answer where it is available, and it was taken on 2026-09-20:** `/creatives` now opens on `epc`, which is in the curated view, so the reveal no longer fires in the DEFAULT case and the default view is 11 columns rather than 12. The reveal rule stays — it is what covers an operator who sorts by a held-back column, and the persisted sorts already saved in operators' browsers — but a page whose default sort names a hidden column is paying ~116px for an indicator it could have had for nothing.
 - **A column with `enableSorting: true` MUST have a matching entry in the route's server-side sort whitelist.** Without it the request is accepted, the route silently falls back to sorting by revenue, and the header still responds — it looks like it works. Guarded by `scripts/verify-sortable-columns.ts`.
 
 ## CTR divides by messages SENT — `delivered_count` is not a send counter (ClickUp 869evxq3f, 2026-09-14)
@@ -1178,7 +1467,7 @@ the same row.
 ## Sales = max(manual tally, Keitaro conversions) — `sales_count` alone is the manual tally (2026-09-15)
 - **`campaign_stages.sales_count` is only the operator's manual sales tally.** The Keitaro poll mirrors clicks (`click_count`) and checkouts (`checkout_click_count`) onto the stage but deliberately never sales ([lib/keitaro/poll.ts](../lib/keitaro/poll.ts)); Keitaro conversions stay in `keitaro_stage_results.sales`. A stage's effective sales = `max(sales_count, Σ keitaro_stage_results.sales)` — the `combineSales` rule in [lib/stage-results.ts](../lib/stage-results.ts), max not sum because a sale in both sources is one sale. The creatives metrics cache summed `sales_count` alone, so on 2026-09-15 Sales CR read 0.0% on every creative (0 manual vs 549 Keitaro sales in 30 days). Same trap as `delivered_count` above: **before summing a stage counter, check who writes it.**
 - **Aggregate a per-stage child table once and join it; don't correlate it per stage.** `(SELECT sum(...) FROM keitaro_stage_results WHERE stage_id = cs.id)` evaluated per stage cost 1,535 ms / 343,794 buffers in the creatives metrics cache; one grouped CTE joined in cost 17 ms / 991 buffers.
-- **A lifetime column must be driven by the lifetime aggregate.** The same cache drove its final SELECT from the 30-day aggregates and LEFT JOINed the lifetime ones, so a creative idle for 30+ days had no row — "Clicks (all time)" and "EPC (all time)" read 0 / "—" for 60 of 405 creatives. Drive from the widest set and LEFT JOIN the narrower windows. Only a check over EVERY row finds this: spot checks pick active creatives. `scripts/verify-creatives-sales.ts` is the guard.
+- **A lifetime column must be driven by the lifetime aggregate.** The same cache drove its final SELECT from the 30-day aggregates and LEFT JOINed the lifetime ones, so a creative idle for 30+ days had no row — "Human clicks (all time)" (then headed "Clicks (all time)") and "EPC (all time)" read 0 / "—" for 60 of 405 creatives. Drive from the widest set and LEFT JOIN the narrower windows. Only a check over EVERY row finds this: spot checks pick active creatives. `scripts/verify-creatives-sales.ts` is the guard.
 
 ## Delivery receipts — capability is DECLARED, and absence renders `—`, never `0%` (see [04-features/delivery-report.md](04-features/delivery-report.md))
 
@@ -2937,6 +3226,8 @@ A planner check must be asked in the regime whose answer you care about. The fix
 Drizzle applies **every pending migration in one transaction**, and each lock is held until that transaction commits. `CREATE TABLE … REFERENCES stage_sends/contacts` takes a lock that conflicts with the drain's inserts and updates. `ALTER TABLE … ADD COLUMN` takes ACCESS EXCLUSIVE. A migration stuck waiting for one of those locks makes every later writer queue behind it.
 
 - Make the first statement `SET LOCAL lock_timeout = '5s';` so a blocked lock fails the migration and you retry, instead of stalling the app.
+- ⭐ **THE RISK IS QUEUEING, NOT DURATION, so "this one is instant" is not a reason to skip it.** PG 11+ stores an `ADD COLUMN … DEFAULT` in the catalog (`pg_attribute.atthasmissing` / `attmissingval`), so there is no table rewrite and the statement itself is milliseconds even on `keitaro_stage_results`' ~17,600 rows. What costs is the WAIT: an unbounded ACCESS EXCLUSIVE request parks behind whatever holds a conflicting lock and every reader and writer of the table then parks behind *it*. `/api/keitaro/poll` alone allows `maxDuration = 230`, so an unlucky apply stalls the table for minutes. A bounded wait fails in 5s and you retry.
+- ⭐ **`SET LOCAL` covers the TRANSACTION, so only the migration that LEADS the pending batch actually sets it — put it on the leader, and on every file that could be applied alone.** Drizzle applies all pending migrations in one transaction, so the first pending file's `lock_timeout` is the one in force for the whole batch; a `SET LOCAL` in an already-applied migration is long committed and protects nothing. This is easy to get wrong because the batch leader CHANGES as migrations are released: `0181` carried it and protected the batch it led, but once `0181` shipped the next production batch began at `0182`, which set nothing — and the protection silently evaporated between two deploys with no file changing. **Whenever a batch is released, look at which file now leads the next one.** Fixed 2026-09-19 by giving `0182`, `0184` and `0185` the same first statement (`0183` already had one).
 - Take the strongest lock first. In `0181_conversion_events.sql`, the `offers` `ADD COLUMN` + index run before any `CREATE TABLE` with a foreign key, so `offers` never needs a lock upgrade while the FK locks on `stage_sends`/`contacts` are held.
 - A seed that `LEFT JOIN`s a lookup by name (e.g. an event-type key) needs `WHERE v.key IS NULL OR lookup.id IS NOT NULL`. Without it, a typo silently seeds a NULL reference, which for conversion mappings means a status-only rule.
 
@@ -2992,6 +3283,330 @@ check("⭐ the pin is still the legacy trio [0,1,2]", JSON.stringify(PINNED_TIER
 Now widening the pin has to come here and argue with the literal first. The same shape applies anywhere a guard compares a result against the constant that produced it.
 
 **And an unreachable `throw` is not a working one.** The total-lookup helpers added in Task 5 (`expectedFor` / `expectLane`) throw when a tier in `LANE_TIER_VALUES` has no seeded expectation — which cannot happen today, so nothing proved the throw fires. Each is now pinned with a call on an unmapped tier inside `try`/`catch`, so the safety net is tested before the day it is needed.
+
+## A shared zero constant that is spread is a shared MUTABLE object (2026-09-19)
+
+`PerfMetrics.ZERO` ([lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts)) was only ever numbers, so `{ ...ZERO }` was a complete copy and eight accumulators in that module relied on it. Phase 5 Task 4 added `events: EventMap` — an object — and a spread is **shallow**: every `{ ...ZERO }` that is later mutated would then have handed two requests the SAME map, `addEventMaps` would mutate it in place, and one org's breakdown would appear inside another org's response. Nothing would have failed; the numbers would just have been wrong, and only for whoever asked second.
+
+Two things fix it, and only one of them is a guard:
+
+```ts
+Object.freeze(ZERO.events);                                        // the guard
+export const zeroMetrics = (): PerfMetrics => ({ ...ZERO, events: {} });   // the fix
+```
+
+Every mutated accumulator calls `zeroMetrics()`. The freeze is what makes a *missed* one a `TypeError` at the mistake (all ES modules are strict) instead of a wrong number somewhere else later — the same lesson `EMPTY_TALLY` taught in Task 1, where `Readonly<T>` was measured NOT to prevent aliasing and only the freeze did. `ZERO` itself is still handed out directly (`app/api/reports/performance/route.ts` does `offer_totals[id] ?? ZERO` straight into a response body), which the freeze makes safe to share rather than something to "fix" by unfreezing.
+
+The general rule: **the moment a spread-and-mutate constant gains a non-primitive field, the spread stops being a copy.** Add the factory and freeze the field in the same commit as the field.
+
+## A breakdown must travel with the residual that explains it (2026-09-19)
+
+`keitaro_stage_results.events` does not add up to `sales`, and it is not supposed to. `sales` resolves `is_purchase` through the non-org-scoped `PURCHASE_EVENT_TYPE_IDS` while the breakdown comes from an org-scoped join, so a ledger row carrying another org's `event_type_id` is counted by the scalar and placed under no key; and a stage's `sales` also carries the manual tally, which the tracker knows nothing about. What holds is:
+
+```
+sales  =  Σ (is_purchase) events[t].n   +   manual_topup   +   cross-org strays
+```
+
+So the read layer carries **all three** together, on every dimension and on the totals: `events`, `unmapped` (where the strays land) and `manual_topup` — the last one previously computed in `getStageMetricsInRange` and thrown away. A path that carries `events` alone presents the breakdown as a complete explanation of Sales when it is short by two terms, and that is silent. If you add a surface that renders `events`, render `unmapped` and `manual_topup` beside it or state the gap.
+
+**…and "all three" has to be STRUCTURAL, or it is only a promise (2026-09-19, review fix).** The sentence above was written in the same commit that left `manual_topup` OFF `FunnelTally` — it sat on `StageMetrics` instead, beside the tally rather than in it. So `mergeFunnel` carried two of the three terms and `withFunnelDerived`'s `...t` spread emitted two of the three, and `/api/keitaro/reports` had to re-roll the third BY HAND at each of the three grains it emits. It did, correctly — and nothing would have failed if it had missed one: a `manual_topup` that is simply not summed reads as a blank footnote, not as a wrong number. `manual_topup` is now a field of `FunnelTally` ([lib/keitaro/funnel.ts](../lib/keitaro/funnel.ts)), so it rides the same merge and the same spread as the breakdown it explains, and the route's hand-rolling is deleted rather than reviewed. `addRowToFunnel` deliberately does NOT touch it — a stored `keitaro_stage_results` row has no manual column — so `getStageMetricsInRange` assigns it per stage and copies it onto `grand` explicitly, exactly as it already does for `sales`. Bars: **F8** enumerates `FunnelTally`'s keys through `mergeFunnel` (the bar whose absence let this happen), **R12/R12b** read the grand tally through the real reader with a non-zero fixture top-up, and `test-stage-funnel.ts` foots it stage-by-stage (**F8**) and pins it to its seeded value (**E8**, top-up 4) — on camman-v2, over a world it builds and tears down itself (it read production until 2026-09-21; it is now preview-only). Red-proved: deleting the `grand.manual_topup = grandSalesTopup;` line turns F8 and E8 red.
+
+**The corollary for an ABSENT breakdown (2026-09-19, review fix).** A reader whose projection does not select `events` / `unmapped_conversions` still gets `events: {}` and `unmapped: 0` out of `addRowToFunnel`, because an absent column folds as an empty map — and `{}` in an API body reads as *measured, and nothing happened*. `/api/keitaro/results` emitted exactly that. **An absent field and an empty map must not look the same**, and there is no third value to invent: `withoutEventBreakdown()` DELETES all three fields, so the shape itself says "not computed here". All three go together — a breakdown that is absent has no residual to carry, and a residual with no breakdown beside it explains nothing.
+
+**The corollary for a new aggregation:** `unmapped` and `manual_topup` have no finer weight by construction — an unmapped conversion resolved to no recipient, and a manual tally is a stage-level number — so the By-Group split spreads both on SENT weights while the map itself splits on SALE weights, the same basis as the `sales` it breaks down. Only the page total is exact; the per-group unmapped figure means "share of this stage's audience".
+
+**The corollary for a SCREEN (2026-09-19): make it structural, not conventional.** "If you add a surface that renders `events`, render `unmapped` beside it" is a rule somebody has to remember. In [components/reports/event-columns-view.tsx](../components/reports/event-columns-view.tsx) it is instead impossible to break: `EventBreakdownToggle` and `UnmappedBadge` are **not exported**, and the only export is `EventColumnsBar`, which renders both. A tab that wants the toggle takes the badge with it. The bar is mounted unconditionally — never inside a `showEvents` branch, and **outside the empty and error states**, because a wholly unmapped conversion resolves to no stage, appears in no row, and therefore exists precisely in the ranges whose table is empty. Bars W13–W16 of [scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts) render the real component with `renderToStaticMarkup` and assert the badge is in the markup in BOTH toggle states; W16 asserts the two halves are not separately exported, with a positive control on the name check so a typo cannot make it vacuous.
+
+**…and the same rule for a surface that has no column set (2026-09-19, Phase 5 Task 6).** The campaign page's stages table cannot mount `EventColumnsBar`: its breakdown is a `·`-joined line inside one Results cell, and its totals are a tile grid. The property that carries over is not the markup but the EXPORT SHAPE — `components/reports/event-columns-view.tsx` now exports exactly two per-event renderers, `StageEventBreakdown` (the segments **and** the inline `⚠ N unmapped` marker) and `EventTotalsTiles` (one tile per registry type **and** the badge, the tiles rendered through a `renderTile` prop so the surrounding card keeps its own markup). Neither half is reachable alone, so a caller cannot obtain the figures without the residual. Bars **X1–X7** of [scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts) render both components and assert both halves in the markup; X6 mirrors W16 on the new names; X7 pins that the campaign page mounts them rather than rolling its own copy — red-proved by replacing the mount with a hand-written `types.map(...)`, which the no-hardcoded-keys gate happily passes. **A gate on event KEYS cannot see a residual-less re-implementation; only a gate on the composition can.**
+
+**A per-stage cell's "are there results" test must include the figures it is about to render (2026-09-19).** The Results cell short-circuits to an em dash when every counter is zero — and `sms_count` is 0 on API sends, so a stage whose only signal is a conversion (or a stray, which counts as nothing anywhere else) is not hypothetical. `keitaro_events` and `keitaro_unmapped` are therefore part of that test: without them the em dash would swallow a stray, and "no data" is the one reading a stray must never get.
+
+**A control's "how many does this reveal" count must not be computed from its own state (2026-09-19).** If the count came from the VISIBLE column set it would read 0 while the toggle is on, which trips the toggle's own `count === 0` early return, unmounts the control, and leaves the extra columns switched on with no way to switch them off. Task 5 made that unrepresentable by giving `tierBColumnCount()` no `showTierB` parameter. The review fix merged that function into `eventColumnBlock()`, which DOES see the toggle — so the property moved from the signature to the code (`eventColsFor(…, /* literal */ true)`) and W12 had to become a real test: it now builds the block with the toggle ON and with it OFF and compares. **The old W12 was a tautology** — it called the same function twice with the same arguments — which is the general trap: *a bar whose two sides are produced by the same call with the same inputs cannot fail.* Red-proved by making the count follow `showEvents` (`off=0 on=3`).
+
+**…and the third hole: the columns themselves could be taken without the bar (2026-09-19, review fix).** Task 5 exported `eventColsFor()` standalone and left `unmapped` a caller-supplied prop, so a new table could render the breakdown while passing the bar a `0`, a different response's number, or never mounting it — the pairing was convention again, one layer up. The entry point is now `eventColumnBlock()`, which returns `{ columns, bar }` from ONE call over ONE `totals` (the residual is READ from it, not passed in), and `EventColumnsBar` takes the whole block. The remaining step — mounting it — is held by bars **X8–X11**, which DISCOVER per-event surfaces by walking `app/` and `components/` rather than listing them, so a table written tomorrow is covered the day it is written. **A gate on event KEYS cannot see a residual-less re-implementation, and neither can a gate that greps one export name: red-proved twice, with a brand-new hand-rolled surface (the key gate scans a fixed list and had never heard of the file) and by hand-rolling inside an EXISTING table (the key gate stayed 34/0 and the component-level bars W13/W14 stayed green — only X9 went red).**
+
+**A source-scanning gate needs a per-needle control, not just a fixture (2026-09-19).** X10 classifies three hand-written samples and passes; renaming ONE needle in the builder list left X8, X9 and X10 all green, because each sample happened to match a second needle. X11 checks every needle separately against a hand-written sample of the call it names — and the samples are written out rather than generated from the needle list, since a control built out of the thing it controls proves only that a string contains itself.
+
+## A NOT-COMPUTED zero and a computed figure must not meet on one row — RESOLVED BY COMPUTING IT (2026-09-19)
+
+`dimension=hourly` used to set the scalar `pending_revenue` to `0` by hand, and the comment said why: "the hourly tab renders no pending column … so this is deliberately not computed rather than half-computed". That zero was a **sentinel, not a measurement** — while the same hourly row carried `events[key].pending_n` and `events[key].pending_revenue`, which ARE computed, off `conversion_events`, bucketed on the same `ce.occurred_at` ET hour as that row's `sales` and `revenue`. One API body therefore answered the same question twice: `totals.pending_revenue: 0` beside a non-zero `events[k].pending_revenue`.
+
+Task 5 could only keep the two apart **on screen** (no hourly column renders the scalar) and said outright that a consumer workaround is not a fix. **The fix is in the aggregation layer, and it is to compute the figure**, not to label the sentinel:
+
+- `getHourlyReport` runs a pending series off the SAME ledger, the SAME hour bucket and the SAME shared clause family as its approved `revenue` — `pendingRevenueClause()` beside `approvedRevenueClause()` ([lib/sale-attribution.ts](../lib/sale-attribution.ts)) — and the hard-coded override is gone.
+- **Why compute rather than signal "not computed" (e.g. `null`):** the data was already being read. `ledgerHourEventQuery` was scanning the same rows for the per-event map, so the scalar cost one more aggregate over an indexed window, not a new access path. A nullable scalar would instead have propagated an "unknown" through `addMetrics`, `scaleMetrics`, the By-Group split and every consumer — the treatment `reached` gets, which is justified there because per-recipient reach is genuinely *unknowable* for a manual-mode stage. Held money on an hour is not unknowable; it was just unasked for. A third state is only worth its cost when there is no second.
+- **The scalar is defined exactly as its stage-path twin**, so `pending_revenue = Σ events[k].pending_revenue + cross-org strays` holds on hourly precisely as it does on the projection (the scalar resolves `counts_revenue` through the non-org-scoped `REVENUE_EVENT_TYPE_IDS`, the map through the org-scoped join). It is the same residual `revenue` already has, and `unmapped` accounts for it.
+
+Bars: **R13** reads a fixture hour holding `$40` PENDING and `$0` approved through the real reader — one-sided, so the sentinel (0) and the truth (40) are different numbers and the bar can go red; **R13b** asserts the scalar equals `Σ events[k].pending_revenue` on every hourly row AND on the totals, with an explicit non-vacuity clause so a world of `0 === 0` cannot satisfy it; **R13c** keeps held money out of `revenue`. **W19** is the cheap source-level gravestone: the hourly row map may contain no `pending_revenue` override at all, with a positive control that it found the right block and that the replacement series exists.
+
+**The general rule:** a placeholder zero is only safe while nothing renders it — and "nothing renders it" is a condition about TODAY'S screens, not about the payload. If the data is already in hand, compute the figure; reach for an explicit "unknown" only when it genuinely is one.
+
+**…and the workaround the sentinel forced on consumers has to be retired WITH it (2026-09-19, review fix).** While the zero stood, [operator-api.md](operator-api.md) told API clients "on hourly, read pending money from `events`, never from the scalar". That paragraph outlived the bug by a commit. A documented workaround is a liability the moment its cause is fixed — a client that implements it now reads the same number twice, and a future reader has no way to tell live advice from an artefact. **The fix and the retraction ship together**, and the retraction names the window it applied to rather than deleting the history.
+
+## A precondition guard is only a guard while it covers the whole path (2026-09-19)
+
+[scripts/_require-migration.ts](../scripts/_require-migration.ts) exists so a prod-facing diagnostic pointed at a database that is behind says *"this database needs migration 0185: `keitaro_stage_results.events` is missing"* instead of dying on a raw Postgres `42703 undefined_column`, which reads like a broken report during a cutover.
+
+It checked **one** column (`pending_revenue`, 0182) under a helper named after it. Then Phase 5 widened the very projection it protects — `events` and `unmapped_conversions` (0185) joined the same `SELECT` — and the guard did not follow. Against a database at 0182–0184 a guarded script **passed its own precondition** and died on the raw 42703 one line later. A guard that is narrower than the thing it guards is a reassurance.
+
+The rules that come out of it:
+
+- **The required set is the path's set, enumerated.** `REPORTING_READ_COLUMNS` lists every `keitaro_stage_results` column `getStageMetricsInRange` names, each with the migration that adds it, and the refusal names **every** missing column at once — naming only the first sends the operator round the loop once per column.
+- **Derive the expectation from the source, and assert SET EQUALITY both ways.** Bar **G1** extracts `keitaro_stage_results.<column>` from `lib/reporting/stage-funnel.ts` and compares it with the guard's list: a column added to the projection and forgotten in the guard goes red, and so does a column left in the guard after the projection stopped selecting it (a refusal asking for a migration nothing needs). It runs with no database at all.
+- **When a dependency widens, re-check every caller, including the ones that were never guarded.** The three callers that had the guard now carry the widened one; five more read-path scripts that never had it (`verify-creative-report`, `verify-epc-surface-grains`, `verify-lifetime-display`, `verify-operator-grading`, `test-performance-report`) now do.
+
+## An all-zero entry is not data, on either producer (2026-09-19)
+
+The stage-day projection FILTERs an all-zero per-event entry out of its `jsonb` (`n <> 0 OR pending_n <> 0 OR revenue <> 0 OR pending_revenue <> 0`), so a stage-day whose only conversion was REJECTED reads `{}` rather than a row of zeros that looks like a configured-but-idle event type. The hourly reader forms the same groups from the same ledger and **emitted** them, so identical data produced `{"purchase":{0,0,0,0}}` on Hourly and `{}` on By Offer.
+
+`getHourlyReport` now applies the same test in JS, after the row's `unmapped` count is taken — the `unmapped` figure comes off the same rows and must survive a skipped entry. The rendered column SET agreed either way (`visibleEventTypes()` keys on a non-zero field, bar **W21**), which is exactly why the payload disagreement was invisible: **two producers of one shape must agree on the shape, not merely on what a renderer makes of it.** Bar **R14**, one-sided against R9.
+
+## A source gate over report surfaces (2026-09-19)
+
+[scripts/test-reports-no-hardcoded-event-keys.ts](../scripts/test-reports-no-hardcoded-event-keys.ts) proves Phase 5's central claim — that report columns are generated from the `event_types` registry rather than written down — by asserting no listed file names an event key. Three things make it a gate rather than decoration:
+
+- **Whitespace-collapsed matching.** This checkout mixes CRLF and LF per file (`core.autocrlf=true`; `.gitattributes` pins only `db/migrations/**`), so every needle is matched against collapsed source and **never contains a newline**. A multi-line needle is always absent, which makes a negative assertion permanently and invisibly green.
+- **Three needle forms per key, and `\b` in two of them.** Quoted literal, dot/optional-chain property access, and object-literal key (which also catches a hard-coded generated column id like `"evtfunnel:registration:purchase"`). The word boundary is load-bearing in BOTH directions: it spares `t.is_purchase` and `is_purchase:` — the registry FLAGS every module is supposed to read — and G0g pins that it also spares `repurchaseRate`. Without it the first response to a false positive would be to weaken the gate.
+- **Negative controls and an existence check.** Every bar but `G0*` asserts an ABSENCE, so a typo in one regex would make them all pass. G0a–G0h run the matcher against strings that must match and strings that must not. **G1** fails when a listed path does not exist, so a renamed module fails loudly instead of dropping silently out of coverage.
+- **…and the list is checked in BOTH directions (2026-09-19, review fix).** G1 proves every LISTED file exists; it cannot see a file that exists and is not listed, which is precisely how `lib/reporting/stage-keitaro-aggregate.ts` — written after the gate — became an unlisted producer that only a reviewer caught. **G1b** walks `app/`, `lib/` and `components/` and fails on any module that imports `@/lib/reporting/event-columns` or names `unmapped_conversions` while being in neither `FILES` nor a tiny, documented `EXEMPT` list; **G1c** is the positive control that the walk still reaches the known producers, because a scanner pointed at the wrong root reports "nothing missing" forever. *A coverage list is only a coverage list when membership is checked from both ends.*
+
+Comments are stripped before matching, so prose may name the keys freely — every module in the list explains itself at length and those explanations name them.
+
+## The unmapped bucket keys on the JOIN RESULT, in every query that computes it (2026-09-19)
+
+Recorded once for the stage-day projection; it now has a second implementation and the rule travels with it. `ledgerHourEventQuery()` ([lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts)) is the hourly tab's own per-event pass over `conversion_events`, and its unmapped count is
+
+```sql
+count(*) FILTER (WHERE et.key IS NULL OR ce.status IS NULL)
+```
+
+— **never** `ce.event_type_id IS NULL`, which is the shape `conversion_events_unmapped_idx`'s predicate uses and the obvious thing to copy. The raw-column form leaves a hole exactly the width of the cross-org stray: that row has a non-null `event_type_id` and a real status, so it is counted by the scalar `sales` series beside it, placed under no key by the org-scoped `LEFT JOIN event_types … AND et.org_id = ce.org_id`, and counted unmapped by neither. Keyed on `et.key` the two buckets are a **partition**. Bar R10b of [scripts/test-report-event-columns-db.ts](../scripts/test-report-event-columns-db.ts) seeds a second org, points one ledger row of the first org at its `purchase` type, and fails on the raw-column form.
+
+## A persisted id outlives the thing it names — fail VISIBLY, never quietly (2026-09-19)
+
+A GENERATED column id (`evt:<event_types.key>:<kind>`) is saved as a sort key in `localStorage` and accepted as one off the wire, while the registry row behind it can be archived, renamed or configured away. Two surfaces silently did nothing about it:
+
+- **Client.** `performance-report.tsx` looked the persisted `sortBy` up in the current columns, found nothing, and read `row[sortBy]` — `undefined` for every row. Every comparison tied, the rows came back in API order, and NO header carried an arrow. "Unsorted with no indicator" is indistinguishable from "sorted", which is the one thing a stale sort must not look like. `sortColumnOrFallback()` falls back to the dimension's default column, and the indicator reads the EFFECTIVE sort so the arrow is where the ordering is (W22/W23).
+- **Server.** `/api/keitaro/reports` accepts a generated sort id by SHAPE through `eventColumnById()` — so a parse IS an acceptance. `event_types_key_format_check` (migration 0181) constrains a key to `^[a-z][a-z0-9_]*$`, but the parser did not, so `evt:PURCHASE:count` parsed into a well-formed column matching no registry row and sorted every row on 0/null. The parser now holds the segment to the same constraint the column it claims to name is held to, and the route falls back to `revenue` — which the operator can SEE (B6/B7).
+
+**The DB constraint and the parser check are not redundant.** One governs what a key can BE; the other governs a string off the wire that merely claims to name one. *A validator that trusts a constraint on a different system is validating nothing.*
+
+**The same rule for an error state: a failed fetch must not leave numbers on screen.** Both report tables replaced the TABLE with an error block while the stat cards and the amber unmapped badge — rendered ABOVE it — kept describing the last range that loaded. "Couldn't load report" beside "12 unmapped" invites the 12 to be read. The stale response is now cleared with the error, so the error is the only claim on the page, and Retry refills it.
+
+## `jsonb_each` on a non-object aborts the STATEMENT, not the row (2026-09-19)
+
+`jsonb_each` / `jsonb_each_text` raise **22023 — "cannot call jsonb_each on a non-object"** when the value is a jsonb scalar, array or `null`. The error is **not scoped to the offending row**: it kills the whole statement. A `CROSS JOIN LATERAL jsonb_each(t.col)` over a table where ONE row is malformed therefore returns nothing at all, and every number computed by that query — for every tenant the query covers — goes with it.
+
+`keitaro_stage_results.events` is `jsonb NOT NULL DEFAULT '{}'` with **no CHECK constraint** (migration 0185). Object-ness is a convention of the one writer ([lib/keitaro/stage-day-conversions.ts](../lib/keitaro/stage-day-conversions.ts)), not a guarantee of the database — which is precisely why `parseEventMap()` ([lib/reporting/event-columns.ts](../lib/reporting/event-columns.ts)) already coerces a NULL, a pre-`events` row and a hand-edited value to an empty map on the JS side. **A SQL reader has to defend the same way**: `AND jsonb_typeof(<col>) = 'object'` beside the org filter, so a malformed row contributes nothing instead of taking the page with it.
+
+There are exactly **three** `jsonb_each` readers of that column and all three carry the guard: [lib/creatives/metrics-cache.ts](../lib/creatives/metrics-cache.ts) `k_stage_ev` (the creatives list; bar **C11**), [lib/reporting/stage-keitaro-aggregate.ts](../lib/reporting/stage-keitaro-aggregate.ts) `ev` (the campaign page's stages table; bar **K6**) and [lib/reporting/attribution.ts](../lib/reporting/attribution.ts) `ev` (the scheduled Telegram report; bar **T19**). **A fourth reader must add it too** — the grep is `jsonb_each` under `lib/`, `app/`, `components/`.
+
+### ⭐⭐ …and the VALUE level is the same bug one level down (2026-09-19)
+
+The guard above is about the TOP level, and it is not enough. `{"k":"abc"}` and `{"k":{"n":"abc"}}` are both perfectly good objects, so `jsonb_each` is happy — and `(e.value ->> 'n')::numeric`, the next thing every one of these readers does, raises **22P02 — "invalid input syntax for type numeric"**, which is **also statement-wide**. Measured on camman-v2, not reasoned about:
+
+| input | today's plain cast |
+| --- | --- |
+| `{"k":{"n":"abc"}}` | `22P02: invalid input syntax for type numeric: "abc"` |
+| `{"k":{"n":{"a":1}}}` | `22P02: … numeric: "{"a": 1}"` |
+| a 2-row set, 1 bad | `22P02` — **the good row's number is lost with it** |
+| `{"k":5}` (non-object VALUE) | harmless: `'5'::jsonb ->> 'n'` is NULL, it does not raise |
+
+So the fix is about the CAST, not about `->>`. All three readers now take their numbers through **`eventNum(value, field)`** ([lib/reporting/event-columns.ts](../lib/reporting/event-columns.ts)) — the SQL-side twin of `parseEventMap()`, which has always done this on the JS side:
+
+- a **JSON number** (what the writer emits) is cast;
+- a **strict numeric string** is cast too — the column's own `$type` declares `number | string` and `parseEventMap` accepts both, so zeroing a value that works today would be a wrong number, which a crash fix is not allowed to buy;
+- anything else — a word, an object, an array, `null`, a missing key — reads **0 for that FIELD only**, so a key with a good `n` and a rotten `revenue` still contributes its count.
+
+⚠️ **The regex brackets its dot (`[.]`), it does not escape it.** `'\.'` inside a TS template literal loses its backslash before Postgres sees it, leaving `.` — which matches any character, so `"4x5"` would have parsed as a number. A character class cannot be eaten by an escape rule.
+
+⚠️ **No backticks inside the `sql` template.** One terminates the literal and the file stops parsing — hit while writing the comment that explains this very guard, in the file that already carried a "NO BACKTICKS ANYWHERE IN THIS TEMPLATE" warning.
+
+**Should the column carry a CHECK constraint?** Recommended, but NOT in this change: it needs a migration and a violation sweep against production, and the guards above make it a defence-in-depth measure rather than a fix. See the "Recommended, not applied" note in [docs/03-data-model.md](03-data-model.md).
+
+*Found by opening the page, not by reading the code.* A hand-written fixture stored a JSON **string** — `${JSON.stringify(obj)}` bound through postgres-js's own tag rather than Drizzle's — and `/creatives` served zeros for every creative in the org. The bar is one-sided: the well-formed counts must still be exactly right WITH the malformed row present, so "it survived by returning nothing" fails it.
+
+## A count-only surface gets a narrower TYPE, not the same one with fields left at zero (2026-09-19)
+
+`/creatives` shows a count per event type beside "Checkout Rate" and no money at all. The obvious move is to reuse `EventMap` and leave `revenue` / `pending_revenue` at 0 — and that is wrong, because a zero that was never computed is indistinguishable on screen from a measured one, and the next reader adds a Revenue column off it without noticing. `EventCountMap` (`Record<string, number>`) is a separate type for exactly that reason, with `visibleEventTypesByCount()` as the primitive and `visibleEventTypes()` delegating to it so "which types are on screen" still has ONE definition.
+
+**The residual rule travels by shape, not by component.** A surface that renders the per-event breakdown must render the unclassified count beside it — `sales = Σ over is_purchase types + strays` — and there are now three shapes that do it: a column set with a filter bar (`eventColumnBlock` → `EventColumnsBar`), an inline `·`-joined line and a tile grid (`StageEventBreakdown` / `EventTotalsTiles`), and a count-only column set (`eventCountColumns`, which returns the residual column **inside the same array** as the counts, so there is no second list to drop). In every case the halves are module-private and only the pairing is exported. Bars **X8–X12** of [scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts) DISCOVER these surfaces by walking `app/` and `components/`; `eventCountColumns(` is listed as BOTH a builder needle and a residual needle, because a file that calls it has discharged the rule by construction.
+
+**⭐ A multi-needle scan bar passes if ANY needle matches, so every needle needs its own control.** X11 checks each needle against a hand-written sample of the call it names, and **X12** re-runs each of those samples with a newline inside the call in BOTH LF and CRLF — this checkout mixes line endings per file, and a needle that matched only one of them would classify a surface differently depending on which machine last touched it, silently, in the direction that makes X9 pass.
+
+**…and the same hole was still open in the key gate's OWN discovery scan (2026-09-19).** `test-reports-no-hardcoded-event-keys.ts` builds its population with `TOUCHES.some(...)`, and its positive control (G1c) names two files that are BOTH reachable through the `unmapped_conversions` needle alone — so nothing in its file clause depended on the registry-import needle at all. Measured: narrow that needle to `"event-columns-view"` and G1b **and** G1c both stay GREEN at 10 touching files while 8 producers (report-snapshot, performance-report, the four API routes…) drop out of coverage unnoticed; only its incidental `length >= 10` threshold notices a needle that dies outright. **G1c2** is now one bar per needle, each named to a file carrying THAT needle and not the other — and the isolation is asserted, not assumed, so a witness that grows the second needle later fails rather than quietly becoming a second copy of G1c. **G1c3** re-runs every needle through `strip()` in LF and CRLF, and in each ending also proves the needle is NOT matched from a comment.
+
+## A residual's copy must say what is TRUE of it, not what is tidy (2026-09-19)
+
+Every surface that carried the unmapped count told the reader it "counts as NOTHING — not a sale, not revenue": the campaign page's Results cell, both report tables' badge, `/creatives`' column tooltip, the Telegram line, and `keitaro_stage_results.unmapped_conversions`' own schema comment. **For the documented cross-organisation stray that is false, and the identity three paragraphs up says so**: `sales` and `revenue` resolve `is_purchase` / `counts_revenue` through NON-org-scoped id lists while the breakdown comes from an org-scoped join, so such a conversion is *inside* the very Sales number the breakdown is explaining — which is exactly why the breakdown falls short. Bar T20 of [scripts/test-telegram-report-metrics.ts](../scripts/test-telegram-report-metrics.ts) seeds it and measures it: `sales=3`, Σ purchases `=2`, top-up `0`, unmapped `1`.
+
+The rest of that bucket (no mapping at all, or no status) really is counted nowhere, and **nothing at this grain separates the two** — so the honest statement is "Sales/Revenue **may** already count them", and the hedge is the accuracy, not a weasel. The Telegram line fits it in one line:
+
+```
+⚠ 3 unmapped — in no line above, but Sales/Revenue may already count them
+```
+
+**The bars are on the PROPERTY, not on the wording** (T10b, X13): a copy that claims the strays are counted nowhere, or that never names Sales, fails — so the old sentence cannot come back as a tidy-up, and a rewrite that is honest in different words passes.
+
+## A breakdown has TWO residuals wherever Sales is a max() (2026-09-19)
+
+`manual_topup` was carried by the Telegram report and both report tables but not by the campaign page or `/creatives` — **both of which display `Sales = max(manual tally, tracker)`** while their per-event figures count tracker events only. Manual sales exist in production today, so those two surfaces under-explained their own totals by a residual nobody was guarding, while the stray count beside it was guarded three ways. Both now carry it, bundled the same way (one component, one source object, one array), and the number comes from `manualSalesTopup()` ([lib/stage-results.ts](../lib/stage-results.ts)) — defined THROUGH `combineSales()` rather than re-derived as `max(m − k, 0)`, so "what Sales carries that the tracker did not report" cannot drift from the rule that produced Sales.
+
+**The general rule:** when a total is a max(), a union or any other non-sum, the breakdown that explains it needs one term per source it can come from — not one for the source that happened to fail first.
+
+## An OPTIONAL field can detach a residual by TYPE alone (2026-09-19)
+
+`EventCountRow.unmapped` was `unmapped?: number`, and the residual column is emitted only while some row HAS one. So a caller mapping its rows to `{ events }` rendered the per-event counts with **no residual column at all**, compiled clean, and left every scan bar green — the structural pairing (`eventCountColumns` returns both in one array) was intact and irrelevant, because the ROW SHAPE suppressed the column. The fields are required now; the bar (**Y9**) is on the DECLARATION, because "this field is optional" is not something `tsc` can fail. The same reasoning as `EMPTY_TALLY`'s freeze: the type is the weaker of the two guards, so the guard goes where the hole is.
+
+## ⭐⭐ A multi-needle source scan passes if ANY needle still matches — so control every needle SEPARATELY (2026-09-19)
+
+Source-scan gates (grep a file, assert a needle is present or absent) are cheap and
+this repo has many. They all share one defect, and it is **not** the obvious one.
+
+**Deleting a needle usually trips something incidental** — a file count, a length
+floor, a `length === N` bar — so it looks covered. **Narrowing one does not.** A
+needle that still exists but matches less is invisible to every bar around it, and
+the coverage it used to give is simply gone. Measured across this branch on
+2026-09-19, twelve needles in six gates stayed **GREEN** when narrowed:
+
+| Gate | Narrowing | What went silently uncovered |
+| --- | --- | --- |
+| `npm run check:guards` (`test-preview-db-guard.ts`) | drop `\.unsafe\s*\(` from the write signal | write-capable set 182 → **176** scripts, "All checks passed" |
+| same | `update` → `upsert` in the ORM-write alternation | 182 → **178** |
+| same | drop `from "postgres"` from the db-reach test | guarded population 141 → **137** |
+| same | drop `import "./_env-preload"` | 141 → **140** |
+| `test-reports-no-hardcoded-event-keys.ts` | drop the backtick from the quoted-key character class | a template-literal key (`` m[`purchase`] ``) stops being caught |
+| same | G3b's `/api/keitaro/results` | the forbidden fetch becomes invisible |
+| `test-event-columns-view.ts` | W19's `"pending_revenue:"` | a re-inlined override stops being caught |
+| same | W20's bare `...withFunnelDerived(` | a re-bared response body stops being caught |
+| same | X7b's `"unmapped={"` | a loose residual prop stops being caught |
+| same | delete one entry from `KNOWN_SURFACES` | X8's `every()` control silently weakens |
+| `test-event-columns.ts` | N2's bare-select regex loses its whitespace/chain tolerance | a bare `db.select()` stops being caught; **N2 had no control on its needle at all** |
+| `test-p3-task4-reader-switch-db.ts` | any of F5/F6's three negated needles | the re-inlined copy it forbids stops being caught |
+
+**The law behind the table: a NEGATED needle can never go red when it is narrowed**,
+because narrowing only makes an absence more certain. Seven of the twelve are that
+shape. An absence bar is therefore *only* as good as a separate positive control on
+its own needle.
+
+**So, for every source-scan gate:**
+
+1. **One bar per needle**, fired at a **hand-written sample of the thing that needle
+   exists to match** — and a sample that no *sibling* needle also matches, so killing
+   one really does change the verdict rather than hiding behind a neighbour.
+2. **Write the sample out; never generate it from the needle.** A control built out
+   of the thing it controls is a tautology. (The first attempt at `G3c` interpolated
+   the needle constant into its own fixture and stayed green under exactly the
+   narrowing it was added to catch.)
+3. **Both line endings.** This checkout genuinely mixes them — measured 781 CRLF and
+   3 LF under `app/`+`lib/`+`components/`, `lib/reporting/stage-keitaro-aggregate.ts`
+   among the three — so a needle that survives `strip()`/whitespace-collapse in one
+   and not the other silently reclassifies a file depending on which machine last
+   touched it, **in the direction that makes the gate pass**.
+4. **Narrowing is caught by the per-needle sample; DELETION is caught by a roster.**
+   The sample bars iterate the surviving list, so removing a row outright leaves them
+   green. Spell the needle ids out (`DB_REACH` / `WRITE_SIGNAL` in
+   `test-preview-db-guard.ts`) so a removal is a two-place edit a reviewer sees.
+5. **Look for a second-order bar.** An exclusion list is one: if every entry of
+   `EXCLUSIONS` must still carry a write signal and still reach a database, then a
+   dead needle reddens the gate for a cause the population counts cannot show. 16 of
+   those entries reach a database only through the `postgres` needle, which is
+   exactly where its deletion lands.
+6. **Prefer a DISCOVERED file list to a hard-coded one.** Walk the tree and classify;
+   a surface written tomorrow is then covered the day it is written, instead of the
+   day someone remembers to add it. Keep the hard-coded list only as the *positive
+   control* on the walk — and put a roster and an on-disk check on that list too.
+
+**Proving it:** mutate the needle, see a **wrong result** (not a crash), restore from
+a **byte copy** (`cp`, never `git checkout`), and confirm `cmp` + md5 identity. A
+narrowing that produces a stack trace has proved nothing about the assertion.
+
+### ⚠️ KNOWN WEAKNESS, NOT FIXED: the roster is a literal, and a failing roster reads like a chore (2026-09-19)
+
+Rule 4 above is load-bearing and it is the weakest thing on this page. Written down
+here deliberately rather than fixed, so the fix is a decision rather than a reflex.
+
+**What the roster actually protects.** In `test-preview-db-guard.ts` the roster is
+two sorted, comma-joined **string literals** compared against
+`list.map(n => n.id).sort().join(",")`. It is the only control in the gate that
+notices a needle being *removed* from `DB_REACH` / `WRITE_SIGNAL`. Every other bar —
+including all 15 per-needle sample bars — iterates the **surviving** list, so a
+deleted row contributes no sample, the loop is simply shorter, and it passes. The
+sample controls *narrowing*, which is a change to a row that still exists; deletion
+removes the subject of the control. No amount of sample-writing closes that.
+
+**How it is defeated, precisely.** The roster fails by printing the actual joined
+string next to the expected one. The diagnosis and the repair are both on screen, and
+the repair is to paste the actual value over the expected literal. That edit:
+
+- is one line, and is **byte-for-byte the same edit as a legitimate roster bump** —
+  adding a needle requires exactly it, and adding needles is the encouraged direction;
+- makes the gate green immediately, which reads as confirmation;
+- arrives with a message that supplies its own answer, so "why did the second place
+  change?" — the entire value of "a two-place edit a reviewer sees" — never gets asked.
+
+So the control costs an attacker, a hurried author, or an agent resolving a red build
+exactly one paste, and the paste looks like housekeeping in the diff.
+
+**What still bites, and why it is not enough — measured, 2026-09-19.** Six needles
+were deleted one at a time, each with the roster literal pasted to its surviving
+value (the reviewer's one-line fix), then `npm run check:guards` was run:
+
+| Deleted needle | Result after the paste |
+| --- | --- |
+| `truncate` | **GREEN** — write-capable population unchanged at **182** |
+| `drop-ddl` | **GREEN** — unchanged at 182 |
+| `alter-table` | **GREEN** — unchanged at 182 |
+| `refresh-matview` | **GREEN** — unchanged at 182 |
+| `postgres` | RED — `every exclusion still reaches a database at all` |
+| `unsafe` | RED — `every exclusion still carries the write signal it was excluded for` |
+
+So deletion is not *wholly* unguarded — the two second-order `EXCLUSIONS` bars
+(rule 5) do catch two of the six. But that is **incidental coverage**: it fires only
+while some currently-excluded file happens to depend on the dead needle. For the
+other four, **nothing moved at all** — not a bar, not a count. Those four are
+precisely the needles that exist for the script written next month, which is the case
+a source-scan gate is for. (The guard file was restored from a byte copy; md5
+identical, `git diff` clean.)
+
+**What a real fix would look like.** Four shapes, weighed honestly:
+
+1. **Derive the expected roster from something that cannot be edited in the same
+   commit** — e.g. read the ids out of the merge-base copy (`git show <base>:<file>`)
+   and require today's list to be a **superset**. Deletion then cannot be resolved in
+   the working tree at all; addition stays free. *Why it may not work here:* it makes
+   a pure source scan depend on git state, and this clone's `origin/main` was measured
+   **stale** on 2026-09-19 — it pointed at `c07636a` (PR #196), predating the very PR
+   (#197) that added this roster, which was not in the clone at all. A baseline that
+   can silently be the wrong commit fails **green**, which is worse than the literal.
+2. **Require a second signal of a different shape.** A `list.length === 11` bar is
+   *not* one — same literal-vs-list shape, same paste. The obvious consequence-keyed
+   version is to pin the write-capable / guarded **population sizes** (182 / 141),
+   generalising the `EXCLUSIONS` bars. *Why it does not work here:* **the table above
+   measures it failing** — all four undetected deletions left the population at 182,
+   so a size bar would have been green too. And the number moves whenever a script is
+   added, so it needs routine bumping, and a bumped number is the same paste again.
+   Strictly weaker than it looks; do not reach for it first.
+3. **Make deletion structurally impossible by making the needle set not a list** —
+   one module per needle (`scripts/guard-needles/unsafe.ts`), each exporting its regex
+   and its sample, **imported by name** by the gate. Deleting a needle is then a
+   `tsc` error, not a shorter array, and `tsc` cannot be satisfied by pasting a
+   printed value: the deletion has to be written out as the removal of an import, in a
+   diff that says exactly that. This is the only option that changes the *kind* of
+   work deletion requires. *Why it may not work:* it is more files and more ceremony
+   for 15 regexes, and if the gate ever iterates a discovered directory instead of
+   named imports, the defect returns with the floor-count as the new literal.
+4. **Accept it and lower the stakes instead** — make the guard's population a
+   *discovered* classification with no needle list to delete (rule 6 taken to its end).
+   Realistically a rewrite, not a fix.
+
+**The honest floor:** none of these stops a determined editor, because the checker and
+the thing checked live in one repo and ship in one commit. What they change is the
+**cost and visibility** of a deletion — from "paste the value the failure printed" to
+"delete a module and answer a type error". On the measurement above, **option 3 is the
+only one that earns its keep**: it is the only shape whose failure cannot be resolved
+by pasting a printed value. Option 2 is measurably green on the cases that matter,
+and option 1 should wait until a trustworthy base ref exists in this clone.
 
 ## A background job that needs its own `statement_timeout` needs its own connection (2026-09-21)
 

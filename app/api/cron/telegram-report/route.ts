@@ -104,15 +104,24 @@ function dayLabel(bounds: { start: Date }): string {
 async function buildDaily(now: Date): Promise<string> {
   const { yesterday } = etDays(now);
   const m = await computeReportMetrics(etDayRange(yesterday));
-  let msg = dailyMessage(dayLabel(yesterday), m);
   // Fold in a one-line carrier-triage summary (brief §9). Sequential + one small
   // query — the daily path is the robust one, so this doesn't touch the hourly
   // cold-start fan-out. Only shown once the queue has any rows.
+  //
+  // ⭐ PASSED IN, NOT CONCATENATED ONTO THE RESULT. dailyMessage caps the
+  // assembled message at MAX_MESSAGE_CHARS; appending afterwards would put this
+  // line outside that guarantee, so the cap would be enforced against a message
+  // that is not the one Telegram receives. It is PLAIN TEXT — three integers —
+  // and dailyMessage escapes it, so this line cannot carry markup into an
+  // HTML-parsed message even if it grows a string field later.
   const t = await carrierTriageSummary();
-  if (t.resolved + t.needsHuman + t.pending > 0) {
-    msg += `\nCarrier triage: ${t.resolved} auto-mapped · ${t.needsHuman} need review · ${t.pending} pending`;
-  }
-  return msg;
+  const extra =
+    t.resolved + t.needsHuman + t.pending > 0
+      ? [
+          `Carrier triage: ${t.resolved} auto-mapped · ${t.needsHuman} need review · ${t.pending} pending`,
+        ]
+      : [];
+  return dailyMessage(dayLabel(yesterday), m, extra);
 }
 
 async function buildHourly(now: Date): Promise<string> {

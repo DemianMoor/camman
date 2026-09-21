@@ -1,9 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { can } from "@/lib/permissions";
 import { readCreativeLifetime } from "@/lib/reporting/creative-lifetime";
+import { loadEventTypes } from "@/lib/reporting/event-columns";
 import { hideBelowMinSent, rpmOf, sortCreativeRows } from "@/lib/reporting/creative-rows";
 import {
   getPerformanceReport,
@@ -139,7 +141,10 @@ export async function GET(req: NextRequest) {
     }
     const totals =
       offerId == null ? stored.basis.totals : stored.basis.offer_totals[String(offerId)] ?? ZERO;
-    const providers = await getReportProviderOptions(auth.orgId);
+    const [providers, eventTypes] = await Promise.all([
+      getReportProviderOptions(auth.orgId),
+      loadEventTypes(db, auth.orgId),
+    ]);
     return NextResponse.json({
       dimension,
       attribution,
@@ -149,6 +154,7 @@ export async function GET(req: NextRequest) {
       ...creativeBody(stored.basis.rows, totals, offerId, minSent, sortBy),
       refreshedAt: stored.basis.refreshedAt,
       providers,
+      event_types: eventTypes,
       range: {
         lifetime: true,
         from: stored.basis.from,
@@ -177,9 +183,20 @@ export async function GET(req: NextRequest) {
   const providerPhoneId =
     providerRaw && /^\d+$/.test(providerRaw) ? Number(providerRaw) : null;
 
-  const [report, providers] = await Promise.all([
+  // The registry rides along in the same round trip — it is one grouped read of a
+  // 2-rows-per-org table, and the column set is useless without it. It goes on
+  // ALL THREE response bodies, INCLUDING the two `dimension=creative` ones,
+  // which serve no screen (API_ONLY_DIMENSIONS — there is no Reports tab for
+  // them). KEPT DELIBERATELY: those bodies carry `events` and `unmapped` on
+  // every row like the others, and a key is not a label — without the registry
+  // an API consumer has a map of `event_types.key` it cannot name, order, or
+  // tell "counts revenue" from "signal". Dropping it would make the one
+  // consumer that has no UI to fall back on the only one that cannot read the
+  // breakdown. Documented in docs/operator-api.md §3, "Creative bank".
+  const [report, providers, eventTypes] = await Promise.all([
     getPerformanceReport(auth.orgId, dimension, { from, to, providerPhoneId, attribution, offerId }),
     getReportProviderOptions(auth.orgId),
+    loadEventTypes(db, auth.orgId),
   ]);
 
   if (creative) {
@@ -192,6 +209,7 @@ export async function GET(req: NextRequest) {
       ...creativeBody(report.rows, report.totals, offerId, minSent, sortBy),
       refreshedAt: report.refreshedAt,
       providers,
+      event_types: eventTypes,
       range: { from, to, timezone: CAMPAIGN_TIMEZONE },
     });
   }
@@ -204,6 +222,7 @@ export async function GET(req: NextRequest) {
     totals: gradePerf(report.totals),
     refreshedAt: report.refreshedAt,
     providers,
+    event_types: eventTypes,
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });
 }

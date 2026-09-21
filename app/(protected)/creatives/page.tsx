@@ -32,6 +32,19 @@ import {
 } from "@/components/creatives/creative-form";
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
+// The SAME generator the reports and the campaign page use, so a "Registrations"
+// column cannot come to mean two things on two screens — and it hands back the
+// residual columns with the counts, never some without the others.
+import {
+  eventCountColumns,
+  eventCountValue,
+  type EventCountRow,
+} from "@/components/reports/event-columns-view";
+import {
+  CREATIVES_EXTRA_COLUMN_IDS,
+  isHeldBackFromDefaultView,
+} from "@/lib/reporting/column-visibility";
+import type { EventCountMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -128,6 +141,20 @@ type Creative = {
     epc_lifetime: number | null;
     // All-time sales: per stage max(manual tally, Keitaro conversions), summed.
     sales_lifetime: number;
+    // The same 30-day conversions as `checkouts` / `sales`, split per
+    // event_types.key. COUNTS ONLY — no rate, revenue or EPC is computed at
+    // this grain, and the type is what keeps it that way.
+    events: EventCountMap;
+    // The TWO residuals those counts do not explain, both rendered beside them
+    // (see the column block below for why neither is optional):
+    //   unmapped     — conversions that matched no event-type mapping. In no
+    //                  event count here, but already inside Sales, which
+    //                  resolves its types through a list that is not org-scoped.
+    //   manual_topup — the part of Sales the operator's tally contributed. Sales
+    //                  is max(manual, tracker) per stage; the counts are tracker
+    //                  only.
+    unmapped: number;
+    manual_topup: number;
   };
   // Spam scoring fields. spam_score is 0-100 (or null when unscored).
   // spam_label is the binary verdict mirrored from the cache; the list
@@ -142,7 +169,23 @@ type Creative = {
   spam_score_error: string | null;
 };
 
-type ListResponse = { data: Creative[]; totalCount: number };
+/**
+ * What a creative with NO metrics is worth to the generated columns: no counts
+ * and no residuals. It exists because the list endpoint omits `metrics` entirely
+ * on the include_metrics=false path — and because EventCountRow's residual
+ * fields are required, so `{}` no longer typechecks in their place. Spelling the
+ * zeros out is the point: a missing row reads as zero of everything, never as a
+ * shape that cannot carry a residual.
+ */
+const NO_EVENT_COUNTS: EventCountRow = { events: {}, unmapped: 0, manual_topup: 0 };
+
+type ListResponse = {
+  data: Creative[];
+  totalCount: number;
+  // The org's event-type registry, response-level. Absent when the caller opted
+  // out of metrics (there would be no counts for the columns to show).
+  event_types?: EventTypeSpec[];
+};
 type OfferInfo = {
   id: number;
   name: string;
@@ -162,8 +205,40 @@ type Filters = {
   pageSize: number;
   sortBy: string;
   sortDir: "asc" | "desc";
+  // The CURATED DEFAULT VIEW's toggle — per-browser, off by default, and NOT a
+  // filter: it changes which columns render and nothing about which rows are
+  // fetched, so it is deliberately absent from `filtersAreDefault` and from the
+  // list request's dependency array. This table is 20 columns / 2084px inside a
+  // 1004px container; the default view is the 9 the owner named. Which columns
+  // and why: lib/reporting/column-visibility.ts.
+  showAllColumns: boolean;
 };
 
+// ⭐ THE LIST OPENS RANKED BY `EPC (30d)`, NOT BY `created_at` (owner,
+// 2026-09-20): "created_at is the wrong default for a ranking page." This is
+// the sort the SERVER performs — `sortBy` is a request parameter
+// (app/api/creatives/list/route.ts, the `RATIO_SQL.epc` branch, NULLS LAST so a
+// creative with no clean clicks sinks rather than floats) — not a client-side
+// re-order of one page. It matches what the creative PICKER dialog already
+// sends, so the two screens that decide what gets sent next now rank the same
+// way.
+//
+// It also removes a reveal. `created_at` is on the CREATIVES_EXTRA_COLUMN_IDS
+// roster, so while it was the default sort isHeldBackFromDefaultView() had to
+// show `Created` in the default view for the sort indicator to have anywhere to
+// land — 12 columns instead of 11. `epc` is default-visible, so the arrow lands
+// on a column that was already on screen and nothing is revealed. The reveal
+// rule is untouched and still fires for an operator who sorts by a held-back
+// column; it simply no longer fires in the DEFAULT case.
+//
+// ⚠️ PER-BROWSER, SO THIS MOVES NOBODY WHO HAS ALREADY USED THE PAGE.
+// usePersistedFilters merges localStorage OVER these defaults, so a browser
+// that has ever sorted this list (the toggle writes the whole filter object)
+// keeps its saved `sortBy` and still opens on `created_at`, revealing `Created`
+// exactly as before. Accepted by the owner, who is changing his own by hand.
+// The API route's own fallback is deliberately NOT changed: a caller that sends
+// no `sortBy` is the stage picker's `include_metrics=false` fast path, where no
+// metrics are joined and an EPC sort has nothing to order by.
 const DEFAULT_FILTERS: Filters = {
   search: "",
   offer_id: null,
@@ -173,8 +248,9 @@ const DEFAULT_FILTERS: Filters = {
   showArchived: false,
   page: 0,
   pageSize: 20,
-  sortBy: "created_at",
+  sortBy: "epc",
   sortDir: "desc",
+  showAllColumns: false,
 };
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -462,6 +538,10 @@ export default function CreativesPage() {
 
   const [data, setData] = useState<Creative[]>([]);
   const [totalCount, setTotalCount] = useState(0);
+  // The registry the per-event count columns are generated from. It arrives on
+  // the list response, so the columns and the counts always describe the same
+  // configuration — there is no second fetch that can be a beat behind.
+  const [eventTypes, setEventTypes] = useState<EventTypeSpec[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
@@ -501,6 +581,7 @@ export default function CreativesPage() {
       if (result.ok) {
         setData(result.data.data);
         setTotalCount(result.data.totalCount);
+        setEventTypes(result.data.event_types ?? []);
       } else {
         setFetchError(result.error);
       }
@@ -780,7 +861,7 @@ export default function CreativesPage() {
         />
       ),
     };
-    return [
+    const built: ColumnDef<Creative>[] = [
       ...(canBulkAny ? [selectColumn] : []),
       {
         id: "slug",
@@ -884,6 +965,63 @@ export default function CreativesPage() {
           );
         },
       },
+      // ⭐ THESE SIT DIRECTLY AFTER "Checkout Rate" ON PURPOSE, AND THAT
+      // PLACEMENT IS THE WHOLE TASK. That column's numerator is
+      // keitaro_type = 'lead' — the only conversion metric in the product keyed
+      // on a raw tracker type — which for one of this account's networks IS the
+      // free registration and for two others is a paid purchase. Creatives are
+      // SORTED AND RANKED by this table, so on that offer the screen has been
+      // ranking by registrations with nothing beside it to disagree. The
+      // registry-driven counts have to be readable in the same glance or the
+      // column that is silently wrong stays silently wrong.
+      //
+      // One call, one array: the counts and BOTH residuals that explain what
+      // they do NOT account for come out together, so this table cannot render a
+      // breakdown of its own Sales column while hiding the strays or the manual
+      // tally. NO_EVENT_COUNTS rather than `{}` because EventCountRow's
+      // residuals are required — a row shape that cannot carry one would
+      // suppress its column silently.
+      //
+      // ⭐ THE TOGGLE IS PASSED IN, NOT APPLIED TO THE RESULT. The curated view
+      // holds back the manual top-up and nothing else here: the counts ARE the
+      // breakdown, and the stray count is appended inside that call on a line
+      // that cannot see the flag. Filtering this array afterwards — the obvious
+      // shortcut — is what would let a later edit drop the strays while the
+      // counts stayed on screen.
+      ...eventCountColumns(
+        eventTypes,
+        data.map((d) => d.metrics ?? NO_EVENT_COUNTS),
+        filters.showAllColumns,
+        (col): ColumnDef<Creative> => ({
+          id: col.id,
+          header: col.header,
+          // No server-side sort exists for these (the list endpoint sorts on
+          // SQL expressions over the metrics join, and no ratio is computed at
+          // this grain), and a client-only sort over one page would silently
+          // reorder a subset while the arrow claimed the whole set.
+          enableSorting: false,
+          cell: ({ row }) => {
+            const n = eventCountValue(col, row.original.metrics ?? NO_EVENT_COUNTS);
+            return (
+              <span
+                className={cn(
+                  "tabular-nums",
+                  // Amber for the STRAYS only: those are actionable (a missing
+                  // conversion_event_mappings row). A manual top-up is an
+                  // explanation of Sales, not a fault, so it reads like the
+                  // counts beside it.
+                  col.kind === "unmapped" && n > 0
+                    ? "text-amber-700 dark:text-amber-500"
+                    : "text-muted-foreground",
+                )}
+                title={col.title}
+              >
+                {numberFmt.format(n)}
+              </span>
+            );
+          },
+        }),
+      ),
       {
         id: "sales_cr",
         header: "Sales CR",
@@ -911,7 +1049,18 @@ export default function CreativesPage() {
       // $0.53 across 694 lifetime clickers. Sort by recent, show both.
       {
         id: "epc",
-        header: "EPC (30d) ↕",
+        // ⭐ NO LITERAL ↕ HERE, EVEN NOW THAT THIS *IS* THE DEFAULT SORT.
+        // DataTable already draws a real indicator on every sortable header (a
+        // neutral ChevronsUpDown, or an up/down chevron when it IS the sort).
+        // The glyph that used to sit here was a second, hand-drawn one beside
+        // it, and it asserted something this page did not do — the list
+        // defaulted to `created_at` and only the creative PICKER dialog sorted
+        // by the 30-day EPC. Since 2026-09-20 the page defaults here too
+        // (DEFAULT_FILTERS above), which makes the old claim true and the old
+        // glyph MORE tempting and no less wrong: a literal in a header string
+        // cannot track the actual sort, so it would still be asserting rather
+        // than reporting the moment the operator clicked another column.
+        header: "EPC (30d)",
         enableSorting: true,
         cell: ({ row }) => {
           const m = row.original.metrics;
@@ -919,7 +1068,7 @@ export default function CreativesPage() {
             <MetricCell
               value={m.epc}
               format={formatEpc}
-              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days) — this is the column the list sorts by`}
+              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days)`}
             />
           );
         },
@@ -935,14 +1084,17 @@ export default function CreativesPage() {
             <MetricCell
               value={m.epc_lifetime}
               format={formatEpc}
-              title={`All-time: ${numberFmt.format(m.clean_clicks_lifetime)} counted clickers. Shown for context — the list sorts by the 30-day figure.`}
+              title={`All-time: ${numberFmt.format(m.clean_clicks_lifetime)} human clicks. Shown for context — the list sorts by the 30-day figure.`}
             />
           );
         },
       },
       {
         id: "clean_clicks_lifetime",
-        header: "Clicks (all time)",
+        // "Human clicks", matching /reports and the Operator API's
+        // `clicks_human`: this is counted_clickers (deduplicated human-scored
+        // people), never Keitaro's landing-visit count. See V23.
+        header: "Human clicks (all time)",
         enableSorting: false,
         cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">
@@ -1050,6 +1202,21 @@ export default function CreativesPage() {
         },
       },
     ];
+    // The curated default view, applied by id over the FIXED columns only. The
+    // roster in lib/reporting/column-visibility.ts holds no `evt:` id and bar
+    // V12 keeps it that way, so this filter cannot reach a generated column —
+    // the residuals are decided inside eventCountColumns(), above.
+    //
+    // ⭐ `filters.sortBy` IS PASSED SO THE SORTED COLUMN IS NEVER HELD BACK.
+    // This table sorts SERVER-side, so the column carrying the arrow has to be
+    // the one the request named — there is no free client-side fallback to move
+    // the sort onto a visible column the way /reports has. See
+    // isHeldBackFromDefaultView() for why the two surfaces differ.
+    return filters.showAllColumns
+      ? built
+      : built.filter(
+          (c) => !isHeldBackFromDefaultView(c.id ?? "", CREATIVES_EXTRA_COLUMN_IDS, filters.sortBy),
+        );
   }, [
     canUpdate,
     canArchive,
@@ -1057,8 +1224,29 @@ export default function CreativesPage() {
     canCreate,
     canBulkAny,
     data,
+    eventTypes,
     selectedIds,
+    filters.showAllColumns,
+    filters.sortBy,
   ]);
+
+  // What ticking "Show all columns" would ADD: the fixed columns it holds back,
+  // plus the manual-top-up column when some row on this page has one. A constant
+  // of the page rather than of the toggle's state — see the same idiom on
+  // /reports — and it renders nothing at 0, because a control that reveals
+  // nothing is a dead control.
+  // ⭐ MINUS THE ONE THE SORT REVEALED, when the sort is on a held-back column.
+  // Counting it would promise a column that is already on screen, and on the
+  // last held-back column it would read "(1 more)" against a toggle that adds
+  // nothing visible. Computed from the SAME predicate the filter above uses, so
+  // the two cannot disagree about what the default view contains.
+  const hiddenColumnCount = useMemo(
+    () =>
+      [...CREATIVES_EXTRA_COLUMN_IDS].filter((id) =>
+        isHeldBackFromDefaultView(id, CREATIVES_EXTRA_COLUMN_IDS, filters.sortBy),
+      ).length + (data.some((d) => (d.metrics ?? NO_EVENT_COUNTS).manual_topup > 0) ? 1 : 0),
+    [data, filters.sortBy],
+  );
 
   const isAuthLoading = !auth;
   const confirmBusy = archiveApi.isLoading || restoreApi.isLoading;
@@ -1186,6 +1374,23 @@ export default function CreativesPage() {
             Show archived
           </Label>
         </div>
+        {/* A DISPLAY preference, not a filter: it is not part of
+            `filtersAreDefault` (so it never summons "Reset filters" on its own)
+            and it is not in the list request's dependency array, so ticking it
+            re-renders the table without refetching it. */}
+        {hiddenColumnCount > 0 ? (
+          <div className="flex items-center gap-2">
+            <Switch
+              id="show-all-columns"
+              checked={filters.showAllColumns}
+              onCheckedChange={(checked) => updateFilters({ showAllColumns: checked })}
+            />
+            <Label htmlFor="show-all-columns" className="text-sm">
+              Show all columns{" "}
+              <span className="text-muted-foreground">({hiddenColumnCount} more)</span>
+            </Label>
+          </div>
+        ) : null}
         {!filtersAreDefault ? (
           <Button
             variant="ghost"
@@ -1317,7 +1522,10 @@ export default function CreativesPage() {
           sortDir={filters.sortDir}
           onSortChange={(by, dir) =>
             updateFilters({
-              sortBy: by ?? "created_at",
+              // Reads the default rather than repeating it: clearing the sort
+              // has to land back on whatever the page opens with, and a second
+              // literal is how those two drift apart.
+              sortBy: by ?? DEFAULT_FILTERS.sortBy,
               sortDir: dir,
               page: 0,
             })

@@ -40,6 +40,22 @@ import {
   shouldSubstituteClickers,
   substitutionDominates,
 } from "@/lib/reporting/tracking-gap-rules";
+// The SAME per-event surfaces the report tables mount, and for the same reason:
+// there is exactly one definition of what a per-event segment says and of what
+// the unclassified count beside it says. Each component renders the breakdown
+// and its residual TOGETHER — see StageEventBreakdown.
+//
+// (This chain does NOT drag db/client into the client bundle the way
+// "@/lib/reporting/tracking-gap" would: lib/reporting/event-columns imports the
+// db only as a TYPE.)
+import {
+  addEventMaps,
+  EventTotalsTiles,
+  StageEventBreakdown,
+  visibleEventTypes,
+  type EventBreakdownSource,
+} from "@/components/reports/event-columns-view";
+import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 import { ExportClickersDialog } from "@/components/campaigns/export-clickers-dialog";
 import {
   StagePrepareDialog,
@@ -56,6 +72,7 @@ import {
   combineSales,
   formatRevenue,
   formatRoi,
+  manualSalesTopup,
   stageRoi,
 } from "@/lib/stage-results";
 import { StageInlineEditor } from "@/components/campaigns/stage-inline-creator";
@@ -254,6 +271,12 @@ type Stage = {
   keitaro_revenue: string;
   // Same money, still pending approval — never added into revenue/ROI/EPC.
   keitaro_pending_revenue: string;
+  // The same conversions, split per event_types.key (migration 0185), and the
+  // ones that matched NO mapping. The two travel together everywhere: the
+  // unmapped count is in no other field, so it is the only account of why the
+  // segments need not sum to Sales.
+  keitaro_events: EventMap;
+  keitaro_unmapped: number;
   // Tracking-gap inputs. When a tracked stage's landing page ships without the
   // Keitaro visit script, these stay 0 while CamMan keeps recording every tap —
   // so the Clickers total substitutes counted_clickers. See the totals memo.
@@ -298,11 +321,33 @@ type Stage = {
   offer: { id: number; name: string; color: string | null; payout_cpa: string | null } | null;
 };
 
+/**
+ * ⭐ ONE STAGE ROW → THE BREAKDOWN AND BOTH ITS RESIDUALS, FROM ONE OBJECT.
+ *
+ * The counts, the strays and the manual top-up are read off the SAME row here,
+ * so a Results cell cannot show one stage's segments beside another number — the
+ * hole the report tables closed by deriving their bar from the very `totals`
+ * the columns came from. The top-up is computed rather than fetched because the
+ * row already carries both sides of it, and manualSalesTopup() is the same
+ * definition `sales` itself uses (lib/stage-results.ts) — not a second one.
+ */
+function stageEventSource(s: Stage): EventBreakdownSource {
+  return {
+    events: s.keitaro_events ?? {},
+    unmapped: s.keitaro_unmapped ?? 0,
+    manual_topup: manualSalesTopup(s.sales_count, s.keitaro_sales_count),
+  };
+}
+
 type StagesListResponse = {
   data: Stage[];
   totalCount: number;
   // Campaign-level DISTINCT contacts attributed an inbound STOP (migration 0075).
   inbound_stop_contacts: number;
+  // The org's event-type registry, once per response. The Results cell and the
+  // totals tiles are generated from THIS, never from the keys present in the
+  // data, so a configured type with no conversions reads 0 instead of vanishing.
+  event_types: EventTypeSpec[];
 };
 
 type Member = {
@@ -459,6 +504,8 @@ export default function CampaignDetailPage() {
   // Campaign-level distinct contacts who STOPped (server-computed; see the
   // stages list endpoint). Drives the "Inbound STOPs" rollup metric.
   const [inboundStopContacts, setInboundStopContacts] = useState(0);
+  // The org's event-type registry, as the stages endpoint returned it.
+  const [eventTypes, setEventTypes] = useState<EventTypeSpec[]>([]);
   const [stagesError, setStagesError] = useState<string | null>(null);
   const [stagesTick, setStagesTick] = useState(0);
   const refetchStages = useCallback(() => setStagesTick((n) => n + 1), []);
@@ -554,6 +601,7 @@ export default function CampaignDetailPage() {
       if (r.ok) {
         setStages(r.data.data);
         setInboundStopContacts(r.data.inbound_stop_contacts ?? 0);
+        setEventTypes(r.data.event_types ?? []);
         // Lane audience counts are deferred (their live-tier scan is slow). Fetch
         // them in the background only when lanes are actually on screen, then
         // patch the null placeholders in place. First paint doesn't wait on this.
@@ -884,6 +932,19 @@ export default function CampaignDetailPage() {
           s.send_counts.sending === 0,
       ),
     [stages],
+  );
+
+  // The event types this campaign's table renders a segment for — computed ONCE
+  // for the whole table, so every row carries the same segments in the same
+  // order and the totals tiles agree with the rows above them.
+  //
+  // An ACTIVE type is always in, with or without conversions (that is what
+  // "generated from the registry" buys); an ARCHIVED one only while some stage
+  // on screen still has a non-zero entry for it, so retiring a type eventually
+  // retires its segment without erasing history that is still displayed.
+  const shownEventTypes = useMemo(
+    () => visibleEventTypes(eventTypes, stages.map((s) => s.keitaro_events ?? {})),
+    [eventTypes, stages],
   );
 
   // ============ Stage columns ============
@@ -1283,14 +1344,24 @@ export default function CampaignDetailPage() {
             checkout_click_count: chk,
             sales_count: manualSales,
             keitaro_sales_count: keitaroSales,
+            keitaro_events: events,
+            keitaro_unmapped: unmapped,
           } = row.original;
           // Keitaro wins when it reports the conversion; manual tally fills gaps.
           const sales = combineSales(manualSales, keitaroSales);
           // Results are considered entered (manually or imported) once any
           // send/outcome counter is non-zero. Clicks/checkout/sales auto-fill
           // from the Keitaro */5 poll; opt-out from the inbound-STOP poll.
+          //
+          // ⭐ THE PER-EVENT COUNTS AND THE UNMAPPED COUNT ARE IN THIS TEST TOO.
+          // `sms_count` is 0 on API sends, so a stage whose only signal is a
+          // conversion is not hypothetical — and a stray that counts as nothing
+          // anywhere else would have been swallowed by the em dash, which is the
+          // one reading this cell must never give it.
+          const hasEvents = Object.values(events ?? {}).some((t) => t.n > 0);
           const hasResults =
-            sms > 0 || delivered > 0 || oo > 0 || cl > 0 || chk > 0 || sales > 0;
+            sms > 0 || delivered > 0 || oo > 0 || cl > 0 || chk > 0 || sales > 0 ||
+            hasEvents || unmapped > 0;
           if (!hasResults)
             return <span className="text-muted-foreground">—</span>;
           // Rate denominator: delivered, falling back to SMS sent.
@@ -1298,9 +1369,24 @@ export default function CampaignDetailPage() {
           const pct = (n: number) =>
             denom > 0 ? `${((n / denom) * 100).toFixed(1)}%` : "—";
           return (
+            // ⚠️ `Checkout` STAYS, and it is NOT the registration segment. It is
+            // keitaro_type = 'lead', which means a REGISTRATION for one network
+            // and a PAID PURCHASE for two others (migration 0181's mapping
+            // seed). The registry-driven counts land beside it; where the two
+            // disagree, that disagreement is the point. Retiring
+            // checkout_click_count is a separate card — it is hand-editable
+            // (manual-results-form.tsx) and exact-mirrored from the projection
+            // every five minutes.
+            //
+            // The generated segments and the unmapped marker come out of ONE
+            // component: the line can never explain part of itself.
             <span className="font-mono text-xs tabular-nums">
-              Clicks: {cl} · Checkout: {chk} · Sales: {sales} · CTR: {pct(cl)} ·
-              OptOut: {pct(oo)}
+              Clicks: {cl} · Checkout: {chk} ·{" "}
+              <StageEventBreakdown
+                types={shownEventTypes}
+                source={stageEventSource(row.original)}
+              />
+              Sales: {sales} · CTR: {pct(cl)} · OptOut: {pct(oo)}
             </span>
           );
         },
@@ -1502,6 +1588,9 @@ export default function CampaignDetailPage() {
       stageStatusApi.isLoading,
       lanesByParent,
       stageNumberById,
+      // The Results cell closes over the registry — without this the segments
+      // keep rendering the set the table was first built with.
+      shownEventTypes,
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stageOpStatus and
     // setPrepareTarget are stable; STAGE_STATUS_META is a module constant.
@@ -1527,6 +1616,26 @@ export default function CampaignDetailPage() {
     let revenue = 0;
     let revenueKnown = false;
     let pendingRevenue = 0;
+    // The same conversions split per event type, and the TWO residuals that
+    // explain why the tiles need not sum to Sales:
+    //
+    //   unmapped     — a conversion the ORG-SCOPED registry join could not
+    //                  place. It is counted by `sales` (which resolves
+    //                  is_purchase through a NON-org-scoped list) and by no key
+    //                  of `events`, so it is the only account of that half of
+    //                  the difference.
+    //   manual_topup — the part of `sales` the operator's tally contributed.
+    //                  `sales` is max(manual, tracker) per stage while `events`
+    //                  counts TRACKER events only, so a hand-entered sale is in
+    //                  the total and in no tile.
+    //
+    // Both are accumulated here, beside the counts, so the tiles can never show
+    // one without the others. addEventMaps deep-copies a key it does not have
+    // yet (never aliasing the shared EMPTY_TALLY), which is why the fold is not
+    // written out by hand.
+    const events: EventMap = {};
+    let unmapped = 0;
+    let manualTopup = 0;
     // Tracking-gap substitution, the SAME rule the Reports Overview tab applies
     // (shouldSubstituteClickers / substitutionDominates in
     // lib/reporting/tracking-gap.ts — imported, never transcribed, so the two
@@ -1561,6 +1670,13 @@ export default function CampaignDetailPage() {
       scrubbed += s.scrubbed_count;
       bounced += s.bounced_count;
       checkoutClicks += s.checkout_click_count;
+      // ⭐ ONE SOURCE PER STAGE, the same object the Results cell renders from:
+      // the counts and both residuals are read off one row, never assembled
+      // field by field from two places.
+      const src = stageEventSource(s);
+      addEventMaps(events, src.events);
+      unmapped += src.unmapped;
+      manualTopup += src.manual_topup;
       // Keitaro wins when it reports the conversion; manual tally fills gaps.
       const stageSales = combineSales(s.sales_count, s.keitaro_sales_count);
       sales += stageSales;
@@ -1588,6 +1704,9 @@ export default function CampaignDetailPage() {
       checkoutClicks,
       sales,
       cost,
+      events,
+      unmapped,
+      manual_topup: manualTopup,
       revenue: revenueKnown ? revenue : null,
       // Same "—, not $0.00" rule as revenue above, for the same reason: a
       // manual campaign has no held money to report, and a tile reading
@@ -1597,6 +1716,23 @@ export default function CampaignDetailPage() {
       pendingRevenue: pendingRevenue > 0 ? pendingRevenue : null,
     };
   }, [stages, inboundStopContacts]);
+  // ⭐ THE WHOLE CARD IS GATED, AND THAT IS WHY IT IS SAFE — written down here
+  // because it is the obvious thing to "fix".
+  //
+  // sms_count is 0 on API sends, so this gate can hide the card on a campaign
+  // that really did send: the per-stage Results cells carry the same numbers and
+  // are NOT gated (their own test includes the per-event counts and the strays),
+  // so nothing is unreachable — this is a summary card, not the only reading.
+  //
+  // What matters for the breakdown is that the gate is ALL-OR-NOTHING. It hides
+  // the event tiles, the manual-tally tile and the unmapped badge together, so
+  // the card can be absent but never present-and-under-explaining. Adding a
+  // per-event disjunct here (sales > 0, any events, unmapped > 0) would be the
+  // hazard: the card would then appear for a campaign with conversions and no
+  // sends, carrying tiles whose residuals were computed over the same stages but
+  // whose SMS/Delivered/Clickers tiles read 0 — a breakdown shown beside an
+  // empty frame. Leave the gate coarse; if it ever needs to widen, widen it to
+  // "any stage has any activity", never to one component of the breakdown.
   const hasResults =
     campaignTotals.sms > 0 || campaignTotals.inboundStops > 0;
 
@@ -1924,6 +2060,19 @@ export default function CampaignDetailPage() {
                 value={campaignTotals.checkoutClicks}
               />
               <TotalsMetric label="Sales" value={campaignTotals.sales} />
+              {/* One tile per event type, generated from the registry — and BOTH
+                  residuals, which come out of the SAME component and the SAME
+                  totals object so the tiles cannot be on screen without them.
+                  Sales is the sum of the is_purchase tiles PLUS the manual
+                  top-up PLUS the strays the badge counts; carrying only one of
+                  the two left the row under-explaining itself by the other. */}
+              <EventTotalsTiles
+                types={shownEventTypes}
+                source={campaignTotals}
+                renderTile={({ key, label, value, title }) => (
+                  <TotalsMetric key={key} label={label} value={value} title={title} />
+                )}
+              />
               <TotalsMetric
                 label="Revenue"
                 value={formatRevenue(campaignTotals.revenue)}

@@ -3,7 +3,12 @@ import { sql, type SQL } from "drizzle-orm";
 import type { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { mirrorStageCountersFromResults } from "@/lib/keitaro/poll";
-import { approvedRevenueClause, pendingRevenueClause, purchasedClause } from "@/lib/sale-attribution";
+import {
+  approvedRevenueClause,
+  countedClause,
+  pendingRevenueClause,
+  purchasedClause,
+} from "@/lib/sale-attribution";
 
 // THE STAGE-DAY CONVERSION PROJECTION.
 //
@@ -135,6 +140,174 @@ const CHECKOUT_FILTER: SQL = sql`ce.keitaro_type = 'lead'`;
 const REVENUE_FILTER: SQL = approvedRevenueClause();
 const PENDING_REVENUE_FILTER: SQL = pendingRevenueClause();
 
+// ⭐ THE COLUMNS THIS MODULE DERIVES, AS ONE LIST. The upsert's change test and
+// the resync's dry-run diff (readStageDayResyncDiff) are both built from it, so
+// "the diff IS the predicate --apply uses" is structural instead of a promise in
+// a comment. It stopped being true once before: Phase 5 added `events` /
+// `unmapped_conversions` to the write and to the zeroing test, and the script's
+// hand-retyped copy of both predicates was left behind — the preview an operator
+// approved no longer described the run. A column added here reaches both sides or
+// neither. Bars R1-R8 in scripts/test-stage-day-conversions.ts execute the diff
+// and the apply against one world and require the row sets to be EQUAL.
+//
+// The ledger CTE names its payout column `payout_at_conversion` (not `payout`)
+// for the same reason: identical names on both sides are what let one builder
+// emit the test for `keitaro_stage_results` vs `EXCLUDED` and for `k` vs `l`.
+const PROJECTED_COLUMNS = [
+  "checkouts",
+  "sales",
+  "revenue",
+  "pending_revenue",
+  "events",
+  "unmapped_conversions",
+  "payout_at_conversion",
+] as const;
+
+/** `(a.col IS DISTINCT FROM b.col OR …)` over every projected column. */
+function projectionChangedClause(a: string, b: string): SQL {
+  return sql`(${sql.join(
+    PROJECTED_COLUMNS.map(
+      (c) => sql`${sql.raw(a)}.${sql.raw(c)} IS DISTINCT FROM ${sql.raw(b)}.${sql.raw(c)}`,
+    ),
+    sql` OR `,
+  )})`;
+}
+
+/**
+ * `(a.<col> is not its zeroed value OR …)` — "this stored row still reports a
+ * conversion". The zeroing UPDATE's content test and the diff's `zero` branch are
+ * the same fragment. `payout_at_conversion` is deliberately NOT in it: it is
+ * derived from sales/revenue, so a row whose six content columns are already
+ * empty has nothing to zero, and adding it would widen the set of rows the
+ * UPDATE touches rather than describe it.
+ */
+function projectionNonEmptyClause(a: string): SQL {
+  const q = sql.raw(a);
+  return sql`(${q}.checkouts <> 0 OR ${q}.sales <> 0 OR ${q}.revenue <> 0 OR ${q}.pending_revenue <> 0
+       OR ${q}.events <> '{}'::jsonb OR ${q}.unmapped_conversions <> 0)`;
+}
+
+/**
+ * THE LEDGER-DERIVED STAGE-DAY, as CTE text: `per_event`, `ledger_raw`, `ledger`.
+ * `ledger` carries one row per (org, stage, ET day) with EVERY projected column
+ * under its stored name. The upsert selects straight out of it; the resync's dry
+ * run joins the stored rows against it. Shared, not retyped — see
+ * PROJECTED_COLUMNS.
+ *
+ * ⭐ THE SCALARS ARE SUMS OF THE PER-EVENT PARTIALS, NOT INDEPENDENT FILTERS. One
+ * pass over conversion_events, grouped one level finer (by event_types.key), then
+ * rolled up:
+ *     sales   = Σ events[t].n     over is_purchase types
+ *     revenue = Σ events[t].revenue
+ * ⚠️ …WITH A RESIDUAL, and the two CAN differ by it. `sales` / `revenue` resolve
+ * the flags through the NON-org-scoped PURCHASE_EVENT_TYPE_IDS /
+ * REVENUE_EVENT_TYPE_IDS (lib/sale-attribution.ts) while the per-event side
+ * resolves them through the ORG-SCOPED join below, so a ledger row carrying
+ * ANOTHER org's event_type_id is counted by the scalar and placed in no entry. It
+ * is counted in `unmapped_conversions` instead — that is what the `et.key IS NULL`
+ * bucket is for. The identity is `sales = Σ (is_purchase) n + strays`, asserted
+ * WITH the residual by bars P23c/P14b and pinned non-zero by P23d/P14c.
+ *
+ * The two expressions are still computed SEPARATELY inside `per_event` — `sales`
+ * via SALES_FILTER (purchasedClause) and `n` via countedClause + the is_purchase
+ * join — and scripts/test-stage-day-conversions.ts asserts they agree. That is
+ * deliberate and is NOT a tautology: it is the guard that goes red if the shared
+ * clauses in lib/sale-attribution.ts are ever changed without the per-event side
+ * following.
+ *
+ * ⚠️ THE JOIN CARRIES org_id AS WELL AS THE ID (CLAUDE.md §3). event_types.id is a
+ * global serial; joining on the id alone would let one org's registry name another
+ * org's column.
+ *
+ * ⚠️ LEFT JOIN, not JOIN. An UNMAPPED row (no event type, or no status) must still
+ * reach this statement: it lands in the event_key IS NULL group, is counted into
+ * unmapped_conversions, and is FILTERed out of the `events` object — stored,
+ * surfaced, counted as nothing. An inner join would drop it and the badge would
+ * never fire.
+ *
+ * ⚠️ jsonb_object_agg CANNOT get a duplicate key here: the outer group is
+ * (org_id, stage_id, stat_date), every row in it shares one org, and
+ * event_types_org_key_uniq (migration 0181) makes `key` unique within an org.
+ */
+function stageDayLedgerCtes(scope: SQL): SQL {
+  return sql`
+    per_event AS (
+      SELECT ce.org_id,
+             ce.stage_id,
+             (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date AS stat_date,
+             et.key AS event_key,
+             count(*) FILTER (WHERE ${SALES_FILTER})::int AS sales,
+             count(*) FILTER (WHERE ${CHECKOUT_FILTER})::int AS checkouts,
+             coalesce(sum(ce.revenue) FILTER (WHERE ${REVENUE_FILTER}), 0)::numeric(12, 4) AS revenue,
+             coalesce(sum(ce.revenue) FILTER (WHERE ${PENDING_REVENUE_FILTER}), 0)::numeric(12, 4) AS pending_revenue,
+             -- The per-event generalisations: the flag half is the join, the
+             -- status half is the shared clause.
+             count(*) FILTER (WHERE ${countedClause()})::int AS n,
+             count(*) FILTER (WHERE ce.status = 'pending')::int AS pending_n,
+             coalesce(sum(ce.revenue) FILTER (WHERE et.counts_revenue AND ce.status = 'approved'), 0)::numeric(12, 4) AS ev_revenue,
+             coalesce(sum(ce.revenue) FILTER (WHERE et.counts_revenue AND ce.status = 'pending'), 0)::numeric(12, 4) AS ev_pending_revenue,
+             -- ⭐ KEYED ON THE JOIN RESULT (et.key IS NULL), NOT ON THE RAW
+             -- COLUMN (ce.event_type_id IS NULL). The index's own predicate is
+             -- the raw-column form, and copying it here would leave a hole:
+             -- PURCHASE_EVENT_TYPE_IDS / REVENUE_EVENT_TYPE_IDS resolve the flags
+             -- through a NON-org-scoped subquery (lib/sale-attribution.ts) while
+             -- this join is org-scoped, so a ledger row carrying ANOTHER ORG'S
+             -- event_type_id — which the FK permits, there being no composite
+             -- (id, org_id) FK — would be counted by SALES_FILTER, placed in no
+             -- events entry, and not counted unmapped either. It would be
+             -- invisible on every surface Phase 5 adds, including the badge whose
+             -- entire purpose is to reveal rows that count as nothing.
+             --
+             -- Keying on et.key makes the two buckets a PARTITION: every row on
+             -- the stage-day is either PLACED (same-org key AND a non-NULL status)
+             -- or counted here. Fixture foreign_type proves it. It also makes this
+             -- column BROADER than conversion_events_unmapped_idx's predicate, and
+             -- broader than the monitor's Telegram alert — deliberately; see the
+             -- column comment in db/schema.ts.
+             count(*) FILTER (WHERE et.key IS NULL OR ce.status IS NULL)::int AS unmapped_n
+      FROM conversion_events ce
+      LEFT JOIN event_types et ON et.id = ce.event_type_id AND et.org_id = ce.org_id
+      WHERE ce.stage_id ${scope}
+      GROUP BY 1, 2, 3, 4
+    ),
+    ledger_raw AS (
+      SELECT org_id, stage_id, stat_date,
+             sum(sales)::int AS sales,
+             sum(checkouts)::int AS checkouts,
+             sum(revenue)::numeric(12, 4) AS revenue,
+             sum(pending_revenue)::numeric(12, 4) AS pending_revenue,
+             sum(unmapped_n)::int AS unmapped_conversions,
+             -- An entry that is zero on EVERY field is omitted, so a stage-day
+             -- whose only row is a rejected purchase reads '{}' rather than a
+             -- row of zeros that looks like a configured-but-idle event type.
+             coalesce(
+               jsonb_object_agg(
+                 event_key,
+                 jsonb_build_object(
+                   'n', n,
+                   'pending_n', pending_n,
+                   'revenue', ev_revenue,
+                   'pending_revenue', ev_pending_revenue
+                 )
+               ) FILTER (
+                 WHERE event_key IS NOT NULL
+                   AND (n <> 0 OR pending_n <> 0 OR ev_revenue <> 0 OR ev_pending_revenue <> 0)
+               ),
+               '{}'::jsonb
+             ) AS events
+      FROM per_event
+      GROUP BY 1, 2, 3
+    ),
+    -- The per-unit rate, in its own level because an aggregate's output alias
+    -- cannot be referenced from the SELECT list that produced it.
+    ledger AS (
+      SELECT r.*,
+             CASE WHEN r.sales > 0 THEN (r.revenue / r.sales)::numeric(12, 4) ELSE NULL END
+               AS payout_at_conversion
+      FROM ledger_raw r
+    )`;
+}
+
 /**
  * Why a run wrote nothing on purpose.
  *   `empty_ledger`         — no stage-attributed ledger row anywhere.
@@ -202,9 +375,17 @@ export async function readProjectionCoverage(
         )})`;
   // `reported_history_floor` is deliberately written as a `stat_date <
   // ledger_floor` probe rather than a bare `min(stat_date)` over the non-zero
-  // rows: the healthy case matches no rows and the range is served by
-  // keitaro_stage_results_campaign_date_idx, so the guard costs an index probe
-  // per run instead of a full scan of the largest table on the tick.
+  // rows: the healthy case matches no rows, so the guard answers NULL without
+  // aggregating anything.
+  //
+  // ⚠️ IT IS A SEQUENTIAL SCAN, and an earlier version of this comment claimed
+  // otherwise. No index serves `stat_date < …` on this table:
+  // keitaro_stage_results_campaign_date_idx is (campaign_id, stat_date) and
+  // stat_date is NOT its leading column, so the range cannot be probed through
+  // it; keitaro_stage_results_stage_date_uniq is (org_id, stage_id, stat_date),
+  // same problem. The cost is a scan plus filter over the whole table (~17.6K
+  // rows in production) on every */5 tick — cheap at this size, which is why no
+  // index is being added for it, but it is a scan and it grows with the table.
   const [row] = (await dbc.execute(sql`
     WITH cov AS (
       SELECT EXISTS (SELECT 1 FROM conversion_events WHERE stage_id IS NOT NULL) AS ledger_has_rows,
@@ -219,7 +400,16 @@ export async function readProjectionCoverage(
            (SELECT min(k.stat_date)::text
               FROM keitaro_stage_results k
              WHERE k.stat_date < cov.ledger_floor
-               AND (k.checkouts <> 0 OR k.sales <> 0 OR k.revenue <> 0 OR k.pending_revenue <> 0)
+               AND (k.checkouts <> 0 OR k.sales <> 0 OR k.revenue <> 0 OR k.pending_revenue <> 0
+                    -- Phase 5: two more columns now "report a conversion". Without
+                    -- them a historical stage-day carrying ONLY registrations, or
+                    -- only unmapped rows, could never trip the global
+                    -- ledger_behind_history refusal — the projection would
+                    -- happily run against a ledger that does not reach back that
+                    -- far and zero it. Moot on day one (every pre-0185 row is
+                    -- '{}' / 0) and asymmetric for ever after, which is exactly
+                    -- the kind of guard that rots quietly.
+                    OR k.events <> '{}'::jsonb OR k.unmapped_conversions <> 0)
            ) AS reported_history_floor
     FROM cov
   `)) as unknown as {
@@ -304,25 +494,26 @@ export async function syncStageDayConversions(
     ).map((r) => [Number(r.stage_id), Number(r.checkouts)] as const),
   );
 
+  // The ledger-derived rows (stageDayLedgerCtes) written onto the stage-day.
+  // The change test is projectionChangedClause over PROJECTED_COLUMNS — the same
+  // builder the resync's dry run uses — so a column that starts being written is
+  // a column the preview starts listing. Two of the seven are there for a reason
+  // worth keeping written down:
+  //   • events / unmapped_conversions — without them a stage-day whose SCALARS
+  //     did not move but whose BREAKDOWN did (a registration arriving where a
+  //     purchase already sat, a mapping healing an unmapped row) would never be
+  //     rewritten, and the new columns would freeze at their first value;
+  //   • payout_at_conversion is derived from sales/revenue, so it only differs on
+  //     its own when a row predates the column or was written NULL by an older
+  //     path. Without it the stale/NULL payout can never be repaired.
   const written = (await dbc.execute(sql`
-    WITH ledger AS (
-      SELECT ce.org_id,
-             ce.stage_id,
-             (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date AS stat_date,
-             count(*) FILTER (WHERE ${SALES_FILTER})::int AS sales,
-             count(*) FILTER (WHERE ${CHECKOUT_FILTER})::int AS checkouts,
-             coalesce(sum(ce.revenue) FILTER (WHERE ${REVENUE_FILTER}), 0)::numeric(12, 4) AS revenue,
-             coalesce(sum(ce.revenue) FILTER (WHERE ${PENDING_REVENUE_FILTER}), 0)::numeric(12, 4) AS pending_revenue
-      FROM conversion_events ce
-      WHERE ce.stage_id ${scope}
-      GROUP BY 1, 2, 3
-    )
+    WITH ${stageDayLedgerCtes(scope)}
     INSERT INTO keitaro_stage_results
       (org_id, campaign_id, stage_id, stage_tracking_id, stat_date,
-       checkouts, sales, revenue, pending_revenue, payout_at_conversion)
+       checkouts, sales, revenue, pending_revenue, events, unmapped_conversions, payout_at_conversion)
     SELECT l.org_id, cs.campaign_id, l.stage_id, coalesce(cs.tracking_id, ''), l.stat_date,
-           l.checkouts, l.sales, l.revenue, l.pending_revenue,
-           CASE WHEN l.sales > 0 THEN (l.revenue / l.sales)::numeric(12, 4) ELSE NULL END
+           l.checkouts, l.sales, l.revenue, l.pending_revenue, l.events, l.unmapped_conversions,
+           l.payout_at_conversion
     FROM ledger l
     -- BOTH keys (review fix A3). The row is written with the LEDGER's org_id, so
     -- joining on the stage id alone would let one bad ledger row create a
@@ -335,16 +526,11 @@ export async function syncStageDayConversions(
       sales                = EXCLUDED.sales,
       revenue              = EXCLUDED.revenue,
       pending_revenue      = EXCLUDED.pending_revenue,
+      events               = EXCLUDED.events,
+      unmapped_conversions = EXCLUDED.unmapped_conversions,
       payout_at_conversion = EXCLUDED.payout_at_conversion,
       synced_at            = now()
-    WHERE keitaro_stage_results.checkouts IS DISTINCT FROM EXCLUDED.checkouts
-       OR keitaro_stage_results.sales     IS DISTINCT FROM EXCLUDED.sales
-       OR keitaro_stage_results.revenue   IS DISTINCT FROM EXCLUDED.revenue
-       OR keitaro_stage_results.pending_revenue IS DISTINCT FROM EXCLUDED.pending_revenue
-       -- payout is derived from the two above, so it only differs on its own when
-       -- a row predates the column or was written NULL by an older path. Without
-       -- this the stale/NULL payout can never be repaired.
-       OR keitaro_stage_results.payout_at_conversion IS DISTINCT FROM EXCLUDED.payout_at_conversion
+    WHERE ${projectionChangedClause("keitaro_stage_results", "EXCLUDED")}
     RETURNING keitaro_stage_results.id AS id
   `)) as unknown as { id: number }[];
 
@@ -355,17 +541,19 @@ export async function syncStageDayConversions(
   // ledger read, and a column that is projected but never zeroed is exactly the
   // stale-higher-value bug this fix is about.
   //
-  // ⚠️ "EXPLAINED" MUST NAME EVERY COLUMN THIS ZEROES — ALL FOUR (review fix,
-  // 2026-09-18). Until Task 6, SALES_FILTER was `keitaro_type IN ('lead','sale',
-  // 'rejected')`, a strict SUPERSET of CHECKOUT_FILTER, so `SALES ∨ REVENUE ∨
-  // PENDING` implied the checkout side for free. Task 6 flipped SALES_FILTER to
-  // the ledger's purchase predicate and broke that containment: a day whose only
-  // ledger rows are lead-TYPE NON-purchases — a $0 registration posted as `lead`,
-  // or an UNMAPPED row — had `checkouts` written by the INSERT above and zeroed
-  // here in the SAME run, then rewritten and re-zeroed on every */5 tick forever,
-  // dragging campaign_stages.checkout_click_count with it. The four filters are
-  // now the exact set the INSERT writes from, so the UPDATE is the complement of
-  // the INSERT and the projection is idempotent (test PB1–PB4).
+  // ⚠️ "EXPLAINED" MUST NAME EVERY COLUMN THIS ZEROES, AND SINCE PHASE 5 THAT IS
+  // EVERY LEDGER ROW. The predicate was a list of the filters the INSERT writes
+  // from: first `SALES ∨ REVENUE ∨ PENDING` (safe only while the pre-Task-6
+  // SALES_FILTER, `keitaro_type IN ('lead','sale','rejected')`, was a strict
+  // SUPERSET of CHECKOUT_FILTER and implied the checkout side for free), then all
+  // four, after Task 6 flipped SALES_FILTER to the ledger's purchase predicate and
+  // broke that containment — a day whose only ledger rows were lead-TYPE
+  // NON-purchases had `checkouts` written by the INSERT and zeroed here in the
+  // SAME run, forever, dragging campaign_stages.checkout_click_count with it
+  // (test PB1–PB4). Phase 5 retires the list entirely: `events` and
+  // `unmapped_conversions` mean EVERY ledger row now writes something, so the
+  // honest complement of the INSERT is "no ledger row on this stage-day at all".
+  // See the ⭐ note on the anti-join below.
   //
   // The join to `cov` is the C1 bound: a stage absent from it (no ledger rows
   // at all) has NO row to zero, and `k.stat_date >= cov.floor_date` keeps
@@ -373,6 +561,7 @@ export async function syncStageDayConversions(
   const zeroed = (await dbc.execute(sql`
     UPDATE keitaro_stage_results k
     SET checkouts = 0, sales = 0, revenue = 0, pending_revenue = 0,
+        events = '{}'::jsonb, unmapped_conversions = 0,
         payout_at_conversion = NULL, synced_at = now()
     FROM (
       SELECT ce.org_id, ce.stage_id,
@@ -387,13 +576,29 @@ export async function syncStageDayConversions(
       -- from the ledger of the row's OWN org, exactly like the write above.
       AND k.org_id = cov.org_id
       AND k.stat_date >= cov.floor_date
-      AND (k.checkouts <> 0 OR k.sales <> 0 OR k.revenue <> 0 OR k.pending_revenue <> 0)
+      -- Shared with the dry run's zero branch (projectionNonEmptyClause), so a
+      -- column that starts being zeroed is a column the preview starts listing.
+      AND ${projectionNonEmptyClause("k")}
+      -- ⭐ WIDENED IN PHASE 5, AND THIS IS NOT TIDYING. The predicate used to be
+      -- the four filters the INSERT writes from (SALES / CHECKOUT / REVENUE /
+      -- PENDING_REVENUE) — "is there a row here that makes a number?". Every
+      -- ledger row now makes a number: a counted event of ANY type lands in
+      -- the events object, and an unmapped row lands in
+      -- unmapped_conversions. Left as it was, a stage-day whose only conversions
+      -- are REGISTRATIONS satisfies "nothing here", and the UPDATE would wipe a
+      -- non-empty breakdown and the unmapped count on a day the ledger fully
+      -- explains. Fixture regonly_zeroing is the bar.
+      --
+      -- The widening can only ever PRESERVE a value, never invent one: it strictly
+      -- reduces the set of rows this statement touches. The one shape it stops
+      -- zeroing — a stage-day whose only rows are REJECTED — needs no zeroing,
+      -- because the INSERT above already emits an all-zero row for it (the
+      -- per_event group exists; every FILTER is empty).
       AND NOT EXISTS (
         SELECT 1 FROM conversion_events ce
         WHERE ce.stage_id = k.stage_id
           AND ce.org_id = k.org_id
           AND (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date = k.stat_date
-          AND (${SALES_FILTER} OR ${CHECKOUT_FILTER} OR ${REVENUE_FILTER} OR ${PENDING_REVENUE_FILTER})
       )
     RETURNING k.id AS id
   `)) as unknown as { id: number }[];
@@ -418,6 +623,130 @@ export async function syncStageDayConversions(
     rowsZeroed: zeroed.length,
     ...coverage,
   };
+}
+
+/** One stage-day the resync would change, with the stored and ledger-derived values. */
+export interface StageDayResyncDiff {
+  stage_id: number;
+  stat_date: string;
+  /**
+   * `insert` — the ledger explains a (stage, day) with no stored row.
+   * `rewrite` — a stored row any projected column of which differs.
+   * `zero` — a covered day the ledger no longer explains at all.
+   */
+  action: "insert" | "rewrite" | "zero";
+  old_checkouts: number;
+  new_checkouts: number;
+  old_sales: number;
+  new_sales: number;
+  old_revenue: string;
+  new_revenue: string;
+  old_pending_revenue: string;
+  new_pending_revenue: string;
+  old_events: string;
+  new_events: string;
+  old_unmapped: number;
+  new_unmapped: number;
+  old_payout: string | null;
+  new_payout: string | null;
+}
+
+/**
+ * EXACTLY THE ROWS syncStageDayConversions WOULD CHANGE, read-only — the dry run
+ * of scripts/resync-stage-day-conversions.ts, and the reason that script's
+ * preview can be trusted.
+ *
+ * ⭐ IT IS THE PREDICATE, NOT AN APPROXIMATION OF IT, AND THAT IS NOW STRUCTURAL.
+ * Every piece is the same object the write uses: the derivation is
+ * stageDayLedgerCtes, the rewrite test is projectionChangedClause over
+ * PROJECTED_COLUMNS (the upsert's own `WHERE`), the zero test is
+ * projectionNonEmptyClause (the zeroing UPDATE's own content test) next to a
+ * verbatim copy of its anti-join, and `stage_floor` is its `cov` subquery. The
+ * script used to carry hand-retyped copies of all four, and they fell behind
+ * twice: once when Task 6 changed what a sale is, once when Phase 5 added
+ * `events` / `unmapped_conversions`. Bars R1-R8 in
+ * scripts/test-stage-day-conversions.ts run this and the real write against ONE
+ * world and require the two row sets to be equal.
+ *
+ * ⚠️ `ledger_written` re-applies the INSERT's JOIN to campaign_stages; `stage_floor`
+ * deliberately does NOT. The two bounds genuinely differ on the write side — a
+ * ledger row whose org does not match its stage writes nothing, while the zeroing
+ * floor is computed over EVERY stage-attributed ledger row — and this diff has to
+ * reproduce each one where it applies, not the nicer of the two.
+ *
+ * Coverage is NOT checked here: a caller must pre-flight readProjectionCoverage
+ * itself, because a diff computed under a refusal reads as "every row must be
+ * zeroed".
+ */
+export async function readStageDayResyncDiff(
+  dbc: DbOrTx,
+  opts: { stageIds?: number[] } = {},
+): Promise<StageDayResyncDiff[]> {
+  const ids = opts.stageIds;
+  if (ids && ids.length === 0) return [];
+  const scope: SQL = ids
+    ? sql`IN (${sql.join(
+        ids.map((id) => sql`${id}::int`),
+        sql`, `,
+      )})`
+    : sql`IS NOT NULL`;
+
+  return (await dbc.execute(sql`
+    WITH ${stageDayLedgerCtes(scope)},
+    ledger_written AS (
+      SELECT l.* FROM ledger l
+      JOIN campaign_stages cs ON cs.id = l.stage_id AND cs.org_id = l.org_id
+    ),
+    stage_floor AS (
+      SELECT ce.org_id, ce.stage_id,
+             min((ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date) AS floor_date
+      FROM conversion_events ce
+      WHERE ce.stage_id ${scope}
+      GROUP BY 1, 2
+    )
+    SELECT coalesce(k.stage_id, l.stage_id) AS stage_id,
+           coalesce(k.stat_date, l.stat_date)::text AS stat_date,
+           CASE WHEN k.id IS NULL THEN 'insert'
+                WHEN l.stage_id IS NOT NULL THEN 'rewrite'
+                ELSE 'zero' END AS action,
+           coalesce(k.checkouts, 0) AS old_checkouts,
+           coalesce(l.checkouts, 0) AS new_checkouts,
+           coalesce(k.sales, 0) AS old_sales,
+           coalesce(l.sales, 0) AS new_sales,
+           coalesce(k.revenue, 0)::text AS old_revenue,
+           coalesce(l.revenue, 0)::text AS new_revenue,
+           coalesce(k.pending_revenue, 0)::text AS old_pending_revenue,
+           coalesce(l.pending_revenue, 0)::text AS new_pending_revenue,
+           coalesce(k.events, '{}'::jsonb)::text AS old_events,
+           coalesce(l.events, '{}'::jsonb)::text AS new_events,
+           coalesce(k.unmapped_conversions, 0) AS old_unmapped,
+           coalesce(l.unmapped_conversions, 0) AS new_unmapped,
+           k.payout_at_conversion::text AS old_payout,
+           l.payout_at_conversion::text AS new_payout
+    FROM keitaro_stage_results k
+    FULL OUTER JOIN ledger_written l
+      ON l.stage_id = k.stage_id AND l.org_id = k.org_id AND l.stat_date = k.stat_date
+    LEFT JOIN stage_floor f ON f.stage_id = k.stage_id AND f.org_id = k.org_id
+    WHERE (
+        l.stage_id IS NOT NULL AND (k.id IS NULL OR ${projectionChangedClause("k", "l")})
+      )
+      OR (
+        k.id IS NOT NULL AND l.stage_id IS NULL
+        -- Outside that stage's coverage nothing happens, so it is not a diff —
+        -- same per-stage bound as syncStageDayConversions.
+        AND f.floor_date IS NOT NULL AND k.stat_date >= f.floor_date
+        AND ${projectionNonEmptyClause("k")}
+        -- The zeroing UPDATE's anti-join, verbatim: "no ledger row on this
+        -- stage-day at all", NOT a list of the filters that make a number.
+        AND NOT EXISTS (
+          SELECT 1 FROM conversion_events ce
+          WHERE ce.stage_id = k.stage_id
+            AND ce.org_id = k.org_id
+            AND (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date = k.stat_date
+        )
+      )
+    ORDER BY 1, 2
+  `)) as unknown as StageDayResyncDiff[];
 }
 
 /** Every stage with a keitaro_stage_results row — the unscoped run's mirror list. */

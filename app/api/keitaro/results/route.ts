@@ -10,6 +10,7 @@ import {
   emptyFunnel,
   addRowToFunnel,
   withFunnelDerived,
+  withoutEventBreakdown,
   type FunnelTally,
 } from "@/lib/keitaro/funnel";
 import {
@@ -41,8 +42,41 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // ⭐ AN EXPLICIT PROJECTION, NOT `db.select()`. A bare select expands to every
+  // column the SCHEMA MIRROR names, which is not the same set as the columns this
+  // handler uses — and not necessarily the same set the DEPLOYED DATABASE has.
+  // db/schema.ts leads the migrations by design (CLAUDE.md §14: additive leads the
+  // code), so between a deploy and its migration a bare select names columns that
+  // do not exist yet and the endpoint answers 42703 for a column nothing here
+  // reads. This list is exactly the funnel's input (KeitaroResultRowLike,
+  // lib/keitaro/funnel.ts) plus the four fields the response body echoes, so the
+  // handler's schema dependency is the one it actually has: `pending_revenue`
+  // (0182) is named because addRowToFunnel reads it, while `events` and
+  // `unmapped_conversions` (0185) are not named because nothing here reads them.
+  //
+  // ⭐ AND BECAUSE THEY ARE NOT SELECTED, THEY ARE NOT EMITTED. Every response
+  // body below goes through withoutEventBreakdown(), which deletes `events`,
+  // `unmapped` and `manual_topup` from the derived tally. Left in, they would
+  // read `{}` / 0 — indistinguishable from "this campaign had no conversions of
+  // any type" — because addRowToFunnel folds an absent column as an empty map.
+  // An absent field and an empty map must not look the same.
   const rows = await db
-    .select()
+    .select({
+      stage_id: keitaro_stage_results.stage_id,
+      stage_tracking_id: keitaro_stage_results.stage_tracking_id,
+      stat_date: keitaro_stage_results.stat_date,
+      synced_at: keitaro_stage_results.synced_at,
+      visit_clicks_raw: keitaro_stage_results.visit_clicks_raw,
+      visit_clicks_clean: keitaro_stage_results.visit_clicks_clean,
+      redirect_clicks_raw: keitaro_stage_results.redirect_clicks_raw,
+      redirect_clicks_clean: keitaro_stage_results.redirect_clicks_clean,
+      raw_clicks: keitaro_stage_results.raw_clicks,
+      clean_clicks: keitaro_stage_results.clean_clicks,
+      sales: keitaro_stage_results.sales,
+      revenue: keitaro_stage_results.revenue,
+      pending_revenue: keitaro_stage_results.pending_revenue,
+      cost: keitaro_stage_results.cost,
+    })
     .from(keitaro_stage_results)
     .where(
       and(
@@ -101,9 +135,11 @@ export async function GET(req: NextRequest) {
     // in the stage's lifetime figure.
     time_basis: { totals: "lifetime", stages: "lifetime", rows: "per_day" },
     totals: {
-      ...withFunnelDerived(
-        campaignTally,
-        denominatorFor(linkMode, clickersByCampaign.get(campaignId), campaignTally.visit_clicks_clean),
+      ...withoutEventBreakdown(
+        withFunnelDerived(
+          campaignTally,
+          denominatorFor(linkMode, clickersByCampaign.get(campaignId), campaignTally.visit_clicks_clean),
+        ),
       ),
       lifetime_epc: withFunnelDerived(
         campaignTally,
@@ -115,9 +151,11 @@ export async function GET(req: NextRequest) {
       .map((s) => ({
         stage_id: s.stage_id,
         stage_tracking_id: s.stage_tracking_id,
-        ...withFunnelDerived(
-          s.tally,
-          denominatorFor(linkMode, clickersByStage.get(s.stage_id), s.tally.visit_clicks_clean),
+        ...withoutEventBreakdown(
+          withFunnelDerived(
+            s.tally,
+            denominatorFor(linkMode, clickersByStage.get(s.stage_id), s.tally.visit_clicks_clean),
+          ),
         ),
         lifetime_epc: withFunnelDerived(
           s.tally,
@@ -131,12 +169,14 @@ export async function GET(req: NextRequest) {
           stage_id: r.stage_id,
           stage_tracking_id: r.stage_tracking_id,
           stat_date: r.stat_date,
-          ...withFunnelDerived(
-            t,
-            denominatorFor(
-              linkMode,
-              clickersByStageDay.get(`${r.stage_id}|${r.stat_date}`),
-              t.visit_clicks_clean,
+          ...withoutEventBreakdown(
+            withFunnelDerived(
+              t,
+              denominatorFor(
+                linkMode,
+                clickersByStageDay.get(`${r.stage_id}|${r.stat_date}`),
+                t.visit_clicks_clean,
+              ),
             ),
           ),
           synced_at: r.synced_at,

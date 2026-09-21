@@ -1,11 +1,15 @@
 import "./_env-preload";
 import { drizzle } from "drizzle-orm/postgres-js"; import postgres from "postgres"; import { sql } from "drizzle-orm";
 import { getPerformanceReport } from "@/lib/reporting/performance-report";
+import { requireReportingColumns } from "./_require-migration";
 function assert(c:boolean,m:string){if(!c)throw new Error(`ASSERTION FAILED: ${m}`);console.log(`  ✓ ${m}`);}
 const rate=(n:number,d:number)=>d>0?n/d:0;
 
 async function main(){
   const c=postgres(process.env.DATABASE_URL!,{prepare:false,max:5}); const d=drizzle(c);
+  // getPerformanceReport reaches getStageMetricsInRange, whose projection needs
+  // 0182 + 0185. Name the missing column instead of dying on a raw 42703.
+  await requireReportingColumns(d, "verify-lifetime-display");
   const org=(await d.execute(sql`SELECT id FROM organizations LIMIT 1`)) as unknown as {id:string}[];
   const orgId=org[0].id;
 

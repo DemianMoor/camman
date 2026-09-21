@@ -19,8 +19,18 @@ import {
   type GradingRates,
 } from "@/lib/reporting/grading-rates";
 import { sendDaysOf } from "@/lib/reporting/creative-rows";
+import {
+  addEventMaps,
+  scaleEventMap,
+  type EventMap,
+} from "@/lib/reporting/event-columns";
 import type { AttributionBasis, PerformanceDimension } from "@/lib/reporting/report-dimensions";
-import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
+import {
+  approvedRevenueClause,
+  countedClause,
+  pendingRevenueClause,
+  purchasedClause,
+} from "@/lib/sale-attribution";
 import {
   getStageMetricsInRange,
   type ClickerDenominators,
@@ -69,6 +79,16 @@ export interface PerfMetrics {
   lifetime_revenue: number;
   sales: number;
   revenue: number;
+  // The per-event-type breakdown of sales / revenue / pending_revenue, keyed by
+  // event_types.key (migration 0185). ADDITIVE: no field above changes meaning.
+  // The report's columns are generated from this map plus the registry
+  // (lib/reporting/event-columns.ts) — nothing branches on a key.
+  events: EventMap;
+  // Conversions in scope that matched no mapping. In NO other field here.
+  unmapped: number;
+  // The part of `sales` that came from the manual tally, not the tracker, so
+  // Σ (is_purchase events).n + manual_topup = sales exactly.
+  manual_topup: number;
   pending_revenue: number;
   cost: number;
 }
@@ -123,9 +143,27 @@ export const ZERO: PerfMetrics = {
   lifetime_revenue: 0,
   sales: 0,
   revenue: 0,
+  // A FRESH object per accumulator — see zeroMetrics() and the freeze below.
+  events: {},
+  unmapped: 0,
+  manual_topup: 0,
   pending_revenue: 0,
   cost: 0,
 };
+
+// ⭐ FROZEN, AND THE FREEZE IS THE GUARD, NOT THE COMMENT. `ZERO` is spread
+// (`{ ...ZERO }`) by every accumulator in this module, and a spread is SHALLOW:
+// without this, one forgotten `zeroMetrics()` gives two requests the same
+// `events` object, addEventMaps mutates it in place, and one org's breakdown
+// leaks into another's response. It is also handed out directly —
+// `app/api/reports/performance/route.ts:141` does
+// `stored.basis.offer_totals[String(offerId)] ?? ZERO` straight into a response
+// body. Freezing turns that whole class of mistake into a TypeError in strict
+// mode (all ES modules are strict) instead of silent cross-request corruption.
+Object.freeze(ZERO.events);
+
+/** A fresh zero accumulator. Use this, not `{ ...ZERO }`, wherever the result is mutated. */
+export const zeroMetrics = (): PerfMetrics => ({ ...ZERO, events: {} });
 
 function stageMetrics(
   s: StageMetrics,
@@ -152,12 +190,19 @@ function stageMetrics(
     lifetime_revenue: lifetimeRevenueByStage.get(s.stage_id) ?? 0,
     sales: s.tally.sales,
     revenue: s.tally.revenue,
+    // The map is COPIED, not aliased: the caller's accumulators mutate what they
+    // are given, and s.tally.events belongs to the StageMetrics record, which a
+    // second dimension in the same getStageDimensionReports() call also reads.
+    events: addEventMaps({}, s.tally.events),
+    unmapped: s.tally.unmapped,
+    manual_topup: s.tally.manual_topup,
     pending_revenue: s.tally.pending_revenue,
     cost: s.tally.cost,
   };
 }
 
-function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
+/** Exported for scripts/test-event-tally-merge.ts — the five accumulators must all carry every field. */
+export function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
   return {
     sent: a.sent + b.sent,
     opt_outs: a.opt_outs + b.opt_outs,
@@ -169,11 +214,15 @@ function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     lifetime_revenue: a.lifetime_revenue + b.lifetime_revenue,
     sales: a.sales + b.sales,
     revenue: a.revenue + b.revenue,
+    events: addEventMaps(addEventMaps({}, a.events), b.events),
+    unmapped: a.unmapped + b.unmapped,
+    manual_topup: a.manual_topup + b.manual_topup,
     pending_revenue: a.pending_revenue + b.pending_revenue,
     cost: a.cost + b.cost,
   };
 }
-function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
+/** Exported for scripts/test-event-tally-merge.ts — the five accumulators must all carry every field. */
+export function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
   return {
     sent: m.sent * f,
     opt_outs: m.opt_outs * f,
@@ -185,11 +234,26 @@ function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     lifetime_revenue: m.lifetime_revenue * f,
     sales: m.sales * f,
     revenue: m.revenue * f,
+    events: scaleEventMap(m.events, f),
+    unmapped: m.unmapped * f,
+    manual_topup: m.manual_topup * f,
     pending_revenue: m.pending_revenue * f,
     cost: m.cost * f,
   };
 }
 const round2 = (n: number) => Math.round(n * 100) / 100;
+const roundEventMap = (m: EventMap): EventMap =>
+  Object.fromEntries(
+    Object.entries(m).map(([k, t]) => [
+      k,
+      {
+        n: round2(t.n),
+        pending_n: round2(t.pending_n),
+        revenue: round2(t.revenue),
+        pending_revenue: round2(t.pending_revenue),
+      },
+    ]),
+  );
 
 // Build a parameterized IN-list from a JS number array (drizzle spreads a bare
 // array, which ANY() rejects). Returns "$1, $2, ...".
@@ -284,7 +348,7 @@ export async function getStageDimensionReports(
       (b.offerId == null || s.offer_id === b.offerId),
   );
 
-  const totals = filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), { ...ZERO });
+  const totals = filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), zeroMetrics());
   await dedupeTotalClickers(orgId, b, filtered, totals, clickers);
   const refreshedAt = await maxSyncedAt(orgId);
 
@@ -369,7 +433,7 @@ async function groupByStageDimension(
   const acc = new Map<string, PerfMetrics>();
   for (const s of stages) {
     const k = keyOf(s);
-    acc.set(k, addMetrics(acc.get(k) ?? { ...ZERO }, metricsOf(s)));
+    acc.set(k, addMetrics(acc.get(k) ?? zeroMetrics(), metricsOf(s)));
   }
 
   if (dimension === "number") {
@@ -480,7 +544,7 @@ async function groupByCreativeOffer(
   for (const s of stages) {
     const key = `${s.creative_id ?? DIMENSION_NONE_KEY}:${s.offer_id ?? DIMENSION_NONE_KEY}`;
     const e = acc.get(key) ?? {
-      m: { ...ZERO },
+      m: zeroMetrics(),
       creativeId: s.creative_id,
       offerId: s.offer_id,
       days: [],
@@ -560,7 +624,7 @@ async function distributeToGroups(
 
   const byGroup = new Map<number, PerfMetrics>();
   const add = (gid: number, m: PerfMetrics) =>
-    byGroup.set(gid, addMetrics(byGroup.get(gid) ?? { ...ZERO }, m));
+    byGroup.set(gid, addMetrics(byGroup.get(gid) ?? zeroMetrics(), m));
 
   for (const s of stages) {
     const m = metricsOf(s);
@@ -599,6 +663,25 @@ async function distributeToGroups(
       spread(add, m.sales, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "sales");
       spread(add, m.revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "revenue");
       spread(add, m.pending_revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "pending_revenue");
+      // The breakdown splits on the SAME basis as the numbers it breaks down —
+      // sale weights, with the documented `?? sentW` re-attribution — so a
+      // group's Registrations and its Sales are built from consistent parts. It
+      // cannot use spread(): that helper adds ONE number into ONE field, and this
+      // is a map. The emptiness test mirrors spread()'s `if (total === 0) return`
+      // — without it a stage with no conversions at all would mint an all-zero
+      // row for every used group, which By Group has never done.
+      if (Object.keys(m.events).length > 0) {
+        for (const [gid, frac] of shares(nonEmpty(wSale.get(s.stage_id)) ?? sentW)) {
+          add(gid, { ...zeroMetrics(), events: scaleEventMap(m.events, frac) });
+        }
+      }
+      // Unmapped conversions and the manual top-up have no finer weight by
+      // construction — an unmapped row resolved to no recipient, and a manual
+      // tally is a stage-level number — so both split on SENT. The per-group
+      // figure is therefore "share of the stage's audience", and only the page
+      // total (which is what the badge and the footing bar read) is exact.
+      spread(add, m.unmapped, sentW, "unmapped");
+      spread(add, m.manual_topup, sentW, "manual_topup");
       spread(add, m.cost, sentW, "cost");
     } else {
       const allocW = nonEmpty(manualAlloc.get(s.campaign_id)) ?? equalW;
@@ -622,6 +705,9 @@ async function distributeToGroups(
       lifetime_revenue: round2(m.lifetime_revenue),
       sales: round2(m.sales),
       revenue: round2(m.revenue),
+      events: roundEventMap(m.events),
+      unmapped: round2(m.unmapped),
+      manual_topup: round2(m.manual_topup),
       pending_revenue: round2(m.pending_revenue),
       cost: round2(m.cost),
     }))
@@ -657,7 +743,7 @@ function spread(
 ) {
   if (total === 0) return;
   for (const [gid, frac] of shares(weights)) {
-    add(gid, { ...ZERO, [field]: total * frac });
+    add(gid, { ...zeroMetrics(), [field]: total * frac });
   }
 }
 
@@ -845,6 +931,60 @@ export function ledgerHourQuery(args: {
     `;
 }
 
+/**
+ * The hourly tab's per-event breakdown AND its unmapped count, in one pass.
+ *
+ * Bucketed on ce.occurred_at exactly like ledgerHourQuery, so the split lands in
+ * the same hours as the `sales` and `revenue` series it breaks down — a second
+ * time basis here would make the columns of one row disagree about what "3pm"
+ * means.
+ *
+ * `event_key` is NULL for an unmapped row (the LEFT JOIN), which is how the same
+ * query answers both questions. The join carries org_id as well as the id.
+ *
+ * The status predicates are the same generalisation the stage-day projection
+ * uses (lib/keitaro/stage-day-conversions.ts): countedClause for `n`, and
+ * counts_revenue + the approved/pending literal for the money.
+ *
+ * ⭐ `unmapped` IS KEYED ON THE JOIN RESULT (et.key IS NULL), NOT ON THE RAW
+ * COLUMN (ce.event_type_id IS NULL) — the same choice, for the same reason, as
+ * the projection's own unmapped_n (lib/keitaro/stage-day-conversions.ts). The
+ * scalar `sales`/`revenue` series beside this one resolve their flags through the
+ * NON-org-scoped PURCHASE_EVENT_TYPE_IDS / REVENUE_EVENT_TYPE_IDS, while this
+ * join is org-scoped, so a ledger row carrying ANOTHER org's event_type_id is
+ * counted by the scalar and lands under no key. Keyed on et.key it is counted
+ * here; keyed on the raw column it would be counted nowhere and invisible on the
+ * one surface whose entire purpose is to reveal rows that count as nothing.
+ */
+export function ledgerHourEventQuery(args: {
+  orgId: string;
+  from: string;
+  to: string;
+  providerPhoneId?: number | null;
+}): SQL {
+  const { start, end } = hourlyEtRange(args.from, args.to);
+  const provFilter =
+    args.providerPhoneId != null
+      ? sql`AND cs.provider_phone_id = ${args.providerPhoneId}`
+      : sql``;
+  return sql`
+      SELECT EXTRACT(HOUR FROM ce.occurred_at AT TIME ZONE 'America/New_York')::int AS hour,
+             et.key AS event_key,
+             count(*) FILTER (WHERE ${countedClause()})::int AS n,
+             count(*) FILTER (WHERE ce.status = 'pending')::int AS pending_n,
+             coalesce(sum(ce.revenue) FILTER (WHERE et.counts_revenue AND ce.status = 'approved'), 0)::float8 AS revenue,
+             coalesce(sum(ce.revenue) FILTER (WHERE et.counts_revenue AND ce.status = 'pending'), 0)::float8 AS pending_revenue,
+             count(*) FILTER (WHERE et.key IS NULL OR ce.status IS NULL)::int AS unmapped
+      FROM conversion_events ce
+      JOIN campaign_stages cs ON cs.id = ce.stage_id
+        ${provFilter}
+      LEFT JOIN event_types et ON et.id = ce.event_type_id AND et.org_id = ce.org_id
+      WHERE ce.org_id = ${args.orgId}::uuid
+        AND ce.occurred_at >= ${start} AND ce.occurred_at < ${end}
+      GROUP BY 1, 2
+    `;
+}
+
 // ---- hourly: user-activity time from internal per-event tables --------------
 async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceReport> {
   const provFilter = b.providerPhoneId != null;
@@ -887,7 +1027,17 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       }),
     )) as unknown as { hour: number; v: number }[];
 
-  const [sentRows, clicks, redirects, sales, revenue, optouts, clickerRows] = await Promise.all([
+  const [
+    sentRows,
+    clicks,
+    redirects,
+    sales,
+    revenue,
+    pendingRevenue,
+    optouts,
+    clickerRows,
+    evRows,
+  ] = await Promise.all([
     // Sent messages by SEND hour (tracked stage_sends; manual-campaign sends have
     // no per-message time and roll up into the Manual row). This is the one column
     // bucketed by send time, not activity time — it's the denominator for the rates.
@@ -911,6 +1061,22 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
     eventAgg("ss.offer_reached_at", provJoin, sql`ss.offer_reached_at IS NOT NULL`, sql`count(*)::int`),
     ledgerHourAgg(purchasedClause(), sql`count(*)::int`),
     ledgerHourAgg(approvedRevenueClause(), sql`coalesce(sum(ce.revenue), 0)::float8`),
+    // ⭐ HELD MONEY, COMPUTED — NOT LEFT AS A ZERO THAT MEANS "NOT COMPUTED".
+    // This series is the exact counterpart of `revenue` above: the same ledger,
+    // the same ce.occurred_at hour, the same shared clause family
+    // (lib/sale-attribution.ts), differing only in the status literal. Pending
+    // money is never added into revenue — it is a separate figure in EVERY
+    // surface that carries both.
+    //
+    // It exists because the hourly row map used to hard-code `pending_revenue: 0`
+    // while ledgerHourEventQuery computed REAL pending figures into `m.events`,
+    // so one API body answered the same question twice: `totals.pending_revenue:
+    // 0` beside a non-zero `events[k].pending_revenue`. A consumer could not tell
+    // that 0 from a measured one, and "no column renders it" is a condition one
+    // column addition away from being false. The two now agree by construction,
+    // with the same cross-org residual that `revenue` has (see
+    // ledgerHourEventQuery), which `unmapped` accounts for.
+    ledgerHourAgg(pendingRevenueClause(), sql`coalesce(sum(ce.revenue), 0)::float8`),
     // opt-outs by receipt time, for TRACKED stages
     (await db.execute(sql`
       SELECT ${hourExpr("oa.created_at")} AS hour, count(*)::int AS v
@@ -931,13 +1097,33 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
         AND cc.first_click_at >= ${rangeStart} AND cc.first_click_at < ${rangeEnd}
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[],
+    // The per-event breakdown + the unmapped count, off the SAME ledger and the
+    // SAME occurred_at bucketing as `sales` and `revenue` above.
+    (await db.execute(
+      ledgerHourEventQuery({
+        orgId,
+        from: b.from,
+        to: b.to,
+        providerPhoneId: b.providerPhoneId,
+      }),
+    )) as unknown as {
+      hour: number;
+      event_key: string | null;
+      n: number;
+      pending_n: number;
+      revenue: number;
+      pending_revenue: number;
+      unmapped: number;
+    }[],
   ]);
 
   const hours = new Map<number, PerfMetrics>();
-  const bump = (h: number, field: keyof PerfMetrics, v: number) => {
+  // `events` is not a number, so it is excluded from the field parameter rather
+  // than cast through: `(m[field] as number) += v` on a map would be silent.
+  const bump = (h: number, field: Exclude<keyof PerfMetrics, "events">, v: number) => {
     // Hour buckets are built from tracked per-recipient events, so an hour with
     // no reach is a real 0 — unlike ZERO's null, which marks "no per-recipient data".
-    if (!hours.has(h)) hours.set(h, { ...ZERO, reached: 0 });
+    if (!hours.has(h)) hours.set(h, { ...zeroMetrics(), reached: 0 });
     (hours.get(h)![field] as number) += v;
   };
   for (const r of sentRows) bump(r.hour, "sent", Number(r.v));
@@ -950,6 +1136,31 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
   for (const r of clickerRows) bump(r.hour, "counted_clickers", Number(r.v));
   for (const r of sales) bump(r.hour, "sales", Number(r.v));
   for (const r of revenue) bump(r.hour, "revenue", Number(r.v));
+  for (const r of pendingRevenue) bump(r.hour, "pending_revenue", Number(r.v));
+  for (const r of evRows) {
+    if (!hours.has(r.hour)) hours.set(r.hour, { ...zeroMetrics(), reached: 0 });
+    const m = hours.get(r.hour)!;
+    m.unmapped += Number(r.unmapped);
+    // A NULL key IS the unmapped bucket — counted above and nowhere else.
+    if (r.event_key == null) continue;
+    const t = {
+      n: Number(r.n),
+      pending_n: Number(r.pending_n),
+      revenue: Number(r.revenue),
+      pending_revenue: Number(r.pending_revenue),
+    };
+    // ⭐ AN ALL-ZERO ENTRY IS NOT DATA, AND THE TWO PATHS MUST AGREE ON THAT.
+    // The stage-day projection FILTERs such an entry out of its jsonb
+    // (lib/keitaro/stage-day-conversions.ts) so a stage-day whose only row is a
+    // REJECTED purchase reads `{}` rather than a row of zeros. This group exists
+    // for the same reason — a rejected conversion still forms a (hour, key)
+    // group — so emitting it here would put a key in hourly's map that By Offer
+    // omits for identical data. visibleEventTypes() keys on a non-zero field, so
+    // the rendered column set agrees either way (bar W21); the PAYLOAD did not,
+    // and an absent key and a zeroed key are different claims.
+    if (t.n === 0 && t.pending_n === 0 && t.revenue === 0 && t.pending_revenue === 0) continue;
+    addEventMaps(m.events, { [r.event_key]: t });
+  }
   for (const r of optouts) bump(r.hour, "opt_outs", Number(r.v));
 
   const rows: PerfRow[] = [...hours.entries()]
@@ -958,9 +1169,10 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       key: String(h),
       label: formatEtHour(h),
       ...m,
-      // The hourly tab renders no pending column (its columns are activity-time
-      // rates), so this is deliberately not computed rather than half-computed.
-      pending_revenue: 0,
+      // `pending_revenue` is NOT overridden here any more. It used to be set to a
+      // literal 0 — "the hourly tab renders no pending column, so this is
+      // deliberately not computed" — which put a not-computed sentinel in the
+      // same body as the real per-event figures. It is computed above.
     }));
 
   // Manual row (pinned first): all results from MANUAL campaigns mapped to the
@@ -970,7 +1182,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
     rows.unshift({ key: "manual", label: "Manual", pinned: true, ...manual });
   }
 
-  const totals = rows.reduce((acc, r) => addMetrics(acc, r), { ...ZERO });
+  const totals = rows.reduce((acc, r) => addMetrics(acc, r), zeroMetrics());
   // Hour rows dedupe clickers per hour; the total dedupes across the whole range.
   totals.counted_clickers = await getTotalCountedClickers(db, orgId, etRangeUtc(b), {
     providerPhoneId: b.providerPhoneId,
@@ -1004,10 +1216,14 @@ async function manualRangeRow(orgId: string, b: Bounds): Promise<PerfMetrics> {
       ), 0) AS sent
   `)) as unknown as { sales: number; opt_outs: number; sent: number }[];
   const r = rows[0] ?? { sales: 0, opt_outs: 0, sent: 0 };
+  // No per-event breakdown, and that is not an omission: a manual-mode campaign
+  // mints no links, so it has no tracker conversion at all. Its `sales` is the
+  // manual tally, which is exactly what manual_topup means everywhere else.
   return {
-    ...ZERO,
+    ...zeroMetrics(),
     sent: Number(r.sent) || 0,
     sales: Number(r.sales) || 0,
+    manual_topup: Number(r.sales) || 0,
     opt_outs: Number(r.opt_outs) || 0,
   };
 }

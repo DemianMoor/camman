@@ -25,6 +25,23 @@ export function combineSales(
   return Math.max(manualSales, keitaroSales);
 }
 
+// The part of that effective Sales figure the MANUAL tally contributed — the
+// second residual of the per-event breakdown, and the reason a screen can show
+// "Purchases: 2" beside "Sales: 5" with only 1 stray to blame.
+//
+// ⭐ DERIVED FROM combineSales(), NOT RE-DERIVED AS max(m - k, 0). They are the
+// same number today, and writing it this way is what keeps them the same number
+// if the dedupe rule above ever changes: this is defined as "what Sales carries
+// that the tracker did not report", which is the property every caller wants.
+// Mirrors `greatest(m_sales - k_sales, 0)` in lib/reporting/attribution.ts and
+// `greatest(cs.sales_count - ks.sales, 0)` in lib/creatives/metrics-cache.ts.
+export function manualSalesTopup(
+  manualSales: number,
+  keitaroSales: number,
+): number {
+  return combineSales(manualSales, keitaroSales) - keitaroSales;
+}
+
 // Returns null when the per-sale payout is unknown (no offer CPA snapshotted),
 // so callers can render "—" instead of a misleading $0.
 export function stageRevenue(

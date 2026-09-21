@@ -48,6 +48,12 @@ export interface SeedConversionEvent {
   revenue?: number;
   /** The raw Keitaro conversion type, for the stage-day projection's filters. */
   keitaroType?: string;
+  /**
+   * When the conversion happened. Defaults to now(). The stage-day projection
+   * dates a row by the ET day of occurred_at, so a test that reads a CLOSED past
+   * window must place its conversions in it.
+   */
+  occurredAt?: Date;
 }
 
 export async function seedConversionEvent(
@@ -75,7 +81,7 @@ export async function seedConversionEvent(
             ${eventTypeId},
             ${e.status !== undefined ? e.status : (e.eventKey ? "approved" : null)},
             ${(e.revenue ?? 0).toFixed(4)}::numeric,
-            now(), now(), ${e.stageSendId ?? null}::uuid, ${e.contactId ?? null}::uuid,
+            coalesce(${e.occurredAt?.toISOString() ?? null}::timestamptz, now()), now(), ${e.stageSendId ?? null}::uuid, ${e.contactId ?? null}::uuid,
             ${e.campaignId ?? null}::int, ${e.stageId ?? null}::int, ${e.offerId ?? null}::int)
     RETURNING id
   `)) as unknown as { id: number }[];

@@ -129,8 +129,15 @@ export async function refreshCreativeCtr(orgId: string): Promise<{ durationMs: n
 }
 
 /** The stored rows; empty until the first refresh, so CTR renders "—", never 0%. */
-export async function readCreativeCtr(orgId: string): Promise<CreativeCtrRow[]> {
-  const rows = (await db.execute(sql`
+// `dbc` defaults to the pool. It is threaded so a verification script can read
+// the snapshot on the SAME connection as the metrics query it is checking — a
+// second connection cannot see an uncommitted fixture, and every DB bar in this
+// repo runs inside a transaction that always rolls back.
+export async function readCreativeCtr(
+  orgId: string,
+  dbc: DbOrTx = db,
+): Promise<CreativeCtrRow[]> {
+  const rows = (await dbc.execute(sql`
     SELECT data->'rows' AS rows
     FROM operator_rollups
     WHERE org_id = ${orgId}::uuid AND rollup_key = ${CREATIVE_CTR_ROLLUP_KEY} AND data IS NOT NULL

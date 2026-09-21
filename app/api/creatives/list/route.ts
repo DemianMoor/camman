@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/db/client";
 import { creative_offers, creatives, offers, spam_scores } from "@/db/schema";
 import { getCreativeMetrics } from "@/lib/creatives/metrics-cache";
+import { loadEventTypes, type EventTypeSpec } from "@/lib/reporting/event-columns";
 import { hashText } from "@/lib/spam/normalize";
 import { deriveVerdict } from "@/lib/spam/types";
 import {
@@ -122,8 +123,16 @@ export async function GET(req: NextRequest) {
   // CTR is the exception: its sends and clickers (the ctr_* columns) come from
   // the hourly snapshot in lib/creatives/ctr-rollup.ts, because counting sends
   // per creative is a full stage_sends pass.
+  // The event-type registry travels WITH the metrics, on the same opt-out.
+  // Without the per-creative counts there is nothing for a column spec to
+  // describe, and the include_metrics=false path is the stage picker's ~3ms
+  // fast path — a second query there would give back part of what that opt-out
+  // bought. A consumer that asked for no metrics gets no event_types and
+  // renders no generated columns, which is the consistent reading.
   const tMetricsStart = performance.now();
-  const metricsRows = includeMetrics ? await getCreativeMetrics(orgId) : [];
+  const [metricsRows, eventTypes] = includeMetrics
+    ? await Promise.all([getCreativeMetrics(orgId), loadEventTypes(db, orgId)])
+    : [[], [] as EventTypeSpec[]];
   // Its own Server-Timing segment: on a cache HIT this is ~0ms, on a MISS it is
   // the full aggregate. Without splitting it out the miss cost would be charged
   // to `enrich` and look like a slow offers/spam lookup.
@@ -142,7 +151,8 @@ export async function GET(req: NextRequest) {
            payout numeric, manual_clean int, tracked_clean int,
            lifetime_payout numeric, lifetime_clean int, lifetime_sales int,
            ctr_sent_7d int, ctr_clicks_7d int, ctr_sent_30d int, ctr_clicks_30d int,
-           ctr_sent_lifetime int, ctr_clicks_lifetime int)
+           ctr_sent_lifetime int, ctr_clicks_lifetime int,
+           events jsonb, unmapped int, manual_topup int)
   ) AS metrics_agg`;
 
   const cleanExpr = drizzleSql`(coalesce(metrics_agg.manual_clean, 0) + coalesce(metrics_agg.tracked_clean, 0))`;
@@ -255,6 +265,13 @@ export async function GET(req: NextRequest) {
           m_ctr_clicks_30d: drizzleSql<number>`metrics_agg.ctr_clicks_30d`.as("m_ctr_clicks_30d"),
           m_ctr_sent_lifetime: drizzleSql<number>`metrics_agg.ctr_sent_lifetime`.as("m_ctr_sent_lifetime"),
           m_ctr_clicks_lifetime: drizzleSql<number>`metrics_agg.ctr_clicks_lifetime`.as("m_ctr_clicks_lifetime"),
+          // The 30-day conversions split per event_types.key, and the TWO
+          // residuals they do not explain. Selected TOGETHER and emitted
+          // together — a breakdown without its stray count and its manual
+          // top-up under-explains Sales, which is max(manual, tracker).
+          m_events: drizzleSql<Record<string, number> | null>`metrics_agg.events`.as("m_events"),
+          m_unmapped: drizzleSql<number>`metrics_agg.unmapped`.as("m_unmapped"),
+          m_manual_topup: drizzleSql<number>`metrics_agg.manual_topup`.as("m_manual_topup"),
         })
         .from(creatives)
         // LEFT JOIN so a creative with no activity in the window still returns
@@ -393,6 +410,9 @@ export async function GET(req: NextRequest) {
             m_ctr_clicks_30d: number | null;
             m_ctr_sent_lifetime: number | null;
             m_ctr_clicks_lifetime: number | null;
+            m_events: Record<string, number> | null;
+            m_unmapped: number | null;
+            m_manual_topup: number | null;
           };
           const delivered = Number(row.m_delivered ?? 0);
           const checkouts = Number(row.m_checkouts ?? 0);
@@ -443,6 +463,15 @@ export async function GET(req: NextRequest) {
                 Number(row.m_lifetime_clean ?? 0) > 0
                   ? Number(row.m_lifetime_payout ?? 0) / Number(row.m_lifetime_clean ?? 0)
                   : null,
+              // COUNTS ONLY, over the same 30 days as checkout_rate above, and
+              // BOTH residuals beside them — the strays the registry could not
+              // place, and the manual tally that `sales` (a max, not a sum)
+              // carries over the tracker. A creative with no row in the metrics
+              // join reads {} / 0 / 0 — the LEFT JOIN's NULL, not a measured
+              // zero of some other window.
+              events: row.m_events ?? {},
+              unmapped: Number(row.m_unmapped ?? 0),
+              manual_topup: Number(row.m_manual_topup ?? 0),
             },
           };
         })()
@@ -482,6 +511,13 @@ export async function GET(req: NextRequest) {
       totalCount: countRows[0]?.count ?? 0,
       page: params.page,
       pageSize: params.pageSize,
+      // The registry the generated count columns are built from. RESPONSE-LEVEL,
+      // not per row: which columns exist is a property of the org's
+      // configuration, and repeating it on every creative would invite a
+      // renderer to discover its columns from the data instead — which is
+      // exactly how a newly configured event type would vanish until its first
+      // conversion landed.
+      event_types: eventTypes,
     },
     {
       headers: {

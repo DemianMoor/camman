@@ -953,18 +953,55 @@ async function main() {
   //     the conversion copy alone. (A bare /bg-(emerald|amber|sky|slate)-\d00/
   //     would match that send-status map and be permanently RED — checked.)
   const activityTsx = "components/campaigns/campaign-activity-section.tsx";
+  const RE_INLINED_MAP = /const\s+CONVERSION_[A-Z_]+\s*(:|=)/;
+  const REJECTED_COLOUR = /bg-red-100 text-red-700/;
+  const CONVERTED_AT_PREDICATE = "ss.converted_at IS NOT NULL";
   check(
     "F5 the activity cell renders through lib/conversion-badge (no second copy in the .tsx)",
     src(activityTsx).includes('from "@/lib/conversion-badge"') &&
       src(activityTsx).includes("conversionBadgeClass(r)") &&
-      !/const\s+CONVERSION_[A-Z_]+\s*(:|=)/.test(flat(activityTsx)) &&
-      !/bg-red-100 text-red-700/.test(flat(activityTsx)),
+      !RE_INLINED_MAP.test(flat(activityTsx)) &&
+      !REJECTED_COLOUR.test(flat(activityTsx)),
     flat(activityTsx).match(/const CONVERSION_[A-Z_]+|bg-red-100 text-red-700/g)?.join(" | ") ?? "",
   );
   check(
     "F6 counted-clickers.ts rescues through rescueSendIds, not a converted_at predicate",
     src("lib/reporting/counted-clickers.ts").includes("rescueSendIds(null, convWindow)") &&
-      !src("lib/reporting/counted-clickers.ts").includes("ss.converted_at IS NOT NULL"),
+      !src("lib/reporting/counted-clickers.ts").includes(CONVERTED_AT_PREDICATE),
+  );
+  // ⭐ POSITIVE CONTROLS ON THE THREE NEGATED NEEDLES ABOVE.
+  //
+  // The header's 2026-09-18 audit checked that each negated needle is a string
+  // the pre-switch code really contained — which is a claim about the PAST. It
+  // does not survive an edit to the needle. Measured 2026-09-19: narrowing any
+  // of the three (`CONVERSION_[A-Z_]+` → `CONVERSION_STATUS_STYLES`,
+  // `bg-red-100 text-red-700` → `… ring-1`, the predicate → `… --`) left this
+  // suite at 76/0 with the regression it forbids invisible. A negated needle
+  // NEVER goes red when it is narrowed; only a control over the forbidden text
+  // itself can. Samples are hand-written, and run in BOTH line endings because
+  // `flat()` collapses whitespace and this checkout mixes endings per file.
+  const crlf = (s: string) => s.replace(/\n/g, "\r\n");
+  const collapse = (s: string) => s.replace(/\s+/g, " ");
+  const reInlined = "const CONVERSION_BADGES: Record<string, string> = {\n  rejected: 'x',\n};";
+  const reColoured = "rejected:\n  'bg-red-100 text-red-700',";
+  const rePredicate = "AND ss.converted_at IS NOT NULL";
+  check(
+    "F5b ⭐ …and BOTH of F5's negated needles fire on a re-inlined copy, in BOTH line endings",
+    RE_INLINED_MAP.test(collapse(reInlined)) &&
+      RE_INLINED_MAP.test(collapse(crlf(reInlined))) &&
+      REJECTED_COLOUR.test(collapse(reColoured)) &&
+      REJECTED_COLOUR.test(collapse(crlf(reColoured))) &&
+      // …and neither fires on the SEND-status map right above it, which uses
+      // text-red-800 and no CONVERSION_ constant — the bar is one-sided.
+      !RE_INLINED_MAP.test(collapse("const SEND_STATUS: Record<string, string> = {};")) &&
+      !REJECTED_COLOUR.test(collapse("failed: 'bg-red-100 text-red-800',")),
+  );
+  check(
+    "F6b ⭐ …and F6's negated needle fires on the predicate it forbids, in BOTH line endings",
+    rePredicate.includes(CONVERTED_AT_PREDICATE) &&
+      crlf(rePredicate).includes(CONVERTED_AT_PREDICATE) &&
+      // …and NOT on the module's surviving prose, which spells it unqualified.
+      !"stage_sends.converted_at IS NOT NULL".includes(CONVERTED_AT_PREDICATE),
   );
 
   console.log(`\n${passed} passed, ${failed} failed  (transaction rolled back)`);

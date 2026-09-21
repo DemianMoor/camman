@@ -70,7 +70,9 @@ corrected at all: no floor, no write, its numbers stay as they were.
 After each write to `keitaro_stage_results`, `mirrorStageCountersFromResults`
 (exported from `lib/keitaro/poll.ts`) syncs the stage's auto-owned counters for
 every stage named (summed across all `stat_date`s): `campaign_stages.click_count` ←
-`visit_clicks_clean` ("Clickers"), `checkout_click_count` ← `checkouts`. **It runs
+`visit_clicks_clean` ("Landing visits"; the header read "Clickers" until
+2026-09-20 and the field is still `clickers`), `checkout_click_count` ←
+`checkouts`. **It runs
 twice per tick** (Phase 3 Task 3) — once from `pollKeitaro` for the stages this
 tick's CLICK window touched, and again from
 [`lib/keitaro/stage-day-conversions.ts`](../../lib/keitaro/stage-day-conversions.ts)'s
@@ -130,10 +132,19 @@ alert. The mirror also THROWS on failure now; the "non-fatal, re-syncs next poll
 swallow lives at `pollKeitaro`'s own call site, because swallowing inside the mirror
 would poison a caller-supplied transaction (the resync's `--apply`, the DB tests).
 
-⚠️ **A drop must be EXPLAINED, and the "explained" test names all four projected
-columns (fixed 2026-09-18).** The zeroing UPDATE asks "does the ledger explain any
-of the values on this row?" — and that test has to cover every column the INSERT
-writes: `SALES ∨ CHECKOUT ∨ REVENUE ∨ PENDING`. Task 6 briefly left `CHECKOUT` out,
+⚠️ **A drop must be EXPLAINED, and since Phase 5 Task 3 "explained" means ANY
+ledger row on that stage-day (widened 2026-09-19).** `events` and
+`unmapped_conversions` mean every ledger row now writes something — a counted event
+of any type lands in the breakdown, an unmapped row lands in the count — so the
+honest complement of the INSERT is `NOT EXISTS (a ledger row for this stage-day)`,
+with no filter list at all. Left as the list it was, a stage-day whose only
+conversions are REGISTRATIONS would satisfy "nothing here" and have its breakdown
+wiped on a day the ledger fully explains. The widening strictly reduces the rows the
+statement touches, so it can only preserve a value, never invent one (bar P6).
+
+The history, because the list was itself a fix: the zeroing UPDATE asks "does the
+ledger explain any of the values on this row?" — and that test had to cover every
+column the INSERT writes: `SALES ∨ CHECKOUT ∨ REVENUE ∨ PENDING`. Task 6 briefly left `CHECKOUT` out,
 which was harmless only while `SALES_FILTER` happened to be a superset of it
 (`keitaro_type IN ('lead','sale','rejected')` ⊇ `keitaro_type = 'lead'`). Once sales
 became `purchasedClause()`, a stage-day whose only ledger rows are lead-TYPE
@@ -208,7 +219,7 @@ in the period** (see the note above).
 Two kinds of Keitaro campaign fire clicks for the **same** `sub_id_3` (stage):
 
 - The **visit** campaign — Keitaro **name `gk-lp-visits`** — fires when a visitor
-  LANDS on the landing page. Its clean clicks are **Clickers**.
+  LANDS on the landing page. Its clean clicks are **Landing visits**.
 - **Offer** campaigns (one per offer, e.g. `Kinzeno - 14508`) fire when a visitor
   clicks through to the offer. Their clean clicks are **Offer Redirect**, and
   their conversions are **Sales**.
@@ -236,7 +247,7 @@ default) and `classification_degraded: true` is set — the next cycle self-heal
 once the list loads.
 
 **Funnel semantics — visits ⊇ redirects, never summed:** every offer redirect is
-also a visit, so total arrivals = the visit (Clickers) count. The headline number
+also a visit, so total arrivals = the visit (Landing visits) count. The headline number
 for each stage is the **clean** (bot/prefetch-filtered) count.
 
 ## 3. The poll (`lib/keitaro/poll.ts` → `pollKeitaro`)
@@ -269,7 +280,7 @@ for each stage is the **clean** (bot/prefetch-filtered) count.
 | Keitaro key | CamMan term | Column |
 |-------------|-------------|--------|
 | `clicks` (visit campaign) | Raw visit clicks | `visit_clicks_raw` |
-| `campaign_unique_clicks` (visit campaign) | **Clickers** | `visit_clicks_clean` |
+| `campaign_unique_clicks` (visit campaign) | **Landing visits** (was "Clickers" until 2026-09-20) | `visit_clicks_clean` |
 | `clicks` (offer campaigns) | Raw offer clicks | `redirect_clicks_raw` |
 | `campaign_unique_clicks` (offer campaigns) | **Offer Redirect** | `redirect_clicks_clean` |
 | `cost` (offer) | Cost | `cost` |
@@ -316,7 +327,7 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
   - On the cron path the projection also drives the latched `conversion_events:projection_failed` alert: a throw, either refusal, or a truncated discovery window fires it; a run that finished its window clears it. A SKIPPED projection gets no decision.
   - `stage_day_conversions_error`: the thrown message when the projection threw, with `monitor: …` appended when the cron path's projection-alert evaluation threw; `null` otherwise (including when it was simply skipped).
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
-  date) rows plus per-stage and campaign rollups with the Clickers → Offer
+  date) rows plus per-stage and campaign rollups with the Landing visits → Offer
   Redirect → Sales funnel + derived rates. Requires `campaigns.view`.
 - `GET /api/keitaro/reports?from&to&search&groupBy&page&pageSize&sortBy&sortDir` —
   read-only; org-scoped. Cross-campaign funnel aggregated over an ET date
@@ -353,7 +364,7 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
     sent), rendered as a %.
   - `click_rate` (CR) = `clickers / total_sent` (a fraction, 0 when nothing was
     sent), rendered as a %. Shares the `rateOfSent` helper with `opt_out_rate`.
-  - Clickers/Offer Redirect/Revenue are the Keitaro funnel, bounded by
+  - Landing visits/Offer Redirect/Revenue are the Keitaro funnel, bounded by
     `stat_date`. **Cost** is the stage's auto-calculated SMS spend
     (`campaign_stages.total_cost` = `cost_per_sms × (sends + opt_outs)`, see
     [`lib/stages/total-cost.ts`](../../lib/stages/total-cost.ts)) — **not**
@@ -382,10 +393,11 @@ A dedicated cross-campaign page ([`app/(protected)/reports/page.tsx`](../../app/
 showing the funnel: Campaign · Stage · **Total Sent** (per-recipient `stage_sends`
 in range for tracked campaigns; the stage's `sms_count` for manual campaigns when
 `sent_at` is in range) · **Opt-outs** (STOPs credited to the stage in range) ·
-**OptOut, %** (opt-outs ÷ total sent) · **Clickers** · **CR, %** (clickers ÷ total
-sent) · **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
+**OptOut, %** (opt-outs ÷ total sent) · **Landing visits** (headed `Clickers`
+before 2026-09-20; the field is still `clickers`) · **CR, %** (landing visits ÷
+total sent) · **Offer Redirect** · Redirect % · Sales · Sales CR · Revenue · Cost · EPC · Profit,
 with a date-range filter, search, sortable columns, grand-total stat cards
-(Clickers · Offer Redirect · Sales · Revenue · Cost · Profit · **Avg Opt-out** —
+(Landing visits · Offer Redirect · Sales · Revenue · Cost · Profit · **Avg Opt-out** —
 the period's aggregate opt-out rate, grand opt-outs ÷ grand total sent), and a
 manual **Refresh from Keitaro** button (operator+, runs the poll). A **Group by**
 toggle (Stage / Campaign) switches between per-stage rows and per-campaign rollups
@@ -405,9 +417,65 @@ to auto-open that stage's editor (there is no standalone stage route).
   you can see exactly what Keitaro is sending if nothing maps back.
 - `KEITARO_API_KEY` unset ⇒ `degraded:true`, no writes.
 
+## 6b. Running `resync-stage-day-conversions.ts --apply` while the poll is live (2026-09-19)
+
+The one-shot resync ([scripts/resync-stage-day-conversions.ts](../../scripts/resync-stage-day-conversions.ts))
+writes `keitaro_stage_results` — the same table this poll writes — inside ONE
+transaction. **It does not need the poll paused.** The reasoning, so the question does
+not have to be re-derived next time:
+
+**Who else writes the table: nobody.** In app code there are exactly two writers, and
+both are on this poll's own tick — `pollKeitaro`'s click upsert
+([lib/keitaro/poll.ts](../../lib/keitaro/poll.ts)) and the stage-day projection's
+upsert + zeroing UPDATE
+([lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts)).
+Everything else (reports, campaign pages, `/creatives`, the matview refreshes, the
+hourly Telegram cron, `delete-stage`'s EXISTS gate) only reads, and a reader never
+blocks on a row lock.
+
+**It is too short to matter.** Measured read-only against production on 2026-09-19
+(`EXPLAIN ANALYZE` of each statement's SELECT half, inside a rolled-back
+`SET TRANSACTION READ ONLY`): coverage 12.1ms, upsert source 31.0ms (1,030 rows),
+zeroing selection 11.3ms (1 row), `stageIdsWithRows` 6.5ms, counter mirror 45.2ms per
+1,000-stage chunk (2 chunks at 1,971 stages) — **~0.19s of server execution**, with
+writes bounded by 1,030 upserted rows and 1,971 `campaign_stages` rows on 5.5MB and
+2.2MB tables. The transaction holds a connection for well under 2 seconds, against a
+poll whose `maxDuration` is **230s** and whose lease TTL is **240s**.
+
+**What a collision does.** A poll tick touching one of the same rows blocks on the row
+lock for that sub-second and then proceeds — no error. A deadlock needs opposed lock
+ordering; both paths take `keitaro_stage_results` then `campaign_stages`, so the cycle
+would have to come from row order within one statement. If one happens anyway,
+Postgres kills one side: the **poll** loses ⇒ `stage_day_conversions_error`, the
+latched `projection_failed` alert, and the watermark is **held** (the UPDATE is never
+reached), so the next tick repairs it; the **resync** loses ⇒ the whole `--apply`
+transaction rolls back, nothing partial, re-run it.
+
+**⭐ The one genuine race is self-healing, and this is the load-bearing reason.** Under
+READ COMMITTED the upsert's `ledger` CTE is computed from a snapshot taken at
+statement start, so a conversion the poll ingests *during* that 31ms could be
+overwritten by a value that does not include it. It cannot persist: the projection's
+discovery window is
+`[LEAST(watermark − PROJECTION_WATERMARK_OVERLAP_MINUTES, now() − LEDGER_CHANGE_LOOKBACK_MINUTES), now()]`,
+and the `LEAST` makes **30 minutes a hard floor** regardless of how far the watermark
+has advanced. Any conversion written in the last 30 minutes is therefore re-projected
+on every tick for the next six ticks, so the clobbered stage-day is repaired within
+one 5-minute cycle.
+
+**If you want to pause it anyway, no deploy is needed.** The poll's single-runner
+guard is a lease ROW, not a config flag: set `cron_locks.lease_until` for
+`job_name = 'keitaro-poll'` to a few minutes in the future and the next tick returns
+`{ skipped: true, reason: "prior_run_in_progress" }` without doing any work. Clear it
+(`lease_until = NULL`) to resume. Two properties make this safe: the release is a CAS
+on the claimer's own token, so a run that legitimately claimed cannot clear your
+pause; and expiry is absolute, so a forgotten pause self-clears instead of stranding
+the poll. Both the 7-day ledger ingest window and the 3-day click window absorb a
+skipped tick without loss. Note this is a production **write** — it is a decision, not
+a formality.
+
 ## 7. Scope & follow-ups
 - **In scope:** the aggregate layer — per-stage/campaign/day clicks, conversions,
-  revenue, EPC — **split into Clickers (visits) vs Offer Redirect (offer clicks)**
+  revenue, EPC — **split into Landing visits vs Offer Redirect (offer clicks)**
   (Step 5b), surfaced on the `/reports` page. **Plus** the per-recipient SALE
   attribution layer (§9 below).
 - **Metric-key verification:** keys come from the documented Keitaro schema and are

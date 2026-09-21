@@ -23,6 +23,7 @@ import { OPT_OUT_ATTRIBUTION_WINDOW_HOURS as POLLER_WINDOW } from "@/lib/sends/p
 import { pct } from "@/lib/reporting/grading-rates";
 import { getPerformanceReport, gradePerf } from "@/lib/reporting/performance-report";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
+import { requireReportingColumns } from "./_require-migration";
 
 let failures = 0;
 let skipped = 0;
@@ -41,6 +42,9 @@ async function one<T>(q: SQL): Promise<T> {
 }
 
 async function main() {
+  // getStageMetricsInRange's projection needs 0182 + 0185. Name the missing
+  // column instead of dying on a raw 42703.
+  await requireReportingColumns(db, "verify-operator-grading");
   const { org_id: orgId } = await one<{ org_id: string }>(sql`
     SELECT org_id FROM campaigns GROUP BY org_id ORDER BY count(*) DESC LIMIT 1`);
   // Seven CLOSED ET days ending yesterday — today is still moving.

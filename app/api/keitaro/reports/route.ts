@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import {
@@ -10,6 +11,11 @@ import {
 } from "@/lib/keitaro/funnel";
 import { can } from "@/lib/permissions";
 import { denominatorFor } from "@/lib/reporting/counted-clickers";
+import {
+  eventCellValue,
+  eventColumnById,
+  loadEventTypes,
+} from "@/lib/reporting/event-columns";
 import {
   getDeliveryByStage,
   getPhoneDirectory,
@@ -69,6 +75,18 @@ export const SORTABLE = new Set([
   "click_rate",
 ]);
 
+// The GENERATED per-event column ids cannot be enumerated in SORTABLE: they are
+// `evt:<event_types.key>:<kind>` / `evtfunnel:<key>:<key>` and the registry is
+// per-org DATA, unknowable at module scope. They are accepted by SHAPE instead,
+// through eventColumnById() — which is the ONE parser of that id grammar
+// (lib/reporting/event-columns.ts). Writing a second regex here would fork it.
+//
+// An id that parses but names no configured event type sorts every row on 0,
+// which is exactly as harmless as sorting on a column of zeros: the key is only
+// ever a property lookup into an EventMap this process built, never SQL and
+// never echoed back.
+const eventSortColumn = (id: string) => eventColumnById(id);
+
 function rateOfSent(numerator: number, totalSent: number): number {
   return totalSent > 0 ? numerator / totalSent : 0;
 }
@@ -120,13 +138,28 @@ export async function GET(req: NextRequest) {
     Number.isFinite(pageSizeRaw) && pageSizeRaw > 0
       ? Math.min(100, Math.floor(pageSizeRaw))
       : 20;
-  const sortBy = SORTABLE.has(sp.get("sortBy") ?? "")
-    ? (sp.get("sortBy") as string)
-    : "revenue";
+  const sortRaw = sp.get("sortBy") ?? "";
+  const sortBy =
+    SORTABLE.has(sortRaw) || eventSortColumn(sortRaw) !== null ? sortRaw : "revenue";
   const sortDir = sp.get("sortDir") === "asc" ? "asc" : "desc";
 
-  const { stages, grand, grandOptOuts, grandTotalSent, clickers } =
-    await getStageMetricsInRange(auth.orgId, from, to);
+  // The registry rides ALONGSIDE the funnel read, not after it. It is one
+  // grouped read of a 2-rows-per-org table and depends on nothing the funnel
+  // produces, so awaiting it at the response literal only added its latency to
+  // a request that already carries a multi-second aggregate.
+  const [{ stages, grand, grandOptOuts, grandTotalSent, clickers }, eventTypes] = await Promise.all([
+    getStageMetricsInRange(auth.orgId, from, to),
+    loadEventTypes(db, auth.orgId),
+  ]);
+
+  // ⭐ manual_topup NEEDS NO ROLL-UP HERE ANY MORE. It is a field of FunnelTally
+  // (lib/keitaro/funnel.ts), so it rides mergeFunnel into the per-campaign tally
+  // and withFunnelDerived's `...t` spread onto every row and the totals, exactly
+  // like `events` and `unmapped` — the two residuals it belongs beside. This
+  // route used to re-roll it by hand at three grains because the field sat on
+  // StageMetrics instead; that hand-rolling was the only thing keeping the
+  // Overview breakdown footed, and nothing failed if a grain was missed.
+  // Bars R12/R12b (scripts/test-report-event-columns-db.ts).
 
   // link_mode per campaign, so manual-mode rows fall back to Keitaro visits.
   const linkModeByCampaign = new Map(stages.map((s) => [s.campaign_id, s.link_mode]));
@@ -224,6 +257,12 @@ export async function GET(req: NextRequest) {
     // you can see the count it divided by was 4.
     lifetime_epc: number;
     lifetime_clickers: number;
+    // `manual_topup` is NOT declared here: it arrives with the intersection
+    // below, off the tally. Sales that came from the manual result tally rather
+    // than the tracker ledger — the per-event columns count TRACKER events only,
+    // so it is the difference between Sales and the sum of the is_purchase
+    // columns:
+    //   sales = Σ (is_purchase) events[t].n + manual_topup + unmapped strays
   } & ReturnType<typeof withFunnelDerived>;
 
   let data: OutRow[];
@@ -374,10 +413,24 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Resolved once, not per comparison: the parse is pure and the answer cannot
+  // change inside a single sort.
+  const sortEventCol = eventSortColumn(sortBy);
   data.sort((a, b) => {
     let cmp: number;
     if (sortBy === "campaign_name") {
       cmp = a.campaign_name.localeCompare(b.campaign_name);
+    } else if (sortEventCol) {
+      // A null (unknown ratio) sorts LAST in BOTH directions — "we cannot say" is
+      // not "zero", and it must not win a descending sort over a real 0.0%. The
+      // early `return` skips the tie-break on purpose: there is no ordering
+      // between two unknowns to break.
+      const av = eventCellValue(sortEventCol, a.events, a.counted_clickers);
+      const bv = eventCellValue(sortEventCol, b.events, b.counted_clickers);
+      if (av == null && bv == null) cmp = 0;
+      else if (av == null) return 1;
+      else if (bv == null) return -1;
+      else cmp = av - bv;
     } else {
       cmp =
         (a[sortBy as keyof typeof a] as number) -
@@ -454,7 +507,13 @@ export async function GET(req: NextRequest) {
         substitutedTotal,
         grand.visit_clicks_clean,
       ),
+      // manual_topup rides `...withFunnelDerived(grand, …)` above — grand.tally
+      // carries it (lib/reporting/stage-funnel.ts).
     },
+    // The event-type registry, so the client can GENERATE the per-event columns
+    // rather than know them. Additive: no existing field changes meaning. Read
+    // in parallel with the funnel above, not here.
+    event_types: eventTypes,
     range: { from, to, timezone: CAMPAIGN_TIMEZONE },
   });
 }

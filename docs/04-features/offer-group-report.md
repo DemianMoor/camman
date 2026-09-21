@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-21_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -209,6 +209,79 @@ on it, so the larger budget costs nothing. The same cron also refreshes the
 Audience Stats group totals (`audience_report_group_totals_mv`, migration 0180)
 last; its defining SELECT measured 5.3s on 2026-09-14, logged per run as
 `audienceTotalsMs`.
+
+### ⛔ The binding limit is Postgres's 120s `statement_timeout`, NOT `maxDuration = 300`
+
+Read back on prod 2026-09-21: `statement_timeout = 120000 ms`, `source =
+configuration file`, `sourcefile = /etc/postgresql-custom/platform-defaults.conf:6`,
+`reset_val = 120000`. That is a Supabase **cluster** default applied to every
+connection, including this route's. `pg_db_role_setting` has **no**
+`statement_timeout` entry for the `postgres` role (only `anon` 3s,
+`authenticated`/`authenticator` 8s), so nothing raises it back, and
+`refreshOfferGroupReport()` never sets one — unlike
+[lib/reporting/counted-clickers.ts](../../lib/reporting/counted-clickers.ts) (300s) and
+[lib/reporting/epc-monitors.ts](../../lib/reporting/epc-monitors.ts) (240s), which do.
+**Any single `REFRESH` statement that runs past 120s is cancelled with SQLSTATE
+57014 long before the 300s Vercel budget is reached.**
+
+How close it already is, read back from `report_refresh_log` on 2026-09-21 (the
+stamps are written immediately after each view's own refresh, in a fixed order,
+so consecutive deltas *are* the per-view `CONCURRENTLY` durations of the last
+real cron run, 05:01–05:03 UTC, **pre-0183 definitions**):
+
+| view | stamp | delta = its refresh |
+| --- | --- | --- |
+| `offer_report_org_summary_mv` | 05:01:01.051 | — (no predecessor) |
+| `offer_group_report_mv` | 05:02:48.583 | **107.5s** |
+| `offer_report_offer_totals_mv` | 05:03:25.291 | 36.7s |
+| `audience_report_group_totals_mv` | 05:03:26.243 | 0.95s |
+
+107.5s against a 120s wall is **12.5s of headroom, today, before 0183**. This is
+a **pre-existing** condition, not something migration 0183 creates — measured
+read-only on prod 2026-09-21, both definitions' SELECTs under
+`EXPLAIN (ANALYZE, BUFFERS)`:
+
+| defining SELECT | run 1 | run 2 | run 3 | avg |
+| --- | --- | --- | --- | --- |
+| `offer_group_report_mv` **installed (pre-0183)**, via `pg_get_viewdef` | 109.6s | 111.8s | 113.2s | 111.5s |
+| `offer_group_report_mv` **new (0183, over `conversion_events`)** | 112.1s | 111.2s | 114.8s | 112.7s |
+
+**0183 costs ~+1.2s on a ~112s query — inside run-to-run variance.** The ledger
+CTE aggregates ~1,500 indexed rows; what dominates is unchanged.
+
+⭐ **`CONCURRENTLY`'s overhead is in the noise here, and that is measurable
+rather than assumed:** the installed definition's own SELECT measures 111.5s
+under `EXPLAIN ANALYZE` while the real `CONCURRENTLY` refresh of that same
+definition took **107.5s** — i.e. `EXPLAIN ANALYZE`'s per-node timing overhead
+exceeds the extra work `CONCURRENTLY` does. That holds because these matviews
+are tiny (56–96 kB, a few hundred rows): the transient copy, the unique-index
+build and the `FULL OUTER JOIN` diff are trivial next to a 112s scan. Do not
+carry forward the older guidance that "the real refresh costs MORE" than the
+SELECT — for *this* family it does not. The anchor for that comparison is the
+cron's own `report_refresh_log` stamp, which no measurement of mine can move.
+
+So the expected post-0183 group refresh is **~108–110s**, not a step change.
+The wall is still close, the variance is real (one of four measurements of the
+new SELECT came in at **120.1s**), and ordinary data growth will cross it.
+
+**The root cause is a disk sort, not the ledger.** In the same plan, at the
+cluster's `work_mem = 5120 kB`, one node reports
+`Sort Method: external merge  Sort Space Used: 170160 kB (166 MB) Disk` — every
+other sort in the plan is an in-memory quicksort of ≤5 MB. `work_mem` is the
+first knob, and it is the same knob the route comment has flagged since 0133.
+
+What happens then, and it is not uniform:
+- **Postgres 57014 (>120s on one statement)** — `db.execute` throws, the route's
+  `catch` fires a Tier-1 `notifyTelegram` alert and returns 500, so Vercel's
+  scheduler flags it red. **Not silent.** The matview is untouched (a cancelled
+  `CONCURRENTLY` refresh is atomic), but the refreshes *after* the failing one
+  never run at all: a group failure means `offer_report_offer_totals_mv` and
+  `audience_report_group_totals_mv` are skipped every run, so three of the four
+  views go stale indefinitely while their `report_refresh_log` stamps correctly
+  age and the page's "Data as of" banner shows it.
+- **Vercel `maxDuration = 300` exceeded** — the invocation is killed, the
+  `catch` never runs, so there is **no Telegram alert**. That is the silent mode,
+  and it is the one the alert was added to close.
 
 **DST drift:** Vercel Cron schedules are fixed-UTC. `0 5,20 * * *` lands at
 **00:00 & 15:00 ET** in winter (EST) and **01:00 & 16:00 ET** in summer (EDT) —

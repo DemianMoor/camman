@@ -18,24 +18,59 @@ export const dynamic = "force-dynamic";
 //     legacy columns because conversion_events does not exist on prod yet:
 //     offer-totals 43.4s · group 116.7s · audience-totals 1.2s ≈ 161s.
 //
-// The two are NOT comparable and (2) is not a ceiling:
-//   • (2) times the SELECT. A REFRESH also writes the new heap and rebuilds the
-//     unique index, and this route refreshes CONCURRENTLY, which additionally
-//     builds a transient table and diffs it. The real refresh costs MORE.
-//   • EXPLAIN ANALYZE adds per-node timing overhead on a row-heavy plan.
-//   • The stub scans all ~5M stage_sends rows for the 1,436 carrying a
-//     converted_at; the real `conv` CTE aggregates ~1.5K indexed
-//     conversion_events rows. So ~10s per matview is stub overhead the real
-//     thing will not pay.
-//   • (2) excludes offer_report_org_summary_mv, which 0183 does not touch.
-//   • Prod data grew between the two dates (stage_sends is ~5M rows now).
+//  3. 2026-09-21, the same read-only `EXPLAIN (ANALYZE, BUFFERS)` on PROD but
+//     UNSTUBBED — 0181 has applied, so conversion_events is real (1,517 rows,
+//     backfilled). Three runs: offer-totals 35.7/36.5/35.6s · group
+//     112.1/111.2/114.8s · audience-totals 1.2/1.1/1.1s (measured separately,
+//     pending_revenue stubbed to 0 because the INSTALLED group matview predates
+//     0183) ⇒ per-run totals 147.8 / 147.7 / 150.4s. This supersedes (2).
+//  4. 2026-09-21, the REAL last cron run, read back as the deltas between
+//     consecutive report_refresh_log stamps (each is written immediately after
+//     its own view's refresh, in a fixed order): group 107.5s · offer-totals
+//     36.7s · audience-totals 0.95s, at 05:01-05:03 UTC, PRE-0183 definitions.
+//     org_summary has no predecessor stamp so its duration is not recoverable
+//     this way.
 //
-// Nothing individually approaches the 300s ceiling, but the group matview's
-// sort spills (`external merge  Disk: ~169MB`), so work_mem is the first knob
-// if this grows. **Capture the real post-ledger number from the first prod run
-// after 0181-0183 apply and the backfill completes** (Task 8's ⛔ block, step
-// 2b — that refresh has to happen there anyway, because the matviews are built
-// from an empty ledger at apply time) and add it here as measurement 3.
+// ⭐ CORRECTION, MEASURED: this comment used to assert "the real refresh costs
+// MORE" than the SELECT. For THIS family it does not. The INSTALLED (pre-0183)
+// group definition's own SELECT, read back via pg_get_viewdef on 2026-09-21,
+// costs 109.6/111.8/113.2s (avg 111.5) under EXPLAIN ANALYZE — while (4) says
+// the real CONCURRENTLY refresh of that identical definition took 107.5s. So
+// EXPLAIN ANALYZE's per-node timing overhead EXCEEDS what CONCURRENTLY adds.
+// That holds because these matviews are tiny (56-96 kB): the transient copy,
+// the unique-index build and the FULL OUTER JOIN diff are noise next to a ~112s
+// scan. Treat an EXPLAIN ANALYZE of a defining SELECT here as a slight
+// OVER-estimate of its refresh, not an under-estimate.
+//
+// ⭐ AND 0183 IS NOT WHAT COSTS: new definition 112.7s avg vs installed 111.5s
+// avg — ~+1.2s, inside run-to-run variance. The ledger CTE aggregates ~1.5K
+// indexed rows. What dominates is one sort spilling to disk: `external merge
+// Sort Space Used: 170160 kB` at the cluster's work_mem = 5120 kB, every other
+// sort in the plan being an in-memory quicksort of <= 5 MB. work_mem remains
+// the first knob, and it is now the knob that matters most.
+//
+// ⛔ maxDuration = 300 IS NOT THE BINDING LIMIT. Prod's statement_timeout is
+// 120000 ms — source `configuration file`,
+// /etc/postgresql-custom/platform-defaults.conf:6, reset_val 120000: a Supabase
+// cluster default on EVERY connection, including this route's.
+// pg_db_role_setting carries no statement_timeout for the `postgres` role (only
+// anon 3s, authenticated/authenticator 8s), and refreshOfferGroupReport() never
+// raises one — unlike lib/reporting/counted-clickers.ts (300s) and
+// lib/reporting/epc-monitors.ts (240s), which do. Any single REFRESH past 120s
+// is cancelled with SQLSTATE 57014 long before 300s is reached, and (4) puts
+// the group refresh at 107.5s TODAY: 12.5s of headroom, pre-0183, which 0183
+// spends about 1s of. One of four measurements of the new SELECT came in at
+// 120.1s. This is a pre-existing ceiling, not one this migration introduces.
+// Failure is NOT silent at the DB wall (57014 ⇒ throw ⇒ the catch below fires a
+// Tier-1 Telegram alert and returns 500) but IS silent at the Vercel wall (a
+// maxDuration kill never reaches the catch). Because the four refreshes run in
+// sequence and group is #2, a group failure means offer-totals and
+// audience-totals are skipped ENTIRELY, every run, until it is fixed.
+// Remedy when it trips: give this job a session-mode connection and set
+// statement_timeout + work_mem on it. Splitting into per-matview cron
+// invocations does NOT help — it divides the Vercel budget, which is not the
+// constraint, and cannot make one REFRESH statement shorter.
+// See docs/04-features/offer-group-report.md.
 //
 // 60s left no cold-start headroom, so this cron gets a larger budget. It is a
 // background job (not user-facing), so a longer ceiling costs nothing;

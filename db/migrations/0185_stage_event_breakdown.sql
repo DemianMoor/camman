@@ -7,6 +7,32 @@
 -- Both are IF NOT EXISTS, so the migration is re-runnable: a timestamp bump can
 -- re-apply it on preview without a second thought.
 --
+-- CONFIRMED ON THE TARGET, read-only, 2026-09-21 — "Postgres 11+" is a version
+-- claim, so it is checked against the server rather than assumed:
+--   • server_version 17.6 (server_version_num 170006), well past the 11.0 floor
+--   • both defaults are CONSTANTS ('{}'::jsonb, 0). The fast path requires a
+--     non-volatile default; a volatile one (now(), random(), a sequence) still
+--     rewrites. These qualify.
+--   • the mechanism is already in use ON THIS TABLE: visit_clicks_raw,
+--     visit_clicks_clean, redirect_clicks_raw and redirect_clicks_clean all
+--     carry pg_attribute.atthasmissing = true with attmissingval = {0} — added
+--     onto a populated keitaro_stage_results and never rewritten. 57 columns
+--     across the public schema are stored this way.
+--   • neither `events` nor `unmapped_conversions` exists yet (pg_attribute, 19
+--     live columns, highest attnum 20), so both ALTERs will really run rather
+--     than no-op on the name.
+--   • the table is 18,484 rows / 439 pages / 3,512 kB heap — small even if it
+--     DID rewrite.
+-- THE LOCK is ACCESS EXCLUSIVE on keitaro_stage_results, and the catalog-only
+-- work behind it is sub-millisecond. But in a COMBINED 0182-0185 apply drizzle
+-- holds every lock until the single transaction COMMITS, so the real hold is
+-- "from this statement to the end of the batch" — and 0183, which runs first,
+-- populates three matviews whose defining SELECTs measure ~150s together on
+-- prod. Ordering is what keeps this cheap: these two ALTERs are the LAST
+-- statements in the batch, so they acquire late and hold briefly. Do not
+-- reorder 0185 ahead of 0183. The risk remains QUEUEING, not duration, and
+-- SET LOCAL lock_timeout = '5s' below is what bounds it.
+--
 -- ⚠️ RE-RUNNABLE IS NOT SHAPE-REPAIRING. `ADD COLUMN IF NOT EXISTS` matches on
 -- the column NAME ALONE: a re-apply over a column of the wrong type, the wrong
 -- nullability or the wrong default is a silent no-op, not a repair. Re-runnable

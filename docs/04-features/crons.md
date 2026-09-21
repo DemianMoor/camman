@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-21_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -126,6 +126,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 ### `/api/cron/refresh-offer-group-report` (offer group report refresh)
 - Calls `refreshOfferGroupReport()` ([lib/reporting/offer-group-report.ts](../../lib/reporting/offer-group-report.ts)): `REFRESH MATERIALIZED VIEW CONCURRENTLY` on `offer_report_org_summary_mv`, `offer_group_report_mv`, `offer_report_offer_totals_mv`, then — **last** — `audience_report_group_totals_mv` (migration 0180; it sums `offer_group_report_mv`, so it must follow that refresh). Separate statements (`CONCURRENTLY` cannot run inside an explicit transaction); each matview's `report_refresh_log` row is stamped `now()` right after its own refresh succeeds. See [audience-report.md](audience-report.md).
 - `maxDuration = 300` (not the default 60) — measured worst-case ~50s cold / ~37s warm against production data before migration 0132, ~104s after 0133 (2026-08-14); the 0180 matview's defining SELECT measured 5.3s (2026-09-14). The log line reports `summaryMs`, `groupMs`, `totalsMs`, `audienceTotalsMs`, `totalMs`. This is a background job with nothing waiting on it, so the larger budget is free.
+- ⛔ **`maxDuration = 300` is NOT this job's binding limit — Postgres's `statement_timeout = 120000 ms` is** (read back on prod 2026-09-21: `source = configuration file`, `/etc/postgresql-custom/platform-defaults.conf:6`, a Supabase cluster default on every connection; no `pg_db_role_setting` override for the `postgres` role, and `refreshOfferGroupReport()` never raises one). The last real run refreshed `offer_group_report_mv` **CONCURRENTLY in 107.5s** — 12.5s under the wall — read back as the delta between consecutive `report_refresh_log` stamps. **A single `REFRESH` past 120s is cancelled with 57014, and because the four run in sequence with group second, that failure skips `offer_report_offer_totals_mv` and `audience_report_group_totals_mv` entirely on every subsequent run.** The DB wall is loud (throw → Tier-1 Telegram alert → 500); the Vercel wall is silent (the kill never reaches the `catch`). **Splitting this into per-matview cron invocations would not help** — it divides the Vercel budget, which is not the constraint, and cannot shorten one `REFRESH` statement. Full measurements and the remedy (a session-mode connection carrying `statement_timeout` + `work_mem`) in [offer-group-report.md](offer-group-report.md).
 - **DST drift:** `0 5,20 * * *` is fixed-UTC → 00:00 & 15:00 ET in winter (EST), 01:00 & 16:00 ET in summer (EDT). ~1h drift across the transition, irrelevant for a twice-daily historical report — same tradeoff already accepted for `telegram-report`'s Warsaw-time schedule.
 - No request body/params; returns `{ ok: true }`. See [offer-group-report.md](offer-group-report.md).
 

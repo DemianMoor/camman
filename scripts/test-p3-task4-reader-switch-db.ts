@@ -167,14 +167,29 @@ async function main() {
       if (!orgId) throw new Error("no organization on the preview DB");
 
       const eventTypes = (await tx.execute(sql`
-        SELECT id, key, is_purchase, counts_revenue FROM event_types WHERE org_id = ${orgId}::uuid
-      `)) as unknown as { id: number; key: string; is_purchase: boolean; counts_revenue: boolean }[];
+        SELECT id, key, label, is_purchase, counts_revenue FROM event_types WHERE org_id = ${orgId}::uuid
+      `)) as unknown as { id: number; key: string; label: string; is_purchase: boolean; counts_revenue: boolean }[];
       const purchaseTypeId = eventTypes.find((t) => t.key === "purchase")?.id;
       const registrationTypeId = eventTypes.find((t) => t.key === "registration")?.id;
+      // The badge prints event_types.label, which is ORG CONFIGURATION (the owner
+      // renamed "Registration" to "Reg"), so the expected text is read from the
+      // org by KEY — the reader resolves it by id through the ledger join, so this
+      // is an independent anchor, not the reader's own answer. S0b keeps it able to
+      // fail: the label must differ from the other type's and from the raw Keitaro
+      // types the fixtures post, or E1/E6 could not tell a right answer from a wrong one.
+      const purchaseLabel = eventTypes.find((t) => t.key === "purchase")?.label ?? null;
+      const registrationLabel = eventTypes.find((t) => t.key === "registration")?.label ?? null;
       check(
         "S0 the 0181 'purchase' + 'registration' event types are seeded on this org",
         purchaseTypeId != null && registrationTypeId != null,
         JSON.stringify(eventTypes),
+      );
+      check(
+        "S0b the two labels are non-empty and distinguishable (from each other and from the raw Keitaro types 'registration' / 'sale' / 'lead')",
+        !!purchaseLabel && !!registrationLabel && purchaseLabel !== registrationLabel &&
+          !["registration", "sale", "lead"].includes(purchaseLabel) &&
+          !["registration", "sale", "lead"].includes(registrationLabel),
+        JSON.stringify({ purchaseLabel, registrationLabel }),
       );
       check(
         "S1 the seed's flags are what the fixtures assume (purchase counts, registration does not)",
@@ -758,7 +773,7 @@ async function main() {
       const row = (role: Role) => badgeById.get(send[role])!;
       check(
         "E1 NEW: ledger_only → Purchase · approved · $42, is_purchase=true",
-        row("ledger_only").conversion_event === "Purchase" &&
+        row("ledger_only").conversion_event === purchaseLabel &&
           row("ledger_only").conversion_status === "approved" &&
           money(row("ledger_only").conversion_revenue) === 42 &&
           row("ledger_only").conversion_is_purchase === true,
@@ -791,14 +806,14 @@ async function main() {
       );
       check(
         "E5c ⭐ NEW: the NULL-status purchase shows its MAPPED label with a NULL status and is_purchase=true",
-        row("mapped_status_null").conversion_event === "Purchase" &&
+        row("mapped_status_null").conversion_event === purchaseLabel &&
           row("mapped_status_null").conversion_status == null &&
           row("mapped_status_null").conversion_is_purchase === true,
         JSON.stringify(row("mapped_status_null")),
       );
       check(
-        "E6 ⭐ NEW: the $0 registration shows Registration · approved with is_purchase=false",
-        row("registration_0").conversion_event === "Registration" &&
+        `E6 ⭐ NEW: the $0 registration shows the org's registration label (${registrationLabel}) · approved with is_purchase=false`,
+        row("registration_0").conversion_event === registrationLabel &&
           row("registration_0").conversion_status === "approved" &&
           row("registration_0").conversion_is_purchase === false &&
           money(row("registration_0").conversion_revenue) === 0,

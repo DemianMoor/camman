@@ -145,9 +145,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   } catch (err) {
     // WHOLE-JOB failure only. Individual view failures no longer reach here —
     // they are caught per view and reported as a PARTIAL above. What lands here
-    // is everything that stops the job before any view can refresh: the
-    // session-mode connection failing to open, the settings read-back guard in
-    // refresh-session.ts refusing, or an unexpected throw.
+    // is an unexpected throw that stops the job as a whole. A session connection
+    // that fails to open (or whose settings read-back refuses) does NOT land here:
+    // refresh-session.ts falls back to the pooled connection and fires its own
+    // loud Tier-2 alert, and the views still refresh.
     //
     // Fire a Tier-1 Telegram alert with duration + error, then surface a 500 so
     // the scheduler flags red too. notifyTelegram is best-effort (never

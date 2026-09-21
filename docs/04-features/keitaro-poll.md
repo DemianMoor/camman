@@ -1,6 +1,6 @@
 # Feature — Keitaro Results Poll
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-21_
 
 ## 1. Purpose
 Pull live click + conversion + revenue data from the **Keitaro** tracker every 5
@@ -88,22 +88,45 @@ reports a value `> 0` — a 0 never zeroes an existing number. Keitaro click sum
 monotonic, so that never drops an update. Stages not named in a given mirror call
 are left untouched.
 
-⚠️ **`checkout_click_count` is the EXCEPTION, and a DROP IS POSSIBLE (corrected
-2026-09-17, review fix I2).** Its source, `checkouts`, is no longer monotonic: it is
-the ledger projection's column, and the projection deliberately zeroes a stage-day
-the ledger no longer explains (a re-posted conversion that moved day, a conversion
-deleted in Keitaro). So the projection calls the mirror with
-`exactCheckoutClicks: true` and that ONE field takes the recomputed sum even when it
-DECREASES, 0 included. Under the old positive-only guard a downward correction could
-never reach the stage, leaving a stale higher number on the campaign page and in the
-creatives metrics cache forever. Consequence, accepted: on a stage the projection has
-in scope, a hand-entered Checkout Clicks value is overwritten by the tracker's sum
-**within 5 minutes**, and set to **0** when that stage has no ledger conversions at
-all — the field belongs to the projection. `scripts/resync-stage-day-conversions.ts
---apply` does this for every stage that has any `keitaro_stage_results` row, in one
-run. If a stage's Checkout Clicks must be operator-owned, it cannot also be in the
-projection's scope; there is no per-stage opt-out today. `sales_count` is still never
-touched by either mode. The mirror also THROWS on failure now; the "non-fatal, re-syncs next poll"
+⚠️ **`checkout_click_count` is the EXCEPTION: a DROP IS POSSIBLE, but only for a
+counter the tracker owns (review fix I2 2026-09-17; provenance rule 2026-09-21).** Its
+source, `checkouts`, is no longer monotonic: it is the ledger projection's column, and
+the projection deliberately zeroes a stage-day the ledger no longer explains (a
+re-posted conversion that moved day, a conversion deleted in Keitaro). Under the
+positive-only guard a downward correction could never reach the stage, leaving a stale
+higher number on the campaign page and in the creatives metrics cache forever.
+
+I2's first fix mirrored the field **exactly** on every stage in the projection's scope,
+and that overwrote hand-entered values. On 2026-09-21, after the Phase 3 deploy, a
+stray click pulled stage 130 (campaign 104: June, manual-era, no ledger rows at all,
+Keitaro checkouts 0) into the `*/5` scope, and its hand-entered Checkout Clicks went
+from **22 to 0**. 44 more stages held 536 hand-entered checkouts above Keitaro's sum,
+and `scripts/resync-stage-day-conversions.ts --apply` would have zeroed all of them in
+one run. The column records no provenance, so **the counter's value is the
+provenance**:
+
+| Counter before the run | Owner | Mirror |
+|---|---|---|
+| **equal** to the tracker's checkout sum as it stood *before* this run (`sum(keitaro_stage_results.checkouts)`, all `stat_date`s) | the tracker put it there | **exact**: follows the new sum, down to 0 (I2 still holds) |
+| **different** from that pre-run sum | a person (manual-results form, CSV) | **guarded**: a positive tracker sum still overwrites it, a tracker **0 never does** |
+
+`syncStageDayConversions` reads the per-stage pre-run sums **before its first write**,
+over exactly the stages it will mirror, on the same executor, and hands them to
+`mirrorStageCountersFromResults` as `priorCheckoutSums`. A stage with no row yet has a
+pre-run sum of 0. The comparison runs inside the mirror's `UPDATE`, against the counter
+as it stands at write time, so a hand entry saved between the read and the write is
+protected too. `pollKeitaro`'s own mirror passes no sums and stays plainly guarded.
+`click_count`, `sales_payout_each` and `sales_count` behave as before (`sales_count`
+is never touched). Pinned by **H1–H5** in `scripts/test-stage-day-conversions.ts`: the
+poll path, the unscoped path, a stage with ledger rows, I2 down to zero, and a positive
+sum overwriting a hand entry.
+
+Two edge cases follow from the rule. A hand entry that happens to **equal** the
+tracker's pre-run sum is treated as the tracker's. A tracker-owned counter left
+**stale** (the projection's writes committed and the mirror after them threw) no
+longer matches its sum, so it is treated as hand-owned and a later tracker 0 cannot
+clear it. On the cron path the throw fires the `conversion_events:projection_failed`
+alert. The mirror also THROWS on failure now; the "non-fatal, re-syncs next poll"
 swallow lives at `pollKeitaro`'s own call site, because swallowing inside the mirror
 would poison a caller-supplied transaction (the resync's `--apply`, the DB tests).
 

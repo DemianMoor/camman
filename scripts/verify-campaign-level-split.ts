@@ -35,6 +35,7 @@
 // (the react-server condition is required: this pulls in lib/sends/scheduled.ts,
 //  which transitively imports a module guarded by `server-only`.)
 import "./_env-preload"; // MUST be first — loads .env.local before db/client init
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { randomUUID } from "node:crypto";
 

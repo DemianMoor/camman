@@ -19,6 +19,7 @@
 //     phases and in every gate, so a future edit that drops one fails here even
 //     when the data happens to agree
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { promises as fs } from "node:fs";
 import path from "node:path";

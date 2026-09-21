@@ -6,6 +6,7 @@
 // seeded Ahoi credential's real token; cleans up in a finally block.
 // Run: npx tsx scripts/test-ahoi-inbound-webhook.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import postgres from "postgres";
 import { NextRequest } from "next/server";
 

@@ -1,18 +1,22 @@
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { inArray, like, sql, type SQL } from "drizzle-orm";
 import type { PgInsertValue } from "drizzle-orm/pg-core";
 
 import { db } from "../db/client";
+import { requirePreviewDb } from "./_require-preview-db";
 import { conversion_events } from "../db/schema";
 import { clearAlert } from "../lib/alerts/alert-state";
-import type { IngestResult } from "../lib/conversions/ingest";
+import type { ConversionEventInsert } from "../lib/conversions/build-rows";
+import { findStatusOnlyFirstSeen, type IngestResult } from "../lib/conversions/ingest";
 import {
-  CONFLICT_COMBOS_SQL,
+  CONFLICT_WHERE,
   CONVERSION_ALERT_KEYS,
   INGEST_HEARTBEAT_ALERT_KEY,
   LEDGER_MAX_COMBOS,
-  UNMAPPED_COMBOS_SQL,
+  STATUS_ONLY_WHERE,
+  UNMAPPED_WHERE,
   evaluateConversionAlerts,
   evaluateProjectionAlert,
   readLedgerHealth,
@@ -28,11 +32,9 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "../lib/reporting/cron-heartbeat
 // channel. PREVIEW DB ONLY:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //     npx tsx scripts/test-conversion-monitor-db.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The ./_require-preview-db import above is the refusal: an ALLOWLIST, so it
+// also stops a raw IP, a pooler alias or a future prod project, which a re-typed
+// "does the URL contain the prod ref?" test would wave straight through.
 delete process.env.TELEGRAM_BOT_TOKEN;
 delete process.env.TELEGRAM_CHAT_ID;
 
@@ -53,10 +55,14 @@ const RUN = `test-cm-${Date.now()}`;
 const K = CONVERSION_ALERT_KEYS;
 // Written out, not imported: the keys the docs and alert_state rows name.
 const UNM = "conversion_events:unmapped:";
+// The status-only first-sighting kind. NOT under UNM — "status_only_unmapped"
+// does not start with "unmapped" — so the two never read or clear each other.
+const SO = "conversion_events:status_only_unmapped:";
 const CONF = "conversion_events:type_conflicts:";
-// The per-kind cap keys. Neither is under a combo prefix, so the stale-combo
+// The per-kind cap keys. None is under a combo prefix, so the stale-combo
 // clear never sees them.
 const CAP_UNM = "conversion_events:combo_cap_exceeded:unmapped";
+const CAP_SO = "conversion_events:combo_cap_exceeded:status_only_unmapped";
 const CAP_CONF = "conversion_events:combo_cap_exceeded:type_conflicts";
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -69,7 +75,7 @@ async function alertRow(tx: Tx, key: string) {
 }
 
 // Every non-ok key under the combo prefixes, sorted in JS.
-async function firingKeys(tx: Tx, prefixes: string[] = [UNM, CONF]): Promise<string[]> {
+async function firingKeys(tx: Tx, prefixes: string[] = [UNM, SO, CONF]): Promise<string[]> {
   const keys: string[] = [];
   for (const prefix of prefixes) {
     const rows = (await tx.execute(sql`
@@ -82,23 +88,64 @@ async function firingKeys(tx: Tx, prefixes: string[] = [UNM, CONF]): Promise<str
 }
 const sameKeys = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
-// Proves the statement CAN be answered from the named index: with seq scans
-// disabled, a predicate that doesn't match the partial index's predicate falls
-// back to a (penalised) seq scan and the index name is absent from the plan.
-async function usesIndex(tx: Tx, query: SQL, index: string): Promise<boolean> {
-  await tx.execute(sql`SET LOCAL enable_seqscan = off`);
-  const plan = await tx.execute(sql`EXPLAIN (FORMAT JSON) ${query}`);
-  await tx.execute(sql`SET LOCAL enable_seqscan = on`);
-  return JSON.stringify(plan).includes(index);
+// Which index each combo statement's PREDICATE is answered from, with seq scans
+// disabled — a predicate its partial index's predicate does not imply cannot use
+// that index at all. The predicates are imported from monitor.ts and are the
+// very fragments the statements are built from.
+//
+// Three things make this the honest form of the check, each measured on
+// camman-v2 before being written down:
+//   - ANALYZE. conversion_events is EMPTY in the preview project, and against an
+//     un-analysed 0-page relation the planner takes the seq scan whatever
+//     enable_seqscan says: 25/25 misses for all three predicates, including the
+//     one already on main. So the check must ANALYZE what it inserted.
+//   - PRODUCTION'S SHAPE, built in a savepoint that rolls back. On a 10-row
+//     table the planner's choice is arbitrary: with seq scans off it will as
+//     happily FULL-scan conversion_events_offer_event_occurred_idx as use the
+//     partial index, and which wins flips with relpages — the same code passed
+//     and failed run to run. Production is the opposite shape, a large ledger in
+//     which problem rows are rare, and there a partial index holding a handful of
+//     entries is decisively cheapest. BULK_HEALTHY_ROWS creates that shape, which
+//     is also the only regime in which "reads only the small index" is the
+//     property worth having.
+//   - The predicate ALONE, not the whole statement. The statements join offers
+//     (and affiliate_networks), so the driving relation is its own cost decision;
+//     what must hold is that the partial index stays USABLE for the predicate.
+const BULK_HEALTHY_ROWS = 2000;
+async function indexesForPredicates(
+  tx: Tx,
+  fixture: { orgId: string; offerId: number; eventTypeId: number },
+  wheres: readonly SQL[],
+): Promise<string[]> {
+  const used: string[] = [];
+  try {
+    await tx.transaction(async (sp) => {
+      await sp.execute(sql`
+        INSERT INTO conversion_events
+          (keitaro_event_id, org_id, keitaro_status, keitaro_type, offer_id, event_type_id, status, occurred_at)
+        SELECT ${`${RUN}-bulk-`} || g, ${fixture.orgId}::uuid, 'sale', 'sale',
+               ${fixture.offerId}, ${fixture.eventTypeId}, 'approved', now()
+        FROM generate_series(1, ${BULK_HEALTHY_ROWS}) g`);
+      await sp.execute(sql`ANALYZE conversion_events`);
+      await sp.execute(sql`SET LOCAL enable_seqscan = off`);
+      for (const where of wheres) {
+        const plan = JSON.stringify(
+          await sp.execute(sql`EXPLAIN (FORMAT JSON) SELECT count(*) FROM conversion_events ce WHERE ${where}`),
+        );
+        const names = [...plan.matchAll(/"Index Name":"([^"]+)"/g)].map((m) => m[1]);
+        used.push(names.join(",") || "(no index — seq scan)");
+      }
+      throw new Rollback();
+    });
+  } catch (e) {
+    if (!(e instanceof Rollback)) throw e;
+  }
+  return used;
 }
 
 async function main() {
-  const host = process.env.DATABASE_URL?.includes("fdzxzxayhknywvmrhjcj") ? "camman-v2 (preview)" : "UNKNOWN";
-  console.log(`Target DB: ${host}\n`);
-  if (host === "UNKNOWN") {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  // The guard already refused every other target; this is the banner, not the check.
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const sent: string[] = [];
   const send = async (text: string) => {
@@ -123,9 +170,12 @@ async function main() {
       )) as unknown as { id: number; key: string }[];
       const purchase = types.find((t) => t.key === "purchase")?.id ?? null;
       const registration = types.find((t) => t.key === "registration")?.id ?? null;
-      const [offer] = (await tx.execute(
-        sql`SELECT id, name FROM offers WHERE org_id = ${org.id}::uuid ORDER BY id LIMIT 1`,
-      )) as unknown as { id: number; name: string }[];
+      const [offer] = (await tx.execute(sql`
+        SELECT o.id, o.name, n.name AS network_name
+        FROM offers o
+        LEFT JOIN affiliate_networks n ON n.id = o.network_id
+        WHERE o.org_id = ${org.id}::uuid ORDER BY o.id LIMIT 1
+      `)) as unknown as { id: number; name: string; network_name: string | null }[];
       check(
         "M0 fixtures: seeded event types and an offer exist for the first org",
         purchase !== null && registration !== null && offer !== undefined,
@@ -147,23 +197,30 @@ async function main() {
       `);
       const before = await readLedgerHealth(tx);
       check(
-        `M0b pre-existing problem rows neutralised in the tx (${preexisting.unmapped_total} unmapped, ${preexisting.conflict_total} conflicting) → no problem rows, no combos`,
+        `M0b pre-existing problem rows neutralised in the tx (${preexisting.unmapped_total} unmapped, ${preexisting.status_only_total} status-only untyped, ${preexisting.conflict_total} conflicting) → no problem rows, no combos of any kind`,
         before.unmapped_total === 0 &&
+          before.status_only_total === 0 &&
           before.conflict_total === 0 &&
           before.unmapped_combo_count === 0 &&
+          before.status_only_combo_count === 0 &&
           before.conflict_combo_count === 0 &&
           before.unmapped_combos.length === 0 &&
+          before.status_only_combos.length === 0 &&
           before.conflict_combos.length === 0,
         JSON.stringify(before),
       );
-      if (before.unmapped_total !== 0 || before.conflict_total !== 0) throw new Rollback();
+      if (before.unmapped_total !== 0 || before.status_only_total !== 0 || before.conflict_total !== 0) {
+        throw new Rollback();
+      }
 
       for (const key of [...Object.values(K), INGEST_HEARTBEAT_ALERT_KEY]) {
         await clearAlert(tx, { alertKey: key });
       }
       await tx.execute(sql`
         UPDATE alert_state SET state = 'ok'
-        WHERE starts_with(alert_key, ${UNM}::text) OR starts_with(alert_key, ${CONF}::text)
+        WHERE starts_with(alert_key, ${UNM}::text)
+           OR starts_with(alert_key, ${SO}::text)
+           OR starts_with(alert_key, ${CONF}::text)
       `);
       const seedFiring = (key: string) =>
         tx.execute(sql`
@@ -176,7 +233,7 @@ async function main() {
       const decoys = ["conversion_events:unmapped", "conversionXevents:unmapped:1", "conversion_events:typeXconflicts:1"];
       // Firing keys INSIDE the prefixes that no combo builds (fix wave 1's per-row
       // format): stale, so the first tick clears them without a page.
-      const leftovers = [`${UNM}1`, `${CONF}1`];
+      const leftovers = [`${UNM}1`, `${SO}1`, `${CONF}1`];
       for (const key of [...decoys, ...leftovers]) await seedFiring(key);
 
       const id = (s: string) => `${RUN}-${s}`;
@@ -278,49 +335,64 @@ async function main() {
       )) as unknown as { now_utc: string }[];
 
       const h = await readLedgerHealth(tx);
-      const [rej, trash] = h.unmapped_combos;
+      const [trash] = h.unmapped_combos;
+      const [rej] = h.status_only_combos;
       check(
-        "M1 unmapped = event type NULL OR status NULL, one group per combo (offer, Keitaro type), MOST RECENTLY CHANGED first — the 1-row rejected combo, re-posted now, ahead of the 4-row trash combo; mapped rows excluded",
-        h.unmapped_total === 5 &&
-          h.unmapped_combo_count === 2 &&
-          h.unmapped_combos.length === 2 &&
-          rej?.keitaro_type === "rejected" &&
-          rej.total === 1 &&
+        "M1 the two kinds PARTITION the problem rows: unmapped is status NULL (the 4-row trash combo), status-only is event type NULL with a status (the 1-row rejected combo). Neither read sees the other's rows, and mapped rows are in neither",
+        h.unmapped_total === 4 &&
+          h.unmapped_combo_count === 1 &&
+          h.unmapped_combos.length === 1 &&
           trash?.keitaro_type === "trash" &&
-          trash.total === 4,
-        JSON.stringify(h.unmapped_combos),
+          trash.total === 4 &&
+          h.status_only_total === 1 &&
+          h.status_only_combo_count === 1 &&
+          h.status_only_combos.length === 1 &&
+          rej?.keitaro_type === "rejected" &&
+          rej.total === 1,
+        JSON.stringify({ unmapped: h.unmapped_combos, statusOnly: h.status_only_combos }),
       );
       const [rejRow] = (await tx.execute(sql`
         SELECT event_type_id, status FROM conversion_events WHERE keitaro_event_id = ${id("rej")}
       `)) as unknown as { event_type_id: number | null; status: string | null }[];
+      const [partition] = (await tx.execute(sql`
+        SELECT count(*) FILTER (WHERE event_type_id IS NULL OR status IS NULL)::int AS idx_covered,
+               count(*) FILTER (WHERE status IS NULL)::int AS unmapped,
+               count(*) FILTER (WHERE event_type_id IS NULL AND status IS NOT NULL)::int AS status_only,
+               count(*) FILTER (WHERE status IS NULL AND event_type_id IS NULL AND status IS NOT NULL)::int AS both
+        FROM conversion_events
+      `)) as unknown as { idx_covered: number; unmapped: number; status_only: number; both: number }[];
       check(
-        "M1b a first-seen status-only row, exactly as ingest inserts one (event_type_id NULL, status 'rejected'), counts as unmapped — through the event_type_id arm of the predicate, which a 'status IS NULL' read would miss",
+        "M1b a first-seen status-only row, exactly as ingest inserts one (event_type_id NULL, status 'rejected'), lands in the STATUS-ONLY kind, not the unmapped one — and the two predicates still cover every row conversion_events_unmapped_idx does, with no overlap",
         rejRow?.event_type_id === null &&
           rejRow.status === "rejected" &&
           rej?.total === 1 &&
-          JSON.stringify(rej.sample_event_ids) === JSON.stringify([id("rej")]),
-        JSON.stringify({ rejRow, rej }),
+          JSON.stringify(rej.sample_event_ids) === JSON.stringify([id("rej")]) &&
+          partition.unmapped + partition.status_only === partition.idx_covered &&
+          partition.both === 0 &&
+          partition.status_only >= 1,
+        JSON.stringify({ rejRow, rej, partition }),
       );
       check(
         "M2 each combo's last-24h count is by created_at, not updated_at (the rejected row was changed just now but created 3 days ago)",
         trash?.last_24h === 4 && rej?.last_24h === 0,
-        JSON.stringify(h.unmapped_combos),
+        JSON.stringify({ trash, rej }),
       );
       check(
-        "M3 combo offer: no CamMan offer → keitaro_offer_id, no name; a CamMan offer → offer_id + name, and its keitaro_offer_id is dropped (offer_id wins)",
+        "M3 combo offer: no CamMan offer → keitaro_offer_id, no name; a CamMan offer → offer_id + name, and its keitaro_offer_id is dropped (offer_id wins). The status-only combo also carries the offer's NETWORK, which the unmapped combo has no column for",
         trash?.offer_id === null &&
           trash.keitaro_offer_id === 41 &&
           trash.offer_name === null &&
           rej?.offer_id === offer.id &&
           rej.offer_name === offer.name &&
-          rej.keitaro_offer_id === null,
-        JSON.stringify(h.unmapped_combos),
+          rej.keitaro_offer_id === null &&
+          rej.network_name === offer.network_name,
+        JSON.stringify({ trash, rej, offer }),
       );
       check(
         "M4 combo samples: newest created first, at most 3",
         JSON.stringify(trash?.sample_event_ids) === JSON.stringify([id("trash-1"), id("trash-2"), id("trash-3")]) &&
           JSON.stringify(rej?.sample_event_ids) === JSON.stringify([id("rej")]),
-        JSON.stringify(h.unmapped_combos.map((c) => c.sample_event_ids)),
+        JSON.stringify([trash?.sample_event_ids, rej?.sample_event_ids]),
       );
       const [c1] = h.conflict_combos;
       check(
@@ -338,13 +410,25 @@ async function main() {
           JSON.stringify(c1.sample_event_ids) === JSON.stringify([id("old-r1")]),
         JSON.stringify({ combos: h.conflict_combos, now_utc }),
       );
-      check(
-        "M6 the unmapped combo statement is answerable from conversion_events_unmapped_idx",
-        await usesIndex(tx, UNMAPPED_COMBOS_SQL, "conversion_events_unmapped_idx"),
+      const [ixUnmapped, ixStatusOnly, ixConflict] = await indexesForPredicates(
+        tx,
+        { orgId: org.id, offerId: offer.id, eventTypeId: purchase },
+        [UNMAPPED_WHERE, STATUS_ONLY_WHERE, CONFLICT_WHERE],
       );
       check(
-        "M7 the conflict combo statement is answerable from conversion_events_type_conflict_idx",
-        await usesIndex(tx, CONFLICT_COMBOS_SQL, "conversion_events_type_conflict_idx"),
+        `M6 against a ${BULK_HEALTHY_ROWS}-row ledger with the same few problem rows, the unmapped predicate is read from conversion_events_unmapped_idx — narrowed to 'status IS NULL' it still implies that index's predicate`,
+        ixUnmapped === "conversion_events_unmapped_idx",
+        ixUnmapped,
+      );
+      check(
+        "M6b the status-only predicate is read from the SAME conversion_events_unmapped_idx — 'event_type_id IS NULL AND status IS NOT NULL' still implies that index's 'event_type_id IS NULL OR status IS NULL', so splitting the kinds needed no new index and no migration",
+        ixStatusOnly === "conversion_events_unmapped_idx",
+        ixStatusOnly,
+      );
+      check(
+        "M7 the conflict predicate is read from conversion_events_type_conflict_idx",
+        ixConflict === "conversion_events_type_conflict_idx",
+        ixConflict,
       );
       let capped: LedgerHealth | undefined;
       try {
@@ -366,18 +450,22 @@ async function main() {
       }
       const afterCap = await readLedgerHealth(tx);
       check(
-        "M8 over the cap (11 more combos of 2 rows, changed 1–11h ago, in a savepoint): the 10 MOST RECENTLY CHANGED are listed — the 1-row rejected combo and the 4-row trash combo ahead of the bigger but older cap-* ones, whose oldest three drop out — while the combo count and row total still cover all 13 combos / 27 rows; the savepoint rolled back",
+        "M8 over the cap (11 more unmapped combos of 2 rows, changed 1–11h ago, in a savepoint): the 10 MOST RECENTLY CHANGED unmapped combos are listed — the 4-row trash combo ahead of the bigger but older cap-* ones, whose oldest two drop out — while the combo count and row total still cover all 12 unmapped combos / 26 rows. The cap is PER KIND, so the status-only kind is untouched at 1 combo; the savepoint rolled back",
         LEDGER_MAX_COMBOS === 10 &&
           JSON.stringify(capped?.unmapped_combos.map((c) => c.keitaro_type)) ===
-            JSON.stringify(["rejected", "trash", ...Array.from({ length: 8 }, (_, i) => `cap-0${i}`)]) &&
-          capped?.unmapped_combo_count === 13 &&
-          capped.unmapped_total === 27 &&
-          afterCap.unmapped_combo_count === 2 &&
-          afterCap.unmapped_total === 5,
+            JSON.stringify(["trash", ...Array.from({ length: 9 }, (_, i) => `cap-0${i}`)]) &&
+          capped?.unmapped_combo_count === 12 &&
+          capped.unmapped_total === 26 &&
+          capped.status_only_combo_count === 1 &&
+          capped.status_only_total === 1 &&
+          afterCap.unmapped_combo_count === 1 &&
+          afterCap.unmapped_total === 4 &&
+          afterCap.status_only_combo_count === 1,
         JSON.stringify({
           count: capped?.unmapped_combo_count,
           total: capped?.unmapped_total,
           listed: capped?.unmapped_combos.map((c) => `${c.keitaro_type}:${c.total}`),
+          statusOnly: capped?.status_only_combos.map((c) => `${c.keitaro_type}:${c.total}`),
         }),
       );
 
@@ -393,6 +481,8 @@ async function main() {
         rows: 4,
         unmappedInBatch: 0,
         statusOnlyInBatch: 0,
+        statusOnlyFirstSeenInBatch: 0,
+        statusOnlyFirstSeenSamples: [],
         inserted: 0,
         updated: 0,
         unchanged: 4,
@@ -431,39 +521,52 @@ async function main() {
         `);
 
       const keyTrash = `${UNM}k41:trash`;
-      const keyRej = `${UNM}${offer.id}:rejected`;
+      // The status-only first sighting is keyed under its OWN prefix — the same
+      // combo (this offer, Keitaro type "rejected") under UNM is a different key.
+      const keyRej = `${SO}${offer.id}:rejected`;
       const keyRegPurchase = `${CONF}${offer.id}:registration>purchase`;
       const a1 = await tick();
       check(
-        "A1 first tick → one page per problem combo, most recently changed first: rejected (the CamMan offer), trash (Keitaro offer 41), registration → purchase",
+        "A1 first tick → one page per problem combo, by kind: trash (unmapped, Keitaro offer 41), rejected (status-only first sighting, the CamMan offer), registration → purchase. The status-only page says what happened and that the fix is a config row",
         a1.length === 3 &&
-          a1[0].includes(`1 conversion(s) for ${offer.name} (offer ${offer.id}) with Keitaro type rejected`) &&
-          a1[1].includes("4 conversion(s) for Keitaro offer 41 (no CamMan offer) with Keitaro type trash") &&
-          a1[1].includes(id("trash-1")) &&
+          a1[0].includes("4 conversion(s) for Keitaro offer 41 (no CamMan offer) with Keitaro type trash") &&
+          a1[0].includes(id("trash-1")) &&
+          a1[1].includes(
+            `1 conversion(s) for ${offer.name} (offer ${offer.id})${offer.network_name === null ? "" : `, network ${offer.network_name}`} were FIRST seen as Keitaro type rejected, which is mapped status-only`,
+          ) &&
+          a1[1].includes("this is a missing config row, not a bug") &&
+          a1[1].includes(id("rej")) &&
           a1[2].includes("locked registration → now purchase") &&
           a1[2].includes(id("old-r1")),
         JSON.stringify(a1),
       );
-      const [aTrash, aRej, aConf, aFetch, aInv, aOrg, aCapU, aCapC, aLeft1, aLeft2] = await Promise.all(
-        [
-          keyTrash,
-          keyRej,
-          keyRegPurchase,
-          K.fetchFailed,
-          K.invalidRows,
-          K.orgMismatch,
-          CAP_UNM,
-          CAP_CONF,
-          ...leftovers,
-        ].map((k) => alertRow(tx, k)),
-      );
+      const [aTrash, aRej, aConf, aFetch, aInv, aOrg, aCapU, aCapS, aCapC, aLeft1, aLeft2, aLeft3] =
+        await Promise.all(
+          [
+            keyTrash,
+            keyRej,
+            keyRegPurchase,
+            K.fetchFailed,
+            K.invalidRows,
+            K.orgMismatch,
+            CAP_UNM,
+            CAP_SO,
+            CAP_CONF,
+            ...leftovers,
+          ].map((k) => alertRow(tx, k)),
+        );
       check(
-        "A2 alert_state: exactly the three combo keys firing under the prefixes, delivered and org-less; the five fixed keys (both cap keys included, the ledger being far under the cap) ok; the leftover in-prefix keys cleared without a page (as clearAlert leaves a row)",
+        "A2 alert_state: exactly the three combo keys firing, one per prefix, delivered and org-less; the six fixed keys this tick decides (all three cap keys included, every kind being far under the cap; projection_failed is decided on its own path, C1–C9) ok; the leftover in-prefix keys — including one under the status-only prefix — cleared without a page (as clearAlert leaves a row)",
         sameKeys(await firingKeys(tx), [keyTrash, keyRej, keyRegPurchase]) &&
           [aTrash, aRej, aConf].every((r) => r?.state === "firing" && r.notified && r.global) &&
-          [aFetch, aInv, aOrg, aCapU, aCapC].every((r) => r?.state === "ok") &&
-          [aLeft1, aLeft2].every((r) => r?.state === "ok" && r.notified && r.global),
-        JSON.stringify({ firing: await firingKeys(tx), aTrash, aRej, aConf, aFetch, aInv, aOrg, aCapU, aCapC, aLeft1, aLeft2 }),
+          [aFetch, aInv, aOrg, aCapU, aCapS, aCapC].every((r) => r?.state === "ok") &&
+          [aLeft1, aLeft2, aLeft3].every((r) => r?.state === "ok" && r.notified && r.global),
+        JSON.stringify({
+          firing: await firingKeys(tx),
+          combos: [aTrash, aRej, aConf],
+          fixed: [aFetch, aInv, aOrg, aCapU, aCapS, aCapC],
+          leftovers: [aLeft1, aLeft2, aLeft3],
+        }),
       );
       const a3 = await tick();
       check(
@@ -570,12 +673,92 @@ async function main() {
       const s6 = await tick();
       const decoyRows = await Promise.all(decoys.map((k) => alertRow(tx, k)));
       check(
-        "S6 every problem row healed → every key under both prefixes cleared, no page; (g) the firing decoy keys outside the prefixes are untouched",
+        "S6 every problem row healed → every key under all three prefixes cleared, no page; (g) the firing decoy keys outside the prefixes are untouched",
         s6.length === 0 &&
           (await firingKeys(tx)).length === 0 &&
           decoyRows.every((r) => r?.state === "firing"),
         JSON.stringify({ s6, firing: await firingKeys(tx), decoyRows }),
       );
+
+      // ── THE GAP: a conversion FIRST seen through a status-only mapping ───────
+      // A status-only rule (event type NULL, status set — the seeded PsychoBook
+      // `rejected`) means "keep the row's existing event type". With no prior
+      // row there is none to keep, so the conversion lands with a status and a
+      // NULL event type and counts as nothing. Detected on the ingest side by
+      // findStatusOnlyFirstSeen, paged by the status_only_unmapped alert.
+      const insRow = (over: Partial<ConversionEventInsert>): ConversionEventInsert => ({
+        orgId: org.id,
+        keitaroEventId: id("ins-default"),
+        tid: null,
+        keitaroClickSubid: null,
+        keitaroStatus: "rejected",
+        keitaroType: "rejected",
+        keitaroVersion: 1,
+        keitaroOfferId: null,
+        stageSendId: null,
+        contactId: null,
+        campaignId: null,
+        stageId: null,
+        offerId: offer.id,
+        eventTypeId: null,
+        status: "rejected",
+        revenue: "0",
+        currency: "USD",
+        occurredAtEt: "2026-09-16 12:00:00",
+        lastPostbackAtEt: "2026-09-16 12:00:00",
+        statusHistory: null,
+        rawParams: null,
+        ...over,
+      });
+      // One-sided fixture: the answer is ONE row, not zero. `so-seen` already has
+      // a ledger row (so its status-only postback is the normal, correct case),
+      // `so-new` does not. The typed row and the rule-less row are the two other
+      // classes and must not be returned at all.
+      await insertRows([mappedRow("so-seen", registration, "2 days")]);
+      const firstSeen = await findStatusOnlyFirstSeen(tx, [
+        insRow({ keitaroEventId: id("so-seen") }),
+        insRow({ keitaroEventId: id("so-new") }),
+        insRow({ keitaroEventId: id("so-typed"), eventTypeId: purchase, status: "approved", keitaroType: "sale" }),
+        insRow({ keitaroEventId: id("so-norule"), eventTypeId: null, status: null, keitaroType: "trash" }),
+      ]);
+      check(
+        "G1 findStatusOnlyFirstSeen returns EXACTLY the status-only rows with no existing ledger row: `so-new` only — not `so-seen` (its row exists, so the rule keeps that row's locked type), not a typed row, not a row no rule matched",
+        firstSeen.length === 1 && firstSeen[0].keitaroEventId === id("so-new"),
+        JSON.stringify(firstSeen.map((r) => r.keitaroEventId)),
+      );
+      // Now store that very conversion the way upsertConversionEvents would.
+      const keySoNew = `${SO}${offer.id}:rejected`;
+      await insertRows([unmappedRow("so-new", "rejected", { offer_id: offer.id, status: "rejected" })]);
+      const g2 = await tick();
+      check(
+        "G2 the stored first sighting pages ONCE on conversion_events:status_only_unmapped:<offer>:<keitaro type>, naming the offer, the network and the type, saying the rows count as nothing and that nothing will heal them — and NOT on the unmapped key for the same combo",
+        g2.length === 1 &&
+          g2[0].includes("were FIRST seen as Keitaro type rejected, which is mapped status-only") &&
+          g2[0].includes(`for ${offer.name} (offer ${offer.id})`) &&
+          g2[0].includes("A later postback will NOT fix them") &&
+          g2[0].includes(id("so-new")) &&
+          (await alertRow(tx, keySoNew))?.state === "firing" &&
+          (await alertRow(tx, `${UNM}${offer.id}:rejected`))?.state !== "firing" &&
+          sameKeys(await firingKeys(tx), [keySoNew]),
+        JSON.stringify({ g2, firing: await firingKeys(tx) }),
+      );
+      const g3 = await tick();
+      check("G3 still first-seen-untyped → no second page (latched like every other combo)", g3.length === 0, JSON.stringify(g3));
+      // Giving the row an event type is the manual fix; the status stays.
+      await tx
+        .update(conversion_events)
+        .set({ event_type_id: purchase, updated_at: sql`now()` })
+        .where(byName(["so-new"]));
+      const g4 = await tick();
+      check(
+        "G4 the row's event type set by SQL (its status kept) → the key clears without a page, and it is in neither kind any more — so the fix the page describes really does resolve the alert",
+        g4.length === 0 &&
+          (await alertRow(tx, keySoNew))?.state === "ok" &&
+          (await firingKeys(tx)).length === 0 &&
+          (await readLedgerHealth(tx)).status_only_total === 0,
+        JSON.stringify({ g4, firing: await firingKeys(tx) }),
+      );
+      await heal(["so-seen", "so-new"]);
 
       // The cap (LEDGER_MAX_COMBOS per kind): ten unmapped combos of 2 rows each,
       // last changed 1–10 hours ago, then a brand-new combo of ONE row.
@@ -831,16 +1014,18 @@ async function main() {
   )) as unknown as { n: number }[];
   const after = await readLedgerHealth(db);
   check(
-    "Z1 rolled back — no test rows left, pre-existing unmapped/conflict row and combo counts unchanged",
+    "Z1 rolled back — no test rows left, pre-existing unmapped / status-only / conflict row and combo counts unchanged",
     left.n === 0 &&
       after.unmapped_total === preexisting.unmapped_total &&
+      after.status_only_total === preexisting.status_only_total &&
       after.conflict_total === preexisting.conflict_total &&
       after.unmapped_combo_count === preexisting.unmapped_combo_count &&
+      after.status_only_combo_count === preexisting.status_only_combo_count &&
       after.conflict_combo_count === preexisting.conflict_combo_count,
     JSON.stringify({
       left: left.n,
-      before: [preexisting.unmapped_total, preexisting.conflict_total],
-      after: [after.unmapped_total, after.conflict_total],
+      before: [preexisting.unmapped_total, preexisting.status_only_total, preexisting.conflict_total],
+      after: [after.unmapped_total, after.status_only_total, after.conflict_total],
     }),
   );
 

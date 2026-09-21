@@ -1,6 +1,6 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-09-07_
+_Last updated: 2026-09-18_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
@@ -369,6 +369,28 @@ Two entry points for two different actions; deliberately not two for one action.
   always show the number (even `0`) tagged `live`. An explainer above the table
   notes that converted contacts exit and opted-out are suppressed, so lane counts
   won't sum to the full pool, and that the numbers change until send.
+- **Pending-group fallback — the displayed count previews the CAMPAIGN-WIDE
+  source set.** A group's `source_stage_ids` stays empty until the T−15 recompute
+  (which is gated on `send_approved` + `scheduled_at`), so a freshly-created lane
+  has none, and `alivenessKey()` would fall back to `parent_stage_id` — counting
+  only the contacts who received the **anchor** stage. The anchor is routinely one
+  half of an A/B split, with its own creative and its own CTR, so that number can
+  be far below the real one: measured on campaign 1342 (2026-09-18) the confirm
+  modal showed **39** clicked / **3** reached offer across all 4 completed stages
+  while the list showed **13** / **1** over the anchor alone. The send was never
+  affected — `kickoff` resolves the group first and REFUSES
+  (`split_group_not_ready`) rather than materializing the single-parent audience —
+  but the narrow number appeared exactly where the operator decides whether a lane
+  is worth sending. So the route now previews what the recompute *will* resolve:
+  when a lane has a `split_group_id` and the group's set is still empty, it passes
+  the live completed-stage set from the shared
+  [lib/sends/stage-complete.ts](../../lib/sends/stage-complete.ts) helper
+  (one query per request, not per lane). Precedence: resolved set → live completed
+  set → `parent_stage_id`. **A legacy pre-0174 lane (`split_group_id IS NULL`)
+  keeps the `parent_stage_id` fallback** — its send genuinely uses single-parent
+  aliveness, so widening its count would break the agreement with
+  `stageRecipientsSql`. Verified by
+  [scripts/test-lane-count-pending-fallback.ts](../../scripts/test-lane-count-pending-fallback.ts).
 - **Per-lane copy:** a lane is an ordinary editable stage — edit its message via
   the normal stage editor. Tier/parent are not editable.
 

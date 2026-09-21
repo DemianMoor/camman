@@ -11,6 +11,7 @@
 //   3. no in-window send → null (the `unattributed` case)
 //   4. idempotent re-credit → ON CONFLICT keeps exactly one attribution row
 
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });

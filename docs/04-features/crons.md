@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-18_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -81,7 +81,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - **Conversion ledger ingest (Phase 2, 2026-09-17).** After the poll and the counted-clicker refresh, the route calls `ingestKeitaroConversions` ([lib/conversions/ingest.ts](../../lib/conversions/ingest.ts)) over a rolling **7-day** ET window (`liveIngestRange`, independent of `?windowDays`) and upserts `conversion_events`.
   - It is isolated from the poll: its own fetch, transaction and try/catch. A throw lands in `conversion_events_error` and never changes the poll's result or `keitaro_stage_results`.
   - It runs on the manual path too.
-- **Cron path only:** `evaluateConversionAlerts` ([lib/conversions/monitor.ts](../../lib/conversions/monitor.ts)) latches seven Tier-2 Telegram alerts in `alert_state`: fixed keys `conversion_events:fetch_failed`, `:invalid_rows`, `:org_mismatch`, `:combo_cap_exceeded:unmapped`, `:combo_cap_exceeded:type_conflicts`, and one key per problem combo, `conversion_events:unmapped:<offer>:<keitaro_type>` and `conversion_events:type_conflicts:<offer>:<locked_key>><conflicting_key>`. The combo alerts are evaluated on every tick, failed ones included. Each new combo pages once, repeats don't re-page, and a key clears when its combo disappears — except while its kind has more than 10 combos, when the kind's `combo_cap_exceeded` key pages instead and no combo key of it clears.
+- **Cron path only:** `evaluateConversionAlerts` ([lib/conversions/monitor.ts](../../lib/conversions/monitor.ts)) latches nine Tier-2 Telegram alerts in `alert_state`: fixed keys `conversion_events:fetch_failed`, `:invalid_rows`, `:org_mismatch`, `:combo_cap_exceeded:unmapped`, `:combo_cap_exceeded:status_only_unmapped`, `:combo_cap_exceeded:type_conflicts`, and one key per problem combo, `conversion_events:unmapped:<offer>:<keitaro_type>`, `conversion_events:status_only_unmapped:<offer>:<keitaro_type>` and `conversion_events:type_conflicts:<offer>:<locked_key>><conflicting_key>`. The combo alerts are evaluated on every tick, failed ones included. Each new combo pages once, repeats don't re-page, and a key clears when its combo disappears — except while its kind has more than 10 combos, when the kind's `combo_cap_exceeded` key pages instead and no combo key of it clears. `unmapped` (`status IS NULL`) and `status_only_unmapped` (`event_type_id IS NULL AND status IS NOT NULL`) are different problems with different fixes — see [conversion-events.md](conversion-events.md).
   - A refused window (HTTP error, timeout, malformed or truncated page) **or a thrown ingest** is a failed tick. `fetch_failed` fires only once the last complete ingest is over 15 min old (`FETCH_FAILED_DEBOUNCE_MINUTES`) or was never recorded; a failed tick inside that neither fires nor clears.
   - Then, last and only when the window was complete (`ok:true`), it runs `recordHeartbeat("conversion-events-ingest")`.
   - `/api/cron/tracking-monitors` watches that heartbeat. See [conversion-events.md](conversion-events.md).

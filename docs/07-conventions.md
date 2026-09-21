@@ -1,6 +1,33 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-09-21_
+
+## A script that writes to a database must refuse production, by import (2026-09-18)
+
+`.env.local` is **PRODUCTION**, and `scripts/_env-preload.ts` loads it whenever `DATABASE_URL` is not already set. On 2026-09-18 a test-fixture script ran that way and created live campaign rows in production before tearing them down. Nothing was damaged; nothing had stopped it either.
+
+[scripts/_require-preview-db.ts](../scripts/_require-preview-db.ts) is now the single refusal, and [scripts/test-preview-db-guard.ts](../scripts/test-preview-db-guard.ts) (`npm run check:guards`) enforces that every write-capable script carries it.
+
+- **It is an ALLOWLIST, not a denylist.** The obvious guard — and the one 14 scripts had hand-copied — asks "does `DATABASE_URL` contain the production project ref?" and runs if it does not. A raw IP, a custom hostname, a CNAME'd pooler alias, a second connection string for the same cluster, or a future prod project with a new ref all pass straight through. The helper asks the opposite question: **is this one of the databases I am allowed to write to?** Adding a preview database is one line in `PREVIEW_PROJECT_REFS`; adding a production one is impossible by construction.
+- **An empty or missing `DATABASE_URL` is refused, not permitted.** `postgres()` falls back to the libpq `PG*` variables when handed no connection string, so `DATABASE_URL= npx tsx …` is not "no database", it is "whatever `PGHOST` and `~/.pgpass` say". The denylist form read that case as safe (`""` contains no prod ref).
+- **Import it for its side effect, ordered ahead of every app module** — second after `./_env-preload`, or first in a script that calls `dotenv`'s `config()` itself (that statement runs *after* all imports, so the guard beats it and a bare invocation can no longer pick up `.env.local`):
+
+  ```ts
+  import "./_env-preload";
+  import "./_require-preview-db"; // MUST be second
+  import { db } from "../db/client";
+  ```
+
+  **Position is a checked property, not a style note.** A refusal written as a statement in the module body runs only after every import has been evaluated; it works today purely because postgres-js connects lazily. A module-scope query — in the script or in anything it imports — would outrun it.
+- **Enrolment is the default.** The bar's population is derived from the source tree: any script that reaches a database *and* carries a write signal (an ORM `.insert/.update/.delete`, a raw-SQL write verb, or `.unsafe(`) must import the helper. A new fixture script is covered the moment it writes, with nobody editing a list.
+- **Opting out is a review decision with a reason.** Prod-facing tooling — the `apply-*` index builders, the one-shot `backfill-*` repairs, the conversion backfill/verify, the deliberate `verify-*-production` proofs, and read-only diagnostics — is named in `EXCLUSIONS` in the bar **with a one-line reason**. An entry naming a file that no longer exists fails the bar rather than rotting.
+- **`check:guards` is deliberately NOT in `vercel-build`.** It is a source scan; a false positive would block a production deploy.
+- ⭐ **The scan is a list of NAMED needles, and each one is proved individually (2026-09-19).** `touchesDb`/`writesDb` used to be single OR'd regexes, and **a multi-needle scan passes if any one needle still matches**. Deleting an alternative usually trips some incidental count; **NARROWING one does not.** Measured: dropping `.unsafe(` took the write-capable set 182 → 176, `update` → `upsert` took it to 178, dropping `from "postgres"` took the guarded population 141 → 137 and dropping `./_env-preload` took it to 140 — **all four still printed "All checks passed."** Each alternative is now a row in `DB_REACH` / `WRITE_SIGNAL` carrying a **hand-written sample** of the code it exists to find, and the bar asserts per needle that it still matches that sample and that **no sibling needle matches it** (isolation is what makes a dead needle change the verdict instead of hiding behind a neighbour), in **both LF and CRLF** — this checkout mixes them.
+  - **Write the sample out by hand; never generate it from the needle.** A control built out of the thing it controls is a tautology: narrow the needle and the fixture narrows with it, so the bar can never go red. Measured on five needles, a needle-derived fixture caught **0/5** narrowings where the hand-written sample caught **5/5**.
+  - **Narrowing is caught by the sample; DELETION is caught by the roster.** The per-needle bars iterate the surviving list, so removing a row outright leaves them green. The two roster assertions spell every id out, making a dropped or renamed needle a two-place edit a reviewer sees.
+  - **Two second-order bars watch the controls themselves**: an exclusion that stops carrying a write signal, or stops reaching a database at all, is either a stale entry or the tell of a dead needle. 16 exclusions reach a database *only* through the `postgres` needle, which is where that needle's death lands. `viaLibrary: true` marks the entries that deliberately have no write token of their own.
+
+⚠️ **The known hole: a script whose writes happen only inside an app library it calls** (`ingestKeitaroConversions(db, …)`, say) carries no write token of its own and the scan cannot see it. Those are handled by being named in `EXCLUSIONS` anyway, but if you add one, **add the guard import yourself**. Transitive import analysis would close it and was measured: it flags ~39 more scripts, nearly all read-only diagnostics that merely import a write-capable module, which trades a crisp signal for a noisy one.
 
 ## A source-grep check must not be able to pass by accident (2026-09-18)
 
@@ -2757,6 +2784,31 @@ Sweeply's postback template hardcodes `status=lead` for **paid** conversions. Ke
 
 `conversion_event_mappings` classifies per network or offer, keyed on Keitaro's canonical conversion **type** (many raw statuses — `approved`, `confirmed`, `paid` — resolve to the one `Sale` type). An unknown network/type is stored with NULL event type and status and is never counted as a purchase. Guessing "it's probably a sale" is exactly how a $0 registration would have become a buyer.
 
+## A "keep the existing value" rule has nothing to keep on a first sighting (2026-09-18)
+
+A `conversion_event_mappings` row with `event_type_id` NULL is a **status-only rule**: "keep this conversion's existing event type and only move its status". PsychoBook's seeded `rejected` is one, and it is right — for the rejection of a conversion already in the ledger.
+
+If that postback is the **first** one for its `keitaro_event_id`, there is no row and no type to keep. The conversion lands with a status and `event_type_id` NULL, which is the same shape as "no mapping matched at all" and counts as nothing everywhere. Two ways that stayed invisible:
+
+- the batch counter `unmappedInBatch` tests `status === null`, and this row HAS a status;
+- the table-level `unmapped` alert did catch it (it read `event_type_id IS NULL OR status IS NULL`) but reported it as an ordinary unmapped combo, whose advice — "add a mapping row for this Keitaro type" — does not fix it. **Nothing heals it**: the sticky `COALESCE(existing, incoming)` only fills a NULL from a mapping that names a type, and the rule that classified the row has none.
+
+Two lessons, neither specific to conversions:
+
+1. **A rule defined relative to prior state needs a defined behaviour for "no prior state."** Write down what happens on the first sighting when you write the rule, not when the first one arrives.
+2. **Two problems that produce the same shape but need different fixes must be two alerts.** Merging them means the page tells the operator to do something that cannot work. The split here is `conversion_events:unmapped:` (`status IS NULL`) vs `conversion_events:status_only_unmapped:` (`event_type_id IS NULL AND status IS NOT NULL`) — disjoint and together exactly the old predicate, so nothing is double-paged and nothing is dropped. Both halves still imply the partial index's predicate, so splitting needed no migration.
+
+Detected before the write by `findStatusOnlyFirstSeen` ([lib/conversions/ingest.ts](../lib/conversions/ingest.ts)), so a dry run reports it too. See [04-features/conversion-events.md](04-features/conversion-events.md).
+
+## A planner assertion on a near-empty table asserts nothing (2026-09-18)
+
+`scripts/test-conversion-monitor-db.ts` proves each combo statement can be read from its partial index: `SET LOCAL enable_seqscan = off`, `EXPLAIN`, look for the index name. On the preview project that check was quietly meaningless, and then flaky:
+
+- `conversion_events` is **empty** there. Against an un-analysed 0-page relation the planner takes the seq scan whatever `enable_seqscan` says — measured 25/25 misses for every predicate, including the one already on `main`. The check only ever passed because the transaction's own inserts happened to move `relpages`.
+- Once ANALYZEd, ten rows are still not a decision. With seq scans off, a FULL scan of `conversion_events_offer_event_occurred_idx` beat the partial index for one predicate and lost for another, flipping run to run on identical code.
+
+A planner check must be asked in the regime whose answer you care about. The fix is to build that regime: a savepoint inserts 2,000 healthy rows — production's shape, a large ledger where problem rows are rare — `ANALYZE`s, EXPLAINs, and rolls back. Then the partial index is decisively cheapest and the answer is stable. Report the index actually chosen in the failure detail; "false" tells you nothing.
+
 ## A migration that touches hot tables: `SET LOCAL lock_timeout` first, strongest lock first (2026-09-17)
 
 Drizzle applies **every pending migration in one transaction**, and each lock is held until that transaction commits. `CREATE TABLE … REFERENCES stage_sends/contacts` takes a lock that conflicts with the drain's inserts and updates. `ALTER TABLE … ADD COLUMN` takes ACCESS EXCLUSIVE. A migration stuck waiting for one of those locks makes every later writer queue behind it.
@@ -2764,3 +2816,42 @@ Drizzle applies **every pending migration in one transaction**, and each lock is
 - Make the first statement `SET LOCAL lock_timeout = '5s';` so a blocked lock fails the migration and you retry, instead of stalling the app.
 - Take the strongest lock first. In `0181_conversion_events.sql`, the `offers` `ADD COLUMN` + index run before any `CREATE TABLE` with a foreign key, so `offers` never needs a lock upgrade while the FK locks on `stage_sends`/`contacts` are held.
 - A seed that `LEFT JOIN`s a lookup by name (e.g. an event-type key) needs `WHERE v.key IS NULL OR lookup.id IS NOT NULL`. Without it, a typo silently seeds a NULL reference, which for conversion mappings means a status-only rule.
+
+## A background job that needs its own `statement_timeout` needs its own connection (2026-09-21)
+
+Production's `statement_timeout` is **120000 ms** — a Supabase platform default (`pg_settings.source = 'configuration file'`), on every connection, with no `pg_db_role_setting` override for the `postgres` role. A job that legitimately runs longer has three ways to raise it, and for `REFRESH MATERIALIZED VIEW CONCURRENTLY` two of them do not work:
+
+- `SET LOCAL` inside a transaction — the trick [counted-clickers.ts](../lib/reporting/counted-clickers.ts) (300s) and [epc-monitors.ts](../lib/reporting/epc-monitors.ts) (240s) use. **Unavailable here:** `CONCURRENTLY` cannot run inside a transaction block.
+- A bare `SET` on the shared pool — **worthless.** `DATABASE_URL` is the *transaction* pooler (Supavisor :6543), which hands out a different backend per transaction, so the setting need not be there for the next statement.
+- A dedicated **session-mode** connection (same host and credentials, port **5432**) — one backend for the life of the client, so a plain `SET` sticks. This is the one that works. See [lib/reporting/refresh-session.ts](../lib/reporting/refresh-session.ts).
+
+Derive the session URL from `DATABASE_URL` (swap 6543 → 5432, drop `prepare=false`) rather than adding a second env var: one string to rotate, and no way for the two to drift. Open it per job, close it in a `finally`, and keep it scoped to the one caller — it is an exception, not a general-purpose "big query" pool.
+
+**Read the settings back, in a separate statement, and refuse to proceed if they did not stick.** Every quiet failure mode of this pattern — a pooler that swallowed the `SET`, a URL that stayed on :6543, a role-level override — ends with the job running at the *old* settings and the only symptom being the failure the change was supposed to prevent. The read-back is what makes that loud.
+
+Pick `statement_timeout` **below** the platform's own wall (`maxDuration` on Vercel). A database cancellation is SQLSTATE 57014: it throws, so the route catches it and alerts. A Vercel timeout kills the invocation with no catch and no alert. Ordering them the wrong way converts a loud failure into a silent one.
+
+## A sequence of independent refreshes must not share a failure (2026-09-21)
+
+Four `REFRESH`es as four bare `await`s look fine until one fails: the throw ends the invocation and **every statement behind it is skipped, on every run, until someone notices**. In `/api/cron/refresh-offer-group-report` the fragile view was #2 of 4, so one view's problem froze three of four reports on a twice-daily schedule.
+
+When N steps are genuinely independent, catch each one separately and let the loop continue — but **report, never swallow**: collect per-step outcomes, log each failure, and have the caller turn any failure into the alert it already uses plus a non-2xx, so the scheduler still flags red. The response should say which steps succeeded and which did not, not just "ok".
+
+The corollary is that each step must record its **own** success. `report_refresh_log` is stamped per view, immediately after that view's refresh, and not at all when it fails — which is what makes reading all four `refreshed_at` values a meaningful health check. A single end-of-run stamp, or a shared heartbeat, cannot tell you *which* view is stale. (The heartbeat in `cron_locks` stays all-or-nothing on purpose: it means "every report is fresh".)
+
+## A degraded-mode fallback must announce itself, or it is worse than no fallback (2026-09-21)
+
+When a fix depends on something that has never been exercised in production — a new port, a new host, a new credential — shipping it without a fallback risks a first unattended run that is *worse* than what it replaced. So fall back and keep working. But a **silent** fallback is the worst of the three outcomes, because it looks fixed and behaves exactly as before: nobody investigates a green run, and the failure the fix existed to prevent arrives anyway, now with the fix's name on it.
+
+`/api/cron/refresh-offer-group-report` falls back from its session-mode connection to the shared pool, and every fallback does three things, with no code path that skips them:
+
+1. **Alerts through the alerting the codebase already has** (`notifyTelegram`, Tier-2 — `🟠`) with a message that names the degradation in plain words: which protection is inactive, and what the consequence is (here: "back on the ~12.5s cliff", SQLSTATE 57014). "Fell back" alone is not a message — say what stops being true.
+2. **Alerts BEFORE doing the degraded work**, not after. A 180s refresh must not delay the warning, and an invocation killed mid-work must still have sent it.
+3. **Reports the degraded state in its return value**, so the response and the log line carry it too. An alert can be missed; a response cannot be, if someone is looking.
+
+Two details that are easy to get wrong:
+
+- **Report what is ACTUALLY in force, not what you intended.** Read the effective settings back out of `pg_settings` on the connection that did the work and return *those*. A response echoing the constants the code meant to apply is not evidence — it says the same thing whether or not the fix worked.
+- **A fallback onto a SHARED resource must not clean it up.** The dedicated connection is closed in a `finally`; the shared pool handed over on the fallback path must not be, or a cron job tears down the pool the whole app uses. Scope the teardown to the path that owns the thing.
+
+And test it with the notifier injected and the real credentials deleted from the environment — `notifyTelegram` reads `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` at call time, so `delete process.env.…` at the top of the suite makes an accidental real send impossible even if a spy is ever forgotten.

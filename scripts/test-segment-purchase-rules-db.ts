@@ -1,8 +1,10 @@
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql, type SQL } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { requirePreviewDb } from "./_require-preview-db";
 import { restedCount } from "@/lib/audience/pool-math";
 import { computeAudiencePools } from "@/lib/audience/pools";
 import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
@@ -44,12 +46,9 @@ import { seedConversionEvent } from "./_conversion-fixture";
 // stages, sends, contact groups, counted clickers and every conversion_events
 // row — lives inside the transaction that ALWAYS rolls back.
 
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The ./_require-preview-db import above is the refusal: an ALLOWLIST, so it
+// also stops a raw IP, a pooler alias or a future prod project, which a re-typed
+// "does the URL contain the prod ref?" test would wave straight through.
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -74,13 +73,8 @@ const uuidArray = (ids: string[]): SQL =>
   )}]::uuid[]`;
 
 async function main() {
-  const ref = /postgres\.([a-z0-9]+):/.exec(process.env.DATABASE_URL ?? "")?.[1] ?? "";
-  const host = ref === PREVIEW_REF ? "camman-v2 (preview)" : "UNKNOWN";
-  console.log(`Target DB: ${host}\n`);
-  if (host === "UNKNOWN") {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  // The guard already refused every other target; this is the banner, not the check.
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const tag = `pr3-${Date.now()}`;
   // Committed registry metadata — see the FIXTURE SPLIT note above.

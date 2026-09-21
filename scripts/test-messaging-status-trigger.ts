@@ -1,6 +1,7 @@
 // Verifies the contacts messaging_status landline-hard-stop trigger (migration
 // 0096) against the live schema. ALL work runs in a transaction that is ROLLED
 // BACK — no data is changed. Run: npx tsx scripts/test-messaging-status-trigger.ts
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });

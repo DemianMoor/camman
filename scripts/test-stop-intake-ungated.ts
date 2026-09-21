@@ -16,6 +16,7 @@
 // committed — the flags are restored by the rollback, not by a compensating
 // write that could itself fail.
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";

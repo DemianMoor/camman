@@ -34,13 +34,23 @@ import {
 //                                       ANOTHER org — not written (no debounce:
 //                                       a data-integrity signal)
 //   conversion_events:unmapped:<offer>:<keitaro type>
+//                                       ledger rows, all-time, with a NULL status:
+//                                       no mapping rule matched their Keitaro type
+//                                       at all — one key per combo
+//   conversion_events:status_only_unmapped:<offer>:<keitaro type>
 //                                       ledger rows, all-time, with a NULL event
-//                                       type or status — one key per combo
+//                                       type but a status: a STATUS-ONLY rule
+//                                       ("keep the existing event type, just move
+//                                       the status" — e.g. the seeded PsychoBook
+//                                       `rejected`) classified a conversion whose
+//                                       row did not exist yet, so there was no
+//                                       type to keep — one key per combo
 //   conversion_events:type_conflicts:<offer>:<locked>><conflicting>
 //                                       ledger rows whose Keitaro type now maps to
 //                                       a different event than their locked one —
 //                                       one key per combo
 //   conversion_events:combo_cap_exceeded:unmapped
+//   conversion_events:combo_cap_exceeded:status_only_unmapped
 //   conversion_events:combo_cap_exceeded:type_conflicts
 //                                       that kind has more than LEDGER_MAX_COMBOS
 //                                       problem combos
@@ -58,16 +68,29 @@ import {
 //
 // NOT alerted: unresolved conversions (no stage, no offers.keitaro_offer_id).
 // They include legitimate non-CamMan traffic; the poll response counts them.
-// Nor statusOnlyInBatch: a brand-new status-only row has a NULL event type, so
-// the table-level unmapped alert already reports it.
+// Nor statusOnlyInBatch on its own: a status-only mapping landing on a row that
+// ALREADY has a locked event type is the normal, correct case. Only the
+// first-sighting subset is a problem, and it is the status_only_unmapped kind.
 //
-// fetch_failed, invalid_rows, org_mismatch, projection_failed, the two
+// unmapped and status_only_unmapped PARTITION the rows the
+// conversion_events_unmapped_idx predicate covers (event_type_id IS NULL OR
+// status IS NULL): status IS NULL is the ordinary unmapped case (including a
+// typed row whose newest Keitaro type maps to nothing), and event_type_id IS
+// NULL AND status IS NOT NULL is the status-only first sighting. Disjoint and
+// total, so no problem row goes unreported and none pages twice. They are
+// separated because the fixes differ: the first needs a mapping row for the
+// type, the second needs a type on the postback that arrives FIRST (and the
+// rows already landed need their type set by SQL — a status-only rule will
+// never heal them).
+//
+// fetch_failed, invalid_rows, org_mismatch, projection_failed, the three
 // combo_cap_exceeded keys and the heartbeat are FIXED keys: one standing
 // condition = one page.
 //
-// unmapped and type_conflicts read the whole table, all-time, and are keyed per
-// PROBLEM COMBO. <offer> is the CamMan offer id, else k<Keitaro offer id>, else
-// none (see unmappedAlertKey / typeConflictAlertKey). On every tick:
+// unmapped, status_only_unmapped and type_conflicts read the whole table,
+// all-time, and are keyed per PROBLEM COMBO. <offer> is the CamMan offer id,
+// else k<Keitaro offer id>, else none (see unmappedAlertKey /
+// statusOnlyAlertKey / typeConflictAlertKey). On every tick:
 //   - each combo present pages ONCE, when it first appears or re-appears after
 //     clearing; more rows of the same combo never page again, so a steady stream
 //     of one unmapped type doesn't flood, and a row that turns into a problem by
@@ -99,16 +122,23 @@ export const CONVERSION_ALERT_KEYS = {
   // refusal or truncated window pages once and clears on the next run that
   // projected a finished window.
   projectionFailed: "conversion_events:projection_failed",
-  // One per combo kind. Deliberately NOT under either combo prefix below
-  // ("conversion_events:unmapped:" / "conversion_events:type_conflicts:"), so
-  // the stale-combo read never sees them and never clears them.
+  // One per combo kind. Deliberately NOT under any combo prefix below
+  // ("conversion_events:unmapped:" / ":status_only_unmapped:" /
+  // ":type_conflicts:"), so the stale-combo read never sees them and never
+  // clears them.
   unmappedComboCap: "conversion_events:combo_cap_exceeded:unmapped",
+  statusOnlyComboCap: "conversion_events:combo_cap_exceeded:status_only_unmapped",
   typeConflictComboCap: "conversion_events:combo_cap_exceeded:type_conflicts",
 } as const;
 
-// Per-combo keys: prefix + combo (unmappedAlertKey, typeConflictAlertKey).
+// Per-combo keys: prefix + combo (unmappedAlertKey, statusOnlyAlertKey,
+// typeConflictAlertKey). No prefix is a prefix of another — in particular
+// "conversion_events:status_only_unmapped:" does NOT start with
+// "conversion_events:unmapped:" — so the per-prefix reads and clears stay
+// disjoint.
 export const CONVERSION_ALERT_KEY_PREFIXES = {
   unmapped: "conversion_events:unmapped:",
+  statusOnlyUnmapped: "conversion_events:status_only_unmapped:",
   typeConflicts: "conversion_events:type_conflicts:",
 } as const;
 
@@ -144,6 +174,14 @@ export interface UnmappedCombo extends ComboOffer {
   sample_event_ids: string[]; // newest created first, at most MAX_SAMPLES
 }
 
+// A conversion first seen through a status-only mapping: it carries a status but
+// no event type, because there was no earlier row whose type it could keep. The
+// mapping rule is per offer or per NETWORK, so the network is named too — it is
+// where the missing config row usually belongs.
+export interface StatusOnlyCombo extends UnmappedCombo {
+  network_name: string | null; // the attributed offer's network, when there is one
+}
+
 export interface ConflictCombo extends ComboOffer {
   locked_event_key: string | null;
   conflicting_event_key: string | null;
@@ -157,6 +195,9 @@ export interface LedgerHealth {
   unmapped_total: number; // rows, across every combo
   unmapped_combo_count: number; // every combo, including any past the cap
   unmapped_combos: UnmappedCombo[]; // the LEDGER_MAX_COMBOS most recently changed
+  status_only_total: number;
+  status_only_combo_count: number;
+  status_only_combos: StatusOnlyCombo[];
   conflict_total: number;
   conflict_combo_count: number;
   conflict_combos: ConflictCombo[];
@@ -213,6 +254,13 @@ function offerKeyPart(c: ComboOffer): string {
 // docs/04-features/conversion-events.md.
 export function unmappedAlertKey(c: UnmappedCombo): string {
   return `${CONVERSION_ALERT_KEY_PREFIXES.unmapped}${offerKeyPart(c)}:${keyPart(c.keitaro_type)}`;
+}
+
+// Same combo shape as unmappedAlertKey — offer + Keitaro type — under its own
+// prefix. The network is NOT a key part: it is derived from the offer, so adding
+// it would only let a re-pointed offer silently move the key.
+export function statusOnlyAlertKey(c: StatusOnlyCombo): string {
+  return `${CONVERSION_ALERT_KEY_PREFIXES.statusOnlyUnmapped}${offerKeyPart(c)}:${keyPart(c.keitaro_type)}`;
 }
 
 export function typeConflictAlertKey(c: ConflictCombo): string {
@@ -298,7 +346,22 @@ function formatUnmappedAlert(c: UnmappedCombo, pastCap: string[]): string {
     `${PREFIX} ${c.total} conversion(s) for ${offerLabel(c)} with Keitaro type ${clip(c.keitaro_type)} have no event-type mapping (${c.last_24h} created in the last 24h).`,
     "They are stored but never counted as a purchase or as revenue.",
     samplesLine(c.sample_event_ids),
-    "Fix: add a conversion_event_mappings row for this offer or its network and this Keitaro type; rows inside the 7-day live window heal on the next tick. A row first seen through a status-only rule (e.g. rejected) has no event type to heal into and needs one set by SQL. See docs/04-features/conversion-events.md.",
+    "Fix: add a conversion_event_mappings row for this offer or its network and this Keitaro type; rows inside the 7-day live window heal on the next tick. See docs/04-features/conversion-events.md.",
+    ...pastCap,
+  ].join("\n");
+}
+
+function networkClause(c: StatusOnlyCombo): string {
+  return c.network_name === null ? "" : `, network ${clip(c.network_name)}`;
+}
+
+function formatStatusOnlyAlert(c: StatusOnlyCombo, pastCap: string[]): string {
+  const type = clip(c.keitaro_type);
+  return [
+    `${PREFIX} ${c.total} conversion(s) for ${offerLabel(c)}${networkClause(c)} were FIRST seen as Keitaro type ${type}, which is mapped status-only — it sets the status and keeps the conversion's existing event type. There was no earlier row, so there was no type to keep and they have none (${c.last_24h} created in the last 24h).`,
+    "They are stored with a status, but with no event type they count as nothing: not a purchase, not a registration, no revenue. A later postback will NOT fix them — a status-only rule has no event type to heal them with.",
+    samplesLine(c.sample_event_ids),
+    `Fix: this is a missing config row, not a bug. Give the Keitaro type that should arrive FIRST for this offer or its network a conversion_event_mappings row that names an event_type_id, so the conversion is typed on its first postback. If ${type} genuinely is the first postback here, decide which event these conversions are and set their event_type_id by SQL. Do NOT put an event type on the ${type} rule itself unless a first ${type} always means that one event — on an existing row it would be recorded as an event-type conflict instead. See docs/04-features/conversion-events.md.`,
     ...pastCap,
   ].join("\n");
 }
@@ -445,7 +508,7 @@ export function decideIngestAlerts(
 }
 
 // Decisions from the whole-ledger combo read (all-time, all orgs) and the keys
-// currently firing under the two combo prefixes.
+// currently firing under the three combo prefixes.
 //   each kind's combo_cap_exceeded key → firing while that kind has more than
 //     LEDGER_MAX_COMBOS combos, ok at or below it.
 //   every listed combo → firing on its key. notifyOnTransition pages only on the
@@ -453,24 +516,35 @@ export function decideIngestAlerts(
 //   a firing key under a prefix that no listed combo builds → ok (cleared, so
 //     the combo pages again if it comes back) — unless that kind is past the
 //     cap, where no combo key of that kind is cleared.
-// Keys outside both prefixes, the cap keys included, get no stale-key decision.
+// Keys outside all three prefixes, the cap keys included, get no stale-key decision.
 export function decideLedgerAlerts(h: LedgerHealth, firingKeys: readonly string[]): ConversionAlertDecision[] {
   const P = CONVERSION_ALERT_KEY_PREFIXES;
   const K = CONVERSION_ALERT_KEYS;
   const unmappedPastCap = pastCapLine("unmapped", h.unmapped_combo_count);
+  const statusOnlyPastCap = pastCapLine("status-only unmapped", h.status_only_combo_count);
   const conflictPastCap = pastCapLine("type-conflict", h.conflict_combo_count);
   const present = new Map<string, string>(); // key → page text
   for (const c of h.unmapped_combos) present.set(unmappedAlertKey(c), formatUnmappedAlert(c, unmappedPastCap));
+  for (const c of h.status_only_combos) present.set(statusOnlyAlertKey(c), formatStatusOnlyAlert(c, statusOnlyPastCap));
   for (const c of h.conflict_combos) present.set(typeConflictAlertKey(c), formatTypeConflictAlert(c, conflictPastCap));
+  // Checked longest-prefix first: ":status_only_unmapped:" does not start with
+  // ":unmapped:", but keep the three arms independent rather than ordered.
   const clearable = (key: string) =>
     (key.startsWith(P.unmapped) && unmappedPastCap.length === 0) ||
+    (key.startsWith(P.statusOnlyUnmapped) && statusOnlyPastCap.length === 0) ||
     (key.startsWith(P.typeConflicts) && conflictPastCap.length === 0);
   return [
     comboCapDecision(
       K.unmappedComboCap,
       "unmapped",
       h.unmapped_combo_count,
-      "Fix: list every combo (conversion_events rows WHERE event_type_id IS NULL OR status IS NULL, grouped by offer_id, keitaro_offer_id and keitaro_type) and add the missing conversion_event_mappings rows. See docs/04-features/conversion-events.md.",
+      "Fix: list every combo (conversion_events rows WHERE status IS NULL, grouped by offer_id, keitaro_offer_id and keitaro_type) and add the missing conversion_event_mappings rows. See docs/04-features/conversion-events.md.",
+    ),
+    comboCapDecision(
+      K.statusOnlyComboCap,
+      "status-only unmapped",
+      h.status_only_combo_count,
+      "Fix: list every combo (conversion_events rows WHERE event_type_id IS NULL AND status IS NOT NULL, grouped by offer_id, keitaro_offer_id and keitaro_type). Each is a conversion first seen through a status-only mapping rule, so give the Keitaro type that should arrive first a conversion_event_mappings row with an event_type_id, and set the stored rows' event_type_id by SQL. See docs/04-features/conversion-events.md.",
     ),
     comboCapDecision(
       K.typeConflictComboCap,
@@ -493,14 +567,30 @@ export function decideLedgerAlerts(h: LedgerHealth, firingKeys: readonly string[
 // by max(updated_at) DESC — set on insert and on every ingest UPDATE, so a new
 // combo ranks first even when it is the smallest, including one an UPDATE
 // creates — then by every GROUP BY column, so the order is total. Each WHERE is
-// written EXACTLY as its partial index's predicate (migration 0181), so the
+// written so it IMPLIES its partial index's predicate (migration 0181), so the
 // planner can read only that small index's rows however large the ledger grows.
+// conversion_events_unmapped_idx is predicated on "event_type_id IS NULL OR
+// status IS NULL" and serves both arms of the split (each arm implies one
+// disjunct); conversion_events_type_conflict_idx's predicate is used verbatim.
+// scripts/test-conversion-monitor-db.ts proves each statement against its index.
 // The per-combo sample array aggregates every row of its combo before slicing:
 // fine for problem rows, which the partial index keeps few. <offer> is offer_id,
 // else keitaro_offer_id (the CASE drops the Keitaro id when a CamMan offer is
 // set), matching offerKeyPart. Exported so scripts/test-conversion-monitor-db.ts
 // can EXPLAIN the very statements readLedgerHealth runs, and
 // scripts/test-conversion-monitor.ts can check their ranking.
+// The three problem predicates, as fragments the statements below are built
+// from, so a test can EXPLAIN a predicate on its own and know it is the very one
+// the statement runs. Each is written to IMPLY its partial index's predicate:
+// UNMAPPED_WHERE and STATUS_ONLY_WHERE partition
+// conversion_events_unmapped_idx's "event_type_id IS NULL OR status IS NULL"
+// (disjoint, and together exactly it); CONFLICT_WHERE is
+// conversion_events_type_conflict_idx's predicate verbatim. `ce` is the alias
+// every statement gives conversion_events.
+export const UNMAPPED_WHERE = sql`ce.status IS NULL`;
+export const STATUS_ONLY_WHERE = sql`ce.event_type_id IS NULL AND ce.status IS NOT NULL`;
+export const CONFLICT_WHERE = sql`ce.conflicting_event_type_id IS NOT NULL`;
+
 export const UNMAPPED_COMBOS_SQL = sql`
   SELECT ce.offer_id,
          CASE WHEN ce.offer_id IS NULL THEN ce.keitaro_offer_id END AS keitaro_offer_id,
@@ -513,7 +603,33 @@ export const UNMAPPED_COMBOS_SQL = sql`
          (sum(count(*)) OVER ())::int AS row_total
   FROM conversion_events ce
   LEFT JOIN offers o ON o.id = ce.offer_id
-  WHERE ce.event_type_id IS NULL OR ce.status IS NULL
+  WHERE ${UNMAPPED_WHERE}
+  GROUP BY 1, 2, 3
+  ORDER BY max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3
+  LIMIT ${LEDGER_MAX_COMBOS}`;
+
+// The status-only first-sighting kind: a status but no event type. Together with
+// UNMAPPED_COMBOS_SQL's "status IS NULL" this partitions the rows
+// conversion_events_unmapped_idx covers, and each arm on its own still implies
+// that index's "event_type_id IS NULL OR status IS NULL" predicate, so both are
+// answerable from it (no new index, no migration). Same shape and ranking as
+// UNMAPPED_COMBOS_SQL, plus the attributed offer's network — the mapping rule
+// the operator has to add is usually the network's.
+export const STATUS_ONLY_COMBOS_SQL = sql`
+  SELECT ce.offer_id,
+         CASE WHEN ce.offer_id IS NULL THEN ce.keitaro_offer_id END AS keitaro_offer_id,
+         ce.keitaro_type,
+         min(o.name) AS offer_name,
+         min(n.name) AS network_name,
+         count(*)::int AS total,
+         count(*) FILTER (WHERE ce.created_at >= now() - interval '24 hours')::int AS last_24h,
+         (array_agg(ce.keitaro_event_id ORDER BY ce.created_at DESC, ce.id DESC))[1:${MAX_SAMPLES}] AS sample_event_ids,
+         count(*) OVER ()::int AS combo_count,
+         (sum(count(*)) OVER ())::int AS row_total
+  FROM conversion_events ce
+  LEFT JOIN offers o ON o.id = ce.offer_id
+  LEFT JOIN affiliate_networks n ON n.id = o.network_id
+  WHERE ${STATUS_ONLY_WHERE}
   GROUP BY 1, 2, 3
   ORDER BY max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3
   LIMIT ${LEDGER_MAX_COMBOS}`;
@@ -534,7 +650,7 @@ export const CONFLICT_COMBOS_SQL = sql`
   LEFT JOIN offers o ON o.id = ce.offer_id
   LEFT JOIN event_types lt ON lt.id = ce.event_type_id
   LEFT JOIN event_types mt ON mt.id = ce.conflicting_event_type_id
-  WHERE ce.conflicting_event_type_id IS NOT NULL
+  WHERE ${CONFLICT_WHERE}
   GROUP BY 1, 2, 3, 4
   ORDER BY max(ce.updated_at) DESC, 1 NULLS LAST, 2 NULLS LAST, 3, 4
   LIMIT ${LEDGER_MAX_COMBOS}`;
@@ -545,9 +661,10 @@ type Send = (text: string) => Promise<boolean>;
 
 type ComboTotals = { combo_count: number; row_total: number };
 
-// Whole ledger, all orgs (the alerts are global). Two small reads per cron tick.
+// Whole ledger, all orgs (the alerts are global). Three small reads per cron tick.
 export async function readLedgerHealth(dbc: DbOrTx): Promise<LedgerHealth> {
   const unmapped = (await dbc.execute(UNMAPPED_COMBOS_SQL)) as unknown as (UnmappedCombo & ComboTotals)[];
+  const statusOnly = (await dbc.execute(STATUS_ONLY_COMBOS_SQL)) as unknown as (StatusOnlyCombo & ComboTotals)[];
   const conflicts = (await dbc.execute(CONFLICT_COMBOS_SQL)) as unknown as (ConflictCombo & ComboTotals)[];
   return {
     unmapped_total: unmapped[0]?.row_total ?? 0,
@@ -556,6 +673,18 @@ export async function readLedgerHealth(dbc: DbOrTx): Promise<LedgerHealth> {
       offer_id: r.offer_id,
       keitaro_offer_id: r.keitaro_offer_id,
       offer_name: r.offer_name,
+      keitaro_type: r.keitaro_type,
+      total: r.total,
+      last_24h: r.last_24h,
+      sample_event_ids: r.sample_event_ids,
+    })),
+    status_only_total: statusOnly[0]?.row_total ?? 0,
+    status_only_combo_count: statusOnly[0]?.combo_count ?? 0,
+    status_only_combos: statusOnly.map((r) => ({
+      offer_id: r.offer_id,
+      keitaro_offer_id: r.keitaro_offer_id,
+      offer_name: r.offer_name,
+      network_name: r.network_name,
       keitaro_type: r.keitaro_type,
       total: r.total,
       last_24h: r.last_24h,
@@ -577,14 +706,16 @@ export async function readLedgerHealth(dbc: DbOrTx): Promise<LedgerHealth> {
   };
 }
 
-// The keys currently firing under the two combo prefixes. starts_with needs no
-// escaping (both prefixes contain "_", a LIKE wildcard).
+// The keys currently firing under the three combo prefixes. starts_with needs no
+// escaping (every prefix contains "_", a LIKE wildcard).
 async function readFiringLedgerKeys(dbc: DbOrTx): Promise<string[]> {
   const P = CONVERSION_ALERT_KEY_PREFIXES;
   const rows = (await dbc.execute(sql`
     SELECT alert_key FROM alert_state
     WHERE state = 'firing'
-      AND (starts_with(alert_key, ${P.unmapped}::text) OR starts_with(alert_key, ${P.typeConflicts}::text))
+      AND (starts_with(alert_key, ${P.unmapped}::text)
+        OR starts_with(alert_key, ${P.statusOnlyUnmapped}::text)
+        OR starts_with(alert_key, ${P.typeConflicts}::text))
   `)) as unknown as { alert_key: string }[];
   return rows.map((r) => r.alert_key);
 }

@@ -11,6 +11,7 @@
 //
 // Run (inline env, Git Bash):
 //   PROVIDER_CREDENTIALS_KEY="..." DATABASE_URL="..." npx tsx scripts/test-second-account-guard.ts
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import assert from "node:assert";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";

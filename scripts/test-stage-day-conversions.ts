@@ -1,4 +1,5 @@
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -7,6 +8,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 import { db } from "../db/client";
+import { requirePreviewDb } from "./_require-preview-db";
 import { seedConversionEvent } from "./_conversion-fixture";
 import { decideProjectionAlert, projectionOutcomeFor } from "../lib/conversions/monitor";
 import {
@@ -26,11 +28,9 @@ import { approvedRevenueClause, purchasedClause, rescueSendIds } from "../lib/sa
 // transaction that ALWAYS rolls back. PREVIEW DB ONLY:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //     npx tsx scripts/test-stage-day-conversions.ts
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) {
-  console.log("Refusing to run against PROD. Point DATABASE_URL at camman-v2 (.env.demo).");
-  process.exit(1);
-}
+// The ./_require-preview-db import above is the refusal: an ALLOWLIST, so it
+// also stops a raw IP, a pooler alias or a future prod project, which a re-typed
+// "does the URL contain the prod ref?" test would wave straight through.
 
 let passed = 0;
 let failed = 0;
@@ -138,12 +138,8 @@ async function throwPathIssuesNoAdvance() {
 }
 
 async function main() {
-  const host = process.env.DATABASE_URL?.includes("fdzxzxayhknywvmrhjcj") ? "camman-v2 (preview)" : "UNKNOWN";
-  console.log(`Target DB: ${host}\n`);
-  if (host === "UNKNOWN") {
-    console.log("FAIL: DATABASE_URL is not the preview project.");
-    process.exit(1);
-  }
+  // The guard already refused every other target; this is the banner, not the check.
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   console.log("route guards (source assertions)");
   routeGuards();

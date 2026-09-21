@@ -7,6 +7,7 @@
 // webhook vs "Stop - 1" via CDR). Rolled-back transaction.
 // Run: npx tsx scripts/test-ahoi-optout-dedup.ts
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";

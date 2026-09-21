@@ -10,6 +10,7 @@
 //
 // Run: npx tsx scripts/test-lane-send.ts
 import "./_env-preload"; // MUST be first — loads .env.local before db/client init
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 

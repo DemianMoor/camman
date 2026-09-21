@@ -23,6 +23,7 @@
 // real drain would send real SMS (owner-gated). Quiet-hours code is untouched.
 //
 // Run: npx tsx scripts/test-cancel-rematerialize.ts
+import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });

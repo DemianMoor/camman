@@ -1,6 +1,6 @@
 # Reports Rollup
 
-_Last updated: 2026-09-20_
+_Last updated: 2026-09-21_
 
 > **⚠️ SOURCE CHANGE (2026-07-20) — read this first.** The five `/reports` tabs
 > were re-sourced to **match the Overview (Keitaro) tab exactly**. On first live
@@ -224,7 +224,7 @@ Guard: [scripts/verify-overview-phone-line.ts](../../scripts/verify-overview-pho
 
 ## Verification
 
-- **Overview parity:** [`scripts/test-stage-funnel.ts`](../../scripts/test-stage-funnel.ts) — the extracted helper reproduces Overview to the cent (Jul 18–19: Clickers 2,144, Redirect 257, Sales 32, Revenue $2,040, Cost $747.53, Profit $1,292.47, Sent 72,408) and `sum(stages) == grand`.
+- **Stage funnel (Overview's numbers):** [`scripts/test-stage-funnel.ts`](../../scripts/test-stage-funnel.ts) — **preview-only** (imports `_require-preview-db`, so a bare run refuses instead of reading production) and **builds its own world**: a throwaway org with committed fixtures in a closed window (2026-04-14..15), torn down by org_id with a post-teardown count of 0. Click rows are seeded in the aggregate poll's shape; the conversion columns come from real `conversion_events` rows through the real projection (`syncStageDayConversions`). It proves `getStageMetricsInRange()` (a) returns exactly the seeded grand totals (E1–E12: clickers 72, redirect 22, sales 8 incl. a manual top-up of 4, approved revenue $100, pending $25, unmapped 1, events `{purchase:4, registration:2}`, opt-outs 3, sent 13, cost $6.40; a rejected purchase, a failed send and a decoy day outside the window must not count) and (b) foots Σ stages == grand per metric and per event key (F1–F10). Run with the `.env.demo` `DATABASE_URL`. (Until 2026-09-21 it read production and asserted floors from a Jul 18–19 Overview screenshot, which kept it permanently red on camman-v2.)
 - **Reports:** [`scripts/test-performance-report.ts`](../../scripts/test-performance-report.ts) — number/offer/sequence totals **equal** Overview and rows reconcile exactly; group rows reconcile to the totals; hourly buckets by activity time. Plus `tsc` + `next build` (routes compile, client/server boundary clean).
 - **Overview campaign cell:** [`scripts/verify-overview-phone-line.ts`](../../scripts/verify-overview-phone-line.ts) — `formatPhoneLast4` unit checks + the live endpoint's `phones` field vs `provider_phones` in the DB (both groupings).
 - **Legacy rollup:** [`scripts/test-report-rollup.ts`](../../scripts/test-report-rollup.ts) still validates the (now-unused) Phase-1 rollup aggregates.

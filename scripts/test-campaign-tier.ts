@@ -1,7 +1,18 @@
 import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
+
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
+
+// ⚠️ This script INSERTS fixtures (brands, campaigns, contacts, clicks, ledger
+// rows) and deletes them again — it is NOT transaction-wrapped. `.env.local` is
+// PRODUCTION, and dotenv above loads it whenever DATABASE_URL is not already
+// set, so the refusal is not optional. Run it as:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/test-campaign-tier.ts
+// The refusal itself is the `_require-preview-db` import at the top — an
+// allowlist, and ahead of the dotenv load, so an unset DATABASE_URL is refused
+// rather than quietly resolved to `.env.local` (i.e. production).
 
 import { randomUUID } from "node:crypto";
 
@@ -9,7 +20,12 @@ import { sql as drizzleSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import { campaignTierExpr } from "../lib/campaign-tier";
+import {
+  campaignTierExpr,
+  EXIT_TIER,
+  TIER_CLICKED,
+  TIER_REGISTERED,
+} from "../lib/campaign-tier";
 import { seedConversionEvent } from "./_conversion-fixture";
 
 // Unit test for campaignTierExpr() against SEEDED synthetic data — the live
@@ -17,22 +33,35 @@ import { seedConversionEvent } from "./_conversion-fixture";
 // and torn down at the end. No API, no auth: seed → run the real fragment →
 // assert → delete everything created.
 //
-// Covers: no activity → 0; clicked → 1; clicked+reached → 2 (high-water);
-// reached+sale → 3; dirty (bot/prefetch/suspect) click only → 0; activity in a
-// DIFFERENT campaign → 0 here (scoping); clicked here + sale elsewhere → 1 here.
-// Plus: an 'unknown'-classification click counts as clean (→ 1), and the
-// cross-campaign contacts read their real tier in the OTHER campaign.
+// ── THE SCALE THIS FILE ASSERTS (Phase 4, migration 0184) ───────────────────
+//   0 ignored · 1 clicked · 2 reached offer · 3 REGISTERED · 4 PURCHASED (exit)
+// Registered is the new tier and the purchased EXIT moved from 3 to 4, so that
+// MAX(tier) still ranks a buyer above a registrant. Assertions below name
+// `EXIT_TIER` / `TIER_REGISTERED` rather than the digit, so the scale can move
+// again without leaving this suite green by accident.
 //
-// ⭐ AND FOUR CONTROLS THAT TELL THE LEDGER READER FROM THE OLD ONE. Tier 3 now
-// comes from conversion_events, not stage_sends.sale_status. A fixture that
-// writes BOTH on the same contact reads as tier 3 under either source, so it
-// proves nothing about the switch. These four write exactly one side:
-//   ledger_only_pending  — ledger purchase (pending), sale_status NULL  → 3
+// Covers: no activity → 0; clicked → 1; clicked+reached → 2 (high-water);
+// reached + counted purchase → EXIT_TIER; dirty (bot/prefetch/suspect) click
+// only → 0; activity in a DIFFERENT campaign → 0 here (scoping); clicked here +
+// sale elsewhere → 1 here. Plus: an 'unknown'-classification click counts as
+// clean (→ 1), and the cross-campaign contacts read their real tier in the
+// OTHER campaign.
+//
+// ⭐ AND SIX CONTROLS THAT TELL THE LEDGER READER FROM THE OLD ONE, AND THE
+// REGISTERED BRANCH FROM THE PURCHASED ONE. The exit tier comes from
+// conversion_events, not stage_sends.sale_status. A fixture that writes BOTH on
+// the same contact reads the same under either source, so it proves nothing
+// about the switch. Each of these writes exactly ONE side:
+//   ledger_only_pending  — ledger purchase (pending), sale_status NULL  → 4
 //   legacy_only          — sale_status 'lead' + converted_at, no ledger → 0
 //   rejected_ledger      — ledger purchase status 'rejected'            → 0
-//   registration_ledger  — ledger registration + a legacy 'lead' row    → 0
-// The last one is the bug that motivated the whole phase: a $0 registration
-// arriving as a 'lead' postback used to make the contact a converted buyer.
+//   registration_ledger  — ledger registration + a legacy 'lead' row    → 3
+//   registered_only      — ledger registration, nothing else            → 3
+//   registered_rejected  — registration + a REJECTED purchase           → NOT 3
+// `registration_ledger` is the bug that motivated the whole phase: a $0
+// registration arriving as a 'lead' postback used to make the contact a
+// converted buyer. It is two-sided by construction, so `legacy_only` is the
+// one-sided control that keeps "the legacy column is not read" provable.
 
 async function main() {
   const dbUrl = process.env.DATABASE_URL;
@@ -139,15 +168,19 @@ async function main() {
       "clicked", // clean click in A → 1
       "clicked_unknown", // 'unknown'-class click in A → 1 (clean)
       "clicked_reached", // clean click + reached in A → 2
-      "reached_sale", // reached + sale in A → 3
+      "reached_sale", // reached + sale in A → 4 (the exit)
       "dirty_only", // bot/prefetch/suspect clicks in A → 0
-      "click_here_sale_b", // clean click in A + sale in B → 1 here / 3 in B
-      "other_campaign", // reached + sale in B only → 0 in A / 3 in B
-      // ⭐ the four one-sided controls (see the header note)
-      "ledger_only_pending", // ledger purchase (pending), sale_status NULL → 3
+      "click_here_sale_b", // clean click in A + sale in B → 1 here / 4 in B
+      "other_campaign", // reached + sale in B only → 0 in A / 4 in B
+      // ⭐ the source controls (see the header note)
+      "ledger_only_pending", // ledger purchase (pending), sale_status NULL → 4
       "legacy_only", // sale_status 'lead' + converted_at, NO ledger row → 0
       "rejected_ledger", // ledger purchase, status 'rejected' → 0
-      "registration_ledger", // ledger registration + a legacy 'lead' row → 0
+      "registration_ledger", // ledger registration + a legacy 'lead' row → 3
+      // ⭐ PHASE 4 CONTROLS. One-sided: a registration ledger row and nothing
+      // else, so neither bar can be satisfied by the legacy column.
+      "registered_only", // registration, no purchase → 3
+      "registered_rejected", // registration + REJECTED purchase → NOT 3
     ];
     for (const role of roles) {
       const phone = `${phonePrefix}${roles.indexOf(role)}`;
@@ -270,6 +303,35 @@ async function main() {
       status: "approved",
     });
 
+    // ⭐ PHASE 4 CONTROLS, both ONE-SIDED (sale_status stays NULL on both).
+    //
+    // `registered_rejected` also gets a clean CLICK, so the bar can assert where
+    // the eviction lands instead of merely "not 3": with no other signal the
+    // contact would read 0, which a contact with no fixture at all also reads —
+    // the assertion would then pass for a contact this script never seeded.
+    await seedSend(campA.campaignId, campA.stageId, cid.registered_only, false, null, {
+      eventKey: "registration",
+      status: "approved",
+    });
+    await seedClick(campA.campaignId, campA.stageId, cid.registered_rejected, "human");
+    await seedSend(campA.campaignId, campA.stageId, cid.registered_rejected, false, null, {
+      eventKey: "registration",
+      status: "approved",
+    });
+    // The second ledger row for the same contact. Both tier branches scope on
+    // conversion_events.campaign_id + contact_id (never through stage_sends), so
+    // this row needs no send of its own — and the cleanup below finds it by
+    // campaign_id like every other fixture row.
+    await seedConversionEvent(db, {
+      orgId,
+      contactId: cid.registered_rejected,
+      campaignId: campA.campaignId,
+      stageId: campA.stageId,
+      eventKey: "purchase",
+      status: "rejected",
+      revenue: 0,
+    });
+
     // ====================================================================
     // ASSERTIONS — campaign A (this campaign)
     // ====================================================================
@@ -285,8 +347,9 @@ async function main() {
       (await tierFor(campA.campaignId, cid.clicked_reached)) === 2,
     );
     check(
-      "reached + sale → 3 (high-water)",
-      (await tierFor(campA.campaignId, cid.reached_sale)) === 3,
+      `reached + counted purchase ⇒ ${EXIT_TIER} (the exit)`,
+      (await tierFor(campA.campaignId, cid.reached_sale)) === EXIT_TIER,
+      `got ${await tierFor(campA.campaignId, cid.reached_sale)}`,
     );
     check(
       "bot/prefetch/suspect click only → 0 (not counted as clicked)",
@@ -297,8 +360,8 @@ async function main() {
       (await tierFor(campA.campaignId, cid.other_campaign)) === 0,
     );
     check(
-      "clicked here + sale elsewhere → 1 here, not 3",
-      (await tierFor(campA.campaignId, cid.click_here_sale_b)) === 1,
+      `clicked here + purchase elsewhere ⇒ 1 here, not ${EXIT_TIER}`,
+      (await tierFor(campA.campaignId, cid.click_here_sale_b)) === TIER_CLICKED,
     );
 
     // ====================================================================
@@ -307,12 +370,15 @@ async function main() {
     // ====================================================================
     console.log("\nCampaign A — ledger vs legacy source controls:");
     check(
-      "⭐ LEDGER-ONLY purchase (pending, sale_status NULL) → 3",
-      (await tierFor(campA.campaignId, cid.ledger_only_pending)) === 3,
+      `⭐ LEDGER-ONLY purchase (pending, sale_status NULL) → ${EXIT_TIER}`,
+      (await tierFor(campA.campaignId, cid.ledger_only_pending)) === EXIT_TIER,
       `got ${await tierFor(campA.campaignId, cid.ledger_only_pending)}`,
     );
+    // The ONE-SIDED half of the registration control below: same legacy column,
+    // no ledger row at all. It is what keeps "the legacy column is not read"
+    // provable now that its two-sided sibling expects a non-zero tier.
     check(
-      "⭐ LEGACY-ONLY row (sale_status 'lead' + converted_at, no ledger) → 0",
+      "⭐ LEGACY-ONLY 'lead' row, no ledger row at all → 0 — the legacy column is still not read",
       (await tierFor(campA.campaignId, cid.legacy_only)) === 0,
       `got ${await tierFor(campA.campaignId, cid.legacy_only)}`,
     );
@@ -321,10 +387,33 @@ async function main() {
       (await tierFor(campA.campaignId, cid.rejected_ledger)) === 0,
       `got ${await tierFor(campA.campaignId, cid.rejected_ledger)}`,
     );
+    // Phase 3's point here was that the legacy sale_status column is NOT read.
+    // Phase 4's is that a registration is its own tier. One bar can no longer
+    // carry both, because THIS fixture writes BOTH sides — a registration ledger
+    // row AND a legacy 'lead' row on the same contact — so once the expectation
+    // flips off 0 it can no longer tell the new tier-3 branch from the old
+    // legacy reader. The one-sided half is the `legacy_only` bar above; this one
+    // keeps the two-sided fixture and asserts the Phase 4 meaning. Together they
+    // still fail if anyone reintroduces a sale_status read (this one would go to
+    // EXIT_TIER, `legacy_only` would leave 0), and this one also fails if the
+    // tier-3 branch goes missing.
     check(
-      "⭐ REGISTRATION in the ledger next to a legacy 'lead' row → 0, not 3",
-      (await tierFor(campA.campaignId, cid.registration_ledger)) === 0,
+      `⭐ REGISTRATION ledger row + a legacy 'lead' row ⇒ ${TIER_REGISTERED} (Registered), NOT ${EXIT_TIER}`,
+      (await tierFor(campA.campaignId, cid.registration_ledger)) === TIER_REGISTERED,
       `got ${await tierFor(campA.campaignId, cid.registration_ledger)}`,
+    );
+
+    // ⭐ PHASE 4 CONTROLS — one-sided, no legacy column written at all.
+    console.log("\nCampaign A — Registered (tier 3) controls:");
+    check(
+      `⭐ registration only ⇒ tier ${TIER_REGISTERED} (Registered)`,
+      (await tierFor(campA.campaignId, cid.registered_only)) === TIER_REGISTERED,
+      `got ${await tierFor(campA.campaignId, cid.registered_only)}`,
+    );
+    check(
+      `⭐ registration + REJECTED purchase ⇒ NOT ${TIER_REGISTERED}, falls back to the click tier ${TIER_CLICKED}`,
+      (await tierFor(campA.campaignId, cid.registered_rejected)) === TIER_CLICKED,
+      `got ${await tierFor(campA.campaignId, cid.registered_rejected)}`,
     );
 
     // ====================================================================
@@ -332,12 +421,14 @@ async function main() {
     // ====================================================================
     console.log("\nCampaign B (the other campaign):");
     check(
-      "sale-in-B contact → 3 in B (scoping reads the other side)",
-      (await tierFor(campB.campaignId, cid.click_here_sale_b)) === 3,
+      `purchase-in-B contact → ${EXIT_TIER} in B (scoping reads the other side)`,
+      (await tierFor(campB.campaignId, cid.click_here_sale_b)) === EXIT_TIER,
+      `got ${await tierFor(campB.campaignId, cid.click_here_sale_b)}`,
     );
     check(
-      "reached+sale-in-B contact → 3 in B",
-      (await tierFor(campB.campaignId, cid.other_campaign)) === 3,
+      `reached + purchase-in-B contact → ${EXIT_TIER} in B`,
+      (await tierFor(campB.campaignId, cid.other_campaign)) === EXIT_TIER,
+      `got ${await tierFor(campB.campaignId, cid.other_campaign)}`,
     );
     check(
       "A-only clicker → 0 in B (scoping)",

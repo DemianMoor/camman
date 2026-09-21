@@ -12,8 +12,9 @@ type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 // ⚠️ THIS DELIBERATELY ADDS NO NEW CONCEPT. campaign_stages already carries
 // parent_stage_id and behavioral_tier, and 536 lane children are live on regular
 // campaigns. lib/sends/recipients.ts already selects a lane by
-// coalesce(tier,0) = behavioral_tier with an explicit <> 3 guard, so "a buyer
-// never appears in a lane" is already enforced upstream of anything here.
+// coalesce(tier,0) = behavioral_tier with an explicit `<> EXIT_TIER` guard
+// (tier 4 since Phase 4 renumbered the scale), so "a buyer never appears in a
+// lane" is already enforced upstream of anything here.
 // Ignored / Clicked / Offer ARE tiers 0 / 1 / 2. A drip-only children table
 // would have duplicated all of that and drifted from it.
 //

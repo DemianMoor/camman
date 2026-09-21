@@ -1,5 +1,5 @@
 import "./_env-preload";
-import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -26,9 +26,6 @@ import { db, sql as pgConn } from "@/db/client";
 //    today, or this migration silently reorders every other consumer of the
 //    lookup queue. So the test claims from a mixed queue and compares the bulk
 //    subsequence against the same query with the OLD ordering.
-
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -61,13 +58,7 @@ async function expectReject(
 }
 
 async function main() {
-  const url = process.env.DATABASE_URL ?? "";
-  const ref = /postgres\.([a-z0-9]+):/.exec(url)?.[1] ?? "(unknown)";
-  if (ref === PROD_REF) {
-    console.error(`REFUSING to run against PRODUCTION (${PROD_REF}). This test writes.`);
-    process.exit(1);
-  }
-  console.log(`target project ref: ${ref}${ref === PREVIEW_REF ? "  (camman-v2 preview ✓)" : ""}`);
+  console.log(`Target DB: ${requirePreviewDb().label}`);
 
   console.log("\nschema (0155-0158):");
   const t = (await db.execute(sql`

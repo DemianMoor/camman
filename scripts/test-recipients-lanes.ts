@@ -1,4 +1,5 @@
 import "./_require-preview-db"; // MUST be first — refuses any target but the preview DB
+
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
@@ -9,16 +10,39 @@ import { sql as drizzleSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
+import { LANE_TIER_VALUES } from "../lib/campaign-tier";
 import { stageRecipientsSql, type StageRecipientFilters } from "../lib/sends/recipients";
 
 import { seedConversionEvent } from "./_conversion-fixture";
 
 // Integration test for the behavioral-lane overlays in stageRecipientsSql().
 //
+// ── THE SCALE (Phase 4) ─────────────────────────────────────────────────────
+// 0 ignored · 1 clicked · 2 reached offer · 3 REGISTERED · 4 PURCHASED (exit).
+// The lanes are LANE_TIER_VALUES (0-3); tier 4 exits and gets no lane. The lane
+// set below is BUILT by iterating that constant, so a tier added to the scale
+// arrives here as an extra lane and trips the accounting bar rather than going
+// silently unexercised.
+//
+// ⚠️ `received()`'s `sale` argument is TWO-SIDED: it writes stage_sends.
+// sale_status AND a ledger purchase row. Harmless for the lane overlays, which
+// read the ledger only — but do NOT copy that pattern. The `reg` role below is
+// seeded one-sided on purpose (a registration ledger row, sale_status left
+// NULL), so its bars cannot be satisfied by the legacy column.
+//
 // TEST-DATA SAFETY: every row is seeded under a DEDICATED throwaway organization
 // whose name carries the marker below. Teardown is scoped to that org_id ONLY
 // (asserted to match the marker first) — never a broad phone/name prefix. Real-
 // data table counts are captured before seeding and re-checked after teardown.
+// ⚠️ `.env.local` is PRODUCTION and the dotenv call above loads it whenever
+// DATABASE_URL is not already set. This script WRITES fixtures, so refuse
+// outright rather than trust the caller's environment:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/test-recipients-lanes.ts
+// The refusal itself is the `_require-preview-db` import at the top — an
+// allowlist, and ahead of the dotenv load, so an unset DATABASE_URL is refused
+// rather than quietly resolved to `.env.local` (i.e. production).
+
 const ORG_MARKER = "__TIER_LANE_TEST__";
 
 // Tables we snapshot to prove real data is untouched.
@@ -153,7 +177,7 @@ async function main() {
     const parentStageId = stageRows[0].id;
 
     // --- Contacts: one per scenario. ---
-    const roles = ["ign", "clk", "rch", "cnv", "opt", "nal"];
+    const roles = ["ign", "clk", "rch", "cnv", "reg", "opt", "nal"];
     for (const role of roles) {
       const phone = `+1999${String(unique).slice(-6)}${roles.indexOf(role)}`;
       const r = (await db.execute(drizzleSql`
@@ -228,7 +252,21 @@ async function main() {
     await received("ign", false, false); // tier 0
     await received("clk", false, false); // tier 1 (click below)
     await received("rch", true, false); // tier 2 (reached) + click below → climbs past 1
-    await received("cnv", true, true); // tier 3 (reached + sale)
+    await received("cnv", true, true); // tier 4 (reached + purchase) — the exit
+    // reg: reached the offer AND registered. ONE-SIDED — `received(..., false)`
+    // leaves sale_status NULL and the registration is written straight to the
+    // ledger below, so tier 3 here cannot come from the legacy column. Reached
+    // is deliberate: it proves a registrant CLIMBS PAST the tier-2 lane.
+    await received("reg", true, false);
+    await seedConversionEvent(db, {
+      orgId: testOrgId,
+      contactId: cid.reg,
+      campaignId,
+      stageId: parentStageId,
+      eventKey: "registration",
+      status: "approved",
+      revenue: 0,
+    });
     await received("opt", false, false); // tier 1 (click below) but opted out
     // nal: NO stage_sends row → not alive (but has a click → tier 1)
     await cleanClick("clk");
@@ -256,39 +294,64 @@ async function main() {
       splitTotal: null,
     });
     check(
-      "ordinary returns pool minus opt-outs (same as today): {ign,clk,rch,cnv,nal}",
+      "ordinary returns pool minus opt-outs (same as today): {ign,clk,rch,cnv,reg,nal}",
       JSON.stringify(roleOf(ord)) ===
-        JSON.stringify(["clk", "cnv", "ign", "nal", "rch"]),
+        JSON.stringify(["clk", "cnv", "ign", "nal", "rch", "reg"]),
       roleOf(ord).join(","),
     );
 
     // ====================================================================
     // 2-8) Lanes
     // ====================================================================
-    const lane0 = await lane(campaignId, parentStageId, 0);
-    const lane1 = await lane(campaignId, parentStageId, 1);
-    const lane2 = await lane(campaignId, parentStageId, 2);
+    // Built from LANE_TIER_VALUES, never a literal list — see the header note.
+    const laneByTier = new Map<number, Set<string>>();
+    for (const tier of LANE_TIER_VALUES) {
+      laneByTier.set(tier, await lane(campaignId, parentStageId, tier));
+    }
+    // Throws rather than returning an empty set: an absent tier means the scale
+    // moved and this file was not updated, which must be loud, not a silent pass.
+    const laneOf = (tier: number): Set<string> => {
+      const s = laneByTier.get(tier);
+      if (!s) throw new Error(`no lane built for tier ${tier} — it is not in LANE_TIER_VALUES`);
+      return s;
+    };
+    const lane0 = laneOf(0);
+    const lane1 = laneOf(1);
+    const lane2 = laneOf(2);
+    const lane3 = laneOf(3);
 
     console.log("\nLanes off the parent:");
     check("tier-0 lane = {ign} (alive, no signal)", JSON.stringify(roleOf(lane0)) === JSON.stringify(["ign"]), roleOf(lane0).join(","));
     check("tier-1 lane = {clk} (alive clicker, not opted out)", JSON.stringify(roleOf(lane1)) === JSON.stringify(["clk"]), roleOf(lane1).join(","));
     check("tier-2 lane = {rch} (climbed past click)", JSON.stringify(roleOf(lane2)) === JSON.stringify(["rch"]), roleOf(lane2).join(","));
+    check(
+      "⭐ tier-3 lane = {reg} — a registrant is in the Registered lane, not Reached offer",
+      JSON.stringify(roleOf(lane3)) === JSON.stringify(["reg"]),
+      roleOf(lane3).join(","),
+    );
 
     check(
       "cross-lane climb: rch in tier-2, NOT in tier-1",
       lane2.has(cid.rch) && !lane1.has(cid.rch),
     );
     check(
-      "converted (tier 3) contact in NO lane (0/1/2)",
-      !lane0.has(cid.cnv) && !lane1.has(cid.cnv) && !lane2.has(cid.cnv),
+      "⭐ the registrant is NOT in the tier-2 lane (it reached the offer too)",
+      !lane2.has(cid.reg),
+    );
+    // Derived over every lane, so a tier added to the scale is covered here for
+    // free instead of leaving the exit contact silently untested in the new lane.
+    const inNoLane = (id: string) => ![...laneByTier.values()].some((s) => s.has(id));
+    check(
+      `purchased (tier 4) contact in NO lane (${LANE_TIER_VALUES.join("/")})`,
+      inNoLane(cid.cnv),
     );
     check(
       "opted-out contact in NO lane (even though tier 1)",
-      !lane0.has(cid.opt) && !lane1.has(cid.opt) && !lane2.has(cid.opt),
+      inNoLane(cid.opt),
     );
     check(
       "not-alive contact (no parent send) in NO lane (even though tier 1)",
-      !lane0.has(cid.nal) && !lane1.has(cid.nal) && !lane2.has(cid.nal),
+      inNoLane(cid.nal),
     );
 
     // ====================================================================
@@ -297,24 +360,32 @@ async function main() {
     console.log("\nPartition / accounting:");
     const inter = (a: Set<string>, b: Set<string>) =>
       [...a].filter((x) => b.has(x));
-    check(
-      "lanes pairwise disjoint",
-      inter(lane0, lane1).length === 0 &&
-        inter(lane0, lane2).length === 0 &&
-        inter(lane1, lane2).length === 0,
-    );
-    // Alive-and-not-opted-out = {ign,clk,rch,cnv}. Lanes(0,1,2) ∪ converted{cnv}
-    // must equal it exactly — no double-count, no loss.
-    const union012 = new Set([...lane0, ...lane1, ...lane2]);
-    const partitioned = new Set([...union012, cid.cnv]);
-    const aliveNotOpted = new Set([cid.ign, cid.clk, cid.rch, cid.cnv]);
+    // Every PAIR of lanes, derived from the map — adding a tier extends the
+    // check instead of leaving the new pairs untested.
+    const tiers = [...laneByTier.keys()];
+    const overlaps: string[] = [];
+    for (let i = 0; i < tiers.length; i++) {
+      for (let j = i + 1; j < tiers.length; j++) {
+        if (inter(laneOf(tiers[i]), laneOf(tiers[j])).length > 0) {
+          overlaps.push(`${tiers[i]}∩${tiers[j]}`);
+        }
+      }
+    }
+    check("lanes pairwise disjoint", overlaps.length === 0, overlaps.join(","));
+    // Alive-and-not-opted-out = {ign,clk,rch,reg,cnv}. Every lane ∪ the exit
+    // contact {cnv} must equal it exactly — no double-count, no loss. `cnv` is
+    // the only member that belongs to no lane, which is what the size bar says
+    // WITHOUT restating the lane count as a literal.
+    const unionLanes = new Set([...laneByTier.values()].flatMap((s) => [...s]));
+    const partitioned = new Set([...unionLanes, cid.cnv]);
+    const aliveNotOpted = new Set([cid.ign, cid.clk, cid.rch, cid.reg, cid.cnv]);
     const sameSet =
       partitioned.size === aliveNotOpted.size &&
       [...aliveNotOpted].every((x) => partitioned.has(x));
     check(
-      "lanes ∪ {converted} == alive-and-not-opted-out (no double, no loss)",
-      sameSet && union012.size === 3,
-      `union012=${roleOf(union012).join(",")}`,
+      "lanes ∪ {purchased} == alive-and-not-opted-out (no double, no loss)",
+      sameSet && unionLanes.size === aliveNotOpted.size - 1,
+      `unionLanes=${roleOf(unionLanes).join(",")}`,
     );
     check(
       "opted-out + not-alive excluded from the partition entirely",

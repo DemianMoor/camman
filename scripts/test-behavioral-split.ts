@@ -16,13 +16,22 @@ import "./_require-preview-db"; // MUST be second — refuses any target but the
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
-import {
-  performBehavioralSplit,
-  LANE_TIERS,
-} from "@/lib/stages/behavioral-split";
+import { performBehavioralSplit } from "@/lib/stages/behavioral-split";
 import { generateStageTrackingId } from "@/lib/tracking-id";
 
+// ⚠️ `.env.local` is PRODUCTION and `_env-preload` loads it whenever
+// DATABASE_URL is not already set. This script WRITES fixtures, so refuse
+// outright rather than trust the caller's environment:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/test-behavioral-split.ts
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
+
 const ORG_MARKER = "__BSPLIT_TEST__";
+// The tier set this file's cases ask for, named ONCE. Every assertion about
+// "which lanes were created" reads this, so the request and the expectation
+// cannot drift into a fourth hard-coded copy of the lane list.
+const TRIO = [0, 1, 2];
 const COUNTED_TABLES = [
   "organizations", "campaigns", "campaign_stages", "creatives",
 ] as const;
@@ -132,7 +141,7 @@ async function main() {
     const parent = await newStage(campaignId, creativeId);
 
     console.log("\nCase 1a - split with NO completed stages (must be rejected):");
-    const r1a = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
+    const r1a = await performBehavioralSplit({ orgId, campaignId, tiers: TRIO });
     check(
       "rejected with conflict / reason=no_completed_stages",
       !r1a.ok && r1a.status === 409 &&
@@ -144,13 +153,13 @@ async function main() {
 
     console.log("\nCase 1b - split a campaign with one completed stage:");
     await markComplete(parent.id);
-    const r1 = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
+    const r1 = await performBehavioralSplit({ orgId, campaignId, tiers: TRIO });
     check("returns ok with 3 lane ids", r1.ok && r1.lane_stage_ids.length === 3, JSON.stringify(r1));
     const lanes = await lanesOf(parent.id);
     check("exactly 3 lanes persisted", lanes.length === 3, `got ${lanes.length}`);
     check(
       "tiers are exactly {0,1,2}",
-      JSON.stringify(lanes.map((l) => l.behavioral_tier)) === JSON.stringify([0, 1, 2]),
+      JSON.stringify(lanes.map((l) => l.behavioral_tier)) === JSON.stringify(TRIO),
       lanes.map((l) => l.behavioral_tier).join(","),
     );
     check("all lanes anchor on the completed stage", lanes.every((l) => l.parent_stage_id === parent.id));
@@ -183,7 +192,7 @@ async function main() {
     check("all 3 lanes carry split_group_id", Number(lanesLinked[0].n) === 3, `got ${lanesLinked[0].n}`);
 
     console.log("\nCase 2 - re-split while one is still pending (must be rejected):");
-    const r2 = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
+    const r2 = await performBehavioralSplit({ orgId, campaignId, tiers: TRIO });
     check(
       "rejected with conflict / reason=split_already_pending",
       !r2.ok && r2.status === 409 &&
@@ -197,7 +206,7 @@ async function main() {
       UPDATE campaign_stages SET status = 'archived'
       WHERE split_group_id = ${g1.id}::uuid
     `);
-    const r2b = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] });
+    const r2b = await performBehavioralSplit({ orgId, campaignId, tiers: TRIO });
     check("re-split ALLOWED once lanes are archived", r2b.ok, JSON.stringify(r2b));
     const liveLanes = (await db.execute(sql`
       SELECT count(*)::int AS n FROM campaign_stages
@@ -212,10 +221,14 @@ async function main() {
 
     // ====================================================================
     // CASE 3 — the CHECK constraint from step 1 is active (lanes are coherent,
-    // and a half-configured / tier-3 row is rejected at the DB level).
+    // and a half-configured / tier-4 row is rejected at the DB level).
     // ====================================================================
     console.log("\nCase 3 — behavioral_lane CHECK:");
-    check("created lanes satisfy CHECK (tier in {0,1,2} AND parent set)", lanes.every((l) => [0, 1, 2].includes(l.behavioral_tier) && l.parent_stage_id != null));
+    // Derived from what case 1b ASKED FOR, not a fourth hard-coded copy of the
+    // lane list: the claim is "the split created exactly the lanes requested and
+    // the DB accepted them", which a literal cannot state.
+    check(`created lanes satisfy CHECK (tier in {${TRIO.join(",")}} AND parent set)`,
+      lanes.every((l) => TRIO.includes(l.behavioral_tier) && l.parent_stage_id != null));
     async function insertRejected(label: string, tier: number | null, parent: number | null) {
       try {
         await db.execute(sql`
@@ -228,7 +241,9 @@ async function main() {
       }
     }
     await insertRejected("CHECK rejects tier set + parent NULL", 1, null);
-    await insertRejected("CHECK rejects tier=3 (converted is never a lane)", 3, parent.id);
+    // Phase 4 / migration 0184: 3 is the Registered LANE now. The value the
+    // CHECK must still refuse is 4 — the purchased tier EXITS the sequence.
+    await insertRejected("CHECK rejects tier=4 (purchased exits; never a lane)", 4, parent.id);
 
     // ====================================================================
     // CASE 4 — a failure mid-transaction rolls back cleanly (no orphan lanes).
@@ -264,7 +279,7 @@ async function main() {
 
     let threw = false;
     try {
-      await performBehavioralSplit({ orgId, campaignId: campaign2Id, tiers: [0, 1, 2] });
+      await performBehavioralSplit({ orgId, campaignId: campaign2Id, tiers: TRIO });
     } catch {
       threw = true;
     }
@@ -278,8 +293,14 @@ async function main() {
       (await db.execute(sql`SELECT count(*)::int AS n FROM campaign_stages WHERE id = ${decoy.id}::int`)) as unknown as { n: number }[]
     )[0].n === 1);
 
-    // sanity: LANE_TIERS is the 0/1/2 trio (no converted lane)
-    check("LANE_TIERS = tiers 0,1,2 (no tier-3 lane)", JSON.stringify(LANE_TIERS.map((t) => t.tier)) === JSON.stringify([0, 1, 2]));
+    // The LANE_TIERS ↔ LANE_TIER_VALUES coupling bar that used to sit here MOVED
+    // to scripts/test-campaign-tier-scale.ts (P17–P19). It needs no database,
+    // and lib/stages/split-group.ts states the rule for exactly this class of
+    // guard: "it lives in the pure suite, not next to the map, so it runs with
+    // no DB." Parked here it did not run in the no-DB lane at all. The DB half
+    // of that coupling — the lane list vs. migration 0184's CHECK — is asserted
+    // in scripts/test-registered-lane-tier-db.ts (C1/C2), which is where a
+    // pg_get_constraintdef read belongs.
   } finally {
     console.log("\nCleanup (scoped to test org only)");
     try {

@@ -54,28 +54,18 @@ const SELF = "test-preview-db-guard.ts";
 /**
  * Scripts that predate the shared helper and still carry their OWN inline
  * DATABASE_URL check, with a project ref spelled in the file. The helper import
- * is what actually protects them now (asserted below); the local check is
- * redundant belt-and-braces, and several of these also check things the helper
- * does not — NEXT_PUBLIC_SUPABASE_URL, a camman-* preview BASE_URL — so they are
- * NOT mechanically strippable. Cleaning them up is a follow-up; until then they
- * are named here so that a NEW hand-copied ref still fails check 1.
+ * is what actually protects them; a local check is redundant belt-and-braces,
+ * and some also check things the helper does not — NEXT_PUBLIC_SUPABASE_URL, a
+ * camman-* preview BASE_URL — so they are NOT mechanically strippable.
+ *
+ * The list may only SHRINK, and it is now EMPTY: the 14 entries it held were
+ * cleaned on feat/conversion-events-p4 (the API-side halves kept, reading the
+ * ref from requirePreviewDb() instead of a literal) and that branch merged here
+ * on 2026-09-18. With no entries, check 1 covers every file in scripts/ with no
+ * exemption — which is the end state this list existed to converge on. Add an
+ * entry only for a script that genuinely cannot drop its literal yet.
  */
-const LEGACY_REF_LITERALS: ReadonlyArray<string> = [
-  "test-campaign-duplicate-type.ts",
-  "test-conversion-events-upsert.ts",
-  "test-conversion-lookups.ts",
-  "test-creative-versioning.ts",
-  "test-drip-enrichment-schema.ts",
-  "test-drip-routing-schema.ts",
-  "test-drip-sends-schema.ts",
-  "test-drip-unengaged-close.ts",
-  "test-intake-schema.ts",
-  "test-landing-page-edit-api.ts",
-  "test-optout-breaker-type-aware.ts",
-  "test-stage-auto-status.ts",
-  "verify-operator-access.ts",
-  "verify-operator-guardrails.ts",
-];
+const LEGACY_REF_LITERALS: ReadonlyArray<string> = [];
 
 /**
  * Scripts that carry a write signal but are DELIBERATELY not guarded, each with
@@ -114,6 +104,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "delete-orphan-test-offers.ts", why: "exists to delete orphan test rows left in PRODUCTION" },
   { file: "drain-texthub-inbox.ts", why: "ingests real STOPs from the live provider inbox into production; --apply" },
   { file: "import-texthub-optouts.ts", why: "imports real opt-outs from a provider export into production; --apply" },
+  { file: "resync-stage-day-conversions.ts", viaLibrary: true, why: "one-shot production re-derive of the stage-day conversion columns; dry-run default, writes only behind --apply (writes via lib/keitaro/stage-day-conversions, so it carries no write token of its own)" },
   { file: "seed-ahoi-number-credential.ts", why: "seeds the real Ahoi sending number + credential in production" },
   { file: "seed-ahoi-webhook-token.ts", why: "mints the real production inbound-webhook token" },
   { file: "seed-tells-webhook-token.ts", why: "mints the real production inbound-webhook token" },
@@ -129,9 +120,6 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "test-drip-regular-unaffected.ts", why: "fixtures written inside a tx that always rolls back; asserts SET EQUALITY against production" },
   { file: "verify-keitaro-batch-update.ts", why: "UPDATEs inside a BEGIN…ROLLBACK; needs real stage_sends rows to mean anything" },
   { file: "verify-purchase-rule-definition.ts", why: "deliberately reads live data; its one synthesized write is inside a tx that always rolls back" },
-
-  // ── shared fixture LIBRARY, not an entry point ─────────────────────────────
-  { file: "_conversion-fixture.ts", why: "helper module, never run directly: its db/client import is `import type` (erased, opens nothing) and it writes only through the executor its caller passes, so each ENTRY POINT decides — every importer is guarded except verify-purchase-rule-definition.ts above, which a guard import here would transitively refuse on production (this bar sees direct imports only)" },
 
   // ── read-only: matched the scan, issue no write ────────────────────────────
   { file: "perf-baseline.ts", why: "read-only: EXPLAIN ANALYZE over SELECTs (the .unsafe( token is the match)" },

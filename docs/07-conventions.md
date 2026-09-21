@@ -38,6 +38,115 @@ A stage counter that both a person and a tracker write has no provenance column,
 
 ⚠️ **The known hole: a script whose writes happen only inside an app library it calls** (`ingestKeitaroConversions(db, …)`, say) carries no write token of its own and the scan cannot see it. Those are handled by being named in `EXCLUSIONS` anyway, but if you add one, **add the guard import yourself**. Transitive import analysis would close it and was measured: it flags ~39 more scripts, nearly all read-only diagnostics that merely import a write-capable module, which trades a crisp signal for a noisy one.
 
+## "Selectable" and "selected" are FOUR separate registries for a behavioural lane tier (2026-09-18)
+
+Whether a lane tier can be stored, offered, and ticked by default are three
+different decisions spread over four places. Changing one does not change the
+others, and only one of them changes who receives a message:
+
+| What | Where | Means |
+|------|-------|-------|
+| `campaign_stages_behavioral_lane_check` | migration 0184 | what the DB will STORE (`0..3`) |
+| `LANE_TIER_VALUES` | [`lib/campaign-tier.ts`](../lib/campaign-tier.ts) | the scale's lane set — what `previewSplitLanes` RENDERS a row for |
+| `LANE_TIERS` | [`lib/stages/behavioral-split.ts`](../lib/stages/behavioral-split.ts) | what the picker OFFERS and a split may CREATE (`resolveLaneTiers` derives its valid set and its refusal message from this) |
+| `DEFAULT_LANE_TIERS` + `DEFAULT_SELECTED_TIERS` | the same lib + [`app/(protected)/campaigns/[id]/page.tsx`](<../app/(protected)/campaigns/[id]/page.tsx>) | what starts TICKED — the server's for an omitted request body, the client's for the dialog |
+
+⭐ **A tier added to `LANE_TIERS` but not to the default cannot message anybody
+new.** That is what made Phase 4 Task 3 safe to ship without an owner decision:
+`Registered` became tickable while `DEFAULT_LANE_TIERS` stayed `[1, 2]`. Turning
+it ON by default is a separate, louder change — and because the client keeps its
+own copy (a client component cannot import the module that owns the server's, it
+pulls in the db client), it is a **two-file** edit that must land together.
+
+⭐ **`LANE_TIER_VALUES` drifting ahead of `LANE_TIERS` is user-visible, not
+theoretical.** The preview renders a row per `LANE_TIER_VALUES` entry, so tier 3
+sat in the confirm dialog as a tickable row with a live count while
+`resolveLaneTiers` still refused it — ticking it 400'd the whole split. The two
+are now asserted equal (and asserted to exclude `EXIT_TIER`) by `P17`–`P19` in
+[`scripts/test-campaign-tier-scale.ts`](../scripts/test-campaign-tier-scale.ts)
+— the **pure** suite, because that bar needs no database and a pure bar parked in
+a DB-requiring script never runs in the no-DB lane. The third leg, `LANE_TIER_VALUES`
+against migration 0184's CHECK itself, is `C1`/`C2` in
+[`scripts/test-registered-lane-tier-db.ts`](../scripts/test-registered-lane-tier-db.ts),
+which reads `pg_get_constraintdef` — the only place the TS list and the database
+can be compared. Without it, adding a tier to both TS lists passes every static
+bar and fails at INSERT time, in production, on a lane the operator just ticked.
+
+⭐ **A refusal message that restates its own valid set goes stale silently.** The
+`invalid_lane_tier` message read "Valid tiers are 0, 1, 2." as a literal; it now
+derives the list from `LANE_TIERS`. Nothing would have failed when the list
+changed — the operator would just have been told the wrong thing.
+
+⭐ **And the bar for that must compare against the REGISTRY, not against today's
+text.** The first attempt asserted `message.includes("0, 1, 2, 3")` under a label
+claiming the message was not hard-coded. It could not fail for that reason: a
+developer who hard-codes `"Valid tiers are 0, 1, 2, 3."` keeps it green, and when
+the registry grows the message `"0, 1, 2, 3, 4"` still *contains* `"0, 1, 2, 3"`
+— green again. The form that states the claim is
+`message.includes(LANE_TIERS.map((t) => t.tier).join(", "))`: it couples the
+produced message to the registry, which IS the claim. **Generally: a bar whose
+expected value is a literal copy of today's output tests nothing but today.**
+
+## A tier-indexed map must be TOTAL over the tier list, and a bar must say so (2026-09-18)
+
+Inserting a value into the behavioural tier scale (`LANE_TIER_VALUES` in [`lib/campaign-tier.ts`](../lib/campaign-tier.ts)) does **not** fail loudly on the readers that index a `Record<number, string>` by it. `tsc` types `TIER_LABEL[t]` as `string`, never `string | undefined`, so a missing key is not a type error, not a crash and not a blank page: it is a **blank but tickable row carrying a live count** in the split confirm dialog (which renders `{ln.label}` raw), and ticking it 400s the whole split. Tier 3 shipped exactly that way between migration 0184 and its label.
+
+Two rules:
+
+1. **Every value in `LANE_TIER_VALUES` has a label, and a bar asserts it** — `unlabelledLaneTiers()` in [`lib/stages/split-group.ts`](../lib/stages/split-group.ts), asserted by `P16` in [`scripts/test-campaign-tier-scale.ts`](../scripts/test-campaign-tier-scale.ts). Add a tier, and the guard goes red naming the number. It lives in the pure suite, not next to the map, so it runs with no DB.
+2. **A reader whose key space is NARROWER than the scale indexes defensively.** `FOLLOWUP_TIERS`/`FollowupTier` are deliberately `{0,1,2}` while lanes go to 3, so [`components/campaigns/drip-followup-children.tsx`](../components/campaigns/drip-followup-children.tsx) casts a number it does not control. `TIER_OPTIONS[3].map` would be a `TypeError` that blanks the whole stage section, so both lookups fall back (`?? \`Tier ${tier}\`` / `?? []`) instead of trusting the cast.
+
+## A new behavioural tier is INSERTED at its rank, never appended (2026-09-18)
+
+The scale is `0 ignored · 1 clicked · 2 reached offer · 3 registered · 4 purchased (EXIT)` — [`lib/campaign-tier.ts`](../lib/campaign-tier.ts), exported as `TIER_IGNORED`…`TIER_PURCHASED`, `EXIT_TIER` and `LANE_TIER_VALUES`. Two properties, both load-bearing:
+
+⭐ **It is MONOTONIC IN BEHAVIOURAL RANK, and the exit is its TOP value.** The ranking function is `MAX(tier)` over a `UNION ALL` of per-signal branches, so the number IS the precedence. **Appending** "registered" as 4 — the obvious move, since 3 was taken — would have made `MAX` rank a $0 registration above a real sale: a buyer would have read as *not* purchased, lost their exit, and been messaged again. Registered was inserted at 3 and the purchased exit moved to 4 instead.
+
+⭐ **Inserting is only cheap because the tier is COMPUTED and never stored.** There is no column to back fill and no history to rewrite: migration 0184 widened `campaign_stages_behavioral_lane_check` from `(0,1,2)` to `(0,1,2,3)` with **no data migration at all**, because prod held zero rows at `behavioral_tier = 3` anywhere (`campaign_stages` 2,100 rows / `report_stage_hour` 514 / `report_group_hour` 3,431, measured 2026-09-18 — the old CHECK had made a stored 3 impossible since 0071). Check that property before assuming the next insertion is as cheap: the moment a tier number is persisted, a renumber becomes a data migration.
+
+A renumber must also land in ONE commit across every site, or the tree is half-renumbered — see the inline-copies section below, and the four-registry table at the top of this file for the separate question of which tiers are *offered*.
+
+**A tier number reaches SQL only through `tierLiteral()`.** Not a bind parameter: `SELECT $1 AS tier` inside a `UNION ALL` fails with *could not determine data type of parameter*, and a parameterised `coalesce(t.tier,0) <> $1` would quietly turn a rendered-SQL guard into one the source-text bars (`P10`–`P26`) can no longer read. Its input is always a module constant, so there is nothing to escape.
+
+**Lane membership freezes at materialization.** A contact who registers or buys *after* their lane materialized is still sent that lane's message: the drain re-checks only opt-outs and the 1-hour cross-campaign phone dedup, not the tier. The recon measured 382 of 382 recent lanes materializing before T−15 (p50 2.6h early), so the window is real but small. A send-time purchase/registration re-check is **out of scope** — the owner ruled it out and it was deliberately not attempted here. No follow-up card for it is known to exist, so treat it as unscheduled work, not as something already queued elsewhere. It is also why the non-monotonicity below costs lanes nothing in practice.
+
+## Tier 3 (Registered) is the one NON-MONOTONIC value on the behavioural scale (2026-09-18)
+
+Every other branch of `campaignTierExpr` is append-only, so a contact's tier can only rise — which is what "high-water" means and what most readers assume. Tier 3 can be **revoked**: the binding rule that a rejected purchase is not a registrant is enforced by a `NOT EXISTS` over purchase-type events at any *known* status, so **a rejected purchase arriving after a registration drops that contact from 3 back to their click / offer-reach tier**. The scale stays monotonic in *rank* (3 above 2, below 4 — all `MAX(tier)` needs); a contact's value over *time* is not.
+
+Deliberate, and the cost is bounded but real:
+
+- **Lanes** — none in practice: lane membership freezes at materialization.
+- **Drip journeys** — **order-dependent and irreversible.** A journey closed while the contact read 3 is never reopened (`close()` guards `state IN ('routed','active')`; `runDripFollowups` filters `j.state = 'active'`), so that contact silently loses the 0/1/2 follow-ups they would now qualify for. The **same final ledger state** yields two different outcomes depending on postback order vs. sweep timing.
+
+Do **not** "fix" it by dropping the `NOT EXISTS` — that re-admits a rejected buyer to the Registered lane, which is the thing the rule exists to prevent. Stated at the expression in [`lib/campaign-tier.ts`](../lib/campaign-tier.ts) and in [`docs/04-features/behavioral-lanes.md`](04-features/behavioral-lanes.md).
+
+⭐ **Generally: when one branch of a "high-water" expression carries an exclusion predicate, that branch is not high-water.** Say so where the expression is defined — a reader who trusts the word will build something that cannot be un-built.
+
+## Renumbering a scale must be chased into its INLINE copies, not just the shared fragment (2026-09-18)
+
+`campaignTierExpr` ([`lib/campaign-tier.ts`](../lib/campaign-tier.ts)) is the source of truth for the behavioural tier scale, and every reader that CAN import it does. Two cannot: `closeCompletedJourneys()` and `expireJourneysPastEndDate()` in [`lib/drip/lifecycle.ts`](../lib/drip/lifecycle.ts) need the tier **correlated per journey row** (`j.campaign_id` / `j.contact_id`) while the shared fragment takes a literal campaign id, so they carry an inline copy of the scale — twice.
+
+⭐ **An inline copy that stops one tier short does not fail; it WAITS.** Both copies ask "is an active behavioural child still owed a send?", and a child BELOW the contact's tier can never be owed because the tier is high-water. While the copies topped out at 2, a REGISTRANT (real tier 3) matched no drip child (0/1/2) yet the tier-2 child was still judged reachable — so the journey never completed, and since `drip_journeys_one_live_per_contact_uniq` keys on `state IN ('routed','active')` it held that contact's **only** live-journey slot against every future journey too. A buyer has the identical shape and only survives because `closeJourneysOnPurchase` closes those separately; there is no registration analogue and (user decision) none is being built.
+
+Three rules:
+
+1. ⭐ **Couple the copies to the original with a BAR, not with a grep.** A grep a human has to remember to run is the weakest form of the guard this document argues for two paragraphs earlier, and remembering is exactly what failed here. `P20`–`P26` in [`scripts/test-campaign-tier-scale.ts`](../scripts/test-campaign-tier-scale.ts) (pure, no DB) extract the tier-3 rule from `lib/campaign-tier.ts` by balanced parens — comments stripped, whitespace collapsed, so CRLF and LF both match — and assert it **byte-identical** in both inline copies; that there are **exactly two** copies (a third added later would be unguarded by construction, and this is the bar that notices it exists); that each copy's UNION arms emit `TIER_REGISTERED` / `TIER_PURCHASED` read from the shared module, since `SELECT 3` / `SELECT 4` are bare literals no type checker sees; and that both ledger arms stay org-scoped. **What is NOT compared is the scoping** — literal ids in the fragment, correlated columns in the copies — because that difference is the whole reason the copy exists. Red-proved from both ends: mutate either copy, or mutate the original.
+2. **Each copy also needs its own behavioural bar.** Text equality proves the copies agree; it does not prove they are *right*. [`scripts/test-drip-lifecycle.ts`](../scripts/test-drip-lifecycle.ts) carries one ⭐ registrant bar per copy (section 3 for completion, 3b for expiry), each asserting the journey **advances** — not that no error was raised.
+3. ⭐ **A defensive line needs a fixture that only IT can satisfy.** `AND pe.status IS NOT NULL` inside the purchase-eviction `NOT EXISTS` is what stops an UNMAPPED purchase row from evicting a registrant — and it was deletable from **both** copies with every bar still green, because no fixture carried a purchase row of any status at all. A guard whose deletion is invisible is not guarded. The fixture that closes it is a registrant who **also** carries a purchase-type row with `status` NULL (`seedConversionEvent({ eventKey: "purchase", status: null })` — not an omitted `eventKey`, whose NULL `event_type_id` is already harmless because `NULL IN (…)` is NULL). When you add a defensive predicate, write down which fixture would go red without it; if the answer is "none", the predicate is undefended.
+
+**Progressing a journey past a registrant is NOT the same as giving registrants a follow-up.** `FOLLOWUP_TIERS` and `FollowupTier` stay `{0, 1, 2}`: a registrant matches no drip child, lands in `tierMismatch`, and that no-op is the intended behaviour. Widening either is what would create a Registered follow-up lane, which is explicitly out of scope.
+
+⭐ **The third site is a detection ladder, and the safe thing to do with it was nothing.** `runDripFollowups` ([`lib/drip/followups.ts`](../lib/drip/followups.ts)) resolves each child's detection moment with a `CASE ch.behavioral_tier` ladder armed for tiers 1 and 2, plus `ELSE NULL`. That looks like the same omission as the reachability copies and is not:
+
+- **It fails CLOSED, in the wanted direction.** `followupDueAt` returns `no_detection` without a detection moment, so an unarmed tier can never send. For tier 3 that IS the ruling — a registrant gets no drip follow-up.
+- **Arming it is the feature, not the fix.** A `WHEN 3` arm only does anything if a tier-3 child exists, which needs `FOLLOWUP_TIERS` widened — i.e. building the Registered follow-up that was ruled out. It also needs `FollowupTier` widened for `followupDueAt`'s input type.
+- **But the halves must move together.** A tier-3 child armed ONLY in the ladder hangs the journey anyway (`lifecycle.ts` waits on it at `3 >= 3`); a tier-3 child with NO arm never sends and hangs it too. So the invariant to pin is the coupling: **every non-zero member of `FOLLOWUP_TIERS` has a detection arm**, asserted in [`scripts/test-drip-followup-timing.ts`](../scripts/test-drip-followup-timing.ts) by reading the two literals out of their two DIFFERENT source files (whitespace collapsed first, so CRLF and LF both match) and red-proved from both sides.
+
+**CLOSED 2026-09-18, and NOT the way it was first proposed.** The hole was real: a Registered LANE has `drip_followup_minutes` NULL, and two raw `PATCH`es (a timer, then `drip_active: true`) turn it into a drip child that hangs every registrant's journey. But ⭐ **adding the field to `NON_UPDATABLE` would have been a SILENT FAILURE, not a fix.** That route drops `NON_UPDATABLE` keys *without an error* (`if (NON_UPDATABLE.has(k)) continue;`), and `drip_followup_minutes` is genuinely user-editable: the timer `<Select>` in [`components/campaigns/drip-followup-children.tsx`](../components/campaigns/drip-followup-children.tsx) is *the* way an operator changes a follow-up timer, and `ensureFollowupChildren` only ever writes the default. Listing it would have made that dropdown return **200**, toast "Follow-up updated", reload and show the old value — every drip child frozen at its default for ever, with no error anywhere.
+
+⭐ **Before making a field non-updatable, check whether the route's drop is SILENT and whether a live UI writes that field.** A generic patch loop that skips keys quietly turns "reject" into "pretend". The hole was closed **semantically** instead, by the thing that is actually wrong — the TIER: [`lib/api/followup-tier-guard.ts`](../lib/api/followup-tier-guard.ts) refuses a patch that sets `drip_followup_minutes` (non-null) or `drip_active: true` on a stage whose stored `behavioral_tier` is outside `FOLLOWUP_TIERS`, with `400` + `details.reason = "followup_tier_unsupported"`. Three carve-outs, each asserted: a NULL tier is **not a lane** and stays allowed (the drip first-send stage is NULL with `drip_active: true`; refusing it breaks drip itself), clearing a timer is always allowed, and `drip_active: false` is always allowed — otherwise a stage armed before the guard existed could never be disarmed. The bars live in [`scripts/test-drip-lifecycle.ts`](../scripts/test-drip-lifecycle.ts) rather than the pure suite because the guard's whole value is its coupling to `FOLLOWUP_TIERS`, whose module is `server-only`; a pure copy of that list would assert nothing. One of them reads the route's source and asserts it actually **calls** the guard — a guard nothing calls is not a guard.
+
 ## A source-grep check must not be able to pass by accident (2026-09-18)
 
 Several guards assert things about a FILE's text (`readFileSync(...).includes(...)`) because the real call site cannot be executed from a rolled-back proof. Two rules, both learned the hard way in `scripts/test-p3-task4-reader-switch-db.ts`:
@@ -316,7 +425,7 @@ Where a truncated value is the only thing on screen, the untruncated value belon
 
 - **The predicate lives in one place**: `purchasedClause()` in [`lib/sale-attribution.ts`](../lib/sale-attribution.ts). Never inline a `sale_status` test again.
 - **UPDATED 2026-09-17 (Phase 3 Task 2) — A BUYER IS NOW A LEDGER ROW, NOT A COLUMN VALUE.** `purchasedClause()` reads `conversion_events`: an event type flagged `is_purchase`, in status `pending` or `approved`. `rejected` is a refund / chargeback / fraud screen and is never a purchase; a **registration is not a purchase either**. Which Keitaro conversion type becomes which (event type, status) is decided per network/offer in `conversion_event_mappings` — that is where the old "`lead` and `sale` both count" rule now lives. The pre-ledger predicate survives only as `legacySaleStatusPurchasedClause()`, for the proof scripts.
-  - Why the column could not stay: `stage_sends.sale_status` holds ONE latest-wins conversion per recipient, so a $0 registration arriving after a purchase overwrote it (measured: 14 recipients, $715), and a registration arriving as a `lead` postback read as a BUYER outright — tier 3, a buyer in the segment rules, its drip journey closed as purchased.
+  - Why the column could not stay: `stage_sends.sale_status` holds ONE latest-wins conversion per recipient, so a $0 registration arriving after a purchase overwrote it (measured: 14 recipients, $715), and a registration arriving as a `lead` postback read as a BUYER outright — the converted tier (numbered **3** at the time; since Phase 4 the exit is tier **4** and 3 is the Registered lane), a buyer in the segment rules, its drip journey closed as purchased. ⚠️ The digit is left as it was written on purpose: renumbering it would falsify the history this bullet records. The bug is unchanged; only the number it was written with has moved.
 - Consumers: the three `made_purchase*` segment rules ([`lib/segment-rules-eval.ts`](../lib/segment-rules-eval.ts)), the converted tier of the behavioural lanes ([`lib/campaign-tier.ts`](../lib/campaign-tier.ts)), the drip purchase close ([`lib/drip/lifecycle.ts`](../lib/drip/lifecycle.ts)) and the operator audience pools ([`lib/audience/pools.ts`](../lib/audience/pools.ts), whose `POOLS_DEFINITION` text states the ledger meaning verbatim because the operator API returns it).
 - **UPDATED 2026-09-17 (Phase 3 Task 4) — the per-RECIPIENT reporting readers switched too**: the partner report's `purchases` CTE ([`lib/reporting/partner-report.ts`](../lib/reporting/partner-report.ts)), the by-group `sale` weight basis ([`lib/reporting/performance-report.ts`](../lib/reporting/performance-report.ts) `trackedWeights`), the hourly sales/revenue pair (same file, `getHourlyReport`'s `ledgerHourAgg`), the dormant reports rollup's `conv_sends` CTE ([`lib/reporting/rollup.ts`](../lib/reporting/rollup.ts)) and the campaign-activity badge ([`app/api/campaigns/[campaignId]/activity/messages/route.ts`](../app/api/campaigns/[campaignId]/activity/messages/route.ts)) all now read `conversion_events` instead of `stage_sends.sale_status`/`converted_at`/`sale_revenue`. A recipient's SECOND conversion is now counted (a send row could hold only one before), and the badge shows the event type with its lifecycle status instead of the old sale/lead/rejected read. `purchasedSendIds`/`rescueSendIds` (`lib/sale-attribution.ts`) take `orgId: string | null` — `null` is cross-org, for the two rebuilds that write every org's rows in one statement (`refreshCountedClickers`, `refreshReportRollup`) and carry `org_id` from the send row.
 - **UPDATED 2026-09-18 (Task 4 review fixes) — a switched reader's query text lives in ONE place, and its guard executes that place.** `purchasesBySendSelect()` (partner report `purchases` + rollup `conv_sends`), `latestConversionForSend()` (the activity badge's LATERAL — in [`lib/sale-attribution.ts`](../lib/sale-attribution.ts) because a Next.js `route.ts` may only export route fields), `saleWeightCandidates()` and `ledgerHourQuery()` ([`lib/reporting/performance-report.ts`](../lib/reporting/performance-report.ts)), and the badge's colour/amount rules ([`lib/conversion-badge.ts`](../lib/conversion-badge.ts)). A guard that retypes a "simplified shape" of the query it tests proves only that the typist agreed with themselves: the first version of the Task 4 guard dropped the hour bucketing, the `occurred_at` range and the provider filter, which left the one change that can move a number entirely untested.
@@ -335,7 +444,7 @@ Guards:
 - [`scripts/test-p3-task4-reader-switch-db.ts`](../scripts/test-p3-task4-reader-switch-db.ts) — preview DB only, rolled back. Runs the actual query text of each Task 4 reader (partner-report `purchases` CTE / rollup `conv_sends`, `trackedWeights` sale basis, `getHourlyReport`'s `ledgerHourAgg`, `rescueSendIds`, the activity-badge LATERAL) against the same three one-sided fixtures (`ledger_only`, `legacy_only`, `rejected_ledger`), and runs the OLD `stage_sends`-column query text against the identical rows next to it — the red proof: the old query's numbers for these fixtures are what pre-switch code would have shown, and they are wrong (misses the real purchase, counts a non-purchase, rescues a rejected conversion).
 - **UPDATED 2026-09-18** — that script now carries SIX one-sided fixtures (adding a recipient with TWO ledger conversions, an UNMAPPED row and a $0 registration) and every block invokes the real exported code, including `refreshCountedClickers()` itself inside the rolled-back transaction; three surfaces (`getPartnerReport`, `trackedWeights`, `getHourlyReport`) execute against the module-level `db` and so cannot see uncommitted fixtures — for those the changed fragment is exported and executed, and the call site is covered by a source guard that the script labels as weak. Proven RED against the pre-switch definitions (39/62 failing), restored byte-identically (`cmp`).
 - ⭐ **A guard must assert the rule the code now uses, not the rule it used to.** [`scripts/verify-counted-clickers.ts`](../scripts/verify-counted-clickers.ts) hand-coded `ss.converted_at IS NOT NULL` in both its independent recomputation and its Rule F invariant; after the switch those asserted the PRE-switch rescue rule, so the first rejected or unmapped conversion would have turned them red for correct behaviour. They now take the predicate from `rescueSendIds()`. Sharing a DEFINITION does not make a comparison vacuous — sharing the COMPUTATION does: the recomputation still walks the base tables in one pass with its own aggregation, against a cache the real `refreshCountedClickers` built.
-- [`scripts/verify-purchase-rule-definition.ts`](../scripts/verify-purchase-rule-definition.ts) — production, read-only; the one write is a synthesized conversion inside a rolled-back transaction. It compares the ledger definition against the live reporting definition rather than a frozen number, so it does not expire as sales accumulate, and it flips a synthesized row `rejected` → `approved` to prove the bar can actually go red. **Its drift bars name their world-state**: with zero registration-typed ledger rows the two definitions agree on every contact, and the first registration makes them differ *correctly* — so those contacts are subtracted by name instead of read as a regression.
+- [`scripts/verify-purchase-rule-definition.ts`](../scripts/verify-purchase-rule-definition.ts) — production, read-only; the one write is a synthesized conversion inside a rolled-back transaction. It compares the ledger definition against the live reporting definition rather than a frozen number, so it does not expire as sales accumulate, and it flips a synthesized row `rejected` → `approved` to prove the bar can actually go red. **Its drift bars name their world-state**: as recorded on **2026-09-18**, production carried no registration-typed ledger rows, so the two definitions agreed on every contact. That is a dated measurement, not a standing fact — the first registration makes them differ *correctly*, so the script subtracts those contacts by name and prints the counts. Read the run's output, not this sentence, for today's state.
 
 
 The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) at the repo root. This page summarizes the rules a developer most needs and flags every doc↔code discrepancy found while writing these docs.
@@ -799,6 +908,7 @@ A teardown that stops at its first failure leaks silently, because the crash sur
 - **A behavioural split is CAMPAIGN-level and its source set is resolved LATE (migration 0174).** `POST /api/campaigns/[campaignId]/behavioral-split` (the per-stage endpoint is gone) creates a `campaign_stage_split_groups` row with `state='pending'` and an **empty** `source_stage_ids`. The set is written at RECOMPUTE time — T−15min on the `send-preflight` cron, or lazily at Phase A — because a stage finishing between creation and recompute MUST be included. Both callers go through the idempotent `ensureGroupSourceResolved()`, guarded on `state='pending'`, so they race harmlessly. **Do not overload `preflight_notified_at`** for this: it is a post-once digest marker, and a group whose digest already fired must still be recomputable. The widening is a strict superset in all but one case (below), verified across 203 real production lane parents.
 - **Split-group atomicity is at the RELEASE boundary, not the insert boundary (migration 0174).** Lanes materialize independently — windowed, per-window commit, resumable, exactly as before — and **Phase B refuses to drain a grouped lane until its whole group is `materialized`**. One transaction for the trio was measured at ~30–65s for the largest real trio (18,755 combined rows at ~500–900 rows/s): it would pin one transaction-pooler connection that long, breach the 300s route ceiling at ~3× today's size, and throw away the resumability that exists because a 60s timeout used to roll back ~17K recipients. On failure the group goes `failed`, NO lane releases, a Tier-1 Telegram alert fires, and **rows already written stay in place unreleased** — rolling them back is a second failure mode with nothing to gain; `.../send/abort` is how an operator clears them.
 - **A zero-recipient behavioural lane is SKIPPED, not burned (migration 0174).** `no_recipients` is a PERMANENT kickoff refusal, so a zero-recipient stage used to be stamped `schedule_missed_at` and render Red "needs attention". Under campaign-level classification an empty tier is ROUTINE — tier 2 measures just 28–323 contacts on the widest production campaigns — so a grouped lane that resolves to zero gets `campaign_stages.skipped_empty_at` instead, reads as the Grey `skipped_empty` operational status, SATISFIES its group so the siblings still release, and posts an informational (Tier-3) note. **`skipped_empty_at` is a PIPELINE marker, not a `status` value** — it joins `schedule_missed_at`/`slip_hold_at`/`preflight_aborted_at`, all nullable timestamps, because `status` is a different axis (see the completed-stage rule above). An ORDINARY stage with no recipients keeps the louder behaviour.
+  ⭐ **`markLaneSkippedEmpty` must NOT gain an `org_id` filter, even though CLAUDE.md §3 asks every query for one (reviewed 2026-09-18).** Its sibling `notifyLaneSkippedEmpty` did gain one, and the difference is the blast radius of a zero-row result. The org_id the only production caller has is **`campaigns.org_id`** ([`lib/sends/scheduled.ts`](../lib/sends/scheduled.ts) selects `c.org_id AS org_id`), *not* the `campaign_stages` row's own `org_id`, and **no constraint ties the two** — the FK is a plain `campaign_id REFERENCES campaigns(id)`, with no composite key and no trigger. So `AND org_id = <that org>` holds by application invariant only. In `notifyLaneSkippedEmpty` a miss costs an alert that says "(unknown)". In `markLaneSkippedEmpty` a miss means the `UPDATE` stamps nothing, `settleSplitGroup` fires immediately afterwards against a lane that is still outstanding, the group never settles and its siblings are held — the 2026-09-05 freeze, reintroduced by the safety predicate meant to prevent leakage. Add the filter only together with a composite FK (or an equivalent enforced invariant) plus a row-count check on the UPDATE.
 - **The widened source set is a superset EXCEPT when the completed stages reached nobody.** `sent(parent) ⊆ sent(all completed stages)` holds because materialization only draws from `campaign_audience_pool` — verified on 203 real lane parents, `old EXCEPT new = 0` every time. The exception (3 of 206 on production: campaigns 119, 120, 478) is a campaign whose *sending* stage still carries stranded `pending` rows, so it is excluded as incomplete and the new source set is EMPTY — a new lane there would be smaller, not larger. The protection is the confirm modal, which reports `0 contacts reached` behind an amber warning before the operator commits. Do NOT "fix" this by relaxing the completeness predicate to bare `sent_at IS NOT NULL`: that would let a stage still actively sending into the classification universe and would diverge from the P4 gate.
 - **A behavioural split group is protected against overlapping cron ticks by three independent guards, and has a per-group timeout (migration 0174).** The `send-scheduled` cron takes no group-level lease, so two ticks CAN reach one group. (1) `ensureGroupSourceResolved` writes under `WHERE state = 'pending'` — one wins, the loser re-reads the winner's row, so only ONE source set is ever written. (2) Two materializations of one lane collide on the pre-existing `stage_sends_active_contact_uniq` partial unique index + `ON CONFLICT DO NOTHING`. (3) `settleSplitGroup` flips under `WHERE state = 'materializing' … RETURNING`, so exactly one caller flips it and counters can't double. All three are asserted by firing the real functions CONCURRENTLY in [scripts/verify-campaign-level-split.ts](../scripts/verify-campaign-level-split.ts), not by reading the SQL. **The timeout** (`sweepStuckSplitGroups`, on the same `send-preflight` cron, `SPLIT_GROUP_STUCK_MS = 60 min`) exists because a group stuck in `materializing` holds its siblings' written rows unreleased forever with nothing else to say so — silent non-delivery. It is **alert-only** (auto-failing would discard work and could cause the very non-delivery it catches), post-once via `last_error`, cleared by `settleSplitGroup`, and **measured from the LAST lane's due time** — anchoring on `recomputed_at` would fire on every legitimately staggered split.
 - **Every path that materializes a grouped lane resolves its split group FIRST, and that lives in `kickoffStageSend` — not in the cron (0174).** Manual Prepare, approve-send and Phase A all go through kickoff, so the invariant "the source set is resolved before any row is written" is enforced in one place instead of three. The `send-preflight` sweep is an OPTIMISATION (resolve early so the T−15 digest reports the real audience), not the mechanism. **This shipped broken and was fixed 2026-08-28:** kickoff originally only *checked* the state and refused a `pending` group, which dead-ended the Prepare button entirely — a group leaves `pending` only when the sweep or Phase A resolves it, and both require the lane to be approved AND due, which clicking Prepare right after creating a split satisfies neither of. **And after resolving, take `source_stage_ids` from the RESOLVE, not from the row read beforehand** — that row still holds the empty array the group was created with, so using it falls through to the single-parent aliveness and materializes the NARROWER audience (a silent wrong-audience bug, not an error). Regression test: [scripts/test-split-manual-prepare.ts](../scripts/test-split-manual-prepare.ts).
@@ -1528,7 +1638,11 @@ wrong by the time they were written:
 
 - `campaignTierExpr`'s tier 3 had moved from `sale_status = 'sale'` to
   `purchasedClause()` (`sale_status IN ('lead','sale')`) — the recon documented
-  the dead definition.
+  the dead definition. (Both numbers here are **as of 2026-08-27** and are left
+  alone so the anecdote stays true: the converted tier is **4** since Phase 4 and
+  3 is now the Registered lane, and `purchasedClause()` has since moved off
+  `sale_status` onto the `conversion_events` ledger. The point the bullet makes —
+  a stale recon records dead specifics — is unaffected.)
 - `stageRecipientsSql` had gained a `carrierPolicy` parameter that **every
   send-path caller must pass**, or the audience shown stops matching the audience
   that materializes. New call sites written from the stale reading would have
@@ -2825,6 +2939,59 @@ Drizzle applies **every pending migration in one transaction**, and each lock is
 - Make the first statement `SET LOCAL lock_timeout = '5s';` so a blocked lock fails the migration and you retry, instead of stalling the app.
 - Take the strongest lock first. In `0181_conversion_events.sql`, the `offers` `ADD COLUMN` + index run before any `CREATE TABLE` with a foreign key, so `offers` never needs a lock upgrade while the FK locks on `stage_sends`/`contacts` are held.
 - A seed that `LEFT JOIN`s a lookup by name (e.g. an event-type key) needs `WHERE v.key IS NULL OR lookup.id IS NOT NULL`. Without it, a typo silently seeds a NULL reference, which for conversion mappings means a status-only rule.
+
+## A refusal that lists what it forbids will always be out of date — allowlist the target (2026-09-18)
+
+`.env.local` is **production**. Every fixture-writing script in `scripts/` is one forgotten `DATABASE_URL=` away from seeding it, and for a while the protection was a five-line block copied into 32 files:
+
+```ts
+const PROD_REF = "rtdarhkkjwcetlmruftl";
+if ((process.env.DATABASE_URL ?? "").includes(PROD_REF)) { … process.exit(1); }
+```
+
+Three things were wrong with it, and only the first is obvious:
+
+1. **It was a denylist.** It refused one spelling of production. A raw IP, a custom hostname, a CNAME'd pooler alias, a second connection string for the same cluster, or a future prod project with a new ref all reach the same data without containing that literal — and all ran. An allowlist inverts the question to *"is this one of the databases I am allowed to write to?"*, which refuses targets nobody has thought of yet.
+2. **`DATABASE_URL=""` slipped through.** `""` contains no prod ref, so the check passed — and `postgres()` with no connection string falls back to the libpq `PG*` variables, i.e. whatever `PGHOST`/`PGDATABASE`/`~/.pgpass` say. Empty is not "no database", it is "an unknown one".
+3. **It ran too late to be total.** A statement in the module body runs only after *every* import has been evaluated. It worked purely because postgres-js connects lazily; a module-scope query anywhere in the import graph would have outrun it.
+
+The rule now: **[`scripts/_require-preview-db.ts`](../scripts/_require-preview-db.ts) is the only place a project ref is spelled, and scripts import it for its side effect, second — after `./_env-preload` and before any app module.**
+
+```ts
+import "./_env-preload";
+import "./_require-preview-db"; // or: import { requirePreviewDb } from "./_require-preview-db";
+
+import { db } from "../db/client";
+```
+
+Imports evaluate in source order (tsx emits its requires in source order too), so the process has already exited by the time `db/client` is required — which closes (3) rather than relying on lazy connection. `requirePreviewDb()` returns `{ ref, label }` for the `Target DB:` banner, so no caller needs the literal.
+
+[`scripts/test-preview-db-guard.ts`](../scripts/test-preview-db-guard.ts) (`npm run check:guards`) asserts the idiom instead of trusting it: no 20-letter project-ref literal outside the helper, every preview-only DB script importing it, and that import ahead of everything that can open a connection. Its population is **derived** — a script is enrolled when it touches a database *and* declares a preview target (imports the helper, or carries the `.env.demo` run line every one of these carries) — so a new fixture script copied from an existing one is covered without editing a list. The bar carries its own can-go-red controls.
+
+**Its limit, stated rather than implied:** a brand-new script that writes fixtures, imports the helper not at all and never mentions `.env.demo` is invisible to it. That hole is deliberate — roughly 150 other scripts here are read-only diagnostics that are *supposed* to run against production, so "every script that touches a database must refuse production" would be false. Closing it properly means every DB-writing script declaring its target either way.
+
+**A prod-facing diagnostic must NOT import the helper.** Refusing production would refuse its only purpose; see [`scripts/verify-purchase-rule-definition.ts`](../scripts/verify-purchase-rule-definition.ts), whose guard belongs on the write side (`SET TRANSACTION READ ONLY`) instead.
+
+## A bar whose two sides move together cannot fail — anchor one of them to a literal (2026-09-18)
+
+[`scripts/verify-campaign-level-split.ts`](../scripts/verify-campaign-level-split.ts) pins blocks (6)–(12) to the legacy lane trio, because those blocks address lanes by index and a fourth lane would leave an unmaterialized sibling and turn (10)'s settle bar red for a reason that has nothing to do with what it tests. The pin was named once, `PINNED_TIERS`, and guarded like this:
+
+```ts
+const split = await performBehavioralSplit({ …, tiers: PINNED_TIERS }, db);
+check("split created EXACTLY the pinned lanes", createdTiers === PINNED_TIERS);   // green forever
+```
+
+That asserts only that `performBehavioralSplit` honours its argument. Widening `PINNED_TIERS` to `[0,1,2,3]` moves **both** sides and the bar stays green — measured: with the pin widened, that check passed with `{0,1,2,3}` while the block it protects failed for unrelated reasons. The comment warned; the bar did not.
+
+The fix is one line anchored to something that does not move:
+
+```ts
+check("⭐ the pin is still the legacy trio [0,1,2]", JSON.stringify(PINNED_TIERS) === JSON.stringify([0, 1, 2]));
+```
+
+Now widening the pin has to come here and argue with the literal first. The same shape applies anywhere a guard compares a result against the constant that produced it.
+
+**And an unreachable `throw` is not a working one.** The total-lookup helpers added in Task 5 (`expectedFor` / `expectLane`) throw when a tier in `LANE_TIER_VALUES` has no seeded expectation — which cannot happen today, so nothing proved the throw fires. Each is now pinned with a call on an unmapped tier inside `try`/`catch`, so the safety net is tested before the day it is needed.
 
 ## A background job that needs its own `statement_timeout` needs its own connection (2026-09-21)
 

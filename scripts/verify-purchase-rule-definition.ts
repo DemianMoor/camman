@@ -4,18 +4,42 @@ import { sql as drizzleSql } from "drizzle-orm";
 
 import { db } from "../db/client";
 import { buildSegmentAudienceClause } from "../lib/segment-rules-eval";
-import { campaignTierExpr } from "../lib/campaign-tier";
+import { campaignTierExpr, EXIT_TIER, tierLiteral } from "../lib/campaign-tier";
 import {
   legacySaleStatusPurchasedClause,
   purchasedClause,
   registeredClause,
 } from "../lib/sale-attribution";
-import { seedConversionEvent } from "./_conversion-fixture";
 
 // Verifies the shared purchase definition (lib/sale-attribution.ts) end-to-end
 // by running the REAL app code paths — buildSegmentAudienceClause and
-// campaignTierExpr — against live data. Read-only: the one write (a synthesized
-// 'rejected' conversion) happens inside a transaction that always ROLLBACKs.
+// campaignTierExpr — against live data.
+//
+// ⭐⭐ THIS SCRIPT DELIBERATELY READS PRODUCTION, AND MUST NEVER WRITE TO IT.
+// Its whole value is the comparison against real accumulated conversions: A, C
+// and E measure the ledger against the legacy `stage_sends` columns on live
+// data, and against an empty database they are all trivially 0 == 0. So it is
+// NOT given the `PROD_REF` refusal the fixture-seeding scripts carry — refusing
+// production here would refuse the only thing it does. (An earlier revision did
+// carry that refusal; it was removed on 2026-09-18 because it blocked the
+// script's entire purpose.)
+//
+// The guard is on the WRITE side instead, and it is enforced by Postgres rather
+// than by convention: `main()` runs inside ONE transaction that begins with
+// `SET TRANSACTION READ ONLY`, so every statement this script issues is checked
+// by the server at executor start and any INSERT / UPDATE / DELETE against a
+// non-temporary table fails loudly with SQLSTATE 25006 instead of landing. Bar
+// B below PROVES that is live rather than assuming it. Do not "helpfully" drop
+// the READ ONLY to make some future write work — add that write to a
+// fixture-seeding script that carries the production refusal.
+//
+// Two honest limits of the guard, so nobody over-trusts it:
+//   • `buildSegmentAudienceClause` is APP code and issues its own read through
+//     the global `db` pool, outside this transaction. It is a plain SELECT over
+//     `segments` / `segment_rules`; the read-only contract still holds, but the
+//     server-side enforcement does not reach it.
+//   • The whole run is one snapshot-holding transaction. It is short (seconds),
+//     but do not grow this script into a long crawl against production.
 //
 // WHAT THIS ASSERTS, and why each bar is shaped this way:
 //   A. The durable invariant — the segment rule agrees with the REPORTING
@@ -31,13 +55,22 @@ import { seedConversionEvent } from "./_conversion-fixture";
 //      for a CORRECT reason. A and E therefore subtract the contacts whose
 //      legacy-only buyer-ness is explained by a registration-typed ledger row,
 //      and print the registration count so the state is named, not assumed.
-//   B. 'rejected' is NOT a purchase — proven on SYNTHESIZED state (there are no
-//      rejected rows in prod today), so the bar can actually go red.
+//   B. This verifier CANNOT write — a modifying statement is refused by the
+//      server. Proven by attempting one, not asserted. (B used to synthesize a
+//      'rejected' conversion here to prove "rejected is not a purchase"; that
+//      needed a write, so it moved out. The predicate itself is still pinned,
+//      on fixtures, by scripts/test-ledger-predicates-db.ts — bars D2 and D5.)
 //   C. The fix is load-bearing — the OLD predicate is re-run and must produce a
 //      STRICTLY SMALLER audience. If the network ever starts sending 'sale' for
 //      everything this bar goes quiet-equal, which is reported, not asserted.
-//   D. The converted tier (campaign-tier.ts tier 3) is reachable.
+//   D. The purchased tier (campaign-tier.ts EXIT_TIER, 4 since Phase 4 — it was
+//      3 before Registered joined the scale) is reachable.
 
+// A/C/E compare LIVE counts, so they are only meaningful against an org that
+// actually has sends and conversions — point VERIFY_ORG_ID at one. Against the
+// preview database's empty default org they report 0 == 0 and D has no campaign
+// to reach; that is an environment, not a regression.
+//   npx tsx --conditions=react-server scripts/verify-purchase-rule-definition.ts
 const ORG_ID = process.env.VERIFY_ORG_ID ?? "b0ce3435-5ea2-4510-ab11-8cdd0d0c125b";
 
 let passed = 0;
@@ -52,38 +85,50 @@ function check(label: string, ok: boolean, detail = "") {
   }
 }
 
-async function countOf(clause: unknown): Promise<number> {
-  const rows = (await db.execute(
-    drizzleSql`SELECT count(*)::int AS n FROM (${clause as never}) x`,
+// ⭐ EVERY HELPER TAKES THE EXECUTOR, AND NONE OF THEM DEFAULTS TO `db`. Two
+// reasons, both learned the hard way:
+//   • a read issued through the global `db` pool lands on a DIFFERENT
+//     connection, so it cannot see the open transaction — which silently turns
+//     an in-transaction assertion into a trivial 0 == 0;
+//   • and it would also escape the `SET TRANSACTION READ ONLY` above, which is
+//     the only thing standing between this script and a write to production.
+// A default parameter would make both failures invisible at the call site, so
+// there isn't one: omitting the executor is a type error.
+type Executor = { execute: (q: never) => Promise<unknown> };
+
+async function countOf(clause: unknown, on: Executor): Promise<number> {
+  const rows = (await on.execute(
+    drizzleSql`SELECT count(*)::int AS n FROM (${clause as never}) x` as never,
   )) as unknown as { n: number }[];
   return rows[0]?.n ?? 0;
 }
 
-// MUST take the executor: reads issued through the global `db` pool land on a
-// DIFFERENT connection and cannot see an open transaction's uncommitted rows —
-// which silently turns every in-transaction assertion into a trivial 0 == 0.
-type Executor = { execute: (q: never) => Promise<unknown> };
-async function scalar(q: unknown, on: Executor = db as never): Promise<number> {
+async function scalar(q: unknown, on: Executor): Promise<number> {
   const rows = (await on.execute(q as never)) as unknown as { n: number }[];
   return Number(rows[0]?.n ?? 0);
 }
 
-async function main() {
+/** The read-only transaction, plus the savepoint capability bar B needs. */
+type RoTx = Executor & {
+  transaction: <T>(fn: (sp: Executor) => Promise<T>) => Promise<T>;
+};
+
+async function main(tx: RoTx) {
   console.log(`Org ${ORG_ID}\n`);
 
   // ---------------------------------------------------------------- context
   const totalSends = await scalar(drizzleSql`
-    SELECT count(*)::int AS n FROM stage_sends WHERE org_id = ${ORG_ID}::uuid`);
+    SELECT count(*)::int AS n FROM stage_sends WHERE org_id = ${ORG_ID}::uuid`, tx);
   const convRows = await scalar(drizzleSql`
     SELECT count(*)::int AS n FROM stage_sends
-    WHERE org_id = ${ORG_ID}::uuid AND converted_at IS NOT NULL`);
+    WHERE org_id = ${ORG_ID}::uuid AND converted_at IS NOT NULL`, tx);
   const rejectedRows = await scalar(drizzleSql`
     SELECT count(*)::int AS n FROM stage_sends
-    WHERE org_id = ${ORG_ID}::uuid AND sale_status = 'rejected'`);
-  const statusMix = (await db.execute(drizzleSql`
+    WHERE org_id = ${ORG_ID}::uuid AND sale_status = 'rejected'`, tx);
+  const statusMix = (await tx.execute(drizzleSql`
     SELECT COALESCE(sale_status, '(null)') AS s, count(*)::int AS n
     FROM stage_sends WHERE org_id = ${ORG_ID}::uuid
-    GROUP BY 1 ORDER BY 2 DESC`)) as unknown as { s: string; n: number }[];
+    GROUP BY 1 ORDER BY 2 DESC` as never)) as unknown as { s: string; n: number }[];
 
   // ⭐ NAME THE WORLD-STATE these bars are calibrated against. Zero
   // registration-typed ledger rows today; the moment that changes, the legacy
@@ -91,10 +136,10 @@ async function main() {
   // E below exclude exactly those contacts instead of reading them as drift.
   const registrationRows = await scalar(drizzleSql`
     SELECT count(*)::int AS n FROM conversion_events ce
-    WHERE ce.org_id = ${ORG_ID}::uuid AND ${registeredClause()}`);
+    WHERE ce.org_id = ${ORG_ID}::uuid AND ${registeredClause()}`, tx);
   const registrationContacts = await scalar(drizzleSql`
     SELECT count(DISTINCT ce.contact_id)::int AS n FROM conversion_events ce
-    WHERE ce.org_id = ${ORG_ID}::uuid AND ce.contact_id IS NOT NULL AND ${registeredClause()}`);
+    WHERE ce.org_id = ${ORG_ID}::uuid AND ce.contact_id IS NOT NULL AND ${registeredClause()}`, tx);
 
   console.log("LIVE CONFIG (reported, not asserted):");
   console.log(`  stage_sends rows           : ${totalSends.toLocaleString()}`);
@@ -116,7 +161,7 @@ async function main() {
   // the two documented differences: rejections are not purchases, and a
   // registration is not a purchase (a registration postback arrives with a
   // `lead` status, so the legacy definition cannot see the difference).
-  const driftA = (await db.execute(drizzleSql`
+  const driftA = (await tx.execute(drizzleSql`
     WITH legacy_reporting AS (
       SELECT DISTINCT ss.contact_id FROM stage_sends ss
       WHERE ss.org_id = ${ORG_ID}::uuid
@@ -142,7 +187,7 @@ async function main() {
               (SELECT * FROM legacy_reporting EXCEPT SELECT * FROM ledger)
               INTERSECT (SELECT * FROM registrants)) y)::int AS lost_explained_by_registration,
            (SELECT count(*) FROM (SELECT * FROM ledger EXCEPT SELECT * FROM legacy_reporting) z)::int AS gained
-  `)) as unknown as {
+  ` as never)) as unknown as {
     legacy_n: number;
     ledger_n: number;
     lost: number;
@@ -170,141 +215,71 @@ async function main() {
   );
 
   // Run the REAL segment eval for every segment that uses a purchase rule.
-  const purchaseSegs = (await db.execute(drizzleSql`
+  const purchaseSegs = (await tx.execute(drizzleSql`
     SELECT DISTINCT s.id, s.name FROM segments s
     JOIN segment_rules r ON r.segment_id = s.id
     WHERE s.org_id = ${ORG_ID}::uuid AND r.is_active
       AND r.rule_type IN ('made_purchase','made_purchase_for_brand','made_purchase_for_offer')
-    ORDER BY s.id`)) as unknown as { id: number; name: string }[];
+    ORDER BY s.id` as never)) as unknown as { id: number; name: string }[];
 
   console.log(
     `\n   Segments using a purchase rule (real eval path): ${purchaseSegs.length}`,
   );
   for (const s of purchaseSegs) {
     const clause = await buildSegmentAudienceClause(s.id, ORG_ID);
-    const n = await countOf(clause);
+    const n = await countOf(clause, tx);
     console.log(`     [${s.id}] ${s.name}: ${n.toLocaleString()} contacts`);
   }
 
-  // ------------------------------------------- B. rejected is not a purchase
-  // Synthesized, so this bar can genuinely go red. Always rolled back.
-  console.log("\nB. 'rejected' is NOT a purchase (synthesized, rolled back)");
-  await db
-    .transaction(async (tx) => {
-      // ⭐ THE DONOR IS CHOSEN BY THE LEDGER, not by the legacy columns. The
-      // bar below asserts before === 0, i.e. "this contact is not already a
-      // buyer" — and "buyer" is now a conversion_events question. Selecting on
-      // sale_status could pick a contact who already carries a counted purchase
-      // in the ledger, making before === 1 and the bar red for a reason that has
-      // nothing to do with rejections. (The row-level sale_status IS NULL is
-      // kept only so the legacy UPDATE below isn't overwriting a real value.)
-      const donor = (await tx.execute(drizzleSql`
-        SELECT ss.id, ss.contact_id, ss.campaign_id, ss.stage_id, ss.phone
-        FROM stage_sends ss
-        WHERE ss.org_id = ${ORG_ID}::uuid AND ss.sale_status IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM conversion_events ce
-            WHERE ce.org_id = ss.org_id AND ce.contact_id = ss.contact_id
-              AND ${purchasedClause()})
-        LIMIT 1`)) as unknown as {
-        id: string;
-        contact_id: string;
-      }[];
-      if (donor.length === 0) {
-        check("found a non-buyer send row to synthesize onto", false);
-        throw new Error("rollback");
-      }
-      const { id, contact_id, campaign_id, stage_id } = donor[0] as {
-        id: string;
-        contact_id: string;
-        campaign_id: number | null;
-        stage_id: number | null;
-      };
-
-      const before = await scalar(
-        drizzleSql`
-        SELECT count(*)::int AS n FROM conversion_events ce
-        WHERE ce.org_id = ${ORG_ID}::uuid AND ce.contact_id = ${contact_id}::uuid
-          AND ce.contact_id IS NOT NULL AND ${purchasedClause()}`,
-        tx as never,
-      );
-
-      // ⚠️ DEVIATION FROM THE BRIEF, DOCUMENTED: purchasedClause() now reads
-      // conversion_events, not stage_sends, so synthesizing the state by
-      // UPDATEing stage_sends.sale_status alone (the brief's literal Part B)
-      // would no longer move what's being asserted — before/afterRejected would
-      // both read 0 for the wrong reason (no ledger row at all), and afterLead
-      // would stay 0, failing the "bar can go red" check. Stamp BOTH: the
-      // legacy column (still written by lib/keitaro/poll-conversions.ts) and a
-      // matching conversion_events row, exactly the pairing every other script
-      // in this task's Step 6 uses. Still inside the same rolled-back tx.
-      await tx.execute(drizzleSql`
-        UPDATE stage_sends
-        SET sale_status = 'rejected', sale_revenue = 99.0000, converted_at = now()
-        WHERE id = ${id}::uuid`);
-      const ceId = await seedConversionEvent(tx, {
-        orgId: ORG_ID,
-        stageSendId: id,
-        contactId: contact_id,
-        campaignId: campaign_id,
-        stageId: stage_id,
-        eventKey: "purchase",
-        status: "rejected",
-        revenue: 99,
-        keitaroType: "rejected",
-      });
-
-      const afterRejected = await scalar(
-        drizzleSql`
-        SELECT count(*)::int AS n FROM conversion_events ce
-        WHERE ce.org_id = ${ORG_ID}::uuid AND ce.contact_id = ${contact_id}::uuid
-          AND ce.contact_id IS NOT NULL AND ${purchasedClause()}`,
-        tx as never,
-      );
-      check(
-        "a 'rejected' conversion does NOT make the contact a buyer",
-        before === 0 && afterRejected === 0,
-        `before=${before} afterRejected=${afterRejected}`,
-      );
-
-      // Same ledger row flipped to approved MUST count — proves the bar above
-      // is live and not just an always-zero query.
-      await tx.execute(drizzleSql`
-        UPDATE stage_sends SET sale_status = 'lead' WHERE id = ${id}::uuid`);
-      await tx.execute(drizzleSql`
-        UPDATE conversion_events SET status = 'approved' WHERE id = ${ceId}::bigint`);
-      const afterLead = await scalar(
-        drizzleSql`
-        SELECT count(*)::int AS n FROM conversion_events ce
-        WHERE ce.org_id = ${ORG_ID}::uuid AND ce.contact_id = ${contact_id}::uuid
-          AND ce.contact_id IS NOT NULL AND ${purchasedClause()}`,
-        tx as never,
-      );
-      check(
-        "the SAME ledger row flipped to approved DOES make them a buyer (bar can go red)",
-        afterLead === 1,
-        `afterLead=${afterLead}`,
-      );
-
-      throw new Error("rollback");
+  // --------------------------------------------- B. this verifier cannot write
+  // ⭐ PROVEN, NOT ASSERTED. The guard that makes it safe to point this script
+  // at production is `SET TRANSACTION READ ONLY` at the bottom of this file, and
+  // a guard nobody exercises is a guard nobody knows is still there. So issue a
+  // real modifying statement and require the SERVER to refuse it.
+  //
+  // ⭐ THE PROBE IS HARMLESS EVEN IF THE GUARD IS GONE: `WHERE false` matches no
+  // row, so the cost of a missing READ ONLY is a red bar, not a mutated
+  // production row. Postgres raises 25006 in ExecutorStart for any statement
+  // that would modify a non-temporary table — before it examines a single row —
+  // so the refusal does not depend on a row existing. That matters: this bar is
+  // just as live against the empty preview database as against production, and
+  // it is NOT an assertion about today's data.
+  //
+  // ⭐ IT CAN GO RED, both ways. Delete the READ ONLY line and the UPDATE is
+  // accepted, no error is raised, and the bar fails naming exactly that.
+  //
+  // The probe runs inside a SAVEPOINT (drizzle renders a nested transaction as
+  // one). Without it the 25006 would abort the WHOLE outer transaction and
+  // every bar after this point would die with 25P02 instead of running.
+  //
+  // (B used to synthesize a rejected conversion here to prove "rejected is not
+  // a purchase". That needed a write. The predicate is still pinned, on
+  // fixtures, by scripts/test-ledger-predicates-db.ts — bars D2 and D5.)
+  console.log("\nB. This verifier CANNOT write (READ ONLY transaction)");
+  const writeErr: string | null = await tx
+    .transaction(async (sp) => {
+      await sp.execute(drizzleSql`
+        UPDATE stage_sends SET sale_status = sale_status WHERE false` as never);
+      return null as string | null;
     })
-    .catch((e: Error) => {
-      if (e.message !== "rollback") throw e;
-    });
-
-  const rejectedAfter = await scalar(drizzleSql`
-    SELECT count(*)::int AS n FROM stage_sends
-    WHERE org_id = ${ORG_ID}::uuid AND sale_status = 'rejected'`);
+    .catch(
+      (e: unknown): string | null =>
+        (e as { cause?: { code?: string } })?.cause?.code ??
+        (e as { code?: string })?.code ??
+        `no SQLSTATE: ${(e as Error)?.message}`,
+    );
   check(
-    "synthesized state was rolled back (prod untouched)",
-    rejectedAfter === rejectedRows,
-    `rejected rows now ${rejectedAfter}, was ${rejectedRows}`,
+    "a write issued by this script is REFUSED by the server (SQLSTATE 25006)",
+    writeErr === "25006",
+    writeErr === null
+      ? "the UPDATE was ACCEPTED — the READ ONLY transaction guard is gone"
+      : `got ${writeErr}`,
   );
 
   // ------------------------------------------------ C. the fix is load-bearing
   const oldPredicate = await scalar(drizzleSql`
     SELECT count(DISTINCT contact_id)::int AS n FROM stage_sends
-    WHERE org_id = ${ORG_ID}::uuid AND sale_status = 'sale'`);
+    WHERE org_id = ${ORG_ID}::uuid AND sale_status = 'sale'`, tx);
   console.log("\nC. The change is load-bearing");
   console.log(
     `   old predicate (= 'sale'): ${oldPredicate} buyers · new: ${ruleBuyers} buyers`,
@@ -316,12 +291,12 @@ async function main() {
   );
 
   // --------------------------------------------- D. converted tier reachable
-  console.log("\nD. campaign-tier tier 3 ('converted') is reachable");
-  const campRow = (await db.execute(drizzleSql`
+  console.log(`\nD. campaign-tier tier ${EXIT_TIER} ('purchased', the exit) is reachable`);
+  const campRow = (await tx.execute(drizzleSql`
     SELECT ce.campaign_id AS id, count(*)::int AS n FROM conversion_events ce
     WHERE ce.org_id = ${ORG_ID}::uuid AND ce.contact_id IS NOT NULL AND ${purchasedClause()}
       AND ce.campaign_id IS NOT NULL
-    GROUP BY 1 ORDER BY 2 DESC LIMIT 1`)) as unknown as {
+    GROUP BY 1 ORDER BY 2 DESC LIMIT 1` as never)) as unknown as {
     id: number;
     n: number;
   }[];
@@ -331,23 +306,25 @@ async function main() {
     const tierCount = await scalar(drizzleSql`
       SELECT count(*)::int AS n
       FROM (${campaignTierExpr(campRow[0].id, ORG_ID)}) t
-      WHERE t.tier = 3`);
+      WHERE t.tier = ${tierLiteral(EXIT_TIER)}`, tx);
     check(
-      `campaign ${campRow[0].id}: ${tierCount} contacts at tier 3 (converted)`,
+      `campaign ${campRow[0].id}: ${tierCount} contacts at tier ${EXIT_TIER} (purchased)`,
       tierCount > 0,
-      "tier 3 still unreachable",
+      `tier ${EXIT_TIER} still unreachable`,
     );
   }
 
-  // ⚠️ SAME WORLD-STATE AS A: with zero registration-typed ledger rows the two
-  // definitions agree on every contact, so `lost` is expected to be 0. The
-  // first PsychoBook registration changes that CORRECTLY — the network posts it
-  // with a `lead` status, so the legacy predicate calls that contact a buyer and
-  // the ledger does not. Those contacts are subtracted by name below, so a
-  // correct future does not read as a regression.
+  // ⚠️ SAME WORLD-STATE AS A: as measured on 2026-09-18 production carried zero
+  // registration-typed ledger rows, so the two definitions agreed on every
+  // contact and `lost` came out 0. That is a dated observation, not a standing
+  // fact. The first PsychoBook registration changes it CORRECTLY — the network
+  // posts it with a `lead` status, so the legacy predicate calls that contact a
+  // buyer and the ledger does not. Those contacts are subtracted by name below
+  // and the counts are printed, so a correct future does not read as a
+  // regression and nobody has to trust this comment's date.
   // ----------------------------------------------- E. ledger vs legacy drift
   console.log("\nE. Ledger buyers vs the legacy sale_status definition (drift)");
-  const drift = (await db.execute(drizzleSql`
+  const drift = (await tx.execute(drizzleSql`
     WITH ledger AS (
       SELECT DISTINCT ce.contact_id FROM conversion_events ce
       WHERE ce.org_id = ${ORG_ID}::uuid AND ce.contact_id IS NOT NULL AND ${purchasedClause()}
@@ -369,7 +346,7 @@ async function main() {
               (SELECT * FROM legacy EXCEPT SELECT * FROM ledger)
               INTERSECT (SELECT * FROM registrants)) z)::int AS lost_explained_by_registration,
            (SELECT count(*) FROM (SELECT * FROM ledger EXCEPT SELECT * FROM legacy) y)::int AS gained
-  `)) as unknown as {
+  ` as never)) as unknown as {
     ledger_n: number;
     legacy_n: number;
     lost: number;
@@ -389,10 +366,22 @@ async function main() {
   );
 
   console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch((err) => {
-  console.error("verifier crashed:", err);
-  process.exit(1);
-});
+// ⭐ ONE transaction, and `SET TRANSACTION READ ONLY` is its FIRST statement —
+// Postgres refuses that form once the transaction has already run a query
+// (25001), so it cannot be moved down. From here on the server rejects every
+// INSERT / UPDATE / DELETE this script could issue against a real table; bar B
+// proves it is doing so.
+//
+// `process.exit` lives OUT here, after the transaction has closed: exiting from
+// inside would abandon an open transaction mid-flight.
+db.transaction(async (tx) => {
+  await tx.execute(drizzleSql`SET TRANSACTION READ ONLY`);
+  await main(tx as never);
+})
+  .then(() => process.exit(failed > 0 ? 1 : 0))
+  .catch((err) => {
+    console.error("verifier crashed:", err);
+    process.exit(1);
+  });

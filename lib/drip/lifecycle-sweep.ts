@@ -27,6 +27,26 @@ import { isDripPostureOn } from "./in-use";
 // also finished should read 'converted', not 'completed'. Closing is guarded by
 // state IN ('routed','active'), so whichever runs first wins and the later ones
 // are no-ops on that row — the order here IS the precedence.
+//
+// ⚠️ AND THE PRECEDENCE IS BEST-EFFORT, NOT ATOMIC. The three calls below run on
+// the POOLED client with no enclosing transaction, so a purchase that lands
+// BETWEEN the converted pass and the completed pass is missed by the first and
+// seen by the second: that buyer closes as `completed` / `all_stages_sent`
+// instead of `converted` / `purchased`. The window is sub-second per campaign.
+//
+// Phase 4 WIDENED it, deliberately and acceptably. Before the tier-4 branch
+// existed, a buyer with unsent children could not be closed by
+// closeCompletedJourneys at all (their tier read ≤2, so a child was always
+// judged owed) — the race could not be lost. Now tier 4 is above every child, so
+// nothing is owed and the completed pass CAN close them.
+//
+// What it costs is a funnel bucket, never a contact: the journey closes either
+// way, the slot is freed either way, and no message is sent or skipped
+// differently. Wrapping the three passes in one transaction would fix the
+// bucket at the price of holding a pooled connection across three whole-campaign
+// UPDATEs — not a trade worth making for a label. Not redesigned here; recorded
+// so the next reader of a funnel that under-counts `converted` knows where to
+// look first.
 
 export interface SweepResult {
   campaigns: number;

@@ -114,7 +114,7 @@ sequenceDiagram
   participant TG as Telegram
   Op->>API: split (gated on >=1 COMPLETED stage)
   API->>API: INSERT split group (state=pending, source_stage_ids EMPTY)
-  API->>API: INSERT 3 lanes (tier 0/1/2, parent=anchor, split_group_id)
+  API->>API: INSERT the SELECTED lanes (tiers 0/1/2/3, parent=anchor, split_group_id)
   Note over API: the source set is NOT frozen here -- a stage finishing<br/>before the recompute must still be included
   Pre->>Pre: ensureGroupSourceResolved (guarded on state='pending')
   Pre->>Pre: resolve COMPLETED stages -> source_stage_ids, recomputed_at
@@ -144,6 +144,20 @@ sequenceDiagram
 > **A failed group keeps its already-materialized rows, unreleased.** Rolling them
 > back would be a second failure mode with nothing to gain — the abort route
 > (`.../send/abort`) is how an operator clears them.
+
+> **The lane set is the operator's SELECTION, not a fixed trio.** The picker
+> offers every tier in `LANE_TIER_VALUES` ([`lib/campaign-tier.ts`](../lib/campaign-tier.ts));
+> `DEFAULT_LANE_TIERS` is `[1, 2]` (Clicked + Reached offer), so tier 0 (Ignored)
+> and tier 3 (**Registered**, migration 0184) are offered **unticked** and a
+> campaign only gets those lanes when someone asks for one. Tier 4 (**purchased**)
+> exits the sequence: it is refused by the route validator (`400
+> invalid_lane_tier`) and by the `campaign_stages_behavioral_lane_check` CHECK, so
+> it cannot be inserted at all. ⚠️ A lane matches on the contact's **exact** tier,
+> and the tier is computed the same way whether or not a Registered lane exists —
+> so a registrant reads 3, is therefore NOT in the Reached-offer lane, and with
+> Registered unticked lands in **no lane at all** and receives nothing at that
+> position. Ticking it is what gives them a message, not what removes them from
+> somewhere else. See [behavioral-lanes.md](04-features/behavioral-lanes.md).
 
 ## E. Opt-out (STOP) intake
 

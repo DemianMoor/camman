@@ -15,7 +15,12 @@
 // Tier 1 is the exception and needs no separate column: clicks.clicked_at
 // defaults to now() at the /r/ request, so a click's detection IS its event.
 
-/** 0 ignored · 1 clicked · 2 reached_offer. Tier 3 (converted) EXITS, never a lane. */
+/**
+ * 0 ignored · 1 clicked · 2 reached_offer. A drip follow-up exists only for
+ * these three: tier 3 (registered) and tier 4 (purchased) get no child —
+ * `FollowupTier` is deliberately NARROWER than the lane scale in
+ * lib/campaign-tier.ts, which runs 0..4.
+ */
 export type FollowupTier = 0 | 1 | 2;
 
 export const TIER_LABEL: Record<FollowupTier, string> = {

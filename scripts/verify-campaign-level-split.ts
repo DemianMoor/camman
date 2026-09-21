@@ -7,8 +7,10 @@
 //
 //   (1) SCOPE is printed and non-empty. A run with zero source stages or zero
 //       sends is a FAILURE, not a pass.
-//   (2) The three lanes PARTITION the source set: they sum to the sent contacts
-//       minus exclusions, and no contact appears in two lanes.
+//   (2) The lanes PARTITION the source set: they sum to the sent contacts minus
+//       exclusions, and no contact appears in two lanes. One lane per
+//       LANE_TIER_VALUES (0 Ignored / 1 Clicked / 2 Reached offer / 3
+//       Registered); tier 4 (purchased) EXITS and gets no lane.
 //   (3) CROSS-STAGE precedence: clicked in stage 1, did nothing in a later stage
 //       => Clicked. (This is the behaviour the whole change exists for.)
 //   (4) OFFER beats Clicked: reached the offer in ANY stage => Reached offer.
@@ -20,8 +22,8 @@
 //       moves the contact into Clicked and OUT of Ignored.
 //   (8) FROZEN after materialization: a later click changes no materialized row,
 //       and Phase A will not re-select the lane.
-//   (9) A FAILED group releases NOTHING — Phase B excludes all three lanes — and
-//       a recompute that fails before any lane materialized leaves zero rows.
+//   (9) Lanes are INDEPENDENT of group state, and a recompute that fails before
+//       any lane materialized leaves zero rows.
 //  (10) A lane that resolves to ZERO recipients is skipped_empty (terminal,
 //       benign), still SATISFIES its group, and is not re-selected by Phase A.
 //  (11) OVERLAPPING TICKS on one group: concurrent recomputes agree on one source
@@ -42,7 +44,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
-import { campaignTierExpr } from "@/lib/campaign-tier";
+import { campaignTierExpr, EXIT_TIER, LANE_TIER_VALUES } from "@/lib/campaign-tier";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
 import { resolveCompletedStages } from "@/lib/sends/stage-complete";
 import {
@@ -60,6 +62,20 @@ import {
   sweepStuckSplitGroups,
 } from "@/lib/stages/split-group";
 import { performBehavioralSplit } from "@/lib/stages/behavioral-split";
+
+// ⚠️ `.env.local` is PRODUCTION and `_env-preload` loads it whenever
+// DATABASE_URL is not already set. This script WRITES fixtures, so refuse
+// outright rather than trust the caller's environment:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/verify-campaign-level-split.ts
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
+
+// The lane trio blocks (6)-(12) deliberately keep. Named once so the two
+// performBehavioralSplit calls below cannot drift apart, and so the pin reads as
+// a decision rather than a literal someone forgot to update — see the note at
+// the (6) split.
+const PINNED_TIERS = [0, 1, 2];
 
 const ORG_MARKER = "__SPLIT_GROUP_VERIFY__";
 const COUNTED_TABLES = [
@@ -209,7 +225,7 @@ async function main() {
     const s2 = await newStage(2, true);
     const s3 = await newStage(3, false);
 
-    const roles = ["ign", "clk_s1", "rch_s2", "both", "cnv", "opt", "s3only", "bot"];
+    const roles = ["ign", "clk_s1", "rch_s2", "both", "cnv", "reg", "opt", "s3only", "bot"];
     for (const role of roles) {
       const phone = `+1999${String(unique).slice(-6)}${roles.indexOf(role)}`;
       const r = (await db.execute(sql`
@@ -285,7 +301,22 @@ async function main() {
     await sent("both", s1);
     await clicked("both", s1);        // clicked AND...
     await sent("both", s2, { reached: true }); // ...reached -> Offer wins, bar (4)
-    await sent("cnv", s1, { purchased: true }); // tier 3, exits
+    await sent("cnv", s1, { purchased: true }); // tier 4 (purchased), exits
+    // reg: reached the offer in S2 AND registered → tier 3. ONE-SIDED — `sent()`
+    // writes sale_status only when `purchased` is set, so the registration comes
+    // from the ledger alone and the Registered lane cannot be satisfied by the
+    // legacy column. Reached is deliberate: it proves a registrant outranks the
+    // Reached-offer lane rather than merely landing somewhere.
+    await sent("reg", s2, { reached: true });
+    await seedConversionEvent(db, {
+      orgId,
+      contactId: cid["reg"],
+      campaignId,
+      stageId: s2,
+      eventKey: "registration",
+      status: "approved",
+      revenue: 0,
+    });
     await sent("opt", s1);
     await db.execute(sql`
       INSERT INTO opt_outs (org_id, contact_id, phone_number, source)
@@ -318,14 +349,41 @@ async function main() {
       `sources=${sourceIds.join(",")} s1=${s1} s2=${s2} s3=${s3}`);
 
     // ── (2) PARTITION ────────────────────────────────────────────────────────
-    console.log("\n(2) The three lanes PARTITION the source set");
-    const L0 = await laneSet(campaignId, 0, { sourceStageIds: sourceIds });
-    const L1 = await laneSet(campaignId, 1, { sourceStageIds: sourceIds });
-    const L2 = await laneSet(campaignId, 2, { sourceStageIds: sourceIds });
-    console.log(`      Ignored=${rolesOf(L0)}  Clicked=${rolesOf(L1)}  Offer=${rolesOf(L2)}`);
+    console.log("\n(2) The lanes PARTITION the source set");
+    // One set per LANE_TIER_VALUES, looked up through `byTier`, which THROWS on a
+    // tier it does not hold. What this replaced was a three-way ternary ladder
+    // keyed on the tier value whose final `else` claimed the Reached-offer set:
+    // it answered that set for ANY tier outside the first two, so the Registered
+    // lane would have been compared against the wrong one and (5) below would
+    // have passed for the wrong reason.
+    const laneSets = new Map<number, Set<string>>();
+    for (const tier of LANE_TIER_VALUES) {
+      laneSets.set(tier, await laneSet(campaignId, tier, { sourceStageIds: sourceIds }));
+    }
+    const byTier = (tier: number): Set<string> => {
+      const s = laneSets.get(tier);
+      if (!s) throw new Error(`no lane set built for tier ${tier} — it is not in LANE_TIER_VALUES`);
+      return s;
+    };
+    const L0 = byTier(0);
+    const L1 = byTier(1);
+    const L2 = byTier(2);
+    const L3 = byTier(3);
+    console.log(
+      `      Ignored=${rolesOf(L0)}  Clicked=${rolesOf(L1)}  Offer=${rolesOf(L2)}  Registered=${rolesOf(L3)}`,
+    );
 
-    const inTwo = [...L0].filter((c) => L1.has(c) || L2.has(c))
-      .concat([...L1].filter((c) => L2.has(c)));
+    // Every PAIR, derived — adding a tier extends the check instead of leaving
+    // the new lane's overlaps untested.
+    const laneTiers = [...laneSets.keys()];
+    const inTwo: string[] = [];
+    for (let i = 0; i < laneTiers.length; i++) {
+      for (let j = i + 1; j < laneTiers.length; j++) {
+        for (const c of byTier(laneTiers[i])) {
+          if (byTier(laneTiers[j]).has(c)) inTwo.push(c);
+        }
+      }
+    }
     check("NO contact appears in two lanes", inTwo.length === 0, `overlap: ${inTwo.length}`);
 
     const pv = await previewSplitLanes(db, campaignId, orgId);
@@ -335,16 +393,23 @@ async function main() {
       laneSum + pv.converted_excluded === pv.source_contacts,
       `${laneSum} + ${pv.converted_excluded} != ${pv.source_contacts}`,
     );
+    // Compared lane-by-lane over EVERY tier the preview reports. Indexing
+    // pv.lanes[0..2] by hand checked three of the four and would have left the
+    // Registered lane's count unverified.
+    check("preview reports exactly the lane tiers the scale allows",
+      JSON.stringify(pv.lanes.map((l) => l.tier)) === JSON.stringify([...LANE_TIER_VALUES]),
+      pv.lanes.map((l) => l.tier).join(","));
     check("preview lane counts match the recipient query",
-      pv.lanes[0].count === L0.size && pv.lanes[1].count === L1.size && pv.lanes[2].count === L2.size,
-      `preview=${pv.lanes.map((l) => l.count).join("/")} query=${L0.size}/${L1.size}/${L2.size}`);
-    check("opted-out contact is in NO lane",
-      !L0.has(cid["opt"]) && !L1.has(cid["opt"]) && !L2.has(cid["opt"]));
-    check("converted contact EXITS (in no lane)",
-      !L0.has(cid["cnv"]) && !L1.has(cid["cnv"]) && !L2.has(cid["cnv"]));
-    check("contact who only received an UNFINISHED stage is in no lane",
-      !L0.has(cid["s3only"]) && !L1.has(cid["s3only"]) && !L2.has(cid["s3only"]));
+      pv.lanes.every((l) => l.count === byTier(l.tier).size),
+      `preview=${pv.lanes.map((l) => l.count).join("/")} query=${LANE_TIER_VALUES.map((t) => byTier(t).size).join("/")}`);
+    const inNoLane = (id: string) => ![...laneSets.values()].some((s) => s.has(id));
+    check("opted-out contact is in NO lane", inNoLane(cid["opt"]));
+    check(`purchased contact (tier ${EXIT_TIER}) EXITS — in no lane`, inNoLane(cid["cnv"]));
+    check("contact who only received an UNFINISHED stage is in no lane", inNoLane(cid["s3only"]));
     check("a BOT click does not promote out of Ignored", L0.has(cid["bot"]));
+    check("⭐ the registrant is in the Registered lane", L3.has(cid["reg"]));
+    check("⭐ the registrant is NOT in the Reached-offer lane (it reached too)",
+      !L2.has(cid["reg"]));
 
     // ── (3) CROSS-STAGE PRECEDENCE ───────────────────────────────────────────
     console.log("\n(3) Clicked in stage 1, did nothing in stage 2 => Clicked");
@@ -359,10 +424,9 @@ async function main() {
 
     // ── (5) OLD IS A STRICT SUBSET OF NEW ────────────────────────────────────
     console.log("\n(5) OLD (single parent) is a SUBSET of NEW (all completed)");
-    for (const tier of [0, 1, 2]) {
+    for (const tier of LANE_TIER_VALUES) {
       const oldSet = await laneSet(campaignId, tier, { parentStageId: s2 });
-      const newSet =
-        tier === 0 ? L0 : tier === 1 ? L1 : L2;
+      const newSet = byTier(tier);
       const escaped = [...oldSet].filter((c) => !newSet.has(c));
       check(
         `synthetic tier ${tier}: old \\ new is EMPTY (old=${oldSet.size}, new=${newSet.size})`,
@@ -373,11 +437,41 @@ async function main() {
 
     // ── (6) A STAGE COMPLETING LATE IS INCLUDED ──────────────────────────────
     console.log("\n(6) A stage completing AFTER the split is created is in the source set");
-    const split = await performBehavioralSplit({ orgId, campaignId, tiers: [0, 1, 2] }, db);
+    // ⚠️ PINNED to the legacy trio, NOT widened to LANE_TIER_VALUES. Blocks
+    // (8)-(12) address lanes by INDEX into `lane_stage_ids` and their subject is
+    // group mechanics — recompute, settle, drainability, concurrency, timeout —
+    // not tier semantics, which (2)-(5) above now exercise across every tier. A
+    // fourth lane here would leave an unmaterialized sibling and turn (10)'s
+    // settle bar red for a reason that has nothing to do with what it tests. The
+    // bar below makes the pin load-bearing rather than incidental.
+    const split = await performBehavioralSplit({ orgId, campaignId, tiers: PINNED_TIERS }, db);
     check("split created", split.ok, JSON.stringify(split));
     if (!split.ok) throw new Error("split failed; cannot continue");
     const groupId = split.split_group_id;
     const laneIds = split.lane_stage_ids;
+    const createdTiers = (
+      (await db.execute(sql`
+        SELECT behavioral_tier AS tier FROM campaign_stages
+        WHERE org_id = ${orgId}::uuid AND split_group_id = ${groupId}::uuid
+        ORDER BY behavioral_tier
+      `)) as unknown as { tier: number }[]
+    ).map((r) => Number(r.tier));
+    // ⭐ ANCHORED TO A LITERAL, NOT TO `PINNED_TIERS`. Comparing the split's
+    // output against the same constant the split was CALLED with proves only
+    // that performBehavioralSplit honours its argument — widening the pin moves
+    // both sides together and the bar stays green, which is exactly the drift
+    // the comment above warns about. The trio is spelled out here so widening
+    // the pin has to come here and argue with this line first.
+    check(
+      "⭐ the pin is still the legacy trio [0,1,2] — widening it is what this bar catches",
+      JSON.stringify(PINNED_TIERS) === JSON.stringify([0, 1, 2]),
+      PINNED_TIERS.join(","),
+    );
+    check(
+      `split created EXACTLY the pinned lanes {${PINNED_TIERS.join(",")}} — no Registered lane in this block`,
+      JSON.stringify(createdTiers) === JSON.stringify(PINNED_TIERS),
+      createdTiers.join(","),
+    );
 
     // S3 finishes sending in the window between the split and the recompute.
     await db.execute(sql`UPDATE campaign_stages SET sent_at = now() WHERE id = ${s3}::int`);
@@ -514,7 +608,7 @@ async function main() {
         RETURNING id::text AS id
       `)) as unknown as { id: string }[]
     )[0].id;
-    for (const t of [0, 1, 2]) {
+    for (const t of LANE_TIER_VALUES) {
       await db.execute(sql`
         INSERT INTO campaign_stages
           (org_id, campaign_id, stage_number, behavioral_tier, parent_stage_id, split_group_id)
@@ -532,7 +626,7 @@ async function main() {
         WHERE s.split_group_id = ${g2}::uuid
       `)) as unknown as { n: number }[]
     )[0].n;
-    check("zero pending rows across all three lanes of the failed group",
+    check(`zero pending rows across all ${LANE_TIER_VALUES.length} lanes of the failed group`,
       Number(g2rows) === 0, `got ${g2rows}`);
 
     // ── (10) EMPTY LANE IS SKIPPED, NOT BURNED ───────────────────────────────
@@ -587,7 +681,8 @@ async function main() {
       VALUES (${orgId}::uuid, ${camp3}::int, ${c3s1}::int, ${cid["ign"]}::uuid,
               ${"x"}, ${"body"}, ${"sent"})
     `);
-    const split3 = await performBehavioralSplit({ orgId, campaignId: camp3, tiers: [0, 1, 2] }, db);
+    // Pinned for the same reason as (6)'s split — see the note there.
+    const split3 = await performBehavioralSplit({ orgId, campaignId: camp3, tiers: PINNED_TIERS }, db);
     if (!split3.ok) throw new Error("camp3 split failed: " + JSON.stringify(split3));
     const g3 = split3.split_group_id;
 

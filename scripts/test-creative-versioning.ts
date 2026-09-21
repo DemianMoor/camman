@@ -1,6 +1,6 @@
 // RUN WITH: npx tsx --conditions=react-server scripts/test-creative-versioning.ts
 import "./_env-preload";
-import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { eq, sql } from "drizzle-orm";
 
@@ -17,8 +17,6 @@ import { checkCreativeBody } from "@/lib/guardrails/url-allowlist";
 // production"). It creates two rows and deletes them, then RE-QUERIES to prove
 // the cleanup actually happened rather than trusting the delete.
 
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
-
 let failures = 0;
 const ok = (m: string) => console.log(`  OK ${m}`);
 const bad = (m: string) => {
@@ -27,17 +25,8 @@ const bad = (m: string) => {
 };
 
 async function main() {
-  const url = process.env.DATABASE_URL ?? "";
-  if (!url.includes(PREVIEW_REF)) {
-    console.error(
-      `REFUSING TO RUN: DATABASE_URL is not the preview project (${PREVIEW_REF}).\n` +
-        "This test creates and deletes creatives.",
-    );
-    process.exit(1);
-  }
-
   console.log("=== creative versioning ===\n");
-  console.log(`  database: preview (${PREVIEW_REF})`);
+  console.log(`  Target DB: ${requirePreviewDb().label}`);
 
   const [org] = (await db.execute(sql`
     SELECT id::text AS id FROM organizations LIMIT 1

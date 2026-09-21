@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
-import { campaignTierExpr } from "@/lib/campaign-tier";
+import { EXIT_TIER, LANE_TIER_VALUES, campaignTierExpr, tierLiteral } from "@/lib/campaign-tier";
 import { resolveCompletedStages } from "@/lib/sends/stage-complete";
 
 // ── Behavioural split GROUP state machine (migration 0174) ───────────────────
@@ -118,8 +118,21 @@ export async function ensureGroupSourceResolved(
 
 // A lane resolved to zero recipients. Terminal + benign: it does NOT burn as
 // `schedule_missed_at` (which renders Red "needs attention") and it SATISFIES the
-// group so its two siblings can still release. Tier-3 severity — an informational
-// note, not an alert.
+// group so its siblings can still release. Tier-3 ALERT severity — an
+// informational note, not an alert. (Unrelated to a behavioural tier 3.)
+//
+// ⚠️ NO `org_id` PREDICATE, DELIBERATELY — do not add one to satisfy CLAUDE.md
+// §3, even though the sibling `notifyLaneSkippedEmpty` below has one. The only
+// production caller (lib/sends/scheduled.ts) holds `campaigns.org_id`, NOT this
+// `campaign_stages` row's own org_id, and no composite FK or trigger ties the
+// two — so the filter would hold by application invariant only. A miss costs
+// `notifyLaneSkippedEmpty` an alert that says "(unknown)"; here it means the
+// UPDATE stamps nothing, `settleSplitGroup` then runs against a lane still
+// counted as outstanding, the group never settles and every sibling is held —
+// the 2026-09-05 freeze, reintroduced by the safety predicate meant to prevent
+// leakage. Add the filter only together with a composite FK (or an equivalently
+// enforced invariant) AND a row-count check on this UPDATE.
+// Full reasoning: docs/07-conventions.md.
 export async function markLaneSkippedEmpty(
   dbc: DbOrTx,
   stageId: number,
@@ -325,7 +338,8 @@ export interface SplitLanePreview {
   anchor_stage_id: number | null;
   // Distinct contacts who received ANY source stage, after opt-out suppression.
   source_contacts: number;
-  // Per-tier lane counts. `converted` exits the sequence (no lane) and is shown
+  // Per-tier lane counts, one entry per LANE_TIER_VALUES. `converted_excluded`
+  // is the EXIT tier (4, purchased): those contacts get no lane, and it is shown
   // so the operator can see why the lanes don't sum to source_contacts.
   lanes: { tier: number; label: string; count: number }[];
   converted_excluded: number;
@@ -336,7 +350,20 @@ const TIER_LABEL: Record<number, string> = {
   0: "Ignored",
   1: "Clicked",
   2: "Reached offer",
+  3: "Registered",
 };
+
+// ⚠️ EVERY VALUE IN `LANE_TIER_VALUES` MUST HAVE A LABEL HERE. `previewSplitLanes`
+// maps the tier values through `TIER_LABEL` and the confirm dialog renders
+// `{ln.label}` raw (app/(protected)/campaigns/[id]/page.tsx:2314-2352), so a
+// missing key is a BLANK but TICKABLE row carrying a live count — which is
+// exactly how tier 3 shipped between migration 0184 and this guard. `tsc` cannot
+// see it: indexing a `Record<number, string>` is typed `string`, never
+// `string | undefined`. Asserted by scripts/test-campaign-tier-scale.ts (P16),
+// which is why this is exported rather than checked inline.
+export function unlabelledLaneTiers(): number[] {
+  return LANE_TIER_VALUES.filter((t) => typeof TIER_LABEL[t] !== "string");
+}
 
 export async function previewSplitLanes(
   dbc: DbOrTx,
@@ -350,7 +377,7 @@ export async function previewSplitLanes(
     source_stages: [],
     anchor_stage_id: null,
     source_contacts: 0,
-    lanes: [0, 1, 2].map((t) => ({ tier: t, label: TIER_LABEL[t], count: 0 })),
+    lanes: LANE_TIER_VALUES.map((t) => ({ tier: t, label: TIER_LABEL[t], count: 0 })),
     converted_excluded: 0,
     opted_out_excluded: 0,
   };
@@ -387,10 +414,16 @@ export async function previewSplitLanes(
     select
       count(*) filter (where not opted_out)                        as source_contacts,
       count(*) filter (where opted_out)                            as opted_out_excluded,
-      count(*) filter (where not opted_out and tier = 3)           as converted_excluded,
-      count(*) filter (where not opted_out and tier = 0)           as t0,
-      count(*) filter (where not opted_out and tier = 1)           as t1,
-      count(*) filter (where not opted_out and tier = 2)           as t2
+      -- The EXIT is tier 4 since Phase 4. Counting the OLD exit literal here
+      -- would report every registrant as a buyer and hide the new lane from the
+      -- operator. Reaches SQL only via tierLiteral (see lib/campaign-tier.ts).
+      count(*) filter (where not opted_out and tier = ${tierLiteral(EXIT_TIER)}) as converted_excluded,
+      ${sql.join(
+        LANE_TIER_VALUES.map(
+          (t) => sql`count(*) filter (where not opted_out and tier = ${tierLiteral(t)}) as ${sql.raw(`t${t}`)}`,
+        ),
+        sql`, `,
+      )}
     from classified
   `)) as unknown as Record<string, string | number>[];
   const r = rows[0] ?? {};
@@ -403,7 +436,7 @@ export async function previewSplitLanes(
     anchor_stage_id: Number(sources[sources.length - 1].id),
     // source_contacts is POST-opt-out, so lanes + converted == source_contacts.
     source_contacts: n("source_contacts"),
-    lanes: [0, 1, 2].map((t) => ({
+    lanes: LANE_TIER_VALUES.map((t) => ({
       tier: t,
       label: TIER_LABEL[t],
       count: n(`t${t}`),
@@ -581,17 +614,31 @@ export async function notifyGroupStuck(
   );
 }
 
-// Tier 3 — informational. An empty tier is a normal outcome, so this must not
-// read like a failure.
+// Tier 3 ALERT LEVEL — informational (the Telegram severity scale, unrelated to
+// the behavioural tier scale where 3 is the Registered lane). An empty lane is a
+// normal outcome, so this must not read like a failure.
 export async function notifyLaneSkippedEmpty(
   dbc: DbOrTx,
   stageId: number,
+  orgId: string,
 ): Promise<void> {
+  // org_id alongside the id, and on the campaigns join too (CLAUDE.md §3).
+  //
+  // ⚠️ The org_id the caller passes is `campaigns.org_id` (lib/sends/scheduled.ts
+  // selects `c.org_id AS org_id`), NOT the campaign_stages row's own org_id, and
+  // NO constraint ties the two together — the FK is a plain
+  // `campaign_id REFERENCES campaigns(id)`. So `s.org_id = <that org>` holds by
+  // application invariant, not by the database. Safe HERE because the worst case
+  // is zero rows and an alert that says "(unknown)". Do NOT copy this shape into
+  // `markLaneSkippedEmpty`: there a zero-row UPDATE would leave the lane
+  // unstamped, its group unsettleable and its siblings held — the 2026-09-05
+  // freeze, reintroduced by a safety predicate.
   const rows = (await dbc.execute(sql`
     SELECT c.name AS campaign, s.stage_number AS stage_number,
            s.label AS label, s.behavioral_tier AS tier
-    FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
-    WHERE s.id = ${stageId}::int LIMIT 1
+    FROM campaign_stages s
+    JOIN campaigns c ON c.id = s.campaign_id AND c.org_id = s.org_id
+    WHERE s.id = ${stageId}::int AND s.org_id = ${orgId}::uuid LIMIT 1
   `)) as unknown as {
     campaign: string | null;
     stage_number: number | null;
@@ -599,8 +646,9 @@ export async function notifyLaneSkippedEmpty(
     tier: number | null;
   }[];
   const r = rows[0];
-  const tierName =
-    r?.tier === 0 ? "Ignored" : r?.tier === 1 ? "Clicked" : r?.tier === 2 ? "Reached offer" : "lane";
+  // One map, not a ladder: the ladder silently said "lane" for tier 3 once
+  // Registered became selectable, so the alert would have named the wrong thing.
+  const tierName = TIER_LABEL[r?.tier ?? -1] ?? "lane";
   await notifyTelegram(
     `ℹ️ Behavioural lane skipped — 0 recipients (normal for a small audience).\n` +
       `Campaign "${r?.campaign ?? "(unknown)"}" · stage ${r?.stage_number ?? stageId} · ${tierName}\n` +

@@ -20,6 +20,15 @@ import { performBehavioralSplit } from "@/lib/stages/behavioral-split";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
 import { STAGE_TRACKING_PARAM } from "@/lib/stage-url";
 
+// ⚠️ This script SEEDS FIXTURES (a throwaway org, creative, campaign, stages,
+// a behavioural split) and deletes them again — it is NOT transaction-wrapped.
+// `./_env-preload` loads `.env.local`, which is PRODUCTION, whenever
+// DATABASE_URL is not already set, so the refusal is not optional. Run it as:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx scripts/test-stage-copy-invariants.ts
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
+
 const ORG_MARKER = "__STAGECOPY_TEST__";
 const COUNTED_TABLES = [
   "organizations", "campaigns", "campaign_stages", "creatives",

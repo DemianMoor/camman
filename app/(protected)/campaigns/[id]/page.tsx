@@ -265,9 +265,10 @@ type Stage = {
   tracking_id: string | null;
   split_index: number | null;
   split_total: number | null;
-  // Behavioral lane (step 5). behavioral_tier NULL ⇒ ordinary stage; 0/1/2 ⇒ a
-  // lane hanging off parent_stage_id (the prior position). audience_count is the
-  // LIVE lane preview for lanes (alive + exact tier − opt-outs, converted out).
+  // Behavioral lane (step 5). behavioral_tier NULL ⇒ ordinary stage; 0/1/2/3 ⇒ a
+  // lane hanging off parent_stage_id (the prior position); 3 is Registered since
+  // Phase 4. audience_count is the LIVE lane preview for lanes (alive + exact
+  // tier − opt-outs, Purchased contacts excluded).
   behavioral_tier: number | null;
   parent_stage_id: number | null;
   archived_at: string | null;
@@ -349,8 +350,10 @@ const ALL_STAGE_STATUSES: StageStatus[] = [
   "failed",
 ];
 
-// Behavioral-lane tier → human label + chip color. Tier 3 (converted) is never
-// a lane — those contacts exit the sequence — so it's intentionally absent.
+// Behavioral-lane tier → human label + chip color. A LOCAL duplicate of
+// LANE_TIERS in lib/stages/behavioral-split.ts on purpose: this is a client
+// component and that module pulls in the db client. Tier 4 (purchased) is never
+// a lane — those contacts exit the sequence — so it is intentionally absent.
 const BEHAVIORAL_TIER_META: Record<
   number,
   { label: string; className: string }
@@ -370,7 +373,26 @@ const BEHAVIORAL_TIER_META: Record<
     className:
       "border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200",
   },
+  3: {
+    label: "Registered",
+    className:
+      "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
+  },
 };
+
+// The client's copy of DEFAULT_LANE_TIERS (lib/stages/behavioral-split.ts). It
+// CANNOT be imported — this is a client component and that module pulls in the
+// db client — so it is duplicated on purpose and named once here instead of
+// twice inline. If the server default changes, this changes with it, and the
+// two must be edited together: the server's is what an omitted request body
+// gets, this one is what the picker ticks.
+// ⚠️ FROZEN, AND COPIED AT EVERY USE. It was a plain array handed BY REFERENCE
+// to both useState and the reset below, so one future non-mutating-by-accident
+// handler (`prev.push(…)`, `prev.sort()`) would have rewritten "the default" for
+// the rest of the session — silently, and only after the first tick. The server's
+// counterpart is already `readonly number[]`; this one now matches it, and
+// Object.freeze makes the mistake throw in strict mode instead of sticking.
+const DEFAULT_SELECTED_TIERS: readonly number[] = Object.freeze([1, 2]);
 
 // Stage status is freely assignable among the non-archived states via an
 // inline dropdown, so an operator can record the resulting status directly.
@@ -612,12 +634,15 @@ export default function CampaignDetailPage() {
   // "is the confirm modal open" plus the provisional preview it renders.
   const [behavioralSplitOpen, setBehavioralSplitOpen] = useState(false);
   const [splitPreview, setSplitPreview] = useState<SplitLanePreview | null>(null);
-  // Which behavioural lanes the split will create. Mirrors DEFAULT_LANE_TIERS in
-  // lib/stages/behavioral-split.ts — tier 0 ("Ignored") starts OFF because the
-  // operator deleted it by hand after all but 4 of the first 77 splits, and a
-  // forgotten one silently freezes its scheduled siblings. Reset in
+  // Which behavioural lanes the split will create — DEFAULT_SELECTED_TIERS, the
+  // client's named copy of the server's DEFAULT_LANE_TIERS. Tier 0 ("Ignored")
+  // starts OFF because the operator deleted it by hand after all but 4 of the
+  // first 77 splits, and a forgotten one silently freezes its scheduled
+  // siblings. Tier 3 ("Registered", Phase 4) starts OFF too, so adding the lane
+  // changes nobody's workflow until it is ticked deliberately. Reset in
   // openBehavioralSplit (an event handler), never in an effect.
-  const [selectedTiers, setSelectedTiers] = useState<number[]>([1, 2]);
+  const [selectedTiers, setSelectedTiers] =
+    useState<number[]>([...DEFAULT_SELECTED_TIERS]);
   const [importStage, setImportStage] = useState<Stage | null>(null);
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
@@ -777,7 +802,7 @@ export default function CampaignDetailPage() {
   // is fetched on open — never inline in the stages list.
   async function openBehavioralSplit() {
     setSplitPreview(null);
-    setSelectedTiers([1, 2]);
+    setSelectedTiers([...DEFAULT_SELECTED_TIERS]);
     setBehavioralSplitOpen(true);
     const result = await splitPreviewApi.execute(
       `/api/campaigns/${campaignId}/behavioral-split/preview`,
@@ -1075,7 +1100,7 @@ export default function CampaignDetailPage() {
             return (
               <span
                 className="font-mono text-sm tabular-nums"
-                title="Live preview — alive + at this exact tier, minus opt-outs (converted exit). Changes until send."
+                title="Live preview — alive + at this exact tier, minus opt-outs (Purchased contacts exit). Changes until send."
               >
                 {n.toLocaleString()}
                 <span className="ml-1 align-middle text-[9px] uppercase tracking-wide text-muted-foreground">
@@ -1830,11 +1855,26 @@ export default function CampaignDetailPage() {
               <span className="font-medium">current</span> tier in this campaign
               — <span className="font-medium">Ignored</span> /{" "}
               <span className="font-medium">Clicked</span> /{" "}
-              <span className="font-medium">Reached offer</span>. A contact lands
-              in exactly one lane (their highest tier reached).{" "}
-              <span className="font-medium">Converted</span> contacts exit the
-              sequence (no lane) and opted-out contacts are suppressed, so lane
-              counts won&apos;t sum to the full audience. The{" "}
+              <span className="font-medium">Reached offer</span> /{" "}
+              <span className="font-medium">Registered</span>. A contact lands in
+              exactly one lane (their highest tier reached), and{" "}
+              <span className="font-medium">Registered</span> outranks{" "}
+              <span className="font-medium">Reached offer</span> — so someone who
+              registered is <em>not</em> in the Reached-offer lane and gets no
+              message unless a Registered lane exists.{" "}
+              {/* The space after this span is an explicit {" "} because the
+                  words rendered JOINED without it. WHAT WAS ESTABLISHED: the
+                  symptom, read out of the rendered DOM of a DEV build — the copy
+                  showed "Convertedcontacts exit the sequence". The CAUSE was not
+                  isolated: under plain JSX semantics a space following </span> on
+                  the same line is preserved, so this is likely transform- or
+                  mode-specific, and nobody has confirmed a production build ever
+                  rendered them joined. The {" "} fix is transform-independent and
+                  correct either way, which is why it stays without the diagnosis. */}
+              <span className="font-medium">Purchased</span>{" "}
+              contacts exit the sequence (no lane) and opted-out contacts are
+              suppressed, so lane counts won&apos;t sum to the full audience.{" "}
+              The{" "}
               <span className="font-mono">live</span> audience numbers are a
               preview computed from current behavior — they change until the
               stage is sent.
@@ -2216,7 +2256,7 @@ export default function CampaignDetailPage() {
               disabled={!hasCompletedStage}
               title={
                 hasCompletedStage
-                  ? "Split this campaign into Ignored / Clicked / Reached offer lanes"
+                  ? "Split this campaign into Ignored / Clicked / Reached offer / Registered lanes"
                   : "Needs at least one stage that has finished sending"
               }
             >
@@ -2280,6 +2320,13 @@ export default function CampaignDetailPage() {
                   a lane you create but never schedule can never be prepared, and
                   the split holds <em>every</em> lane back until all of them are,
                   so it would silently block the ones you did schedule.
+                </p>
+                <p>
+                  <span className="font-medium">Registered</span> is a new lane:
+                  someone who registered but has not purchased. It outranks{" "}
+                  <span className="font-medium">Reached offer</span>, so those
+                  contacts are no longer in that lane — leave Registered unticked
+                  and they get nothing at this position.
                 </p>
 
                 {splitPreviewApi.isLoading || splitPreview === null ? (
@@ -2356,7 +2403,7 @@ export default function CampaignDetailPage() {
                         );
                       })}
                       <div className="mt-1 flex items-center justify-between gap-2 border-t pt-1 text-xs text-muted-foreground">
-                        <span>Converted (exits — no lane)</span>
+                        <span>Purchased (exits — no lane)</span>
                         <span className="tabular-nums">
                           {splitPreview.converted_excluded.toLocaleString()}
                         </span>

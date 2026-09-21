@@ -63,7 +63,7 @@ Per-recipient recovers **92.5% of sales / 94% of revenue**. The ~7% gap = conver
 
 **#3 Sequence message — needs your call.** Four candidate columns, semantically different:
 - `campaign_stages.stage_number` (`:1564`) — the literal ladder rung L1/L2/L3 within a campaign. **Recommended primary.**
-- `campaign_stages.behavioral_tier` (`:1689`, `{0=ignored,1=clicked,2=reached offer}`) — the send-time behavioral lane.
+- `campaign_stages.behavioral_tier` (`:1689`, `{0=ignored,1=clicked,2=reached offer,3=registered}`) — the send-time behavioral lane. (Tier 3 was added by migration 0184 on 2026-09-18. Tier **4 = purchased EXITS** the sequence and is therefore never a lane and never stored in this column — do not expect a 4 here.)
 - `creatives.funnel_stage` (`:1323`, `start|clicked|checkout|ignored|unknown`) — creative's declared intent (a content tag, often `unknown`).
 - `creatives.sequence_placement` (`:1322`) / `creative_id` — the specific creative.
 

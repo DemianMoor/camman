@@ -271,7 +271,7 @@ Don't flip a key to `ok` by hand; that hides a real condition. Fix the cause, an
 - One-shot repair for stage-days frozen before this shipped: `npx tsx scripts/resync-stage-day-conversions.ts` (dry-run by default, prints the coverage floor and every diff; `--apply` writes inside one transaction, prod needs approval). Both paths pre-flight `readProjectionCoverage` and refuse on `empty_ledger` / `ledger_behind_history` before printing anything. The dry run lists exactly the rows `--apply` would change, each tagged `insert` / `rewrite` / `zero`: it applies the same per-stage coverage floor and the same org join, and its diff predicate includes `payout_at_conversion` (a row whose payout ALONE is stale is rewritten) and `pending_revenue` (a `zero` resets it, so a row whose only non-zero column is pending is a real change). **The Phase 1 backfill must have run on prod before the projecting code is live** — the first tick after the ledger is populated re-derives all of history in its scope (Task 8's precondition list).
 - `mirrorStageCountersFromResults` (exported from `lib/keitaro/poll.ts`) runs after BOTH the click upsert and the conversion projection, so `campaign_stages.checkout_click_count` never lags a tick. The projection passes each stage's checkout sum as it stood BEFORE the run (`priorCheckoutSums`): a counter still equal to it belongs to the tracker and takes the recomputed sum even when it DECREASES (0 included) — otherwise a zeroed day would leave a stale higher counter on the campaign page and in the creatives metrics cache forever — while a counter that differs was entered by hand and a tracker 0 never overwrites it. `click_count` and `sales_payout_each` keep their positive-only/COALESCE guard, `sales_count` is never touched. It also THROWS now instead of swallowing: the swallow lives at `pollKeitaro`'s call site (the pool), because swallowing inside would poison a caller-supplied transaction (`--apply`, the DB tests). See [keitaro-poll.md §2a](keitaro-poll.md).
 
-Checks: `scripts/test-stage-day-conversions.ts` (camman-v2 only, rolled back, 66) — the projection's semantics; all three coverage bounds alongside the bug-2 correction that must survive them; the org join; the payout-only rewrite; the exact downward mirror; the watermark (first run, out-of-window, an old watermark extending the window, the cap, advance-only-on-a-finished-window, no advance on a refusal or a truncation, and — against a recording fake `dbc`, because a rolled-back savepoint could never prove it — no watermark UPDATE issued at all when the write throws). The fixture is built so a GLOBAL floor cannot pass: stage A is covered from 2026-05-01, stage Y only from 2026-09-14, and Y carries a stale non-zero row on 2026-06-01 — inside the global coverage, outside its own. Proven red on 2026-09-17 by two temporary variants of [lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts) (restored byte-identically, `cmp`-verified): a global-floor zeroing subquery ⇒ 3 failures incl. Y's row zeroed to 0/$0, and the guard removed ⇒ the pre-coverage case writes 3 rows, zeroes 1 and advances the cursor silently. The alert's decisions are in `scripts/test-conversion-monitor.ts` (J1-J5, J4b-J4d) and its latch in `scripts/test-conversion-monitor-db.ts` (C1-C9). ⚠️ The route guards in the test file (G1-G3) are SOURCE assertions — they read the route's text, so they go red on a rename and cannot see what the branch does at runtime.
+Checks: `scripts/test-stage-day-conversions.ts` (camman-v2 only, rolled back, 75) — the projection's semantics; all three coverage bounds alongside the bug-2 correction that must survive them; the org join; the payout-only rewrite; the exact downward mirror of a tracker-owned Checkout Clicks counter and the hand-entered one it must never zero (H1–H5); the watermark (first run, out-of-window, an old watermark extending the window, the cap, advance-only-on-a-finished-window, no advance on a refusal or a truncation, and — against a recording fake `dbc`, because a rolled-back savepoint could never prove it — no watermark UPDATE issued at all when the write throws). The fixture is built so a GLOBAL floor cannot pass: stage A is covered from 2026-05-01, stage Y only from 2026-09-14, and Y carries a stale non-zero row on 2026-06-01 — inside the global coverage, outside its own. Proven red on 2026-09-17 by two temporary variants of [lib/keitaro/stage-day-conversions.ts](../../lib/keitaro/stage-day-conversions.ts) (restored byte-identically, `cmp`-verified): a global-floor zeroing subquery ⇒ 3 failures incl. Y's row zeroed to 0/$0, and the guard removed ⇒ the pre-coverage case writes 3 rows, zeroes 1 and advances the cursor silently. The alert's decisions are in `scripts/test-conversion-monitor.ts` (J1-J5, J4b-J4d) and its latch in `scripts/test-conversion-monitor-db.ts` (C1-C9). ⚠️ The route guards in the test file (G1-G3) are SOURCE assertions — they read the route's text, so they go red on a rename and cannot see what the branch does at runtime.
 
 The closing check (RF1-RF4, added Task 6) proves Rule F's numerator/denominator invariant directly rather than inferring it from "0 rejected/unmapped rows today": a dedicated stage + five real `stage_sends` recipients (one each: approved purchase, rejected purchase, $0 registration, unmapped shape (a), unmapped shape (b)) are projected for real, then RF3b asserts the stored stage-day's sales/revenue equal an independent recomputation restricted to ONLY the recipients `rescueSendIds()` rescues. RF4 is a permanent embedded red-proof control (the retyped pre-Task-6 filter does violate the invariant on this fixture). Additionally, `lib/keitaro/stage-day-conversions.ts`'s `SALES_FILTER`/`REVENUE_FILTER` were manually reverted to the pre-Task-6 literal, which failed RF1 and RF3b (sales 2/$119 vs the correct 1/$42), then restored byte-identically (`md5sum`-verified).
 
@@ -334,7 +334,45 @@ Checks:
 - `scripts/test-stage-day-conversions.ts` (camman-v2 only, rolled back) — S2/S3/S4/S5 assert the new sales/checkouts/revenue/payout semantics on a fixture carrying a lead, a sale and a rejected purchase on one stage-day; S5b/S5c/S5d add a `pending`-status purchase to the same day and assert it counts as a sale, is excluded from revenue, and lands in `pending_revenue` alone. **PB1–PB4** hold the zeroing fix: a stage-day whose only ledger rows are a lead-typed $0 registration and an unmapped lead-typed row keeps its `checkouts` across TWO consecutive projection runs (byte-identical, non-zero, second run writes 0 / zeroes 0) and `campaign_stages.checkout_click_count` holds at the same value. Proven RED against the pre-fix filter (4 failed, `rowsWritten: 1, rowsZeroed: 1` on every run).
 - `scripts/test-funnel-pending-exclusion.ts` — PURE, no DB. Held money is carried and never spent: a pending-only tally must produce the same `epc`, `sales_cr` and `profit` as a tally with no money at all, and the check is a whole-object diff (every derived field but `pending_revenue`), so a metric added later cannot quietly start spending it. F5/F6 anchor it — the same $500 APPROVED does move EPC and profit — so "nothing changed" cannot pass by the derivation having stopped reading revenue. Proven RED against a `funnel.ts` mutated to fold pending into all three (6 failed), restored `cmp`-identical.
 
+## Who reads `registeredClause()` (Phase 4)
+
+`registeredClause()` ([`lib/sale-attribution.ts`](../../lib/sale-attribution.ts)) is
+`event_type_id IN <retarget-signal types> AND status IN ('pending','approved')` —
+a counted registration. It had no consumer until Phase 4. It now has three, and
+**all three are behavioural; none is a reporting reader.** A registration is not a
+sale, not revenue and not a counted clicker, so nothing in
+[reports-rollup.md](reports-rollup.md) or [epc-denominator.md](epc-denominator.md)
+reads it.
+
+| Consumer | File | What it does with it |
+|---|---|---|
+| Behavioural tier 3 (the Registered lane) | [`lib/campaign-tier.ts`](../../lib/campaign-tier.ts) — the tier-3 branch of `campaignTierExpr` | The one definition of a Registered lane's audience. **Paired with a `NOT EXISTS` over `PURCHASE_EVENT_TYPE_IDS` at any KNOWN status** (`pending`/`approved`/`rejected`) |
+| Drip journey completion | [`lib/drip/lifecycle.ts`](../../lib/drip/lifecycle.ts) — `closeCompletedJourneys()` | Same shape, inlined: the reachability ladder must reach 3 or a registrant's journey never completes |
+| Drip end-date expiry | [`lib/drip/lifecycle.ts`](../../lib/drip/lifecycle.ts) — `expireJourneysPastEndDate()` | The second inline copy of the same ladder |
+
+⚠️ **The clause is HALF of a definition, never the whole of one.** "Registered" as
+a tier means *registered **and** has not bought* — and a `rejected` purchase
+yields no tier row of its own, so `MAX(tier)` alone would read a registrant whose
+purchase was rejected as 3. Each consumer therefore carries the explicit
+`NOT EXISTS`; see [behavioral-lanes.md](behavioral-lanes.md) and
+[07-conventions.md](../07-conventions.md). A future consumer that wants only "a
+registration happened" is asserting something different and should say so at the
+call site.
+
+⚠️ **An UNMAPPED purchase row does NOT evict a registrant.** The `NOT EXISTS`
+requires `pe.status IS NOT NULL`, matching the rule everywhere else in this
+codebase — an unmapped row is *stored, alerted, never counted*.
+
+The two `lib/drip/lifecycle.ts` copies exist because they need the tier
+**correlated per journey row** (`j.campaign_id` / `j.contact_id`) while
+`campaignTierExpr` takes a literal campaign id. They are inline copies, not
+imports, and the coupling is pinned by bars `P20`–`P26` in
+[`scripts/test-campaign-tier-scale.ts`](../../scripts/test-campaign-tier-scale.ts).
+
 ## Not built yet
 
-- **Phase 4:** Registered lane (tier 3; converted becomes 4; CHECK widened then).
-- **Phase 5:** per-event report columns.
+- **Phase 5 — proposed, not built, not ratified:** per-event report columns. The
+  sketch is that registrations get columns of their own, which would make
+  `registeredClause()`'s consumers four rather than three and add the first
+  *reporting* one. None of it exists in the code and the owner has not signed
+  off on the shape, so nothing here should be relied on as decided.

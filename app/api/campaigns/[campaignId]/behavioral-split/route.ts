@@ -6,10 +6,10 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { can } from "@/lib/permissions";
 import { LANE_TIERS, performBehavioralSplit } from "@/lib/stages/behavioral-split";
 
-// Behavioural split, CAMPAIGN-LEVEL (migration 0174). Stamps three lane-stages —
-// one per behavioural tier (0 ignored / 1 clicked / 2 reached offer) — plus the
-// `campaign_stage_split_groups` row that owns them. Tier 3 (converted) gets NO
-// lane; those contacts exit the sequence.
+// Behavioural split, CAMPAIGN-LEVEL (migration 0174). Stamps one lane-stage per
+// SELECTED behavioural tier (0 ignored / 1 clicked / 2 reached offer /
+// 3 registered; 4 purchased exits) — plus the `campaign_stage_split_groups` row
+// that owns them. Tier 4 gets NO lane; those contacts exit the sequence.
 //
 // This REPLACES the old per-stage endpoint
 // (`/stages/[stageId]/behavioral-split`, removed in the same change). The split

@@ -14,9 +14,18 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { LANE_TIER_VALUES } from "@/lib/campaign-tier";
 import { countStageRecipients } from "@/lib/sends/recipients";
 
 import { seedConversionEvent } from "./_conversion-fixture";
+
+// ⚠️ `.env.local` is PRODUCTION and `_env-preload` loads it whenever
+// DATABASE_URL is not already set. This script WRITES fixtures, so refuse
+// outright rather than trust the caller's environment:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/test-lane-preview-count.ts
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 const ORG_MARKER = "__LANE_PREVIEW_TEST__";
 const COUNTED_TABLES = [
@@ -146,7 +155,7 @@ async function main() {
 
     // ---- Campaign A: full scenario (mirrors step 3). ----
     const A = await seedCampaignStage("a");
-    const roles = ["ign", "clk", "rch", "cnv", "opt", "nal"];
+    const roles = ["ign", "clk", "rch", "cnv", "reg", "opt", "nal"];
     for (const role of roles) {
       const phone = `+1998${String(unique).slice(-6)}${roles.indexOf(role)}`;
       cid[role] = (
@@ -211,6 +220,19 @@ async function main() {
     await received(A.campaignId, A.stageId, "clk", false, false);
     await received(A.campaignId, A.stageId, "rch", true, false);
     await received(A.campaignId, A.stageId, "cnv", true, true);
+    // reg: reached the offer AND registered → tier 3. ONE-SIDED — `received(...,
+    // false)` leaves sale_status NULL, so the Registered lane's count cannot come
+    // from the legacy column.
+    await received(A.campaignId, A.stageId, "reg", true, false);
+    await seedConversionEvent(db, {
+      orgId,
+      contactId: cid.reg,
+      campaignId: A.campaignId,
+      stageId: A.stageId,
+      eventKey: "registration",
+      status: "approved",
+      revenue: 0,
+    });
     await received(A.campaignId, A.stageId, "opt", false, false);
     // nal: no parent send (not alive)
     await cleanClick(A.campaignId, A.stageId, "clk");
@@ -224,16 +246,50 @@ async function main() {
     `);
 
     console.log("\nLive lane preview counts (campaign A):");
-    check("ordinary stage count = 5 (pool − opt-out)", (await ordinaryCount(A.campaignId)) === 5);
-    check("tier-0 (Ignored) lane = 1", (await laneCount(A.campaignId, A.stageId, 0)) === 1);
-    check("tier-1 (Clicked) lane = 1", (await laneCount(A.campaignId, A.stageId, 1)) === 1);
-    check("tier-2 (Reached) lane = 1", (await laneCount(A.campaignId, A.stageId, 2)) === 1);
-    // The three lane counts + converted(1) + opted-out(1) = 5 received-parent.
-    const sum =
-      (await laneCount(A.campaignId, A.stageId, 0)) +
-      (await laneCount(A.campaignId, A.stageId, 1)) +
-      (await laneCount(A.campaignId, A.stageId, 2));
-    check("lane counts sum to 3 (converted + opted-out NOT counted)", sum === 3);
+    check("ordinary stage count = 6 (pool − opt-out)", (await ordinaryCount(A.campaignId)) === 6);
+    // One expected count per lane tier, read through a helper that THROWS on a
+    // tier it has no entry for — a tier joining LANE_TIER_VALUES must be seeded
+    // here, not silently skipped or compared against a default.
+    const expectedLane: Record<number, { label: string; n: number }> = {
+      0: { label: "Ignored", n: 1 },
+      1: { label: "Clicked", n: 1 },
+      2: { label: "Reached", n: 1 },
+      3: { label: "Registered", n: 1 },
+    };
+    const expectLane = (tier: number) => {
+      const e = expectedLane[tier];
+      if (!e) {
+        throw new Error(`lane tier ${tier} is in LANE_TIER_VALUES but this fixture seeds no count for it`);
+      }
+      return e;
+    };
+    // ⭐ PIN THE THROW. It is unreachable today — every tier in LANE_TIER_VALUES
+    // has a row in `expectedLane` — and an unreachable throw is not a working
+    // one. Its whole job is to make a future scale addition LOUD instead of
+    // letting the tier compare against `undefined`, so prove it fires.
+    let unmappedThrew = false;
+    try {
+      expectLane(-1);
+    } catch {
+      unmappedThrew = true;
+    }
+    check("⭐ a tier with no seeded count THROWS (not silently skipped)", unmappedThrew);
+    let sum = 0;
+    for (const tier of LANE_TIER_VALUES) {
+      const e = expectLane(tier);
+      const n = await laneCount(A.campaignId, A.stageId, tier);
+      sum += n;
+      check(`tier-${tier} (${e.label}) lane = ${e.n}`, n === e.n, `got ${n}`);
+    }
+    // Every lane + purchased(1) + opted-out(1) = 6 received-parent. The expected
+    // sum is derived from the same table the per-lane bars use, so it cannot
+    // drift away from them.
+    const expectedSum = LANE_TIER_VALUES.reduce((a, t) => a + expectLane(t).n, 0);
+    check(
+      `lane counts sum to ${expectedSum} (purchased + opted-out NOT counted)`,
+      sum === expectedSum,
+      `got ${sum}`,
+    );
 
     // ---- Campaign B: ZERO-DATA — pool exists, but NO sends fired. ----
     // Mirrors production today: with no sends, nobody is "alive", so every lane
@@ -257,9 +313,14 @@ async function main() {
 
     console.log("\nZero-data (campaign B — pool present, no sends fired):");
     check("ordinary count = 1 (pool present)", (await ordinaryCount(B.campaignId)) === 1);
-    check("tier-0 lane = 0 (no one alive — no parent sends)", (await laneCount(B.campaignId, B.stageId, 0)) === 0);
-    check("tier-1 lane = 0", (await laneCount(B.campaignId, B.stageId, 1)) === 0);
-    check("tier-2 lane = 0", (await laneCount(B.campaignId, B.stageId, 2)) === 0);
+    // Every lane, derived. These are "== 0" bars, but NOT of an empty world: bar
+    // above pins the pool at 1, so the 0s mean "present in the pool, not alive",
+    // and the campaign-A block proves the same helper returns non-zero when a
+    // contact IS alive.
+    for (const tier of LANE_TIER_VALUES) {
+      const n = await laneCount(B.campaignId, B.stageId, tier);
+      check(`tier-${tier} lane = 0 (no one alive — no parent sends)`, n === 0, `got ${n}`);
+    }
   } finally {
     console.log("\nCleanup (scoped to test org only)");
     try {

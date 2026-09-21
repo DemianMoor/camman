@@ -10,6 +10,7 @@
 // db/client had already read process.env.DATABASE_URL — the script died with
 // `password authentication failed for user "dimat"` (28P01) every time.
 import "./_env-preload";
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql as drizzleSql } from "drizzle-orm";
 
@@ -19,6 +20,19 @@ import {
   type LaneCountBatchItem,
 } from "@/lib/audience-snapshot";
 import { countStageRecipients } from "@/lib/sends/recipients";
+
+// ⚠️ `./_env-preload` loads `.env.local`, which is PRODUCTION, whenever
+// DATABASE_URL is not already set. This script issues only SELECTs today, but
+// it drives two pieces of APP code (`computeLaneAudienceCountsBatch`,
+// `countStageRecipients`) that this script does not own, and it drives them
+// once per lane for EVERY campaign on the target database — an unbounded fan of
+// audience scans that at production scale is an expensive, pointless load on
+// the live pooler. It is an identity/timing proof, not a production report:
+// point it at the preview database.
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx scripts/verify-lane-batch.ts
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 let pass = 0;
 let fail = 0;

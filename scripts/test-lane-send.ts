@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { EXIT_TIER, LANE_TIER_VALUES } from "@/lib/campaign-tier";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
 import { runStageDrain, type Sender } from "@/lib/sends/drain";
 import {
@@ -23,6 +24,14 @@ import {
 } from "@/lib/sends/recipients";
 
 import { seedConversionEvent } from "./_conversion-fixture";
+
+// ⚠️ `.env.local` is PRODUCTION and `_env-preload` loads it whenever
+// DATABASE_URL is not already set. This script WRITES fixtures and drives the
+// send drain, so refuse outright rather than trust the caller's environment:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2-)" \
+//     npx tsx --conditions=react-server scripts/test-lane-send.ts
+// The refusal itself is the `_require-preview-db` import above — an allowlist,
+// and early enough that nothing can query ahead of it.
 
 const ORG_MARKER = "__LANE_SEND_TEST__";
 const COUNTED_TABLES = [
@@ -177,12 +186,15 @@ async function main() {
 
     const parent = await newStage({});
     const ord = await newStage({}); // ordinary stage for row-shape comparison
-    lane[0] = await newStage({ tier: 0, parent: parent.id });
-    lane[1] = await newStage({ tier: 1, parent: parent.id });
-    lane[2] = await newStage({ tier: 2, parent: parent.id });
+    // One lane per LANE_TIER_VALUES, not a literal trio: without this the
+    // Registered lane would never be built, and the preview == materializes
+    // proof — the whole point of this file — would never touch it.
+    for (const tier of LANE_TIER_VALUES) {
+      lane[tier] = await newStage({ tier, parent: parent.id });
+    }
 
     // Contacts + frozen pool (all no_status so the base filter passes everyone).
-    const roles = ["ign", "clk", "rch", "cnv", "opt", "nal"];
+    const roles = ["ign", "clk", "rch", "cnv", "reg", "opt", "nal"];
     for (const role of roles) {
       const phone = `+1996${String(unique).slice(-6)}${roles.indexOf(role)}`;
       cid[role] = (
@@ -248,7 +260,20 @@ async function main() {
     await receivedParent("ign", false, false); // tier 0
     await receivedParent("clk", false, false); // tier 1 (click below)
     await receivedParent("rch", true, false); // tier 2
-    await receivedParent("cnv", true, true); // tier 3
+    await receivedParent("cnv", true, true); // tier 4 (purchased) — exits
+    // reg: reached + registered → tier 3. ONE-SIDED — `receivedParent(..., false)`
+    // leaves sale_status NULL and the registration goes straight to the ledger,
+    // so the Registered lane below cannot be satisfied by the legacy column.
+    await receivedParent("reg", true, false);
+    await seedConversionEvent(db, {
+      orgId,
+      contactId: cid.reg,
+      campaignId,
+      stageId: parent.id,
+      eventKey: "registration",
+      status: "approved",
+      revenue: 0,
+    });
     await receivedParent("opt", false, false); // tier 1 but opted out
     // nal: NO parent send → not alive
     await cleanClick("clk");
@@ -265,12 +290,38 @@ async function main() {
     // 1) preview recipients == send recipients, per lane.
     // ====================================================================
     console.log("\nPreview == send (kickoff materializes the previewed set):");
+    // Tier → the roles that lane must materialize. Read through a helper that
+    // THROWS on a tier it has no entry for: a bare `expected[tier]` yields
+    // `undefined`, and the bar below would then either crash with a TypeError
+    // that names nothing or, worse, quietly compare against a default. A tier
+    // that joins LANE_TIER_VALUES without a fixture here must say so.
     const expected: Record<number, string[]> = {
       0: ["ign"],
       1: ["clk"],
       2: ["rch"],
+      3: ["reg"],
     };
-    for (const tier of [0, 1, 2]) {
+    const expectedFor = (tier: number): string[] => {
+      const roles = expected[tier];
+      if (!roles) {
+        throw new Error(
+          `lane tier ${tier} is in LANE_TIER_VALUES but this fixture seeds no expectation for it`,
+        );
+      }
+      return roles;
+    };
+    // ⭐ PIN THE THROW. It is unreachable today — every tier in LANE_TIER_VALUES
+    // has a row in `expected` — and an unreachable throw is not a working one.
+    // Its whole job is to make a future scale addition LOUD instead of letting
+    // the tier compare against `undefined`, so prove it fires.
+    let unmappedThrew = false;
+    try {
+      expectedFor(-1);
+    } catch {
+      unmappedThrew = true;
+    }
+    check("⭐ a tier with no seeded expectation THROWS (not silently skipped)", unmappedThrew);
+    for (const tier of LANE_TIER_VALUES) {
       const preview = await previewSet(lane[tier].id, tier, parent.id);
       const r = await kickoffStageSend(db, { orgId, campaignId, stageId: lane[tier].id });
       check(`tier-${tier} kickoff ok`, r.ok === true, JSON.stringify(r));
@@ -283,8 +334,8 @@ async function main() {
         `preview=${roleOf(preview).join(",")} sent=${roleOf(sent).join(",")}`,
       );
       check(
-        `tier-${tier}: equals expected {${expected[tier].join(",")}}`,
-        JSON.stringify(roleOf(sent)) === JSON.stringify(expected[tier]),
+        `tier-${tier}: equals expected {${expectedFor(tier).join(",")}}`,
+        JSON.stringify(roleOf(sent)) === JSON.stringify(expectedFor(tier)),
         roleOf(sent).join(","),
       );
     }
@@ -294,8 +345,8 @@ async function main() {
     // ====================================================================
     console.log("\nExclusions at send resolution:");
     const allLaneSent = new Set<string>();
-    for (const tier of [0, 1, 2]) for (const x of await materializedSet(lane[tier].id)) allLaneSent.add(x);
-    check("converted (cnv) materialized into NO lane", !allLaneSent.has(cid.cnv));
+    for (const tier of LANE_TIER_VALUES) for (const x of await materializedSet(lane[tier].id)) allLaneSent.add(x);
+    check(`purchased (tier ${EXIT_TIER}, cnv) materialized into NO lane`, !allLaneSent.has(cid.cnv));
     check("opted-out (opt) materialized into NO lane", !allLaneSent.has(cid.opt));
     check("not-alive (nal) materialized into NO lane", !allLaneSent.has(cid.nal));
 

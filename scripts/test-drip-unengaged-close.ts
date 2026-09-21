@@ -1,5 +1,5 @@
 import "./_env-preload";
-import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -24,9 +24,6 @@ import { closeJourneyUnengaged } from "@/lib/drip/lifecycle";
 //   3. DISTINCT IN THE FUNNEL. `completed/unengaged` and
 //      `completed/all_stages_sent` must not merge, or the campaign's bad news
 //      vanishes into its good news.
-
-const PROD_REF = "rtdarhkkjwcetlmruftl";
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -100,13 +97,7 @@ async function fixture(
 }
 
 async function main() {
-  const url = process.env.DATABASE_URL ?? "";
-  const ref = /postgres\.([a-z0-9]+):/.exec(url)?.[1] ?? "(unknown)";
-  if (ref === PROD_REF) {
-    console.error(`REFUSING to run against PRODUCTION (${PROD_REF}). This test writes.`);
-    process.exit(1);
-  }
-  console.log(`target project ref: ${ref}${ref === PREVIEW_REF ? "  (camman-v2 preview ✓)" : ""}\n`);
+  console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   class Rollback extends Error {}
   try {

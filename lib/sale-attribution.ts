@@ -11,8 +11,11 @@ import { sql, type SQL } from "drizzle-orm";
 // `stage_sends.sale_status` could only ever hold ONE conversion per recipient —
 // latest `datetime` wins — which meant a registration arriving after a purchase
 // overwrote the purchase (measured: 14 recipients, $715 lost) and a registration
-// arriving as `lead` made the contact read as a BUYER: tier 3, a buyer in the
-// segment rules, its drip journey closed as purchased, dropped from every lane.
+// arriving as `lead` made the contact read as a BUYER — at the time, the top of
+// the behavioural scale: a buyer in the segment rules, its drip journey closed as
+// purchased, dropped from every lane. (That top value was renumbered from 3 to 4
+// in Phase 4, when Registered took 3; the historical bug is unchanged, only the
+// number it used to be written with. lib/campaign-tier.ts holds the scale.)
 //
 // The alias these predicates take is a `conversion_events` row (default "ce"),
 // NOT a `stage_sends` row. Call sites select FROM the ledger. That is deliberate:
@@ -76,8 +79,27 @@ export function pendingRevenueClause(alias = "ce"): SQL {
 
 /**
  * A retarget signal (today: Registration), on the aliased conversion_events row.
- * Feeds the Phase 4 "Registered — not purchased" lane and the registration
- * columns Phase 5 adds. Zero rows today.
+ * Zero rows in production today — the mapping exists, no registration has
+ * arrived yet.
+ *
+ * ⚠️ THIS PREDICATE IS HALF OF A DEFINITION, NEVER THE WHOLE OF ONE. "Registered"
+ * as a behavioural TIER means "registered AND has not bought", so every consumer
+ * below pairs it with a `NOT EXISTS` over PURCHASE_EVENT_TYPE_IDS at any KNOWN
+ * status (see lib/campaign-tier.ts for why that cannot be left to MAX). A new
+ * consumer that uses this clause alone is asserting something different — that a
+ * registration merely happened — and should say so at the call site.
+ *
+ * CONSUMERS (three, all behavioural; none reporting):
+ *   • lib/campaign-tier.ts — the tier-3 branch of campaignTierExpr, the one
+ *     definition of a Registered lane's audience.
+ *   • lib/drip/lifecycle.ts — TWICE, in the inlined tier ladders of
+ *     closeCompletedJourneys() and expireJourneysPastEndDate(). They cannot
+ *     import campaignTierExpr (it takes a literal campaign id; they need the
+ *     tier correlated per journey row), so the two copies must be kept in step
+ *     with this file and with each other — pinned by
+ *     scripts/test-campaign-tier-scale.ts bars P20-P26.
+ * Phase 5's per-event report columns will be a fourth. Reporting does NOT read
+ * this: a registration is not a sale, not revenue, and not a counted clicker.
  */
 export function registeredClause(alias = "ce"): SQL {
   const a = sql.raw(alias);

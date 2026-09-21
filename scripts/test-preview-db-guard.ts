@@ -70,8 +70,15 @@ const LEGACY_REF_LITERALS: ReadonlyArray<string> = [];
 /**
  * Scripts that carry a write signal but are DELIBERATELY not guarded, each with
  * the reason. Adding an entry here is a review decision, not a convenience.
+ *
+ * `viaLibrary` marks the entries that deliberately have NO write token of their
+ * own — they write through an app module, or are read-only and listed as
+ * belt-and-braces. They are exempt from the second-order bar at the bottom of
+ * this file, which asserts that every OTHER exclusion still carries the write
+ * signal it was excluded for: an exclusion that quietly stops matching is either
+ * a stale entry or the tell of a WRITE_SIGNAL needle that has been narrowed.
  */
-const EXCLUSIONS: ReadonlyArray<{ file: string; why: string }> = [
+const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }> = [
   // ── production operations tooling: changing production IS the purpose ──────
   { file: "apply-0099.ts", why: "controlled apply of migration 0099 against the production database" },
   { file: "apply-ahoi-stage-sends-index-concurrent.ts", why: "builds a production index with CREATE INDEX CONCURRENTLY" },
@@ -81,7 +88,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string }> = [
   { file: "apply-lookup-migrations.ts", why: "controlled, ordered apply of migrations 0095–0098 against production" },
   { file: "apply-trgm-concurrent.ts", why: "builds production indexes with CREATE INDEX CONCURRENTLY" },
   { file: "backfill-content-dedup-exposures.ts", why: "one-shot production backfill of the content-dedup ledgers" },
-  { file: "backfill-conversion-events.ts", why: "one-shot production backfill; writes only behind --apply (writes via lib/conversions/ingest, so it carries no write token of its own)" },
+  { file: "backfill-conversion-events.ts", viaLibrary: true, why: "one-shot production backfill; writes only behind --apply (writes via lib/conversions/ingest, so it carries no write token of its own)" },
   { file: "backfill-creative-spam-scores.ts", why: "one-shot production backfill of creatives.spam_score" },
   { file: "backfill-drip-journey-lifecycle.ts", why: "one-shot production backfill; closes journeys already terminal in fact" },
   { file: "backfill-guidekn-destinations.ts", why: "one-shot production repair; writes only behind --apply" },
@@ -97,7 +104,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string }> = [
   { file: "delete-orphan-test-offers.ts", why: "exists to delete orphan test rows left in PRODUCTION" },
   { file: "drain-texthub-inbox.ts", why: "ingests real STOPs from the live provider inbox into production; --apply" },
   { file: "import-texthub-optouts.ts", why: "imports real opt-outs from a provider export into production; --apply" },
-  { file: "resync-stage-day-conversions.ts", why: "one-shot production re-derive of the stage-day conversion columns; dry-run default, writes only behind --apply (writes via lib/keitaro/stage-day-conversions, so it carries no write token of its own)" },
+  { file: "resync-stage-day-conversions.ts", viaLibrary: true, why: "one-shot production re-derive of the stage-day conversion columns; dry-run default, writes only behind --apply (writes via lib/keitaro/stage-day-conversions, so it carries no write token of its own)" },
   { file: "seed-ahoi-number-credential.ts", why: "seeds the real Ahoi sending number + credential in production" },
   { file: "seed-ahoi-webhook-token.ts", why: "mints the real production inbound-webhook token" },
   { file: "seed-tells-webhook-token.ts", why: "mints the real production inbound-webhook token" },
@@ -120,7 +127,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string }> = [
   { file: "perf-baseline-tier3.ts", why: "read-only: EXPLAIN ANALYZE over SELECTs" },
   { file: "test-creative-metrics-cache.ts", why: "read-only: the .unsafe( call is the ground-truth SELECT" },
   { file: "verify-audience-report.ts", why: "read-only and server-enforced: every query runs inside begin(\"… read only\")" },
-  { file: "verify-conversion-events.ts", why: "read-only conversion verification against production; every statement is a SELECT" },
+  { file: "verify-conversion-events.ts", viaLibrary: true, why: "read-only conversion verification against production; every statement is a SELECT, so it carries no write token (the entry is belt-and-braces)" },
   { file: "verify-migration-integrity.ts", why: "read-only diagnostic (CLAUDE.md §11); the match is createHash().update()" },
   { file: "verify-send-state-perf.ts", why: "read-only: EXPLAIN ANALYZE over a SELECT" },
 ];
@@ -160,25 +167,73 @@ function mayPrecedeGuard(spec: string): boolean {
   return spec === "./_env-preload" || spec === "dotenv" || spec.startsWith("node:");
 }
 
-/** Does this script reach a database at all? */
-function touchesDb(src: string): boolean {
-  return (
-    /from\s+["'](?:@\/|\.\.\/|\.\/)db\/client["']/.test(src) ||
-    /import\s+["']\.\/_env-preload["']/.test(src) ||
-    /from\s+["']postgres["']/.test(src) ||
-    /from\s+["']drizzle-orm\/postgres-js["']/.test(src)
-  );
+/**
+ * ⭐ ONE NAMED NEEDLE PER ROW, EACH WITH THE SAMPLE IT EXISTS TO MATCH.
+ *
+ * `touchesDb` and `writesDb` used to be single OR'd regexes, and A MULTI-NEEDLE
+ * SCAN PASSES IF ANY ONE NEEDLE STILL MATCHES. Deleting an alternative outright
+ * usually trips some incidental count; NARROWING one does not. Measured
+ * 2026-09-19 on the tree this fix was written against, every one of these left
+ * the whole gate GREEN while the protected population silently shrank:
+ *
+ *   dropping `\.unsafe\s*\(`                  → 182 → 176 write-capable, PASS
+ *   `update` → `upsert` in the ORM branch     → 182 → 178 write-capable, PASS
+ *   dropping `from "postgres"`                → 141 → 137 guarded scripts, PASS
+ *   dropping `import "./_env-preload"`        → 141 → 140 guarded scripts, PASS
+ *
+ * A gate that keeps printing "All checks passed" while scripts drop out of the
+ * population is worse than no gate, because it is counted as protection. So
+ * every needle now carries a HAND-WRITTEN sample of the code it exists to find,
+ * and the controls at the bottom of this file assert, needle by needle, that it
+ * still matches that sample and that NO OTHER needle in the same list reaches it
+ * — isolation is what makes a dead needle change the verdict rather than hide
+ * behind a sibling. Both line endings, because this checkout mixes them.
+ *
+ * Samples are written out by hand, never generated from the needles: a control
+ * built out of the thing it controls is a tautology that always passes.
+ */
+interface Needle {
+  readonly id: string;
+  readonly re: RegExp;
+  /** Code this needle MUST match, and that no sibling needle may match. */
+  readonly sample: string;
 }
 
+/** Ways a script can reach a database at all. */
+const DB_REACH: ReadonlyArray<Needle> = [
+  { id: "db/client", re: /from\s+["'](?:@\/|\.\.\/|\.\/)db\/client["']/, sample: `import { db } from "../db/client";` },
+  { id: "_env-preload", re: /import\s+["']\.\/_env-preload["']/, sample: `import "./_env-preload";` },
+  { id: "postgres", re: /from\s+["']postgres["']/, sample: `import pg from "postgres";` },
+  { id: "drizzle-postgres-js", re: /from\s+["']drizzle-orm\/postgres-js["']/, sample: `import { drizzle } from "drizzle-orm/postgres-js";` },
+];
+
 /**
- * Does this script carry a WRITE signal? An ORM write, a raw-SQL write verb, or
- * `.unsafe(` — the raw-SQL escape hatch, counted because it can be either and
- * the read-only users of it are few enough to name in EXCLUSIONS.
+ * WRITE signals: an ORM write, a raw-SQL write verb, or `.unsafe(` — the raw-SQL
+ * escape hatch, counted because it can be either and the read-only users of it
+ * are few enough to name in EXCLUSIONS.
  */
+const WRITE_SIGNAL: ReadonlyArray<Needle> = [
+  { id: "orm-write", re: /\.\s*(insert|update|delete)\s*\(/i, sample: `await db.insert(rows).values({});` },
+  { id: "sql-insert", re: /insert\s+into\b/i, sample: "sql`INSERT INTO contacts (id) VALUES (1)`" },
+  { id: "sql-delete", re: /delete\s+from\b/i, sample: "sql`DELETE FROM contacts WHERE id = 1`" },
+  { id: "sql-update", re: /update\s+[a-z_"][\w".]*(\s+(as\s+)?[a-z_][\w]*)?\s+set\b/i, sample: "sql`UPDATE contacts SET name = 'x'`" },
+  { id: "truncate", re: /truncate\b/i, sample: "sql`TRUNCATE spam_scores`" },
+  { id: "create-ddl", re: /create\s+(table|index|unique\s+index|or\s+replace)/i, sample: "sql`CREATE INDEX probe_idx ON links (code)`" },
+  { id: "drop-ddl", re: /drop\s+(table|index)/i, sample: "sql`DROP INDEX probe_idx`" },
+  { id: "alter-table", re: /alter\s+table/i, sample: "sql`ALTER TABLE contacts ADD COLUMN probe int`" },
+  { id: "refresh-matview", re: /refresh\s+materialized\s+view/i, sample: "sql`REFRESH MATERIALIZED VIEW offer_report_mv`" },
+  { id: "unsafe", re: /\.unsafe\s*\(/i, sample: "await conn.unsafe(text);" },
+  { id: "on-conflict", re: /onConflict/i, sample: `.onConflictDoNothing()` },
+];
+
+/** Does this script reach a database at all? */
+function touchesDb(src: string): boolean {
+  return DB_REACH.some((n) => n.re.test(src));
+}
+
+/** Does this script carry a WRITE signal? */
 function writesDb(src: string): boolean {
-  return /(\.\s*(insert|update|delete)\s*\(|insert\s+into\b|delete\s+from\b|update\s+[a-z_"][\w".]*(\s+(as\s+)?[a-z_][\w]*)?\s+set\b|truncate\b|create\s+(table|index|unique\s+index|or\s+replace)|drop\s+(table|index)|alter\s+table|refresh\s+materialized\s+view|\.unsafe\s*\(|onConflict)/i.test(
-    src,
-  );
+  return WRITE_SIGNAL.some((n) => n.re.test(src));
 }
 
 /** Lines whose statement is at column 0 and performs a query — module scope. */
@@ -330,6 +385,83 @@ function main() {
   const newcomer = `import { db } from "../db/client";${eol}await db.insert(foo).values({});${eol}`;
   check("⭐ a brand-new write-capable script with no guard IS caught",
         touchesDb(newcomer) && writesDb(newcomer) && verdictFor(newcomer).importsHelper === false);
+
+  // ── ⭐ …AND EVERY CLASSIFIER NEEDLE SEPARATELY ─────────────────────────────
+  //
+  // Every control above exercises the GUARD VERDICT — none of them touches
+  // `touchesDb`/`writesDb`, which is how a narrowed needle silently shrank the
+  // population while this file printed "All checks passed" (see the measurements
+  // on DB_REACH). One bar per needle, against the hand-written sample it names:
+  //
+  //   • the needle MATCHES its own sample                  — it is not dead;
+  //   • NO SIBLING needle matches that sample              — so killing it
+  //     really does change the verdict, instead of hiding behind a neighbour;
+  //   • both hold in LF and in CRLF                        — this checkout mixes
+  //     them (core.autocrlf=true; .gitattributes pins only db/migrations/**),
+  //     and a needle that matched only one would classify a script differently
+  //     depending on which machine last touched it, in the direction that makes
+  //     the gate pass.
+  //
+  // The sample is embedded in a two-line module so the line ending is actually
+  // in play rather than being a string with no newline in it at all.
+  const needleBars = (label: string, list: ReadonlyArray<Needle>) => {
+    const dead: string[] = [];
+    const shared: string[] = [];
+    for (const n of list) {
+      for (const [ending, nl] of [["LF", "\n"], ["CRLF", "\r\n"]] as const) {
+        const mod = `import "./_x";${nl}${n.sample}${nl}`;
+        if (!n.re.test(mod)) dead.push(`${n.id}@${ending}`);
+        const others = list.filter((o) => o.id !== n.id && o.re.test(n.sample)).map((o) => o.id);
+        if (others.length > 0) shared.push(`${n.id} also matched by ${others.join("/")}`);
+      }
+    }
+    check(`⭐ every ${label} needle matches its own sample and NO sibling's (${list.length} needles × LF/CRLF)`,
+          dead.length === 0 && shared.length === 0,
+          `dead: ${dead.join(", ") || "none"} | not isolated: ${[...new Set(shared)].join("; ") || "none"}`);
+    // Negative control on the matcher itself: a read-only script must classify
+    // as neither, or "everything matches" would satisfy the bar above.
+    const readOnly = `import { readFileSync } from "node:fs";${eol}const rows = await client.query(select);${eol}`;
+    check(`⭐ …and no ${label} needle fires on a read-only module (negative control)`,
+          !list.some((n) => n.re.test(readOnly)),
+          list.filter((n) => n.re.test(readOnly)).map((n) => n.id).join(", "));
+  };
+  needleBars("DB_REACH", DB_REACH);
+  needleBars("WRITE_SIGNAL", WRITE_SIGNAL);
+
+  // ⭐ NARROWING IS CAUGHT ABOVE; DELETION IS CAUGHT HERE. The bars above
+  // iterate the SURVIVING list, so removing a row outright leaves them green
+  // (measured: deleting the `postgres` row dropped scripts from the
+  // write-capable set and every check still passed). The roster is therefore
+  // spelled out: dropping or renaming a needle is a two-place edit a reviewer
+  // sees, and adding one is a deliberate bump here rather than a silent widening.
+  const roster = (list: ReadonlyArray<Needle>) => list.map((n) => n.id).sort().join(",");
+  check("⭐ the DB_REACH roster is intact (a deleted needle is not a narrowed one)",
+        roster(DB_REACH) === "_env-preload,db/client,drizzle-postgres-js,postgres",
+        roster(DB_REACH));
+  check("⭐ the WRITE_SIGNAL roster is intact",
+        roster(WRITE_SIGNAL) ===
+          "alter-table,create-ddl,drop-ddl,on-conflict,orm-write,refresh-matview,sql-delete,sql-insert,sql-update,truncate,unsafe",
+        roster(WRITE_SIGNAL));
+
+  // ⭐ SECOND-ORDER: an exclusion that no longer carries a write signal is
+  // either a stale entry or the tell of a dead needle — the `.unsafe(`-only and
+  // `.update(`-only entries lose their signal the moment either of those needles
+  // rots, so this bar reddens for a cause the population counts cannot show.
+  // `viaLibrary` names the entries that deliberately have no token of their own.
+  const signalless = EXCLUSIONS.filter(
+    (e) => !e.viaLibrary && existsSync(`scripts/${e.file}`) && !writesDb(code.get(e.file) ?? ""),
+  ).map((e) => e.file);
+  check("⭐ every exclusion still carries the write signal it was excluded for",
+        signalless.length === 0,
+        `${signalless.join(", ")} — either the entry is stale, or a WRITE_SIGNAL needle died`);
+  // The same, one axis over: 16 of these reach a database ONLY through the
+  // `postgres` needle, so this is where that needle's death lands.
+  const unreachable = EXCLUSIONS.filter(
+    (e) => existsSync(`scripts/${e.file}`) && !touchesDb(code.get(e.file) ?? ""),
+  ).map((e) => e.file);
+  check("⭐ every exclusion still reaches a database at all",
+        unreachable.length === 0,
+        `${unreachable.join(", ")} — either the entry is stale, or a DB_REACH needle died`);
 
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
   if (failures > 0) process.exitCode = 1;

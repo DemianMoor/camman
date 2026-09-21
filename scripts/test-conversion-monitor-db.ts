@@ -1,10 +1,11 @@
 import "./_env-preload";
-import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { inArray, like, sql, type SQL } from "drizzle-orm";
 import type { PgInsertValue } from "drizzle-orm/pg-core";
 
 import { db } from "../db/client";
+import { requirePreviewDb } from "./_require-preview-db";
 import { conversion_events } from "../db/schema";
 import { clearAlert } from "../lib/alerts/alert-state";
 import type { ConversionEventInsert } from "../lib/conversions/build-rows";
@@ -555,7 +556,7 @@ async function main() {
           ].map((k) => alertRow(tx, k)),
         );
       check(
-        "A2 alert_state: exactly the three combo keys firing, one per prefix, delivered and org-less; the six fixed keys evaluateConversionAlerts owns (all three cap keys included, every kind being far under the cap) ok — projection_failed is the projection's own key, covered by C1-C9; the leftover in-prefix keys — including one under the status-only prefix — cleared without a page (as clearAlert leaves a row)",
+        "A2 alert_state: exactly the three combo keys firing, one per prefix, delivered and org-less; the six fixed keys this tick decides (all three cap keys included, every kind being far under the cap; projection_failed is decided on its own path, C1–C9) ok; the leftover in-prefix keys — including one under the status-only prefix — cleared without a page (as clearAlert leaves a row)",
         sameKeys(await firingKeys(tx), [keyTrash, keyRej, keyRegPurchase]) &&
           [aTrash, aRej, aConf].every((r) => r?.state === "firing" && r.notified && r.global) &&
           [aFetch, aInv, aOrg, aCapU, aCapS, aCapC].every((r) => r?.state === "ok") &&

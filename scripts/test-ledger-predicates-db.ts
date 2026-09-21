@@ -1,9 +1,10 @@
 import "./_env-preload";
-import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "../db/client";
+import { requirePreviewDb } from "./_require-preview-db";
 import {
   approvedRevenueClause,
   pendingRevenueClause,
@@ -17,8 +18,9 @@ import {
 // rows, inside a transaction that ALWAYS rolls back. PREVIEW DB ONLY:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //     npx tsx scripts/test-ledger-predicates-db.ts
-// The refusal itself is the `_require-preview-db` import above — an allowlist,
-// and early enough that nothing can query ahead of it.
+// The ./_require-preview-db import above is the refusal: an ALLOWLIST, so it
+// also stops a raw IP, a pooler alias or a future prod project, which a re-typed
+// "does the URL contain the prod ref?" test would wave straight through.
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -58,6 +60,7 @@ async function indexPlan(tx: Tx, query: SQL): Promise<{ noSeqScan: boolean; inde
 class Rollback extends Error {}
 
 async function main() {
+  // The guard already refused every other target; this is the banner, not the check.
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   try {

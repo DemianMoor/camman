@@ -1,9 +1,10 @@
 import "./_env-preload";
-import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { sql, type SQL } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { requirePreviewDb } from "./_require-preview-db";
 import { restedCount } from "@/lib/audience/pool-math";
 import { computeAudiencePools } from "@/lib/audience/pools";
 import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
@@ -45,8 +46,9 @@ import { seedConversionEvent } from "./_conversion-fixture";
 // stages, sends, contact groups, counted clickers and every conversion_events
 // row — lives inside the transaction that ALWAYS rolls back.
 
-// The refusal itself is the `_require-preview-db` import above — an allowlist,
-// and early enough that nothing can query ahead of it.
+// The ./_require-preview-db import above is the refusal: an ALLOWLIST, so it
+// also stops a raw IP, a pooler alias or a future prod project, which a re-typed
+// "does the URL contain the prod ref?" test would wave straight through.
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -71,6 +73,7 @@ const uuidArray = (ids: string[]): SQL =>
   )}]::uuid[]`;
 
 async function main() {
+  // The guard already refused every other target; this is the banner, not the check.
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const tag = `pr3-${Date.now()}`;

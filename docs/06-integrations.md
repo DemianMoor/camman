@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-09-17_
+_Last updated: 2026-09-21_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -8,7 +8,8 @@ External services CamMan talks to, their contracts, and every environment variab
 
 | Service | Direction | Used by | Auth | Contract |
 |---------|-----------|---------|------|----------|
-| **Supabase Postgres** | app → DB | everything (Drizzle) | `DATABASE_URL` (pooler, `?prepare=false`) | SQL |
+| **Supabase Postgres** | app → DB | everything (Drizzle) | `DATABASE_URL` (transaction pooler :6543, `?prepare=false`) | SQL |
+| **Supabase Postgres (session pooler)** | cron → DB | `/api/cron/refresh-offer-group-report` only | derived from `DATABASE_URL` (:5432) | SQL |
 | **Supabase Auth** | app ↔ auth | sign-in/up, sessions | anon key (client), service-role (admin) | `@supabase/ssr` |
 | **SMS Spam Classifier** (Cloud Run) | app → service | creative scoring | `X-API-Key` header | `POST {CLASSIFIER_URL}/score` `{text}` → `{score,label?,confidence?,model_version?}` |
 | **TextHub** | app ↔ provider | send + STOP inbox poll | per-provider `api_key` (DB, brand-scoped) | send: `GET https://api.texthub.com/v2/?api_key=&text=&number=&lead_id=&sender=`; inbox: `?inbox=true` |
@@ -126,7 +127,7 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 | `NEXT_PUBLIC_SUPABASE_URL` | public | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | public | anon key (browser-safe) |
 | `SUPABASE_SERVICE_ROLE_KEY` | **server** | bypasses RLS; used by `lib/supabase/admin.ts`. Never expose to browser |
-| `DATABASE_URL` | server | Postgres connection (Supabase pooler, `?prepare=false`). URL-encode special chars in the password (`#`/`&`) or rotate to alphanumerics — `#` silently truncates the string |
+| `DATABASE_URL` | server | Postgres connection (Supabase **transaction** pooler, port `6543`, `?prepare=false`). URL-encode special chars in the password (`#`/`&`) or rotate to alphanumerics — `#` silently truncates the string. One job derives a **session**-mode URL from this same string (port `5432`, `prepare` dropped) — see below; there is deliberately no second connection-string variable |
 | `NEXT_PUBLIC_SITE_URL` | public | **primary** app origin; auth callback base, internal alert deep-links, and every provider webhook/callback URL we register. Must match the deployed origin in prod |
 | `NEXT_PUBLIC_PARTNER_HOST` | public | **optional** partner-facing origin. Only affects URLs handed to a partner: the lead intake endpoint in Settings → Partner intake keys, and `/docs/partner-api`. Unset ⇒ those fall back to the operator's current browser origin (single-hostname behavior). Never used for auth, alerts, or webhooks. Inlined at **build time** — changing it requires a redeploy |
 | `SPAM_PROVIDER` | server | which spam provider (`classifier` is the only option) |
@@ -163,6 +164,27 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 - Never commit `.env.local` or any populated secrets; never log secrets or put them in error messages.
 - The TextHub/Ahoi `api_key` is **not** an env var — it's stored per provider, per-account (migration 0110 made `provider_credentials` multi-account: N credentials per provider, each a row) in `provider_credentials`, **AES-256-GCM-encrypted at rest** (`api_key_encrypted`, keyed by `PROVIDER_CREDENTIALS_KEY`; protected by deny-by-default RLS + app-layer permission checks as defense-in-depth). See [security-notes.md](security-notes.md) and [07-conventions.md](07-conventions.md). The legacy plaintext `api_key` column is retained only for a dual-read window until a later, separately-gated migration drops it. The blob's leading `v1.` version segment is the rotation seam for a future master-key rotation (`v2.` alongside `v1.`, no big-bang re-encrypt required).
 - Production env vars are set in the Vercel dashboard (Settings → Environment Variables), not via CLI.
+
+## Supabase session pooler (:5432) — one job only
+
+Supavisor exposes the same database on two ports: **`6543` transaction-pooled**
+(what `DATABASE_URL` and [db/client.ts](../db/client.ts) use — a different
+backend per transaction, required for serverless) and **`5432` session-pooled**
+(one backend pinned for the life of the client).
+
+`/api/cron/refresh-offer-group-report` is the **only** consumer of the session
+port. It needs a raised `statement_timeout` and `work_mem`, and
+`REFRESH MATERIALIZED VIEW CONCURRENTLY` cannot run inside a transaction, so
+neither `SET LOCAL` nor a bare `SET` on the transaction pooler can deliver them.
+[lib/reporting/refresh-session.ts](../lib/reporting/refresh-session.ts) derives
+the session URL from `DATABASE_URL` (port swap + drop `prepare`), applies the
+settings, **reads them back and refuses if they did not stick**, and closes the
+connection in a `finally`.
+
+No new environment variable, by design: one connection string to rotate, and no
+way for a second one to drift out of sync. Nothing else should use this port —
+session-mode connections hold a backend each and the cluster's client cap is
+small.
 
 ## Supabase Auth URL configuration (prod)
 Authentication → URL Configuration must include the production origin under Site URL and Redirect URLs (`/auth/callback`, `/auth/complete`, `/auth/reset-password`), keeping localhost entries for dev (CLAUDE.md §14).

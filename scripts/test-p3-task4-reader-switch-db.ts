@@ -1,5 +1,5 @@
 import "./_env-preload";
-import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { readFileSync } from "node:fs";
 
@@ -7,6 +7,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { requirePreviewDb } from "./_require-preview-db";
 import {
   CONVERSION_SIGNAL_STYLE,
   CONVERSION_STATUS_STYLES,
@@ -119,8 +120,9 @@ import {
 //
 // docs/superpowers/plans/2026-09-17-conversion-events-phase3.md (Task 4)
 
-// The refusal itself is the `_require-preview-db` import above — an allowlist,
-// and early enough that nothing can query ahead of it.
+// The ./_require-preview-db import above is the refusal: an ALLOWLIST, so it
+// also stops a raw IP, a pooler alias or a future prod project, which a re-typed
+// "does the URL contain the prod ref?" test would wave straight through.
 
 // The fixture ET day. Far from any real preview-DB data, and the block-D world
 // state check asserts the ledger is empty inside this window before the fixtures
@@ -150,6 +152,7 @@ const money = (v: unknown) => Math.round(Number(v ?? 0) * 10000) / 10000;
 class Rollback extends Error {}
 
 async function main() {
+  // The guard already refused every other target; this is the banner, not the check.
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   let sawTx = false;

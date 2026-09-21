@@ -1,0 +1,119 @@
+-- Migration 0185: the per-event-type breakdown on the stage-day projection
+-- (Conversion Events Phase 5).
+--
+-- TWO ADDITIVE COLUMNS. Nothing is dropped, no column changes type, no row is
+-- rewritten: Postgres 11+ stores an ADD COLUMN ... DEFAULT in the catalog, so
+-- neither statement takes more than a brief ACCESS EXCLUSIVE lock on the table.
+-- Both are IF NOT EXISTS, so the migration is re-runnable: a timestamp bump can
+-- re-apply it on preview without a second thought.
+--
+-- CONFIRMED ON THE TARGET, read-only, 2026-09-21 — "Postgres 11+" is a version
+-- claim, so it is checked against the server rather than assumed:
+--   • server_version 17.6 (server_version_num 170006), well past the 11.0 floor
+--   • both defaults are CONSTANTS ('{}'::jsonb, 0). The fast path requires a
+--     non-volatile default; a volatile one (now(), random(), a sequence) still
+--     rewrites. These qualify.
+--   • the mechanism is already in use ON THIS TABLE: visit_clicks_raw,
+--     visit_clicks_clean, redirect_clicks_raw and redirect_clicks_clean all
+--     carry pg_attribute.atthasmissing = true with attmissingval = {0} — added
+--     onto a populated keitaro_stage_results and never rewritten. 57 columns
+--     across the public schema are stored this way.
+--   • neither `events` nor `unmapped_conversions` exists yet (pg_attribute, 19
+--     live columns, highest attnum 20), so both ALTERs will really run rather
+--     than no-op on the name.
+--   • the table is 18,484 rows / 439 pages / 3,512 kB heap — small even if it
+--     DID rewrite.
+-- THE LOCK is ACCESS EXCLUSIVE on keitaro_stage_results, and the catalog-only
+-- work behind it is sub-millisecond. But in a COMBINED 0182-0185 apply drizzle
+-- holds every lock until the single transaction COMMITS, so the real hold is
+-- "from this statement to the end of the batch" — and 0183, which runs first,
+-- populates three matviews whose defining SELECTs measure ~150s together on
+-- prod. Ordering is what keeps this cheap: these two ALTERs are the LAST
+-- statements in the batch, so they acquire late and hold briefly. Do not
+-- reorder 0185 ahead of 0183. The risk remains QUEUEING, not duration, and
+-- SET LOCAL lock_timeout = '5s' below is what bounds it.
+--
+-- ⚠️ RE-RUNNABLE IS NOT SHAPE-REPAIRING. `ADD COLUMN IF NOT EXISTS` matches on
+-- the column NAME ALONE: a re-apply over a column of the wrong type, the wrong
+-- nullability or the wrong default is a silent no-op, not a repair. Re-runnable
+-- means "applying it twice raises nothing and changes nothing", and that is the
+-- only thing bar S8b of scripts/test-stage-event-columns-db.ts asserts. A shape
+-- that has drifted has to be fixed by a NEW migration that names the difference.
+--
+--   events               the SAME numbers as sales / revenue / pending_revenue,
+--                        split per event_types.key. Written by the same
+--                        INSERT ... ON CONFLICT in
+--                        lib/keitaro/stage-day-conversions.ts, from the same
+--                        single pass over conversion_events, so the scalars are
+--                        literally the SUM of this object's entries and the two
+--                        cannot drift.
+--
+--     {"purchase":     {"n": 12, "pending_n": 1,
+--                       "revenue": 540.0000, "pending_revenue": 60.0000},
+--      "registration": {"n": 40, "pending_n": 0,
+--                       "revenue": 0.0000,   "pending_revenue": 0.0000}}
+--
+--     n                 counted events: status IN ('pending','approved')
+--     pending_n         a SUBSET of n: status = 'pending'
+--     revenue           counts_revenue types only, status = 'approved'
+--     pending_revenue   counts_revenue types only, status = 'pending'
+--
+--   unmapped_conversions  rows on this stage-day with NO event type or NO status
+--                        (conversion_events_unmapped_idx's own predicate). They
+--                        count as NOTHING anywhere; this column exists so a
+--                        screen can say they exist at all.
+--
+-- ⚠️ THE MONEY INSIDE THE OBJECT IS A JSON NUMBER, NOT A STRING.
+-- `jsonb_build_object('revenue', <numeric(12,4)>)` stores a jsonb NUMBER that
+-- keeps the numeric's scale (`540.0000`), and postgres-js JSON.parses the column,
+-- so the driver hands the reader a JS number — measured exact at 1234567.8901 and
+-- 0.0001 (bars S13/S14, scripts/test-stage-event-columns-db.ts). A TOP-LEVEL
+-- numeric column on the same row still arrives as a STRING, which is why
+-- parseEventMap (lib/reporting/event-columns.ts) accepts both and neither of its
+-- branches is dead.
+--
+-- ⚠️ KEYED BY event_types.key, NOT event_types.id. `id` is a global serial but
+-- the natural key is (org_id, key) — event_types_org_key_uniq, migration 0181 —
+-- and the one cross-org reader on the platform (the scheduled Telegram report,
+-- lib/reporting/report-snapshot.ts) needs a key that means the same thing in two
+-- organizations. A duplicate key inside one object is impossible: the aggregate
+-- groups by (org_id, stage_id, stat_date) and keys are unique within an org.
+--
+-- ⚠️ unmapped_conversions IS DELIBERATELY NOT INSIDE `events`. Inside it, some
+-- future loop over the object would sum it into a total. An unmapped conversion
+-- must count as nothing, everywhere; keeping it a scalar is what makes that
+-- structural rather than a convention.
+--
+-- ⚠️ NO INDEX. The table is read by (org_id, stage_id, stat_date) and by
+-- (campaign_id, stat_date), both already indexed; neither new column is ever a
+-- predicate. A GIN index on `events` would cost writes on every 5-minute
+-- projection tick and buy nothing.
+--
+-- Existing rows get '{}' / 0 and stay wrong-but-empty until the projection next
+-- covers their stage. That is the same catch-up the pending_revenue column (0182)
+-- had, and the projection's watermark + coverage floor
+-- (lib/keitaro/stage-day-conversions.ts) is what fills them.
+--
+-- THE MIGRATION is inert on arrival: it changes no stored value and no query
+-- plan. THE SCHEMA MIRROR IS NOT. The moment db/schema.ts names these columns,
+-- every `db.select()` with no projection over keitaro_stage_results expands to
+-- include them, so the CODE requires this migration even where no feature reads
+-- the columns. Additive leads the code (CLAUDE.md §14) — that is the rule this
+-- is an instance of, not an exemption from it.
+
+-- Drizzle applies every pending migration in ONE transaction, so a combined
+-- 0182–0185 apply already runs under 0182's lock_timeout. This re-asserts it for
+-- a SOLO apply or roll-forward of 0185 alone. The risk is QUEUEING, not duration:
+-- the two ALTERs are milliseconds (catalog-stored defaults, no rewrite), but
+-- ACCESS EXCLUSIVE on keitaro_stage_results with no bound stalls every reader and
+-- writer of it — /api/keitaro/poll alone allows maxDuration = 230. A blocked lock
+-- fails the migration instead; just retry. SET LOCAL is scoped to the apply
+-- transaction either way, so on a combined apply this is a harmless re-set of the
+-- same value.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
+ALTER TABLE public.keitaro_stage_results
+  ADD COLUMN IF NOT EXISTS events jsonb NOT NULL DEFAULT '{}'::jsonb;
+--> statement-breakpoint
+ALTER TABLE public.keitaro_stage_results
+  ADD COLUMN IF NOT EXISTS unmapped_conversions integer NOT NULL DEFAULT 0;

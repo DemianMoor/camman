@@ -37,24 +37,55 @@
 -- predicate fans a recipient out into one row per org that has a ledger row for
 -- that stage_send_id, and adding it to the join without the CTE does not compile.
 --
--- APPLY-TIME WINDOW, deliberate and NOT fixable here: `CREATE MATERIALIZED VIEW
--- ... AS` populates immediately, and 0181 creates conversion_events empty, so
--- all three matviews below are built from an EMPTY ledger. From the instant this
--- migration commits until Phase 1's backfill AND refreshOfferGroupReport() have
--- both run, /offers/[id]/report and /reports/audience read $0 revenue / 0 sales
--- to live users. `WITH NO DATA` is not the alternative (it makes them
--- unreadable). The prod order is apply -> backfill -> refresh, back to back —
--- see the HARD PRECONDITION block of Task 8 in
--- docs/superpowers/plans/2026-09-17-conversion-events-phase3.md.
+-- APPLY-TIME STATE — REWRITTEN 2026-09-21, AND IT NOW SAYS THE OPPOSITE OF WHAT
+-- IT USED TO. The original block claimed the three matviews below are built from
+-- an EMPTY ledger and therefore read $0 revenue / 0 sales to live users until
+-- Phase 1's backfill runs. That was true when it was written and is FALSE NOW:
+-- 0181 applied to production AHEAD of this file, and conversion_events is
+-- backfilled and taking live rows. Measured read-only on prod 2026-09-21:
+--     conversion_events            1,517 rows, 1,486 carrying a stage_send_id,
+--                                  first 2026-09-18, latest 2026-09-21
+--     attributable at CREATE time  $100,763.0000 approved revenue · 1,482 sales
+--                                  (the same purchase/revenue predicates as the
+--                                  matviews below, aggregated per stage_send_id)
+-- `CREATE MATERIALIZED VIEW ... AS` still populates immediately — that part was
+-- never in question — but what it populates FROM is now a live ledger. There is
+-- no $0 window: the instant this migration commits, /offers/[id]/report and
+-- /reports/audience read real revenue. `WITH NO DATA` is still not the
+-- alternative (it makes them unreadable).
 --
--- Which is also why offer_group_report_mv's report_refresh_log row is NOT
--- stamped now() at the bottom of this file, where 0132:426 and 0133:226 both
--- did. Those two rebuilt it from sources that were already correct, so now()
--- was honest. This one rebuilds it from an empty ledger, and stamping now()
--- would assert that the $0 on screen is current data. Leaving the previous cron
--- stamp keeps the page's staleness banner amber for exactly the
--- apply -> backfill -> refresh window; the first refreshOfferGroupReport()
--- after the backfill stamps it correctly.
+-- WHAT SURVIVES THE CORRECTION: apply -> refresh still matters, but for
+-- FRESHNESS, not for correctness. CREATE ... AS populates from the ledger as it
+-- stood at COMMIT, so conversions landing after that are invisible until the
+-- next refreshOfferGroupReport(). The HARD PRECONDITION block of Task 8 in
+-- docs/superpowers/plans/2026-09-17-conversion-events-phase3.md still governs
+-- the order, but its backfill step is already done on prod, so the remaining
+-- sequence is apply -> refresh, not apply -> backfill -> refresh.
+--
+-- offer_group_report_mv's report_refresh_log row is STILL not stamped now() at
+-- the bottom of this file, where 0132:426 and 0133:226 both did — but the reason
+-- has changed with the facts. It is NO LONGER "stamping now() would assert that
+-- the $0 on screen is current data"; the data is current. It is that the stamp
+-- means "the CRON last rebuilt this view", and the cron has not run since the
+-- apply. Leaving the previous cron stamp therefore UNDERSTATES the data's
+-- freshness rather than overstating it — the conservative direction — and the
+-- first refreshOfferGroupReport() after the apply corrects it.
+--
+-- ⚠️ THIS CORRECTION CHANGES THE FILE'S SHA-256 AND 0183 IS ALREADY APPLIED ON
+-- camman-v2, so scripts/verify-migration-integrity.ts will report a hash
+-- mismatch for idx 183 THERE, and only there. Deliberate, and cheap for three
+-- reasons, each checked rather than assumed: (1) drizzle WRITES the hash and
+-- never compares it (drizzle-orm/pg-core/dialect.js:44-71 — the same fact the
+-- JOURNAL TIMESTAMP note below rests on), so the edit cannot change what is
+-- applied anywhere; (2) PRODUCTION has not applied 0183 yet — it applies this
+-- file exactly once, at the Task 8 gate, and records the CORRECTED hash, so the
+-- database that matters is clean; (3) camman-v2's record already fails to
+-- reconcile with this journal — read back 2026-09-21, it carries the pre-amend
+-- hash for 0184 and two entries whose `when` (1792108800000, 1792368000000) no
+-- longer exists in meta/_journal.json at all. The journal `when` is NOT bumped
+-- here: bumping it would re-apply this file on camman-v2, which is a real
+-- change, where a stale hash on a disposable preview project is a diagnostic
+-- line. See docs/07-conventions.md.
 --
 -- STRUCTURE IS OTHERWISE UNCHANGED, deliberately: every CTE, join path, dedupe
 -- grain and comment below is reproduced from 0132 / 0133 / 0180. Only the
@@ -66,11 +97,40 @@
 --
 -- REFRESH: refreshOfferGroupReport() still refreshes summary -> group -> totals
 -- -> audience totals, each CONCURRENTLY, which needs the unique indexes
--- recreated below. Cost: measured read-only on prod 2026-09-18 with the ledger
--- CTE stubbed (conversion_events does not exist there yet) at
--- 43.4s / 116.7s / 1.2s for the three SELECTs below; the caveats and the two
--- earlier figures are in app/api/cron/refresh-offer-group-report/route.ts. The
--- real post-ledger number comes from the first refresh after the backfill.
+-- recreated below. Cost: re-measured read-only on prod 2026-09-21, this time
+-- UNSTUBBED (0181 has applied, so conversion_events is real), three runs of the
+-- three SELECTs below under EXPLAIN (ANALYZE, BUFFERS):
+--     offer_report_offer_totals_mv      35.7 / 36.5 / 35.6 s
+--     offer_group_report_mv            112.1 / 111.2 / 114.8 s
+--     audience_report_group_totals_mv    1.2 /  1.1 /  1.1 s   (measured
+--         separately; pending_revenue stubbed to 0, since the INSTALLED
+--         offer_group_report_mv it reads predates this file)
+--     per-run total                    147.8 / 147.7 / 150.4 s
+-- The 2026-09-18 stubbed figures (43.4 / 116.7 / 1.2) are superseded; the
+-- caveats and the two earlier measurements are in
+-- app/api/cron/refresh-offer-group-report/route.ts.
+--
+-- ⚠️ THIS FILE IS NOT WHAT MAKES THE REFRESH EXPENSIVE, and the number that
+-- shows it is the INSTALLED definition's own SELECT: read back from
+-- pg_get_viewdef on the same day, the PRE-0183 offer_group_report_mv SELECT
+-- costs 109.6 / 111.8 / 113.2 s (avg 111.5) against this file's 112.7 avg. The
+-- ledger CTE adds ~1.2 s to a ~112 s query — inside run-to-run variance. What
+-- dominates is a sort that spills to disk: one node reports
+-- `external merge  Sort Space Used: 170160 kB` at the cluster's work_mem of
+-- 5120 kB, while every other sort in the plan is an in-memory quicksort of
+-- <= 5 MB.
+--
+-- ⛔ AND THE CEILING IS NOT THE ROUTE'S maxDuration = 300. Prod's
+-- statement_timeout is 120000 ms (source: configuration file,
+-- /etc/postgresql-custom/platform-defaults.conf:6 — a Supabase cluster default
+-- on every connection; pg_db_role_setting has no entry for the postgres role),
+-- and refreshOfferGroupReport() never raises it. The last real cron run
+-- (2026-09-21 05:01-05:03 UTC, PRE-0183) refreshed offer_group_report_mv
+-- CONCURRENTLY in 107.5 s — read back as the delta between consecutive
+-- report_refresh_log stamps. That is 12.5 s of headroom against the 120 s wall,
+-- BEFORE this file, and this file spends about 1 s of it. The wall is a
+-- pre-existing problem that 0183 neither causes nor fixes; see
+-- docs/04-features/offer-group-report.md.
 --
 -- SALES IS NOW PER-EVENT, NOT PER-RECIPIENT. `sales` / `attributable_sales`
 -- count ledger ROWS, so a recipient with two purchases is two sales and a cell's

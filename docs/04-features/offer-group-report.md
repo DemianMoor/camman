@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-09-14_
+_Last updated: 2026-09-21_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -191,6 +191,21 @@ Full column lists and the no-RLS note are in
   after all of them), so a mid-sequence throw leaves only the
   not-yet-refreshed matviews' rows unstamped.
 
+  **Each view refreshes independently (2026-09-21).** The four statements used
+  to be four bare `await`s, so the first failure ended the invocation and every
+  view behind it was skipped — with the group view at #2 and 12.5s from the
+  120s `statement_timeout`, the realistic outcome was three of four reports
+  frozen by one view's problem, twice a day, until someone noticed. Each
+  refresh is now caught on its own: one failure freezes exactly one view.
+  Nothing is swallowed — every failure lands in the returned `outcomes[]`, is
+  `console.error`'d, and the route turns a non-empty `failed[]` into a Tier-1
+  Telegram alert plus HTTP 500.
+- `withRefreshSession(fn)`
+  ([lib/reporting/refresh-session.ts](../../lib/reporting/refresh-session.ts))
+  — the dedicated **session-mode** connection this refresh runs on, opened per
+  job and closed in a `finally`. See "Why a session-mode connection" below.
+  Scoped to this one caller; nothing else should import it.
+
 ## Refresh (twice-daily cron)
 
 `GET/POST /api/cron/refresh-offer-group-report`
@@ -209,6 +224,92 @@ on it, so the larger budget costs nothing. The same cron also refreshes the
 Audience Stats group totals (`audience_report_group_totals_mv`, migration 0180)
 last; its defining SELECT measured 5.3s on 2026-09-14, logged per run as
 `audienceTotalsMs`.
+
+### ⛔ `maxDuration` is not the binding limit — `statement_timeout` is
+
+Production's `statement_timeout` is **120000 ms**, a Supabase platform default
+(`pg_settings.source = 'configuration file'`) applied to every connection;
+`pg_db_role_setting` carries no override for the `postgres` role. Any single
+`REFRESH` past 120s is cancelled with SQLSTATE **57014** long before the 300s
+Vercel budget is reached. Raising `maxDuration`, or splitting the four views
+into four crons, divides a budget that was never the constraint and **cannot
+make one `REFRESH` statement shorter**.
+
+Read back from `report_refresh_log` on **2026-09-21** (the gaps between
+consecutive stamps written by the real 05:00 UTC run, not estimates):
+
+| view | duration |
+| --- | --- |
+| `offer_group_report_mv` | **107.5s** |
+| `offer_report_offer_totals_mv` | 36.7s |
+| `audience_report_group_totals_mv` | 0.95s |
+
+The group refresh was **12.5s from the wall**.
+
+### Why a session-mode connection
+
+The root cause is one sort node. At the cluster's `work_mem = 5120kB`, read-only
+`EXPLAIN (ANALYZE, BUFFERS)` of the group view's defining SELECT on production
+reports `Sort Method: external merge  Disk: ~128MB` in both the leader and its
+parallel worker, while every other sort in the plan is an in-memory quicksort of
+a few MB. Given room, that node becomes `Sort Method: quicksort  Memory:
+~236–256MB` and **no sort in the plan spills** (0 of 13, every run).
+
+Measured read-only on production, 2026-09-21, each run inside a rolled-back
+`READ ONLY` transaction. Paired A/B (the two settings alternated so drifting
+load lands on both arms):
+
+| pair | `work_mem` 5120kB | `work_mem` 384MB | delta | notes |
+| --- | --- | --- | --- | --- |
+| 1 | 111.7s, 2/14 spilled | **87.7s, 0/13 spilled** | −24.0s | idle cluster |
+| 2 | 109.2s, 2/14 spilled | **103.8s, 0/13 spilled** | −5.4s | idle cluster |
+| 3 | 269.1s, 2/14 spilled | **163.1s, 0/12 spilled** | −106.0s | 1 / 4 other active backends |
+
+An earlier unpaired set agrees on the spill and shows the same variance:
+control 126.9 / 123.4 / 133.5s (2–3 sorts spilled every run), treatment
+103.9 / 182.6 / 90.9s (0 spilled every run).
+
+**Read the result honestly:** the spill is eliminated in *every* treatment run
+(9 of 9), and the treatment is faster in *every* pair, but the wall-time gain is
+variable (−5% to −39%) because this query's cost is dominated by cluster load,
+not by the sort. Buffer accounting corroborates the mechanism — shared buffer
+hits fall from ~36M to ~5.6M, the re-reads the disk merge was doing. So
+`work_mem` is the performance fix and it is real, but **`statement_timeout` is
+the fix that removes the failure cliff**; do not expect the former to do the
+latter's job.
+
+`SET LOCAL` cannot fix this: `REFRESH MATERIALIZED VIEW CONCURRENTLY` may not
+run inside a transaction block, which is the trick
+[counted-clickers.ts](../../lib/reporting/counted-clickers.ts) (300s) and
+[epc-monitors.ts](../../lib/reporting/epc-monitors.ts) (240s) rely on. A bare
+`SET` over the shared **transaction** pooler (Supavisor :6543) is worthless
+because the next statement may land on a different backend.
+
+So this job gets its own **session-mode** connection (same host and
+credentials, port **5432**, derived from `DATABASE_URL` — no second env var),
+which pins one backend so a plain `SET` sticks across the four autocommit
+statements:
+
+| setting | value | why |
+| --- | --- | --- |
+| `work_mem` | **384MB** | The spilling sort needs ~236–256MB resident and runs in the leader **and** one parallel worker (`max_parallel_workers_per_gather = 1`). `work_mem` is a per-node ceiling, so the worst case for this plan is 384 × 2 = **768MB**; on this instance (`shared_buffers` 512MB, `effective_cache_size` 1.5GB ⇒ ~2GB RAM) that is survivable, whereas 512MB × 2 = 1GB would not be. Exposure lasts only as long as the job — ~2 minutes, twice a day — and no other connection sees it. |
+| `statement_timeout` | **180s** | ~1.7–2× the 87.7–103.8s the SELECT measured under the new `work_mem` on a quiet cluster. Not theoretical room: in a paired A/B one pair landed while production was busy (1 and 4 other active backends) and the same query took **269.1s** at the current `work_mem` and **163.1s** at 384MB — this statement can already exceed 120s under load, so today's 12.5s of headroom only holds when the cluster is idle. Deliberately **below** `maxDuration = 300` so the *database* cancels first: a 57014 throws and this route alerts on it, whereas a Vercel timeout kills the invocation with no catch and no alert. Not 240s, because the four views share one 300s invocation and the other three stretch under load too (180 + ~90 + ~20 + ~3 ≈ 293s fits; 240 does not). And if 180s is exceeded anyway, the per-view catch means group alone freezes. |
+
+`withRefreshSession()` **reads both settings back out of `pg_settings` in a
+separate statement** and throws before any refresh runs if either did not
+stick. That is not ceremony: every quiet failure mode of this change (a pooler
+that swallowed the `SET`, a URL that stayed on :6543, a role-level override)
+ends with the refresh silently running at 5120kB/120s exactly as before.
+
+### Checking a run
+
+Read all four rows of **`report_refresh_log` (`view_name`, `refreshed_at`)**.
+Each view stamps its own row only when its own refresh succeeded, so a healthy
+run leaves **all four `refreshed_at` values within a few minutes of the 05:00
+or 20:00 UTC slot**. Any row still showing the previous slot is precisely the
+view that failed — and, unlike before, its neighbours will have refreshed
+anyway. The route's JSON response carries the same split as `refreshed[]` /
+`failed[]`, and a partial run fires a Tier-1 Telegram alert and returns 500.
 
 **DST drift:** Vercel Cron schedules are fixed-UTC. `0 5,20 * * *` lands at
 **00:00 & 15:00 ET** in winter (EST) and **01:00 & 16:00 ET** in summer (EDT) —
@@ -294,6 +395,9 @@ pin rows or foot a table; justified by the small per-offer row count).
   `offer_report_offer_totals_mv`; extends the dedup-at-grain rule to every
   group-row column.
 - `lib/reporting/offer-group-report.ts` — read + refresh helper.
+- `lib/reporting/refresh-session.ts` — the session-mode connection the refresh
+  runs on, with this job's `statement_timeout` (180s) and `work_mem` (384MB)
+  and the read-back that proves they applied. One caller only.
 - `app/api/offers/[id]/report/route.ts` — the API route.
 - `app/api/cron/refresh-offer-group-report/route.ts` — the twice-daily refresh cron.
 - `app/(protected)/offers/[id]/report/page.tsx` — the report page.
@@ -306,3 +410,13 @@ pin rows or foot a table; justified by the small per-offer row count).
 - `scripts/test-offer-group-report-helper.ts` — smoke-tests
   `getOfferGroupReport`/`refreshOfferGroupReport` directly against a real org
   and offer, independent of the API route and the UI.
+  ⚠️ It loads `.env.local` (**production**) and calls `refreshOfferGroupReport()`,
+  so running it refreshes the production matviews. Pre-existing behaviour, not
+  preview-guarded — point `DATABASE_URL` at the preview database first.
+- `scripts/test-refresh-session.ts` — preview-only
+  (`_require-preview-db`-guarded) tests for the session connection and the
+  independent per-view refresh: that both settings apply and **persist across
+  statements**, that the connection is closed on both the success and the throw
+  path, and — by renaming `offer_group_report_mv` out from under the run — that
+  a failing view is reported, does not abort the run, does not stamp a success,
+  and does not stop the other three from refreshing.

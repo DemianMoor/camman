@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-21_
 
 ## A script that writes to a database must refuse production, by import (2026-09-18)
 
@@ -2772,3 +2772,25 @@ Drizzle applies **every pending migration in one transaction**, and each lock is
 - Make the first statement `SET LOCAL lock_timeout = '5s';` so a blocked lock fails the migration and you retry, instead of stalling the app.
 - Take the strongest lock first. In `0181_conversion_events.sql`, the `offers` `ADD COLUMN` + index run before any `CREATE TABLE` with a foreign key, so `offers` never needs a lock upgrade while the FK locks on `stage_sends`/`contacts` are held.
 - A seed that `LEFT JOIN`s a lookup by name (e.g. an event-type key) needs `WHERE v.key IS NULL OR lookup.id IS NOT NULL`. Without it, a typo silently seeds a NULL reference, which for conversion mappings means a status-only rule.
+
+## A background job that needs its own `statement_timeout` needs its own connection (2026-09-21)
+
+Production's `statement_timeout` is **120000 ms** — a Supabase platform default (`pg_settings.source = 'configuration file'`), on every connection, with no `pg_db_role_setting` override for the `postgres` role. A job that legitimately runs longer has three ways to raise it, and for `REFRESH MATERIALIZED VIEW CONCURRENTLY` two of them do not work:
+
+- `SET LOCAL` inside a transaction — the trick [counted-clickers.ts](../lib/reporting/counted-clickers.ts) (300s) and [epc-monitors.ts](../lib/reporting/epc-monitors.ts) (240s) use. **Unavailable here:** `CONCURRENTLY` cannot run inside a transaction block.
+- A bare `SET` on the shared pool — **worthless.** `DATABASE_URL` is the *transaction* pooler (Supavisor :6543), which hands out a different backend per transaction, so the setting need not be there for the next statement.
+- A dedicated **session-mode** connection (same host and credentials, port **5432**) — one backend for the life of the client, so a plain `SET` sticks. This is the one that works. See [lib/reporting/refresh-session.ts](../lib/reporting/refresh-session.ts).
+
+Derive the session URL from `DATABASE_URL` (swap 6543 → 5432, drop `prepare=false`) rather than adding a second env var: one string to rotate, and no way for the two to drift. Open it per job, close it in a `finally`, and keep it scoped to the one caller — it is an exception, not a general-purpose "big query" pool.
+
+**Read the settings back, in a separate statement, and refuse to proceed if they did not stick.** Every quiet failure mode of this pattern — a pooler that swallowed the `SET`, a URL that stayed on :6543, a role-level override — ends with the job running at the *old* settings and the only symptom being the failure the change was supposed to prevent. The read-back is what makes that loud.
+
+Pick `statement_timeout` **below** the platform's own wall (`maxDuration` on Vercel). A database cancellation is SQLSTATE 57014: it throws, so the route catches it and alerts. A Vercel timeout kills the invocation with no catch and no alert. Ordering them the wrong way converts a loud failure into a silent one.
+
+## A sequence of independent refreshes must not share a failure (2026-09-21)
+
+Four `REFRESH`es as four bare `await`s look fine until one fails: the throw ends the invocation and **every statement behind it is skipped, on every run, until someone notices**. In `/api/cron/refresh-offer-group-report` the fragile view was #2 of 4, so one view's problem froze three of four reports on a twice-daily schedule.
+
+When N steps are genuinely independent, catch each one separately and let the loop continue — but **report, never swallow**: collect per-step outcomes, log each failure, and have the caller turn any failure into the alert it already uses plus a non-2xx, so the scheduler still flags red. The response should say which steps succeeded and which did not, not just "ok".
+
+The corollary is that each step must record its **own** success. `report_refresh_log` is stamped per view, immediately after that view's refresh, and not at all when it fails — which is what makes reading all four `refreshed_at` values a meaningful health check. A single end-of-run stamp, or a shared heartbeat, cannot tell you *which* view is stale. (The heartbeat in `cron_locks` stays all-or-nothing on purpose: it means "every report is fresh".)

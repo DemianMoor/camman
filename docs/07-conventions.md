@@ -2,6 +2,15 @@
 
 _Last updated: 2026-09-21_
 
+## A tracker-mirrored counter follows the tracker only while it still holds the tracker's value (2026-09-21)
+
+A stage counter that both a person and a tracker write has no provenance column, so **its value is its provenance**. If the counter still **equals the tracker's previous value** (the tracker's sum as it stood *before* this run wrote anything), the tracker owns it: mirror the new value **exactly**, so a downward correction reaches it, 0 included. If it **differs**, someone typed it (manual-results form, CSV): mirror it **guarded**, so a positive tracker value may still overwrite it but a **tracker 0 never does**.
+
+- **Why:** `campaign_stages.checkout_click_count` was mirrored exactly on every stage in the stage-day projection's scope (review fix I2, so a ledger correction could pull it down). After the Phase 3 deploy a stray click pulled stage 130 (June, manual-era, no ledger rows) into the `*/5` scope and its hand-entered 22 became 0. 44 more stages held 536 hand-entered checkouts that an unscoped resync would have zeroed at once.
+- **How:** `syncStageDayConversions` reads `sum(keitaro_stage_results.checkouts)` per stage **before its first write**, over exactly the stages it mirrors, and passes it as `priorCheckoutSums` to `mirrorStageCountersFromResults` ([lib/keitaro/poll.ts](../lib/keitaro/poll.ts)). The equality is tested inside the `UPDATE`, so it uses the counter's value at write time. Read the "before" value **after** the write and every tracker-owned counter looks hand-entered, and I2 silently stops working. Test H4 catches that.
+- **Limits:** a hand entry that happens to equal the tracker's previous value counts as the tracker's. A tracker-owned counter left stale by a failed mirror counts as hand-owned.
+- Pinned by H1–H5 in [scripts/test-stage-day-conversions.ts](../scripts/test-stage-day-conversions.ts). See [04-features/keitaro-poll.md §2a](04-features/keitaro-poll.md).
+
 ## A script that writes to a database must refuse production, by import (2026-09-18)
 
 `.env.local` is **PRODUCTION**, and `scripts/_env-preload.ts` loads it whenever `DATABASE_URL` is not already set. On 2026-09-18 a test-fixture script ran that way and created live campaign rows in production before tearing them down. Nothing was damaged; nothing had stopped it either.

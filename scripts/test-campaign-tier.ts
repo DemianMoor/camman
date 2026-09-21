@@ -10,6 +10,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import { campaignTierExpr } from "../lib/campaign-tier";
+import { seedConversionEvent } from "./_conversion-fixture";
 
 // Unit test for campaignTierExpr() against SEEDED synthetic data — the live
 // click/send tables are empty, so every signal here is created by this script
@@ -21,6 +22,17 @@ import { campaignTierExpr } from "../lib/campaign-tier";
 // DIFFERENT campaign → 0 here (scoping); clicked here + sale elsewhere → 1 here.
 // Plus: an 'unknown'-classification click counts as clean (→ 1), and the
 // cross-campaign contacts read their real tier in the OTHER campaign.
+//
+// ⭐ AND FOUR CONTROLS THAT TELL THE LEDGER READER FROM THE OLD ONE. Tier 3 now
+// comes from conversion_events, not stage_sends.sale_status. A fixture that
+// writes BOTH on the same contact reads as tier 3 under either source, so it
+// proves nothing about the switch. These four write exactly one side:
+//   ledger_only_pending  — ledger purchase (pending), sale_status NULL  → 3
+//   legacy_only          — sale_status 'lead' + converted_at, no ledger → 0
+//   rejected_ledger      — ledger purchase status 'rejected'            → 0
+//   registration_ledger  — ledger registration + a legacy 'lead' row    → 0
+// The last one is the bug that motivated the whole phase: a $0 registration
+// arriving as a 'lead' postback used to make the contact a converted buyer.
 
 async function main() {
   const dbUrl = process.env.DATABASE_URL;
@@ -131,6 +143,11 @@ async function main() {
       "dirty_only", // bot/prefetch/suspect clicks in A → 0
       "click_here_sale_b", // clean click in A + sale in B → 1 here / 3 in B
       "other_campaign", // reached + sale in B only → 0 in A / 3 in B
+      // ⭐ the four one-sided controls (see the header note)
+      "ledger_only_pending", // ledger purchase (pending), sale_status NULL → 3
+      "legacy_only", // sale_status 'lead' + converted_at, NO ledger row → 0
+      "rejected_ledger", // ledger purchase, status 'rejected' → 0
+      "registration_ledger", // ledger registration + a legacy 'lead' row → 0
     ];
     for (const role of roles) {
       const phone = `${phonePrefix}${roles.indexOf(role)}`;
@@ -167,23 +184,59 @@ async function main() {
         VALUES (${orgId}::uuid, ${linkRows[0].id}::bigint, ${classification})
       `);
     }
+    type LedgerSpec = {
+      eventKey: "purchase" | "registration";
+      status: "pending" | "approved" | "rejected";
+    } | null;
     async function seedSend(
       campaignId: number,
       stageId: number,
       contactId: string,
       reached: boolean,
       saleStatus: string | null,
+      // ⭐ SEPARATE from saleStatus on purpose. `undefined` keeps the realistic
+      // pairing (a paid 'lead'/'sale' postback also lands an approved purchase
+      // in the ledger); passing it EXPLICITLY lets a control write the ledger
+      // without the legacy column, or the legacy column without the ledger —
+      // which is the only way a fixture can tell the two sources apart.
+      ledger?: LedgerSpec,
     ) {
-      await db.execute(drizzleSql`
+      const legacyPaid = saleStatus === "lead" || saleStatus === "sale";
+      const sendRows = (await db.execute(drizzleSql`
         INSERT INTO stage_sends
           (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status,
-           sale_status, offer_reached_at, offer_reach_event_id)
+           sale_status, sale_revenue, converted_at, offer_reached_at, offer_reach_event_id)
         VALUES
           (${orgId}::uuid, ${campaignId}::int, ${stageId}::int, ${contactId}::uuid,
            ${"x"}, ${"test body"}, ${"sent"}, ${saleStatus},
+           ${saleStatus === null ? null : "100.0000"}::numeric,
+           ${saleStatus === null ? drizzleSql`NULL` : drizzleSql`now()`},
            ${reached ? drizzleSql`now()` : drizzleSql`NULL`},
            ${reached ? `evt-${contactId}` : null})
-      `);
+        RETURNING id::text AS id
+      `)) as unknown as { id: string }[];
+      // Tier 3 is read off the conversion_events ledger now, so a purchase has
+      // to be seeded there. The legacy column is still written above because the
+      // projection keeps it (lib/keitaro/poll-conversions.ts).
+      const spec: LedgerSpec =
+        ledger === undefined
+          ? legacyPaid
+            ? { eventKey: "purchase", status: "approved" }
+            : null
+          : ledger;
+      if (spec) {
+        await seedConversionEvent(db, {
+          orgId,
+          stageSendId: sendRows[0].id,
+          contactId,
+          campaignId,
+          stageId,
+          eventKey: spec.eventKey,
+          status: spec.status,
+          revenue: spec.eventKey === "registration" ? 0 : 100,
+          keitaroType: legacyPaid ? (saleStatus as string) : undefined,
+        });
+      }
     }
 
     // --- Apply signals. ---
@@ -201,6 +254,21 @@ async function main() {
     await seedSend(campB.campaignId, campB.stageId, cid.click_here_sale_b, false, "sale");
     // other_campaign: reached + sale in B only.
     await seedSend(campB.campaignId, campB.stageId, cid.other_campaign, true, "sale");
+
+    // ⭐ the four one-sided controls, all in campaign A, none of them reached.
+    await seedSend(campA.campaignId, campA.stageId, cid.ledger_only_pending, false, null, {
+      eventKey: "purchase",
+      status: "pending",
+    });
+    await seedSend(campA.campaignId, campA.stageId, cid.legacy_only, false, "lead", null);
+    await seedSend(campA.campaignId, campA.stageId, cid.rejected_ledger, false, null, {
+      eventKey: "purchase",
+      status: "rejected",
+    });
+    await seedSend(campA.campaignId, campA.stageId, cid.registration_ledger, false, "lead", {
+      eventKey: "registration",
+      status: "approved",
+    });
 
     // ====================================================================
     // ASSERTIONS — campaign A (this campaign)
@@ -234,6 +302,32 @@ async function main() {
     );
 
     // ====================================================================
+    // ⭐ SOURCE CONTROLS — these are the bars that go red if tier 3 is read
+    // off stage_sends.sale_status instead of the conversion_events ledger.
+    // ====================================================================
+    console.log("\nCampaign A — ledger vs legacy source controls:");
+    check(
+      "⭐ LEDGER-ONLY purchase (pending, sale_status NULL) → 3",
+      (await tierFor(campA.campaignId, cid.ledger_only_pending)) === 3,
+      `got ${await tierFor(campA.campaignId, cid.ledger_only_pending)}`,
+    );
+    check(
+      "⭐ LEGACY-ONLY row (sale_status 'lead' + converted_at, no ledger) → 0",
+      (await tierFor(campA.campaignId, cid.legacy_only)) === 0,
+      `got ${await tierFor(campA.campaignId, cid.legacy_only)}`,
+    );
+    check(
+      "⭐ REJECTED ledger purchase → 0 (a refund is not a purchase)",
+      (await tierFor(campA.campaignId, cid.rejected_ledger)) === 0,
+      `got ${await tierFor(campA.campaignId, cid.rejected_ledger)}`,
+    );
+    check(
+      "⭐ REGISTRATION in the ledger next to a legacy 'lead' row → 0, not 3",
+      (await tierFor(campA.campaignId, cid.registration_ledger)) === 0,
+      `got ${await tierFor(campA.campaignId, cid.registration_ledger)}`,
+    );
+
+    // ====================================================================
     // ASSERTIONS — campaign B (the OTHER campaign) — confirms scoping both ways
     // ====================================================================
     console.log("\nCampaign B (the other campaign):");
@@ -252,6 +346,21 @@ async function main() {
   } finally {
     console.log("\nCleanup");
     try {
+      // conversion_events.campaign_id is ON DELETE SET NULL, not CASCADE, so the
+      // fixture rows must be deleted BEFORE the campaigns — otherwise the
+      // campaign_id scoping below can no longer find them.
+      if (createdCampaignIds.length > 0) {
+        const campaignArray = drizzleSql`ARRAY[${drizzleSql.join(
+          createdCampaignIds.map((c) => drizzleSql`${c}`),
+          drizzleSql`, `,
+        )}]::int[]`;
+        await db.execute(drizzleSql`
+          DELETE FROM conversion_events
+          WHERE org_id = ${orgId}::uuid
+            AND keitaro_event_id LIKE 'fixture-%'
+            AND campaign_id = ANY(${campaignArray})
+        `);
+      }
       // Deleting campaigns cascades campaign_stages, stage_sends, links (and
       // clicks via links) — clearing the RESTRICT refs to short_domain/dest.
       for (const c of createdCampaignIds) {

@@ -22,11 +22,14 @@ import {
   enumerateStageRecipients,
 } from "@/lib/sends/recipients";
 
+import { seedConversionEvent } from "./_conversion-fixture";
+
 const ORG_MARKER = "__LANE_SEND_TEST__";
 const COUNTED_TABLES = [
   "organizations", "brands", "contacts", "campaigns", "campaign_stages",
   "campaign_audience_pool", "stage_sends", "links", "clicks", "opt_outs",
   "short_domains", "link_destinations", "creatives", "send_attempts",
+  "conversion_events", "event_types",
 ] as const;
 
 async function main() {
@@ -94,6 +97,17 @@ async function main() {
         RETURNING id::text AS id
       `)) as unknown as { id: string }[]
     )[0].id;
+    // migration 0181's event_types seed is a one-time backfill over orgs that
+    // existed at migration time — a brand-new org (like this throwaway one)
+    // gets none automatically, so seedConversionEvent's key lookup would throw.
+    // Mirror that backfill for this org; it cascades away with it on teardown.
+    await db.execute(sql`
+      INSERT INTO event_types (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal)
+      VALUES
+        (${orgId}::uuid, 'purchase', 'Purchase', 10, true, true, false),
+        (${orgId}::uuid, 'registration', 'Registration', 20, false, false, true)
+      ON CONFLICT (org_id, key) DO NOTHING
+    `);
 
     const brandId = (
       (await db.execute(sql`
@@ -188,14 +202,28 @@ async function main() {
 
     // "Received the parent" markers (aliveness) — parent stage_sends status='sent'.
     async function receivedParent(role: string, reached: boolean, sale: boolean) {
-      await db.execute(sql`
+      const sendRows = (await db.execute(sql`
         INSERT INTO stage_sends
           (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status,
            sale_status, offer_reached_at, offer_reach_event_id, sent_at)
         VALUES (${orgId}::uuid, ${campaignId}::int, ${parent.id}::int, ${cid[role]}::uuid,
                 ${"x"}, ${"parent body"}, ${"sent"}, ${sale ? "sale" : null},
                 ${reached ? sql`now()` : sql`NULL`}, ${reached ? `e-${role}` : null}, now())
-      `);
+        RETURNING id::text AS id
+      `)) as unknown as { id: string }[];
+      if (sale) {
+        await seedConversionEvent(db, {
+          orgId,
+          stageSendId: sendRows[0].id,
+          contactId: cid[role],
+          campaignId,
+          stageId: parent.id,
+          eventKey: "purchase",
+          status: "approved",
+          revenue: 100,
+          keitaroType: "sale",
+        });
+      }
     }
     let codeSeq = 0;
     async function cleanClick(role: string) {

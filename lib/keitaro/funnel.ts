@@ -21,6 +21,7 @@ export interface KeitaroResultRowLike {
   clean_clicks: number;
   sales: number;
   revenue: number | string;
+  pending_revenue: number | string;
   cost: number | string;
 }
 
@@ -31,6 +32,7 @@ export interface FunnelTally {
   redirect_clicks_clean: number; // Offer Redirect (headline)
   sales: number;
   revenue: number;
+  pending_revenue: number;
   cost: number;
 }
 
@@ -42,6 +44,7 @@ export function emptyFunnel(): FunnelTally {
     redirect_clicks_clean: 0,
     sales: 0,
     revenue: 0,
+    pending_revenue: 0,
     cost: 0,
   };
 }
@@ -74,6 +77,7 @@ export function addRowToFunnel(
   t.redirect_clicks_clean += split ? r.redirect_clicks_clean : r.clean_clicks;
   t.sales += r.sales;
   t.revenue += num(r.revenue);
+  t.pending_revenue += num(r.pending_revenue);
   t.cost += num(r.cost);
   return t;
 }
@@ -88,6 +92,7 @@ export function mergeFunnel(into: FunnelTally, from: FunnelTally): FunnelTally {
   into.redirect_clicks_clean += from.redirect_clicks_clean;
   into.sales += from.sales;
   into.revenue += from.revenue;
+  into.pending_revenue += from.pending_revenue;
   into.cost += from.cost;
   return into;
 }
@@ -109,6 +114,11 @@ function rate(numerator: number, denominator: number): number {
 // the denominator is CamMan's own deduplicated counted-clicker set (or, for
 // manual-mode campaigns which mint no links, Keitaro's clean landing visits).
 // Callers resolve it with denominatorFor() and pass it in.
+//
+// `pending_revenue` rides along untouched — it is NOT in epc, sales_cr or
+// profit. Revenue is approved-only (lib/sale-attribution.ts) and pending is the
+// same money still held, so adding it anywhere would count a payout that may yet
+// be rejected.
 export function withFunnelDerived(t: FunnelTally, countedClickers: number) {
   return {
     ...t,

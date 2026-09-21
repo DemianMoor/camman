@@ -130,6 +130,9 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "verify-keitaro-batch-update.ts", why: "UPDATEs inside a BEGIN…ROLLBACK; needs real stage_sends rows to mean anything" },
   { file: "verify-purchase-rule-definition.ts", why: "deliberately reads live data; its one synthesized write is inside a tx that always rolls back" },
 
+  // ── shared fixture LIBRARY, not an entry point ─────────────────────────────
+  { file: "_conversion-fixture.ts", why: "helper module, never run directly: its db/client import is `import type` (erased, opens nothing) and it writes only through the executor its caller passes, so each ENTRY POINT decides — every importer is guarded except verify-purchase-rule-definition.ts above, which a guard import here would transitively refuse on production (this bar sees direct imports only)" },
+
   // ── read-only: matched the scan, issue no write ────────────────────────────
   { file: "perf-baseline.ts", why: "read-only: EXPLAIN ANALYZE over SELECTs (the .unsafe( token is the match)" },
   { file: "perf-baseline-tier2.ts", why: "read-only: EXPLAIN ANALYZE over SELECTs" },

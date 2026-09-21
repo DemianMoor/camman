@@ -4,9 +4,19 @@ import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { ingestKeitaroConversions, type IngestResult } from "@/lib/conversions/ingest";
 import { liveIngestRange } from "@/lib/conversions/keitaro-row";
-import { evaluateConversionAlerts, type IngestOutcome } from "@/lib/conversions/monitor";
+import {
+  evaluateConversionAlerts,
+  evaluateProjectionAlert,
+  projectionOutcomeFor,
+  type IngestOutcome,
+  type ProjectionOutcome,
+} from "@/lib/conversions/monitor";
 import { withCronLease } from "@/lib/cron/lease";
 import { pollKeitaro } from "@/lib/keitaro/poll";
+import {
+  runStageDayProjection,
+  type StageDayProjectionRun,
+} from "@/lib/keitaro/stage-day-conversions";
 import { can } from "@/lib/permissions";
 import { refreshCountedClickers } from "@/lib/reporting/counted-clickers";
 import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
@@ -19,7 +29,9 @@ import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat"
 //
 // ?windowDays=N overrides the rolling lookback window (default 3) of the
 // aggregate poll only. Each tick also keeps the conversion_events ledger live
-// over its own 7-day window — see ingestConversionLedger below.
+// over its own 7-day window (ingestConversionLedger) and then re-derives the
+// stage-day conversion columns of keitaro_stage_results from that ledger
+// (runStageDayProjection) — skipped when the ingest window was not complete.
 export const dynamic = "force-dynamic";
 // Must die before the cron lease (CRON_LEASE_MS, lib/cron/lease.ts) expires at
 // 240s, or two ticks could overlap. Typical runs are low single-digit seconds;
@@ -98,12 +110,57 @@ async function pollAndRefresh(windowDays: number | undefined, isCron: boolean) {
     console.error("[keitaro/poll] counted-clicker refresh failed", err);
   }
   const ledger = await ingestConversionLedger(isCron);
+  // THE STAGE-DAY PROJECTION, and ONLY after a complete ingest window.
+  // syncStageDayConversions re-derives its scope from the ledger and zeroes the
+  // days the ledger no longer explains, so running it against a ledger that is
+  // missing rows would zero real revenue. A refused or thrown ingest therefore
+  // skips it entirely and the stage-days keep their previous values until the
+  // next good tick.
+  //
+  // Scope = the stages this tick's CLICK window touched, plus every stage whose
+  // LEDGER ROWS changed since the projection's watermark (floor: the last
+  // LEDGER_CHANGE_LOOKBACK_MINUTES). The second half is what repairs a re-posted
+  // OLD conversion: occurred_at doesn't move, so its stage-day is outside the
+  // click window and only `updated_at` finds it. runStageDayProjection advances
+  // that watermark ONLY after a run that finished its discovery window, so a
+  // failed, killed, refused or capped tick strands nothing — and the
+  // projection_failed alert says a run is failing, refusing (empty ledger, or a
+  // ledger that doesn't reach the reported history) or capped (cron only; a
+  // skipped projection gets no decision, the ingest's own fetch_failed alert
+  // covers that).
+  let stageDays: StageDayProjectionRun | null = null;
+  let stageDaysError: string | null = null;
+  if (ledger.result?.ok) {
+    let outcome: ProjectionOutcome;
+    try {
+      stageDays = await runStageDayProjection(db, { extraStageIds: poll.stage_ids });
+      // The refusal reasons and the truncated-window case all map to the one
+      // latched alert; projectionOutcomeFor owns that mapping so a new reason
+      // cannot reach this route without an alert text.
+      outcome = projectionOutcomeFor(stageDays);
+    } catch (err) {
+      stageDaysError = err instanceof Error ? err.message : String(err);
+      console.error("[keitaro/poll] stage-day conversion sync failed", err);
+      outcome = { kind: "threw", error: stageDaysError };
+    }
+    if (isCron) {
+      try {
+        await evaluateProjectionAlert(db, outcome);
+      } catch (err) {
+        console.error("[keitaro/poll] stage-day projection monitor failed", err);
+        const monitorError = `monitor: ${err instanceof Error ? err.message : String(err)}`;
+        stageDaysError = stageDaysError ? `${stageDaysError}; ${monitorError}` : monitorError;
+      }
+    }
+  }
   return {
     ...poll,
     counted_clickers: clickers,
     counted_clickers_error: clickersError,
     conversion_events: ledger.result,
     conversion_events_error: ledger.error,
+    stage_day_conversions: stageDays,
+    stage_day_conversions_error: stageDaysError,
   };
 }
 

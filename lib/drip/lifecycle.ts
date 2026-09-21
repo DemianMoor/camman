@@ -86,10 +86,13 @@ export async function closeJourneyOnOptOut(
 /**
  * Purchase ⇒ close.
  *
- * ⚠️ VIA purchasedClause(), NEVER sale_status = 'sale'. This account's network
- * fires `lead`-status postbacks for paid conversions and effectively never sends
- * `sale`; an `= 'sale'` test once found 2 buyers where the truth was ~835. That
- * bug is the reason this helper exists rather than an inline predicate.
+ * ⚠️ VIA purchasedClause() OVER THE conversion_events LEDGER, never
+ * `stage_sends.sale_status`. Two reasons, both load-bearing:
+ *   • the network fires `lead`-status postbacks for paid conversions, so an
+ *     `= 'sale'` test once found 2 buyers where the truth was ~835;
+ *   • `stage_sends` keeps ONE conversion per recipient (latest wins), so a $0
+ *     REGISTRATION arriving as `lead` closed the journey as purchased. A
+ *     registration is not a purchase event and can no longer close anything.
  */
 export async function closeJourneysOnPurchase(
   tx: DripTx,
@@ -102,10 +105,10 @@ export async function closeJourneysOnPurchase(
     "purchased",
     sql`j.org_id = ${orgId}::uuid ${scope}
         AND EXISTS (
-          SELECT 1 FROM stage_sends ss
-          WHERE ss.contact_id = j.contact_id
-            AND ss.campaign_id = j.campaign_id
-            AND ss.org_id = j.org_id
+          SELECT 1 FROM conversion_events ce
+          WHERE ce.contact_id = j.contact_id
+            AND ce.campaign_id = j.campaign_id
+            AND ce.org_id = j.org_id
             AND ${purchasedClause()}
         )`,
   );

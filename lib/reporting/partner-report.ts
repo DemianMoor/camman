@@ -3,7 +3,7 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { purchasedClause } from "@/lib/sale-attribution";
+import { purchasesBySendSelect } from "@/lib/sale-attribution";
 import { getCalibratedLookupRate, lookupCostUsd, type LookupRate } from "./lookup-rate";
 
 // Partner reporting (Drip Phase 7) — partner key x interest tag x ET-day range.
@@ -115,7 +115,7 @@ export async function getPartnerReport(
     ),
     -- ── send half: every drip send, attributed to EXACTLY ONE journey ────────
     attributed AS (
-      SELECT ss.id, ss.status, ss.sale_status, ss.sale_revenue, ss.link_id,
+      SELECT ss.id, ss.status, ss.link_id,
              ss.contact_id,
              le.partner_key_id, COALESCE(le.interest_tag, '') AS interest_tag
       FROM stage_sends ss
@@ -137,13 +137,34 @@ export async function getPartnerReport(
         AND (ss.created_at AT TIME ZONE 'America/New_York')::date >= b.from_day
         AND (ss.created_at AT TIME ZONE 'America/New_York')::date <= b.to_day
     ),
+    -- Sales and revenue per RECIPIENT ROW, from the conversion_events ledger —
+    -- the shared aggregation (lib/sale-attribution.ts), which the dormant rollup
+    -- also uses, so the two cannot drift. Revenue is APPROVED only: a held payout
+    -- is not partner revenue.
+    --
+    -- ⚠️ UNEXERCISED BY ANY TEST: getPartnerReport runs against the module-level
+    -- db handle, which cannot see a rolled-back proof's fixtures, so this bound is
+    -- inert by construction and never executed by
+    -- scripts/test-p3-task4-reader-switch-db.ts (the rollup's equivalent bound IS
+    -- executed, via its check A8; A7 proves a bound of this shape changes no
+    -- number). A test that cannot fail would be worse than saying so here.
+    --
+    -- BOUNDED BY THIS REPORT'S OWN SEND SET, not by the range. Restricting to the
+    -- ids in the attributed CTE can only drop rows the LEFT JOIN below would
+    -- discard, so no number moves — where an occurred_at range filter WOULD move
+    -- one: a conversion trickles in days after its send, so an upper bound at the
+    -- range end would silently drop real payouts from a completed range's report.
+    purchases AS (${purchasesBySendSelect(
+      orgId,
+      sql`AND ce.stage_send_id IN (SELECT a.id FROM attributed a)`,
+    )}),
     sends AS (
-      SELECT partner_key_id, interest_tag,
-             count(*) FILTER (WHERE status = 'sent')::int AS sent,
-             count(*) FILTER (WHERE ${purchasedClause("attributed")})::int AS sales,
-             COALESCE(sum(sale_revenue) FILTER (WHERE ${purchasedClause("attributed")}), 0)::float8
-               AS revenue_usd
-      FROM attributed
+      SELECT a.partner_key_id, a.interest_tag,
+             count(*) FILTER (WHERE a.status = 'sent')::int AS sent,
+             coalesce(sum(p.purchases), 0)::int AS sales,
+             coalesce(sum(p.revenue), 0)::float8 AS revenue_usd
+      FROM attributed a
+      LEFT JOIN purchases p ON p.stage_send_id = a.id
       GROUP BY 1, 2
     ),
     -- clicks: clean only, the same definition campaignTierExpr and the click

@@ -19,6 +19,39 @@ export const dynamic = "force-dynamic";
 // from the real 05:00 UTC run: group 107.5s, offer-totals 36.7s,
 // audience-totals 0.95s. The group refresh was 12.5s from the 120s wall.
 //
+// COST OF THE LEDGER STRUCTURE (0183). Besides the 2026-09-21 refresh times
+// above, two measurements exist, of two different things. Neither is "~104s on
+// 2026-08-13" — that conflation is what this comment used to say; ~104s came
+// from the Task 5 brief with no date and no breakdown behind it.
+//
+//  1. 2026-08-13, REFRESH durations logged by this route, PRE-ledger structure:
+//     summary ~11s, group ~25s, offer-totals ~4.5s ≈ ~40.5s (the first three
+//     matviews; 0180's audience totals came later).
+//  2. 2026-09-18, read-only `EXPLAIN ANALYZE` on PROD of the three defining
+//     SELECTs migration 0183 introduces, with the `conv` CTE stubbed from the
+//     legacy columns because conversion_events does not exist on prod yet:
+//     offer-totals 43.4s · group 116.7s · audience-totals 1.2s ≈ 161s.
+//
+// The two are NOT comparable and (2) is not a ceiling:
+//   • (2) times the SELECT. A REFRESH also writes the new heap and rebuilds the
+//     unique index, and this route refreshes CONCURRENTLY, which additionally
+//     builds a transient table and diffs it. The real refresh costs MORE.
+//   • EXPLAIN ANALYZE adds per-node timing overhead on a row-heavy plan.
+//   • The stub scans all ~5M stage_sends rows for the 1,436 carrying a
+//     converted_at; the real `conv` CTE aggregates ~1.5K indexed
+//     conversion_events rows. So ~10s per matview is stub overhead the real
+//     thing will not pay.
+//   • (2) excludes offer_report_org_summary_mv, which 0183 does not touch.
+//   • Prod data grew between the two dates (stage_sends is ~5M rows now).
+//
+// The group matview's sort spills (`external merge  Disk: ~169MB`) — one reason
+// the session above raises work_mem. **Capture the real post-ledger number from
+// the first prod run after 0181-0183 apply and the backfill completes** (Task
+// 8's ⛔ block, step 2b — that refresh has to happen there anyway, because the
+// matviews are built from an empty ledger at apply time) and add it here as
+// measurement 3. The budget it has to fit is the 180s per-statement timeout
+// above, not the 300s ceiling.
+//
 // 300s remains the right Vercel budget: it is ~2x the ~145s the four views
 // cost today, and it is ABOVE the 180s per-statement timeout so the database
 // cancels a runaway refresh first. That ordering is deliberate — a 57014

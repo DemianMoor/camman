@@ -49,6 +49,7 @@ import {
   selectDrainableStages,
   selectDueScheduledStages,
 } from "@/lib/sends/scheduled";
+import { seedConversionEvent } from "./_conversion-fixture";
 import {
   ensureGroupSourceResolved,
   failSplitGroup,
@@ -65,6 +66,7 @@ const COUNTED_TABLES = [
   "organizations", "brands", "contacts", "campaigns", "campaign_stages",
   "campaign_audience_pool", "stage_sends", "links", "clicks", "opt_outs",
   "short_domains", "link_destinations", "campaign_stage_split_groups",
+  "conversion_events", "event_types",
 ] as const;
 
 let passed = 0;
@@ -142,6 +144,17 @@ async function main() {
       RETURNING id::text AS id
     `)) as unknown as { id: string }[];
     orgId = orgRows[0].id;
+    // migration 0181's event_types seed is a one-time backfill over orgs that
+    // existed at migration time — a brand-new org (like this throwaway one)
+    // gets none automatically, so seedConversionEvent's key lookup would throw.
+    // Mirror that backfill for this org; it cascades away with it on teardown.
+    await db.execute(sql`
+      INSERT INTO event_types (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal)
+      VALUES
+        (${orgId}::uuid, 'purchase', 'Purchase', 10, true, true, false),
+        (${orgId}::uuid, 'registration', 'Registration', 20, false, false, true)
+      ON CONFLICT (org_id, key) DO NOTHING
+    `);
 
     const brandId = (
       (await db.execute(sql`
@@ -220,7 +233,7 @@ async function main() {
       stageId: number,
       o: { reached?: boolean; purchased?: boolean } = {},
     ) {
-      await db.execute(sql`
+      const sendRows = (await db.execute(sql`
         INSERT INTO stage_sends
           (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status,
            sale_status, offer_reached_at, offer_reach_event_id)
@@ -229,7 +242,21 @@ async function main() {
                 ${o.purchased ? "lead" : null},
                 ${o.reached ? sql`now()` : sql`NULL`},
                 ${o.reached ? `evt-${role}-${stageId}` : null})
-      `);
+        RETURNING id::text AS id
+      `)) as unknown as { id: string }[];
+      if (o.purchased) {
+        await seedConversionEvent(db, {
+          orgId,
+          stageSendId: sendRows[0].id,
+          contactId: cid[role],
+          campaignId,
+          stageId,
+          eventKey: "purchase",
+          status: "approved",
+          revenue: 100,
+          keitaroType: "lead",
+        });
+      }
     }
     async function clicked(role: string, stageId: number, classification = "human") {
       codeSeq++;

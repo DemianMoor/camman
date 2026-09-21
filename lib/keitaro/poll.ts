@@ -9,7 +9,6 @@ import {
 import {
   buildKeitaroReport,
   fetchKeitaroCampaigns,
-  fetchKeitaroConversions,
   KEITARO_VISIT_CAMPAIGN_NAME,
   type KeitaroReportRow,
 } from "@/lib/keitaro/client";
@@ -36,12 +35,15 @@ export interface KeitaroPollResult {
   upserted: number; // (stage, date) aggregates written
   unmatched: number; // report rows skipped (no/blank/unknown sub_id_3)
   errored: number; // (stage, date) aggregates that threw during upsert
-  // Conversion side (conversions/log): one row per conversion event, dated by the
-  // conversion's own datetime so a sale lands on the day it happened, not the click
-  // day. See the file header + lib/reporting/attribution.ts (ATTRIBUTION_BASIS).
-  conversions_fetched: number; // conversion rows returned by Keitaro
-  conversions_matched: number; // conversion rows whose sub_id_3 mapped to a stage
-  conversions_unmatched: number; // conversion rows skipped (no/unknown sub_id_3)
+  // The CONVERSION side of keitaro_stage_results is no longer written here. It is
+  // re-derived from the conversion_events ledger by
+  // lib/keitaro/stage-day-conversions.ts, which the poll ROUTE runs after the
+  // ledger ingest — so a conversion lands on its ORIGINAL day and a re-post can
+  // no longer count twice (recon bug 2). See docs/04-features/keitaro-poll.md.
+  // The stages this window's CLICK rows touched. The route feeds them to the
+  // stage-day conversion projection, so a stage that got clicks today also gets
+  // its conversion columns re-derived on the same tick.
+  stage_ids: number[];
   // Step 5b: rows we couldn't classify as visit vs redirect because the Keitaro
   // campaigns list failed to load — those clicks fall back to the redirect side
   // (the brief's default for "any non-visit campaign"). >0 ⇒ visit counts may be
@@ -176,9 +178,6 @@ export interface StageDayAgg {
   visitClean: number;
   redirectRaw: number;
   redirectClean: number;
-  checkouts: number;
-  sales: number;
-  revenue: number;
   cost: number;
 }
 
@@ -191,8 +190,8 @@ export interface StageDayAgg {
 //
 // CONVERSIONS (sales / checkouts / revenue) are NOT taken from report/build —
 // report/build attributes a conversion to the originating CLICK's day, but we need
-// it on the day the sale actually happened. Those metrics come from conversions/log
-// via applyConversionRowToAggregate (keyed by the conversion's own datetime).
+// it on the day the sale actually happened. Those columns are the
+// conversion_events ledger's projection (lib/keitaro/stage-day-conversions.ts).
 export function applyRowToAggregate(
   agg: StageDayAgg,
   row: KeitaroReportRow,
@@ -209,28 +208,6 @@ export function applyRowToAggregate(
     agg.redirectClean += cleanClicks;
     agg.cost += toNum(row.cost);
   }
-}
-
-// Fold one conversions/log row into a (stage, date) aggregate, where `date` is the
-// conversion's OWN event day (extracted by the caller from `datetime`) — so a sale
-// lands on the day it happened, not the click/campaign day.
-//
-// Mapping (preserves the prior report/build semantics, only re-dated): every
-// returned conversion row counts as one **Sale** (the fetch already filters to the
-// lead/sale/rejected statuses Keitaro's `conversions` metric counts), a `lead`-
-// status row also counts as a **Checkout** (= Keitaro's `leads` metric), and the
-// row's `revenue` sums into the stage's revenue. This account's network fires only
-// `lead`-status postbacks (confirmed via a direct probe 2026-06-19), so Sales and
-// Checkout are equal today, but the split is preserved for correctness.
-export function applyConversionRowToAggregate(
-  agg: StageDayAgg,
-  row: KeitaroReportRow,
-): void {
-  const status =
-    typeof row.status === "string" ? row.status.trim().toLowerCase() : "";
-  agg.sales += 1;
-  if (status === "lead") agg.checkouts += 1;
-  agg.revenue += toNum(row.revenue);
 }
 
 // Pull the rolling window from Keitaro (grouped by day + sub_id_3 + campaign),
@@ -260,41 +237,27 @@ export async function pollKeitaro(
     upserted: 0,
     unmatched: 0,
     errored: 0,
-    conversions_fetched: 0,
-    conversions_matched: 0,
-    conversions_unmatched: 0,
+    stage_ids: [],
     classification_degraded: false,
     visit_campaigns_matched: 0,
     unmatched_samples: [],
     error: null,
   };
 
-  // Two independent fetches over the SAME window: report/build for clicks (dated by
-  // click day) and conversions/log for sales (dated by the conversion's own day).
-  // BOTH must succeed before we write — a clicks-only upsert would set sales=0 and
-  // could zero a previously-stored conversion. On either failure we degrade and
-  // leave existing rows untouched for the next cycle.
-  const [report, conversions] = await Promise.all([
-    buildKeitaroReport(range),
-    fetchKeitaroConversions(range),
-  ]);
+  // CLICKS ONLY. The conversion side comes from the ledger (see the header): the
+  // poll no longer fetches conversions/log at all, so a conversions outage can no
+  // longer block the click write, and there is one Keitaro conversion fetch per
+  // tick (the ledger ingest's) instead of two.
+  const report = await buildKeitaroReport(range);
   if (!report.ok) {
     return { ...base, error: report.error };
   }
-  if (!conversions.ok) {
-    return { ...base, fetched: report.rows.length, error: conversions.error };
-  }
 
   const rows = report.rows;
-  const convRows = conversions.rows;
   const tidOf = (r: KeitaroReportRow): string =>
     typeof r.sub_id_3 === "string" ? r.sub_id_3.trim() : "";
-  // Resolve every tracking id seen on either side in one query.
-  const trackingIds = [
-    ...new Set(
-      [...rows, ...convRows].map(tidOf).filter((s) => s.length > 0),
-    ),
-  ];
+  // Resolve every tracking id seen in the report in one query.
+  const trackingIds = [...new Set(rows.map(tidOf).filter((s) => s.length > 0))];
   const [classifier, stageMap] = await Promise.all([
     buildVisitClassifier(),
     resolveStages(database, trackingIds),
@@ -302,8 +265,6 @@ export async function pollKeitaro(
 
   let matched = 0;
   let unmatched = 0;
-  let conversionsMatched = 0;
-  let conversionsUnmatched = 0;
   const unmatchedSamples = new Set<string>();
   // Fold both sides into one aggregate per (stage, date).
   const aggregates = new Map<string, StageDayAgg>();
@@ -325,9 +286,6 @@ export async function pollKeitaro(
         visitClean: 0,
         redirectRaw: 0,
         redirectClean: 0,
-        checkouts: 0,
-        sales: 0,
-        revenue: 0,
         cost: 0,
       };
       aggregates.set(key, agg);
@@ -349,20 +307,6 @@ export async function pollKeitaro(
     applyRowToAggregate(aggFor(stage, tid, statDate), row, classifier.isVisitRow(row));
   }
 
-  // CONVERSIONS — conversions/log rows, dated by the conversion's own `datetime`.
-  for (const row of convRows as KeitaroReportRow[]) {
-    const tid = tidOf(row);
-    const statDate = extractDate(row.datetime);
-    const stage = tid ? stageMap.get(tid) : undefined;
-    if (!stage || !statDate) {
-      conversionsUnmatched++;
-      if (tid && unmatchedSamples.size < 10) unmatchedSamples.add(tid);
-      continue;
-    }
-    conversionsMatched++;
-    applyConversionRowToAggregate(aggFor(stage, tid, statDate), row);
-  }
-
   // Collect one VALUES tuple per (stage, date) aggregate, then flush in chunked,
   // batched INSERT … ON CONFLICT statements inside a single transaction — instead
   // of one round-trip per aggregate. The old per-row loop fired ~one DB round-trip
@@ -373,18 +317,16 @@ export async function pollKeitaro(
   // to its own freshly-computed metrics. Column order below is load-bearing — it
   // must match the INSERT column list exactly.
   const rowVals: SQL[] = [...aggregates.values()].map((agg) => {
-    // NOTE: `epc` is no longer written. The column stored a THIRD EPC
-    // definition — revenue over RAW redirect clicks — while every screen now
-    // divides by counted clickers (lib/reporting/counted-clickers.ts). Nothing
-    // ever read it. The write is removed BEFORE the column is dropped: a
-    // destructive migration must follow its dependent code, not lead it, or the
-    // poll errors the moment the column disappears. See docs/07-conventions.md.
-    // Per-conversion payout, frozen onto the row so a later CPA edit can't
-    // retro-change it. = revenue / conversions; NULL when there are no sales.
-    const payoutAtConversion = agg.sales > 0 ? agg.revenue / agg.sales : null;
+    // NOTE: `epc` is no longer written (it stored a THIRD EPC definition and
+    // nothing read it). The column itself is already gone — migration 0127
+    // dropped it.
+    // NOTE: checkouts / sales / revenue / payout_at_conversion are no longer
+    // written HERE either. They are the ledger's projection
+    // (lib/keitaro/stage-day-conversions.ts). A brand-new row gets their column
+    // defaults (0) and the projection fills them in the same tick.
     // Legacy raw_clicks/clean_clicks mirror the redirect totals so the pre-5b
     // column meaning (offer clicks) stays consistent for any back-compat reader.
-    return sql`(${agg.orgId}::uuid, ${agg.campaignId}::integer, ${agg.stageId}::integer, ${agg.tid}::text, ${agg.statDate}::date, ${agg.visitRaw}::integer, ${agg.visitClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.checkouts}::integer, ${agg.sales}::integer, ${toNumericString(agg.revenue)}::numeric, ${payoutAtConversion == null ? null : toNumericString(payoutAtConversion)}::numeric, ${toNumericString(agg.cost)}::numeric)`;
+    return sql`(${agg.orgId}::uuid, ${agg.campaignId}::integer, ${agg.stageId}::integer, ${agg.tid}::text, ${agg.statDate}::date, ${agg.visitRaw}::integer, ${agg.visitClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${agg.redirectRaw}::integer, ${agg.redirectClean}::integer, ${toNumericString(agg.cost)}::numeric)`;
   });
 
   let upserted = 0;
@@ -403,7 +345,7 @@ export async function pollKeitaro(
             INSERT INTO keitaro_stage_results
               (org_id, campaign_id, stage_id, stage_tracking_id, stat_date,
                visit_clicks_raw, visit_clicks_clean, redirect_clicks_raw, redirect_clicks_clean,
-               raw_clicks, clean_clicks, checkouts, sales, revenue, payout_at_conversion, cost)
+               raw_clicks, clean_clicks, cost)
             VALUES ${sql.join(chunk, sql`, `)}
             ON CONFLICT (org_id, stage_id, stat_date) DO UPDATE SET
               stage_tracking_id     = EXCLUDED.stage_tracking_id,
@@ -413,10 +355,6 @@ export async function pollKeitaro(
               redirect_clicks_clean = EXCLUDED.redirect_clicks_clean,
               raw_clicks            = EXCLUDED.raw_clicks,
               clean_clicks          = EXCLUDED.clean_clicks,
-              checkouts             = EXCLUDED.checkouts,
-              sales                 = EXCLUDED.sales,
-              revenue               = EXCLUDED.revenue,
-              payout_at_conversion  = EXCLUDED.payout_at_conversion,
               cost                  = EXCLUDED.cost,
               synced_at             = now()
           `);
@@ -428,53 +366,17 @@ export async function pollKeitaro(
     }
   }
 
-  // Mirror the auto-owned stage counters from the freshly-upserted Keitaro rows:
-  //   Clickers       = landing-page visits (visit_clicks_clean)
-  //   Checkout Clicks = checkouts (Keitaro `leads`)
-  // summed across ALL stat_dates for each stage touched this run. Only stages
-  // that appear in Keitaro this cycle are overwritten — an untracked stage keeps
-  // whatever was entered manually or via CSV.
-  //
-  // SALES IS ADDITIVE, NOT OVERWRITTEN. `sales_count` holds the operator's MANUAL
-  // sale tally; the Keitaro conversion count (`keitaro_stage_results.sales`, =
-  // Keitaro `conversions`) is added ON TOP at read time (the stages API + Reports
-  // sum the two), so the poll must NOT touch `sales_count` or it would clobber the
-  // manual baseline. We still snapshot `sales_payout_each` from the offer CPA when
-  // Keitaro reports conversions, so Revenue/ROI can rate the combined count.
-  const syncStageIds = [
-    ...new Set([...aggregates.values()].map((a) => a.stageId)),
-  ];
-  if (syncStageIds.length > 0) {
-    try {
-      // Per-field guard: only let Keitaro OVERWRITE a counter when it reports a
-      // POSITIVE value for that field. A Keitaro 0 (no tracked clicks/checkouts)
-      // leaves the manual/CSV value intact. Keitaro sums are monotonic (they only
-      // grow as more days are polled), so this never drops a legitimate update.
-      await database.execute(sql`
-        UPDATE campaign_stages cs SET
-          click_count = CASE WHEN k.clickers > 0 THEN k.clickers ELSE cs.click_count END,
-          checkout_click_count = CASE WHEN k.checkouts > 0 THEN k.checkouts ELSE cs.checkout_click_count END,
-          sales_payout_each = CASE
-            WHEN k.sales > 0 THEN COALESCE(cs.sales_payout_each, o.payout_cpa)
-            ELSE cs.sales_payout_each
-          END
-        FROM (
-          SELECT stage_id,
-                 max(campaign_id) AS campaign_id,
-                 coalesce(sum(visit_clicks_clean), 0)::int AS clickers,
-                 coalesce(sum(checkouts), 0)::int          AS checkouts,
-                 coalesce(sum(sales), 0)::int              AS sales
-          FROM keitaro_stage_results
-          WHERE stage_id IN (${sql.join(syncStageIds, sql`, `)})
-          GROUP BY stage_id
-        ) k
-        LEFT JOIN campaigns c ON c.id = k.campaign_id
-        LEFT JOIN offers o    ON o.id = c.offer_id
-        WHERE cs.id = k.stage_id
-      `);
-    } catch {
-      // Non-fatal — the counters re-sync on the next poll.
-    }
+  const syncStageIds = [...new Set([...aggregates.values()].map((a) => a.stageId))];
+  try {
+    await mirrorStageCountersFromResults(database, syncStageIds);
+  } catch (err) {
+    // Non-fatal HERE, and only here: `database` is the module-level pool, so a
+    // failed mirror has poisoned nothing and the counters re-sync on the next
+    // poll. The swallow lives at this call site rather than inside the mirror
+    // because the other caller passes a TRANSACTION (the resync's --apply and
+    // the DB tests) — swallowing there would leave a poisoned tx whose later
+    // statements all fail with "current transaction is aborted".
+    console.error("[keitaro/poll] stage counter mirror failed", err);
   }
 
   return {
@@ -486,12 +388,80 @@ export async function pollKeitaro(
     upserted,
     unmatched,
     errored,
-    conversions_fetched: convRows.length,
-    conversions_matched: conversionsMatched,
-    conversions_unmatched: conversionsUnmatched,
+    stage_ids: syncStageIds,
     classification_degraded: classifier.degraded,
     visit_campaigns_matched: classifier.visitCampaignCount,
     unmatched_samples: [...unmatchedSamples],
     error: null,
   };
+}
+
+// Mirror the auto-owned stage counters from keitaro_stage_results:
+//   Clickers        = landing-page visits (visit_clicks_clean)
+//   Checkout Clicks = checkouts (Keitaro `leads`)
+// summed across ALL stat_dates for each named stage. Only stages named here are
+// overwritten — an untracked stage keeps whatever was entered manually or by CSV.
+//
+// SALES IS ADDITIVE, NOT OVERWRITTEN. `sales_count` holds the operator's MANUAL
+// tally; the tracker count is added on top at read time, so this must never touch
+// it. `sales_payout_each` is still snapshotted from the offer CPA when the tracker
+// reports conversions, so Revenue/ROI can rate the combined count.
+//
+// Per-field guard: a counter is only overwritten when the tracker reports a
+// POSITIVE value for that field, so a 0 leaves a manual/CSV value intact.
+//
+// ⚠️ EXCEPT `checkout_click_count` UNDER `exactCheckoutClicks` (review fix I2).
+// The positive-only guard was right while every source was monotonic (Keitaro
+// click sums only grow). `checkouts` is no longer one: it is the ledger
+// projection's column (lib/keitaro/stage-day-conversions.ts), which DELIBERATELY
+// zeroes a day the ledger no longer explains. Guarded, a correction downwards
+// could never reach the stage counter, so the campaign page and the creatives
+// metrics cache would keep a stale higher number forever. So the projection calls
+// this with `exactCheckoutClicks: true` and that ONE field takes the recomputed
+// sum even when it decreases, 0 included. `click_count` (Keitaro visits, still
+// monotonic) and `sales_payout_each` (COALESCEd snapshot) keep the guard, and
+// `sales_count` is never touched by either mode. Consequence, accepted: on a
+// stage the projection has in scope, a hand-entered Checkout Clicks value is
+// overwritten by the tracker's sum — the field is the projection's.
+//
+// FAILURE: this THROWS. The caller decides, because it knows whether `database`
+// is the pool or a transaction — see the call in pollKeitaro (swallows) versus
+// syncStageDayConversions (propagates, so the resync's --apply rolls back).
+//
+// Exported because the conversion columns are now written after the poll, by
+// lib/keitaro/stage-day-conversions.ts, which re-mirrors its own scope.
+export async function mirrorStageCountersFromResults(
+  database: Database,
+  stageIds: number[],
+  opts: { exactCheckoutClicks?: boolean } = {},
+): Promise<void> {
+  if (stageIds.length === 0) return;
+  const checkoutClicks: SQL = opts.exactCheckoutClicks
+    ? sql`k.checkouts`
+    : sql`CASE WHEN k.checkouts > 0 THEN k.checkouts ELSE cs.checkout_click_count END`;
+  await database.execute(sql`
+    UPDATE campaign_stages cs SET
+      click_count = CASE WHEN k.clickers > 0 THEN k.clickers ELSE cs.click_count END,
+      checkout_click_count = ${checkoutClicks},
+      sales_payout_each = CASE
+        WHEN k.sales > 0 THEN COALESCE(cs.sales_payout_each, o.payout_cpa)
+        ELSE cs.sales_payout_each
+      END
+    FROM (
+      SELECT stage_id,
+             max(campaign_id) AS campaign_id,
+             coalesce(sum(visit_clicks_clean), 0)::int AS clickers,
+             coalesce(sum(checkouts), 0)::int          AS checkouts,
+             coalesce(sum(sales), 0)::int              AS sales
+      FROM keitaro_stage_results
+      WHERE stage_id IN (${sql.join(
+        stageIds.map((id) => sql`${id}::int`),
+        sql`, `,
+      )})
+      GROUP BY stage_id
+    ) k
+    LEFT JOIN campaigns c ON c.id = k.campaign_id
+    LEFT JOIN offers o    ON o.id = c.offer_id
+    WHERE cs.id = k.stage_id
+  `);
 }

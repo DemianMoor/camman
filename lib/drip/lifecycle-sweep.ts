@@ -14,7 +14,8 @@ import { isDripPostureOn } from "./in-use";
 //
 // Three of the five terminal transitions cannot be event-driven, because nothing
 // calls us when they become true:
-//   • converted — Keitaro's poller writes sale_status; it knows nothing of drip
+//   • converted — Keitaro's poller writes conversion_events rows; it knows
+//                 nothing of drip (the close reads the ledger, not sale_status)
 //   • completed — becomes true when the LAST follow-up sends
 //   • expired   — becomes true when a clock passes end_at
 //

@@ -17,8 +17,10 @@ import {
   UNMAPPED_COMBOS_SQL,
   decideIngestAlerts,
   decideLedgerAlerts,
+  decideProjectionAlert,
   formatIngestHeartbeatAlert,
   ingestFailed,
+  projectionOutcomeFor,
   statusOnlyAlertKey,
   typeConflictAlertKey,
   unmappedAlertKey,
@@ -665,6 +667,118 @@ check(
   `${keysOnly(soDs)}\n---\n${unmappedText}`,
 );
 
+console.log("\nstage-day projection alert (Phase 3 Task 3)");
+const projOk = decideProjectionAlert({ kind: "ok" });
+check(
+  "J1 a successful projection clears the fixed key",
+  projOk.alertKey === K.projectionFailed && projOk.state === "ok",
+  JSON.stringify(projOk),
+);
+const projThrew = decideProjectionAlert({
+  kind: "threw",
+  error: "canceling statement due to statement timeout",
+});
+const projThrewText = projThrew.state === "firing" ? projThrew.text : "";
+check(
+  "J2 a throw fires it, names the error, and says the columns are stale rather than zeroed",
+  projThrew.state === "firing" &&
+    projThrewText.startsWith(PREFIX) &&
+    projThrewText.includes("canceling statement due to statement timeout") &&
+    projThrewText.includes("stale, never zeroed by a failure"),
+  projThrewText,
+);
+check(
+  "J3 the throw page names the watermark, so the reader knows nothing is stranded",
+  projThrewText.includes("conversion-stage-day-projection") && projThrewText.includes("cron_locks"),
+  projThrewText,
+);
+const projRefused = decideProjectionAlert({ kind: "refused", reason: "empty_ledger" });
+const projRefusedText = projRefused.state === "firing" ? projRefused.text : "";
+check(
+  "J4 the empty-ledger refusal fires the SAME key and points at the Phase 1 backfill",
+  projRefused.alertKey === K.projectionFailed &&
+    projRefused.state === "firing" &&
+    projRefusedText.includes("no stage-attributed rows") &&
+    projRefusedText.includes("backfill-conversion-events.ts --apply") &&
+    projRefusedText.includes("Nothing was written"),
+  projRefusedText,
+);
+const projBehind = decideProjectionAlert({
+  kind: "refused",
+  reason: "ledger_behind_history",
+  reportedFrom: "2026-04-01",
+  coverageFrom: "2026-09-14",
+});
+const projBehindText = projBehind.state === "firing" ? projBehind.text : "";
+check(
+  "J4b ⭐ the coverage refusal names BOTH dates, says nothing was written OR zeroed, and orders backfill → resync",
+  projBehind.alertKey === K.projectionFailed &&
+    projBehind.state === "firing" &&
+    projBehindText.includes("2026-04-01") &&
+    projBehindText.includes("2026-09-14") &&
+    projBehindText.includes("nothing was zeroed") &&
+    projBehindText.indexOf("backfill-conversion-events.ts --apply") <
+      projBehindText.indexOf("resync-stage-day-conversions.ts --apply"),
+  projBehindText,
+);
+const projTruncated = decideProjectionAlert({ kind: "truncated", projected: 20000 });
+const projTruncatedText = projTruncated.state === "firing" ? projTruncated.text : "";
+check(
+  "J4c ⭐ a truncated discovery window fires the same key: the cursor was held and the resync is the way out",
+  projTruncated.alertKey === K.projectionFailed &&
+    projTruncated.state === "firing" &&
+    projTruncatedText.includes("20000") &&
+    projTruncatedText.includes("NOT advanced") &&
+    projTruncatedText.includes("resync-stage-day-conversions.ts --apply"),
+  projTruncatedText,
+);
+
+// The route's mapping from a projection RUN to an outcome — the one place that
+// decides which of these texts a tick gets.
+const mapped = [
+  projectionOutcomeFor({
+    refused: null,
+    ledgerFloor: "2026-05-01",
+    reportedHistoryFloor: null,
+    discovery: { truncated: false, stageIds: [1, 2] },
+  }),
+  projectionOutcomeFor({
+    refused: null,
+    ledgerFloor: "2026-05-01",
+    reportedHistoryFloor: null,
+    discovery: { truncated: true, stageIds: [1, 2] },
+  }),
+  projectionOutcomeFor({
+    refused: "empty_ledger",
+    ledgerFloor: null,
+    reportedHistoryFloor: null,
+    discovery: { truncated: true, stageIds: [1] },
+  }),
+  projectionOutcomeFor({
+    refused: "ledger_behind_history",
+    ledgerFloor: "2026-05-01",
+    reportedHistoryFloor: "2026-04-01",
+    discovery: { truncated: false, stageIds: [] },
+  }),
+];
+check(
+  "J4d the run → outcome mapping: ok · truncated · refusal WINS over truncation · the dated refusal",
+  JSON.stringify(mapped) ===
+    JSON.stringify([
+      { kind: "ok" },
+      { kind: "truncated", projected: 2 },
+      { kind: "refused", reason: "empty_ledger" },
+      { kind: "refused", reason: "ledger_behind_history", reportedFrom: "2026-04-01", coverageFrom: "2026-05-01" },
+    ]),
+  JSON.stringify(mapped),
+);
+const clipped = decideProjectionAlert({ kind: "threw", error: "x".repeat(600) });
+check(
+  "J5 an unbounded error message is clipped like every other external text",
+  clipped.state === "firing" && clipped.text.split("\n")[1].length <= 307,
+  clipped.state === "firing" ? String(clipped.text.split("\n")[1].length) : "",
+);
+
 console.log("\nheartbeat alert");
 const breach =
   "Conversion events ingest (Keitaro poll tick) last ran 3h ago (tolerance 1h). Its silence cannot be read as healthy.";
@@ -688,6 +802,8 @@ const texts = [
   cappedTexts[0] ?? "",
   capText,
   hbText,
+  projThrewText,
+  projRefusedText,
 ];
 const MARKUP = /<\/?[a-z][^>]*>|\*[^*\n]+\*|__[^_\n]+__|`/i;
 check(
@@ -700,10 +816,11 @@ check(
   K.fetchFailed === "conversion_events:fetch_failed" &&
     K.invalidRows === "conversion_events:invalid_rows" &&
     K.orgMismatch === "conversion_events:org_mismatch" &&
+    K.projectionFailed === "conversion_events:projection_failed" &&
     K.unmappedComboCap === "conversion_events:combo_cap_exceeded:unmapped" &&
     K.statusOnlyComboCap === "conversion_events:combo_cap_exceeded:status_only_unmapped" &&
     K.typeConflictComboCap === "conversion_events:combo_cap_exceeded:type_conflicts" &&
-    Object.keys(K).length === 6 &&
+    Object.keys(K).length === 7 &&
     P.unmapped === "conversion_events:unmapped:" &&
     P.statusOnlyUnmapped === "conversion_events:status_only_unmapped:" &&
     P.typeConflicts === "conversion_events:type_conflicts:" &&

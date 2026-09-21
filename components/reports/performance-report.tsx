@@ -123,6 +123,7 @@ const FULL_COLS: Col[] = [
   { id: "sales", header: "Sales", kind: "count" },
   { id: "sales_cr", header: "Sales CR", kind: "pct", muted: true },
   { id: "revenue", header: "Revenue", kind: "usd" },
+  { id: "pending_revenue", header: "Pending $", kind: "usd", muted: true },
   { id: "cost", header: "Cost", kind: "usd", muted: true },
   // LIFETIME first — it is the primary figure and ignores the date filter.
   // Each EPC sits immediately after the count it divided by: a $0.00 EPC is only

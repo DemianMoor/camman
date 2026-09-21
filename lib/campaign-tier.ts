@@ -6,8 +6,9 @@ import { purchasedClause } from "@/lib/sale-attribution";
 //   0 = ignored        — no qualifying signal (see "absence" note below)
 //   1 = clicked        — a CLEAN click on a link belonging to this campaign
 //   2 = reached_offer  — a stage_sends row with offer_reached_at set
-//   3 = converted      — a stage_sends row with a non-rejected conversion
-//                        (lib/sale-attribution.ts — NOT sale_status='sale')
+//   3 = converted      — a counted PURCHASE event in the conversion_events
+//                        ledger for this campaign (lib/sale-attribution.ts).
+//                        A registration is NOT a purchase and never reaches 3.
 //
 // "Clean click" = NOT bot/prefetch/suspect, byte-for-byte the same definition
 // the click report uses for its clean count (lib/links/click-report.ts:
@@ -36,10 +37,12 @@ const DIRTY_CLICK_CLASSIFICATIONS = ["bot", "prefetch", "suspect"] as const;
 // tier)` table is a one-line change at the single call site — the (contact_id,
 // tier) shape callers depend on stays identical.
 //
-// TRACKED-mode signals only for now (clicks via links⋈clicks, offer/sale via
-// stage_sends). A manual-mode source (e.g. CSV-derived clicked/reached/converted)
-// slots in later as ANOTHER `SELECT contact_id, <tier>` UNION branch below
-// WITHOUT reshaping the output or touching any caller.
+// TRACKED-mode signals only for now: clicks via links⋈clicks, offer reach via
+// stage_sends.offer_reached_at, and the purchase via the conversion_events
+// ledger (NOT stage_sends.sale_status — see the tier-3 branch below). A
+// manual-mode source (e.g. CSV-derived clicked/reached/converted) slots in later
+// as ANOTHER `SELECT contact_id, <tier>` UNION branch below WITHOUT reshaping
+// the output or touching any caller.
 export function campaignTierExpr(campaignId: number, orgId: string): SQL {
   const dirty = sql.join(
     DIRTY_CLICK_CLASSIFICATIONS.map((c) => sql`${c}`),
@@ -65,12 +68,24 @@ export function campaignTierExpr(campaignId: number, orgId: string): SQL {
         AND ss.offer_reached_at IS NOT NULL
 
       UNION ALL
-      -- tier 3: converted (a non-rejected conversion attributed to this
-      -- recipient). Shared definition — see lib/sale-attribution.ts.
-      SELECT ss.contact_id AS contact_id, 3 AS tier
-      FROM stage_sends ss
-      WHERE ss.campaign_id = ${campaignId}::int
-        AND ss.org_id = ${orgId}::uuid
+      -- tier 3: converted — a counted PURCHASE event in the conversion_events
+      -- ledger attributed to this campaign. Shared definition:
+      -- lib/sale-attribution.ts (purchase event types, status pending|approved;
+      -- rejected is a refund and never a purchase).
+      --
+      -- READS THE LEDGER, NOT stage_sends.sale_status. One row per conversion, so
+      -- a $0 registration arriving after a purchase can no longer overwrite it —
+      -- and a registration is not a purchase at all, so it cannot put a contact
+      -- in this tier. Index conversion_events_campaign_event_idx
+      -- (campaign_id, event_type_id, contact_id) answers this from the campaign's
+      -- handful of conversions; an EXISTS over stage_sends would probe once per
+      -- recipient. contact_id IS NOT NULL drops the stage-only rows (a conversion
+      -- whose recipient could not be resolved has no contact to place in a tier).
+      SELECT ce.contact_id AS contact_id, 3 AS tier
+      FROM conversion_events ce
+      WHERE ce.campaign_id = ${campaignId}::int
+        AND ce.org_id = ${orgId}::uuid
+        AND ce.contact_id IS NOT NULL
         AND ${purchasedClause()}
     ) signals
     GROUP BY contact_id

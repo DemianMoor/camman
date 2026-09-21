@@ -8,7 +8,7 @@ import { eq, sql as drizzleSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { randomBytes } from "node:crypto";
-import { organizations, org_members } from "../db/schema";
+import { organizations, org_members, event_types } from "../db/schema";
 
 async function main() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -74,6 +74,34 @@ async function main() {
         `Expected org name "Trigger Test's Organization", got "${org.name}"`,
       );
     }
+
+    // 0183: handle_new_user() now seeds this org's event-type registry
+    // (purchase + registration) in the same trigger transaction as the org +
+    // org_members inserts.
+    const eventTypeRows = await db
+      .select()
+      .from(event_types)
+      .where(eq(event_types.org_id, createdOrgId));
+    console.log(`\nevent_types rows for org: ${eventTypeRows.length}`);
+    if (eventTypeRows.length !== 2) {
+      throw new Error(
+        `Expected exactly 2 event_types rows, got ${eventTypeRows.length}`,
+      );
+    }
+    const purchase = eventTypeRows.find((et) => et.key === "purchase");
+    if (!purchase || !purchase.is_purchase || !purchase.counts_revenue) {
+      throw new Error(
+        `Expected 'purchase' event type with is_purchase && counts_revenue, got ${JSON.stringify(purchase)}`,
+      );
+    }
+    const registration = eventTypeRows.find((et) => et.key === "registration");
+    if (!registration || !registration.is_retarget_signal) {
+      throw new Error(
+        `Expected 'registration' event type with is_retarget_signal, got ${JSON.stringify(registration)}`,
+      );
+    }
+    console.log(`  purchase:     is_purchase=${purchase.is_purchase} counts_revenue=${purchase.counts_revenue}`);
+    console.log(`  registration: is_retarget_signal=${registration.is_retarget_signal}`);
 
     console.log("\nTrigger test passed.");
   } finally {

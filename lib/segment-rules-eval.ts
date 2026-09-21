@@ -145,29 +145,34 @@ function ruleInnerQuery(
     case "is_clicker_for_offer":
       return drizzleSql`SELECT contact_id FROM clickers WHERE org_id = ${orgId}::uuid AND offer_id = ${Number(v)}::int`;
     case "made_purchase":
-      // A buyer: ≥1 send row carrying a non-rejected conversion. `purchasedClause`
-      // is the shared definition — see lib/sale-attribution.ts for why this is
-      // NOT `sale_status = 'sale'` (the network pays out on `lead` postbacks).
-      // DISTINCT because a contact can have many send rows. Partial index
-      // stage_sends_sale_status_idx.
-      return drizzleSql`SELECT DISTINCT ss.contact_id FROM stage_sends ss WHERE ss.org_id = ${orgId}::uuid AND ${purchasedClause()}`;
+      // A buyer: ≥1 counted PURCHASE event in the conversion_events ledger.
+      // `purchasedClause` is the shared definition — see lib/sale-attribution.ts.
+      // DISTINCT because a contact can carry several conversions; contact_id IS
+      // NOT NULL drops stage-only rows (no resolvable recipient). Index
+      // conversion_events_contact_event_idx.
+      return drizzleSql`SELECT DISTINCT ce.contact_id FROM conversion_events ce WHERE ce.org_id = ${orgId}::uuid AND ce.contact_id IS NOT NULL AND ${purchasedClause()}`;
     case "made_purchase_for_brand":
-      // Brand scope: join to the campaign that owns the send. brand lives on
-      // campaigns, not stage_sends.
+      // Brand scope: join the campaign the conversion is attributed to. Brand
+      // lives on campaigns, not on the ledger row.
       return drizzleSql`
-        SELECT DISTINCT ss.contact_id
-        FROM stage_sends ss
-        JOIN campaigns ca ON ca.id = ss.campaign_id
-        WHERE ss.org_id = ${orgId}::uuid
+        SELECT DISTINCT ce.contact_id
+        FROM conversion_events ce
+        JOIN campaigns ca ON ca.id = ce.campaign_id
+        WHERE ce.org_id = ${orgId}::uuid
+          AND ce.contact_id IS NOT NULL
           AND ${purchasedClause()}
           AND ca.brand_id = ${Number(v)}::int
       `;
     case "made_purchase_for_offer":
+      // Offer scope via the CAMPAIGN's offer, not conversion_events.offer_id:
+      // the ledger column is the offer at ingest time, while this rule has always
+      // meant "the campaign's offer". Keeping the join keeps the rule's meaning.
       return drizzleSql`
-        SELECT DISTINCT ss.contact_id
-        FROM stage_sends ss
-        JOIN campaigns ca ON ca.id = ss.campaign_id
-        WHERE ss.org_id = ${orgId}::uuid
+        SELECT DISTINCT ce.contact_id
+        FROM conversion_events ce
+        JOIN campaigns ca ON ca.id = ce.campaign_id
+        WHERE ce.org_id = ${orgId}::uuid
+          AND ce.contact_id IS NOT NULL
           AND ${purchasedClause()}
           AND ca.offer_id = ${Number(v)}::int
       `;

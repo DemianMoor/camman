@@ -15,6 +15,14 @@ import {
 export type RawMetrics = {
   sends: number;
   revenue: number;
+  // PER EVENT, not per recipient (migration 0183). One ledger row with an
+  // is_purchase event type and status pending|approved is one sale, so a
+  // recipient who bought twice is two sales and a row's `sales` can legitimately
+  // EXCEED its `sends`. It no longer means "buyers" — nothing asserts
+  // sales <= sends, and the coverage wording on the offer report already handles
+  // a ratio over 100%. Before 0183 this counted stage_sends rows carrying a
+  // converted_at, which could only ever be one per recipient (latest wins) and
+  // silently dropped the second conversion.
   sales: number;
   clicks: number;
   cost: number;
@@ -24,6 +32,10 @@ export type RawMetrics = {
 export type GroupRawRow = RawMetrics & {
   group_id: number;
   group_name: string;
+  // Approved-only revenue is RawMetrics.revenue; this is the same money still in
+  // lifecycle status `pending` (a held conversion). A SEPARATE figure — never
+  // added into revenue, and never in EPC / RPM / net profit.
+  pending_revenue: number;
   sent_7d: number;
   sent_30d: number;
   sent_90d: number;
@@ -39,15 +51,17 @@ export type OfferTotals = RawMetrics & {
   // sends - attributable_sends: recorded outside the app, from a non-tracked
   // or untargeted campaign, or sent to a recipient outside its targeted groups.
   unattributed_sends: number;
-  // The group rows' revenue/sales come from a DIFFERENT source than this row's:
-  // per-recipient stage_sends.sale_revenue / converted_at, versus Keitaro's
-  // per-stage aggregate (and GREATEST(keitaro, manual) for sales). Coverage is
-  // ~97% of revenue and ~90% of sales, so a group row is systematically a little
-  // lower than its share of the footer. These two carry the same figures on the
-  // group rows' basis so the gap is visible instead of being read as a shortfall.
+  // The group rows' revenue/sales and these three come from the conversion_events
+  // ledger (one row per conversion, joined on stage_send_id); this row's
+  // `revenue`/`sales` come from Keitaro's per-stage aggregate — and for sales
+  // GREATEST(keitaro, manual). The two bases still differ: the ledger can only
+  // place a conversion whose RECIPIENT resolved, while the stage-day projection
+  // also counts conversions known only at stage level. So a group row still
+  // reads a little lower than its share of the footer.
   // NOT a whole-and-part pair with revenue/sales — do not subtract them.
   attributable_revenue: number;
   attributable_sales: number;
+  attributable_pending_revenue: number;
 };
 
 export type OfferGroupReport = {
@@ -67,7 +81,7 @@ export async function getOfferGroupReport(
   offerId: number,
 ): Promise<OfferGroupReport> {
   const groupRows = (await db.execute(sql`
-    select group_id, group_name, sends, revenue, sales, clicks, cost, optouts,
+    select group_id, group_name, sends, revenue, pending_revenue, sales, clicks, cost, optouts,
            sent_7d, sent_30d, sent_90d, fresh_pool
     from offer_group_report_mv
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
@@ -78,7 +92,7 @@ export async function getOfferGroupReport(
   const totalsRows = (await db.execute(sql`
     select sends, revenue, sales, clicks, cost, optouts, has_manual_stages,
            attributable_sends, unattributed_sends,
-           attributable_revenue, attributable_sales
+           attributable_revenue, attributable_sales, attributable_pending_revenue
     from offer_report_offer_totals_mv
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
   `)) as unknown as Record<string, unknown>[];
@@ -94,6 +108,7 @@ export async function getOfferGroupReport(
       group_name: String(r.group_name),
       sends: n(r.sends),
       revenue: n(r.revenue),
+      pending_revenue: n(r.pending_revenue),
       sales: n(r.sales),
       clicks: n(r.clicks),
       cost: n(r.cost),
@@ -116,6 +131,7 @@ export async function getOfferGroupReport(
           unattributed_sends: n(t.unattributed_sends),
           attributable_revenue: n(t.attributable_revenue),
           attributable_sales: n(t.attributable_sales),
+          attributable_pending_revenue: n(t.attributable_pending_revenue),
         }
       : {
           ...ZERO,
@@ -124,6 +140,7 @@ export async function getOfferGroupReport(
           unattributed_sends: 0,
           attributable_revenue: 0,
           attributable_sales: 0,
+          attributable_pending_revenue: 0,
         },
     orgBenchmark,
     benchmarkHasManual,
@@ -247,6 +264,11 @@ const REFRESH_SEQUENCE = [
 // Runs on a dedicated session-mode connection (see ./refresh-session) so the
 // raised statement_timeout and work_mem actually apply; the connection is
 // closed in that helper's `finally`.
+//
+// Refresh timings -- pre-ledger, and post-0183 (which rebuilt group +
+// offer-totals + audience-totals over conversion_events) -- live ONLY in
+// app/api/cron/refresh-offer-group-report/route.ts, so two comments cannot
+// drift into two different "last measured" figures again.
 export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
   return withRefreshSession(async (sessionDb, connection) => {
     const t0 = Date.now();

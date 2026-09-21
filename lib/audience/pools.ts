@@ -10,6 +10,7 @@ import {
   type OfferHistograms,
   type PoolCounts,
 } from "@/lib/audience/pool-math";
+import { purchasedSendIds } from "@/lib/sale-attribution";
 
 // "How many contacts could still be sent offer X?" — the rollup behind
 // GET /api/audience/pools. Spec:
@@ -35,7 +36,7 @@ export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]
 export const POOLS_ROLLUP_KEY = "audience_pools";
 
 export const POOLS_DEFINITION =
-  "eligible = not archived and not opted out; received = at least one sent message of this offer; rested = the contact's last sent message of ANY offer was at least rest_days before computed_at, or never messaged; human click = a counted human clicker on this offer; converted = a tracker conversion on this offer's messages";
+  "eligible = not archived and not opted out; received = at least one sent message of this offer; rested = the contact's last sent message of ANY offer was at least rest_days before computed_at, or never messaged; human click = a counted human clicker on this offer; converted = a purchase-type conversion event in status pending or approved on this offer's messages — a rejected conversion or a registration does NOT count as converted";
 
 export interface PoolsSnapshot {
   version: 1;
@@ -69,9 +70,11 @@ function addTo(map: HistogramsByGroup, key: string, bucket: number, n: number) {
  * verification can run it inside a REPEATABLE READ transaction next to an
  * independent recount.
  *
- * ⚠️ `MATERIALIZED` is load-bearing: `last_pair`, `eligible`, `memb` and
- * `offer_rows` are each read by two branches, and inlined the planner would
- * repeat the stage_sends scan per branch.
+ * ⚠️ `MATERIALIZED` is load-bearing: `purchased`, `last_pair`, `eligible`,
+ * `memb` and `offer_rows` are each read by more than one place, and inlined the
+ * planner would repeat the work per branch — for `last_pair` the org-wide
+ * stage_sends scan, and for `purchased` the conversion_events scan once per
+ * `last_pair` row instead of once as a hash-join build side.
  */
 export async function computeAudiencePools(
   dbc: DbOrTx,
@@ -84,11 +87,22 @@ export async function computeAudiencePools(
   `)) as unknown as { id: number; name: string }[];
 
   const rows = (await dbc.execute(sql`
-    WITH last_pair AS MATERIALIZED (
+    WITH purchased AS MATERIALIZED (
+      ${purchasedSendIds(orgId)}
+    ),
+    last_pair AS MATERIALIZED (
+      -- 'converted' is a COUNTED PURCHASE on that recipient row
+      -- (lib/sale-attribution.ts), not 'converted_at IS NOT NULL'. The old test
+      -- counted a rejected conversion as converted, and — once registrations
+      -- arrive — would have counted a $0 registration too, dropping those
+      -- contacts out of the non-buyer pools they belong in.
+      -- LEFT JOIN a ~1.5K-row set, not an EXISTS per send row: this CTE scans
+      -- every sent row of the org.
       SELECT ss.contact_id, c.offer_id, max(ss.sent_at) AS last_sent,
-             bool_or(ss.converted_at IS NOT NULL) AS converted
+             bool_or(pe.stage_send_id IS NOT NULL) AS converted
       FROM stage_sends ss
       JOIN campaigns c ON c.id = ss.campaign_id
+      LEFT JOIN purchased pe ON pe.stage_send_id = ss.id
       WHERE ss.org_id = ${orgId}::uuid AND ss.status = 'sent'
       GROUP BY 1, 2
     ),

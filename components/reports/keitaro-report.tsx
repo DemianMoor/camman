@@ -53,6 +53,7 @@ type ReportRow = {
   sales: number;
   sales_cr: number;
   revenue: number;
+  pending_revenue: number;
   cost: number;
   epc: number; // PERIOD — the selected date range
   counted_clickers: number;
@@ -501,6 +502,19 @@ export function KeitaroReport() {
         ),
       },
       {
+        id: "pending_revenue",
+        header: "Pending $",
+        enableSorting: true,
+        // "—" when nothing is held, like the totals tile and the campaign page's
+        // stage cell: held money is shown where it exists, and a column of
+        // "$0.00" reads as a measured zero rather than "no held conversions".
+        cell: ({ row }) => (
+          <span className="tabular-nums text-muted-foreground">
+            {row.original.pending_revenue > 0 ? fmtUsd(row.original.pending_revenue) : "—"}
+          </span>
+        ),
+      },
+      {
         id: "cost",
         header: "Cost",
         enableSorting: true,
@@ -663,7 +677,7 @@ export function KeitaroReport() {
 
       {totals ? (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-8">
             <StatCard
               label="Clickers"
               value={`${fmtInt(totals.clickers)}${totals.clickers_is_fallback ? "*" : ""}`}
@@ -674,6 +688,15 @@ export function KeitaroReport() {
             />
             <StatCard label="Sales" value={fmtInt(totals.sales)} />
             <StatCard label="Revenue" value={fmtUsd(totals.revenue)} />
+            {/* Held money, beside the revenue it is NOT part of. The table has
+                carried a "Pending $" column since Task 6; without the tile the
+                totals card silently dropped the figure at the one grain an
+                operator reads first. "—" when nothing is held, matching the
+                campaign page's tile rather than asserting $0.00. */}
+            <StatCard
+              label="Pending $"
+              value={totals.pending_revenue > 0 ? fmtUsd(totals.pending_revenue) : "—"}
+            />
             <StatCard label="Cost" value={fmtUsd(totals.cost)} />
             <StatCard label="Profit" value={fmtUsd(totals.profit)} />
             <StatCard label="Avg Opt-out" value={fmtPct(totals.opt_out_rate)} />

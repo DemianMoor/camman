@@ -2,17 +2,14 @@
 //
 // Pins the 2026-06-29 attribution fix: CLICKS come from report/build rows
 // (applyRowToAggregate, split into visits vs offer redirects, dated by click day),
-// while CONVERSIONS come from conversions/log rows (applyConversionRowToAggregate,
-// dated by the conversion's own day). report/build rows NO LONGER credit
-// sales/checkouts/revenue — that would date a sale on the click day, not the day
-// it happened. Pure logic, no DB / no network.
+// while CONVERSIONS are no longer folded here at all: keitaro_stage_results'
+// conversion columns are re-derived from the conversion_events ledger by
+// lib/keitaro/stage-day-conversions.ts (covered by
+// scripts/test-stage-day-conversions.ts on camman-v2). This script is the
+// CLICK-side classifier only.
 //
 // Run: npx tsx scripts/test-keitaro-visit-conversions.ts
-import {
-  applyRowToAggregate,
-  applyConversionRowToAggregate,
-  type StageDayAgg,
-} from "@/lib/keitaro/poll";
+import { applyRowToAggregate, type StageDayAgg } from "@/lib/keitaro/poll";
 import type { KeitaroReportRow } from "@/lib/keitaro/client";
 
 function freshAgg(): StageDayAgg {
@@ -26,9 +23,6 @@ function freshAgg(): StageDayAgg {
     visitClean: 0,
     redirectRaw: 0,
     redirectClean: 0,
-    checkouts: 0,
-    sales: 0,
-    revenue: 0,
     cost: 0,
   };
 }
@@ -45,8 +39,7 @@ function check(name: string, cond: boolean, detail?: string) {
   }
 }
 
-// 1. A VISIT-campaign report row: clicks count as visits; conversions/revenue are
-//    NOT credited from report/build (they ride conversions/log now).
+// 1. A VISIT-campaign report row: clicks count as visits.
 {
   const agg = freshAgg();
   const visitRow: KeitaroReportRow = {
@@ -61,14 +54,10 @@ function check(name: string, cond: boolean, detail?: string) {
   applyRowToAggregate(agg, visitRow, true);
   check("visit clicks → visitClean", agg.visitClean === 39, `got ${agg.visitClean}`);
   check("visit row adds 0 redirect clicks", agg.redirectRaw === 0, `got ${agg.redirectRaw}`);
-  check("report row does NOT credit sales", agg.sales === 0, `got ${agg.sales}`);
-  check("report row does NOT credit checkouts", agg.checkouts === 0, `got ${agg.checkouts}`);
-  check("report row does NOT credit revenue", agg.revenue === 0, `got ${agg.revenue}`);
   check("visit row adds no cost", agg.cost === 0, `got ${agg.cost}`);
 }
 
-// 2. An OFFER-campaign report row: clicks are redirects, cost rides the offer side,
-//    still no conversion crediting from report/build.
+// 2. An OFFER-campaign report row: clicks are redirects, cost rides the offer side.
 {
   const agg = freshAgg();
   const offerRow: KeitaroReportRow = {
@@ -83,44 +72,18 @@ function check(name: string, cond: boolean, detail?: string) {
   applyRowToAggregate(agg, offerRow, false);
   check("offer clicks → redirectClean", agg.redirectClean === 9, `got ${agg.redirectClean}`);
   check("offer row adds 0 visit clicks", agg.visitClean === 0, `got ${agg.visitClean}`);
-  check("report row does NOT credit sales", agg.sales === 0, `got ${agg.sales}`);
   check("offer row credits cost", agg.cost === 4, `got ${agg.cost}`);
 }
 
-// 3. conversions/log fold: each row is one sale; a lead-status row is also a
-//    checkout; revenue sums. (Dating by the conversion's own day is the caller's
-//    job — it picks the (stage, date) aggregate before calling this.)
-{
-  const agg = freshAgg();
-  applyConversionRowToAggregate(agg, { status: "lead", revenue: 75 });
-  applyConversionRowToAggregate(agg, { status: "lead", revenue: 75 });
-  applyConversionRowToAggregate(agg, { status: "sale", revenue: 100 });
-  check("3 conversion rows → 3 sales", agg.sales === 3, `got ${agg.sales}`);
-  check("2 lead-status rows → 2 checkouts", agg.checkouts === 2, `got ${agg.checkouts}`);
-  check("revenue sums to 250", agg.revenue === 250, `got ${agg.revenue}`);
-}
-
-// 4. A rejected conversion still counts as a sale (matches Keitaro's `conversions`
-//    metric, which the fetch filters to lead/sale/rejected) but not a checkout.
-{
-  const agg = freshAgg();
-  applyConversionRowToAggregate(agg, { status: "rejected", revenue: 0 });
-  check("rejected → 1 sale", agg.sales === 1, `got ${agg.sales}`);
-  check("rejected → 0 checkouts", agg.checkouts === 0, `got ${agg.checkouts}`);
-}
-
-// 5. Combined: clicks from a report row + conversions from the log, on the SAME
-//    aggregate — both sides accumulate independently.
+// 3. Combined: a visit row + an offer row fold into the SAME aggregate — both
+//    sides accumulate independently.
 {
   const agg = freshAgg();
   applyRowToAggregate(agg, { clicks: 46, campaign_unique_clicks: 39 }, true);
   applyRowToAggregate(agg, { clicks: 11, campaign_unique_clicks: 9, cost: 4 }, false);
-  applyConversionRowToAggregate(agg, { status: "lead", revenue: 75 });
   check("combined visitClean = 39", agg.visitClean === 39, `got ${agg.visitClean}`);
   check("combined redirectClean = 9", agg.redirectClean === 9, `got ${agg.redirectClean}`);
   check("combined cost = 4", agg.cost === 4, `got ${agg.cost}`);
-  check("combined sales = 1", agg.sales === 1, `got ${agg.sales}`);
-  check("combined revenue = 75", agg.revenue === 75, `got ${agg.revenue}`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

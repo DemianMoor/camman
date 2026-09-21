@@ -23,50 +23,102 @@ see CLAUDE.md §10g) into the offer's postfix URL param, which is configured as
 > Keitaro campaign → its **alias** for the visit/redirect classification (§2b). It
 > is still **not** the join key — that remains `sub_id_3`.
 
-## 2c. Sales are dated by the CONVERSION day, not the click day (fixed 2026-06-29)
-The aggregate poll reads **two** Keitaro endpoints over the same window, because the
-two metric families belong to different days:
+## 2c. Sales are dated by the CONVERSION day, not the click day (fixed 2026-06-29; re-sourced 2026-09-17)
+`keitaro_stage_results` holds two kinds of column on one row, from two independent
+sources:
 
 - **Clicks** (visits / offer redirects / cost) come from `report/build` grouped by
-  `day` + `sub_id_3` + `campaign_id`. Keitaro's `day` here is the **click day** —
-  correct for clicks.
-- **Conversions** (sales count / checkouts / revenue) come from **`conversions/log`**
-  (one row per conversion, carrying `sub_id_3` + `datetime`), bucketed by the
-  conversion's **own `datetime`** ET day. So a sale lands on **the day it happened**.
+  `day` + `sub_id_3` + `campaign_id`, folded by `applyRowToAggregate` and upserted by
+  `pollKeitaro` itself. Keitaro's `day` here is the **click day** — correct for clicks.
+- **Conversions** (checkouts / sales / revenue / `payout_at_conversion`) are no
+  longer fetched or written by `pollKeitaro` at all (as of Phase 3 Task 3 — bug 2
+  fix). They are a **projection of the `conversion_events` ledger**
+  ([`lib/keitaro/stage-day-conversions.ts`](../../lib/keitaro/stage-day-conversions.ts)),
+  dated by the ledger's `occurred_at` (the conversion's ORIGINAL time, which never
+  moves — see [conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3)).
 
-Both fold into the same `(stage, stat_date)` aggregate (`applyRowToAggregate` for
-clicks, `applyConversionRowToAggregate` for conversions). **Both fetches must succeed
-before any write** — a clicks-only upsert would set `sales = 0` and could zero a
-stored conversion; on either failure the poll degrades and leaves rows untouched.
+**Why it changed again.** The aggregate poll used to fetch `conversions/log` itself
+and fold each row in, dated by Keitaro's `datetime`. Keitaro **moves** `datetime`
+when a conversion is re-posted (same `event_id`, new `datetime` — see
+[07-conventions.md](../07-conventions.md)), and the poll's rolling window left the
+OLD day's row frozen with stale values — one conversion counted on two days
+(measured: +1 sale / +$100 on one stage). Re-deriving a stage's conversion columns
+from the ledger every time, instead of folding one row at a time, makes that
+structurally impossible: a day the ledger no longer explains is zeroed, not left
+stale. `/api/keitaro/poll` runs the projection right after the ledger ingest, and
+only when that ingest window was complete — see
+[conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3)
+for the exact scope/ordering.
 
-> **Why it changed.** `report/build` attributes a conversion to the **originating
-> click's day**, not the conversion day. So a sale that clicked Mon and converted
-> Wed showed under **Mon** (the campaign/click day) on `/reports`, even though the
-> Keitaro panel's conversion counter (and `conversions/log`) showed it Wed. The
-> whole reporting layer already *documented* `stat_date` as the conversion date
-> (`lib/reporting/attribution.ts`), so the poll contradicted its own contract.
-> Totals were always correct (`report/build` conversions ≡ `conversions/log` rows);
-> only the per-day bucket was wrong. The fix re-sources conversions from
-> `conversions/log`. **Counts are unchanged** — only the date a sale is filed under.
-> Backfill: re-run `pollKeitaro(db, { windowDays: 45 })` once after deploy to
-> re-date stored history ([`scripts/run-keitaro-redate-backfill.ts`](../../scripts/run-keitaro-redate-backfill.ts)).
-> The `*/5` cron's default 3-day window keeps recent days fresh thereafter.
+⚠️ **A re-derivation is only as safe as the ledger's coverage.** The same statement
+that fixes a stale-high day would REDUCE a real day to a partial sum if the ledger
+held only part of it, so the projection refuses outright when the ledger does not
+reach back as far as the conversions `keitaro_stage_results` still reports
+(`refused: "ledger_behind_history"`, both dates in the response and in the page).
+What it cannot see is a coverage GAP *inside* the covered range — "no conversion that
+day" and "the ingest lost that day" read identically — so the gap is the BACKFILL's
+problem, proven by `scripts/verify-conversion-events.ts` against a fresh Keitaro
+pull, not the projection's. And a stage whose ledger rows were all deleted is never
+corrected at all: no floor, no write, its numbers stay as they were.
+
+> **History.** `report/build` used to attribute a conversion to the **originating
+> click's day**, not the conversion day (fixed 2026-06-29 by re-sourcing from
+> `conversions/log`, dated by its own `datetime`). That fix is superseded by the
+> ledger re-source above — `datetime` itself turned out not to be stable.
 
 ## 2a. Auto-fill of the stage Results panel (migration 0077)
-After each poll upserts `keitaro_stage_results`, it syncs the stage's auto-owned
-counters for every stage touched this run (summed across all `stat_date`s):
-`campaign_stages.click_count` ← `visit_clicks_clean` ("Clickers"),
-`checkout_click_count` ← `checkouts`. The poll also stamps
-`keitaro_stage_results.payout_at_conversion` (= `revenue / NULLIF(sales,0)`,
-migration 0083) so each row freezes the per-conversion rate that was actually paid
-— immune to a later CPA edit on the offer. `sales_payout_each` is still snapshotted
-from the campaign's offer CPA when conversions appear (COALESCE keeps an existing
-snapshot), but it is now only the manual-results form's pre-save **estimate** — the
-revenue source of truth is `keitaro_stage_results.revenue`, never `sales × CPA`.
-**Per-field positive-only guard:** each
-counter is overwritten ONLY when Keitaro reports a value `> 0` — a Keitaro 0 never
-zeroes an existing number. Keitaro sums are monotonic, so this never drops an
-update. Stages with no Keitaro rows are left untouched.
+After each write to `keitaro_stage_results`, `mirrorStageCountersFromResults`
+(exported from `lib/keitaro/poll.ts`) syncs the stage's auto-owned counters for
+every stage named (summed across all `stat_date`s): `campaign_stages.click_count` ←
+`visit_clicks_clean` ("Clickers"), `checkout_click_count` ← `checkouts`. **It runs
+twice per tick** (Phase 3 Task 3) — once from `pollKeitaro` for the stages this
+tick's CLICK window touched, and again from
+[`lib/keitaro/stage-day-conversions.ts`](../../lib/keitaro/stage-day-conversions.ts)'s
+`syncStageDayConversions` for whatever it just wrote/zeroed, so `checkout_click_count`
+(sourced from `checkouts`, now the ledger projection's column) never lags a tick.
+`syncStageDayConversions` stamps `keitaro_stage_results.payout_at_conversion` (=
+`revenue / NULLIF(sales,0)`, migration 0083) so each row freezes the per-conversion
+rate that was actually paid — immune to a later CPA edit on the offer.
+`sales_payout_each` is still snapshotted from the campaign's offer CPA when
+conversions appear (COALESCE keeps an existing snapshot), but it is now only the
+manual-results form's pre-save **estimate** — the revenue source of truth is
+`keitaro_stage_results.revenue`, never `sales × CPA`. **Per-field positive-only
+guard:** `click_count` and `sales_payout_each` are overwritten ONLY when the source
+reports a value `> 0` — a 0 never zeroes an existing number. Keitaro click sums are
+monotonic, so that never drops an update. Stages not named in a given mirror call
+are left untouched.
+
+⚠️ **`checkout_click_count` is the EXCEPTION, and a DROP IS POSSIBLE (corrected
+2026-09-17, review fix I2).** Its source, `checkouts`, is no longer monotonic: it is
+the ledger projection's column, and the projection deliberately zeroes a stage-day
+the ledger no longer explains (a re-posted conversion that moved day, a conversion
+deleted in Keitaro). So the projection calls the mirror with
+`exactCheckoutClicks: true` and that ONE field takes the recomputed sum even when it
+DECREASES, 0 included. Under the old positive-only guard a downward correction could
+never reach the stage, leaving a stale higher number on the campaign page and in the
+creatives metrics cache forever. Consequence, accepted: on a stage the projection has
+in scope, a hand-entered Checkout Clicks value is overwritten by the tracker's sum
+**within 5 minutes**, and set to **0** when that stage has no ledger conversions at
+all — the field belongs to the projection. `scripts/resync-stage-day-conversions.ts
+--apply` does this for every stage that has any `keitaro_stage_results` row, in one
+run. If a stage's Checkout Clicks must be operator-owned, it cannot also be in the
+projection's scope; there is no per-stage opt-out today. `sales_count` is still never
+touched by either mode. The mirror also THROWS on failure now; the "non-fatal, re-syncs next poll"
+swallow lives at `pollKeitaro`'s own call site, because swallowing inside the mirror
+would poison a caller-supplied transaction (the resync's `--apply`, the DB tests).
+
+⚠️ **A drop must be EXPLAINED, and the "explained" test names all four projected
+columns (fixed 2026-09-18).** The zeroing UPDATE asks "does the ledger explain any
+of the values on this row?" — and that test has to cover every column the INSERT
+writes: `SALES ∨ CHECKOUT ∨ REVENUE ∨ PENDING`. Task 6 briefly left `CHECKOUT` out,
+which was harmless only while `SALES_FILTER` happened to be a superset of it
+(`keitaro_type IN ('lead','sale','rejected')` ⊇ `keitaro_type = 'lead'`). Once sales
+became `purchasedClause()`, a stage-day whose only ledger rows are lead-TYPE
+non-purchases — a $0 registration posted as `lead`, an unmapped row — had its
+`checkouts` written and then zeroed **inside the same run**, and `checkout_click_count`
+mirrored the flap: write, zero, write, zero, every `*/5` tick, forever. Guarded by
+PB1–PB4 in `scripts/test-stage-day-conversions.ts`, which run the projection TWICE
+and require the second run to change nothing.
 
 **Sales = max(manual, Keitaro), NOT the sum (changed 2026-06-21).** `campaign_stages.sales_count`
 holds the operator's **manual** sale tally; the poll does **not** touch it. At read
@@ -138,16 +190,15 @@ Two kinds of Keitaro campaign fire clicks for the **same** `sub_id_3` (stage):
   clicks through to the offer. Their clean clicks are **Offer Redirect**, and
   their conversions are **Sales**.
 
-> **Classification splits CLICKS only — conversions are credited regardless of
-> campaign (changed 2026-06-24).** A conversion's `leads`/`conversions`/`revenue`
-> is folded into the stage **whichever campaign reports it**, including a
-> `gk-lp-visits` row. Normally conversions only attach to an offer row, but a
-> broken landing→offer redirect can strand them on the visit campaign (the click
-> never reached the offer, so the postback fired against the visit click). Crediting
-> them rescues that otherwise-dropped revenue. **Safe against double-counting:**
-> Keitaro attributes each conversion to exactly one `campaign_id`, so a given
-> conversion appears in exactly one report row (verified: 0 cross-campaign
-> conversion splits over 30 days). The split still governs `cost` (offer side only).
+> **Classification splits CLICKS only.** (Historical note: 2026-06-24 through
+> Phase 3 Task 3, the aggregate poll also folded `conversions/log` rows here and
+> credited a conversion to the stage regardless of which campaign reported it —
+> rescuing revenue stranded on the visit campaign by a broken landing→offer
+> redirect. That fold is gone: conversions are no longer fetched by this poll at
+> all. Ledger attribution (`lib/conversions/ingest.ts`'s `buildConversionEventRows`)
+> resolves a conversion to its stage via `sub_id_1`/`sub_id_3`/`offers.keitaro_offer_id`
+> independently of which Keitaro campaign fired it, so the same rescue still
+> happens — just one layer down, in the ledger, not in this classifier.)
 
 Classify by the campaign **name** (`gk-lp-visits`), never a numeric id — the name
 is the rebuild-safe human label. **Match on `name`, not `alias`:** in the live
@@ -178,14 +229,17 @@ for each stage is the **clean** (bot/prefetch-filtered) count.
    the campaigns list for the alias classifier (in parallel).
 4. **Fold** the per-campaign rows into one aggregate per (stage, ET date) via
    `applyRowToAggregate`, routing each row's **clicks** to the visit or redirect
-   side by campaign; **conversions (checkouts/sales/revenue) are credited from
-   every row** regardless of campaign (§2b), and `cost` rides the offer side.
+   side by campaign, and `cost` to the offer side. **CLICKS ONLY** — no conversion
+   metric is folded here (Phase 3 Task 3; see §2c).
 5. Idempotent **UPSERT** per (stage, date) into `keitaro_stage_results`
-   (`onConflictDoUpdate` on `(org_id, stage_id, stat_date)`, `synced_at = now()`).
-   Each poll recomputes the **full** window totals and overwrites in place —
-   never appends, never double-counts. (The fold is required: multiple campaign
-   rows now share one `(stage, date)` key, so a per-row last-write-wins would drop
-   all but the last campaign.)
+   (`onConflictDoUpdate` on `(org_id, stage_id, stat_date)`, `synced_at = now()`,
+   the CLICK columns only). Each poll recomputes the **full** window's click totals
+   and overwrites in place — never appends, never double-counts. (The fold is
+   required: multiple campaign rows now share one `(stage, date)` key, so a
+   per-row last-write-wins would drop all but the last campaign.) The route then
+   runs `runStageDayProjection` (§2c) to fill/refresh the CONVERSION columns on
+   the same rows (or insert a new row for a conversion-only stage-day with no
+   clicks).
 
 **Metric mapping (Keitaro → CamMan term → column):**
 
@@ -195,11 +249,13 @@ for each stage is the **clean** (bot/prefetch-filtered) count.
 | `campaign_unique_clicks` (visit campaign) | **Clickers** | `visit_clicks_clean` |
 | `clicks` (offer campaigns) | Raw offer clicks | `redirect_clicks_raw` |
 | `campaign_unique_clicks` (offer campaigns) | **Offer Redirect** | `redirect_clicks_clean` |
-| `leads` (offer) | Checkouts (CI) | `checkouts` |
-| `sales` (offer) | Sales (CV) | `sales` |
-| `revenue` (offer) | Revenue | `revenue` |
 | `cost` (offer) | Cost | `cost` |
 | `epc` | EPC (derived rev/redirect-raw) | `epc` |
+
+`checkouts` / `sales` / `revenue` / `payout_at_conversion` are no longer written by
+this poll (Phase 3 Task 3) — they are the `conversion_events` ledger's projection,
+written by `syncStageDayConversions`; see §2c and
+[conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3).
 
 The poll also mirrors the redirect totals into the legacy `raw_clicks` /
 `clean_clicks` columns so the pre-5b column meaning (offer clicks) stays
@@ -229,9 +285,13 @@ offer-redirect counts in the legacy `raw_clicks` / `clean_clicks`; the read laye
 ## 5. Endpoints
 - `GET|POST /api/keitaro/poll` — cron (CRON_SECRET) or manual (operator+,
   `result_imports.create`). `?windowDays=N` (aggregate poll only). Returns
-  `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, classification_degraded, visit_campaigns_matched, unmatched_samples, error, counted_clickers, counted_clickers_error, conversion_events, conversion_events_error }`.
+  `{ ok, degraded, range, fetched, matched, upserted, unmatched, errored, stage_ids, classification_degraded, visit_campaigns_matched, unmatched_samples, error, counted_clickers, counted_clickers_error, conversion_events, conversion_events_error, stage_day_conversions, stage_day_conversions_error }`.
+  - `stage_ids`: the stages this window's CLICK rows touched (`pollKeitaro`'s own aggregate keys) — the seed for the stage-day projection's scope.
   - `conversion_events`: the ledger ingest's `IngestResult`, or `null` when the ingest threw. Fields: `ok`, `dryRun`, `range`, `fetched`, `invalid`/`invalidSamples`, `unresolved`/`unresolvedSamples` (samples include `sub_id_1`), `rows`, `unmappedInBatch`, `statusOnlyInBatch`, `statusOnlyFirstSeenInBatch`/`statusOnlyFirstSeenSamples` (conversions a **status-only** mapping classified with no existing ledger row — they land with a status and no event type and count as nothing; see [conversion-events.md](conversion-events.md)), `inserted`/`updated`/`unchanged`, `typeConflicts`, `orgMismatch`/`orgMismatchSamples`, `error`. `ok:false` with `error` means the window was refused (Keitaro HTTP error, timeout, a malformed 200 that isn't JSON with a `rows` array and a numeric `total`, or a truncated page) and nothing was written.
   - `conversion_events_error`: the thrown message when the ingest threw; `monitor: …` when the cron path's alert evaluation or heartbeat stamp threw (appended after `; ` if the ingest also threw); `null` otherwise. On the cron path a thrown ingest also counts as a failed tick for the debounced `conversion_events:fetch_failed` alert.
+  - `stage_day_conversions` (Phase 3 Task 3): what `runStageDayProjection` returned, or `null` when it was skipped (the ledger ingest wasn't `ok`) or threw. `{ stagesInScope, rowsWritten, rowsZeroed, ledgerHasRows, ledgerFloor, reportedHistoryFloor, coverageFloor, refused, watermarkTo, watermarkHeld, discovery }` — `stagesInScope` is the scope it was GIVEN (`"all"` for the unscoped resync), `coverageFloor` the earliest ET day the ledger covers across that scope (nothing older was zeroed), `ledgerFloor` the global one, `reportedHistoryFloor` the earliest reported conversion day the ledger does NOT cover (non-null ⇒ the run refused), `refused` either `"empty_ledger"` or `"ledger_behind_history"` (both mean nothing was written and nothing zeroed), `watermarkHeld: true` when the cursor was deliberately left where it was (a refusal, or a truncated discovery), and `discovery` the `updated_at` window it scanned (`watermarkFrom`, `windowFrom`, `windowTo`, `stageIds`, `truncated`, `resumeTo` — `resumeTo` is the window end and is only meaningful when `truncated` is false). See [conversion-events.md](conversion-events.md#stage-day-projection-phase-3-task-3).
+  - On the cron path the projection also drives the latched `conversion_events:projection_failed` alert: a throw, either refusal, or a truncated discovery window fires it; a run that finished its window clears it. A SKIPPED projection gets no decision.
+  - `stage_day_conversions_error`: the thrown message when the projection threw, with `monitor: …` appended when the cron path's projection-alert evaluation threw; `null` otherwise (including when it was simply skipped).
 - `GET /api/keitaro/results?campaign_id=<id>` — read-only; org-scoped. Per-(stage,
   date) rows plus per-stage and campaign rollups with the Clickers → Offer
   Redirect → Sales funnel + derived rates. Requires `campaigns.view`.

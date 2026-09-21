@@ -214,12 +214,19 @@ export const RULE_TYPES = {
     operators: ["is", "is_not"],
     value_shape: "offer_id",
   },
-  // Purchase (sale) rules — mirror the clicker scoping (any / brand / offer).
-  // A contact "made a purchase" when they have ≥1 stage_sends row carrying a
-  // NON-REJECTED conversion, i.e. sale_status IN ('lead','sale'). The network
-  // pays out on `lead` postbacks, so `lead` IS a purchase — see
-  // lib/sale-attribution.ts for the shared definition and why, and
-  // lib/segment-rules-eval.ts for the SQL.
+  // Purchase rules — mirror the clicker scoping (any / brand / offer).
+  // A contact "made a purchase" when they have ≥1 row in the conversion_events
+  // ledger whose event type is flagged is_purchase and whose status is
+  // 'pending' or 'approved'. NOT stage_sends.sale_status: that column holds one
+  // latest-wins conversion per recipient, so a $0 registration arriving after a
+  // purchase used to overwrite it — and a registration that arrives as a 'lead'
+  // postback used to read as a purchase outright.
+  // Which Keitaro conversion type becomes which event type + status is decided
+  // per network/offer in `conversion_event_mappings` (that is where the old
+  // "'lead' AND 'sale' both count" rule now lives — the network pays out on
+  // `lead` postbacks). A 'rejected' conversion is a refund and never counts.
+  // lib/sale-attribution.ts is the shared definition; lib/segment-rules-eval.ts
+  // has the SQL.
   made_purchase: {
     label: "Made a purchase (any)",
     operators: ["is", "is_not"],

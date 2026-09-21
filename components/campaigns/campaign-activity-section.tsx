@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import { conversionAmountLabel, conversionBadgeClass } from "@/lib/conversion-badge";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 // ---- Wire types (mirror app/api/campaigns/[id]/activity/*). ----
@@ -72,8 +73,10 @@ interface MessageRow {
   texthub_message_id: string | null;
   attempts: number;
   last_error: string | null;
-  sale_status: string | null;
-  sale_revenue: string | null;
+  conversion_event: string | null;
+  conversion_status: string | null;
+  conversion_revenue: string | null;
+  conversion_is_purchase: boolean | null;
   reply_result: string | null;
   reply_received_at: string | null;
 }
@@ -106,14 +109,10 @@ const STATUS_STYLES: Record<string, string> = {
   sending: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
 };
 
-// Keitaro conversion status → badge color. Stamped per recipient by the
-// conversions poll (sub_id_1 = stage_sends.id). sale = green (the win), lead =
-// amber (checkout, payout unconfirmed), rejected = muted red (payout cancelled).
-const SALE_STATUS_STYLES: Record<string, string> = {
-  sale: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-  lead: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
-  rejected: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400",
-};
+// The conversion badge's colour + amount live in lib/conversion-badge.ts, so the
+// proof script can assert the real rendering decisions (an approved $0
+// registration is not purchase-green, and prints no money) without importing a
+// client component. Do not re-implement them here.
 
 // Event type → a short human label + an accent dot color for the timeline.
 const EVENT_META: Record<string, { label: string; dot: string }> = {
@@ -466,7 +465,7 @@ function MessagesPanel({
                     <th className="px-3 py-2 font-medium">Stage</th>
                     <th className="px-3 py-2 font-medium">Phone</th>
                     <th className="px-3 py-2 font-medium">Status</th>
-                    <th className="px-3 py-2 font-medium">Sale</th>
+                    <th className="px-3 py-2 font-medium">Conversion</th>
                     <th className="px-3 py-2 font-medium">Sent</th>
                     <th className="px-3 py-2 font-medium">Reply</th>
                     <th className="px-3 py-2 font-medium">Message ID</th>
@@ -492,20 +491,15 @@ function MessagesPanel({
                         </Badge>
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">
-                        {r.sale_status ? (
+                        {r.conversion_event ? (
                           <Badge
                             variant="secondary"
-                            className={SALE_STATUS_STYLES[r.sale_status] ?? ""}
-                            title={
-                              r.sale_revenue
-                                ? `Revenue $${Number(r.sale_revenue).toFixed(2)}`
-                                : undefined
-                            }
+                            className={conversionBadgeClass(r)}
+                            title={`${r.conversion_event} · ${r.conversion_status ?? "unmapped"}${conversionAmountLabel(r)}`}
                           >
-                            {r.sale_status}
-                            {r.sale_status !== "rejected" && r.sale_revenue
-                              ? ` · $${Number(r.sale_revenue).toFixed(2)}`
-                              : ""}
+                            {r.conversion_event}
+                            {r.conversion_status ? ` · ${r.conversion_status}` : " · unmapped"}
+                            {conversionAmountLabel(r)}
                           </Badge>
                         ) : (
                           <span className="text-muted-foreground">—</span>

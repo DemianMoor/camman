@@ -126,7 +126,17 @@ async function main() {
                 AND NOT EXISTS (SELECT 1 FROM opt_outs x WHERE x.org_id = ${orgId}::uuid AND x.contact_id = ct.id)
             ),
             rc AS MATERIALIZED (
-              SELECT s.contact_id, bool_or(s.converted_at IS NOT NULL) AS converted
+              -- Independent recount: an EXISTS with an explicit JOIN event_types,
+              -- the same meaning purchasedClause() expresses, reached a different
+              -- way -- the point of a recount is to not import the SQL it checks.
+              SELECT s.contact_id,
+                     bool_or(EXISTS (
+                       SELECT 1 FROM conversion_events ce
+                       JOIN event_types et ON et.id = ce.event_type_id
+                       WHERE ce.stage_send_id = s.id
+                         AND et.is_purchase
+                         AND ce.status <> 'rejected'
+                     )) AS converted
               FROM stage_sends s JOIN campaigns c ON c.id = s.campaign_id
               WHERE s.org_id = ${orgId}::uuid AND c.org_id = ${orgId}::uuid
                 AND c.offer_id = ${o.id} AND s.status = 'sent'

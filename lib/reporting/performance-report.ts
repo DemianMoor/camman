@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
@@ -20,6 +20,7 @@ import {
 } from "@/lib/reporting/grading-rates";
 import { sendDaysOf } from "@/lib/reporting/creative-rows";
 import type { AttributionBasis, PerformanceDimension } from "@/lib/reporting/report-dimensions";
+import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
 import {
   getStageMetricsInRange,
   type ClickerDenominators,
@@ -31,8 +32,13 @@ import {
 // same numbers as the Overview tab — so By Number / By Offer / By Sequence match
 // Overview to the cent, and By Group distributes those same stage totals across
 // contact groups. "hourly" is different: it buckets by USER-ACTIVITY time from the
-// internal per-event tables (clicks.clicked_at, stage_sends.converted_at /
-// offer_reached_at, opt_out_attributions.created_at). See docs/04-features/reports-rollup.md.
+// internal per-event tables (clicks.clicked_at, conversion_events.occurred_at,
+// stage_sends.offer_reached_at, opt_out_attributions.created_at). See
+// docs/04-features/reports-rollup.md.
+//
+// Hourly sales/revenue moved from stage_sends.converted_at (Keitaro's latest
+// re-post time, which MOVES) to the ledger's occurred_at (the conversion's own
+// time, which never does) — see ledgerHourQuery for what that changes.
 
 export type { ReportDimension } from "@/lib/reporting/report-dimensions";
 
@@ -63,6 +69,7 @@ export interface PerfMetrics {
   lifetime_revenue: number;
   sales: number;
   revenue: number;
+  pending_revenue: number;
   cost: number;
 }
 
@@ -116,6 +123,7 @@ export const ZERO: PerfMetrics = {
   lifetime_revenue: 0,
   sales: 0,
   revenue: 0,
+  pending_revenue: 0,
   cost: 0,
 };
 
@@ -144,6 +152,7 @@ function stageMetrics(
     lifetime_revenue: lifetimeRevenueByStage.get(s.stage_id) ?? 0,
     sales: s.tally.sales,
     revenue: s.tally.revenue,
+    pending_revenue: s.tally.pending_revenue,
     cost: s.tally.cost,
   };
 }
@@ -160,6 +169,7 @@ function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     lifetime_revenue: a.lifetime_revenue + b.lifetime_revenue,
     sales: a.sales + b.sales,
     revenue: a.revenue + b.revenue,
+    pending_revenue: a.pending_revenue + b.pending_revenue,
     cost: a.cost + b.cost,
   };
 }
@@ -175,6 +185,7 @@ function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     lifetime_revenue: m.lifetime_revenue * f,
     sales: m.sales * f,
     revenue: m.revenue * f,
+    pending_revenue: m.pending_revenue * f,
     cost: m.cost * f,
   };
 }
@@ -576,8 +587,18 @@ async function distributeToGroups(
       if (m.reached != null) {
         spread(add, m.reached, nonEmpty(wReach.get(s.stage_id)) ?? sentW, "reached");
       }
+      // ⚠️ THE `?? sentW` FALLBACK RE-ATTRIBUTES, IT DOES NOT ZERO. When a stage
+      // has NO sale weights — no ledger purchase resolved to one of its
+      // recipients, which is now also the case for a stage whose only conversions
+      // are rejected or unmapped — the stage's sales and revenue are spread
+      // across its groups on SENT weights instead. The stage total still
+      // reconciles (that is what the fallback is for: no metric is ever dropped),
+      // but the per-group split is then "who was messaged", not "who bought", and
+      // the row cannot tell you which. Only By Group is affected; every other
+      // dimension sums the stage totals directly.
       spread(add, m.sales, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "sales");
       spread(add, m.revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "revenue");
+      spread(add, m.pending_revenue, nonEmpty(wSale.get(s.stage_id)) ?? sentW, "pending_revenue");
       spread(add, m.cost, sentW, "cost");
     } else {
       const allocW = nonEmpty(manualAlloc.get(s.campaign_id)) ?? equalW;
@@ -601,6 +622,7 @@ async function distributeToGroups(
       lifetime_revenue: round2(m.lifetime_revenue),
       sales: round2(m.sales),
       revenue: round2(m.revenue),
+      pending_revenue: round2(m.pending_revenue),
       cost: round2(m.cost),
     }))
     .sort((a, b) => b.sent - a.sent);
@@ -650,6 +672,27 @@ function shares(weights: Map<number, number>): Map<number, number> {
 
 type WeightBasis = "sent" | "click" | "sale" | "optout" | "reach";
 
+// The `sale` basis's candidate (stage, contact) set: who converted, from the
+// ledger. DISTINCT keeps one row per (stage, contact) so the weights stay
+// per-CONTACT exactly as before (the 1/k normalisation in trackedWeights would
+// cancel duplicates anyway, but an explicit DISTINCT states the intended grain).
+//
+// EXPORTED so scripts/test-p3-task4-reader-switch-db.ts proves THIS text rather
+// than a retyped lookalike. trackedWeights itself executes against the
+// module-level `db`, which cannot see a test's uncommitted fixtures, so the
+// candidate set is the largest piece of it a rolled-back proof can reach; the
+// 1/k spread downstream is unchanged by the ledger switch.
+export function saleWeightCandidates(orgId: string, stageIds: number[]): SQL {
+  return sql`
+        SELECT DISTINCT ss.stage_id, ss.contact_id, cs.campaign_id
+        FROM conversion_events ce
+        JOIN stage_sends ss ON ss.id = ce.stage_send_id
+        JOIN campaign_stages cs ON cs.id = ss.stage_id
+        WHERE ce.org_id = ${orgId}::uuid
+          AND ${purchasedClause()}
+          AND ss.stage_id IN (${inList(stageIds)})`;
+}
+
 // Per-(stage, group) weight = Σ over the stage's qualifying contacts of 1/k,
 // where k = how many of the contact's groups were USED in the campaign audience.
 async function trackedWeights(
@@ -677,12 +720,7 @@ async function trackedWeights(
           AND ck.classification = 'human' AND ck.scored_at IS NOT NULL
         WHERE ss.org_id = ${orgId}::uuid AND ss.stage_id IN (${inList(stageIds)})`
         : basis === "sale"
-          ? sql`
-        SELECT ss.stage_id, ss.contact_id, cs.campaign_id
-        FROM stage_sends ss
-        JOIN campaign_stages cs ON cs.id = ss.stage_id
-        WHERE ss.org_id = ${orgId}::uuid AND ss.converted_at IS NOT NULL
-          AND ss.stage_id IN (${inList(stageIds)})`
+          ? saleWeightCandidates(orgId, stageIds)
           : basis === "reach"
             ? sql`
         SELECT ss.stage_id, ss.contact_id, cs.campaign_id
@@ -746,6 +784,67 @@ async function manualAllocationWeights(
   return out;
 }
 
+// The hourly tab's ET range, shared by every query on the tab so they cannot
+// disagree about what "in range" means.
+// NAME IS NARROWER THAN THE USE: callers are ledgerHourQuery + getHourlyReport
+// (the hourly tab) AND manualRangeRow, which is not hourly at all — it is an ET
+// DATE-RANGE bound, and the manual row must use the same one as the tab it is
+// pinned to.
+function hourlyEtRange(from: string, to: string): { start: SQL; end: SQL } {
+  return {
+    start: sql`(${from} || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`,
+    end: sql`((${to}::date + 1) || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`,
+  };
+}
+
+// Hourly sales/revenue, straight from the ledger, bucketed by the CONVERSION's
+// own ET hour. NOT the stage_sends-walking eventAgg in getHourlyReport: a send
+// row could hold only ONE conversion — so a recipient's second conversion was
+// invisible — and a stage-attributable conversion whose recipient never resolved
+// (26 of them, $1,463) could not be counted at all. The INNER JOIN to
+// campaign_stages is what scopes the rows to this org's stages and carries the
+// provider filter; a ledger row with no stage cannot be placed in an hour.
+//
+// ⚠️ THE INSTANT IS `ce.occurred_at`, AND THAT IS A DELIBERATE CHANGE OF MEANING.
+// The old basis was stage_sends.converted_at — the time of the LATEST postback
+// for that recipient, which Keitaro moves when it re-posts a conversion. So a
+// re-post silently carried revenue into a later hour, and out of the range
+// entirely once it crossed midnight: yesterday's 9pm sale became today's 2am
+// sale, and yesterday's report changed after the fact. `occurred_at` is when the
+// conversion happened and never moves, so an hour, once reported, stays put.
+// This is the one change in Task 4 that can move a number TODAY (correction
+// class D — see the Phase 3 plan); it is not a regression.
+//
+// EXPORTED for scripts/test-p3-task4-reader-switch-db.ts: the hour bucketing,
+// the occurred_at range and the provider filter are exactly the parts a retyped
+// "simplified shape" used to drop, which left the only semantic change in the
+// task untested.
+export function ledgerHourQuery(args: {
+  orgId: string;
+  from: string;
+  to: string;
+  providerPhoneId?: number | null;
+  where: SQL;
+  valueExpr: SQL;
+}): SQL {
+  const { start, end } = hourlyEtRange(args.from, args.to);
+  const provFilter =
+    args.providerPhoneId != null
+      ? sql`AND cs.provider_phone_id = ${args.providerPhoneId}`
+      : sql``;
+  return sql`
+      SELECT EXTRACT(HOUR FROM ce.occurred_at AT TIME ZONE 'America/New_York')::int AS hour,
+             ${args.valueExpr} AS v
+      FROM conversion_events ce
+      JOIN campaign_stages cs ON cs.id = ce.stage_id
+        ${provFilter}
+      WHERE ce.org_id = ${args.orgId}::uuid
+        AND ce.occurred_at >= ${start} AND ce.occurred_at < ${end}
+        AND ${args.where}
+      GROUP BY 1
+    `;
+}
+
 // ---- hourly: user-activity time from internal per-event tables --------------
 async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceReport> {
   const provFilter = b.providerPhoneId != null;
@@ -754,8 +853,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
   const provJoin = provFilter
     ? sql`JOIN campaign_stages cs ON cs.id = ss.stage_id AND cs.provider_phone_id = ${b.providerPhoneId}`
     : sql``;
-  const rangeStart = sql`(${b.from} || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
-  const rangeEnd = sql`((${b.to}::date + 1) || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
+  const { start: rangeStart, end: rangeEnd } = hourlyEtRange(b.from, b.to);
   const hourExpr = (col: string) =>
     sql`EXTRACT(HOUR FROM ${sql.raw(col)} AT TIME ZONE 'America/New_York')::int`;
 
@@ -773,6 +871,21 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
         AND ${where}
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[];
+
+  // Sales and revenue from the ledger, by the CONVERSION's own ET hour — the
+  // query text lives in ledgerHourQuery above (exported so its proof runs the
+  // real thing), including why the instant is occurred_at and not converted_at.
+  const ledgerHourAgg = async (where: SQL, valueExpr: SQL) =>
+    (await db.execute(
+      ledgerHourQuery({
+        orgId,
+        from: b.from,
+        to: b.to,
+        providerPhoneId: b.providerPhoneId,
+        where,
+        valueExpr,
+      }),
+    )) as unknown as { hour: number; v: number }[];
 
   const [sentRows, clicks, redirects, sales, revenue, optouts, clickerRows] = await Promise.all([
     // Sent messages by SEND hour (tracked stage_sends; manual-campaign sends have
@@ -796,8 +909,8 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
       GROUP BY 1
     `)) as unknown as { hour: number; v: number }[],
     eventAgg("ss.offer_reached_at", provJoin, sql`ss.offer_reached_at IS NOT NULL`, sql`count(*)::int`),
-    eventAgg("ss.converted_at", provJoin, sql`ss.converted_at IS NOT NULL`, sql`count(*)::int`),
-    eventAgg("ss.converted_at", provJoin, sql`ss.converted_at IS NOT NULL`, sql`coalesce(sum(ss.sale_revenue),0)::float8`),
+    ledgerHourAgg(purchasedClause(), sql`count(*)::int`),
+    ledgerHourAgg(approvedRevenueClause(), sql`coalesce(sum(ce.revenue), 0)::float8`),
     // opt-outs by receipt time, for TRACKED stages
     (await db.execute(sql`
       SELECT ${hourExpr("oa.created_at")} AS hour, count(*)::int AS v
@@ -841,7 +954,14 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
 
   const rows: PerfRow[] = [...hours.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([h, m]) => ({ key: String(h), label: formatEtHour(h), ...m }));
+    .map(([h, m]) => ({
+      key: String(h),
+      label: formatEtHour(h),
+      ...m,
+      // The hourly tab renders no pending column (its columns are activity-time
+      // rates), so this is deliberately not computed rather than half-computed.
+      pending_revenue: 0,
+    }));
 
   // Manual row (pinned first): all results from MANUAL campaigns mapped to the
   // range — manual sales by ledger entry date, plus manual-campaign opt-outs.
@@ -859,8 +979,7 @@ async function getHourlyReport(orgId: string, b: Bounds): Promise<PerformanceRep
 }
 
 async function manualRangeRow(orgId: string, b: Bounds): Promise<PerfMetrics> {
-  const rangeStart = sql`(${b.from} || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
-  const rangeEnd = sql`((${b.to}::date + 1) || ' 00:00')::timestamp AT TIME ZONE 'America/New_York'`;
+  const { start: rangeStart, end: rangeEnd } = hourlyEtRange(b.from, b.to);
   const rows = (await db.execute(sql`
     SELECT
       coalesce((

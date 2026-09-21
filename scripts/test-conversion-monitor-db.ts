@@ -18,6 +18,7 @@ import {
   STATUS_ONLY_WHERE,
   UNMAPPED_WHERE,
   evaluateConversionAlerts,
+  evaluateProjectionAlert,
   readLedgerHealth,
   watchIngestHeartbeat,
   type IngestOutcome,
@@ -555,7 +556,7 @@ async function main() {
           ].map((k) => alertRow(tx, k)),
         );
       check(
-        "A2 alert_state: exactly the three combo keys firing, one per prefix, delivered and org-less; the six fixed keys (all three cap keys included, every kind being far under the cap) ok; the leftover in-prefix keys — including one under the status-only prefix — cleared without a page (as clearAlert leaves a row)",
+        "A2 alert_state: exactly the three combo keys firing, one per prefix, delivered and org-less; the six fixed keys this tick decides (all three cap keys included, every kind being far under the cap; projection_failed is decided on its own path, C1–C9) ok; the leftover in-prefix keys — including one under the status-only prefix — cleared without a page (as clearAlert leaves a row)",
         sameKeys(await firingKeys(tx), [keyTrash, keyRej, keyRegPurchase]) &&
           [aTrash, aRej, aConf].every((r) => r?.state === "firing" && r.notified && r.global) &&
           [aFetch, aInv, aOrg, aCapU, aCapS, aCapC].every((r) => r?.state === "ok") &&
@@ -894,6 +895,89 @@ async function main() {
         "A14 clean complete window → invalid_rows cleared, no page",
         a14.length === 0 && (await alertRow(tx, K.invalidRows))?.state === "ok",
         JSON.stringify(a14),
+      );
+
+      // The stage-day projection's own latched key (Phase 3 Task 3).
+      await clearAlert(tx, { alertKey: K.projectionFailed });
+      const pf1 = await pagesDuring(() =>
+        evaluateProjectionAlert(tx, { kind: "threw", error: "statement timeout" }, { send }),
+      );
+      check(
+        "C1 a thrown projection pages once and latches firing",
+        pf1.length === 1 &&
+          pf1[0].includes("stage-day conversion projection failed") &&
+          pf1[0].includes("statement timeout") &&
+          (await alertRow(tx, K.projectionFailed))?.state === "firing",
+        JSON.stringify(pf1),
+      );
+      const pf2 = await pagesDuring(() =>
+        evaluateProjectionAlert(tx, { kind: "threw", error: "statement timeout" }, { send }),
+      );
+      check("C2 still failing → no second page", pf2.length === 0, JSON.stringify(pf2));
+      const pf3 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "ok" }, { send }));
+      check(
+        "C3 a successful projection clears it, silently",
+        pf3.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "ok",
+        JSON.stringify(pf3),
+      );
+      const pf4 = await pagesDuring(() =>
+        evaluateProjectionAlert(tx, { kind: "refused", reason: "empty_ledger" }, { send }),
+      );
+      check(
+        "C4 the empty-ledger refusal re-arms the same key and pages, pointing at the backfill",
+        pf4.length === 1 &&
+          pf4[0].includes("no stage-attributed rows") &&
+          pf4[0].includes("backfill-conversion-events.ts --apply") &&
+          (await alertRow(tx, K.projectionFailed))?.state === "firing" &&
+          (await alertRow(tx, K.projectionFailed))?.global === true,
+        JSON.stringify(pf4),
+      );
+      const pf5 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "ok" }, { send }));
+      check(
+        "C5 and clears again",
+        pf5.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "ok",
+        JSON.stringify(pf5),
+      );
+      // The coverage refusal (review fix A2) and the capped discovery window
+      // (A5) ride the SAME latched key: each pages once when it appears.
+      const pf6 = await pagesDuring(() =>
+        evaluateProjectionAlert(
+          tx,
+          { kind: "refused", reason: "ledger_behind_history", reportedFrom: "2026-04-01", coverageFrom: "2026-09-14" },
+          { send },
+        ),
+      );
+      check(
+        "C6 ⭐ the coverage refusal pages with both dates and latches firing",
+        pf6.length === 1 &&
+          pf6[0].includes("2026-04-01") &&
+          pf6[0].includes("2026-09-14") &&
+          pf6[0].includes("nothing was zeroed") &&
+          (await alertRow(tx, K.projectionFailed))?.state === "firing",
+        JSON.stringify(pf6),
+      );
+      const pf6b = await pagesDuring(() =>
+        evaluateProjectionAlert(tx, { kind: "truncated", projected: 20000 }, { send }),
+      );
+      check(
+        "C6b sharing the key means a SECOND condition does not re-page while the first is firing (accepted trade)",
+        pf6b.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "firing",
+        JSON.stringify(pf6b),
+      );
+      await clearAlert(tx, { alertKey: K.projectionFailed });
+      const pf7 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "truncated", projected: 20000 }, { send }));
+      check(
+        "C7 ⭐ from a clear key, a truncated window pages on its own: the cursor was held and it says so",
+        pf7.length === 1 && pf7[0].includes("NOT advanced") && pf7[0].includes("20000"),
+        JSON.stringify(pf7),
+      );
+      const pf8 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "truncated", projected: 20000 }, { send }));
+      check("C8 still truncated → no second page", pf8.length === 0, JSON.stringify(pf8));
+      const pf9 = await pagesDuring(() => evaluateProjectionAlert(tx, { kind: "ok" }, { send }));
+      check(
+        "C9 a finished window clears it",
+        pf9.length === 0 && (await alertRow(tx, K.projectionFailed))?.state === "ok",
+        JSON.stringify(pf9),
       );
 
       await setLastSuccess(sql`now() - interval '3 hours'`);

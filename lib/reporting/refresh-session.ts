@@ -2,6 +2,9 @@ import { sql } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
+import { db } from "@/db/client";
+import { notifyTelegram } from "@/lib/alerts/telegram";
+
 // =============================================================================
 // A SESSION-MODE CONNECTION FOR THE TWICE-DAILY REPORT MATVIEW REFRESH.
 //
@@ -117,6 +120,55 @@ export function toSessionModeUrl(raw: string): string {
   return url.toString();
 }
 
+/** Which connection actually ran the refreshes, and what was actually in force on it. */
+export type RefreshConnection = {
+  /** `session` = the dedicated :5432 connection. `pooled` = the shared :6543 fallback. */
+  mode: "session" | "pooled";
+  /**
+   * EFFECTIVE settings, read out of `pg_settings` ON THE CONNECTION THAT RAN
+   * THE REFRESHES — not the values this module intended. When `mode` is
+   * `pooled` these are the cluster defaults (5120kB / 120000ms), which is the
+   * point: they say the fix was not in force.
+   */
+  workMemKb: number;
+  statementTimeoutMs: number;
+  /** Why the session connection was not used. Set only when `mode === "pooled"`. */
+  fallbackReason?: string;
+};
+
+/**
+ * The Tier-2 alert fired when the refresh falls back to the pooled connection.
+ *
+ * A separate pure function so it can be asserted verbatim in a test WITHOUT
+ * sending anything to the real Telegram chat.
+ */
+export function fallbackAlertText(connection: RefreshConnection): string {
+  return [
+    "🟠 Tier-2 reports: offer-group-report matview refresh FELL BACK to the pooled connection — THE HEADROOM FIX IS INACTIVE.",
+    `Session-mode connection unavailable: ${connection.fallbackReason ?? "unknown"}`,
+    `This run refreshed WITHOUT the raised settings — effective work_mem=${connection.workMemKb}kB ` +
+      `(intended ${REFRESH_WORK_MEM}), statement_timeout=${connection.statementTimeoutMs}ms ` +
+      `(intended ${REFRESH_STATEMENT_TIMEOUT}).`,
+    "offer_group_report_mv measured 107.5s against that 120000ms limit, so this run is back on the ~12.5s cliff and can be cancelled mid-refresh (SQLSTATE 57014).",
+    "Every run stays unprotected until session-pooler connectivity (port 5432) is fixed.",
+  ].join("\n");
+}
+
+/** Reads what is ACTUALLY in force, as its own statement. */
+async function readEffectiveSettings(
+  on: PostgresJsDatabase,
+): Promise<{ workMemKb: number; statementTimeoutMs: number }> {
+  const rows = (await on.execute(sql`
+    select
+      (select setting::bigint from pg_settings where name = 'work_mem') as work_mem_kb,
+      (select setting::bigint from pg_settings where name = 'statement_timeout') as statement_timeout_ms
+  `)) as unknown as { work_mem_kb: string | number; statement_timeout_ms: string | number }[];
+  return {
+    workMemKb: Number(rows[0]?.work_mem_kb),
+    statementTimeoutMs: Number(rows[0]?.statement_timeout_ms),
+  };
+}
+
 /**
  * Opens a dedicated session-mode connection, applies this job's
  * statement_timeout and work_mem, PROVES both took effect, runs `fn`, and
@@ -128,56 +180,121 @@ export function toSessionModeUrl(raw: string): string {
  * different backend, a role-level override. In all of those the refresh runs at
  * 5120kB/120s exactly as before and the only symptom is the failure this change
  * was meant to prevent. So the settings are read back out of pg_settings and a
- * mismatch throws BEFORE any refresh runs.
+ * mismatch is treated exactly like a connection failure.
+ *
+ * ── FALLBACK: LOUD, NEVER SILENT ─────────────────────────────────────────────
+ * NOTHING IN THIS APP HAS EVER CONNECTED VIA THE SESSION POOLER FROM VERCEL, so
+ * the first unattended cron run is the first real test of port 5432 from that
+ * network. If it fails, refusing to refresh would make this change WORSE than
+ * what it replaced: four stale reports instead of a working-but-fragile job. So
+ * `fn` is run on the shared pooled connection instead and the views refresh.
+ *
+ * But a silent fallback would be the worst outcome of all — it would look fixed
+ * and behave exactly as before. So the fallback:
+ *   1. fires a Tier-2 Telegram alert (the same `notifyTelegram` the rest of the
+ *      codebase uses) saying in plain words that the fix is inactive and the job
+ *      is back on the 120s cliff, and
+ *   2. reports `mode: "pooled"` plus the settings ACTUALLY in force, which the
+ *      route puts in its response and its log line.
+ * There is no path that falls back without doing both.
+ *
+ * @param notify injectable only so tests can assert the alert text without
+ *               sending to the real chat. Production always uses the default.
  */
 export async function withRefreshSession<T>(
-  fn: (db: PostgresJsDatabase) => Promise<T>,
+  fn: (db: PostgresJsDatabase, connection: RefreshConnection) => Promise<T>,
+  notify: (text: string) => Promise<unknown> = notifyTelegram,
 ): Promise<T> {
   const raw = process.env.DATABASE_URL;
   if (!raw) throw new Error("DATABASE_URL is not set");
 
-  const client = postgres(toSessionModeUrl(raw), {
-    prepare: false,
-    // One backend, so the `SET`s below apply to every statement fn() runs.
-    max: 1,
-    connect_timeout: 15,
-    // Never recycle mid-job: a reconnect would silently drop the settings.
-    idle_timeout: 0,
-    max_lifetime: 0,
-  });
+  let client: ReturnType<typeof postgres> | null = null;
+  let sessionDb: PostgresJsDatabase | null = null;
+  let connection: RefreshConnection | null = null;
+  let fallbackReason: string | null = null;
 
   try {
-    const db = drizzle(client);
+    client = postgres(toSessionModeUrl(raw), {
+      prepare: false,
+      // One backend, so the `SET`s below apply to every statement fn() runs.
+      max: 1,
+      connect_timeout: 15,
+      // Never recycle mid-job: a reconnect would silently drop the settings.
+      idle_timeout: 0,
+      max_lifetime: 0,
+    });
+    const candidate = drizzle(client);
 
     // Constants defined in this module, never caller input — safe to inline,
     // and they have to be: SET does not accept bind parameters.
-    await db.execute(sql.raw(`set statement_timeout = '${REFRESH_STATEMENT_TIMEOUT}'`));
-    await db.execute(sql.raw(`set work_mem = '${REFRESH_WORK_MEM}'`));
+    await candidate.execute(sql.raw(`set statement_timeout = '${REFRESH_STATEMENT_TIMEOUT}'`));
+    await candidate.execute(sql.raw(`set work_mem = '${REFRESH_WORK_MEM}'`));
 
     // Deliberately a SEPARATE statement from the SETs above: on a transaction
     // pooler this is where the lie shows up, because the read lands on a
     // different backend than the write did.
-    const applied = (await db.execute(sql`
-      select
-        (select setting::bigint from pg_settings where name = 'work_mem') as work_mem_kb,
-        (select setting::bigint from pg_settings where name = 'statement_timeout') as statement_timeout_ms
-    `)) as unknown as { work_mem_kb: string | number; statement_timeout_ms: string | number }[];
-
-    const workMemKb = Number(applied[0]?.work_mem_kb);
-    const timeoutMs = Number(applied[0]?.statement_timeout_ms);
-    if (workMemKb !== REFRESH_WORK_MEM_KB || timeoutMs !== REFRESH_STATEMENT_TIMEOUT_MS) {
+    const applied = await readEffectiveSettings(candidate);
+    if (
+      applied.workMemKb !== REFRESH_WORK_MEM_KB ||
+      applied.statementTimeoutMs !== REFRESH_STATEMENT_TIMEOUT_MS
+    ) {
       throw new Error(
-        `refresh session settings did not stick: work_mem=${workMemKb}kB ` +
-          `(expected ${REFRESH_WORK_MEM_KB}kB), statement_timeout=${timeoutMs}ms ` +
-          `(expected ${REFRESH_STATEMENT_TIMEOUT_MS}ms). Refusing to refresh — the ` +
-          `connection is not session-mode, or an override outranks these settings.`,
+        `settings did not stick: work_mem=${applied.workMemKb}kB ` +
+          `(expected ${REFRESH_WORK_MEM_KB}kB), statement_timeout=${applied.statementTimeoutMs}ms ` +
+          `(expected ${REFRESH_STATEMENT_TIMEOUT_MS}ms) — the connection is not ` +
+          `session-mode, or an override outranks these settings`,
       );
     }
 
-    return await fn(db);
-  } finally {
-    // Closes even when fn() throws, when the settings guard throws, and when
-    // the caller is cancelled: this connection must never outlive the job.
-    await client.end({ timeout: 5 }).catch(() => {});
+    sessionDb = candidate;
+    connection = { mode: "session", ...applied };
+  } catch (err) {
+    // Covers BOTH failure modes — could not connect, and connected but the
+    // settings did not stick. Either way the raised settings are not in force,
+    // so both take the loud fallback rather than one throwing and one not.
+    fallbackReason = err instanceof Error ? err.message : String(err);
+    if (client) await client.end({ timeout: 5 }).catch(() => {});
+    client = null;
   }
+
+  if (sessionDb && client && connection) {
+    try {
+      return await fn(sessionDb, connection);
+    } finally {
+      // Closes even when fn() throws and when the caller is cancelled: this
+      // connection must never outlive the job.
+      await client.end({ timeout: 5 }).catch(() => {});
+    }
+  }
+
+  // ── FALLBACK PATH ──────────────────────────────────────────────────────────
+  // Read the effective settings from the POOLED connection too, so the alert
+  // and the response quote what was really in force rather than assuming the
+  // cluster defaults. (The transaction pooler may answer this read from a
+  // different backend than the refreshes use, but these are `configuration
+  // file` defaults identical on every backend, so the reading is honest.)
+  let effective = { workMemKb: NaN, statementTimeoutMs: NaN };
+  try {
+    effective = await readEffectiveSettings(db);
+  } catch {
+    // Never let the diagnostic read stop the refresh it is describing.
+  }
+  const pooled: RefreshConnection = {
+    mode: "pooled",
+    ...effective,
+    fallbackReason: fallbackReason ?? "unknown",
+  };
+
+  console.error(
+    `[refresh-offer-group-report] SESSION CONNECTION UNAVAILABLE — falling back to the ` +
+      `pooled connection. The headroom fix is INACTIVE for this run. ` +
+      `effectiveWorkMemKb=${pooled.workMemKb} effectiveStatementTimeoutMs=${pooled.statementTimeoutMs} ` +
+      `reason=${pooled.fallbackReason}`,
+  );
+  // Awaited so delivery happens before the serverless invocation can end, and
+  // BEFORE the refreshes run — a 180s refresh must not delay the warning, and
+  // if the invocation is killed mid-refresh the alert has already gone.
+  await notify(fallbackAlertText(pooled));
+
+  return await fn(db, pooled);
 }

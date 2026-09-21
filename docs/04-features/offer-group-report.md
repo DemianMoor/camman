@@ -296,10 +296,60 @@ statements:
 | `statement_timeout` | **180s** | ~1.7–2× the 87.7–103.8s the SELECT measured under the new `work_mem` on a quiet cluster. Not theoretical room: in a paired A/B one pair landed while production was busy (1 and 4 other active backends) and the same query took **269.1s** at the current `work_mem` and **163.1s** at 384MB — this statement can already exceed 120s under load, so today's 12.5s of headroom only holds when the cluster is idle. Deliberately **below** `maxDuration = 300` so the *database* cancels first: a 57014 throws and this route alerts on it, whereas a Vercel timeout kills the invocation with no catch and no alert. Not 240s, because the four views share one 300s invocation and the other three stretch under load too (180 + ~90 + ~20 + ~3 ≈ 293s fits; 240 does not). And if 180s is exceeded anyway, the per-view catch means group alone freezes. |
 
 `withRefreshSession()` **reads both settings back out of `pg_settings` in a
-separate statement** and throws before any refresh runs if either did not
+separate statement** and refuses the session connection if either did not
 stick. That is not ceremony: every quiet failure mode of this change (a pooler
 that swallowed the `SET`, a URL that stayed on :6543, a role-level override)
 ends with the refresh silently running at 5120kB/120s exactly as before.
+
+### The fallback is loud, never silent
+
+**Nothing in this app had ever connected via the session pooler from Vercel**
+before this change, so the first unattended cron run is the first real test of
+port 5432 from that network. If the session connection cannot be established —
+or connects but the settings do not stick — refusing to refresh would make this
+change *worse* than what it replaced: four stale reports instead of a
+working-but-fragile job. So the refresh **runs anyway on the shared pooled
+connection**.
+
+A silent fallback would be the worst outcome of all: it would look fixed and
+behave exactly as before. So every fallback:
+
+1. fires a **Tier-2 Telegram alert** through the same `notifyTelegram` the rest
+   of the codebase uses, saying in plain words that the fix is inactive and the
+   job is back on the 120s cliff (awaited **before** the refreshes, so a 180s
+   refresh cannot delay the warning and a mid-refresh kill cannot lose it);
+2. `console.error`s the same facts; and
+3. reports `connection.mode = "pooled"` with a `fallbackReason` and the settings
+   **actually in force**, which the route returns and logs.
+
+There is no code path that falls back without doing all three. The fallback
+hands `fn` the *shared* pool, so — unlike the dedicated session client — it is
+deliberately **not** closed afterwards; closing it would tear down the pool the
+whole app uses.
+
+### Checking which connection did the work
+
+Both the JSON response and the log line carry it, so a manual trigger answers
+"did the fix apply?" on its own:
+
+```jsonc
+{ "ok": true,
+  "connection": { "mode": "session", "workMemKb": 393216, "statementTimeoutMs": 180000 },
+  "refreshed": ["offer_report_org_summary_mv", "..."], "failed": [], "durations": { ... } }
+```
+
+```
+[refresh-offer-group-report] ok connection=session effectiveWorkMemKb=393216 \
+  effectiveStatementTimeoutMs=180000 totalsMs=… summaryMs=… groupMs=… \
+  audienceTotalsMs=… totalMs=… refreshed=4/4
+```
+
+`workMemKb` / `statementTimeoutMs` are **read out of `pg_settings` on the
+connection that ran the refreshes**, not the constants this module intended — so
+they are evidence, not an echo. A healthy run reads `mode: "session"`,
+`393216` and `180000`. A fallback reads `mode: "pooled"`, a `fallbackReason`,
+and the cluster defaults (`5120` / `120000`) — which is precisely the statement
+that the fix was not in force.
 
 ### Checking a run
 
@@ -310,6 +360,14 @@ or 20:00 UTC slot**. Any row still showing the previous slot is precisely the
 view that failed — and, unlike before, its neighbours will have refreshed
 anyway. The route's JSON response carries the same split as `refreshed[]` /
 `failed[]`, and a partial run fires a Tier-1 Telegram alert and returns 500.
+
+⚠️ **There is no refresh HISTORY.** `report_refresh_log.view_name` is the
+primary key, so each run overwrites the previous stamp and only the last run is
+knowable. That is why "how often has this already failed?" cannot be answered
+today. Keeping ≥30 days per view needs a new table, deliberately kept out of the
+hotfix that introduced this section — see the ClickUp card *"Keep 30 days of
+matview refresh history (report_refresh_runs)"* in CamMan Platform → Features &
+Backlog.
 
 **DST drift:** Vercel Cron schedules are fixed-UTC. `0 5,20 * * *` lands at
 **00:00 & 15:00 ET** in winter (EST) and **01:00 & 16:00 ET** in summer (EDT) —

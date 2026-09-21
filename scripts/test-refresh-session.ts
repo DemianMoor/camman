@@ -15,12 +15,23 @@ import path from "node:path";
 import postgres from "postgres";
 
 import {
+  fallbackAlertText,
   REFRESH_STATEMENT_TIMEOUT,
   REFRESH_WORK_MEM,
   toSessionModeUrl,
   withRefreshSession,
+  type RefreshConnection,
 } from "../lib/reporting/refresh-session";
 import { refreshOfferGroupReport } from "../lib/reporting/offer-group-report";
+
+// ⛔ NEVER LET A TEST REACH THE REAL TELEGRAM CHAT. `_env-preload` loads
+// `.env.local`, which carries a live TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID,
+// and the fallback path below deliberately fires an alert. notifyTelegram()
+// reads these at CALL time and no-ops when either is missing, so deleting them
+// here — before any test runs — makes an accidental real send impossible even
+// if an injected spy is ever forgotten.
+delete process.env.TELEGRAM_BOT_TOKEN;
+delete process.env.TELEGRAM_CHAT_ID;
 
 let passed = 0;
 let failed = 0;
@@ -54,6 +65,17 @@ function scanSource(file: string, needles: string[]): boolean {
 }
 
 async function main() {
+  // ── 0. The Telegram stub really is in place ────────────────────────────────
+  check(
+    "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are unset — no test can reach the real chat",
+    !process.env.TELEGRAM_BOT_TOKEN && !process.env.TELEGRAM_CHAT_ID,
+  );
+  const { notifyTelegram } = await import("../lib/alerts/telegram");
+  check(
+    "notifyTelegram() is a no-op under the stub (returns false, sends nothing)",
+    (await notifyTelegram("test must never reach Telegram")) === false,
+  );
+
   // ── 1-2. URL derivation (pure) ─────────────────────────────────────────────
   const txn = toSessionModeUrl("postgresql://u:p@db.example.com:6543/postgres?prepare=false");
   check(
@@ -138,6 +160,101 @@ async function main() {
     closedAfterThrow = true;
   }
   check("connection is closed by `finally` when fn() throws", closedAfterThrow);
+
+  // ── 8-14. THE LOUD FALLBACK ────────────────────────────────────────────────
+  // The session path reports itself as such, with the raised settings.
+  const sessionConn = await withRefreshSession(async (_db, connection) => connection);
+  check(
+    "a working session connection reports mode='session'",
+    sessionConn.mode === "session",
+    `got ${sessionConn.mode}`,
+  );
+  check(
+    "the session path reports the RAISED settings as effective",
+    sessionConn.workMemKb === 393216 && sessionConn.statementTimeoutMs === 180000,
+    `work_mem=${sessionConn.workMemKb}kB statement_timeout=${sessionConn.statementTimeoutMs}ms`,
+  );
+  check("the session path carries no fallbackReason", sessionConn.fallbackReason === undefined);
+
+  // Now make the session connection impossible. The pooled client in
+  // db/client.ts was already built from the real URL at import time, so it
+  // keeps working — exactly the production shape of this failure.
+  const realUrl = process.env.DATABASE_URL!;
+  const unreachable = new URL(realUrl);
+  unreachable.hostname = "session-pooler-unreachable.invalid";
+  const sent: string[] = [];
+  let fallbackConn: RefreshConnection;
+  let pooledQueryWorked = false;
+  try {
+    process.env.DATABASE_URL = unreachable.toString();
+    fallbackConn = await withRefreshSession(
+      async (dbc, connection) => {
+        // Proves the fallback actually REFRESHES rather than just reporting:
+        // the db handed to fn is a live, usable connection.
+        const rows = (await dbc.execute(sql`select 1 as ok`)) as unknown as { ok: number }[];
+        pooledQueryWorked = Number(rows[0]?.ok) === 1;
+        return connection;
+      },
+      async (text) => {
+        sent.push(text);
+        return true;
+      },
+    );
+  } finally {
+    process.env.DATABASE_URL = realUrl;
+  }
+
+  check(
+    "an unreachable session connection falls back to mode='pooled'",
+    fallbackConn.mode === "pooled",
+    `got ${fallbackConn.mode}`,
+  );
+  check(
+    "the fallback still runs the work on a LIVE pooled connection",
+    pooledQueryWorked,
+  );
+  check(
+    "the fallback names why the session connection was not used",
+    Boolean(fallbackConn.fallbackReason && fallbackConn.fallbackReason.length > 0),
+    `reason=${fallbackConn.fallbackReason}`,
+  );
+  check(
+    "the fallback reports the UNRAISED settings actually in force",
+    fallbackConn.workMemKb !== 393216 && fallbackConn.statementTimeoutMs !== 180000,
+    `work_mem=${fallbackConn.workMemKb}kB statement_timeout=${fallbackConn.statementTimeoutMs}ms`,
+  );
+  // ⭐ The fallback hands `fn` the SHARED application pool. Closing that in a
+  // `finally` — the right thing to do for the dedicated session client — would
+  // tear down the connection pool the whole app uses, from a cron job. The
+  // session path's close must therefore be scoped to the session path only.
+  const { db: sharedDb } = await import("../db/client");
+  let sharedPoolStillUsable = false;
+  try {
+    const rows = (await sharedDb.execute(sql`select 1 as ok`)) as unknown as { ok: number }[];
+    sharedPoolStillUsable = Number(rows[0]?.ok) === 1;
+  } catch {
+    sharedPoolStillUsable = false;
+  }
+  check(
+    "the fallback does NOT close the shared application pool",
+    sharedPoolStillUsable,
+  );
+
+  check(
+    "the fallback is NEVER silent — exactly one alert fired",
+    sent.length === 1,
+    `${sent.length} alert(s)`,
+  );
+  check(
+    "the alert says the fix is inactive and names the cliff",
+    sent[0] === fallbackAlertText(fallbackConn) &&
+      sent[0].includes("Tier-2") &&
+      sent[0].includes("THE HEADROOM FIX IS INACTIVE") &&
+      sent[0].includes("WITHOUT the raised settings") &&
+      sent[0].includes("120000ms") &&
+      sent[0].includes("57014"),
+    sent[0],
+  );
 
   // ── 8. A clean run refreshes all four and stamps all four ──────────────────
   const probe = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
@@ -240,6 +357,31 @@ async function main() {
     scanSource("app/api/cron/refresh-offer-group-report/route.ts", [
       '"refresh_partial"',
       "refreshed,",
+    ]),
+  );
+  check(
+    "the route logs the connection mode and the EFFECTIVE settings",
+    scanSource("app/api/cron/refresh-offer-group-report/route.ts", [
+      "connection=${connection.mode}",
+      "effectiveWorkMemKb=${connection.workMemKb}",
+    ]),
+  );
+  // Both needles assert the SAME fact — the fallback firing the alert — so the
+  // ANY-match semantics cannot let a live needle mask a dead one. (An earlier
+  // version paired this with a needle about the notifier's DEFAULT, a different
+  // fact, and the bar stayed green when the alert call was deleted.)
+  check(
+    "the fallback path fires the alert through the shared notifier",
+    scanSource("lib/reporting/refresh-session.ts", [
+      "await notify(fallbackAlertText(pooled));",
+      "notify(fallbackAlertText(",
+    ]),
+  );
+  check(
+    "the notifier defaults to notifyTelegram in production",
+    scanSource("lib/reporting/refresh-session.ts", [
+      "= notifyTelegram,",
+      "notify: (text: string) => Promise<unknown> = notifyTelegram",
     ]),
   );
 

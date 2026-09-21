@@ -39,12 +39,19 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const durations = await refreshOfferGroupReport();
     const refreshed = durations.outcomes.filter((o) => o.ok).map((o) => o.view);
     const failures = durations.outcomes.filter((o) => !o.ok);
+    const { connection } = durations;
 
     // Log runtime every run so we can watch it against the 180s per-statement
-    // timeout and the 300s ceiling.
+    // timeout and the 300s ceiling — and log WHICH CONNECTION did the work plus
+    // the settings ACTUALLY in force on it, never the values we intended. After
+    // a manual trigger this one line answers "did the fix apply?" on its own.
     console.log(
       `[refresh-offer-group-report] ${failures.length === 0 ? "ok" : "PARTIAL"} ` +
-        `totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} ` +
+        `connection=${connection.mode} ` +
+        `effectiveWorkMemKb=${connection.workMemKb} ` +
+        `effectiveStatementTimeoutMs=${connection.statementTimeoutMs}` +
+        (connection.fallbackReason ? ` fallbackReason=${connection.fallbackReason}` : "") +
+        ` totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} ` +
         `audienceTotalsMs=${durations.audienceTotalsMs} totalMs=${durations.totalMs} ` +
         `refreshed=${refreshed.length}/${durations.outcomes.length}`,
     );
@@ -66,6 +73,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         {
           ok: false,
           error: "refresh_partial",
+          connection,
           refreshed,
           failed: failures.map((f) => ({
             view: f.view,
@@ -83,7 +91,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // worked". Per-view freshness lives in report_refresh_log, which each view
     // stamps for itself.
     await recordHeartbeat(db, HEARTBEAT_JOBS.offerReportRefresh.job_name);
-    return NextResponse.json({ ok: true, refreshed, failed: [], durations });
+    // `connection` is top-level as well as inside `durations` so a manual
+    // trigger can read session-vs-pooled and the effective settings without
+    // digging.
+    return NextResponse.json({ ok: true, connection, refreshed, failed: [], durations });
   } catch (err) {
     // WHOLE-JOB failure only. Individual view failures no longer reach here —
     // they are caught per view and reported as a PARTIAL above. What lands here

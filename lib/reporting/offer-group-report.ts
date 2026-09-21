@@ -1,7 +1,10 @@
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { withRefreshSession } from "@/lib/reporting/refresh-session";
+import {
+  withRefreshSession,
+  type RefreshConnection,
+} from "@/lib/reporting/refresh-session";
 
 // No `"server-only"` import: this module is also exercised directly by
 // scripts/test-offer-group-report-helper.ts (a plain Node/tsx entry point,
@@ -188,6 +191,12 @@ export type RefreshDurations = {
   outcomes: RefreshOutcome[];
   /** Names of the views that failed this run. Empty on a clean run. */
   failed: string[];
+  /**
+   * Which connection ran the refreshes and the settings ACTUALLY in force on
+   * it. `mode: "pooled"` means the session connection was unavailable and the
+   * headroom fix was NOT active for this run (a Tier-2 alert will have fired).
+   */
+  connection: RefreshConnection;
 };
 
 // The four matviews, in refresh order. Ordering still matters even though a
@@ -239,7 +248,7 @@ const REFRESH_SEQUENCE = [
 // raised statement_timeout and work_mem actually apply; the connection is
 // closed in that helper's `finally`.
 export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
-  return withRefreshSession(async (sessionDb) => {
+  return withRefreshSession(async (sessionDb, connection) => {
     const t0 = Date.now();
     const outcomes: RefreshOutcome[] = [];
     const durations = { summaryMs: 0, groupMs: 0, totalsMs: 0, audienceTotalsMs: 0 };
@@ -284,6 +293,7 @@ export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
       totalMs: Date.now() - t0,
       outcomes,
       failed: outcomes.filter((o) => !o.ok).map((o) => o.view),
+      connection,
     };
   });
 }

@@ -2794,3 +2794,20 @@ Four `REFRESH`es as four bare `await`s look fine until one fails: the throw ends
 When N steps are genuinely independent, catch each one separately and let the loop continue — but **report, never swallow**: collect per-step outcomes, log each failure, and have the caller turn any failure into the alert it already uses plus a non-2xx, so the scheduler still flags red. The response should say which steps succeeded and which did not, not just "ok".
 
 The corollary is that each step must record its **own** success. `report_refresh_log` is stamped per view, immediately after that view's refresh, and not at all when it fails — which is what makes reading all four `refreshed_at` values a meaningful health check. A single end-of-run stamp, or a shared heartbeat, cannot tell you *which* view is stale. (The heartbeat in `cron_locks` stays all-or-nothing on purpose: it means "every report is fresh".)
+
+## A degraded-mode fallback must announce itself, or it is worse than no fallback (2026-09-21)
+
+When a fix depends on something that has never been exercised in production — a new port, a new host, a new credential — shipping it without a fallback risks a first unattended run that is *worse* than what it replaced. So fall back and keep working. But a **silent** fallback is the worst of the three outcomes, because it looks fixed and behaves exactly as before: nobody investigates a green run, and the failure the fix existed to prevent arrives anyway, now with the fix's name on it.
+
+`/api/cron/refresh-offer-group-report` falls back from its session-mode connection to the shared pool, and every fallback does three things, with no code path that skips them:
+
+1. **Alerts through the alerting the codebase already has** (`notifyTelegram`, Tier-2 — `🟠`) with a message that names the degradation in plain words: which protection is inactive, and what the consequence is (here: "back on the ~12.5s cliff", SQLSTATE 57014). "Fell back" alone is not a message — say what stops being true.
+2. **Alerts BEFORE doing the degraded work**, not after. A 180s refresh must not delay the warning, and an invocation killed mid-work must still have sent it.
+3. **Reports the degraded state in its return value**, so the response and the log line carry it too. An alert can be missed; a response cannot be, if someone is looking.
+
+Two details that are easy to get wrong:
+
+- **Report what is ACTUALLY in force, not what you intended.** Read the effective settings back out of `pg_settings` on the connection that did the work and return *those*. A response echoing the constants the code meant to apply is not evidence — it says the same thing whether or not the fix worked.
+- **A fallback onto a SHARED resource must not clean it up.** The dedicated connection is closed in a `finally`; the shared pool handed over on the fallback path must not be, or a cron job tears down the pool the whole app uses. Scope the teardown to the path that owns the thing.
+
+And test it with the notifier injected and the real credentials deleted from the environment — `notifyTelegram` reads `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` at call time, so `delete process.env.…` at the top of the suite makes an accidental real send impossible even if a spy is ever forgotten.

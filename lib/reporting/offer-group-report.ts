@@ -1,6 +1,10 @@
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import {
+  withRefreshSession,
+  type RefreshConnection,
+} from "@/lib/reporting/refresh-session";
 
 // No `"server-only"` import: this module is also exercised directly by
 // scripts/test-offer-group-report-helper.ts (a plain Node/tsx entry point,
@@ -185,81 +189,133 @@ export async function readGroupReportRefreshedAt(): Promise<string | null> {
     : null;
 }
 
+/** Per-view result. One entry per matview, in refresh order, always all four. */
+export type RefreshOutcome = {
+  view: string;
+  ok: boolean;
+  durationMs: number;
+  /** Present only when ok === false. */
+  error?: string;
+};
+
 export type RefreshDurations = {
   totalsMs: number;
   summaryMs: number;
   groupMs: number;
   audienceTotalsMs: number;
   totalMs: number;
+  /** All four views, in order, with per-view success and duration. */
+  outcomes: RefreshOutcome[];
+  /** Names of the views that failed this run. Empty on a clean run. */
+  failed: string[];
+  /**
+   * Which connection ran the refreshes and the settings ACTUALLY in force on
+   * it. `mode: "pooled"` means the session connection was unavailable and the
+   * headroom fix was NOT active for this run (a Tier-2 alert will have fired).
+   */
+  connection: RefreshConnection;
 };
+
+// The four matviews, in refresh order. Ordering still matters even though a
+// failure no longer stops the run:
+//
+//   * audience_report_group_totals_mv SUMS offer_group_report_mv, so it must
+//     refresh after it to pick up the same snapshot. If the group refresh
+//     FAILS, this one still runs and sums the previous group snapshot — stale,
+//     but internally consistent and visibly stale via its own log stamp, which
+//     beats freezing it too.
+//   * The two 0093 matviews lead, so a code-before-migration deploy (CLAUDE.md
+//     §14) breaks on the newer views rather than the older ones.
+const REFRESH_SEQUENCE = [
+  { view: "offer_report_org_summary_mv", durationKey: "summaryMs" },
+  { view: "offer_group_report_mv", durationKey: "groupMs" },
+  { view: "offer_report_offer_totals_mv", durationKey: "totalsMs" },
+  { view: "audience_report_group_totals_mv", durationKey: "audienceTotalsMs" },
+] as const satisfies ReadonlyArray<{
+  view: string;
+  durationKey: "summaryMs" | "groupMs" | "totalsMs" | "audienceTotalsMs";
+}>;
 
 // Rebuild all four matviews (CONCURRENTLY -- non-blocking) and stamp the
 // refresh log. Called by the twice-daily cron. CONCURRENTLY must run outside a
 // transaction, so each statement is its own execute() call.
 //
-// offer_report_offer_totals_mv (introduced in migration 0132) refreshes after
-// the two 0093 matviews, not for a cosmetic footer-freshness reason, but for
-// deploy-order blast radius: this code and 0132 are meant to deploy together
-// (0132 first, per CLAUDE.md §14), but if this code ever ships before 0132
-// applies, the `offer_report_offer_totals_mv` statement is the one that throws
-// (relation does not exist). With it after them, the two PRE-EXISTING matviews
-// (offer_report_org_summary_mv, offer_group_report_mv -- both from 0093,
-// refreshed by this function since before 0132 existed) still refresh and
-// stay live before the throw ends the invocation. Refreshing it first would
-// mean the throw happens before either of the other two statements run, so a
-// code-before-migration deploy would freeze ALL THREE reports at their last
-// snapshot (twice-daily cron, so potentially days) instead of just one.
-// Measured 2026-08-13: summary ~11s, group ~25s, totals ~4.5s -- ~40.5s
-// against a 300s ceiling. That is the PRE-ledger structure; migration 0183
-// rebuilt group + offer-totals + audience-totals over conversion_events. The
-// post-0183 numbers, how they were taken and why they are not comparable to
-// these are in app/api/cron/refresh-offer-group-report/route.ts -- one place,
-// so the two comments cannot drift into two different "last measured" figures
-// again.
+// ── EACH VIEW REFRESHES INDEPENDENTLY ────────────────────────────────────────
+// This used to be four awaits in a row, so the FIRST failure ended the
+// invocation and every view queued behind it was skipped. Because the group
+// view is #2 and the one that was 12.5s from the 120s statement_timeout, the
+// realistic failure was: group hits 57014, and offer-totals + audience-totals
+// are skipped ENTIRELY on every run until someone notices -- three of four
+// reports frozen by one view's problem, on a twice-daily schedule.
 //
-// audience_report_group_totals_mv (migration 0180, Audience Stats) refreshes
-// LAST, for two reasons that agree: it sums offer_group_report_mv, so it must
-// follow that refresh; and by the same blast-radius reasoning, a deploy that
-// precedes 0180 throws on this final statement, after the other three have
-// refreshed and been stamped.
+// Now each refresh is caught on its own. One view's failure freezes ONE view.
+// Nothing is swallowed: every failure is recorded in the returned `outcomes`,
+// logged, and the caller (/api/cron/refresh-offer-group-report) turns a
+// non-empty `failed` into a Tier-1 Telegram alert and an HTTP 500.
 //
-// Each view's report_refresh_log row is stamped immediately after that
-// view's OWN refresh succeeds, not once at the end after all of them. If a
-// LATER refresh throws -- precisely the code-before-migration case the
-// ordering above exists for -- the ones that DID refresh are correctly marked
-// fresh instead of the page reporting "a refresh was missed" over data that is
-// actually seconds old.
+// ── EACH VIEW STAMPS ITS OWN SUCCESS ─────────────────────────────────────────
+// report_refresh_log is updated immediately after that view's OWN refresh
+// succeeds, and NOT at all when it fails. That is what makes the four
+// refreshed_at values independently meaningful: a view whose stamp is current
+// really was rebuilt on the last run, and a view whose stamp is stale really
+// was not, regardless of what its neighbours did. Reading all four back is the
+// supported way to check a run.
+//
+// Runs on a dedicated session-mode connection (see ./refresh-session) so the
+// raised statement_timeout and work_mem actually apply; the connection is
+// closed in that helper's `finally`.
+//
+// Refresh timings -- pre-ledger, and post-0183 (which rebuilt group +
+// offer-totals + audience-totals over conversion_events) -- live ONLY in
+// app/api/cron/refresh-offer-group-report/route.ts, so two comments cannot
+// drift into two different "last measured" figures again.
 export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
-  const t0 = Date.now();
-  await db.execute(sql`refresh materialized view concurrently offer_report_org_summary_mv`);
-  const t1 = Date.now();
-  await db.execute(sql`
-    update report_refresh_log set refreshed_at = now() where view_name = 'offer_report_org_summary_mv'
-  `);
+  return withRefreshSession(async (sessionDb, connection) => {
+    const t0 = Date.now();
+    const outcomes: RefreshOutcome[] = [];
+    const durations = { summaryMs: 0, groupMs: 0, totalsMs: 0, audienceTotalsMs: 0 };
 
-  await db.execute(sql`refresh materialized view concurrently offer_group_report_mv`);
-  const t2 = Date.now();
-  await db.execute(sql`
-    update report_refresh_log set refreshed_at = now() where view_name = 'offer_group_report_mv'
-  `);
+    for (const target of REFRESH_SEQUENCE) {
+      const startedAt = Date.now();
+      try {
+        // View names come from the frozen REFRESH_SEQUENCE above, never from
+        // input; REFRESH does not accept a bind parameter for its target.
+        await sessionDb.execute(
+          sql.raw(`refresh materialized view concurrently ${target.view}`),
+        );
+        durations[target.durationKey] = Date.now() - startedAt;
+        await sessionDb.execute(sql`
+          update report_refresh_log set refreshed_at = now() where view_name = ${target.view}
+        `);
+        outcomes.push({
+          view: target.view,
+          ok: true,
+          durationMs: durations[target.durationKey],
+        });
+      } catch (err) {
+        // Reported, not swallowed: recorded below, logged here, alerted by the
+        // route. The loop continues so the remaining views still refresh.
+        durations[target.durationKey] = Date.now() - startedAt;
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[refresh-offer-group-report] ${target.view} FAILED after ${durations[target.durationKey]}ms:`,
+          err,
+        );
+        outcomes.push({
+          view: target.view,
+          ok: false,
+          durationMs: durations[target.durationKey],
+          error: message,
+        });
+      }
+    }
 
-  await db.execute(sql`refresh materialized view concurrently offer_report_offer_totals_mv`);
-  const t3 = Date.now();
-  await db.execute(sql`
-    update report_refresh_log set refreshed_at = now() where view_name = 'offer_report_offer_totals_mv'
-  `);
-
-  await db.execute(sql`refresh materialized view concurrently audience_report_group_totals_mv`);
-  const t4 = Date.now();
-  await db.execute(sql`
-    update report_refresh_log set refreshed_at = now() where view_name = 'audience_report_group_totals_mv'
-  `);
-
-  return {
-    summaryMs: t1 - t0,
-    groupMs: t2 - t1,
-    totalsMs: t3 - t2,
-    audienceTotalsMs: t4 - t3,
-    totalMs: Date.now() - t0,
-  };
+    return {
+      ...durations,
+      totalMs: Date.now() - t0,
+      outcomes,
+      failed: outcomes.filter((o) => !o.ok).map((o) => o.view),
+      connection,
+    };
+  });
 }

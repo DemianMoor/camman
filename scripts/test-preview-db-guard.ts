@@ -70,6 +70,13 @@ const LEGACY_REF_LITERALS: ReadonlyArray<string> = [];
 /**
  * Scripts that carry a write signal but are DELIBERATELY not guarded, each with
  * the reason. Adding an entry here is a review decision, not a convenience.
+ *
+ * `viaLibrary` marks the entries that deliberately have NO write token of their
+ * own — they write through an app module, or are read-only and listed as
+ * belt-and-braces. They are exempt from the second-order bar at the bottom of
+ * this file, which asserts that every OTHER exclusion still carries the write
+ * signal it was excluded for: an exclusion that quietly stops matching is either
+ * a stale entry or the tell of a WRITE_SIGNAL needle that has been narrowed.
  */
 const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }> = [
   // ── production operations tooling: changing production IS the purpose ──────
@@ -166,16 +173,16 @@ function mayPrecedeGuard(spec: string): boolean {
  * `touchesDb` and `writesDb` used to be single OR'd regexes, and A MULTI-NEEDLE
  * SCAN PASSES IF ANY ONE NEEDLE STILL MATCHES. Deleting an alternative outright
  * usually trips some incidental count; NARROWING one does not. Measured
- * 2026-09-19 on this tree, every one of these left the whole gate GREEN while
- * the protected population silently shrank:
+ * 2026-09-19 on the tree this fix was written against, every one of these left
+ * the whole gate GREEN while the protected population silently shrank:
  *
  *   dropping `\.unsafe\s*\(`                  → 182 → 176 write-capable, PASS
  *   `update` → `upsert` in the ORM branch     → 182 → 178 write-capable, PASS
  *   dropping `from "postgres"`                → 141 → 137 guarded scripts, PASS
  *   dropping `import "./_env-preload"`        → 141 → 140 guarded scripts, PASS
  *
- * A gate that keeps printing "All checks passed" while four scripts drop out of
- * the population is worse than no gate, because it is counted as protection. So
+ * A gate that keeps printing "All checks passed" while scripts drop out of the
+ * population is worse than no gate, because it is counted as protection. So
  * every needle now carries a HAND-WRITTEN sample of the code it exists to find,
  * and the controls at the bottom of this file assert, needle by needle, that it
  * still matches that sample and that NO OTHER needle in the same list reaches it
@@ -183,7 +190,7 @@ function mayPrecedeGuard(spec: string): boolean {
  * behind a sibling. Both line endings, because this checkout mixes them.
  *
  * Samples are written out by hand, never generated from the needles: a control
- * built out of the thing it controls is a tautology.
+ * built out of the thing it controls is a tautology that always passes.
  */
 interface Needle {
   readonly id: string;
@@ -423,7 +430,7 @@ function main() {
 
   // ⭐ NARROWING IS CAUGHT ABOVE; DELETION IS CAUGHT HERE. The bars above
   // iterate the SURVIVING list, so removing a row outright leaves them green
-  // (measured: deleting the `postgres` row dropped 20 scripts from the
+  // (measured: deleting the `postgres` row dropped scripts from the
   // write-capable set and every check still passed). The roster is therefore
   // spelled out: dropping or renaming a needle is a two-place edit a reviewer
   // sees, and adding one is a deliberate bump here rather than a silent widening.
@@ -437,11 +444,10 @@ function main() {
         roster(WRITE_SIGNAL));
 
   // ⭐ SECOND-ORDER: an exclusion that no longer carries a write signal is
-  // either a stale entry or the tell of a dead needle — the six `.unsafe(`-only
-  // and `.update(`-only entries below lose their signal the moment either of
-  // those needles rots, so this bar reddens for a cause the population counts
-  // cannot show. `viaLibrary` names the two that deliberately have no token of
-  // their own because they write through an app module.
+  // either a stale entry or the tell of a dead needle — the `.unsafe(`-only and
+  // `.update(`-only entries lose their signal the moment either of those needles
+  // rots, so this bar reddens for a cause the population counts cannot show.
+  // `viaLibrary` names the entries that deliberately have no token of their own.
   const signalless = EXCLUSIONS.filter(
     (e) => !e.viaLibrary && existsSync(`scripts/${e.file}`) && !writesDb(code.get(e.file) ?? ""),
   ).map((e) => e.file);

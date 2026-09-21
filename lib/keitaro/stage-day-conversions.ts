@@ -120,7 +120,8 @@ export const PROJECTION_WATERMARK_OVERLAP_MINUTES = 5;
 export const MAX_CHANGED_STAGE_IDS = 20000;
 
 // Stage ids per counter-mirror statement — same reason, and the resync's
-// unscoped run names every stage in the org.
+// unscoped run names every stage in the org. Each id binds three parameters
+// there (the IN list, plus its row in the prior-checkout-sum VALUES list).
 const MIRROR_CHUNK = 1000;
 
 // THE SHARED DEFINITIONS (lib/sale-attribution.ts). Sales = counted PURCHASE
@@ -475,6 +476,24 @@ export async function syncStageDayConversions(
     return { stagesInScope, ...nothing, ...coverage };
   }
 
+  // THE TRACKER'S CHECKOUT SUM PER STAGE, AS IT STANDS BEFORE THIS RUN WRITES —
+  // the provenance input of the Checkout Clicks mirror below (see
+  // mirrorStageCountersFromResults): a counter still equal to it is the
+  // tracker's and follows the new sum exactly, 0 included; one that differs was
+  // entered by hand and a tracker 0 never overwrites it. Same scope as the
+  // mirror; a stage with no row yet (the unscoped run can create one) has no
+  // entry, and the mirror reads that as 0.
+  const priorCheckoutSums = new Map(
+    (
+      (await dbc.execute(sql`
+        SELECT k.stage_id, coalesce(sum(k.checkouts), 0)::int AS checkouts
+        FROM keitaro_stage_results k
+        WHERE k.stage_id ${scope}
+        GROUP BY k.stage_id
+      `)) as unknown as { stage_id: number; checkouts: number }[]
+    ).map((r) => [Number(r.stage_id), Number(r.checkouts)] as const),
+  );
+
   // The ledger-derived rows (stageDayLedgerCtes) written onto the stage-day.
   // The change test is projectionChangedClause over PROJECTED_COLUMNS — the same
   // builder the resync's dry run uses — so a column that starts being written is
@@ -586,12 +605,15 @@ export async function syncStageDayConversions(
 
   // Checkout Clicks on the stage is a mirror of `checkouts`, so it has to be
   // re-mirrored AFTER the conversion columns move, or it lags a whole tick.
-  // EXACT mode: the projection is non-monotonic, so a zeroed day must be able to
-  // pull the counter DOWN (review fix I2).
+  // The projection is non-monotonic, so a zeroed day must be able to pull a
+  // TRACKER-OWNED counter down (review fix I2) — but only that one: a counter
+  // that no longer equals the pre-run sum is hand-entered and keeps the guard
+  // (prod 2026-09-21: exact mode on every in-scope stage zeroed stage 130's
+  // hand-entered 22).
   const mirrorIds = ids ?? (await stageIdsWithRows(dbc));
   for (let i = 0; i < mirrorIds.length; i += MIRROR_CHUNK) {
     await mirrorStageCountersFromResults(dbc as Database, mirrorIds.slice(i, i + MIRROR_CHUNK), {
-      exactCheckoutClicks: true,
+      priorCheckoutSums,
     });
   }
 

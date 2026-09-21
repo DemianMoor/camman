@@ -2,6 +2,15 @@
 
 _Last updated: 2026-09-21_
 
+## A tracker-mirrored counter follows the tracker only while it still holds the tracker's value (2026-09-21)
+
+A stage counter that both a person and a tracker write has no provenance column, so **its value is its provenance**. If the counter still **equals the tracker's previous value** (the tracker's sum as it stood *before* this run wrote anything), the tracker owns it: mirror the new value **exactly**, so a downward correction reaches it, 0 included. If it **differs**, someone typed it (manual-results form, CSV): mirror it **guarded**, so a positive tracker value may still overwrite it but a **tracker 0 never does**.
+
+- **Why:** `campaign_stages.checkout_click_count` was mirrored exactly on every stage in the stage-day projection's scope (review fix I2, so a ledger correction could pull it down). After the Phase 3 deploy a stray click pulled stage 130 (June, manual-era, no ledger rows) into the `*/5` scope and its hand-entered 22 became 0. 44 more stages held 536 hand-entered checkouts that an unscoped resync would have zeroed at once.
+- **How:** `syncStageDayConversions` reads `sum(keitaro_stage_results.checkouts)` per stage **before its first write**, over exactly the stages it mirrors, and passes it as `priorCheckoutSums` to `mirrorStageCountersFromResults` ([lib/keitaro/poll.ts](../lib/keitaro/poll.ts)). The equality is tested inside the `UPDATE`, so it uses the counter's value at write time. Read the "before" value **after** the write and every tracker-owned counter looks hand-entered, and I2 silently stops working. Test H4 catches that.
+- **Limits:** a hand entry that happens to equal the tracker's previous value counts as the tracker's. A tracker-owned counter left stale by a failed mirror counts as hand-owned.
+- Pinned by H1–H5 in [scripts/test-stage-day-conversions.ts](../scripts/test-stage-day-conversions.ts). See [04-features/keitaro-poll.md §2a](04-features/keitaro-poll.md).
+
 ## A curated default view hides columns by KIND, never by key (2026-09-20)
 
 `/reports` (the dimension tabs) and `/creatives` open on a short, owner-approved
@@ -286,6 +295,10 @@ DDL into the test would only ever test the copy. Two rules fall out of it:
 - **Enrolment is the default.** The bar's population is derived from the source tree: any script that reaches a database *and* carries a write signal (an ORM `.insert/.update/.delete`, a raw-SQL write verb, or `.unsafe(`) must import the helper. A new fixture script is covered the moment it writes, with nobody editing a list.
 - **Opting out is a review decision with a reason.** Prod-facing tooling — the `apply-*` index builders, the one-shot `backfill-*` repairs, the conversion backfill/verify, the deliberate `verify-*-production` proofs, and read-only diagnostics — is named in `EXCLUSIONS` in the bar **with a one-line reason**. An entry naming a file that no longer exists fails the bar rather than rotting.
 - **`check:guards` is deliberately NOT in `vercel-build`.** It is a source scan; a false positive would block a production deploy.
+- ⭐ **The scan is a list of NAMED needles, and each one is proved individually (2026-09-19).** `touchesDb`/`writesDb` used to be single OR'd regexes, and **a multi-needle scan passes if any one needle still matches**. Deleting an alternative usually trips some incidental count; **NARROWING one does not.** Measured: dropping `.unsafe(` took the write-capable set 182 → 176, `update` → `upsert` took it to 178, dropping `from "postgres"` took the guarded population 141 → 137 and dropping `./_env-preload` took it to 140 — **all four still printed "All checks passed."** Each alternative is now a row in `DB_REACH` / `WRITE_SIGNAL` carrying a **hand-written sample** of the code it exists to find, and the bar asserts per needle that it still matches that sample and that **no sibling needle matches it** (isolation is what makes a dead needle change the verdict instead of hiding behind a neighbour), in **both LF and CRLF** — this checkout mixes them.
+  - **Write the sample out by hand; never generate it from the needle.** A control built out of the thing it controls is a tautology: narrow the needle and the fixture narrows with it, so the bar can never go red. Measured on five needles, a needle-derived fixture caught **0/5** narrowings where the hand-written sample caught **5/5**.
+  - **Narrowing is caught by the sample; DELETION is caught by the roster.** The per-needle bars iterate the surviving list, so removing a row outright leaves them green. The two roster assertions spell every id out, making a dropped or renamed needle a two-place edit a reviewer sees.
+  - **Two second-order bars watch the controls themselves**: an exclusion that stops carrying a write signal, or stops reaching a database at all, is either a stale entry or the tell of a dead needle. 16 exclusions reach a database *only* through the `postgres` needle, which is where that needle's death lands. `viaLibrary: true` marks the entries that deliberately have no write token of their own.
 
 ⚠️ **The known hole: a script whose writes happen only inside an app library it calls** (`ingestKeitaroConversions(db, …)`, say) carries no write token of its own and the scan cannot see it. Those are handled by being named in `EXCLUSIONS` anyway, but if you add one, **add the guard import yourself**. Transitive import analysis would close it and was measured: it flags ~39 more scripts, nearly all read-only diagnostics that merely import a write-capable module, which trades a crisp signal for a noisy one.
 
@@ -3173,7 +3186,7 @@ The generalisation: **any job that derives a table from another and deletes _or 
 
 **A cap that cannot finish its window must not claim it did.** The same projection's discovery capped its change set at N stage ids (a bind-parameter ceiling) and advanced the cursor to the last id it KEPT, "so the rest come next tick". That only works if the kept ids reach a later timestamp than the window start — and the case that produces an oversized change set is a backfill's single statement re-touching every row, which stamps them all with ONE `updated_at`. The resume point then equals the window start, the tick reports progress, and the remainder is never projected. A truncated pass now holds the cursor and pages instead. **A partial-progress cursor is only honest when the ordering key is known to be distinct enough to advance.**
 
-**A projection that can subtract needs every mirror of it to subtract too.** `campaign_stages.checkout_click_count` mirrors `checkouts` and was guarded `CASE WHEN k.checkouts > 0` — right while every source was monotonic (Keitaro click sums only grow), wrong the moment the source became a non-monotonic projection: a zeroed day would have left a stale higher counter on the campaign page and in the creatives metrics cache forever. `mirrorStageCountersFromResults` now takes `exactCheckoutClicks` and the projection passes it; the still-monotonic fields keep the guard. When a column's source changes from "accumulates" to "recomputes", every downstream copy's positive-only guard becomes a one-way ratchet.
+**A projection that can subtract needs every mirror of it to subtract too.** `campaign_stages.checkout_click_count` mirrors `checkouts` and was guarded `CASE WHEN k.checkouts > 0` — right while every source was monotonic (Keitaro click sums only grow), wrong the moment the source became a non-monotonic projection: a zeroed day would have left a stale higher counter on the campaign page and in the creatives metrics cache forever. `mirrorStageCountersFromResults` was given an unconditional `exactCheckoutClicks` mode for the projection (the still-monotonic fields kept the guard) — which then zeroed hand-entered counters, so it was replaced on 2026-09-21 by the provenance rule at the top of this file: exact only while the counter still equals the tracker's pre-run sum. When a column's source changes from "accumulates" to "recomputes", every downstream copy's positive-only guard becomes a one-way ratchet.
 
 **Discovery by a fixed lookback is a silent data-loss window.** The projection found changed stages with a stateless 30-minute `updated_at` lookback, so ~6 consecutive failed ticks (or route kills after the ingest committed) stranded those stage-days forever, with no alert. It now carries a watermark in `cron_locks.watermark` under `job_name = 'conversion-stage-day-projection'` (the column `propagate-clickers` already uses), the lookback is only the FLOOR of the window, and the watermark advances ONLY after a projection that neither threw nor refused nor ran out of cap. A fixed lookback is safe only for an additive job whose repair path runs on its own schedule — never for one whose work would otherwise be lost. Note what that makes untestable-by-savepoint: in production the projection runs on the POOL, so nothing rolls back a wrong advance, and a test that wraps the whole run in a rolled-back transaction would pass even if the advance ran. The no-advance-on-throw check therefore drives the real function against a recording fake `dbc` and asserts the statement sequence contains no watermark UPDATE.
 
@@ -3594,3 +3607,42 @@ the thing checked live in one repo and ship in one commit. What they change is t
 only one that earns its keep**: it is the only shape whose failure cannot be resolved
 by pasting a printed value. Option 2 is measurably green on the cases that matter,
 and option 1 should wait until a trustworthy base ref exists in this clone.
+
+## A background job that needs its own `statement_timeout` needs its own connection (2026-09-21)
+
+Production's `statement_timeout` is **120000 ms** — a Supabase platform default (`pg_settings.source = 'configuration file'`), on every connection, with no `pg_db_role_setting` override for the `postgres` role. A job that legitimately runs longer has three ways to raise it, and for `REFRESH MATERIALIZED VIEW CONCURRENTLY` two of them do not work:
+
+- `SET LOCAL` inside a transaction — the trick [counted-clickers.ts](../lib/reporting/counted-clickers.ts) (300s) and [epc-monitors.ts](../lib/reporting/epc-monitors.ts) (240s) use. **Unavailable here:** `CONCURRENTLY` cannot run inside a transaction block.
+- A bare `SET` on the shared pool — **worthless.** `DATABASE_URL` is the *transaction* pooler (Supavisor :6543), which hands out a different backend per transaction, so the setting need not be there for the next statement.
+- A dedicated **session-mode** connection (same host and credentials, port **5432**) — one backend for the life of the client, so a plain `SET` sticks. This is the one that works. See [lib/reporting/refresh-session.ts](../lib/reporting/refresh-session.ts).
+
+Derive the session URL from `DATABASE_URL` (swap 6543 → 5432, drop `prepare=false`) rather than adding a second env var: one string to rotate, and no way for the two to drift. Open it per job, close it in a `finally`, and keep it scoped to the one caller — it is an exception, not a general-purpose "big query" pool.
+
+**Read the settings back, in a separate statement, and refuse to proceed if they did not stick.** Every quiet failure mode of this pattern — a pooler that swallowed the `SET`, a URL that stayed on :6543, a role-level override — ends with the job running at the *old* settings and the only symptom being the failure the change was supposed to prevent. The read-back is what makes that loud.
+
+Pick `statement_timeout` **below** the platform's own wall (`maxDuration` on Vercel). A database cancellation is SQLSTATE 57014: it throws, so the route catches it and alerts. A Vercel timeout kills the invocation with no catch and no alert. Ordering them the wrong way converts a loud failure into a silent one.
+
+## A sequence of independent refreshes must not share a failure (2026-09-21)
+
+Four `REFRESH`es as four bare `await`s look fine until one fails: the throw ends the invocation and **every statement behind it is skipped, on every run, until someone notices**. In `/api/cron/refresh-offer-group-report` the fragile view was #2 of 4, so one view's problem froze three of four reports on a twice-daily schedule.
+
+When N steps are genuinely independent, catch each one separately and let the loop continue — but **report, never swallow**: collect per-step outcomes, log each failure, and have the caller turn any failure into the alert it already uses plus a non-2xx, so the scheduler still flags red. The response should say which steps succeeded and which did not, not just "ok".
+
+The corollary is that each step must record its **own** success. `report_refresh_log` is stamped per view, immediately after that view's refresh, and not at all when it fails — which is what makes reading all four `refreshed_at` values a meaningful health check. A single end-of-run stamp, or a shared heartbeat, cannot tell you *which* view is stale. (The heartbeat in `cron_locks` stays all-or-nothing on purpose: it means "every report is fresh".)
+
+## A degraded-mode fallback must announce itself, or it is worse than no fallback (2026-09-21)
+
+When a fix depends on something that has never been exercised in production — a new port, a new host, a new credential — shipping it without a fallback risks a first unattended run that is *worse* than what it replaced. So fall back and keep working. But a **silent** fallback is the worst of the three outcomes, because it looks fixed and behaves exactly as before: nobody investigates a green run, and the failure the fix existed to prevent arrives anyway, now with the fix's name on it.
+
+`/api/cron/refresh-offer-group-report` falls back from its session-mode connection to the shared pool, and every fallback does three things, with no code path that skips them:
+
+1. **Alerts through the alerting the codebase already has** (`notifyTelegram`, Tier-2 — `🟠`) with a message that names the degradation in plain words: which protection is inactive, and what the consequence is (here: "back on the ~12.5s cliff", SQLSTATE 57014). "Fell back" alone is not a message — say what stops being true.
+2. **Alerts BEFORE doing the degraded work**, not after. A 180s refresh must not delay the warning, and an invocation killed mid-work must still have sent it.
+3. **Reports the degraded state in its return value**, so the response and the log line carry it too. An alert can be missed; a response cannot be, if someone is looking.
+
+Two details that are easy to get wrong:
+
+- **Report what is ACTUALLY in force, not what you intended.** Read the effective settings back out of `pg_settings` on the connection that did the work and return *those*. A response echoing the constants the code meant to apply is not evidence — it says the same thing whether or not the fix worked.
+- **A fallback onto a SHARED resource must not clean it up.** The dedicated connection is closed in a `finally`; the shared pool handed over on the fallback path must not be, or a cron job tears down the pool the whole app uses. Scope the teardown to the path that owns the thing.
+
+And test it with the notifier injected and the real credentials deleted from the environment — `notifyTelegram` reads `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` at call time, so `delete process.env.…` at the top of the suite makes an accidental real send impossible even if a spy is ever forgotten.

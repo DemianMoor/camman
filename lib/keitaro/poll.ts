@@ -410,19 +410,36 @@ export async function pollKeitaro(
 // Per-field guard: a counter is only overwritten when the tracker reports a
 // POSITIVE value for that field, so a 0 leaves a manual/CSV value intact.
 //
-// ⚠️ EXCEPT `checkout_click_count` UNDER `exactCheckoutClicks` (review fix I2).
-// The positive-only guard was right while every source was monotonic (Keitaro
-// click sums only grow). `checkouts` is no longer one: it is the ledger
-// projection's column (lib/keitaro/stage-day-conversions.ts), which DELIBERATELY
-// zeroes a day the ledger no longer explains. Guarded, a correction downwards
-// could never reach the stage counter, so the campaign page and the creatives
-// metrics cache would keep a stale higher number forever. So the projection calls
-// this with `exactCheckoutClicks: true` and that ONE field takes the recomputed
-// sum even when it decreases, 0 included. `click_count` (Keitaro visits, still
-// monotonic) and `sales_payout_each` (COALESCEd snapshot) keep the guard, and
-// `sales_count` is never touched by either mode. Consequence, accepted: on a
-// stage the projection has in scope, a hand-entered Checkout Clicks value is
-// overwritten by the tracker's sum — the field is the projection's.
+// ⚠️ `checkout_click_count` UNDER `priorCheckoutSums`: THE PROVENANCE RULE
+// (2026-09-21). The positive-only guard was right while every source was
+// monotonic (Keitaro click sums only grow). `checkouts` is no longer one: it is
+// the ledger projection's column (lib/keitaro/stage-day-conversions.ts), which
+// DELIBERATELY zeroes a day the ledger no longer explains, so guarded, a
+// correction downwards could never reach the stage counter (review fix I2). I2's
+// first answer mirrored the field EXACTLY on every stage in the projection's
+// scope, and that overwrote hand-entered Checkout Clicks with the tracker's 0:
+// on prod a stray click pulled stage 130 (June, manual-era, no ledger rows at
+// all) into scope and its hand-entered 22 became 0, with 44 more stages holding
+// 536 hand-entered checkouts above the tracker's sum. The column records no
+// provenance, so the counter's VALUE is the provenance:
+//   counter == the tracker's sum as it stood BEFORE the caller's writes
+//     ⇒ the tracker put it there: take the new sum EXACTLY, down to 0 (I2 holds).
+//   counter != that prior sum
+//     ⇒ someone else did (the manual-results form, a CSV): guarded, so a
+//       POSITIVE tracker sum still overwrites it and a tracker 0 NEVER does.
+// The caller reads the prior sums before it writes keitaro_stage_results
+// (syncStageDayConversions does); a stage it has no sum for had no rows, so its
+// prior sum is 0. The comparison runs inside this UPDATE, against the counter as
+// it stands at write time, so a hand entry that lands between the caller's read
+// and this statement is protected too. Without `priorCheckoutSums` (pollKeitaro)
+// the field is plainly guarded. `click_count` (Keitaro visits, still monotonic)
+// and `sales_payout_each` (COALESCEd snapshot) always keep the guard, and
+// `sales_count` is never touched. Test H1–H5 in
+// scripts/test-stage-day-conversions.ts.
+//
+// Known limit: a counter that EQUALS its prior sum by coincidence is read as the
+// tracker's, and one the tracker left stale (its sum moved and the mirror after
+// it failed) is read as hand-owned, so a later tracker 0 cannot clear it.
 //
 // FAILURE: this THROWS. The caller decides, because it knows whether `database`
 // is the pool or a transaction — see the call in pollKeitaro (swallows) versus
@@ -433,12 +450,23 @@ export async function pollKeitaro(
 export async function mirrorStageCountersFromResults(
   database: Database,
   stageIds: number[],
-  opts: { exactCheckoutClicks?: boolean } = {},
+  opts: { priorCheckoutSums?: ReadonlyMap<number, number> } = {},
 ): Promise<void> {
   if (stageIds.length === 0) return;
-  const checkoutClicks: SQL = opts.exactCheckoutClicks
-    ? sql`k.checkouts`
+  const prior = opts.priorCheckoutSums;
+  const checkoutClicks: SQL = prior
+    ? sql`CASE WHEN k.checkouts > 0 OR coalesce(cs.checkout_click_count, 0) = p.prior_checkouts
+               THEN k.checkouts ELSE cs.checkout_click_count END`
     : sql`CASE WHEN k.checkouts > 0 THEN k.checkouts ELSE cs.checkout_click_count END`;
+  // One (stage, prior sum) row per named stage — sql.join over per-id fragments,
+  // never an interpolated array. Every stage gets a row, so the LEFT JOIN always
+  // matches; if it ever did not, `= NULL` is not true and the field stays guarded.
+  const priorJoin: SQL = prior
+    ? sql`LEFT JOIN (VALUES ${sql.join(
+        stageIds.map((id) => sql`(${id}::int, ${prior.get(id) ?? 0}::int)`),
+        sql`, `,
+      )}) AS p(stage_id, prior_checkouts) ON p.stage_id = k.stage_id`
+    : sql``;
   await database.execute(sql`
     UPDATE campaign_stages cs SET
       click_count = CASE WHEN k.clickers > 0 THEN k.clickers ELSE cs.click_count END,
@@ -462,6 +490,7 @@ export async function mirrorStageCountersFromResults(
     ) k
     LEFT JOIN campaigns c ON c.id = k.campaign_id
     LEFT JOIN offers o    ON o.id = c.offer_id
+    ${priorJoin}
     WHERE cs.id = k.stage_id
   `);
 }

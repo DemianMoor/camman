@@ -1,5 +1,5 @@
 import "./_env-preload";
-import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -8,6 +8,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 import { db } from "../db/client";
+import { requirePreviewDb } from "./_require-preview-db";
 import { seedConversionEvent } from "./_conversion-fixture";
 import { CAMPAIGN_TIMEZONE } from "../lib/campaign-timezone";
 import { decideProjectionAlert, projectionOutcomeFor } from "../lib/conversions/monitor";
@@ -36,8 +37,9 @@ import {
 // transaction that ALWAYS rolls back. PREVIEW DB ONLY:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //     npx tsx scripts/test-stage-day-conversions.ts
-// The refusal itself is the `_require-preview-db` import above — an allowlist,
-// and early enough that nothing can query ahead of it.
+// The ./_require-preview-db import above is the refusal: an ALLOWLIST, so it
+// also stops a raw IP, a pooler alias or a future prod project, which a re-typed
+// "does the URL contain the prod ref?" test would wave straight through.
 
 // The projection's filter constants are module-PRIVATE, so the independent
 // recomputation is built from the shared CLAUSES instead, and writes the
@@ -141,6 +143,8 @@ async function throwPathIssuesNoAdvance() {
           },
         ];
       }
+      // The pre-run tracker checkout sums (the Checkout Clicks provenance read).
+      if (/sum\(k\.checkouts\)/.test(text)) return [];
       if (/INSERT INTO keitaro_stage_results/.test(text)) throw new Error("simulated write failure");
       throw new Error(`unexpected statement: ${text.slice(0, 120)}`);
     },
@@ -170,6 +174,7 @@ async function throwPathIssuesNoAdvance() {
 }
 
 async function main() {
+  // The guard already refused every other target; this is the banner, not the check.
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   console.log("route guards (source assertions)");
@@ -1552,6 +1557,164 @@ async function main() {
         "P26 ⭐ and one whose only signal is unmapped_conversions does too",
         sql`unmapped_conversions`,
         sql`3::int`,
+      );
+
+      console.log("\nH — a hand-entered Checkout Clicks value is never overwritten by a tracker 0 (prod, 2026-09-21)");
+      // ⚠️ THE REGRESSION THESE BARS PIN. The projection used to mirror every
+      // stage in its scope in EXACT mode (review fix I2), so a stray click that
+      // pulled an old manual-era stage into the poll's scope wrote the tracker's
+      // checkout sum — 0 — over the operator's hand-entered Checkout Clicks.
+      // Measured on prod: stage 130 (no ledger rows at all) 22 → 0; 44 more
+      // stages held 536 hand-entered checkouts above the tracker's sum, and an
+      // unscoped resync would have zeroed them all at once. The rule now: a
+      // counter EQUAL to the tracker's sum as it stood before the run is the
+      // tracker's (exact — it follows a correction down to 0, H4); one that
+      // DIFFERS is hand-owned (guarded — a positive sum still overwrites it, H5;
+      // a 0 never does, H1–H3).
+      //
+      // Each red-capable bar also requires the run was NOT refused and that it
+      // really reached the stage (click_count / the tracker sum moved), so a
+      // refused or skipped run cannot pass it by leaving everything alone.
+      const trackerCheckouts = async (dbc: DbOrTx, stageId: number) =>
+        Number(
+          (
+            (await dbc.execute(sql`
+              SELECT coalesce(sum(checkouts), 0)::int AS n FROM keitaro_stage_results WHERE stage_id = ${stageId}::int
+            `)) as unknown as { n: number }[]
+          )[0].n,
+        );
+      const handEnter = async (dbc: DbOrTx, stageId: number, checkouts: number) => {
+        await dbc.execute(sql`
+          UPDATE campaign_stages SET checkout_click_count = ${checkouts}::int WHERE id = ${stageId}::int
+        `);
+      };
+
+      // H1/H2 — stage 130's shape: June manual-era, NO ledger rows at all, a
+      // hand-entered 22, and a stray click that re-syncs a click row whose
+      // checkouts are 0.
+      const stageH = await stage(8, `p3_${run}_h`);
+      await handEnter(tx, stageH, 22);
+      await ksr(stageH, "2026-09-20", { visits: 5 });
+      const h1Run = await runStageDayProjection(tx, { extraStageIds: [stageH] });
+      const h1 = await stageRow(stageH);
+      check(
+        "H1 ⭐⭐ POLL PATH: a hand-entered 22 on a stage with NO ledger rows survives the tracker's 0 (prod: stage 130, 22 → 0)",
+        h1Run.refused === null && h1.click_count === 5 && h1.checkout_click_count === 22,
+        JSON.stringify({ refused: h1Run.refused, h1 }),
+      );
+
+      // UNSCOPED — every stage with a keitaro_stage_results row, the resync's
+      // --apply shape. It projects ALL of camman-v2's shared ledger, so it runs in
+      // a SAVEPOINT rolled back here (inside the suite's own always-rolled-back
+      // transaction) and the counter is read inside it. The 22 is re-entered and
+      // click_count reset first, so H2 stands on its own rather than on H1's
+      // outcome, and click_count's return to 5 proves this run named the stage.
+      try {
+        await tx.transaction(async (tx2) => {
+          await tx2.execute(sql`
+            UPDATE campaign_stages SET checkout_click_count = 22, click_count = 0 WHERE id = ${stageH}::int
+          `);
+          const h2Run = await syncStageDayConversions(tx2, {});
+          const h2 = (
+            (await tx2.execute(sql`
+              SELECT click_count, checkout_click_count FROM campaign_stages WHERE id = ${stageH}::int
+            `)) as unknown as { click_count: number; checkout_click_count: number }[]
+          )[0];
+          check(
+            "H2 ⭐⭐ UNSCOPED PATH (the resync's --apply shape): the same hand-entered 22 survives",
+            h2Run.refused === null &&
+              h2Run.stagesInScope === "all" &&
+              h2.click_count === 5 &&
+              h2.checkout_click_count === 22,
+            JSON.stringify({ refused: h2Run.refused, stagesInScope: h2Run.stagesInScope, h2 }),
+          );
+          throw new Rollback();
+        });
+      } catch (err) {
+        if (!(err instanceof Rollback)) throw err;
+      }
+
+      // H3/H4 — the same ledger history, twice: one lead-TYPE conversion, which
+      // Keitaro then re-posts as a `sale`. It stops being a checkout, so the
+      // tracker's sum goes 1 → 0, while the row still covers its day (so the
+      // projection rewrites the day to 0 rather than leaving it alone). The ONLY
+      // difference between the two stages is whether a person typed over the
+      // tracker's 1 in between.
+      const H_DAY = "2026-09-19";
+      const hEvt = async (stageId: number, keitaroType: string) => {
+        const id = await seedConversionEvent(tx, {
+          orgId,
+          campaignId: camp,
+          stageId,
+          eventKey: "purchase",
+          status: "approved",
+          revenue: 50,
+          keitaroType,
+        });
+        await tx.execute(sql`
+          UPDATE conversion_events
+          SET occurred_at = (${`${H_DAY} 12:00:00`}::text || ' ' || 'America/New_York')::timestamptz
+          WHERE id = ${id}::bigint
+        `);
+        return id;
+      };
+      const repostAsSale = async (id: number) => {
+        await tx.execute(sql`
+          UPDATE conversion_events SET keitaro_type = 'sale', keitaro_status = 'sale' WHERE id = ${id}::bigint
+        `);
+      };
+
+      const stageJ = await stage(9, `p3_${run}_j`);
+      const leadJ = await hEvt(stageJ, "lead");
+      await syncStageDayConversions(tx, { stageIds: [stageJ] });
+      const j0 = await stageRow(stageJ);
+      await handEnter(tx, stageJ, 40); // the operator types 40 over the tracker's 1
+      await repostAsSale(leadJ);
+      const h3Run = await syncStageDayConversions(tx, { stageIds: [stageJ] });
+      const j1 = await stageRow(stageJ);
+      const jSum = await trackerCheckouts(tx, stageJ);
+      check(
+        "H3 ⭐⭐ a stage WITH ledger rows: a hand-entered 40 above the tracker's 1 survives the sum dropping to 0",
+        j0.checkout_click_count === 1 &&
+          h3Run.refused === null &&
+          h3Run.rowsWritten === 1 &&
+          jSum === 0 &&
+          j1.checkout_click_count === 40,
+        JSON.stringify({ j0, refused: h3Run.refused, rowsWritten: h3Run.rowsWritten, jSum, j1 }),
+      );
+
+      const stageK = await stage(10, `p3_${run}_k`);
+      const leadK = await hEvt(stageK, "lead");
+      await syncStageDayConversions(tx, { stageIds: [stageK] });
+      const k0 = await stageRow(stageK);
+      await repostAsSale(leadK);
+      const h4Run = await syncStageDayConversions(tx, { stageIds: [stageK] });
+      const k1 = await stageRow(stageK);
+      const kSum = await trackerCheckouts(tx, stageK);
+      check(
+        "H4 ⭐ I2 still holds, to ZERO: a tracker-owned counter (1 = the tracker's prior sum) follows the sum down to 0",
+        k0.checkout_click_count === 1 &&
+          h4Run.refused === null &&
+          h4Run.rowsWritten === 1 &&
+          kSum === 0 &&
+          k1.checkout_click_count === 0,
+        JSON.stringify({ k0, refused: h4Run.refused, rowsWritten: h4Run.rowsWritten, kSum, k1 }),
+      );
+
+      // H5 — the other half of the guard, pinned so the rule is fully specified:
+      // a hand-owned counter is not frozen, a POSITIVE tracker sum still wins.
+      const stageL = await stage(11, `p3_${run}_l`);
+      await handEnter(tx, stageL, 1);
+      await hEvt(stageL, "lead");
+      await hEvt(stageL, "lead");
+      await hEvt(stageL, "lead");
+      const h5Run = await syncStageDayConversions(tx, { stageIds: [stageL] });
+      const l1 = await stageRow(stageL);
+      const lSum = await trackerCheckouts(tx, stageL);
+      check(
+        "H5 a hand-entered 1 BELOW a positive tracker sum (3) is overwritten by it — the guarded mode's long-standing rule",
+        h5Run.refused === null && lSum === 3 && l1.checkout_click_count === 3,
+        JSON.stringify({ refused: h5Run.refused, lSum, l1 }),
       );
 
       throw new Rollback();
